@@ -1,0 +1,32 @@
+[package]
+name = "kimi-agent"
+version = "0.1.0"
+edition = "2021"
+description = "Agentic harness for Kimi K2.5"
+authors = ["Trebuchet Network"]
+
+[dependencies]
+tokio = { version = "1.35", features = ["full"] }
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.11", features = ["json", "stream"] }
+clap = { version = "4.4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+git2 = "0.18"
+walkdir = "2.4"
+regex = "1.10"
+colored = "2.1"
+chrono = "0.4"
+thiserror = "1.0"
+futures = "0.3"
+async-trait = "0.1"
+tempfile = "3.9"
+base64 = "0.21"
+glob = "0.3"
+rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+sha2 = "0.10"
+hex = "0.4"
+toml = "0.8"
+
