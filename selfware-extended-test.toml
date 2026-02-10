@@ -1,0 +1,43 @@
+# Extended Test Configuration for Selfware
+# Use this configuration for multi-hour test sessions
+#
+# Run extended tests with:
+#   SELFWARE_TIMEOUT=28800 cargo test --features integration extended_
+
+# Top-level config fields (match Config struct schema)
+endpoint = "http://localhost:8000/v1"
+model = "Qwen/Qwen3-Coder-Next-FP8"
+# api_key = ""  # Optional, uncomment if needed
+max_tokens = 65536
+temperature = 0.7
+
+[agent]
+max_iterations = 500
+step_timeout_secs = 1800    # 30 minutes per step
+token_budget = 500000
+native_function_calling = true
+
+[safety]
+# Safety settings for extended tests
+allowed_paths = ["/tmp/**", "./**", "tests/**"]
+denied_paths = ["/etc/**", "/root/**"]
+protected_branches = ["main", "master"]
+require_confirmation = []
+
+[yolo]
+# YOLO mode settings for automated testing
+enabled = true
+max_operations = 1000
+max_hours = 4.0
+allow_git_push = false
+audit_log_path = "/tmp/selfware-extended-audit.log"
+
+# Extended test metadata (not part of Config struct, used by test harness)
+# These are documented here for reference but ignored by the runtime
+#
+# [extended_test]
+# max_duration_hours = 4
+# checkpoint_interval_mins = 15
+# progress_report_interval = 25
+# memory_limit_mb = 4096
+# max_concurrent_agents = 16

@@ -1,0 +1,16 @@
+endpoint = "http://localhost:8000/v1"
+model = "Qwen/Qwen3-Coder-Next-FP8"
+max_tokens = 98304
+
+# Safety section is nested - that part was correct
+[safety]
+allowed_paths = ["/home/thread/kimi-workspace/**", "/home/thread/kimi-workspace/kimi-agent/**", "./**"]
+denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
+
+
+[agent]
+max_iterations = 500
+step_timeout_secs = 600
+# Enable native function calling (requires backend support like sglang --tool-call-parser)
+native_function_calling = true
+

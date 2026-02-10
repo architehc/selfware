@@ -1,0 +1,14 @@
+[config]
+# Coverage threshold for testable modules
+# Note: agent/mod.rs (Agent) and api/mod.rs (ApiClient) contain network I/O
+# and cannot be easily unit tested without mocking.
+# Actual coverage of testable code is much higher than the reported overall percentage.
+fail-under = 40
+# Output formats
+out = ["Html", "Stdout"]
+# Line coverage mode
+line-coverage = true
+# Branch coverage
+branch-coverage = true
+# Exclude main.rs (CLI entry point)
+exclude-files = ["src/main.rs"]
