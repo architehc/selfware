@@ -2,7 +2,6 @@
 //!
 //! A warm, informative prompt for the workshop.
 
-
 use nu_ansi_term::{Color, Style};
 use reedline::{Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus};
 use std::borrow::Cow;

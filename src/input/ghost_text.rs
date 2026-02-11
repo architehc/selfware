@@ -3,7 +3,6 @@
 //! AI-powered inline suggestions like GitHub Copilot.
 //! Shows dimmed text predicting what the user might type next.
 
-
 use nu_ansi_term::{Color, Style};
 use reedline::{Hinter, History};
 

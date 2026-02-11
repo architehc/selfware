@@ -2,7 +2,6 @@
 //!
 //! Context-aware completion for commands, tools, and file paths.
 
-
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use reedline::{Completer, Span, Suggestion};

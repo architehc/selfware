@@ -308,7 +308,9 @@ impl BM25Index {
         let mut tokens = Vec::new();
 
         // Split on whitespace and punctuation, but keep underscores for snake_case
-        for word in text.split(|c: char| c.is_whitespace() || ".,;:!?()[]{}\"'`<>=+-*/\\|&^%$#@~".contains(c)) {
+        for word in text
+            .split(|c: char| c.is_whitespace() || ".,;:!?()[]{}\"'`<>=+-*/\\|&^%$#@~".contains(c))
+        {
             if word.is_empty() {
                 continue;
             }
@@ -359,9 +361,7 @@ impl BM25Index {
             // Split on uppercase -> lowercase if preceded by uppercase (e.g., XMLParser -> XML, Parser)
             else if i >= 2 {
                 let (prev2_byte, prev2_char) = indexed[i - 2];
-                if prev2_char.is_uppercase()
-                    && prev_char.is_uppercase()
-                    && curr_char.is_lowercase()
+                if prev2_char.is_uppercase() && prev_char.is_uppercase() && curr_char.is_lowercase()
                 {
                     if last_byte < prev_byte {
                         parts.push(&s[last_byte..prev_byte]);
@@ -477,7 +477,10 @@ mod tests {
     #[test]
     fn test_bm25_code_search() {
         let mut index = BM25Index::new();
-        index.add("fn1", "pub fn execute_workflow(&self, name: &str) -> Result<()>");
+        index.add(
+            "fn1",
+            "pub fn execute_workflow(&self, name: &str) -> Result<()>",
+        );
         index.add("fn2", "pub fn parse_config(path: &Path) -> Config");
         index.add("fn3", "pub fn run_tests(&self) -> TestResult");
 
@@ -595,14 +598,20 @@ mod tests {
         // All same case - no split
         assert_eq!(BM25Index::split_camel_case("日本語"), vec!["日本語"]);
         // café (lowercase) + Latte (uppercase) = split
-        assert_eq!(BM25Index::split_camel_case("caféLatte"), vec!["café", "Latte"]);
+        assert_eq!(
+            BM25Index::split_camel_case("caféLatte"),
+            vec!["café", "Latte"]
+        );
         // αβγ (lowercase Greek) + Δ (uppercase Greek) = split
         assert_eq!(BM25Index::split_camel_case("αβγΔ"), vec!["αβγ", "Δ"]);
         // Empty string
         assert_eq!(BM25Index::split_camel_case(""), vec![""]);
         // Multi-byte chars that were causing panics before
         assert_eq!(BM25Index::split_camel_case("über"), vec!["über"]);
-        assert_eq!(BM25Index::split_camel_case("naïveMethod"), vec!["naïve", "Method"]);
+        assert_eq!(
+            BM25Index::split_camel_case("naïveMethod"),
+            vec!["naïve", "Method"]
+        );
     }
 
     #[test]
@@ -614,7 +623,10 @@ mod tests {
         assert_eq!(index.len(), 1);
 
         let results = index.search("original", 10);
-        assert!(results.is_empty(), "original should not be found after update");
+        assert!(
+            results.is_empty(),
+            "original should not be found after update"
+        );
 
         let results = index.search("updated", 10);
         assert_eq!(results.len(), 1);

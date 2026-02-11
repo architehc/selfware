@@ -2,7 +2,6 @@
 //!
 //! Highlights commands, paths, and tool names as you type.
 
-
 use nu_ansi_term::{Color, Style};
 use reedline::{Highlighter, StyledText};
 

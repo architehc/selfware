@@ -1104,9 +1104,10 @@ impl HealthMonitor {
         self.checks
             .read()
             .ok()
-            .and_then(|c| c.get(service).map(|h| {
-                now.saturating_sub(h.last_check) >= self.check_interval.as_secs()
-            }))
+            .and_then(|c| {
+                c.get(service)
+                    .map(|h| now.saturating_sub(h.last_check) >= self.check_interval.as_secs())
+            })
             .unwrap_or(true) // If not found, needs check
     }
 

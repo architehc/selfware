@@ -4,7 +4,6 @@
 //! Built around the philosophy: software you own, software that knows you,
 //! software that lasts.
 
-
 pub mod animations;
 pub mod banners;
 pub mod components;

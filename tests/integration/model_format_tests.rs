@@ -6,9 +6,12 @@ use std::process::Command;
 use std::time::Duration;
 
 /// Helper to run selfware command with timeout
-fn run_selfware_with_timeout(args: &[&str], timeout_secs: u64) -> std::io::Result<std::process::Output> {
-    use std::process::Stdio;
+fn run_selfware_with_timeout(
+    args: &[&str],
+    timeout_secs: u64,
+) -> std::io::Result<std::process::Output> {
     use std::io::{Error, ErrorKind};
+    use std::process::Stdio;
 
     let mut child = Command::new("./target/release/selfware")
         .args(args)
@@ -31,7 +34,7 @@ fn run_selfware_with_timeout(args: &[&str], timeout_secs: u64) -> std::io::Resul
                     let _ = child.kill();
                     return Err(Error::new(
                         ErrorKind::TimedOut,
-                        format!("Command timed out after {} seconds", timeout_secs)
+                        format!("Command timed out after {} seconds", timeout_secs),
                     ));
                 }
                 std::thread::sleep(Duration::from_millis(100));
@@ -74,11 +77,8 @@ fn test_model_tool_calls_are_parsed() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_analyze_tool_calls_work() {
-    let output = run_selfware_with_timeout(
-        &["--yolo", "analyze", "./src"],
-        120,
-    )
-    .expect("Failed to run selfware");
+    let output = run_selfware_with_timeout(&["--yolo", "analyze", "./src"], 120)
+        .expect("Failed to run selfware");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -103,11 +103,8 @@ fn test_analyze_tool_calls_work() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_model_format_compatibility() {
-    let output = run_selfware_with_timeout(
-        &["--yolo", "run", "read the file Cargo.toml"],
-        60,
-    )
-    .expect("Failed to run selfware");
+    let output = run_selfware_with_timeout(&["--yolo", "run", "read the file Cargo.toml"], 60)
+        .expect("Failed to run selfware");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -165,7 +162,10 @@ fn test_interactive_analyze_parses_tools() {
             Ok(None) => {
                 if start.elapsed() > timeout {
                     let _ = child.kill();
-                    panic!("Interactive test timed out after {} seconds", timeout.as_secs());
+                    panic!(
+                        "Interactive test timed out after {} seconds",
+                        timeout.as_secs()
+                    );
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }

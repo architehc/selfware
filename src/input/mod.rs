@@ -3,7 +3,6 @@
 //! Rich terminal input with autocomplete, history, and vim keybindings.
 //! Built on reedline for a professional IDE-like experience.
 
-
 mod completer;
 mod ghost_text;
 mod highlighter;

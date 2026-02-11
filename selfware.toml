@@ -4,7 +4,7 @@ max_tokens = 98304
 
 # Safety section is nested - that part was correct
 [safety]
-allowed_paths = ["/home/thread/kimi-workspace/**", "/home/thread/kimi-workspace/kimi-agent/**", "./**"]
+allowed_paths = ["./**", "~/**"]
 denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
 
 

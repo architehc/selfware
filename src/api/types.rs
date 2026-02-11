@@ -263,7 +263,7 @@ mod tests {
             "id": "resp_123",
             "object": "chat.completion",
             "created": 1234567890,
-            "model": "kimi-k2.5",
+            "model": "test-model",
             "choices": [{
                 "index": 0,
                 "message": {"role": "assistant", "content": "Hello!"},
@@ -362,7 +362,7 @@ mod tests {
             "id": "chunk_123",
             "object": "chat.completion.chunk",
             "created": 1234567890,
-            "model": "kimi-k2.5",
+            "model": "test-model",
             "choices": [{
                 "index": 0,
                 "delta": {},

@@ -1,6 +1,5 @@
 //! Secrets redaction to prevent sensitive data from leaking to logs/checkpoints
 
-
 use regex::Regex;
 use std::borrow::Cow;
 use std::sync::OnceLock;

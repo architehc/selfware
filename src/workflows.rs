@@ -815,7 +815,10 @@ impl WorkflowExecutor {
                 // Optional step with runtime dep failure - skip
                 context.log(
                     LogLevel::Warn,
-                    format!("Skipping optional step {} due to dependency: {}", step.id, dep_err),
+                    format!(
+                        "Skipping optional step {} due to dependency: {}",
+                        step.id, dep_err
+                    ),
                     Some(step.id.clone()),
                 );
                 context.step_results.insert(

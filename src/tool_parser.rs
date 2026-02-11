@@ -6,7 +6,6 @@
 //! 3. JSON code blocks with tool schema
 //! 4. Markdown code blocks with tool invocations
 
-
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};

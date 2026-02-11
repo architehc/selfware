@@ -6,7 +6,6 @@
 //! 3. Feedback: Agent sees results immediately
 //! 4. Commit: Only on green, or explicit override
 
-
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

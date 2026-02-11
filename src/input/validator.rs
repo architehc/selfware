@@ -3,7 +3,6 @@
 //! Validates input before submission, including bracket matching
 //! and JSON validation.
 
-
 use reedline::{ValidationResult, Validator};
 
 /// Bracket-aware validator that ensures matching pairs

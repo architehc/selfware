@@ -7,7 +7,6 @@
 //! - Success/failure recording
 //! - Configurable log levels via RUST_LOG
 
-
 use std::time::Instant;
 use tracing::{error, info, info_span, Span};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};

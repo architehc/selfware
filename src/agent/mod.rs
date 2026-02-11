@@ -191,10 +191,7 @@ To call a tool, use this EXACT XML structure:
     ) -> Result<(String, Option<String>, Option<Vec<ToolCall>>)> {
         use std::io::{self, Write};
 
-        let stream = self
-            .client
-            .chat_stream(messages, tools, thinking)
-            .await?;
+        let stream = self.client.chat_stream(messages, tools, thinking).await?;
 
         let mut rx = stream.into_channel().await;
         let mut content = String::new();
@@ -229,7 +226,10 @@ To call a tool, use this EXACT XML structure:
                     tool_calls.push(call);
                 }
                 StreamChunk::Usage(u) => {
-                    debug!("Token usage: {} prompt, {} completion", u.prompt_tokens, u.completion_tokens);
+                    debug!(
+                        "Token usage: {} prompt, {} completion",
+                        u.prompt_tokens, u.completion_tokens
+                    );
                 }
                 StreamChunk::Done => break,
             }
@@ -242,8 +242,16 @@ To call a tool, use this EXACT XML structure:
 
         Ok((
             content,
-            if reasoning.is_empty() { None } else { Some(reasoning) },
-            if tool_calls.is_empty() { None } else { Some(tool_calls) },
+            if reasoning.is_empty() {
+                None
+            } else {
+                Some(reasoning)
+            },
+            if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
         ))
     }
 

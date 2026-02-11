@@ -1,16 +1,10 @@
 #[derive(Debug, Clone)]
 pub enum AgentState {
     Planning,
-    Executing {
-        step: usize,
-    },
-    ErrorRecovery {
-        error: String,
-    },
+    Executing { step: usize },
+    ErrorRecovery { error: String },
     Completed,
-    Failed {
-        reason: String,
-    },
+    Failed { reason: String },
 }
 
 pub struct AgentLoop {

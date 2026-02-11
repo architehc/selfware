@@ -966,7 +966,10 @@ impl RecoveryExecutor {
             // This is deterministic for testing - real implementation would execute actual actions
             if strategy.success_probability < 0.5 {
                 success = false;
-                error = Some(format!("Action {} failed (low success probability)", action_name));
+                error = Some(format!(
+                    "Action {} failed (low success probability)",
+                    action_name
+                ));
                 break;
             }
         }

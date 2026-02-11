@@ -228,8 +228,7 @@ pub fn run_tui(model: &str) -> Result<Vec<String>> {
             if app.state == AppState::RunningTask {
                 if let Some(ref progress) = app.task_progress {
                     let gauge = GrowthGauge::new(
-                        progress.current_step as f64
-                            / progress.total_steps.unwrap_or(10) as f64,
+                        progress.current_step as f64 / progress.total_steps.unwrap_or(10) as f64,
                     );
                     // Gauge would be rendered in the progress area
                     let _ = gauge; // Use the gauge

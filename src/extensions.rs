@@ -995,12 +995,7 @@ impl ToolRegistry {
 
     pub fn register(&mut self, tool: CustomTool) {
         // Add to BM25 index
-        let searchable = format!(
-            "{} {} {}",
-            tool.name,
-            tool.description,
-            tool.tags.join(" ")
-        );
+        let searchable = format!("{} {} {}", tool.name, tool.description, tool.tags.join(" "));
         self.bm25.add(&tool.id, searchable);
         self.tools.insert(tool.id.clone(), tool);
     }
