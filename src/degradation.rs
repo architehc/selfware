@@ -932,6 +932,16 @@ impl PartialResultManager {
         }
     }
 
+    /// Check if a result meets the minimum completion threshold
+    pub fn is_acceptable<T>(&self, result: &PartialResult<T>) -> bool {
+        result.completion >= self.min_completion
+    }
+
+    /// Get the minimum completion threshold
+    pub fn min_completion(&self) -> f32 {
+        self.min_completion
+    }
+
     /// Get summary
     pub fn summary(&self) -> PartialSummary {
         let complete = self.stats.complete_results.load(Ordering::Relaxed);
@@ -1077,6 +1087,27 @@ impl HealthMonitor {
                 },
             );
         }
+    }
+
+    /// Get the configured check interval
+    pub fn check_interval(&self) -> Duration {
+        self.check_interval
+    }
+
+    /// Check if a service needs a health check based on the interval
+    pub fn needs_check(&self, service: &str) -> bool {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        self.checks
+            .read()
+            .ok()
+            .and_then(|c| c.get(service).map(|h| {
+                now.saturating_sub(h.last_check) >= self.check_interval.as_secs()
+            }))
+            .unwrap_or(true) // If not found, needs check
     }
 
     /// Get health status for a service

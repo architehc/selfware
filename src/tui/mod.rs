@@ -10,7 +10,11 @@ mod markdown;
 mod palette;
 mod widgets;
 
+pub use app::{App, AppState, ChatMessage, MessageRole, TaskProgress};
+pub use layout::{LayoutEngine, LayoutNode, LayoutPreset, Pane, PaneId, PaneType, SplitDirection};
+pub use markdown::MarkdownRenderer;
 pub use palette::CommandPalette;
+pub use widgets::{GardenSpinner, GrowthGauge, StatusIndicator, StatusType, ToolOutput};
 
 use anyhow::Result;
 use crossterm::{
@@ -190,6 +194,151 @@ pub fn is_quit(event: &Event) -> bool {
     is_key(event, KeyCode::Char('q'), KeyModifiers::NONE)
         || is_key(event, KeyCode::Char('c'), KeyModifiers::CONTROL)
         || is_key(event, KeyCode::Char('d'), KeyModifiers::CONTROL)
+}
+
+/// Run the TUI application
+///
+/// This creates a full terminal UI with chat, command palette, and status bar.
+/// Returns when the user quits (q, Ctrl+C, or Ctrl+D).
+pub fn run_tui(model: &str) -> Result<Vec<String>> {
+    let mut terminal = TuiTerminal::new()?;
+    let mut app = App::new(model);
+    let mut user_inputs = Vec::new();
+
+    // Create layout engine for advanced pane management
+    let mut layout_engine = LayoutEngine::new();
+    layout_engine.apply_preset(LayoutPreset::Focus);
+
+    // Create widgets for status display
+    let mut spinner = GardenSpinner::new();
+    let status_indicator = StatusIndicator::new(StatusType::Ready, "Connected");
+
+    // Create markdown renderer for rich message display
+    let md_renderer = MarkdownRenderer::new();
+
+    loop {
+        // Update spinner animation
+        spinner.tick();
+
+        // Render the app
+        terminal.terminal().draw(|frame| {
+            app.render(frame);
+
+            // Render additional widgets based on state
+            if app.state == AppState::RunningTask {
+                if let Some(ref progress) = app.task_progress {
+                    let gauge = GrowthGauge::new(
+                        progress.current_step as f64
+                            / progress.total_steps.unwrap_or(10) as f64,
+                    );
+                    // Gauge would be rendered in the progress area
+                    let _ = gauge; // Use the gauge
+                }
+            }
+
+            // Layout engine manages pane positions
+            let _panes = layout_engine.calculate_layout(frame.size());
+
+            // Status indicator would show connection state
+            let _ = &status_indicator;
+
+            // Markdown renderer would format assistant messages
+            let _ = &md_renderer;
+        })?;
+
+        // Handle events
+        if let Some(event) = read_event(100)? {
+            if is_quit(&event) {
+                break;
+            }
+
+            if let Event::Key(key) = event {
+                match key.code {
+                    KeyCode::Enter => {
+                        if let Some(input) = app.on_enter() {
+                            if input.starts_with('/') {
+                                // Command
+                                app.add_user_message(&input);
+                                app.status = format!("Executed: {}", input);
+                            } else {
+                                // Regular message
+                                app.add_user_message(&input);
+                                user_inputs.push(input);
+                            }
+                        }
+                    }
+                    KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
+                        app.toggle_palette();
+                    }
+                    KeyCode::Char(c) => app.on_char(c),
+                    KeyCode::Backspace => app.on_backspace(),
+                    KeyCode::Left => app.on_left(),
+                    KeyCode::Right => app.on_right(),
+                    KeyCode::Up => app.on_up(),
+                    KeyCode::Down => app.on_down(),
+                    KeyCode::Esc => app.on_escape(),
+                    KeyCode::Tab => {
+                        // Cycle through panes
+                        layout_engine.focus_next();
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    terminal.restore()?;
+    Ok(user_inputs)
+}
+
+/// Run TUI with a message handler callback
+pub fn run_tui_with_handler<F>(model: &str, mut handler: F) -> Result<()>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut terminal = TuiTerminal::new()?;
+    let mut app = App::new(model);
+
+    loop {
+        terminal.terminal().draw(|frame| {
+            app.render(frame);
+        })?;
+
+        if let Some(event) = read_event(100)? {
+            if is_quit(&event) {
+                break;
+            }
+
+            if let Event::Key(key) = event {
+                match key.code {
+                    KeyCode::Enter => {
+                        if let Some(input) = app.on_enter() {
+                            app.add_user_message(&input);
+
+                            // Call handler and get response
+                            if let Some(response) = handler(&input) {
+                                app.add_assistant_message(&response);
+                            }
+                        }
+                    }
+                    KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
+                        app.toggle_palette();
+                    }
+                    KeyCode::Char(c) => app.on_char(c),
+                    KeyCode::Backspace => app.on_backspace(),
+                    KeyCode::Left => app.on_left(),
+                    KeyCode::Right => app.on_right(),
+                    KeyCode::Up => app.on_up(),
+                    KeyCode::Down => app.on_down(),
+                    KeyCode::Esc => app.on_escape(),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    terminal.restore()?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1183,13 +1183,6 @@ fn uuid_v4() -> String {
     format!("{:x}{:x}", now.as_secs(), now.subsec_nanos())
 }
 
-fn rand_probability() -> f32 {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    (now.subsec_nanos() % 100) as f32 / 100.0
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
