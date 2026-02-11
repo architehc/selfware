@@ -3,16 +3,53 @@
 //! These tests catch bugs where the model outputs formats the parser doesn't handle.
 
 use std::process::Command;
+use std::time::Duration;
+
+/// Helper to run selfware command with timeout
+fn run_selfware_with_timeout(args: &[&str], timeout_secs: u64) -> std::io::Result<std::process::Output> {
+    use std::process::Stdio;
+    use std::io::{Error, ErrorKind};
+
+    let mut child = Command::new("./target/release/selfware")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    // Use wait_timeout via thread spawn and join with timeout
+    let timeout = Duration::from_secs(timeout_secs);
+    let start = std::time::Instant::now();
+
+    loop {
+        match child.try_wait()? {
+            Some(_status) => {
+                return child.wait_with_output();
+            }
+            None => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    return Err(Error::new(
+                        ErrorKind::TimedOut,
+                        format!("Command timed out after {} seconds", timeout_secs)
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+}
 
 /// Test that a simple task results in tool calls being parsed and executed
 /// This catches format mismatches between model output and parser expectations
 #[test]
 #[cfg(feature = "integration")]
 fn test_model_tool_calls_are_parsed() {
-    let output = Command::new("./target/release/selfware")
-        .args(["run", "list files in the current directory"])
-        .output()
-        .expect("Failed to run selfware");
+    let output = run_selfware_with_timeout(
+        &["--yolo", "run", "list files in the current directory"],
+        60,
+    )
+    .expect("Failed to run selfware");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -37,10 +74,11 @@ fn test_model_tool_calls_are_parsed() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_analyze_tool_calls_work() {
-    let output = Command::new("./target/release/selfware")
-        .args(["analyze", "./src"])
-        .output()
-        .expect("Failed to run selfware");
+    let output = run_selfware_with_timeout(
+        &["--yolo", "analyze", "./src"],
+        120,
+    )
+    .expect("Failed to run selfware");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -65,10 +103,11 @@ fn test_analyze_tool_calls_work() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_model_format_compatibility() {
-    let output = Command::new("./target/release/selfware")
-        .args(["run", "read the file Cargo.toml"])
-        .output()
-        .expect("Failed to run selfware");
+    let output = run_selfware_with_timeout(
+        &["--yolo", "run", "read the file Cargo.toml"],
+        60,
+    )
+    .expect("Failed to run selfware");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -103,7 +142,7 @@ fn test_interactive_analyze_parses_tools() {
     use std::process::Stdio;
 
     let mut child = Command::new("./target/release/selfware")
-        .arg("chat")
+        .args(["--yolo", "chat"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -114,7 +153,28 @@ fn test_interactive_analyze_parses_tools() {
         stdin.write_all(b"/analyze ./src\nexit\n").ok();
     }
 
-    let output = child.wait_with_output().expect("Failed to wait");
+    // Wait with timeout
+    let timeout = Duration::from_secs(120);
+    let start = std::time::Instant::now();
+
+    let output = loop {
+        match child.try_wait() {
+            Ok(Some(_status)) => {
+                break child.wait_with_output().expect("Failed to get output");
+            }
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    panic!("Interactive test timed out after {} seconds", timeout.as_secs());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                panic!("Error waiting for child: {}", e);
+            }
+        }
+    };
+
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
