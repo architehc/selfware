@@ -210,8 +210,8 @@ pub fn run_tui(model: &str) -> Result<Vec<String>> {
     layout_engine.apply_preset(LayoutPreset::Focus);
 
     // Create widgets for status display
-    let mut spinner = GardenSpinner::new();
-    let status_indicator = StatusIndicator::new(StatusType::Ready, "Connected");
+    let mut spinner = GardenSpinner::new("Processing...");
+    let status_indicator = StatusIndicator::new(StatusType::Info, "Connected");
 
     // Create markdown renderer for rich message display
     let md_renderer = MarkdownRenderer::new();
@@ -229,6 +229,7 @@ pub fn run_tui(model: &str) -> Result<Vec<String>> {
                 if let Some(ref progress) = app.task_progress {
                     let gauge = GrowthGauge::new(
                         progress.current_step as f64 / progress.total_steps.unwrap_or(10) as f64,
+                        "Task",
                     );
                     // Gauge would be rendered in the progress area
                     let _ = gauge; // Use the gauge
