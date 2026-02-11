@@ -64,6 +64,7 @@ fn slow_model_config() -> Config {
             step_timeout_secs: timeout,
             token_budget: 100000,          // Larger token budget
             native_function_calling: true, // Use native FC when available
+            streaming: true,
         },
         yolo: YoloFileConfig::default(),
         execution_mode: ExecutionMode::Normal,

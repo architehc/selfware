@@ -33,6 +33,7 @@ pub fn test_config() -> Config {
             step_timeout_secs: timeout,
             token_budget: 50000,
             native_function_calling: false,
+            streaming: false, // Disable for tests
         },
         yolo: YoloFileConfig::default(),
         execution_mode: ExecutionMode::Normal,

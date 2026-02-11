@@ -101,7 +101,8 @@ impl ContextCompressor {
         compressed.push(Message::user(
             "Based on the above summary, please continue the task.",
         ));
-        compressed.extend(recent_msgs.into_iter().rev());
+        // Keep messages in chronological order (recent_msgs is already chronological)
+        compressed.extend(recent_msgs);
 
         let new_estimate = self.estimate_tokens(&compressed);
         info!(

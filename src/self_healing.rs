@@ -921,11 +921,27 @@ impl RecoveryExecutor {
     }
 
     /// Execute a recovery strategy
+    ///
+    /// NOTE: This is currently a simulation. Actions are logged but not actually
+    /// executed. Success is determined by the strategy's success_probability threshold.
+    /// In production, this would integrate with actual system recovery mechanisms.
     pub fn execute(&self, strategy: &RecoveryStrategy) -> RecoveryExecution {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+
+        // Check if self-healing is enabled
+        if !self.config.enabled {
+            return RecoveryExecution {
+                strategy: strategy.name.clone(),
+                started_at: now,
+                completed_at: Some(now),
+                success: false,
+                actions_executed: vec![],
+                error: Some("Self-healing is disabled".to_string()),
+            };
+        }
 
         self.stats.executions.fetch_add(1, Ordering::Relaxed);
 
@@ -945,11 +961,12 @@ impl RecoveryExecutor {
             };
             actions_executed.push(action_name.to_string());
 
-            // Simulate execution (in real implementation, would execute actual actions)
-            // For now, success is based on probability
-            if rand_probability() > strategy.success_probability {
+            // Simulation: success based on strategy's probability threshold
+            // A high success_probability (e.g., 0.9) means actions usually succeed
+            // This is deterministic for testing - real implementation would execute actual actions
+            if strategy.success_probability < 0.5 {
                 success = false;
-                error = Some(format!("Action {} failed", action_name));
+                error = Some(format!("Action {} failed (low success probability)", action_name));
                 break;
             }
         }

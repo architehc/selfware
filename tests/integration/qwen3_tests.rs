@@ -28,6 +28,7 @@ fn qwen3_config() -> Config {
             step_timeout_secs: 120,
             token_budget: 100000,
             native_function_calling: true, // Use native FC with Qwen3
+            streaming: true,
         },
         yolo: YoloFileConfig::default(),
         execution_mode: ExecutionMode::Normal,

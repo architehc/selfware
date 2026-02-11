@@ -91,7 +91,7 @@ impl Default for BracketValidator {
 
 /// State of bracket matching
 #[derive(Debug, Clone, PartialEq)]
-pub enum BracketState {
+pub(crate) enum BracketState {
     /// All brackets are balanced
     Balanced,
     /// Missing closing brackets
