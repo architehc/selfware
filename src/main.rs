@@ -55,10 +55,6 @@ struct Cli {
     #[arg(long)]
     daemon: bool,
 
-    /// Output format for machine consumption
-    #[arg(long, value_enum, default_value = "text")]
-    output_format: OutputFormat,
-
     /// Disable colored output
     #[arg(long)]
     no_color: bool,
@@ -133,7 +129,11 @@ enum Commands {
     },
 
     /// Show workshop status and statistics
-    Status,
+    Status {
+        /// Output format for machine consumption
+        #[arg(long, value_enum, default_value = "text")]
+        output_format: OutputFormat,
+    },
 
     /// Execute a workflow from a YAML file
     #[command(alias = "w")]
@@ -493,7 +493,7 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::Status => {
+        Commands::Status { output_format } => {
             // Count journal entries
             let tasks = Agent::list_tasks().unwrap_or_default();
             let completed = tasks
@@ -510,7 +510,7 @@ async fn main() -> Result<()> {
                 })
                 .count();
 
-            match cli.output_format {
+            match output_format {
                 OutputFormat::Json => {
                     let status = serde_json::json!({
                         "model": ctx.model_name,

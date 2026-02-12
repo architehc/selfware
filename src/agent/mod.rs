@@ -49,6 +49,13 @@ impl std::fmt::Display for AgentError {
 
 impl std::error::Error for AgentError {}
 
+/// Check if an anyhow error is a confirmation-required error (fatal in non-interactive mode)
+fn is_confirmation_error(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<AgentError>()
+        .map(|ae| matches!(ae, AgentError::ConfirmationRequired { .. }))
+        .unwrap_or(false)
+}
+
 pub struct Agent {
     client: ApiClient,
     tools: ToolRegistry,
@@ -1078,10 +1085,7 @@ To call a tool, use this EXACT XML structure:
                                 warn!("Initial execution failed: {}", e);
 
                                 // Check for confirmation error - these are fatal in non-interactive mode
-                                if e.downcast_ref::<AgentError>()
-                                    .map(|ae| matches!(ae, AgentError::ConfirmationRequired { .. }))
-                                    .unwrap_or(false)
-                                {
+                                if is_confirmation_error(&e) {
                                     record_state_transition("Planning", "Failed");
                                     if let Some(ref mut checkpoint) = self.current_checkpoint {
                                         checkpoint.log_error(0, e.to_string(), false);
@@ -1144,10 +1148,7 @@ To call a tool, use this EXACT XML structure:
                             warn!("Step failed: {}", e);
 
                             // Check for confirmation error - these are fatal in non-interactive mode
-                            if e.downcast_ref::<AgentError>()
-                                .map(|ae| matches!(ae, AgentError::ConfirmationRequired { .. }))
-                                .unwrap_or(false)
-                            {
+                            if is_confirmation_error(&e) {
                                 record_state_transition("Executing", "Failed");
                                 if let Some(ref mut checkpoint) = self.current_checkpoint {
                                     checkpoint.log_error(step, e.to_string(), false);
@@ -2558,10 +2559,7 @@ To call a tool, use this EXACT XML structure:
                             warn!("Step failed: {}", e);
 
                             // Check for confirmation error - these are fatal in non-interactive mode
-                            if e.downcast_ref::<AgentError>()
-                                .map(|ae| matches!(ae, AgentError::ConfirmationRequired { .. }))
-                                .unwrap_or(false)
-                            {
+                            if is_confirmation_error(&e) {
                                 record_state_transition("Executing", "Failed");
                                 if let Some(ref mut checkpoint) = self.current_checkpoint {
                                     checkpoint.log_error(step, e.to_string(), false);

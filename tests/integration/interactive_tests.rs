@@ -606,7 +606,9 @@ fn test_selfware_timeout_env_var() {
 
 /// Test that non-interactive mode fails fast without recovery loop when confirmation is required
 /// This validates the AgentError::ConfirmationRequired path
+/// Note: Model-dependent test - may be flaky if model doesn't call confirmation-required tools
 #[test]
+#[ignore] // Model-dependent: run with --include-ignored for E2E coverage
 #[cfg(feature = "integration")]
 fn test_non_interactive_fails_fast_on_confirmation() {
     // Run without --yolo, piping empty stdin to ensure non-interactive mode
