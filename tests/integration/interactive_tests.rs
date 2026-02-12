@@ -4,12 +4,32 @@
 //! These tests use subprocess execution to simulate real user interaction.
 
 use std::io::{Read, Write};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// Get the selfware binary path, checking release then debug
+fn get_binary_path() -> String {
+    if let Ok(path) = std::env::var("SELFWARE_BINARY") {
+        return path;
+    }
+
+    let release_path = "./target/release/selfware";
+    let debug_path = "./target/debug/selfware";
+
+    if Path::new(release_path).exists() {
+        release_path.to_string()
+    } else if Path::new(debug_path).exists() {
+        debug_path.to_string()
+    } else {
+        release_path.to_string()
+    }
+}
+
 /// Helper to run selfware with input and capture output with timeout enforcement
 fn run_interactive(input: &str, timeout_secs: u64) -> (String, String, i32) {
-    let mut child = Command::new("./target/release/selfware")
+    let binary = get_binary_path();
+    let mut child = Command::new(&binary)
         .arg("chat")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -63,7 +83,7 @@ fn run_interactive(input: &str, timeout_secs: u64) -> (String, String, i32) {
 
 /// Helper to run selfware 'run' command (non-interactive) with timeout enforcement
 fn run_task(task: &str, timeout_secs: u64) -> (String, String, i32) {
-    let mut child = Command::new("./target/release/selfware")
+    let mut child = Command::new(&get_binary_path())
         .args(["run", task])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -240,7 +260,7 @@ fn test_run_command_simple_task() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_analyze_command() {
-    let output = Command::new("./target/release/selfware")
+    let output = Command::new(&get_binary_path())
         .args(["analyze", "./src"])
         .output()
         .expect("Failed to run selfware");
@@ -259,7 +279,7 @@ fn test_analyze_command() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_help_flag() {
-    let output = Command::new("./target/release/selfware")
+    let output = Command::new(&get_binary_path())
         .arg("--help")
         .output()
         .expect("Failed to run selfware");
@@ -280,7 +300,7 @@ fn test_help_flag() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_version_flag() {
-    let output = Command::new("./target/release/selfware")
+    let output = Command::new(&get_binary_path())
         .arg("--version")
         .output()
         .expect("Failed to run selfware");
@@ -299,7 +319,7 @@ fn test_version_flag() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_journal_command() {
-    let output = Command::new("./target/release/selfware")
+    let output = Command::new(&get_binary_path())
         .arg("journal")
         .output()
         .expect("Failed to run selfware");
@@ -320,7 +340,7 @@ fn test_journal_command() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_status_command() {
-    let output = Command::new("./target/release/selfware")
+    let output = Command::new(&get_binary_path())
         .arg("status")
         .output()
         .expect("Failed to run selfware");
@@ -339,7 +359,7 @@ fn test_status_command() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_garden_command() {
-    let output = Command::new("./target/release/selfware")
+    let output = Command::new(&get_binary_path())
         .args(["garden", "."])
         .output()
         .expect("Failed to run selfware");
@@ -360,7 +380,7 @@ fn test_garden_command() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_multi_chat_init() {
-    let mut child = Command::new("./target/release/selfware")
+    let mut child = Command::new(&get_binary_path())
         .args(["multi-chat", "-n", "2"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -388,7 +408,7 @@ fn test_multi_chat_init() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_config_flag() {
-    let output = Command::new("./target/release/selfware")
+    let output = Command::new(&get_binary_path())
         .args(["-c", "selfware.toml", "--help"])
         .output()
         .expect("Failed to run selfware");
@@ -403,7 +423,7 @@ fn test_config_flag() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_workdir_flag() {
-    let output = Command::new("./target/release/selfware")
+    let output = Command::new(&get_binary_path())
         .args(["-C", "/tmp", "--help"])
         .output()
         .expect("Failed to run selfware");
@@ -418,7 +438,7 @@ fn test_workdir_flag() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_invalid_command() {
-    let output = Command::new("./target/release/selfware")
+    let output = Command::new(&get_binary_path())
         .arg("invalid_command_xyz")
         .output()
         .expect("Failed to run selfware");
@@ -438,7 +458,7 @@ fn test_invalid_command() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_quiet_mode() {
-    let output = Command::new("./target/release/selfware")
+    let output = Command::new(&get_binary_path())
         .args(["-q", "status"])
         .output()
         .expect("Failed to run selfware");
@@ -455,7 +475,7 @@ fn test_quiet_mode() {
 #[cfg(feature = "integration")]
 fn test_interrupt_handling() {
     // This tests that the process can be killed cleanly
-    let mut child = Command::new("./target/release/selfware")
+    let mut child = Command::new(&get_binary_path())
         .arg("chat")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -481,12 +501,12 @@ fn test_interrupt_handling() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_binary_exists() {
-    use std::path::Path;
-
-    let path = Path::new("./target/release/selfware");
+    let binary_path = get_binary_path();
+    let path = Path::new(&binary_path);
     assert!(
         path.exists(),
-        "Binary should exist at ./target/release/selfware"
+        "Binary should exist at {} (build with: cargo build or cargo build --release)",
+        binary_path
     );
 }
 
@@ -494,7 +514,7 @@ fn test_binary_exists() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_env_var_config() {
-    let output = Command::new("./target/release/selfware")
+    let output = Command::new(&get_binary_path())
         .env("SELFWARE_DEBUG", "1")
         .arg("--help")
         .output()

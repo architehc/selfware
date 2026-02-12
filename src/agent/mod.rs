@@ -2192,13 +2192,34 @@ To call a tool, use this EXACT XML structure:
         println!("{}", "🦊 Selfware Workshop (Basic Mode)".bright_cyan());
         println!("Type 'exit' to quit, '/help' for commands");
 
+        // Detect if stdin is a TTY or piped
+        use std::io::IsTerminal;
+        let is_tty = std::io::stdin().is_terminal();
+
         loop {
-            print!("🦊 ❯ ");
-            io::stdout().flush()?;
+            if is_tty {
+                print!("🦊 ❯ ");
+                io::stdout().flush()?;
+            }
 
             let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
+            let bytes_read = io::stdin().read_line(&mut input)?;
+
+            // EOF detection: read_line returns Ok(0) on EOF
+            if bytes_read == 0 {
+                break;
+            }
+
             let input = input.trim();
+
+            // Skip empty lines in non-interactive mode to avoid spurious tasks
+            if input.is_empty() {
+                if is_tty {
+                    continue; // In TTY mode, just prompt again
+                } else {
+                    break; // In piped mode, empty line = done
+                }
+            }
 
             if input == "exit" || input == "quit" {
                 break;

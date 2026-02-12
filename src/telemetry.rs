@@ -12,29 +12,45 @@ use tracing::{error, info, info_span, Span};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 /// Initialize global tracing subscriber with configurable output
+/// By default, only enables tracing if RUST_LOG is explicitly set
 pub fn init_tracing() {
+    // Only initialize verbose tracing if RUST_LOG is set
+    // Otherwise use a quiet "error-only" mode to avoid polluting CLI output
+    if std::env::var("RUST_LOG").is_ok() {
+        init_tracing_with_filter(&std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()));
+    }
+    // If RUST_LOG not set, don't initialize tracing at all - keeps CLI output clean
+}
+
+/// Initialize tracing only for debug/verbose mode
+pub fn init_tracing_verbose() {
     init_tracing_with_filter("info")
 }
 
 /// Initialize with custom filter string
 pub fn init_tracing_with_filter(filter: &str) {
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .with_target(true)
-        .with_thread_ids(true)
-        .with_thread_names(true)
-        .with_file(true)
-        .with_line_number(true)
-        .with_level(true)
-        .compact();
+    // Skip if already initialized
+    use std::sync::Once;
+    static INIT: Once = Once::new();
 
-    let filter_layer = EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("info"));
+    INIT.call_once(|| {
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .with_target(false)
+            .with_thread_ids(false)
+            .with_thread_names(false)
+            .with_file(false)
+            .with_line_number(false)
+            .with_level(true)
+            .compact()
+            .with_writer(std::io::stderr); // Write to stderr, not stdout
 
-    tracing_subscriber::registry()
-        .with(filter_layer)
-        .with(fmt_layer)
-        .init();
+        let filter_layer = EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("warn"));
 
-    info!("Tracing initialized with filter: {}", filter);
+        let _ = tracing_subscriber::registry()
+            .with(filter_layer)
+            .with(fmt_layer)
+            .try_init();
+    });
 }
 
 /// Create a span for tracking tool execution with automatic duration and outcome logging

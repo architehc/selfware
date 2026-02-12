@@ -213,10 +213,11 @@ pub struct ApiClient {
 
 impl ApiClient {
     pub fn new(config: &crate::config::Config) -> Result<Self> {
-        // Use step_timeout from config, with 4 hour default for slow local models
-        let request_timeout = config.agent.step_timeout_secs.max(14400);
+        // Use step_timeout from config with reasonable 60s minimum
+        // Users can configure longer timeouts for slow models
+        let request_timeout = config.agent.step_timeout_secs.max(60);
         let client = Client::builder()
-            .timeout(Duration::from_secs(request_timeout)) // From config, min 4 hours
+            .timeout(Duration::from_secs(request_timeout))
             .connect_timeout(Duration::from_secs(30))
             .build()
             .context("Failed to build HTTP client")?;
