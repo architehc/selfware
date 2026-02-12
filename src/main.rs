@@ -64,7 +64,7 @@ struct Cli {
     no_color: bool,
 }
 
-/// Output format for CLI
+/// Output format for CLI (currently only affects `status` command)
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
 pub enum OutputFormat {
     /// Human-readable text (default)
@@ -72,8 +72,6 @@ pub enum OutputFormat {
     Text,
     /// JSON output for scripting
     Json,
-    /// Streaming JSON (newline-delimited)
-    StreamJson,
 }
 
 #[derive(Subcommand)]
@@ -513,7 +511,7 @@ async fn main() -> Result<()> {
                 .count();
 
             match cli.output_format {
-                OutputFormat::Json | OutputFormat::StreamJson => {
+                OutputFormat::Json => {
                     let status = serde_json::json!({
                         "model": ctx.model_name,
                         "endpoint": config.endpoint,

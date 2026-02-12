@@ -365,19 +365,31 @@ To call a tool, use this EXACT XML structure:
             })
             .collect();
 
+        // Check if colors are enabled (respects --no-color and NO_COLOR env)
+        let colors_enabled = colored::control::SHOULD_COLORIZE.should_colorize();
+
         // Rusty, weathered color palette - like oxidized metal under salty water
-        let rust = "\x1b[38;5;130m"; // Deep rust orange
-        let rust_light = "\x1b[38;5;173m"; // Light copper/rust
-        let patina = "\x1b[38;5;66m"; // Oxidized teal/verdigris
-        let patina_light = "\x1b[38;5;109m"; // Weathered blue-green
-        let sand = "\x1b[38;5;180m"; // Faded sandy gold
-        let worn = "\x1b[38;5;245m"; // Weathered gray
-        let coral = "\x1b[38;5;174m"; // Faded coral/salmon
-        let aged = "\x1b[38;5;137m"; // Aged brown
-        let reset = "\x1b[0m";
+        let (rust, rust_light, patina, patina_light, sand, worn, coral, aged, reset) =
+            if colors_enabled {
+                (
+                    "\x1b[38;5;130m", // Deep rust orange
+                    "\x1b[38;5;173m", // Light copper/rust
+                    "\x1b[38;5;66m",  // Oxidized teal/verdigris
+                    "\x1b[38;5;109m", // Weathered blue-green
+                    "\x1b[38;5;180m", // Faded sandy gold
+                    "\x1b[38;5;245m", // Weathered gray
+                    "\x1b[38;5;174m", // Faded coral/salmon
+                    "\x1b[38;5;137m", // Aged brown
+                    "\x1b[0m",        // Reset
+                )
+            } else {
+                ("", "", "", "", "", "", "", "", "")
+            };
 
         // Progress bar colors - rusty theme
-        let bar_color = if used_pct > 90.0 {
+        let bar_color = if !colors_enabled {
+            ""
+        } else if used_pct > 90.0 {
             "\x1b[38;5;160m" // Deep warning red
         } else if used_pct > 70.0 {
             "\x1b[38;5;172m" // Amber rust
@@ -736,13 +748,20 @@ To call a tool, use this EXACT XML structure:
             .filter(|m| m.role == "assistant" && m.content.contains("<tool>"))
             .count();
 
-        // Colors
-        let rust = "\x1b[38;5;130m";
-        let patina = "\x1b[38;5;66m";
-        let sand = "\x1b[38;5;180m";
-        let worn = "\x1b[38;5;245m";
-        let reset = "\x1b[0m";
-        let bold = "\x1b[1m";
+        // Colors - respect --no-color and NO_COLOR env
+        let colors_enabled = colored::control::SHOULD_COLORIZE.should_colorize();
+        let (rust, patina, sand, worn, reset, bold) = if colors_enabled {
+            (
+                "\x1b[38;5;130m",
+                "\x1b[38;5;66m",
+                "\x1b[38;5;180m",
+                "\x1b[38;5;245m",
+                "\x1b[0m",
+                "\x1b[1m",
+            )
+        } else {
+            ("", "", "", "", "", "")
+        };
 
         // Elapsed time since session start (approximation based on messages)
         let session_indicator = if messages > 50 {
