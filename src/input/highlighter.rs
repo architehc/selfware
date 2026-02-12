@@ -12,7 +12,7 @@ pub struct SelfwareHighlighter {
     /// Style for file paths
     path_style: Style,
     /// Style for tool names
-    #[allow(dead_code)]
+    #[allow(dead_code)] // For future tool highlighting
     tool_style: Style,
     /// Style for keywords
     keyword_style: Style,
@@ -61,7 +61,7 @@ impl SelfwareHighlighter {
     }
 
     /// Check if a word looks like a path
-    #[allow(dead_code)]
+    #[allow(dead_code)] // For future path highlighting
     fn is_path(&self, word: &str) -> bool {
         word.contains('/')
             || word.starts_with('.')
@@ -76,7 +76,7 @@ impl SelfwareHighlighter {
     }
 
     /// Check if a word is a known keyword
-    #[allow(dead_code)]
+    #[allow(dead_code)] // For future keyword highlighting
     fn is_keyword(&self, word: &str) -> bool {
         matches!(
             word.to_lowercase().as_str(),
@@ -111,7 +111,7 @@ impl SelfwareHighlighter {
     }
 
     /// Check if position is inside a string
-    #[allow(dead_code)]
+    #[allow(dead_code)] // For future string context detection
     fn in_string(&self, pos: usize, strings: &[(usize, usize)]) -> bool {
         strings
             .iter()

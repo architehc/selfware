@@ -128,7 +128,7 @@ pub struct Usage {
     pub total_tokens: usize,
 }
 
-#[allow(dead_code)]
+// OpenAI API compatible types (used in tests and for API completeness)
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChatResponseChunk {
     pub id: String,
@@ -138,7 +138,7 @@ pub struct ChatResponseChunk {
     pub choices: Vec<ChoiceDelta>,
 }
 
-#[allow(dead_code)]
+// OpenAI API compatible types (used in tests and for API completeness)
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChoiceDelta {
     pub index: usize,
@@ -146,7 +146,7 @@ pub struct ChoiceDelta {
     pub finish_reason: Option<String>,
 }
 
-#[allow(dead_code)]
+// OpenAI API compatible types (used in tests and for API completeness)
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct MessageDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -159,7 +159,7 @@ pub struct MessageDelta {
     pub tool_calls: Option<Vec<ToolCallDelta>>,
 }
 
-#[allow(dead_code)]
+// OpenAI API compatible types (used in tests and for API completeness)
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ToolCallDelta {
     pub index: usize,
@@ -169,7 +169,7 @@ pub struct ToolCallDelta {
     pub function: Option<FunctionDelta>,
 }
 
-#[allow(dead_code)]
+// OpenAI API compatible types (used in tests and for API completeness)
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FunctionDelta {
     pub name: Option<String>,

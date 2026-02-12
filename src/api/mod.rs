@@ -10,7 +10,7 @@ pub mod types;
 use types::*;
 
 /// A streaming response that yields chunks as they arrive
-#[allow(dead_code)]
+// Streaming infrastructure (used by chat_streaming)
 pub struct StreamingResponse {
     response: reqwest::Response,
 }
@@ -118,7 +118,7 @@ impl StreamingResponse {
 
 /// A chunk from a streaming response
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+// Streaming infrastructure (used by chat_streaming)
 pub enum StreamChunk {
     /// Text content
     Content(String),
@@ -133,7 +133,7 @@ pub enum StreamChunk {
 }
 
 /// Parse a Server-Sent Events (SSE) event
-#[allow(dead_code)]
+// Streaming infrastructure (used by chat_streaming)
 fn parse_sse_event(event: &str) -> Option<StreamChunk> {
     for line in event.lines() {
         if let Some(data) = line.strip_prefix("data: ") {

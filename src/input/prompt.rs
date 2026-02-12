@@ -13,10 +13,10 @@ pub struct SelfwarePrompt {
     /// Current step number
     step: usize,
     /// Left prompt style
-    #[allow(dead_code)]
+    #[allow(dead_code)] // For future styled prompts
     left_style: Style,
     /// Right prompt style
-    #[allow(dead_code)]
+    #[allow(dead_code)] // For future styled prompts
     right_style: Style,
 }
 

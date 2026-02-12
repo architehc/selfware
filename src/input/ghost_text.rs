@@ -24,7 +24,7 @@ struct PatternHint {
     /// Suggested completion
     completion: String,
     /// Description
-    #[allow(dead_code)]
+    #[allow(dead_code)] // For future tooltip display
     description: String,
 }
 

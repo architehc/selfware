@@ -75,7 +75,7 @@ impl ToolCache {
     }
 
     /// Create a cache with custom TTL
-    #[allow(dead_code)]
+
     pub fn with_ttl(ttl: Duration) -> Self {
         Self {
             entries: RwLock::new(HashMap::new()),
@@ -167,7 +167,7 @@ impl ToolCache {
     }
 
     /// Invalidate a specific cache entry
-    #[allow(dead_code)]
+
     pub fn invalidate(&self, tool_name: &str, args: &Value) {
         let key = Self::cache_key(tool_name, args);
         if let Ok(mut entries) = self.entries.write() {
@@ -176,7 +176,7 @@ impl ToolCache {
     }
 
     /// Invalidate all entries for a specific tool
-    #[allow(dead_code)]
+
     pub fn invalidate_tool(&self, tool_name: &str) {
         let prefix = format!("{}:", tool_name);
         if let Ok(mut entries) = self.entries.write() {
@@ -192,7 +192,7 @@ impl ToolCache {
     }
 
     /// Clear all cached entries
-    #[allow(dead_code)]
+
     pub fn clear(&self) {
         if let Ok(mut entries) = self.entries.write() {
             entries.clear();
@@ -200,7 +200,7 @@ impl ToolCache {
     }
 
     /// Get cache statistics
-    #[allow(dead_code)]
+
     pub fn stats(&self) -> CacheStats {
         let entries = self.entries.read().map(|e| e.len()).unwrap_or(0);
         CacheStats {
