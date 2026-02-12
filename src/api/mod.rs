@@ -21,7 +21,7 @@ impl StreamingResponse {
     }
 
     /// Process the stream and send chunks through a channel
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Streaming API - used by chat_streaming
     pub async fn into_channel(self) -> mpsc::Receiver<Result<StreamChunk>> {
         let (tx, rx) = mpsc::channel(32);
 
@@ -58,7 +58,7 @@ impl StreamingResponse {
     }
 
     /// Collect all chunks into a complete response
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Streaming API - collects stream into response
     pub async fn collect(self) -> Result<ChatResponse> {
         let mut rx = self.into_channel().await;
         let mut content = String::new();
@@ -231,7 +231,7 @@ impl ApiClient {
     }
 
     /// Create client with custom retry configuration
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Builder method for API configuration
     pub fn with_retry_config(mut self, retry_config: RetryConfig) -> Self {
         self.retry_config = retry_config;
         self
@@ -275,7 +275,7 @@ impl ApiClient {
 
     /// Stream a chat completion response
     /// Returns a receiver that yields chunks as they arrive
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Streaming API endpoint
     pub async fn chat_stream(
         &self,
         messages: Vec<Message>,
@@ -437,7 +437,7 @@ pub enum ThinkingMode {
     /// Thinking disabled for faster responses
     Disabled,
     /// Thinking with a specific token budget
-    #[allow(dead_code)]
+    #[allow(dead_code)] // For models supporting thinking budget
     Budget(usize),
 }
 
