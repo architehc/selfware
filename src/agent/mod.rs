@@ -1484,23 +1484,13 @@ To call a tool, use this EXACT XML structure:
                         args_preview
                     };
 
-                    // In non-interactive mode, auto-reject unless in yolo mode
+                    // In non-interactive mode, fail fast - don't silently skip tools
                     if !self.is_interactive() {
-                        let skip_msg = "Tool execution skipped (non-interactive mode, use --yolo to auto-approve)";
-                        eprintln!("{} {}: {}", "⏭️".bright_yellow(), name, skip_msg);
-
-                        if use_native_fc {
-                            self.messages.push(Message::tool(
-                                serde_json::json!({"skipped": skip_msg}).to_string(),
-                                &call_id,
-                            ));
-                        } else {
-                            self.messages.push(Message::user(format!(
-                                "<tool_result><skipped>{}</skipped></tool_result>",
-                                skip_msg
-                            )));
-                        }
-                        continue;
+                        anyhow::bail!(
+                            "Tool '{}' requires confirmation but running in non-interactive mode. \
+                            Use --yolo to auto-approve tools, or run interactively.",
+                            name
+                        );
                     }
 
                     println!(

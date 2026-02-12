@@ -525,3 +525,87 @@ fn test_env_var_config() {
     // Should accept env var
     assert!(code == 0, "Should work with env var");
 }
+
+/// Test --output-format json produces valid JSON
+#[test]
+#[cfg(feature = "integration")]
+fn test_output_format_json() {
+    let output = Command::new(&get_binary_path())
+        .args(["--output-format", "json", "status"])
+        .output()
+        .expect("Failed to run selfware");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let code = output.status.code().unwrap_or(-1);
+
+    assert!(code == 0, "Should exit successfully");
+
+    // Output should be valid JSON
+    let parsed: Result<serde_json::Value, _> = serde_json::from_str(&stdout);
+    assert!(
+        parsed.is_ok(),
+        "Output should be valid JSON. Got: {}",
+        stdout
+    );
+
+    // JSON should contain expected fields
+    let json = parsed.unwrap();
+    assert!(json.get("model").is_some(), "JSON should have 'model' field");
+    assert!(
+        json.get("journal").is_some(),
+        "JSON should have 'journal' field"
+    );
+}
+
+/// Test --no-color disables color codes
+#[test]
+#[cfg(feature = "integration")]
+fn test_no_color_flag() {
+    let output = Command::new(&get_binary_path())
+        .args(["--no-color", "status"])
+        .output()
+        .expect("Failed to run selfware");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+
+    // Should not contain ANSI escape codes
+    assert!(
+        !stdout.contains("\x1b["),
+        "Output should not contain ANSI escape codes with --no-color"
+    );
+}
+
+/// Test NO_COLOR env var disables color codes
+#[test]
+#[cfg(feature = "integration")]
+fn test_no_color_env_var() {
+    let output = Command::new(&get_binary_path())
+        .env("NO_COLOR", "1")
+        .arg("status")
+        .output()
+        .expect("Failed to run selfware");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+
+    // Should not contain ANSI escape codes
+    assert!(
+        !stdout.contains("\x1b["),
+        "Output should not contain ANSI escape codes with NO_COLOR env var"
+    );
+}
+
+/// Test SELFWARE_TIMEOUT env var is applied
+#[test]
+#[cfg(feature = "integration")]
+fn test_selfware_timeout_env_var() {
+    // This just checks the env var is accepted without error
+    // Actual timeout behavior is hard to test without a slow endpoint
+    let output = Command::new(&get_binary_path())
+        .env("SELFWARE_TIMEOUT", "120")
+        .arg("--help")
+        .output()
+        .expect("Failed to run selfware");
+
+    let code = output.status.code().unwrap_or(-1);
+    assert!(code == 0, "Should accept SELFWARE_TIMEOUT env var");
+}

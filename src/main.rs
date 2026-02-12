@@ -164,6 +164,11 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // Apply --no-color early to disable all color output
+    if cli.no_color || std::env::var("NO_COLOR").is_ok() {
+        colored::control::set_override(false);
+    }
+
     // Change to working directory FIRST (before resolving relative paths)
     if let Some(ref workdir) = cli.workdir {
         std::env::set_current_dir(workdir)
@@ -491,29 +496,6 @@ async fn main() -> Result<()> {
         }
 
         Commands::Status => {
-            if !cli.quiet {
-                println!("{}", render_header(&ctx));
-            }
-            println!(
-                "\n{} {}\n",
-                Glyphs::HOME,
-                "Workshop Status".workshop_title()
-            );
-
-            let hosting = if ctx.is_local_model {
-                format!("{} Running on your hardware (local)", Glyphs::HOME).garden_healthy()
-            } else {
-                format!("{} Connected to remote model", Glyphs::COMPASS).garden_wilting()
-            };
-
-            println!("   {} Model: {}", Glyphs::GEAR, ctx.model_name.emphasis());
-            println!("   {}", hosting);
-            println!(
-                "   {} Garden: {}",
-                Glyphs::SPROUT,
-                ctx.project_path.path_local()
-            );
-
             // Count journal entries
             let tasks = Agent::list_tasks().unwrap_or_default();
             let completed = tasks
@@ -530,18 +512,60 @@ async fn main() -> Result<()> {
                 })
                 .count();
 
-            println!(
-                "\n   {} Journal: {} entries ({} complete, {} in progress)",
-                Glyphs::JOURNAL,
-                tasks.len().to_string().emphasis(),
-                completed.to_string().garden_healthy(),
-                in_progress.to_string().muted()
-            );
+            match cli.output_format {
+                OutputFormat::Json | OutputFormat::StreamJson => {
+                    let status = serde_json::json!({
+                        "model": ctx.model_name,
+                        "endpoint": config.endpoint,
+                        "is_local": ctx.is_local_model,
+                        "project_path": ctx.project_path,
+                        "execution_mode": format!("{:?}", exec_mode),
+                        "journal": {
+                            "total": tasks.len(),
+                            "completed": completed,
+                            "in_progress": in_progress
+                        }
+                    });
+                    println!("{}", serde_json::to_string_pretty(&status)?);
+                }
+                OutputFormat::Text => {
+                    if !cli.quiet {
+                        println!("{}", render_header(&ctx));
+                    }
+                    println!(
+                        "\n{} {}\n",
+                        Glyphs::HOME,
+                        "Workshop Status".workshop_title()
+                    );
 
-            println!(
-                "\n   {} This is your software. It runs on your terms.\n",
-                Glyphs::KEY
-            );
+                    let hosting = if ctx.is_local_model {
+                        format!("{} Running on your hardware (local)", Glyphs::HOME).garden_healthy()
+                    } else {
+                        format!("{} Connected to remote model", Glyphs::COMPASS).garden_wilting()
+                    };
+
+                    println!("   {} Model: {}", Glyphs::GEAR, ctx.model_name.emphasis());
+                    println!("   {}", hosting);
+                    println!(
+                        "   {} Garden: {}",
+                        Glyphs::SPROUT,
+                        ctx.project_path.path_local()
+                    );
+
+                    println!(
+                        "\n   {} Journal: {} entries ({} complete, {} in progress)",
+                        Glyphs::JOURNAL,
+                        tasks.len().to_string().emphasis(),
+                        completed.to_string().garden_healthy(),
+                        in_progress.to_string().muted()
+                    );
+
+                    println!(
+                        "\n   {} This is your software. It runs on your terms.\n",
+                        Glyphs::KEY
+                    );
+                }
+            }
         }
 
         Commands::Workflow {
