@@ -1126,6 +1126,18 @@ To call a tool, use this EXACT XML structure:
                 }
                 AgentState::ErrorRecovery { error } => {
                     let _span = enter_agent_step("ErrorRecovery", self.loop_control.current_step());
+
+                    // In non-interactive mode, confirmation errors are fatal - don't retry
+                    if !self.is_interactive()
+                        && error.contains("requires confirmation but running in non-interactive mode")
+                    {
+                        record_state_transition("ErrorRecovery", "Failed");
+                        self.loop_control.set_state(AgentState::Failed {
+                            reason: error.clone(),
+                        });
+                        continue;
+                    }
+
                     println!("{} {}", "⚠️ Recovering from error:".bright_red(), error);
 
                     // Add cognitive context about the error
@@ -2518,6 +2530,18 @@ To call a tool, use this EXACT XML structure:
                 }
                 AgentState::ErrorRecovery { error } => {
                     let _span = enter_agent_step("ErrorRecovery", self.loop_control.current_step());
+
+                    // In non-interactive mode, confirmation errors are fatal - don't retry
+                    if !self.is_interactive()
+                        && error.contains("requires confirmation but running in non-interactive mode")
+                    {
+                        record_state_transition("ErrorRecovery", "Failed");
+                        self.loop_control.set_state(AgentState::Failed {
+                            reason: error.clone(),
+                        });
+                        continue;
+                    }
+
                     println!("{} {}", "⚠️ Recovering from error:".bright_red(), error);
 
                     let cognitive_summary = self.cognitive_state.summary();
