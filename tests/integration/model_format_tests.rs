@@ -8,25 +8,16 @@
 use std::process::Command;
 use std::time::Duration;
 
-/// Get the selfware binary path, preferring debug (freshly built) over release
+/// Get the selfware binary path using Cargo-provided path (ensures freshly built binary)
 fn get_binary_path() -> String {
-    // Check environment variable first
+    // Allow override via environment variable
     if let Ok(path) = std::env::var("SELFWARE_BINARY") {
         return path;
     }
 
-    // Prefer debug build to avoid running stale release binaries
-    let debug_path = "./target/debug/selfware";
-    let release_path = "./target/release/selfware";
-
-    if std::path::Path::new(debug_path).exists() {
-        debug_path.to_string()
-    } else if std::path::Path::new(release_path).exists() {
-        release_path.to_string()
-    } else {
-        // Fall back to debug path (will fail with helpful error)
-        debug_path.to_string()
-    }
+    // Use Cargo-provided binary path when running via `cargo test`
+    // This ensures we always use the binary that was just built
+    env!("CARGO_BIN_EXE_selfware").to_string()
 }
 
 /// Helper to run selfware command with timeout
@@ -48,7 +39,7 @@ fn run_selfware_with_timeout(
         .map_err(|e| {
             Error::new(
                 e.kind(),
-                format!("Failed to spawn {}: {}. Build with: cargo build --release", binary, e),
+                format!("Failed to spawn {}: {}. Run tests with: cargo test", binary, e),
             )
         })?;
 
@@ -106,7 +97,9 @@ fn test_model_tool_calls_are_parsed() {
 
 /// Test that /analyze command works end-to-end with real model
 /// This test analyzes a single file to be faster and more deterministic
+/// Note: Ignored by default due to variable backend latency (run with --include-ignored)
 #[test]
+#[ignore]
 #[cfg(feature = "integration")]
 fn test_analyze_tool_calls_work() {
     // Analyze a single small file instead of entire src/ directory

@@ -4,27 +4,19 @@
 //! These tests use subprocess execution to simulate real user interaction.
 
 use std::io::{Read, Write};
-use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Get the selfware binary path, preferring debug (freshly built) over release
+/// Get the selfware binary path using Cargo-provided path (ensures freshly built binary)
 fn get_binary_path() -> String {
+    // Allow override via environment variable
     if let Ok(path) = std::env::var("SELFWARE_BINARY") {
         return path;
     }
 
-    let debug_path = "./target/debug/selfware";
-    let release_path = "./target/release/selfware";
-
-    // Prefer debug build to avoid running stale release binaries
-    if Path::new(debug_path).exists() {
-        debug_path.to_string()
-    } else if Path::new(release_path).exists() {
-        release_path.to_string()
-    } else {
-        debug_path.to_string()
-    }
+    // Use Cargo-provided binary path when running via `cargo test`
+    // This ensures we always use the binary that was just built
+    env!("CARGO_BIN_EXE_selfware").to_string()
 }
 
 /// Helper to run selfware with input and capture output with timeout enforcement
@@ -610,4 +602,78 @@ fn test_selfware_timeout_env_var() {
 
     let code = output.status.code().unwrap_or(-1);
     assert!(code == 0, "Should accept SELFWARE_TIMEOUT env var");
+}
+
+/// Test that non-interactive mode fails fast without recovery loop when confirmation is required
+/// This validates the AgentError::ConfirmationRequired path
+#[test]
+#[cfg(feature = "integration")]
+fn test_non_interactive_fails_fast_on_confirmation() {
+    // Run without --yolo, piping empty stdin to ensure non-interactive mode
+    let mut child = Command::new(&get_binary_path())
+        .args(["run", "use shell_exec to run pwd"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn selfware");
+
+    // Close stdin immediately to simulate non-interactive
+    drop(child.stdin.take());
+
+    let timeout = Duration::from_secs(60);
+    let start = Instant::now();
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout_buf = Vec::new();
+                let mut stderr_buf = Vec::new();
+                if let Some(mut stdout) = child.stdout.take() {
+                    use std::io::Read;
+                    stdout.read_to_end(&mut stdout_buf).ok();
+                }
+                if let Some(mut stderr) = child.stderr.take() {
+                    use std::io::Read;
+                    stderr.read_to_end(&mut stderr_buf).ok();
+                }
+                let stdout = String::from_utf8_lossy(&stdout_buf);
+                let stderr = String::from_utf8_lossy(&stderr_buf);
+                let combined = format!("{}{}", stdout, stderr);
+
+                // Should fail (non-zero exit code)
+                assert!(
+                    !status.success(),
+                    "Non-interactive mode should fail when confirmation required"
+                );
+
+                // Should mention confirmation/non-interactive in output
+                assert!(
+                    combined.contains("confirmation")
+                        || combined.contains("non-interactive")
+                        || combined.contains("--yolo"),
+                    "Error should mention confirmation issue. Output: {}",
+                    combined
+                );
+
+                // Should NOT show multiple recovery attempts
+                let recovery_count = combined.matches("Recovering from error").count();
+                assert!(
+                    recovery_count == 0,
+                    "Should fail immediately without recovery loop, but found {} recovery attempts",
+                    recovery_count
+                );
+
+                return;
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    child.kill().ok();
+                    panic!("Test timed out - possible infinite loop in error handling");
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => panic!("Error waiting for process: {}", e),
+        }
+    }
 }

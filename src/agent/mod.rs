@@ -1079,6 +1079,22 @@ To call a tool, use this EXACT XML structure:
                             }
                             Err(e) => {
                                 warn!("Initial execution failed: {}", e);
+
+                                // Check for confirmation error - these are fatal in non-interactive mode
+                                if e.downcast_ref::<AgentError>()
+                                    .map(|ae| matches!(ae, AgentError::ConfirmationRequired { .. }))
+                                    .unwrap_or(false)
+                                {
+                                    record_state_transition("Planning", "Failed");
+                                    if let Some(ref mut checkpoint) = self.current_checkpoint {
+                                        checkpoint.log_error(0, e.to_string(), false);
+                                    }
+                                    self.loop_control.set_state(AgentState::Failed {
+                                        reason: e.to_string(),
+                                    });
+                                    continue;
+                                }
+
                                 self.cognitive_state
                                     .working_memory
                                     .fail_step(1, &e.to_string());
