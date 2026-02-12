@@ -54,6 +54,26 @@ struct Cli {
     /// Shortcut for --mode=daemon (run forever)
     #[arg(long)]
     daemon: bool,
+
+    /// Output format for machine consumption
+    #[arg(long, value_enum, default_value = "text")]
+    output_format: OutputFormat,
+
+    /// Disable colored output
+    #[arg(long)]
+    no_color: bool,
+}
+
+/// Output format for CLI
+#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
+pub enum OutputFormat {
+    /// Human-readable text (default)
+    #[default]
+    Text,
+    /// JSON output for scripting
+    Json,
+    /// Streaming JSON (newline-delimited)
+    StreamJson,
 }
 
 #[derive(Subcommand)]

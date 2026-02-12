@@ -277,25 +277,47 @@ To call a tool, use this EXACT XML structure:
         self.config.execution_mode
     }
 
-    /// Check if tool execution needs confirmation based on current mode
+    /// Check if tool execution needs confirmation based on current mode and risk level
     pub fn needs_confirmation(&self, tool_name: &str) -> bool {
         use crate::config::ExecutionMode;
+
+        // Read-only tools never need confirmation
+        let safe_tools = [
+            "file_read",
+            "directory_tree",
+            "glob_find",
+            "grep_search",
+            "git_status",
+            "git_diff",
+            "git_log",
+            "ripgrep_search",
+            "web_search",
+        ];
+
+        if safe_tools.contains(&tool_name) {
+            return false;
+        }
+
         match self.config.execution_mode {
-            ExecutionMode::Normal => true, // Always ask
+            ExecutionMode::Yolo | ExecutionMode::Daemon => false, // Never ask
             ExecutionMode::AutoEdit => {
-                // Auto-approve file operations, ask for others
+                // Auto-approve file operations, ask for destructive operations
                 !matches!(
                     tool_name,
-                    "file_read"
-                        | "file_write"
-                        | "file_edit"
-                        | "directory_tree"
-                        | "glob_find"
-                        | "grep_search"
+                    "file_write" | "file_edit" | "file_create" | "directory_tree" | "glob_find"
                 )
             }
-            ExecutionMode::Yolo | ExecutionMode::Daemon => false, // Never ask
+            ExecutionMode::Normal => {
+                // Ask for all tools except safe ones
+                !safe_tools.contains(&tool_name)
+            }
         }
+    }
+
+    /// Check if running in non-interactive mode (piped stdin)
+    pub fn is_interactive(&self) -> bool {
+        use std::io::IsTerminal;
+        std::io::stdin().is_terminal()
     }
 
     // =========================================================================
@@ -1461,6 +1483,25 @@ To call a tool, use this EXACT XML structure:
                     } else {
                         args_preview
                     };
+
+                    // In non-interactive mode, auto-reject unless in yolo mode
+                    if !self.is_interactive() {
+                        let skip_msg = "Tool execution skipped (non-interactive mode, use --yolo to auto-approve)";
+                        eprintln!("{} {}: {}", "⏭️".bright_yellow(), name, skip_msg);
+
+                        if use_native_fc {
+                            self.messages.push(Message::tool(
+                                serde_json::json!({"skipped": skip_msg}).to_string(),
+                                &call_id,
+                            ));
+                        } else {
+                            self.messages.push(Message::user(format!(
+                                "<tool_result><skipped>{}</skipped></tool_result>",
+                                skip_msg
+                            )));
+                        }
+                        continue;
+                    }
 
                     println!(
                         "{} Tool: {} Args: {}",

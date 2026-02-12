@@ -270,6 +270,11 @@ impl Config {
                 config.temperature = t;
             }
         }
+        if let Ok(timeout) = std::env::var("SELFWARE_TIMEOUT") {
+            if let Ok(t) = timeout.parse::<u64>() {
+                config.agent.step_timeout_secs = t;
+            }
+        }
 
         Ok(config)
     }

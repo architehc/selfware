@@ -614,8 +614,10 @@ impl EmbeddingProvider for TfIdfEmbeddingProvider {
     }
 }
 
-/// Vector index using simple brute-force search (for small collections)
-/// TODO: Integrate HNSW for larger collections
+/// Vector index using simple brute-force search
+///
+/// This implementation uses linear scan which is efficient for small collections
+/// (< 10,000 vectors). For larger collections, consider HNSW or IVF indexing.
 pub struct VectorIndex {
     /// Embeddings matrix (row-major)
     embeddings: Vec<Vec<f32>>,

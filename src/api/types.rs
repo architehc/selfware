@@ -37,7 +37,6 @@ impl Message {
         }
     }
 
-    #[allow(dead_code)]
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
             role: "assistant".to_string(),
@@ -49,7 +48,6 @@ impl Message {
         }
     }
 
-    #[allow(dead_code)]
     pub fn assistant_with_reasoning(
         content: impl Into<String>,
         reasoning: impl Into<String>,
@@ -64,7 +62,6 @@ impl Message {
         }
     }
 
-    #[allow(dead_code)]
     pub fn tool(content: impl Into<String>, tool_call_id: impl Into<String>) -> Self {
         Self {
             role: "tool".to_string(),

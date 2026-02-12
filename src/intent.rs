@@ -951,9 +951,16 @@ impl SolutionSynthesizer {
         } else if desc_lower.contains("run") || desc_lower.contains("execute") {
             self.synthesize_command(goal)
         } else {
-            // Generic code solution
-            Solution::code(&goal.id, "rust", &format!("// TODO: {}", goal.description))
-                .with_confidence(0.5)
+            // Generic solution - describe what needs to be done
+            Solution::code(
+                &goal.id,
+                "text",
+                &format!(
+                    "Task: {}\n\nThis task requires manual implementation. Please provide more specific instructions.",
+                    goal.description
+                ),
+            )
+            .with_confidence(0.3)
         };
 
         // Check constraints
