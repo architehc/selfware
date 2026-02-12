@@ -32,8 +32,6 @@ use planning::Planner;
 pub enum AgentError {
     /// Tool requires confirmation but running in non-interactive mode
     ConfirmationRequired { tool_name: String },
-    /// Generic recoverable error
-    Recoverable(String),
 }
 
 impl std::fmt::Display for AgentError {
@@ -45,7 +43,6 @@ impl std::fmt::Display for AgentError {
                 Use --yolo to auto-approve tools, or run interactively.",
                 tool_name
             ),
-            AgentError::Recoverable(msg) => write!(f, "{}", msg),
         }
     }
 }

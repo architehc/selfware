@@ -496,10 +496,10 @@ fn test_interrupt_handling() {
 #[cfg(feature = "integration")]
 fn test_binary_exists() {
     let binary_path = get_binary_path();
-    let path = Path::new(&binary_path);
+    let path = std::path::Path::new(&binary_path);
     assert!(
         path.exists(),
-        "Binary should exist at {} (build with: cargo build or cargo build --release)",
+        "Binary should exist at {} (run: cargo test to build)",
         binary_path
     );
 }
