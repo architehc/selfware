@@ -8,21 +8,22 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Get the selfware binary path, checking release then debug
+/// Get the selfware binary path, preferring debug (freshly built) over release
 fn get_binary_path() -> String {
     if let Ok(path) = std::env::var("SELFWARE_BINARY") {
         return path;
     }
 
-    let release_path = "./target/release/selfware";
     let debug_path = "./target/debug/selfware";
+    let release_path = "./target/release/selfware";
 
-    if Path::new(release_path).exists() {
-        release_path.to_string()
-    } else if Path::new(debug_path).exists() {
+    // Prefer debug build to avoid running stale release binaries
+    if Path::new(debug_path).exists() {
         debug_path.to_string()
-    } else {
+    } else if Path::new(release_path).exists() {
         release_path.to_string()
+    } else {
+        debug_path.to_string()
     }
 }
 
@@ -82,9 +83,10 @@ fn run_interactive(input: &str, timeout_secs: u64) -> (String, String, i32) {
 }
 
 /// Helper to run selfware 'run' command (non-interactive) with timeout enforcement
+/// Uses --yolo to auto-approve tools since non-interactive mode requires it
 fn run_task(task: &str, timeout_secs: u64) -> (String, String, i32) {
     let mut child = Command::new(&get_binary_path())
-        .args(["run", task])
+        .args(["--yolo", "run", task])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

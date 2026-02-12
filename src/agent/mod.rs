@@ -27,6 +27,31 @@ use context::ContextCompressor;
 use loop_control::{AgentLoop, AgentState};
 use planning::Planner;
 
+/// Agent-specific errors that require special handling
+#[derive(Debug, Clone, PartialEq)]
+pub enum AgentError {
+    /// Tool requires confirmation but running in non-interactive mode
+    ConfirmationRequired { tool_name: String },
+    /// Generic recoverable error
+    Recoverable(String),
+}
+
+impl std::fmt::Display for AgentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentError::ConfirmationRequired { tool_name } => write!(
+                f,
+                "Tool '{}' requires confirmation but running in non-interactive mode. \
+                Use --yolo to auto-approve tools, or run interactively.",
+                tool_name
+            ),
+            AgentError::Recoverable(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+impl std::error::Error for AgentError {}
+
 pub struct Agent {
     client: ApiClient,
     tools: ToolRegistry,
@@ -1104,6 +1129,22 @@ To call a tool, use this EXACT XML structure:
                         }
                         Err(e) => {
                             warn!("Step failed: {}", e);
+
+                            // Check for confirmation error - these are fatal in non-interactive mode
+                            if e.downcast_ref::<AgentError>()
+                                .map(|ae| matches!(ae, AgentError::ConfirmationRequired { .. }))
+                                .unwrap_or(false)
+                            {
+                                record_state_transition("Executing", "Failed");
+                                if let Some(ref mut checkpoint) = self.current_checkpoint {
+                                    checkpoint.log_error(step, e.to_string(), false);
+                                }
+                                self.loop_control.set_state(AgentState::Failed {
+                                    reason: e.to_string(),
+                                });
+                                continue;
+                            }
+
                             record_state_transition("Executing", "ErrorRecovery");
 
                             // Record failure in cognitive state
@@ -1126,17 +1167,6 @@ To call a tool, use this EXACT XML structure:
                 }
                 AgentState::ErrorRecovery { error } => {
                     let _span = enter_agent_step("ErrorRecovery", self.loop_control.current_step());
-
-                    // In non-interactive mode, confirmation errors are fatal - don't retry
-                    if !self.is_interactive()
-                        && error.contains("requires confirmation but running in non-interactive mode")
-                    {
-                        record_state_transition("ErrorRecovery", "Failed");
-                        self.loop_control.set_state(AgentState::Failed {
-                            reason: error.clone(),
-                        });
-                        continue;
-                    }
 
                     println!("{} {}", "⚠️ Recovering from error:".bright_red(), error);
 
@@ -1517,11 +1547,10 @@ To call a tool, use this EXACT XML structure:
 
                     // In non-interactive mode, fail fast - don't silently skip tools
                     if !self.is_interactive() {
-                        anyhow::bail!(
-                            "Tool '{}' requires confirmation but running in non-interactive mode. \
-                            Use --yolo to auto-approve tools, or run interactively.",
-                            name
-                        );
+                        return Err(AgentError::ConfirmationRequired {
+                            tool_name: name.clone(),
+                        }
+                        .into());
                     }
 
                     println!(
@@ -2514,6 +2543,22 @@ To call a tool, use this EXACT XML structure:
                         }
                         Err(e) => {
                             warn!("Step failed: {}", e);
+
+                            // Check for confirmation error - these are fatal in non-interactive mode
+                            if e.downcast_ref::<AgentError>()
+                                .map(|ae| matches!(ae, AgentError::ConfirmationRequired { .. }))
+                                .unwrap_or(false)
+                            {
+                                record_state_transition("Executing", "Failed");
+                                if let Some(ref mut checkpoint) = self.current_checkpoint {
+                                    checkpoint.log_error(step, e.to_string(), false);
+                                }
+                                self.loop_control.set_state(AgentState::Failed {
+                                    reason: e.to_string(),
+                                });
+                                continue;
+                            }
+
                             record_state_transition("Executing", "ErrorRecovery");
                             self.cognitive_state
                                 .working_memory
@@ -2530,17 +2575,6 @@ To call a tool, use this EXACT XML structure:
                 }
                 AgentState::ErrorRecovery { error } => {
                     let _span = enter_agent_step("ErrorRecovery", self.loop_control.current_step());
-
-                    // In non-interactive mode, confirmation errors are fatal - don't retry
-                    if !self.is_interactive()
-                        && error.contains("requires confirmation but running in non-interactive mode")
-                    {
-                        record_state_transition("ErrorRecovery", "Failed");
-                        self.loop_control.set_state(AgentState::Failed {
-                            reason: error.clone(),
-                        });
-                        continue;
-                    }
 
                     println!("{} {}", "⚠️ Recovering from error:".bright_red(), error);
 

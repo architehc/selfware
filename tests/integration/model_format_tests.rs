@@ -8,24 +8,24 @@
 use std::process::Command;
 use std::time::Duration;
 
-/// Get the selfware binary path, checking release then debug
+/// Get the selfware binary path, preferring debug (freshly built) over release
 fn get_binary_path() -> String {
     // Check environment variable first
     if let Ok(path) = std::env::var("SELFWARE_BINARY") {
         return path;
     }
 
-    // Try release build first, then debug
-    let release_path = "./target/release/selfware";
+    // Prefer debug build to avoid running stale release binaries
     let debug_path = "./target/debug/selfware";
+    let release_path = "./target/release/selfware";
 
-    if std::path::Path::new(release_path).exists() {
-        release_path.to_string()
-    } else if std::path::Path::new(debug_path).exists() {
+    if std::path::Path::new(debug_path).exists() {
         debug_path.to_string()
-    } else {
-        // Fall back to release path (will fail with helpful error)
+    } else if std::path::Path::new(release_path).exists() {
         release_path.to_string()
+    } else {
+        // Fall back to debug path (will fail with helpful error)
+        debug_path.to_string()
     }
 }
 
