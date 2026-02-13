@@ -36,6 +36,14 @@ pub enum PaneType {
     Debug,
     /// Help/documentation pane
     Help,
+    /// Status bar widget (model, tokens, time)
+    StatusBar,
+    /// Garden health widget
+    GardenHealth,
+    /// Active tools widget
+    ActiveTools,
+    /// Log output widget
+    Logs,
 }
 
 impl PaneType {
@@ -49,6 +57,10 @@ impl PaneType {
             PaneType::Diff => "📊",
             PaneType::Debug => "🔍",
             PaneType::Help => "❓",
+            PaneType::StatusBar => "⚙️",
+            PaneType::GardenHealth => "🌱",
+            PaneType::ActiveTools => "🔧",
+            PaneType::Logs => "📜",
         }
     }
 
@@ -62,6 +74,10 @@ impl PaneType {
             PaneType::Diff => "Diff",
             PaneType::Debug => "Debug",
             PaneType::Help => "Help",
+            PaneType::StatusBar => "Status",
+            PaneType::GardenHealth => "Garden Health",
+            PaneType::ActiveTools => "Active Tools",
+            PaneType::Logs => "Logs",
         }
     }
 }
@@ -122,6 +138,8 @@ pub enum LayoutPreset {
     Explore,
     /// Three-column: explorer, editor, chat [20% | 50% | 30%]
     FullWorkspace,
+    /// Dashboard: status bar, chat, garden health, active tools, logs
+    Dashboard,
 }
 
 impl LayoutPreset {
@@ -134,6 +152,7 @@ impl LayoutPreset {
             LayoutPreset::Review => "Full-screen diff view",
             LayoutPreset::Explore => "Chat with file explorer",
             LayoutPreset::FullWorkspace => "Explorer + Editor + Chat",
+            LayoutPreset::Dashboard => "Dashboard with status, garden, tools",
         }
     }
 
@@ -146,6 +165,7 @@ impl LayoutPreset {
             LayoutPreset::Review => "Alt+4",
             LayoutPreset::Explore => "Alt+5",
             LayoutPreset::FullWorkspace => "Alt+6",
+            LayoutPreset::Dashboard => "Alt+d",
         }
     }
 }
@@ -342,6 +362,59 @@ impl LayoutEngine {
                     second: Box::new(right_split),
                 });
                 self.focused_pane = Some(editor_id);
+            }
+            LayoutPreset::Dashboard => {
+                // Dashboard layout:
+                // ┌──────────────────────────────────────────────────────┐
+                // │ [Status Bar] Model: xxx | Tokens: 45K | ⏱ 2h 34m    │
+                // ├─────────────────────────┬────────────────────────────┤
+                // │   Chat/Output Pane      │   Garden Health Widget     │
+                // │   (60%)                 │   ████████░░ 82%           │
+                // │                         ├────────────────────────────┤
+                // │                         │   Active Tools Widget      │
+                // │                         │   🔧 file_read ●●●○○       │
+                // ├─────────────────────────┴────────────────────────────┤
+                // │   Logs (compact)                                     │
+                // └──────────────────────────────────────────────────────┘
+
+                let status_id = self.create_pane(PaneType::StatusBar);
+                let chat_id = self.create_pane(PaneType::Chat);
+                let garden_id = self.create_pane(PaneType::GardenHealth);
+                let tools_id = self.create_pane(PaneType::ActiveTools);
+                let logs_id = self.create_pane(PaneType::Logs);
+
+                // Right column: garden health on top, active tools below
+                let right_widgets = LayoutNode::Split {
+                    direction: SplitDirection::Vertical,
+                    ratio: 0.5,
+                    first: Box::new(LayoutNode::Pane(garden_id)),
+                    second: Box::new(LayoutNode::Pane(tools_id)),
+                };
+
+                // Middle row: chat on left (60%), widgets on right (40%)
+                let middle_row = LayoutNode::Split {
+                    direction: SplitDirection::Horizontal,
+                    ratio: 0.6,
+                    first: Box::new(LayoutNode::Pane(chat_id)),
+                    second: Box::new(right_widgets),
+                };
+
+                // Main body: middle row on top (85%), logs at bottom (15%)
+                let main_body = LayoutNode::Split {
+                    direction: SplitDirection::Vertical,
+                    ratio: 0.85,
+                    first: Box::new(middle_row),
+                    second: Box::new(LayoutNode::Pane(logs_id)),
+                };
+
+                // Full layout: status bar on top (fixed ~3 lines), main body below
+                self.root = Some(LayoutNode::Split {
+                    direction: SplitDirection::Vertical,
+                    ratio: 0.05, // Status bar takes ~5% of height
+                    first: Box::new(LayoutNode::Pane(status_id)),
+                    second: Box::new(main_body),
+                });
+                self.focused_pane = Some(chat_id);
             }
         }
     }

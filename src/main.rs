@@ -294,6 +294,26 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Handle TUI dashboard mode first (before subcommands)
+    #[cfg(feature = "extras")]
+    if cli.tui {
+        use selfware::tui;
+
+        if !cli.quiet {
+            // TUI will handle its own display
+        }
+
+        let _user_inputs = tui::run_tui_dashboard(&config.model)?;
+        return Ok(());
+    }
+
+    #[cfg(not(feature = "extras"))]
+    if cli.tui {
+        eprintln!("Error: TUI dashboard requires the 'extras' feature.");
+        eprintln!("Rebuild with: cargo build --features extras");
+        std::process::exit(1);
+    }
+
     // Default to Chat if no subcommand specified
     let command = cli.command.unwrap_or(Commands::Chat);
 

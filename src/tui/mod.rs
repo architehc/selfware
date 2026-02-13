@@ -5,12 +5,17 @@
 // Feature-gated module - dead_code lint disabled at crate level
 
 mod app;
+mod dashboard_widgets;
 mod layout;
 mod markdown;
 mod palette;
 mod widgets;
 
 pub use app::{App, AppState, ChatMessage, MessageRole, TaskProgress};
+pub use dashboard_widgets::{
+    render_active_tools, render_garden_health, render_help_overlay, render_logs,
+    render_status_bar, ActiveTool, DashboardState, LogEntry, LogLevel,
+};
 pub use layout::{LayoutEngine, LayoutNode, LayoutPreset, Pane, PaneId, PaneType, SplitDirection};
 pub use markdown::MarkdownRenderer;
 pub use palette::CommandPalette;
@@ -26,7 +31,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    Terminal,
+    Frame, Terminal,
 };
 use std::io::{self, Stdout};
 
@@ -339,6 +344,366 @@ where
 
     terminal.restore()?;
     Ok(())
+}
+
+/// Run the TUI dashboard mode
+///
+/// This creates a full terminal dashboard UI with:
+/// - Status bar showing model, tokens, elapsed time
+/// - Main chat pane (60% width)
+/// - Garden health widget
+/// - Active tools widget
+/// - Logs panel at bottom
+///
+/// Keyboard shortcuts:
+/// - q / Ctrl+C / Ctrl+D: Quit
+/// - ?: Toggle help overlay
+/// - d: Toggle dashboard/focus mode
+/// - g: Toggle garden view zoom
+/// - l: Toggle logs view zoom
+/// - Tab: Cycle focus between panes
+/// - z: Toggle zoom on focused pane
+/// - Alt+1-6: Quick layout presets
+pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
+    let mut terminal = TuiTerminal::new()?;
+    let mut app = App::new(model);
+    let mut layout_engine = LayoutEngine::new();
+    let mut dashboard_state = DashboardState::new(model);
+    let mut user_inputs = Vec::new();
+    let mut show_help = false;
+    let mut paused = false;
+
+    // Apply dashboard layout preset
+    layout_engine.apply_preset(LayoutPreset::Dashboard);
+    dashboard_state.log(LogLevel::Info, "Dashboard initialized");
+    dashboard_state.log(LogLevel::Success, "Connected to model");
+
+    loop {
+        // Render the dashboard
+        terminal.terminal().draw(|frame| {
+            let area = frame.size();
+
+            // Calculate pane layouts
+            let pane_layouts = layout_engine.calculate_layout(area);
+
+            // Render each pane based on its type
+            for (pane_id, pane_area) in &pane_layouts {
+                if let Some(pane) = layout_engine.get_pane(*pane_id) {
+                    match pane.pane_type {
+                        PaneType::StatusBar => {
+                            render_status_bar(frame, *pane_area, &dashboard_state);
+                        }
+                        PaneType::Chat => {
+                            // Render chat in this pane
+                            render_chat_pane(frame, *pane_area, &app, pane.focused);
+                        }
+                        PaneType::GardenHealth => {
+                            render_garden_health(frame, *pane_area, &dashboard_state);
+                        }
+                        PaneType::ActiveTools => {
+                            render_active_tools(frame, *pane_area, &dashboard_state);
+                        }
+                        PaneType::Logs => {
+                            render_logs(frame, *pane_area, &dashboard_state);
+                        }
+                        _ => {
+                            // Render placeholder for other pane types
+                            render_placeholder_pane(frame, *pane_area, pane);
+                        }
+                    }
+                }
+            }
+
+            // Render help overlay if active
+            if show_help {
+                render_help_overlay(frame, area);
+            }
+
+            // Render pause indicator if paused
+            if paused {
+                render_pause_indicator(frame, area);
+            }
+        })?;
+
+        // Handle events
+        if let Some(event) = read_event(100)? {
+            if is_quit(&event) {
+                dashboard_state.log(LogLevel::Info, "Shutting down...");
+                break;
+            }
+
+            if let Event::Key(key) = event {
+                match key.code {
+                    // Toggle help overlay
+                    KeyCode::Char('?') => {
+                        show_help = !show_help;
+                    }
+
+                    // Toggle dashboard/focus mode
+                    KeyCode::Char('d') => {
+                        if layout_engine.current_preset() == LayoutPreset::Dashboard {
+                            layout_engine.apply_preset(LayoutPreset::Focus);
+                            dashboard_state.log(LogLevel::Info, "Switched to focus mode");
+                        } else {
+                            layout_engine.apply_preset(LayoutPreset::Dashboard);
+                            dashboard_state.log(LogLevel::Info, "Switched to dashboard mode");
+                        }
+                    }
+
+                    // Toggle garden view (zoom on garden)
+                    KeyCode::Char('g') => {
+                        // Find garden pane and focus/zoom it
+                        for pane_id in layout_engine.pane_ids() {
+                            if let Some(pane) = layout_engine.get_pane(pane_id) {
+                                if pane.pane_type == PaneType::GardenHealth {
+                                    layout_engine.set_focus(pane_id);
+                                    layout_engine.toggle_zoom();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Toggle logs view (zoom on logs)
+                    KeyCode::Char('l') => {
+                        for pane_id in layout_engine.pane_ids() {
+                            if let Some(pane) = layout_engine.get_pane(pane_id) {
+                                if pane.pane_type == PaneType::Logs {
+                                    layout_engine.set_focus(pane_id);
+                                    layout_engine.toggle_zoom();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    // Pause/resume
+                    KeyCode::Char(' ') => {
+                        paused = !paused;
+                        if paused {
+                            dashboard_state.log(LogLevel::Warning, "Streaming paused");
+                        } else {
+                            dashboard_state.log(LogLevel::Info, "Streaming resumed");
+                        }
+                    }
+
+                    // Zoom toggle
+                    KeyCode::Char('z') => {
+                        layout_engine.toggle_zoom();
+                    }
+
+                    // Cycle focus
+                    KeyCode::Tab => {
+                        layout_engine.focus_next();
+                    }
+                    KeyCode::BackTab => {
+                        layout_engine.focus_prev();
+                    }
+
+                    // Quick layout presets
+                    KeyCode::Char('1') if key.modifiers == KeyModifiers::ALT => {
+                        layout_engine.apply_preset(LayoutPreset::Focus);
+                        dashboard_state.log(LogLevel::Info, "Layout: Focus");
+                    }
+                    KeyCode::Char('2') if key.modifiers == KeyModifiers::ALT => {
+                        layout_engine.apply_preset(LayoutPreset::Coding);
+                        dashboard_state.log(LogLevel::Info, "Layout: Coding");
+                    }
+                    KeyCode::Char('3') if key.modifiers == KeyModifiers::ALT => {
+                        layout_engine.apply_preset(LayoutPreset::Debugging);
+                        dashboard_state.log(LogLevel::Info, "Layout: Debugging");
+                    }
+                    KeyCode::Char('4') if key.modifiers == KeyModifiers::ALT => {
+                        layout_engine.apply_preset(LayoutPreset::Review);
+                        dashboard_state.log(LogLevel::Info, "Layout: Review");
+                    }
+                    KeyCode::Char('5') if key.modifiers == KeyModifiers::ALT => {
+                        layout_engine.apply_preset(LayoutPreset::Explore);
+                        dashboard_state.log(LogLevel::Info, "Layout: Explore");
+                    }
+                    KeyCode::Char('6') if key.modifiers == KeyModifiers::ALT => {
+                        layout_engine.apply_preset(LayoutPreset::FullWorkspace);
+                        dashboard_state.log(LogLevel::Info, "Layout: Full Workspace");
+                    }
+
+                    // Chat input handling
+                    KeyCode::Enter => {
+                        if !show_help {
+                            if let Some(input) = app.on_enter() {
+                                if input.starts_with('/') {
+                                    app.add_user_message(&input);
+                                    app.status = format!("Executed: {}", input);
+                                    dashboard_state.log(LogLevel::Info, &format!("Command: {}", input));
+                                } else {
+                                    app.add_user_message(&input);
+                                    user_inputs.push(input.clone());
+                                    dashboard_state.log(LogLevel::Info, &format!("User: {}", &input[..input.len().min(50)]));
+                                }
+                            }
+                        }
+                    }
+
+                    KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
+                        app.toggle_palette();
+                    }
+
+                    KeyCode::Char(c) if !show_help => app.on_char(c),
+                    KeyCode::Backspace if !show_help => app.on_backspace(),
+                    KeyCode::Left if !show_help => app.on_left(),
+                    KeyCode::Right if !show_help => app.on_right(),
+                    KeyCode::Up if !show_help => app.on_up(),
+                    KeyCode::Down if !show_help => app.on_down(),
+                    KeyCode::Esc => {
+                        if show_help {
+                            show_help = false;
+                        } else if layout_engine.is_zoomed() {
+                            layout_engine.toggle_zoom();
+                        } else {
+                            app.on_escape();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    terminal.restore()?;
+    Ok(user_inputs)
+}
+
+/// Render a chat pane
+fn render_chat_pane(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
+    use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+    use ratatui::text::{Line, Span};
+
+    let border_style = if focused {
+        TuiPalette::title_style()
+    } else {
+        TuiPalette::border_style()
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(Span::styled(" 💬 Chat ", TuiPalette::title_style()));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Split inner area for messages and input
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(3),    // Messages
+            Constraint::Length(3), // Input
+        ])
+        .split(inner);
+
+    // Render messages
+    let items: Vec<ListItem> = app
+        .messages
+        .iter()
+        .rev()
+        .skip(app.scroll)
+        .take(chunks[0].height as usize)
+        .map(|msg| {
+            let style = match msg.role {
+                MessageRole::User => Style::default().fg(TuiPalette::AMBER),
+                MessageRole::Assistant => Style::default().fg(TuiPalette::GARDEN_GREEN),
+                MessageRole::System => TuiPalette::muted_style(),
+                MessageRole::Tool => Style::default().fg(TuiPalette::COPPER),
+            };
+
+            let prefix = match msg.role {
+                MessageRole::User => "You",
+                MessageRole::Assistant => "🦊",
+                MessageRole::System => "📋",
+                MessageRole::Tool => "🔧",
+            };
+
+            let content = format!("{} {} {}", msg.timestamp, prefix, msg.content);
+            ListItem::new(Line::from(Span::styled(content, style)))
+        })
+        .collect();
+
+    let messages = List::new(items);
+    frame.render_widget(messages, chunks[0]);
+
+    // Render input
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(if focused && app.state == AppState::Chatting {
+            TuiPalette::title_style()
+        } else {
+            TuiPalette::muted_style()
+        })
+        .title(" Input ");
+
+    let input_inner = input_block.inner(chunks[1]);
+    frame.render_widget(input_block, chunks[1]);
+
+    let input_text = Paragraph::new(format!("❯ {}", app.input))
+        .style(Style::default().fg(TuiPalette::PARCHMENT));
+    frame.render_widget(input_text, input_inner);
+
+    // Show cursor if focused and chatting
+    if focused && app.state == AppState::Chatting {
+        frame.set_cursor(input_inner.x + 2 + app.cursor as u16, input_inner.y);
+    }
+}
+
+/// Render a placeholder pane for unimplemented pane types
+fn render_placeholder_pane(frame: &mut Frame, area: Rect, pane: &Pane) {
+    use ratatui::widgets::{Block, Borders, Paragraph};
+    use ratatui::text::Span;
+
+    let border_style = if pane.focused {
+        TuiPalette::title_style()
+    } else {
+        TuiPalette::border_style()
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(Span::styled(
+            format!(" {} {} ", pane.pane_type.icon(), pane.title()),
+            TuiPalette::title_style(),
+        ));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let placeholder = Paragraph::new(format!("  {} pane", pane.pane_type.title()))
+        .style(TuiPalette::muted_style());
+    frame.render_widget(placeholder, inner);
+}
+
+/// Render pause indicator
+fn render_pause_indicator(frame: &mut Frame, area: Rect) {
+    use ratatui::widgets::{Block, Paragraph};
+    use ratatui::text::Span;
+
+    let width = 20;
+    let height = 3;
+    let x = (area.width - width) / 2;
+    let y = area.height - height - 2;
+
+    let indicator_area = Rect::new(x, y, width, height);
+
+    let block = Block::default()
+        .style(Style::default().bg(TuiPalette::WILT));
+
+    frame.render_widget(block, indicator_area);
+
+    let text = Paragraph::new(Span::styled(
+        "  ⏸ PAUSED  ",
+        Style::default()
+            .fg(TuiPalette::PARCHMENT)
+            .add_modifier(Modifier::BOLD),
+    ));
+    frame.render_widget(text, Rect::new(x, y + 1, width, 1));
 }
 
 #[cfg(test)]
