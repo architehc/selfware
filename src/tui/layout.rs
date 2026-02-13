@@ -759,4 +759,66 @@ mod tests {
         let v = SplitDirection::Vertical;
         assert_ne!(h, v);
     }
+
+    #[test]
+    fn test_apply_preset_dashboard() {
+        let mut engine = LayoutEngine::new();
+        engine.apply_preset(LayoutPreset::Dashboard);
+        assert_eq!(engine.current_preset(), LayoutPreset::Dashboard);
+        // Dashboard has: StatusBar, Chat, GardenHealth, ActiveTools, Logs = 5 panes
+        assert_eq!(engine.pane_ids().len(), 5);
+    }
+
+    #[test]
+    fn test_dashboard_pane_types() {
+        let mut engine = LayoutEngine::new();
+        engine.apply_preset(LayoutPreset::Dashboard);
+
+        let pane_types: Vec<_> = engine
+            .pane_ids()
+            .iter()
+            .filter_map(|id| engine.get_pane(*id))
+            .map(|p| p.pane_type)
+            .collect();
+
+        assert!(pane_types.contains(&PaneType::StatusBar));
+        assert!(pane_types.contains(&PaneType::Chat));
+        assert!(pane_types.contains(&PaneType::GardenHealth));
+        assert!(pane_types.contains(&PaneType::ActiveTools));
+        assert!(pane_types.contains(&PaneType::Logs));
+    }
+
+    #[test]
+    fn test_dashboard_pane_icons() {
+        assert_eq!(PaneType::StatusBar.icon(), "⚙️");
+        assert_eq!(PaneType::GardenHealth.icon(), "🌱");
+        assert_eq!(PaneType::ActiveTools.icon(), "🔧");
+        assert_eq!(PaneType::Logs.icon(), "📜");
+    }
+
+    #[test]
+    fn test_dashboard_pane_titles() {
+        assert_eq!(PaneType::StatusBar.title(), "Status");
+        assert_eq!(PaneType::GardenHealth.title(), "Garden Health");
+        assert_eq!(PaneType::ActiveTools.title(), "Active Tools");
+        assert_eq!(PaneType::Logs.title(), "Logs");
+    }
+
+    #[test]
+    fn test_dashboard_layout_calculation() {
+        let mut engine = LayoutEngine::new();
+        engine.apply_preset(LayoutPreset::Dashboard);
+
+        let area = Rect::new(0, 0, 100, 50);
+        let layouts = engine.calculate_layout(area);
+
+        // All 5 panes should have layout areas
+        assert_eq!(layouts.len(), 5);
+
+        // Each pane should have non-zero dimensions
+        for (_id, rect) in &layouts {
+            assert!(rect.width > 0);
+            assert!(rect.height > 0);
+        }
+    }
 }
