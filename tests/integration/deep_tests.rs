@@ -68,9 +68,6 @@ fn slow_model_config() -> Config {
         },
         yolo: YoloFileConfig::default(),
         execution_mode: ExecutionMode::Normal,
-        compact: false,
-        verbose: false,
-        show_tokens: false,
     }
 }
 

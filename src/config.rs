@@ -61,18 +61,6 @@ pub struct Config {
     /// Runtime execution mode (set via CLI, not persisted)
     #[serde(skip)]
     pub execution_mode: ExecutionMode,
-
-    /// Compact output mode (minimal, no animations) - set via CLI
-    #[serde(skip)]
-    pub compact: bool,
-
-    /// Verbose output (show detailed tool execution) - set via CLI
-    #[serde(skip)]
-    pub verbose: bool,
-
-    /// Always show token usage in output - set via CLI
-    #[serde(skip)]
-    pub show_tokens: bool,
 }
 
 /// YOLO mode configuration (loaded from config file)
@@ -165,9 +153,6 @@ impl Default for Config {
             agent: AgentConfig::default(),
             yolo: YoloFileConfig::default(),
             execution_mode: ExecutionMode::default(),
-            compact: false,
-            verbose: false,
-            show_tokens: false,
         }
     }
 }
@@ -631,9 +616,6 @@ mod tests {
                 status_interval: 25,
             },
             execution_mode: ExecutionMode::default(),
-            compact: false,
-            verbose: false,
-            show_tokens: false,
         };
 
         let toml_str = toml::to_string(&config).unwrap();

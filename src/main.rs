@@ -72,18 +72,6 @@ struct Cli {
     /// Color theme: amber (default), ocean, minimal, high-contrast
     #[arg(long, value_enum, default_value = "amber")]
     theme: Theme,
-
-    /// Compact output mode (minimal, no animations)
-    #[arg(long)]
-    compact: bool,
-
-    /// Verbose output (show detailed tool execution)
-    #[arg(long, short = 'v')]
-    verbose: bool,
-
-    /// Always show token usage in output
-    #[arg(long)]
-    show_tokens: bool,
 }
 
 /// Color theme for terminal output
@@ -264,11 +252,6 @@ async fn main() -> Result<()> {
 
     // Apply execution mode to config
     config.execution_mode = exec_mode;
-
-    // Apply UI flags to config
-    config.compact = cli.compact;
-    config.verbose = cli.verbose;
-    config.show_tokens = cli.show_tokens;
 
     let ctx = WorkshopContext::from_config(&config.endpoint, &config.model).with_mode(exec_mode);
 
