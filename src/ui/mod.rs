@@ -8,4 +8,6 @@ pub mod animations;
 pub mod banners;
 pub mod components;
 pub mod garden;
+pub mod mascot;
 pub mod style;
+pub mod theme;

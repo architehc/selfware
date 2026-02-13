@@ -913,6 +913,178 @@ pub fn gradient_progress_bar(progress: f64, width: usize, start: Color, end: Col
 }
 
 // ============================================================================
+// Multi-Step Progress Tracker
+// ============================================================================
+
+/// Status of a phase in the multi-step progress
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhaseStatus {
+    /// Phase not started
+    Pending,
+    /// Phase currently executing
+    Active,
+    /// Phase completed successfully
+    Completed,
+    /// Phase failed
+    Failed,
+    /// Phase skipped
+    Skipped,
+}
+
+/// A single phase in multi-step progress
+#[derive(Debug, Clone)]
+pub struct ProgressPhase {
+    /// Phase name
+    pub name: String,
+    /// Current status
+    pub status: PhaseStatus,
+    /// Progress within this phase (0.0 to 1.0)
+    pub progress: f64,
+}
+
+/// Multi-step progress tracker for complex tasks
+pub struct MultiStepProgress {
+    phases: Vec<ProgressPhase>,
+    current_phase: usize,
+    start_time: std::time::Instant,
+}
+
+impl MultiStepProgress {
+    /// Create a new multi-step progress tracker
+    pub fn new(phase_names: &[&str]) -> Self {
+        Self {
+            phases: phase_names
+                .iter()
+                .map(|name| ProgressPhase {
+                    name: name.to_string(),
+                    status: PhaseStatus::Pending,
+                    progress: 0.0,
+                })
+                .collect(),
+            current_phase: 0,
+            start_time: std::time::Instant::now(),
+        }
+    }
+
+    /// Start the current phase
+    pub fn start_phase(&mut self) {
+        if self.current_phase < self.phases.len() {
+            self.phases[self.current_phase].status = PhaseStatus::Active;
+        }
+    }
+
+    /// Update progress of current phase
+    pub fn update_progress(&mut self, progress: f64) {
+        if self.current_phase < self.phases.len() {
+            self.phases[self.current_phase].progress = progress.clamp(0.0, 1.0);
+        }
+    }
+
+    /// Complete current phase and move to next
+    pub fn complete_phase(&mut self) {
+        if self.current_phase < self.phases.len() {
+            self.phases[self.current_phase].status = PhaseStatus::Completed;
+            self.phases[self.current_phase].progress = 1.0;
+            self.current_phase += 1;
+            if self.current_phase < self.phases.len() {
+                self.phases[self.current_phase].status = PhaseStatus::Active;
+            }
+        }
+    }
+
+    /// Mark current phase as failed
+    pub fn fail_phase(&mut self) {
+        if self.current_phase < self.phases.len() {
+            self.phases[self.current_phase].status = PhaseStatus::Failed;
+        }
+    }
+
+    /// Get overall progress (0.0 to 1.0)
+    pub fn overall_progress(&self) -> f64 {
+        let completed: f64 = self
+            .phases
+            .iter()
+            .map(|p| match p.status {
+                PhaseStatus::Completed => 1.0,
+                PhaseStatus::Active => p.progress,
+                _ => 0.0,
+            })
+            .sum();
+        completed / self.phases.len() as f64
+    }
+
+    /// Estimate remaining time based on elapsed time and progress
+    pub fn estimated_remaining(&self) -> Option<std::time::Duration> {
+        let progress = self.overall_progress();
+        if progress > 0.01 {
+            let elapsed = self.start_time.elapsed();
+            let estimated_total = elapsed.as_secs_f64() / progress;
+            let remaining = estimated_total - elapsed.as_secs_f64();
+            if remaining > 0.0 {
+                return Some(std::time::Duration::from_secs_f64(remaining));
+            }
+        }
+        None
+    }
+
+    /// Render the progress display
+    pub fn render(&self) -> String {
+        use colored::Colorize;
+        use super::theme::current_theme;
+
+        let theme = current_theme();
+        let mut result = String::new();
+
+        for (i, phase) in self.phases.iter().enumerate() {
+            let (icon, color) = match phase.status {
+                PhaseStatus::Pending => ("○", theme.muted),
+                PhaseStatus::Active => ("●", theme.accent),
+                PhaseStatus::Completed => ("✓", theme.success),
+                PhaseStatus::Failed => ("✗", theme.error),
+                PhaseStatus::Skipped => ("◌", theme.muted),
+            };
+
+            let phase_num = format!("{}/{}", i + 1, self.phases.len());
+            let progress_str = if phase.status == PhaseStatus::Active && phase.progress > 0.0 {
+                format!(" [{:.0}%]", phase.progress * 100.0)
+            } else {
+                String::new()
+            };
+
+            result.push_str(&format!(
+                "{} Phase {}: {}{}",
+                icon.custom_color(color),
+                phase_num.custom_color(theme.muted),
+                phase.name.custom_color(if phase.status == PhaseStatus::Active {
+                    theme.primary
+                } else {
+                    theme.muted
+                }),
+                progress_str.custom_color(theme.accent)
+            ));
+            result.push('\n');
+        }
+
+        // Add ETA if available
+        if let Some(remaining) = self.estimated_remaining() {
+            let secs = remaining.as_secs();
+            let eta = if secs >= 60 {
+                format!("~{}m {}s", secs / 60, secs % 60)
+            } else {
+                format!("~{}s", secs)
+            };
+            result.push_str(&format!(
+                "\n{} {}",
+                "ETA:".custom_color(theme.muted),
+                eta.custom_color(theme.accent)
+            ));
+        }
+
+        result
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

@@ -17,6 +17,7 @@ use selfware::ui::components::{
     render_header, render_task_complete, render_task_start, WorkshopContext,
 };
 use selfware::ui::style::{Glyphs, SelfwareStyle};
+use selfware::ui::theme::{self, ThemeId};
 use selfware::workflows::{VarValue, WorkflowExecutor};
 
 #[derive(Parser)]
@@ -58,6 +59,40 @@ struct Cli {
     /// Disable colored output
     #[arg(long)]
     no_color: bool,
+
+    /// Launch full TUI dashboard mode (requires --features tui)
+    #[arg(long)]
+    tui: bool,
+
+    /// Color theme: amber (default), ocean, minimal, high-contrast
+    #[arg(long, value_enum, default_value = "amber")]
+    theme: Theme,
+
+    /// Compact output mode (minimal, no animations)
+    #[arg(long)]
+    compact: bool,
+
+    /// Verbose output (show detailed tool execution)
+    #[arg(long, short = 'v')]
+    verbose: bool,
+
+    /// Always show token usage in output
+    #[arg(long)]
+    show_tokens: bool,
+}
+
+/// Color theme for terminal output
+#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
+pub enum Theme {
+    /// Warm amber tones (default)
+    #[default]
+    Amber,
+    /// Cool ocean blues and teals
+    Ocean,
+    /// Clean grayscale minimal
+    Minimal,
+    /// High contrast for accessibility
+    HighContrast,
 }
 
 /// Output format for CLI (currently only affects `status` command)
@@ -166,6 +201,15 @@ async fn main() -> Result<()> {
     if cli.no_color || std::env::var("NO_COLOR").is_ok() {
         colored::control::set_override(false);
     }
+
+    // Apply theme selection
+    let theme_id = match cli.theme {
+        Theme::Amber => ThemeId::Amber,
+        Theme::Ocean => ThemeId::Ocean,
+        Theme::Minimal => ThemeId::Minimal,
+        Theme::HighContrast => ThemeId::HighContrast,
+    };
+    theme::set_theme(theme_id);
 
     // Change to working directory FIRST (before resolving relative paths)
     if let Some(ref workdir) = cli.workdir {

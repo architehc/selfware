@@ -368,6 +368,45 @@ pub fn render_box(title: &str, content: &str) -> String {
     result
 }
 
+/// Render welcome message with mascot
+pub fn render_welcome_with_mascot(ctx: &WorkshopContext) -> String {
+    use super::mascot::{render_mascot, MascotMood};
+
+    let mascot = render_mascot(MascotMood::Greeting);
+    let header = render_header(ctx);
+
+    format!(
+        "{}\n{}\n\n  {} Ready to tend your garden!\n",
+        mascot,
+        header,
+        Glyphs::FLOWER.garden_healthy()
+    )
+}
+
+/// Render thinking state with mascot
+pub fn render_thinking_with_mascot(message: &str) -> String {
+    use super::mascot::{render_mascot, MascotMood};
+
+    let mascot = render_mascot(MascotMood::Thinking);
+    format!("{}\n  {}\n", mascot, message.craftsman_voice())
+}
+
+/// Render success state with mascot
+pub fn render_success_with_mascot(message: &str) -> String {
+    use super::mascot::{render_mascot, MascotMood};
+
+    let mascot = render_mascot(MascotMood::Success);
+    format!("{}\n  {}\n", mascot, message.garden_healthy())
+}
+
+/// Render error state with mascot
+pub fn render_error_with_mascot(message: &str) -> String {
+    use super::mascot::{render_mascot, MascotMood};
+
+    let mascot = render_mascot(MascotMood::Error);
+    format!("{}\n  {}\n", mascot, message.garden_wilting())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
