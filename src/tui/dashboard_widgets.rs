@@ -11,7 +11,31 @@ use ratatui::{
     widgets::{Block, Borders, Gauge, List, ListItem, Paragraph},
     Frame,
 };
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Events sent from the agent to update the TUI dashboard
+#[derive(Debug, Clone)]
+pub enum TuiEvent {
+    /// Agent started processing
+    AgentStarted,
+    /// Agent completed successfully
+    AgentCompleted { message: String },
+    /// Agent encountered an error
+    AgentError { message: String },
+    /// Tool execution started
+    ToolStarted { name: String },
+    /// Tool execution completed
+    ToolCompleted { name: String, success: bool, duration_ms: u64 },
+    /// Token usage update
+    TokenUsage { prompt_tokens: u64, completion_tokens: u64 },
+    /// Status message update
+    StatusUpdate { message: String },
+    /// Garden health update (from code analysis or other metrics)
+    GardenHealthUpdate { health: f64 },
+    /// Log message
+    Log { level: LogLevel, message: String },
+}
 
 /// Dashboard state containing all widget data
 #[derive(Debug, Clone)]
@@ -105,7 +129,54 @@ impl DashboardState {
     pub fn tool_complete(&mut self, name: &str) {
         self.active_tools.retain(|t| t.name != name);
     }
+
+    /// Process a TUI event and update state accordingly
+    pub fn process_event(&mut self, event: TuiEvent) {
+        match event {
+            TuiEvent::AgentStarted => {
+                self.status_message = "Agent working...".to_string();
+                self.log(LogLevel::Info, "Agent started processing");
+            }
+            TuiEvent::AgentCompleted { message } => {
+                self.status_message = "Ready".to_string();
+                self.log(LogLevel::Success, &format!("Completed: {}", message));
+            }
+            TuiEvent::AgentError { message } => {
+                self.status_message = format!("Error: {}", &message[..message.len().min(30)]);
+                self.log(LogLevel::Error, &message);
+            }
+            TuiEvent::ToolStarted { name } => {
+                self.tool_start(&name);
+                self.status_message = format!("Running: {}", name);
+            }
+            TuiEvent::ToolCompleted { name, success, duration_ms } => {
+                self.tool_complete(&name);
+                if success {
+                    self.log(LogLevel::Success, &format!("{} completed ({}ms)", name, duration_ms));
+                } else {
+                    self.log(LogLevel::Warning, &format!("{} failed ({}ms)", name, duration_ms));
+                }
+            }
+            TuiEvent::TokenUsage { prompt_tokens, completion_tokens } => {
+                self.tokens_used += completion_tokens;
+                self.log(LogLevel::Debug, &format!("+{} tokens (prompt: {})", completion_tokens, prompt_tokens));
+            }
+            TuiEvent::StatusUpdate { message } => {
+                self.status_message = message.clone();
+                self.log(LogLevel::Info, &message);
+            }
+            TuiEvent::GardenHealthUpdate { health } => {
+                self.garden_health = health.clamp(0.0, 1.0);
+            }
+            TuiEvent::Log { level, message } => {
+                self.log(level, &message);
+            }
+        }
+    }
 }
+
+/// Thread-safe wrapper for DashboardState
+pub type SharedDashboardState = Arc<Mutex<DashboardState>>;
 
 /// An active tool being tracked
 #[derive(Debug, Clone)]

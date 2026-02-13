@@ -15,6 +15,7 @@ pub use app::{App, AppState, ChatMessage, MessageRole, TaskProgress};
 pub use dashboard_widgets::{
     render_active_tools, render_garden_health, render_help_overlay, render_logs,
     render_status_bar, ActiveTool, DashboardState, LogEntry, LogLevel,
+    SharedDashboardState, TuiEvent,
 };
 pub use layout::{LayoutEngine, LayoutNode, LayoutPreset, Pane, PaneId, PaneType, SplitDirection};
 pub use markdown::MarkdownRenderer;
@@ -575,6 +576,232 @@ pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
 
     terminal.restore()?;
     Ok(user_inputs)
+}
+
+/// Run the TUI dashboard with shared state and event receiver
+///
+/// This version allows external code (like the Agent) to send events that
+/// update the dashboard in real-time. The event_rx is polled non-blocking
+/// on each frame.
+pub fn run_tui_dashboard_with_events(
+    model: &str,
+    shared_state: SharedDashboardState,
+    event_rx: std::sync::mpsc::Receiver<TuiEvent>,
+) -> Result<Vec<String>> {
+    let mut terminal = TuiTerminal::new()?;
+    let mut app = App::new(model);
+    let mut layout_engine = LayoutEngine::new();
+    let mut user_inputs = Vec::new();
+    let mut show_help = false;
+    let mut paused = false;
+
+    // Apply dashboard layout preset
+    layout_engine.apply_preset(LayoutPreset::Dashboard);
+    {
+        let mut state = shared_state.lock().unwrap();
+        state.log(LogLevel::Info, "Dashboard initialized");
+        state.log(LogLevel::Success, "Connected to model");
+    }
+
+    loop {
+        // Process any pending events from the agent (non-blocking)
+        loop {
+            match event_rx.try_recv() {
+                Ok(event) => {
+                    let mut state = shared_state.lock().unwrap();
+                    state.process_event(event);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // Sender dropped, log and continue
+                    let mut state = shared_state.lock().unwrap();
+                    state.log(LogLevel::Warning, "Event channel disconnected");
+                    break;
+                }
+            }
+        }
+
+        // Get a copy of the dashboard state for rendering
+        let dashboard_state = shared_state.lock().unwrap().clone();
+
+        // Render the dashboard
+        terminal.terminal().draw(|frame| {
+            let area = frame.size();
+            let pane_layouts = layout_engine.calculate_layout(area);
+
+            for (pane_id, pane_area) in &pane_layouts {
+                if let Some(pane) = layout_engine.get_pane(*pane_id) {
+                    match pane.pane_type {
+                        PaneType::StatusBar => {
+                            render_status_bar(frame, *pane_area, &dashboard_state);
+                        }
+                        PaneType::Chat => {
+                            render_chat_pane(frame, *pane_area, &app, pane.focused);
+                        }
+                        PaneType::GardenHealth => {
+                            render_garden_health(frame, *pane_area, &dashboard_state);
+                        }
+                        PaneType::ActiveTools => {
+                            render_active_tools(frame, *pane_area, &dashboard_state);
+                        }
+                        PaneType::Logs => {
+                            render_logs(frame, *pane_area, &dashboard_state);
+                        }
+                        _ => {
+                            render_placeholder_pane(frame, *pane_area, pane);
+                        }
+                    }
+                }
+            }
+
+            if show_help {
+                render_help_overlay(frame, area);
+            }
+
+            if paused {
+                render_pause_indicator(frame, area);
+            }
+        })?;
+
+        // Handle events (same logic as run_tui_dashboard)
+        if let Some(event) = read_event(100)? {
+            if is_quit(&event) {
+                let mut state = shared_state.lock().unwrap();
+                state.log(LogLevel::Info, "Shutting down...");
+                break;
+            }
+
+            if let Event::Key(key) = event {
+                let in_input_mode = app.state == AppState::Chatting && !show_help;
+
+                match key.code {
+                    KeyCode::Char('?') if !in_input_mode || app.input.is_empty() => {
+                        show_help = !show_help;
+                    }
+                    KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
+                        if layout_engine.current_preset() == LayoutPreset::Dashboard {
+                            layout_engine.apply_preset(LayoutPreset::Focus);
+                            shared_state.lock().unwrap().log(LogLevel::Info, "Switched to focus mode");
+                        } else {
+                            layout_engine.apply_preset(LayoutPreset::Dashboard);
+                            shared_state.lock().unwrap().log(LogLevel::Info, "Switched to dashboard mode");
+                        }
+                    }
+                    KeyCode::Char('g') if key.modifiers == KeyModifiers::CONTROL => {
+                        for pane_id in layout_engine.pane_ids() {
+                            if let Some(pane) = layout_engine.get_pane(pane_id) {
+                                if pane.pane_type == PaneType::GardenHealth {
+                                    layout_engine.set_focus(pane_id);
+                                    layout_engine.toggle_zoom();
+                                    shared_state.lock().unwrap().log(LogLevel::Info, "Toggled garden view");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char('l') if key.modifiers == KeyModifiers::CONTROL => {
+                        for pane_id in layout_engine.pane_ids() {
+                            if let Some(pane) = layout_engine.get_pane(pane_id) {
+                                if pane.pane_type == PaneType::Logs {
+                                    layout_engine.set_focus(pane_id);
+                                    layout_engine.toggle_zoom();
+                                    shared_state.lock().unwrap().log(LogLevel::Info, "Toggled logs view");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char(' ') if app.input.is_empty() => {
+                        paused = !paused;
+                        let mut state = shared_state.lock().unwrap();
+                        if paused {
+                            state.log(LogLevel::Warning, "Streaming paused");
+                        } else {
+                            state.log(LogLevel::Info, "Streaming resumed");
+                        }
+                    }
+                    KeyCode::Char('z') => {
+                        layout_engine.toggle_zoom();
+                    }
+                    KeyCode::Tab => {
+                        layout_engine.focus_next();
+                    }
+                    KeyCode::BackTab => {
+                        layout_engine.focus_prev();
+                    }
+                    KeyCode::Char('1') if key.modifiers == KeyModifiers::ALT => {
+                        layout_engine.apply_preset(LayoutPreset::Focus);
+                        shared_state.lock().unwrap().log(LogLevel::Info, "Layout: Focus");
+                    }
+                    KeyCode::Char('2') if key.modifiers == KeyModifiers::ALT => {
+                        layout_engine.apply_preset(LayoutPreset::Coding);
+                        shared_state.lock().unwrap().log(LogLevel::Info, "Layout: Coding");
+                    }
+                    KeyCode::Char('3') if key.modifiers == KeyModifiers::ALT => {
+                        layout_engine.apply_preset(LayoutPreset::Debugging);
+                        shared_state.lock().unwrap().log(LogLevel::Info, "Layout: Debugging");
+                    }
+                    KeyCode::Char('4') if key.modifiers == KeyModifiers::ALT => {
+                        layout_engine.apply_preset(LayoutPreset::Review);
+                        shared_state.lock().unwrap().log(LogLevel::Info, "Layout: Review");
+                    }
+                    KeyCode::Char('5') if key.modifiers == KeyModifiers::ALT => {
+                        layout_engine.apply_preset(LayoutPreset::Explore);
+                        shared_state.lock().unwrap().log(LogLevel::Info, "Layout: Explore");
+                    }
+                    KeyCode::Char('6') if key.modifiers == KeyModifiers::ALT => {
+                        layout_engine.apply_preset(LayoutPreset::FullWorkspace);
+                        shared_state.lock().unwrap().log(LogLevel::Info, "Layout: Full Workspace");
+                    }
+                    KeyCode::Enter => {
+                        if !show_help {
+                            if let Some(input) = app.on_enter() {
+                                if input.starts_with('/') {
+                                    app.add_user_message(&input);
+                                    app.status = format!("Executed: {}", input);
+                                    shared_state.lock().unwrap().log(LogLevel::Info, &format!("Command: {}", input));
+                                } else {
+                                    app.add_user_message(&input);
+                                    user_inputs.push(input.clone());
+                                    shared_state.lock().unwrap().log(LogLevel::Info, &format!("User: {}", &input[..input.len().min(50)]));
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
+                        app.toggle_palette();
+                    }
+                    KeyCode::Char(c) if !show_help => app.on_char(c),
+                    KeyCode::Backspace if !show_help => app.on_backspace(),
+                    KeyCode::Left if !show_help => app.on_left(),
+                    KeyCode::Right if !show_help => app.on_right(),
+                    KeyCode::Up if !show_help => app.on_up(),
+                    KeyCode::Down if !show_help => app.on_down(),
+                    KeyCode::Esc => {
+                        if show_help {
+                            show_help = false;
+                        } else if layout_engine.is_zoomed() {
+                            layout_engine.toggle_zoom();
+                        } else {
+                            app.on_escape();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    terminal.restore()?;
+    Ok(user_inputs)
+}
+
+/// Create a channel pair for sending events to the TUI dashboard
+///
+/// Returns (sender, receiver) tuple. Pass the receiver to `run_tui_dashboard_with_events`
+/// and keep the sender to send events from your agent code.
+pub fn create_event_channel() -> (std::sync::mpsc::Sender<TuiEvent>, std::sync::mpsc::Receiver<TuiEvent>) {
+    std::sync::mpsc::channel()
 }
 
 /// Render a chat pane
