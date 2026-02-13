@@ -61,8 +61,13 @@ struct Cli {
     no_color: bool,
 
     /// Launch full TUI dashboard mode (requires --features extras)
+    /// This is the default when no subcommand is specified
     #[arg(long)]
     tui: bool,
+
+    /// Use classic CLI mode instead of TUI (overrides default TUI)
+    #[arg(long)]
+    no_tui: bool,
 
     /// Color theme: amber (default), ocean, minimal, high-contrast
     #[arg(long, value_enum, default_value = "amber")]
@@ -299,17 +304,18 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Handle TUI dashboard mode first (before subcommands)
+    // Handle TUI dashboard mode
+    // Default to TUI when extras feature is enabled and no subcommand specified
+    // Use --no-tui to force classic CLI mode
     #[cfg(feature = "extras")]
-    if cli.tui {
-        use selfware::tui;
+    {
+        let should_use_tui = cli.tui || (cli.command.is_none() && !cli.no_tui);
+        if should_use_tui {
+            use selfware::tui;
 
-        if !cli.quiet {
-            // TUI will handle its own display
+            let _user_inputs = tui::run_tui_dashboard(&config.model)?;
+            return Ok(());
         }
-
-        let _user_inputs = tui::run_tui_dashboard(&config.model)?;
-        return Ok(());
     }
 
     #[cfg(not(feature = "extras"))]
@@ -319,7 +325,7 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    // Default to Chat if no subcommand specified
+    // Default to Chat if no subcommand specified (non-extras builds)
     let command = cli.command.unwrap_or(Commands::Chat);
 
     match command {

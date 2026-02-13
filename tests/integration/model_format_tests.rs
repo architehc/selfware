@@ -128,6 +128,7 @@ fn test_analyze_tool_calls_work() {
 
 /// Test that the parser handles whatever format the current model produces
 #[test]
+#[ignore = "Backend-dependent test with variable latency; run with --include-ignored"]
 #[cfg(feature = "integration")]
 fn test_model_format_compatibility() {
     let output = run_selfware_with_timeout(&["--yolo", "run", "read the file Cargo.toml"], 90)
