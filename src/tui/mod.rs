@@ -433,14 +433,17 @@ pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
             }
 
             if let Event::Key(key) = event {
+                // Check if we're in input mode (chat focused with non-empty input or chatting state)
+                let in_input_mode = app.state == AppState::Chatting && !show_help;
+
                 match key.code {
-                    // Toggle help overlay
-                    KeyCode::Char('?') => {
+                    // Toggle help overlay (works anywhere)
+                    KeyCode::Char('?') if !in_input_mode || app.input.is_empty() => {
                         show_help = !show_help;
                     }
 
-                    // Toggle dashboard/focus mode
-                    KeyCode::Char('d') => {
+                    // Toggle dashboard/focus mode (Ctrl+D or 'd' when input is empty)
+                    KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
                         if layout_engine.current_preset() == LayoutPreset::Dashboard {
                             layout_engine.apply_preset(LayoutPreset::Focus);
                             dashboard_state.log(LogLevel::Info, "Switched to focus mode");
@@ -450,35 +453,37 @@ pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
                         }
                     }
 
-                    // Toggle garden view (zoom on garden)
-                    KeyCode::Char('g') => {
+                    // Toggle garden view (Ctrl+G)
+                    KeyCode::Char('g') if key.modifiers == KeyModifiers::CONTROL => {
                         // Find garden pane and focus/zoom it
                         for pane_id in layout_engine.pane_ids() {
                             if let Some(pane) = layout_engine.get_pane(pane_id) {
                                 if pane.pane_type == PaneType::GardenHealth {
                                     layout_engine.set_focus(pane_id);
                                     layout_engine.toggle_zoom();
+                                    dashboard_state.log(LogLevel::Info, "Toggled garden view");
                                     break;
                                 }
                             }
                         }
                     }
 
-                    // Toggle logs view (zoom on logs)
-                    KeyCode::Char('l') => {
+                    // Toggle logs view (Ctrl+L)
+                    KeyCode::Char('l') if key.modifiers == KeyModifiers::CONTROL => {
                         for pane_id in layout_engine.pane_ids() {
                             if let Some(pane) = layout_engine.get_pane(pane_id) {
                                 if pane.pane_type == PaneType::Logs {
                                     layout_engine.set_focus(pane_id);
                                     layout_engine.toggle_zoom();
+                                    dashboard_state.log(LogLevel::Info, "Toggled logs view");
                                     break;
                                 }
                             }
                         }
                     }
 
-                    // Pause/resume
-                    KeyCode::Char(' ') => {
+                    // Pause/resume (works when input is empty)
+                    KeyCode::Char(' ') if app.input.is_empty() => {
                         paused = !paused;
                         if paused {
                             dashboard_state.log(LogLevel::Warning, "Streaming paused");
