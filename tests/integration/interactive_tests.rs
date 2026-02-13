@@ -77,7 +77,7 @@ fn run_interactive(input: &str, timeout_secs: u64) -> (String, String, i32) {
 /// Helper to run selfware 'run' command (non-interactive) with timeout enforcement
 /// Uses --yolo to auto-approve tools since non-interactive mode requires it
 fn run_task(task: &str, timeout_secs: u64) -> (String, String, i32) {
-    let mut child = Command::new(&get_binary_path())
+    let mut child = Command::new(get_binary_path())
         .args(["--yolo", "run", task])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -254,7 +254,7 @@ fn test_run_command_simple_task() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_analyze_command() {
-    let output = Command::new(&get_binary_path())
+    let output = Command::new(get_binary_path())
         .args(["analyze", "./src"])
         .output()
         .expect("Failed to run selfware");
@@ -273,7 +273,7 @@ fn test_analyze_command() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_help_flag() {
-    let output = Command::new(&get_binary_path())
+    let output = Command::new(get_binary_path())
         .arg("--help")
         .output()
         .expect("Failed to run selfware");
@@ -294,7 +294,7 @@ fn test_help_flag() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_version_flag() {
-    let output = Command::new(&get_binary_path())
+    let output = Command::new(get_binary_path())
         .arg("--version")
         .output()
         .expect("Failed to run selfware");
@@ -313,7 +313,7 @@ fn test_version_flag() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_journal_command() {
-    let output = Command::new(&get_binary_path())
+    let output = Command::new(get_binary_path())
         .arg("journal")
         .output()
         .expect("Failed to run selfware");
@@ -334,7 +334,7 @@ fn test_journal_command() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_status_command() {
-    let output = Command::new(&get_binary_path())
+    let output = Command::new(get_binary_path())
         .arg("status")
         .output()
         .expect("Failed to run selfware");
@@ -353,7 +353,7 @@ fn test_status_command() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_garden_command() {
-    let output = Command::new(&get_binary_path())
+    let output = Command::new(get_binary_path())
         .args(["garden", "."])
         .output()
         .expect("Failed to run selfware");
@@ -374,7 +374,7 @@ fn test_garden_command() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_multi_chat_init() {
-    let mut child = Command::new(&get_binary_path())
+    let mut child = Command::new(get_binary_path())
         .args(["multi-chat", "-n", "2"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -402,7 +402,7 @@ fn test_multi_chat_init() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_config_flag() {
-    let output = Command::new(&get_binary_path())
+    let output = Command::new(get_binary_path())
         .args(["-c", "selfware.toml", "--help"])
         .output()
         .expect("Failed to run selfware");
@@ -417,7 +417,7 @@ fn test_config_flag() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_workdir_flag() {
-    let output = Command::new(&get_binary_path())
+    let output = Command::new(get_binary_path())
         .args(["-C", "/tmp", "--help"])
         .output()
         .expect("Failed to run selfware");
@@ -432,7 +432,7 @@ fn test_workdir_flag() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_invalid_command() {
-    let output = Command::new(&get_binary_path())
+    let output = Command::new(get_binary_path())
         .arg("invalid_command_xyz")
         .output()
         .expect("Failed to run selfware");
@@ -452,7 +452,7 @@ fn test_invalid_command() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_quiet_mode() {
-    let output = Command::new(&get_binary_path())
+    let output = Command::new(get_binary_path())
         .args(["-q", "status"])
         .output()
         .expect("Failed to run selfware");
@@ -469,7 +469,7 @@ fn test_quiet_mode() {
 #[cfg(feature = "integration")]
 fn test_interrupt_handling() {
     // This tests that the process can be killed cleanly
-    let mut child = Command::new(&get_binary_path())
+    let mut child = Command::new(get_binary_path())
         .arg("chat")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -508,7 +508,7 @@ fn test_binary_exists() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_env_var_config() {
-    let output = Command::new(&get_binary_path())
+    let output = Command::new(get_binary_path())
         .env("SELFWARE_DEBUG", "1")
         .arg("--help")
         .output()
@@ -524,7 +524,7 @@ fn test_env_var_config() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_output_format_json() {
-    let output = Command::new(&get_binary_path())
+    let output = Command::new(get_binary_path())
         .args(["status", "--output-format", "json"])
         .output()
         .expect("Failed to run selfware");
@@ -555,7 +555,7 @@ fn test_output_format_json() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_no_color_flag() {
-    let output = Command::new(&get_binary_path())
+    let output = Command::new(get_binary_path())
         .args(["--no-color", "status"])
         .output()
         .expect("Failed to run selfware");
@@ -573,7 +573,7 @@ fn test_no_color_flag() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_no_color_env_var() {
-    let output = Command::new(&get_binary_path())
+    let output = Command::new(get_binary_path())
         .env("NO_COLOR", "1")
         .arg("status")
         .output()
@@ -594,7 +594,7 @@ fn test_no_color_env_var() {
 fn test_selfware_timeout_env_var() {
     // This just checks the env var is accepted without error
     // Actual timeout behavior is hard to test without a slow endpoint
-    let output = Command::new(&get_binary_path())
+    let output = Command::new(get_binary_path())
         .env("SELFWARE_TIMEOUT", "120")
         .arg("--help")
         .output()
@@ -612,7 +612,7 @@ fn test_selfware_timeout_env_var() {
 #[cfg(feature = "integration")]
 fn test_non_interactive_fails_fast_on_confirmation() {
     // Run without --yolo, piping empty stdin to ensure non-interactive mode
-    let mut child = Command::new(&get_binary_path())
+    let mut child = Command::new(get_binary_path())
         .args(["run", "use shell_exec to run pwd"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

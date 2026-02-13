@@ -518,6 +518,7 @@ impl Parser {
     }
 
     /// Peek ahead
+    #[allow(dead_code)]
     fn peek(&self) -> &Token {
         self.tokens.get(self.pos + 1).unwrap_or(&Token::Eof)
     }

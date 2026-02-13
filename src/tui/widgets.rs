@@ -83,6 +83,7 @@ impl GrowthGauge {
     }
 
     /// Get the bar characters
+    #[allow(dead_code)]
     fn bar_chars(&self, width: usize) -> String {
         let filled = ((self.ratio * width as f64) as usize).min(width);
         let empty = width - filled;
@@ -219,6 +220,7 @@ impl Widget for ToolOutput {
 }
 
 /// Render a keyboard shortcut hint
+#[allow(dead_code)]
 pub fn render_shortcut(frame: &mut Frame, area: Rect, key: &str, action: &str) {
     let line = Line::from(vec![
         Span::styled(
@@ -237,6 +239,7 @@ pub fn render_shortcut(frame: &mut Frame, area: Rect, key: &str, action: &str) {
 }
 
 /// Render a help bar at the bottom
+#[allow(dead_code)]
 pub fn render_help_bar(frame: &mut Frame, area: Rect, hints: &[(&str, &str)]) {
     let spans: Vec<Span> = hints
         .iter()

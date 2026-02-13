@@ -1059,6 +1059,7 @@ pub struct ExecutionStatsSummary {
 // ============================================================================
 
 /// Enhanced parallel executor with all capabilities
+#[allow(dead_code)]
 pub struct EnhancedParallelExecutor {
     config: ParallelConfig,
     semaphore: Arc<Semaphore>,

@@ -816,7 +816,7 @@ mod tests {
         assert_eq!(layouts.len(), 5);
 
         // Each pane should have non-zero dimensions
-        for (_id, rect) in &layouts {
+        for rect in layouts.values() {
             assert!(rect.width > 0);
             assert!(rect.height > 0);
         }
