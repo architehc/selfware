@@ -67,12 +67,14 @@ fn run_selfware_with_timeout(
 
 /// Test that a simple task results in tool calls being parsed and executed
 /// This catches format mismatches between model output and parser expectations
+/// Note: Ignored by default due to variable backend latency (run with --include-ignored)
 #[test]
+#[ignore = "Backend-dependent test with variable latency; run with --include-ignored"]
 #[cfg(feature = "integration")]
 fn test_model_tool_calls_are_parsed() {
     let output = run_selfware_with_timeout(
         &["--yolo", "run", "list files in the current directory"],
-        90,
+        180, // Increased timeout for backend variability
     )
     .expect("Failed to run selfware");
 

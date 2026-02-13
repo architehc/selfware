@@ -60,7 +60,7 @@ struct Cli {
     #[arg(long)]
     no_color: bool,
 
-    /// Launch full TUI dashboard mode (requires --features tui)
+    /// Launch full TUI dashboard mode (requires --features extras)
     #[arg(long)]
     tui: bool,
 
@@ -259,6 +259,11 @@ async fn main() -> Result<()> {
 
     // Apply execution mode to config
     config.execution_mode = exec_mode;
+
+    // Apply UI flags to config
+    config.compact = cli.compact;
+    config.verbose = cli.verbose;
+    config.show_tokens = cli.show_tokens;
 
     let ctx = WorkshopContext::from_config(&config.endpoint, &config.model).with_mode(exec_mode);
 

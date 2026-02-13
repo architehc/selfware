@@ -397,8 +397,8 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
         ("l", "Toggle log view"),
         ("Tab", "Cycle focus between panes"),
         ("Space", "Pause/resume streaming"),
-        ("+/-", "Adjust animation speed"),
         ("z", "Toggle zoom on focused pane"),
+        ("Esc", "Unzoom / close overlay"),
         ("Alt+1-6", "Quick layout presets"),
     ];
 

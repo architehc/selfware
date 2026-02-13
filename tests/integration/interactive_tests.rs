@@ -525,7 +525,7 @@ fn test_env_var_config() {
 #[cfg(feature = "integration")]
 fn test_output_format_json() {
     let output = Command::new(&get_binary_path())
-        .args(["--output-format", "json", "status"])
+        .args(["status", "--output-format", "json"])
         .output()
         .expect("Failed to run selfware");
 
