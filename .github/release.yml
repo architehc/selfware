@@ -1,0 +1,38 @@
+changelog:
+  exclude:
+    labels:
+      - "skip-changelog"
+      - "dependencies"
+  categories:
+    - title: "⚠️ Breaking Changes"
+      labels:
+        - "breaking-change"
+        - "breaking"
+    - title: "🚀 Features"
+      labels:
+        - "feature"
+        - "enhancement"
+    - title: "🐛 Bug Fixes"
+      labels:
+        - "bug"
+        - "fix"
+        - "bugfix"
+    - title: "🔒 Security"
+      labels:
+        - "security"
+    - title: "📚 Documentation"
+      labels:
+        - "documentation"
+        - "docs"
+    - title: "🧪 Testing"
+      labels:
+        - "testing"
+        - "test"
+    - title: "🏗️ Infrastructure"
+      labels:
+        - "infrastructure"
+        - "ci"
+        - "devops"
+    - title: "📦 Other Changes"
+      labels:
+        - "*"

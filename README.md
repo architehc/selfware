@@ -25,18 +25,18 @@ Download the latest release for your platform:
 
 | Platform | Architecture | Download |
 |----------|--------------|----------|
-| **Linux** | x86_64 (Intel/AMD) | [selfware-linux-x86_64.tar.gz](https://github.com/trebuchet-network/selfware/releases/latest) |
-| **Linux** | aarch64 (ARM64) | [selfware-linux-aarch64.tar.gz](https://github.com/trebuchet-network/selfware/releases/latest) |
-| **macOS** | Apple Silicon (M1/M2/M3) | [selfware-macos-aarch64.tar.gz](https://github.com/trebuchet-network/selfware/releases/latest) |
-| **macOS** | Intel | [selfware-macos-x86_64.tar.gz](https://github.com/trebuchet-network/selfware/releases/latest) |
-| **Windows** | x86_64 | [selfware-windows-x86_64.zip](https://github.com/trebuchet-network/selfware/releases/latest) |
+| **Linux** | x86_64 (Intel/AMD) | [selfware-linux-x86_64.tar.gz](https://github.com/architehc/selfware/releases/latest) |
+| **Linux** | aarch64 (ARM64) | [selfware-linux-aarch64.tar.gz](https://github.com/architehc/selfware/releases/latest) |
+| **macOS** | Apple Silicon (M1/M2/M3) | [selfware-macos-aarch64.tar.gz](https://github.com/architehc/selfware/releases/latest) |
+| **macOS** | Intel | [selfware-macos-x86_64.tar.gz](https://github.com/architehc/selfware/releases/latest) |
+| **Windows** | x86_64 | [selfware-windows-x86_64.zip](https://github.com/architehc/selfware/releases/latest) |
 
 ```bash
 # Linux/macOS quick install
 # Translates platform names: Darwin->macos, arm64->aarch64
 OS=$(uname -s | tr '[:upper:]' '[:lower:]' | sed 's/darwin/macos/')
 ARCH=$(uname -m | sed 's/arm64/aarch64/')
-curl -fsSL "https://github.com/trebuchet-network/selfware/releases/latest/download/selfware-${OS}-${ARCH}.tar.gz" | tar -xz
+curl -fsSL "https://github.com/architehc/selfware/releases/latest/download/selfware-${OS}-${ARCH}.tar.gz" | tar -xz
 sudo mv selfware /usr/local/bin/
 
 # Verify installation
@@ -52,7 +52,7 @@ cargo install selfware
 ### Option 3: Build from Source
 
 ```bash
-git clone https://github.com/trebuchet-network/selfware.git
+git clone https://github.com/architehc/selfware.git
 cd selfware
 cargo build --release
 ./target/release/selfware --help
