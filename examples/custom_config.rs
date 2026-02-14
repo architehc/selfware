@@ -148,6 +148,11 @@ fn build_custom_config() -> Config {
 
         // Default execution mode
         execution_mode: ExecutionMode::Normal,
+
+        // CLI-only flags (not persisted in config)
+        compact_mode: false,
+        verbose_mode: false,
+        show_tokens: false,
     }
 }
 

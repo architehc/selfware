@@ -7,6 +7,7 @@
 pub mod animation;
 mod app;
 mod dashboard_widgets;
+pub mod garden_view;
 mod layout;
 mod markdown;
 mod palette;
@@ -17,6 +18,7 @@ pub use dashboard_widgets::{
     render_active_tools, render_garden_health, render_help_overlay, render_logs, render_status_bar,
     ActiveTool, DashboardState, LogEntry, LogLevel, SharedDashboardState, TuiEvent,
 };
+pub use garden_view::{render_garden_view, GardenFocus, GardenItem, GardenView};
 pub use layout::{LayoutEngine, LayoutNode, LayoutPreset, Pane, PaneId, PaneType, SplitDirection};
 pub use markdown::MarkdownRenderer;
 pub use palette::CommandPalette;
@@ -380,6 +382,7 @@ pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
     let mut app = App::new(model);
     let mut layout_engine = LayoutEngine::new();
     let mut dashboard_state = DashboardState::new(model);
+    let mut garden_view = garden_view::GardenView::new();
     let mut user_inputs = Vec::new();
     let mut show_help = false;
     let mut paused = false;
@@ -416,6 +419,9 @@ pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
                         }
                         PaneType::Logs => {
                             render_logs(frame, *pane_area, &dashboard_state);
+                        }
+                        PaneType::GardenView => {
+                            render_garden_view(frame, *pane_area, &mut garden_view, pane.focused);
                         }
                         _ => {
                             // Future pane types (Editor, Terminal, Explorer, etc.)
@@ -605,6 +611,7 @@ pub fn run_tui_dashboard_with_events(
     let mut terminal = TuiTerminal::new()?;
     let mut app = App::new(model);
     let mut layout_engine = LayoutEngine::new();
+    let mut garden_view = garden_view::GardenView::new();
     let mut user_inputs = Vec::new();
     let mut show_help = false;
     let mut paused = false;
@@ -660,6 +667,9 @@ pub fn run_tui_dashboard_with_events(
                         }
                         PaneType::Logs => {
                             render_logs(frame, *pane_area, &dashboard_state);
+                        }
+                        PaneType::GardenView => {
+                            render_garden_view(frame, *pane_area, &mut garden_view, pane.focused);
                         }
                         _ => {
                             render_placeholder_pane(frame, *pane_area, pane);

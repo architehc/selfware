@@ -44,6 +44,8 @@ pub enum PaneType {
     ActiveTools,
     /// Log output widget
     Logs,
+    /// Full interactive garden view with tree navigation
+    GardenView,
 }
 
 impl PaneType {
@@ -61,6 +63,7 @@ impl PaneType {
             PaneType::GardenHealth => "🌱",
             PaneType::ActiveTools => "🔧",
             PaneType::Logs => "📜",
+            PaneType::GardenView => "🌳",
         }
     }
 
@@ -78,6 +81,7 @@ impl PaneType {
             PaneType::GardenHealth => "Garden Health",
             PaneType::ActiveTools => "Active Tools",
             PaneType::Logs => "Logs",
+            PaneType::GardenView => "Garden View",
         }
     }
 }
