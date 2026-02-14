@@ -49,6 +49,8 @@ pub mod database;
 pub mod database_tools;
 #[cfg(feature = "extras")]
 pub mod degradation;
+#[cfg(feature = "extras")]
+pub mod demo;
 pub mod distributed;
 pub mod doc_generator;
 #[cfg(feature = "extras")]

@@ -4,6 +4,7 @@
 
 // Feature-gated module - dead_code lint disabled at crate level
 
+pub mod animation;
 mod app;
 mod dashboard_widgets;
 mod layout;
@@ -20,6 +21,16 @@ pub use layout::{LayoutEngine, LayoutNode, LayoutPreset, Pane, PaneId, PaneType,
 pub use markdown::MarkdownRenderer;
 pub use palette::CommandPalette;
 pub use widgets::{GardenSpinner, GrowthGauge, StatusIndicator, StatusType, ToolOutput};
+
+// Re-export animation components for convenience
+pub use animation::{
+    agent_avatar::{ActivityLevel, AgentAvatar, AgentRole},
+    message_flow::{MessageFlow, MessageFlowManager, MessageType},
+    particles::{EmitConfig, Particle, ParticleSystem},
+    progress::AnimatedProgressBar,
+    token_stream::{TokenSize, TokenStream},
+    Animation, AnimationManager,
+};
 
 use anyhow::Result;
 use crossterm::{
