@@ -58,7 +58,7 @@ bincode = "1.3"  # Fast binary serialization
 serde_yaml = "0.9"  # YAML workflow definitions
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.28", features = ["signal"] }
+nix = { version = "0.30", features = ["signal"] }
 
 [features]
 default = []
