@@ -413,12 +413,21 @@ impl ContractVerifier {
             HttpMethod::Options => reqwest::Method::OPTIONS,
         };
 
-        let mut request_builder = client.request(method, &url);
+        // Build URL with query parameters
+        let full_url = if interaction.request.query.is_empty() {
+            url
+        } else {
+            let query_string: String = interaction
+                .request
+                .query
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect::<Vec<_>>()
+                .join("&");
+            format!("{}?{}", url, query_string)
+        };
 
-        // Add query parameters
-        if !interaction.request.query.is_empty() {
-            request_builder = request_builder.query(&interaction.request.query);
-        }
+        let mut request_builder = client.request(method, &full_url);
 
         // Add headers
         for (key, value) in &interaction.request.headers {

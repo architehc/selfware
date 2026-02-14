@@ -25,7 +25,7 @@ pub struct WorkshopContext {
 impl Default for WorkshopContext {
     fn default() -> Self {
         Self {
-            owner_name: whoami::username(),
+            owner_name: whoami::username().unwrap_or_else(|_| "friend".to_string()),
             companion_name: "Selfware".to_string(),
             project_name: std::env::current_dir()
                 .ok()
