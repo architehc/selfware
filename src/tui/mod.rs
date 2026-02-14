@@ -444,6 +444,15 @@ pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
     let mut show_help = false;
     let mut paused = false;
 
+    // Scan current directory for garden view
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let garden = crate::ui::garden::scan_directory(&cwd);
+    dashboard_state.log(
+        LogLevel::Info,
+        &format!("Scanned garden: {} plants", garden.total_plants),
+    );
+    garden_view.set_garden(garden);
+
     // Apply dashboard layout preset
     layout_engine.apply_preset(LayoutPreset::Dashboard);
     dashboard_state.log(LogLevel::Info, "Dashboard initialized");
@@ -682,6 +691,18 @@ pub fn run_tui_dashboard_with_events(
     let mut user_inputs = Vec::new();
     let mut show_help = false;
     let mut paused = false;
+
+    // Scan current directory for garden view
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let garden = crate::ui::garden::scan_directory(&cwd);
+    {
+        let mut state = shared_state.lock().unwrap();
+        state.log(
+            LogLevel::Info,
+            &format!("Scanned garden: {} plants", garden.total_plants),
+        );
+    }
+    garden_view.set_garden(garden);
 
     // Apply dashboard layout preset
     layout_engine.apply_preset(LayoutPreset::Dashboard);

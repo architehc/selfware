@@ -413,6 +413,95 @@ pub fn garden_status_short(garden: &DigitalGarden) -> String {
     format!("{} {} plants", health_glyph, garden.total_plants)
 }
 
+/// Scan a directory and create a DigitalGarden from its contents
+pub fn scan_directory(dir: &Path) -> DigitalGarden {
+    use walkdir::WalkDir;
+
+    let project_name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "project".to_string());
+
+    let mut garden = DigitalGarden::new(&project_name);
+
+    // Code file extensions to include
+    let code_extensions = [
+        "rs", "toml", "md", "ts", "tsx", "js", "jsx", "py", "go", "java", "c", "cpp", "h", "hpp",
+        "cs", "rb", "php", "swift", "kt", "scala", "sh", "bash", "zsh", "yaml", "yml", "json",
+    ];
+
+    for entry in WalkDir::new(dir)
+        .max_depth(8) // Limit depth to avoid scanning too deep
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+    {
+        let path = entry.path();
+        let path_str = path.strip_prefix(dir).unwrap_or(path).display().to_string();
+
+        // Skip common non-code directories
+        if path_str.contains("/target/")
+            || path_str.contains("/node_modules/")
+            || path_str.contains("/.git/")
+            || path_str.contains("/__pycache__/")
+            || path_str.contains("/vendor/")
+            || path_str.contains("/dist/")
+            || path_str.contains("/build/")
+        {
+            continue;
+        }
+
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        if !code_extensions.contains(&ext.as_str()) {
+            continue;
+        }
+
+        // Read file metadata
+        let lines = std::fs::read_to_string(path)
+            .map(|s| s.lines().count())
+            .unwrap_or(0);
+
+        let metadata = std::fs::metadata(path).ok();
+        let age_days = metadata
+            .as_ref()
+            .and_then(|m| m.created().ok())
+            .and_then(|t| t.elapsed().ok())
+            .map(|d| d.as_secs() / 86400)
+            .unwrap_or(0);
+
+        let last_modified_days = metadata
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.elapsed().ok())
+            .map(|d| d.as_secs() / 86400)
+            .unwrap_or(0);
+
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        let plant = GardenPlant {
+            path: path_str,
+            name,
+            extension: ext,
+            lines,
+            age_days,
+            last_tended_days: last_modified_days,
+            growth_stage: GrowthStage::from_metrics(lines, age_days, last_modified_days),
+            plant_type: PlantType::from_path(path.to_string_lossy().as_ref()),
+        };
+
+        garden.add_plant(plant);
+    }
+
+    garden
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
