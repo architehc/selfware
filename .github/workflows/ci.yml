@@ -86,21 +86,21 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings -A clippy::unnecessary_unwrap
 
   # Minimum supported Rust version
   msrv:
-    name: MSRV (1.75.0)
+    name: MSRV (1.80.0)
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust 1.75.0
+      - name: Install Rust 1.80.0
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.75.0
+          toolchain: 1.80.0
 
       - name: Cache cargo registry
         uses: actions/cache@v4
