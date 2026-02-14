@@ -5,7 +5,7 @@
 
 // Feature-gated module - dead_code lint disabled at crate level
 
-use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
@@ -15,6 +15,18 @@ use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 
 use super::TuiPalette;
+
+/// Convert HeadingLevel to usize for repeat operations
+fn heading_level_to_usize(level: HeadingLevel) -> usize {
+    match level {
+        HeadingLevel::H1 => 1,
+        HeadingLevel::H2 => 2,
+        HeadingLevel::H3 => 3,
+        HeadingLevel::H4 => 4,
+        HeadingLevel::H5 => 5,
+        HeadingLevel::H6 => 6,
+    }
+}
 
 /// Markdown renderer with streaming support
 pub struct MarkdownRenderer {
@@ -321,7 +333,7 @@ impl<'a> RenderState<'a> {
     fn process_event(&mut self, event: Event) {
         match event {
             Event::Start(tag) => self.start_tag(tag.clone()),
-            Event::End(tag) => self.end_tag(tag),
+            Event::End(tag_end) => self.end_tag(tag_end),
             Event::Text(text) => self.add_text(&text),
             Event::Code(code) => self.add_inline_code(&code),
             Event::SoftBreak | Event::HardBreak => self.line_break(),
@@ -332,9 +344,9 @@ impl<'a> RenderState<'a> {
 
     fn start_tag(&mut self, tag: Tag) {
         match tag {
-            Tag::Heading(level, _, _) => {
+            Tag::Heading { level, .. } => {
                 self.flush_line();
-                let prefix = "#".repeat(level as usize);
+                let prefix = "#".repeat(heading_level_to_usize(level));
                 self.current_line.push(Span::styled(
                     format!("{} ", prefix),
                     Style::default()
@@ -367,51 +379,51 @@ impl<'a> RenderState<'a> {
             Tag::Strong => {
                 self.strong = true;
             }
-            Tag::BlockQuote => {
+            Tag::BlockQuote(_) => {
                 self.flush_line();
                 self.current_line
                     .push(Span::styled("▌ ", Style::default().fg(TuiPalette::SAGE)));
             }
-            Tag::Link(_, _, _) => {
+            Tag::Link { .. } => {
                 // Links will be styled differently
             }
             _ => {}
         }
     }
 
-    fn end_tag(&mut self, tag: Tag) {
-        match tag {
-            Tag::Heading(_, _, _) => {
+    fn end_tag(&mut self, tag_end: TagEnd) {
+        match tag_end {
+            TagEnd::Heading(_) => {
                 self.flush_line();
                 self.lines.push(Line::default()); // Add blank line after heading
             }
-            Tag::CodeBlock(_) => {
+            TagEnd::CodeBlock => {
                 if self.in_code_block {
                     self.render_code_block();
                     self.in_code_block = false;
                     self.code_content.clear();
                 }
             }
-            Tag::List(_) => {
+            TagEnd::List(_) => {
                 self.list_depth = self.list_depth.saturating_sub(1);
                 if self.list_depth == 0 {
                     self.flush_line();
                 }
             }
-            Tag::Item => {
+            TagEnd::Item => {
                 self.flush_line();
             }
-            Tag::Emphasis => {
+            TagEnd::Emphasis => {
                 self.emphasis = false;
             }
-            Tag::Strong => {
+            TagEnd::Strong => {
                 self.strong = false;
             }
-            Tag::Paragraph => {
+            TagEnd::Paragraph => {
                 self.flush_line();
                 self.lines.push(Line::default()); // Blank line after paragraph
             }
-            Tag::BlockQuote => {
+            TagEnd::BlockQuote(_) => {
                 self.flush_line();
             }
             _ => {}

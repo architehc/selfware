@@ -383,7 +383,7 @@ impl LayoutEngine {
 
                 let status_id = self.create_pane(PaneType::StatusBar);
                 let chat_id = self.create_pane(PaneType::Chat);
-                let garden_id = self.create_pane(PaneType::GardenHealth);
+                let garden_id = self.create_pane(PaneType::GardenView);
                 let tools_id = self.create_pane(PaneType::ActiveTools);
                 let logs_id = self.create_pane(PaneType::Logs);
 
@@ -769,7 +769,7 @@ mod tests {
         let mut engine = LayoutEngine::new();
         engine.apply_preset(LayoutPreset::Dashboard);
         assert_eq!(engine.current_preset(), LayoutPreset::Dashboard);
-        // Dashboard has: StatusBar, Chat, GardenHealth, ActiveTools, Logs = 5 panes
+        // Dashboard has: StatusBar, Chat, GardenView, ActiveTools, Logs = 5 panes
         assert_eq!(engine.pane_ids().len(), 5);
     }
 
@@ -787,7 +787,7 @@ mod tests {
 
         assert!(pane_types.contains(&PaneType::StatusBar));
         assert!(pane_types.contains(&PaneType::Chat));
-        assert!(pane_types.contains(&PaneType::GardenHealth));
+        assert!(pane_types.contains(&PaneType::GardenView));
         assert!(pane_types.contains(&PaneType::ActiveTools));
         assert!(pane_types.contains(&PaneType::Logs));
     }
