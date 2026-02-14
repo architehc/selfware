@@ -1,0 +1,68 @@
+# cargo-deny configuration
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Only check these targets
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+
+[advisories]
+# The database of advisories
+db-path = "~/.cargo/advisory-db"
+# URL(s) of the advisory database to fetch
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Ignore these advisories (add specific IDs if needed)
+ignore = []
+# Treat unmaintained crates as warnings
+unmaintained = "warn"
+# Yanked crates are errors
+yanked = "deny"
+
+[licenses]
+# List of allowed licenses
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "Unlicense",
+]
+# Confidence threshold for detecting license from text
+confidence-threshold = 0.8
+# Allow exceptions for specific crates
+exceptions = []
+
+[bans]
+# Lint level for multiple versions of the same crate
+multiple-versions = "warn"
+# Lint level for when a crate is detected as a build-time dependency
+wildcards = "allow"
+# Allow dependencies with git sources
+allow-build-scripts = ["*"]
+
+# Specific crate denials
+deny = []
+
+# Skip specific versions (for version conflicts)
+skip = []
+
+# Skip entire dependency trees
+skip-tree = []
+
+[sources]
+# Allowed registries
+unknown-registry = "warn"
+# Allowed git sources
+unknown-git = "warn"
+# List of allowed registries
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

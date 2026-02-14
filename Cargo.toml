@@ -68,6 +68,7 @@ extras = []
 
 [dev-dependencies]
 tokio-test = "0.4"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [lib]
 name = "selfware"
@@ -98,3 +99,8 @@ path = "examples/multi_agent.rs"
 [[example]]
 name = "custom_config"
 path = "examples/custom_config.rs"
+
+# Benchmarks
+[[bench]]
+name = "token_processing"
+harness = false
