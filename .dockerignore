@@ -1,0 +1,83 @@
+# =============================================================================
+# Docker Build Context Exclusions
+# =============================================================================
+# This file excludes unnecessary files from the Docker build context,
+# reducing build time and final image size.
+# =============================================================================
+
+# Build artifacts
+target/
+*.profraw
+*.profdata
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.editorconfig
+
+# Documentation (not needed in container)
+*.md
+!README.md
+docs/
+LICENSE
+
+# Coverage and testing artifacts
+coverage/
+tarpaulin-report.html
+lcov.info
+*.gcno
+*.gcda
+
+# Test projects (not needed for binary build)
+tests/e2e-projects/
+
+# Local configuration
+.env
+.env.*
+selfware-local.toml
+*.local
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Docker files (avoid recursive context)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# CI/CD configuration
+.github/
+.gitlab-ci.yml
+.travis.yml
+.circleci/
+Jenkinsfile
+
+# Logs
+logs/
+*.log
+
+# Temporary files
+tmp/
+*.tmp
+*.bak
+*.backup
+
+# Package artifacts
+*.tar.gz
+*.zip
+*.deb
+*.rpm
+
+# Rust specific
+**/*.rs.bk
+Cargo.lock.bak
