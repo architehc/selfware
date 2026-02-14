@@ -1,5 +1,11 @@
 # Selfware
 
+[![CI](https://github.com/architehc/selfware/actions/workflows/ci.yml/badge.svg)](https://github.com/architehc/selfware/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/selfware)](https://crates.io/crates/selfware)
+[![Docs.rs](https://docs.rs/selfware/badge.svg)](https://docs.rs/selfware)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![codecov](https://codecov.io/gh/architehc/selfware/branch/main/graph/badge.svg)](https://codecov.io/gh/architehc/selfware)
+
 ```
     🦊 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
        Your Personal AI Workshop
