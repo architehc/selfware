@@ -19,7 +19,7 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 clap = { version = "4.4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-git2 = "0.19"  # Updated for security fixes (CVE-2024-24575, CVE-2024-24577)
+git2 = "0.20"  # Updated for security fixes (CVE-2024-24575, CVE-2024-24577)
 walkdir = "2.4"
 regex = "1.11"
 colored = "3.1"
