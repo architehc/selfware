@@ -426,10 +426,10 @@ where
 /// - Logs panel at bottom
 ///
 /// Keyboard shortcuts:
-/// - q / Ctrl+C / Ctrl+D: Quit
+/// - q / Ctrl+C: Quit
 /// - ?: Toggle help overlay
-/// - d: Toggle dashboard/focus mode
-/// - g: Toggle garden view zoom
+/// - Ctrl+D: Toggle dashboard/focus mode
+/// - Ctrl+G: Toggle garden view zoom
 /// - l: Toggle logs view zoom
 /// - Tab: Cycle focus between panes
 /// - z: Toggle zoom on focused pane
@@ -541,7 +541,7 @@ pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
                         // Find garden pane and focus/zoom it
                         for pane_id in layout_engine.pane_ids() {
                             if let Some(pane) = layout_engine.get_pane(pane_id) {
-                                if pane.pane_type == PaneType::GardenHealth {
+                                if pane.pane_type == PaneType::GardenView {
                                     layout_engine.set_focus(pane_id);
                                     layout_engine.toggle_zoom();
                                     dashboard_state.log(LogLevel::Info, "Toggled garden view");
@@ -808,7 +808,7 @@ pub fn run_tui_dashboard_with_events(
                     KeyCode::Char('g') if key.modifiers == KeyModifiers::CONTROL => {
                         for pane_id in layout_engine.pane_ids() {
                             if let Some(pane) = layout_engine.get_pane(pane_id) {
-                                if pane.pane_type == PaneType::GardenHealth {
+                                if pane.pane_type == PaneType::GardenView {
                                     layout_engine.set_focus(pane_id);
                                     layout_engine.toggle_zoom();
                                     shared_state
