@@ -63,8 +63,27 @@ nix = { version = "0.30", features = ["signal"] }
 [features]
 default = []
 integration = []  # Enable with: cargo test --features integration
-# Orphan/experimental modules - not used in core functionality
-extras = []
+
+# Semantic feature flags (replacing monolithic "extras")
+# TUI dashboard mode with animations and demos
+tui = []
+# Workflow automation and parallel execution
+workflows = []
+# Self-healing and graceful degradation
+resilience = []
+# Execution control modes (dry-run, confirm, yolo)
+execution-modes = []
+# Caching layer for responses
+cache = []
+# Log analysis and diagnostics
+log-analysis = []
+# Speculative execution
+speculative = []
+# Token counting and management
+tokens = []
+
+# Convenience feature that enables all optional modules
+extras = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-analysis", "speculative", "tokens"]
 
 [dev-dependencies]
 tokio-test = "0.4"
