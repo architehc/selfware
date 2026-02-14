@@ -408,7 +408,7 @@ pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
                             render_logs(frame, *pane_area, &dashboard_state);
                         }
                         _ => {
-                            // Render placeholder for other pane types
+                            // Future pane types (Editor, Terminal, Explorer, etc.)
                             render_placeholder_pane(frame, *pane_area, pane);
                         }
                     }
@@ -885,7 +885,13 @@ fn render_chat_pane(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
     }
 }
 
-/// Render a placeholder pane for unimplemented pane types
+/// Render a placeholder pane for pane types not yet implemented
+///
+/// These pane types (Editor, Terminal, Explorer, Diff, Debug, Help) exist in the
+/// layout system to enable future features. This placeholder provides a consistent
+/// visual indicator that the pane is recognized but content rendering is pending.
+///
+/// Implemented panes: Chat, StatusBar, GardenHealth, ActiveTools, Logs
 fn render_placeholder_pane(frame: &mut Frame, area: Rect, pane: &Pane) {
     use ratatui::widgets::{Block, Borders, Paragraph};
     use ratatui::text::Span;

@@ -5,7 +5,7 @@ use anyhow::Result;
 use tracing::{debug, info, warn};
 
 pub struct ContextCompressor {
-    #[allow(dead_code)] // Reserved for future use
+    #[allow(dead_code)] // Used for absolute budget enforcement (planned feature)
     token_budget: usize,
     compression_threshold: usize,
     min_messages_to_keep: usize,

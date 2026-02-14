@@ -50,6 +50,9 @@ jobs:
       - name: Run unit tests
         run: cargo test --verbose
 
+      - name: Run tests with all features
+        run: cargo test --all-features --verbose
+
       - name: Build release
         run: cargo build --release --verbose
 
@@ -89,6 +92,9 @@ jobs:
 
       - name: Run tests
         run: cargo test --verbose
+
+      - name: Run tests with all features
+        run: cargo test --all-features --verbose
 
   # Documentation build
   docs:

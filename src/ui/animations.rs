@@ -464,8 +464,8 @@ pub struct MatrixRainAnimation {
     width: usize,
     height: usize,
 
-    #[allow(dead_code)] // Animation state for future use
-    columns: Vec<usize>, // Current position in each column
+    #[allow(dead_code)] // Tracks column drop positions for tick() animation
+    columns: Vec<usize>,
 }
 
 impl MatrixRainAnimation {
