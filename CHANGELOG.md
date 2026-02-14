@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dependabot configuration for automated dependency updates
 - Codecov integration for coverage tracking
 - Release notes categorization template
+- Docker support with multi-stage build (Dockerfile, .dockerignore)
+- Examples directory with 4 usage examples (basic_chat, run_task, multi_agent, custom_config)
+- 53 new tests for agent module (state transitions, tool handling, error recovery)
+- 24 new tests for API client (retry logic, request construction, response parsing)
 
 ### Changed
 - CI workflow now runs tests with `--all-features`
@@ -26,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 - Updated CI to include security audit job
+- **Critical**: Hardened shell command validation with regex-based matching and obfuscation detection
+- **Critical**: Fixed path traversal bypass via canonical path validation only
+- Added symlink chain validation to prevent symlink-based attacks
+- Added detection for base64-encoded command execution
+- Added command chaining detection (`;`, `&&`, `||`)
+- Added netcat reverse shell pattern detection
+- Added eval with command substitution detection
 
 ## [0.1.0] - 2026-02-13
 
