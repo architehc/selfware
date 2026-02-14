@@ -41,10 +41,10 @@ impl TokenSize {
     /// Get the color for this token size
     pub fn color(&self) -> Color {
         match self {
-            TokenSize::Small => colors::SECONDARY,  // Blue
-            TokenSize::Medium => colors::ACCENT,    // Mint
-            TokenSize::Large => colors::WARNING,    // Yellow
-            TokenSize::Massive => colors::PRIMARY,  // Coral
+            TokenSize::Small => colors::SECONDARY, // Blue
+            TokenSize::Medium => colors::ACCENT,   // Mint
+            TokenSize::Large => colors::WARNING,   // Yellow
+            TokenSize::Massive => colors::PRIMARY, // Coral
         }
     }
 
@@ -227,7 +227,9 @@ impl Widget for &TokenStream {
                 // Calculate vertical position with wave effect
                 let wave = (self.wave_phase + particle.wave_offset).sin();
                 let y_offset = (wave * (area.height as f32 / 4.0)) as i16;
-                let y = (center_y as i16 + y_offset).clamp(area.y as i16, (area.y + area.height - 1) as i16) as u16;
+                let y = (center_y as i16 + y_offset)
+                    .clamp(area.y as i16, (area.y + area.height - 1) as i16)
+                    as u16;
 
                 let symbol = particle.size.symbol();
                 let color = particle.size.color();

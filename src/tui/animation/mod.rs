@@ -7,17 +7,17 @@
 //! - Token stream visualizations
 //! - Particle system for sparkle effects
 
-pub mod progress;
 pub mod agent_avatar;
 pub mod message_flow;
-pub mod token_stream;
 pub mod particles;
+pub mod progress;
+pub mod token_stream;
 
-pub use progress::AnimatedProgressBar;
-pub use agent_avatar::{AgentAvatar, AgentRole, ActivityLevel};
+pub use agent_avatar::{ActivityLevel, AgentAvatar, AgentRole};
 pub use message_flow::{MessageFlow, MessageFlowManager, MessageType};
-pub use token_stream::{TokenStream, TokenSize};
-pub use particles::{ParticleSystem, Particle, EmitConfig};
+pub use particles::{EmitConfig, Particle, ParticleSystem};
+pub use progress::AnimatedProgressBar;
+pub use token_stream::{TokenSize, TokenStream};
 
 use std::time::Instant;
 
@@ -133,10 +133,10 @@ pub mod colors {
 
     /// Gradient for progress bars
     pub const GRADIENT: [Color; 4] = [
-        Color::Rgb(0x52, 0xD6, 0x81),  // Green
-        Color::Rgb(0x95, 0xE1, 0xD3),  // Mint
-        Color::Rgb(0x4E, 0xC5, 0xF1),  // Blue
-        Color::Rgb(0x6B, 0x7A, 0xF7),  // Purple
+        Color::Rgb(0x52, 0xD6, 0x81), // Green
+        Color::Rgb(0x95, 0xE1, 0xD3), // Mint
+        Color::Rgb(0x4E, 0xC5, 0xF1), // Blue
+        Color::Rgb(0x6B, 0x7A, 0xF7), // Purple
     ];
 }
 
@@ -169,14 +169,20 @@ mod tests {
     #[test]
     fn test_animation_manager_add() {
         let mut manager = AnimationManager::new();
-        manager.add(TestAnimation { updates: 0, complete_after: 5 });
+        manager.add(TestAnimation {
+            updates: 0,
+            complete_after: 5,
+        });
         assert_eq!(manager.animation_count(), 1);
     }
 
     #[test]
     fn test_animation_manager_update() {
         let mut manager = AnimationManager::new();
-        manager.add(TestAnimation { updates: 0, complete_after: 3 });
+        manager.add(TestAnimation {
+            updates: 0,
+            complete_after: 3,
+        });
 
         manager.update(0.016);
         assert_eq!(manager.animation_count(), 1);
@@ -189,7 +195,10 @@ mod tests {
     #[test]
     fn test_animation_manager_pause() {
         let mut manager = AnimationManager::new();
-        manager.add(TestAnimation { updates: 0, complete_after: 10 });
+        manager.add(TestAnimation {
+            updates: 0,
+            complete_after: 10,
+        });
 
         manager.toggle_pause();
         assert!(manager.is_paused());

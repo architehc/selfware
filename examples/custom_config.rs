@@ -28,7 +28,9 @@
 //! 4. Programmatic overrides
 
 use anyhow::Result;
-use selfware::config::{AgentConfig, Config, ExecutionMode, SafetyConfig, UiConfig, YoloFileConfig};
+use selfware::config::{
+    AgentConfig, Config, ExecutionMode, SafetyConfig, UiConfig, YoloFileConfig,
+};
 use std::path::PathBuf;
 
 fn main() -> Result<()> {

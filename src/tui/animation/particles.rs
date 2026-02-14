@@ -148,7 +148,8 @@ impl ParticleSystem {
             let vx = angle.cos() * speed;
             let vy = angle.sin() * speed;
 
-            let lifetime = config.lifetime_min + pseudo_random() * (config.lifetime_max - config.lifetime_min);
+            let lifetime =
+                config.lifetime_min + pseudo_random() * (config.lifetime_max - config.lifetime_min);
 
             let symbol = config.symbols[pseudo_random_index(config.symbols.len())];
             let color = config.colors[pseudo_random_index(config.colors.len())];
@@ -219,7 +220,12 @@ impl ParticleSystem {
                 lifetime_max: 2.0,
                 gravity: 3.0,
                 symbols: &['★', '✦', '✧', '◆'],
-                colors: &[colors::SUCCESS, colors::ACCENT, colors::WARNING, colors::SECONDARY],
+                colors: &[
+                    colors::SUCCESS,
+                    colors::ACCENT,
+                    colors::WARNING,
+                    colors::SECONDARY,
+                ],
             },
         );
     }

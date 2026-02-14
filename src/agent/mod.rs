@@ -7,13 +7,13 @@ use tracing::{debug, info, warn};
 use crate::analyzer::ErrorAnalyzer;
 use crate::api::types::{Message, ToolCall};
 use crate::api::{ApiClient, StreamChunk, ThinkingMode};
-use crate::output;
 use crate::checkpoint::{
     capture_git_state, CheckpointManager, TaskCheckpoint, TaskStatus, ToolCallLog,
 };
 use crate::cognitive::{CognitiveState, CyclePhase};
 use crate::config::Config;
 use crate::memory::AgentMemory;
+use crate::output;
 use crate::safety::SafetyChecker;
 use crate::telemetry::{enter_agent_step, record_state_transition};
 use crate::tool_parser::parse_tool_calls;
@@ -1702,7 +1702,10 @@ To call a tool, use this EXACT XML structure:
                                                                 path
                                                             ),
                                                         );
-                                                    output::verification_report(&format!("{}", report), true);
+                                                    output::verification_report(
+                                                        &format!("{}", report),
+                                                        true,
+                                                    );
                                                     None
                                                 } else {
                                                     self.cognitive_state
@@ -1714,7 +1717,10 @@ To call a tool, use this EXACT XML structure:
                                                                 path
                                                             ),
                                                         );
-                                                    output::verification_report(&format!("{}", report), false);
+                                                    output::verification_report(
+                                                        &format!("{}", report),
+                                                        false,
+                                                    );
                                                     Some(format!("\n\n<verification_failed>\n{}\n</verification_failed>", report))
                                                 }
                                             }

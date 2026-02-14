@@ -384,13 +384,15 @@ impl App {
 
     /// Increase animation speed (+ key)
     pub fn on_plus(&mut self) {
-        self.animation_speed = (self.animation_speed + ANIMATION_SPEED_STEP).min(ANIMATION_SPEED_MAX);
+        self.animation_speed =
+            (self.animation_speed + ANIMATION_SPEED_STEP).min(ANIMATION_SPEED_MAX);
         self.status = format!("Animation speed: {:.0}%", self.animation_speed * 100.0);
     }
 
     /// Decrease animation speed (- key)
     pub fn on_minus(&mut self) {
-        self.animation_speed = (self.animation_speed - ANIMATION_SPEED_STEP).max(ANIMATION_SPEED_MIN);
+        self.animation_speed =
+            (self.animation_speed - ANIMATION_SPEED_STEP).max(ANIMATION_SPEED_MIN);
         self.status = format!("Animation speed: {:.0}%", self.animation_speed * 100.0);
     }
 

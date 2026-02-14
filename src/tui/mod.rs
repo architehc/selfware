@@ -264,11 +264,11 @@ pub fn is_key(event: &Event, key: KeyCode, modifiers: KeyModifiers) -> bool {
     )
 }
 
-/// Check for quit keys (q, Ctrl+C, Ctrl+D)
+/// Check for quit keys (q, Ctrl+C)
+/// Note: Ctrl+D is reserved for dashboard toggle
 pub fn is_quit(event: &Event) -> bool {
     is_key(event, KeyCode::Char('q'), KeyModifiers::NONE)
         || is_key(event, KeyCode::Char('c'), KeyModifiers::CONTROL)
-        || is_key(event, KeyCode::Char('d'), KeyModifiers::CONTROL)
 }
 
 /// Run the TUI application
@@ -571,6 +571,16 @@ pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
                         layout_engine.toggle_zoom();
                     }
 
+                    // Animation speed controls
+                    KeyCode::Char('+') | KeyCode::Char('=') => {
+                        app.on_plus();
+                        dashboard_state.log(LogLevel::Info, &app.status);
+                    }
+                    KeyCode::Char('-') | KeyCode::Char('_') => {
+                        app.on_minus();
+                        dashboard_state.log(LogLevel::Info, &app.status);
+                    }
+
                     // Cycle focus
                     KeyCode::Tab => {
                         layout_engine.focus_next();
@@ -815,6 +825,15 @@ pub fn run_tui_dashboard_with_events(
                     }
                     KeyCode::Char('z') => {
                         layout_engine.toggle_zoom();
+                    }
+                    // Animation speed controls
+                    KeyCode::Char('+') | KeyCode::Char('=') => {
+                        app.on_plus();
+                        shared_state.lock().unwrap().log(LogLevel::Info, &app.status);
+                    }
+                    KeyCode::Char('-') | KeyCode::Char('_') => {
+                        app.on_minus();
+                        shared_state.lock().unwrap().log(LogLevel::Info, &app.status);
                     }
                     KeyCode::Tab => {
                         layout_engine.focus_next();

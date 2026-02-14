@@ -208,15 +208,6 @@ async fn main() -> Result<()> {
         colored::control::set_override(false);
     }
 
-    // Apply theme selection
-    let theme_id = match cli.theme {
-        Theme::Amber => ThemeId::Amber,
-        Theme::Ocean => ThemeId::Ocean,
-        Theme::Minimal => ThemeId::Minimal,
-        Theme::HighContrast => ThemeId::HighContrast,
-    };
-    theme::set_theme(theme_id);
-
     // Change to working directory FIRST (before resolving relative paths)
     if let Some(ref workdir) = cli.workdir {
         std::env::set_current_dir(workdir)
@@ -266,13 +257,33 @@ async fn main() -> Result<()> {
     // Apply execution mode to config
     config.execution_mode = exec_mode;
 
-    // Apply UI mode flags
-    config.compact_mode = cli.compact;
-    config.verbose_mode = cli.verbose;
-    config.show_tokens = cli.show_tokens;
+    // Apply UI settings from config file first
+    config.apply_ui_settings();
 
-    // Initialize output control with CLI flags
-    output::init(cli.compact, cli.verbose, cli.show_tokens);
+    // CLI flags override config file settings
+    // For theme, check if --theme was explicitly provided (not default)
+    let theme_explicitly_set = std::env::args().any(|arg| arg.starts_with("--theme"));
+    if theme_explicitly_set {
+        let theme_id = match cli.theme {
+            Theme::Amber => ThemeId::Amber,
+            Theme::Ocean => ThemeId::Ocean,
+            Theme::Minimal => ThemeId::Minimal,
+            Theme::HighContrast => ThemeId::HighContrast,
+        };
+        theme::set_theme(theme_id);
+    }
+
+    // CLI flags override config for compact/verbose/show_tokens
+    let compact = cli.compact || config.ui.compact_mode;
+    let verbose = cli.verbose || config.ui.verbose_mode;
+    let show_tokens = cli.show_tokens || config.ui.show_tokens;
+
+    config.compact_mode = compact;
+    config.verbose_mode = verbose;
+    config.show_tokens = show_tokens;
+
+    // Initialize output control with merged settings
+    output::init(compact, verbose, show_tokens);
 
     let ctx = WorkshopContext::from_config(&config.endpoint, &config.model).with_mode(exec_mode);
 
