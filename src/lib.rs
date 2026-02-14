@@ -32,9 +32,12 @@ pub mod tools;
 pub mod ui;
 
 // ============================================================================
-// Reorganized modules (Phase 2+)
+// Reorganized modules
 // ============================================================================
 pub mod safety;
+pub mod analysis;
+pub mod session;
+pub mod observability;
 
 // Backward-compatible re-exports for safety module
 pub use safety::autonomy;
@@ -49,21 +52,40 @@ pub use safety::threat_modeling;
 #[cfg(feature = "execution-modes")]
 pub use safety::yolo;
 
+// Backward-compatible re-exports for analysis module
+pub use analysis::analyzer;
+pub use analysis::bm25;
+pub use analysis::code_graph;
+pub use analysis::tech_debt;
+pub use analysis::vector_store;
+
+// Backward-compatible re-exports for session module
+pub use session::checkpoint;
+pub use session::time_travel;
+pub use session::local_first;
+pub use session::edit_history;
+#[cfg(feature = "cache")]
+pub use session::cache;
+
+// Backward-compatible re-exports for observability module
+pub use observability::telemetry;
+pub use observability::analytics;
+pub use observability::carbon_tracker;
+pub use observability::dashboard as observability_dashboard;
+pub use observability::test_dashboard;
+#[cfg(feature = "log-analysis")]
+pub use observability::log_analysis;
+
+// Backward-compatible re-export for config module
+pub use config::typed as typed_config;
+
 // ============================================================================
 // Modules to be reorganized (kept for now)
 // ============================================================================
-pub mod analytics;
-pub mod analyzer;
 pub mod api_testing;
-pub mod bm25;
 pub mod browser_automation;
-#[cfg(feature = "cache")]
-pub mod cache;
-pub mod carbon_tracker;
-pub mod checkpoint;
 pub mod cicd;
 pub mod cloud_infra;
-pub mod code_graph;
 pub mod code_review;
 pub mod cognitive;
 pub mod cognitive_load;
@@ -79,7 +101,6 @@ pub mod demo;
 pub mod distributed;
 pub mod doc_generator;
 pub mod dyslexia_friendly;
-pub mod edit_history;
 pub mod embedded;
 pub mod episodic;
 pub mod extensions;
@@ -92,16 +113,12 @@ pub mod knowledge_graph;
 pub mod kubernetes;
 pub mod learning;
 pub mod literate;
-pub mod local_first;
-#[cfg(feature = "log-analysis")]
-pub mod log_analysis;
 pub mod mcp;
 pub mod memory;
 pub mod mlops;
 pub mod model_router;
 pub mod monorepo;
 pub mod multiagent;
-pub mod observability;
 pub mod output;
 #[cfg(feature = "workflows")]
 pub mod parallel;
@@ -120,17 +137,11 @@ pub mod speculative;
 pub mod streaming;
 pub mod swarm;
 pub mod team_knowledge;
-pub mod tech_debt;
-pub mod telemetry;
-pub mod test_dashboard;
-pub mod time_travel;
 #[cfg(feature = "tokens")]
 pub mod tokens;
 pub mod tool_parser;
 #[cfg(feature = "tui")]
 pub mod tui;
-pub mod typed_config;
-pub mod vector_store;
 pub mod verification;
 pub mod voice_interface;
 pub mod wellness;
