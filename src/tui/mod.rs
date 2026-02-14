@@ -829,11 +829,17 @@ pub fn run_tui_dashboard_with_events(
                     // Animation speed controls
                     KeyCode::Char('+') | KeyCode::Char('=') => {
                         app.on_plus();
-                        shared_state.lock().unwrap().log(LogLevel::Info, &app.status);
+                        shared_state
+                            .lock()
+                            .unwrap()
+                            .log(LogLevel::Info, &app.status);
                     }
                     KeyCode::Char('-') | KeyCode::Char('_') => {
                         app.on_minus();
-                        shared_state.lock().unwrap().log(LogLevel::Info, &app.status);
+                        shared_state
+                            .lock()
+                            .unwrap()
+                            .log(LogLevel::Info, &app.status);
                     }
                     KeyCode::Tab => {
                         layout_engine.focus_next();
