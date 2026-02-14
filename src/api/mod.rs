@@ -713,10 +713,7 @@ mod tests {
     #[test]
     fn test_chat_request_body_construction_basic() {
         // Test that basic chat request body is constructed correctly
-        let messages = vec![
-            Message::system("You are helpful"),
-            Message::user("Hello"),
-        ];
+        let messages = vec![Message::system("You are helpful"), Message::user("Hello")];
 
         let body = serde_json::json!({
             "model": "test-model",
@@ -871,7 +868,10 @@ mod tests {
 
         let response: ChatResponse = serde_json::from_str(json).unwrap();
 
-        assert_eq!(response.choices[0].finish_reason, Some("tool_calls".to_string()));
+        assert_eq!(
+            response.choices[0].finish_reason,
+            Some("tool_calls".to_string())
+        );
         let tool_calls = response.choices[0].message.tool_calls.as_ref().unwrap();
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].id, "call_abc123");

@@ -39,7 +39,10 @@ fn run_selfware_with_timeout(
         .map_err(|e| {
             Error::new(
                 e.kind(),
-                format!("Failed to spawn {}: {}. Run tests with: cargo test", binary, e),
+                format!(
+                    "Failed to spawn {}: {}. Run tests with: cargo test",
+                    binary, e
+                ),
             )
         })?;
 
@@ -120,7 +123,8 @@ fn test_analyze_tool_calls_work() {
 
     // Should not have unparsed tool call warnings
     assert!(
-        !stderr.contains("Content appears to contain tool-related keywords but no valid tool calls"),
+        !stderr
+            .contains("Content appears to contain tool-related keywords but no valid tool calls"),
         "All tool calls should be parsed. stderr: {}",
         stderr
     );
@@ -180,7 +184,9 @@ fn test_interactive_analyze_parses_tools() {
 
     if let Some(mut stdin) = child.stdin.take() {
         // Use a simpler command that completes faster
-        stdin.write_all(b"list files in current directory\nexit\n").ok();
+        stdin
+            .write_all(b"list files in current directory\nexit\n")
+            .ok();
     }
 
     // Wait with timeout

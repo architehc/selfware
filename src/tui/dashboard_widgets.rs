@@ -26,9 +26,16 @@ pub enum TuiEvent {
     /// Tool execution started
     ToolStarted { name: String },
     /// Tool execution completed
-    ToolCompleted { name: String, success: bool, duration_ms: u64 },
+    ToolCompleted {
+        name: String,
+        success: bool,
+        duration_ms: u64,
+    },
     /// Token usage update
-    TokenUsage { prompt_tokens: u64, completion_tokens: u64 },
+    TokenUsage {
+        prompt_tokens: u64,
+        completion_tokens: u64,
+    },
     /// Status message update
     StatusUpdate { message: String },
     /// Garden health update (from code analysis or other metrics)
@@ -149,17 +156,33 @@ impl DashboardState {
                 self.tool_start(&name);
                 self.status_message = format!("Running: {}", name);
             }
-            TuiEvent::ToolCompleted { name, success, duration_ms } => {
+            TuiEvent::ToolCompleted {
+                name,
+                success,
+                duration_ms,
+            } => {
                 self.tool_complete(&name);
                 if success {
-                    self.log(LogLevel::Success, &format!("{} completed ({}ms)", name, duration_ms));
+                    self.log(
+                        LogLevel::Success,
+                        &format!("{} completed ({}ms)", name, duration_ms),
+                    );
                 } else {
-                    self.log(LogLevel::Warning, &format!("{} failed ({}ms)", name, duration_ms));
+                    self.log(
+                        LogLevel::Warning,
+                        &format!("{} failed ({}ms)", name, duration_ms),
+                    );
                 }
             }
-            TuiEvent::TokenUsage { prompt_tokens, completion_tokens } => {
+            TuiEvent::TokenUsage {
+                prompt_tokens,
+                completion_tokens,
+            } => {
                 self.tokens_used += completion_tokens;
-                self.log(LogLevel::Debug, &format!("+{} tokens (prompt: {})", completion_tokens, prompt_tokens));
+                self.log(
+                    LogLevel::Debug,
+                    &format!("+{} tokens (prompt: {})", completion_tokens, prompt_tokens),
+                );
             }
             TuiEvent::StatusUpdate { message } => {
                 self.status_message = message.clone();
@@ -258,10 +281,7 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, state: &DashboardState) 
     };
 
     let spans = vec![
-        Span::styled(
-            format!(" {} ", connection_icon),
-            connection_style,
-        ),
+        Span::styled(format!(" {} ", connection_icon), connection_style),
         Span::styled(
             format!("{} ", state.model),
             Style::default()
@@ -270,10 +290,7 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, state: &DashboardState) 
         ),
         Span::styled(" │ ", TuiPalette::muted_style()),
         Span::styled("Tokens: ", TuiPalette::muted_style()),
-        Span::styled(
-            tokens_display,
-            Style::default().fg(TuiPalette::COPPER),
-        ),
+        Span::styled(tokens_display, Style::default().fg(TuiPalette::COPPER)),
         Span::styled(" │ ", TuiPalette::muted_style()),
         Span::styled("⏱ ", TuiPalette::muted_style()),
         Span::styled(
@@ -294,7 +311,10 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, state: &DashboardState) 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(TuiPalette::border_style())
-        .title(Span::styled(" 🦊 Selfware Dashboard ", TuiPalette::title_style()));
+        .title(Span::styled(
+            " 🦊 Selfware Dashboard ",
+            TuiPalette::title_style(),
+        ));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -308,7 +328,10 @@ pub fn render_garden_health(frame: &mut Frame, area: Rect, state: &DashboardStat
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(TuiPalette::border_style())
-        .title(Span::styled(" 🌱 Garden Health ", TuiPalette::title_style()));
+        .title(Span::styled(
+            " 🌱 Garden Health ",
+            TuiPalette::title_style(),
+        ));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -336,7 +359,12 @@ pub fn render_garden_health(frame: &mut Frame, area: Rect, state: &DashboardStat
     let gauge = Gauge::default()
         .gauge_style(Style::default().fg(health_color))
         .ratio(state.garden_health)
-        .label(format!("{} {} ({:.0}%)", icon, stage, state.garden_health * 100.0));
+        .label(format!(
+            "{} {} ({:.0}%)",
+            icon,
+            stage,
+            state.garden_health * 100.0
+        ));
 
     frame.render_widget(gauge, inner);
 }
@@ -352,8 +380,7 @@ pub fn render_active_tools(frame: &mut Frame, area: Rect, state: &DashboardState
     frame.render_widget(block, area);
 
     if state.active_tools.is_empty() {
-        let idle = Paragraph::new("  No active tools")
-            .style(TuiPalette::muted_style());
+        let idle = Paragraph::new("  No active tools").style(TuiPalette::muted_style());
         frame.render_widget(idle, inner);
         return;
     }
@@ -366,11 +393,7 @@ pub fn render_active_tools(frame: &mut Frame, area: Rect, state: &DashboardState
             // Progress dots: ●●●○○ style
             let filled = (tool.progress * 5.0) as usize;
             let empty = 5 - filled;
-            let progress_dots = format!(
-                "{}{}",
-                "●".repeat(filled),
-                "○".repeat(empty)
-            );
+            let progress_dots = format!("{}{}", "●".repeat(filled), "○".repeat(empty));
 
             let elapsed = tool.elapsed().as_secs();
             let time_str = if elapsed >= 60 {
@@ -409,8 +432,7 @@ pub fn render_logs(frame: &mut Frame, area: Rect, state: &DashboardState) {
     frame.render_widget(block, area);
 
     if state.logs.is_empty() {
-        let empty = Paragraph::new("  No logs yet")
-            .style(TuiPalette::muted_style());
+        let empty = Paragraph::new("  No logs yet").style(TuiPalette::muted_style());
         frame.render_widget(empty, inner);
         return;
     }
@@ -423,14 +445,9 @@ pub fn render_logs(frame: &mut Frame, area: Rect, state: &DashboardState) {
         .rev()
         .take(max_logs)
         .map(|entry| {
-            let icon_span = Span::styled(
-                format!(" {} ", entry.level.icon()),
-                entry.level.style(),
-            );
-            let time_span = Span::styled(
-                format!("{} ", entry.timestamp),
-                TuiPalette::muted_style(),
-            );
+            let icon_span = Span::styled(format!(" {} ", entry.level.icon()), entry.level.style());
+            let time_span =
+                Span::styled(format!("{} ", entry.timestamp), TuiPalette::muted_style());
             let msg_span = Span::styled(&entry.message, entry.level.style());
 
             ListItem::new(Line::from(vec![icon_span, time_span, msg_span]))
@@ -455,7 +472,10 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
         .borders(Borders::ALL)
         .border_style(TuiPalette::title_style())
         .style(Style::default().bg(TuiPalette::INK))
-        .title(Span::styled(" ❓ Keyboard Shortcuts ", TuiPalette::title_style()));
+        .title(Span::styled(
+            " ❓ Keyboard Shortcuts ",
+            TuiPalette::title_style(),
+        ));
 
     let inner = block.inner(help_area);
     frame.render_widget(block, help_area);

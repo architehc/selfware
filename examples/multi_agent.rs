@@ -106,7 +106,11 @@ async fn main() -> Result<()> {
         while let Some(event) = event_rx.recv().await {
             match event {
                 MultiAgentEvent::AgentStarted { name, task, .. } => {
-                    println!("[START] {} - Working on: {}...", name, &task[..40.min(task.len())]);
+                    println!(
+                        "[START] {} - Working on: {}...",
+                        name,
+                        &task[..40.min(task.len())]
+                    );
                 }
                 MultiAgentEvent::AgentToolCall { agent_id, tool } => {
                     println!("[TOOL]  Agent-{} calling: {}", agent_id, tool);
@@ -163,17 +167,18 @@ async fn main() -> Result<()> {
                 while end > 0 && !result.content.is_char_boundary(end) {
                     end -= 1;
                 }
-                format!("{}...\n[{} more characters]", &result.content[..end], result.content.len() - end)
+                format!(
+                    "{}...\n[{} more characters]",
+                    &result.content[..end],
+                    result.content.len() - end
+                )
             } else {
                 result.content.clone()
             };
             println!("{}", preview);
             println!();
         } else {
-            println!(
-                "=== {} (FAILED) ===",
-                result.agent_name
-            );
+            println!("=== {} (FAILED) ===", result.agent_name);
             if let Some(ref error) = result.error {
                 println!("Error: {}", error);
             }

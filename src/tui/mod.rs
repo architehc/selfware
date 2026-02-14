@@ -13,9 +13,8 @@ mod widgets;
 
 pub use app::{App, AppState, ChatMessage, MessageRole, TaskProgress};
 pub use dashboard_widgets::{
-    render_active_tools, render_garden_health, render_help_overlay, render_logs,
-    render_status_bar, ActiveTool, DashboardState, LogEntry, LogLevel,
-    SharedDashboardState, TuiEvent,
+    render_active_tools, render_garden_health, render_help_overlay, render_logs, render_status_bar,
+    ActiveTool, DashboardState, LogEntry, LogLevel, SharedDashboardState, TuiEvent,
 };
 pub use layout::{LayoutEngine, LayoutNode, LayoutPreset, Pane, PaneId, PaneType, SplitDirection};
 pub use markdown::MarkdownRenderer;
@@ -539,11 +538,15 @@ pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
                                 if input.starts_with('/') {
                                     app.add_user_message(&input);
                                     app.status = format!("Executed: {}", input);
-                                    dashboard_state.log(LogLevel::Info, &format!("Command: {}", input));
+                                    dashboard_state
+                                        .log(LogLevel::Info, &format!("Command: {}", input));
                                 } else {
                                     app.add_user_message(&input);
                                     user_inputs.push(input.clone());
-                                    dashboard_state.log(LogLevel::Info, &format!("User: {}", &input[..input.len().min(50)]));
+                                    dashboard_state.log(
+                                        LogLevel::Info,
+                                        &format!("User: {}", &input[..input.len().min(50)]),
+                                    );
                                 }
                             }
                         }
@@ -681,10 +684,16 @@ pub fn run_tui_dashboard_with_events(
                     KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
                         if layout_engine.current_preset() == LayoutPreset::Dashboard {
                             layout_engine.apply_preset(LayoutPreset::Focus);
-                            shared_state.lock().unwrap().log(LogLevel::Info, "Switched to focus mode");
+                            shared_state
+                                .lock()
+                                .unwrap()
+                                .log(LogLevel::Info, "Switched to focus mode");
                         } else {
                             layout_engine.apply_preset(LayoutPreset::Dashboard);
-                            shared_state.lock().unwrap().log(LogLevel::Info, "Switched to dashboard mode");
+                            shared_state
+                                .lock()
+                                .unwrap()
+                                .log(LogLevel::Info, "Switched to dashboard mode");
                         }
                     }
                     KeyCode::Char('g') if key.modifiers == KeyModifiers::CONTROL => {
@@ -693,7 +702,10 @@ pub fn run_tui_dashboard_with_events(
                                 if pane.pane_type == PaneType::GardenHealth {
                                     layout_engine.set_focus(pane_id);
                                     layout_engine.toggle_zoom();
-                                    shared_state.lock().unwrap().log(LogLevel::Info, "Toggled garden view");
+                                    shared_state
+                                        .lock()
+                                        .unwrap()
+                                        .log(LogLevel::Info, "Toggled garden view");
                                     break;
                                 }
                             }
@@ -705,7 +717,10 @@ pub fn run_tui_dashboard_with_events(
                                 if pane.pane_type == PaneType::Logs {
                                     layout_engine.set_focus(pane_id);
                                     layout_engine.toggle_zoom();
-                                    shared_state.lock().unwrap().log(LogLevel::Info, "Toggled logs view");
+                                    shared_state
+                                        .lock()
+                                        .unwrap()
+                                        .log(LogLevel::Info, "Toggled logs view");
                                     break;
                                 }
                             }
@@ -731,27 +746,45 @@ pub fn run_tui_dashboard_with_events(
                     }
                     KeyCode::Char('1') if key.modifiers == KeyModifiers::ALT => {
                         layout_engine.apply_preset(LayoutPreset::Focus);
-                        shared_state.lock().unwrap().log(LogLevel::Info, "Layout: Focus");
+                        shared_state
+                            .lock()
+                            .unwrap()
+                            .log(LogLevel::Info, "Layout: Focus");
                     }
                     KeyCode::Char('2') if key.modifiers == KeyModifiers::ALT => {
                         layout_engine.apply_preset(LayoutPreset::Coding);
-                        shared_state.lock().unwrap().log(LogLevel::Info, "Layout: Coding");
+                        shared_state
+                            .lock()
+                            .unwrap()
+                            .log(LogLevel::Info, "Layout: Coding");
                     }
                     KeyCode::Char('3') if key.modifiers == KeyModifiers::ALT => {
                         layout_engine.apply_preset(LayoutPreset::Debugging);
-                        shared_state.lock().unwrap().log(LogLevel::Info, "Layout: Debugging");
+                        shared_state
+                            .lock()
+                            .unwrap()
+                            .log(LogLevel::Info, "Layout: Debugging");
                     }
                     KeyCode::Char('4') if key.modifiers == KeyModifiers::ALT => {
                         layout_engine.apply_preset(LayoutPreset::Review);
-                        shared_state.lock().unwrap().log(LogLevel::Info, "Layout: Review");
+                        shared_state
+                            .lock()
+                            .unwrap()
+                            .log(LogLevel::Info, "Layout: Review");
                     }
                     KeyCode::Char('5') if key.modifiers == KeyModifiers::ALT => {
                         layout_engine.apply_preset(LayoutPreset::Explore);
-                        shared_state.lock().unwrap().log(LogLevel::Info, "Layout: Explore");
+                        shared_state
+                            .lock()
+                            .unwrap()
+                            .log(LogLevel::Info, "Layout: Explore");
                     }
                     KeyCode::Char('6') if key.modifiers == KeyModifiers::ALT => {
                         layout_engine.apply_preset(LayoutPreset::FullWorkspace);
-                        shared_state.lock().unwrap().log(LogLevel::Info, "Layout: Full Workspace");
+                        shared_state
+                            .lock()
+                            .unwrap()
+                            .log(LogLevel::Info, "Layout: Full Workspace");
                     }
                     KeyCode::Enter => {
                         if !show_help {
@@ -759,11 +792,17 @@ pub fn run_tui_dashboard_with_events(
                                 if input.starts_with('/') {
                                     app.add_user_message(&input);
                                     app.status = format!("Executed: {}", input);
-                                    shared_state.lock().unwrap().log(LogLevel::Info, &format!("Command: {}", input));
+                                    shared_state
+                                        .lock()
+                                        .unwrap()
+                                        .log(LogLevel::Info, &format!("Command: {}", input));
                                 } else {
                                     app.add_user_message(&input);
                                     user_inputs.push(input.clone());
-                                    shared_state.lock().unwrap().log(LogLevel::Info, &format!("User: {}", &input[..input.len().min(50)]));
+                                    shared_state.lock().unwrap().log(
+                                        LogLevel::Info,
+                                        &format!("User: {}", &input[..input.len().min(50)]),
+                                    );
                                 }
                             }
                         }
@@ -800,14 +839,17 @@ pub fn run_tui_dashboard_with_events(
 ///
 /// Returns (sender, receiver) tuple. Pass the receiver to `run_tui_dashboard_with_events`
 /// and keep the sender to send events from your agent code.
-pub fn create_event_channel() -> (std::sync::mpsc::Sender<TuiEvent>, std::sync::mpsc::Receiver<TuiEvent>) {
+pub fn create_event_channel() -> (
+    std::sync::mpsc::Sender<TuiEvent>,
+    std::sync::mpsc::Receiver<TuiEvent>,
+) {
     std::sync::mpsc::channel()
 }
 
 /// Render a chat pane
 fn render_chat_pane(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
-    use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
     use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
     let border_style = if focused {
         TuiPalette::title_style()
@@ -893,8 +935,8 @@ fn render_chat_pane(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
 ///
 /// Implemented panes: Chat, StatusBar, GardenHealth, ActiveTools, Logs
 fn render_placeholder_pane(frame: &mut Frame, area: Rect, pane: &Pane) {
-    use ratatui::widgets::{Block, Borders, Paragraph};
     use ratatui::text::Span;
+    use ratatui::widgets::{Block, Borders, Paragraph};
 
     let border_style = if pane.focused {
         TuiPalette::title_style()
@@ -920,8 +962,8 @@ fn render_placeholder_pane(frame: &mut Frame, area: Rect, pane: &Pane) {
 
 /// Render pause indicator
 fn render_pause_indicator(frame: &mut Frame, area: Rect) {
-    use ratatui::widgets::{Block, Paragraph};
     use ratatui::text::Span;
+    use ratatui::widgets::{Block, Paragraph};
 
     let width = 20;
     let height = 3;
@@ -930,8 +972,7 @@ fn render_pause_indicator(frame: &mut Frame, area: Rect) {
 
     let indicator_area = Rect::new(x, y, width, height);
 
-    let block = Block::default()
-        .style(Style::default().bg(TuiPalette::WILT));
+    let block = Block::default().style(Style::default().bg(TuiPalette::WILT));
 
     frame.render_widget(block, indicator_area);
 

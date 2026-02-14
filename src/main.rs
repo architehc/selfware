@@ -595,7 +595,8 @@ async fn main() -> Result<()> {
                     );
 
                     let hosting = if ctx.is_local_model {
-                        format!("{} Running on your hardware (local)", Glyphs::HOME).garden_healthy()
+                        format!("{} Running on your hardware (local)", Glyphs::HOME)
+                            .garden_healthy()
                     } else {
                         format!("{} Connected to remote model", Glyphs::COMPASS).garden_wilting()
                     };

@@ -54,10 +54,22 @@ fn main() -> Result<()> {
 
     // Example 4: Environment variable demonstration
     println!("\n4. Environment variable overrides:");
-    println!("   SELFWARE_ENDPOINT = {:?}", std::env::var("SELFWARE_ENDPOINT").ok());
-    println!("   SELFWARE_MODEL = {:?}", std::env::var("SELFWARE_MODEL").ok());
-    println!("   SELFWARE_TIMEOUT = {:?}", std::env::var("SELFWARE_TIMEOUT").ok());
-    println!("   SELFWARE_API_KEY = {:?}", std::env::var("SELFWARE_API_KEY").ok().map(|_| "[REDACTED]"));
+    println!(
+        "   SELFWARE_ENDPOINT = {:?}",
+        std::env::var("SELFWARE_ENDPOINT").ok()
+    );
+    println!(
+        "   SELFWARE_MODEL = {:?}",
+        std::env::var("SELFWARE_MODEL").ok()
+    );
+    println!(
+        "   SELFWARE_TIMEOUT = {:?}",
+        std::env::var("SELFWARE_TIMEOUT").ok()
+    );
+    println!(
+        "   SELFWARE_API_KEY = {:?}",
+        std::env::var("SELFWARE_API_KEY").ok().map(|_| "[REDACTED]")
+    );
 
     // Example 5: Execution modes
     println!("\n5. Execution modes:");
@@ -91,7 +103,7 @@ fn build_custom_config() -> Config {
         // Safety settings
         safety: SafetyConfig {
             allowed_paths: vec![
-                "./**".to_string(),           // Current directory
+                "./**".to_string(),             // Current directory
                 "/tmp/selfware/**".to_string(), // Temp workspace
             ],
             denied_paths: vec![
@@ -117,7 +129,7 @@ fn build_custom_config() -> Config {
         // Agent behavior
         agent: AgentConfig {
             max_iterations: 100,
-            step_timeout_secs: 300,   // 5 minutes
+            step_timeout_secs: 300, // 5 minutes
             token_budget: 500000,
             native_function_calling: false,
             streaming: true,
@@ -153,9 +165,18 @@ fn print_config_summary(name: &str, config: &Config) {
 /// Demonstrate different execution modes
 fn demonstrate_execution_modes() {
     let modes = [
-        (ExecutionMode::Normal, "Ask for confirmation on destructive operations"),
-        (ExecutionMode::AutoEdit, "Auto-approve file edits, ask for others"),
-        (ExecutionMode::Yolo, "Auto-approve all operations (use with caution)"),
+        (
+            ExecutionMode::Normal,
+            "Ask for confirmation on destructive operations",
+        ),
+        (
+            ExecutionMode::AutoEdit,
+            "Auto-approve file edits, ask for others",
+        ),
+        (
+            ExecutionMode::Yolo,
+            "Auto-approve all operations (use with caution)",
+        ),
         (ExecutionMode::Daemon, "Run continuously in autonomous mode"),
     ];
 

@@ -2664,10 +2664,7 @@ mod tests {
 
         // Start in Planning
         let _ = loop_ctrl.next_state();
-        assert!(matches!(
-            loop_ctrl.next_state(),
-            Some(AgentState::Planning)
-        ));
+        assert!(matches!(loop_ctrl.next_state(), Some(AgentState::Planning)));
 
         // Transition to Executing with step 0
         loop_ctrl.set_state(AgentState::Executing { step: 0 });
@@ -2718,10 +2715,7 @@ mod tests {
         let mut loop_ctrl = AgentLoop::new(100);
 
         // Planning -> Executing -> Error -> Recovery -> Executing -> Completed
-        assert!(matches!(
-            loop_ctrl.next_state(),
-            Some(AgentState::Planning)
-        ));
+        assert!(matches!(loop_ctrl.next_state(), Some(AgentState::Planning)));
 
         loop_ctrl.set_state(AgentState::Executing { step: 0 });
         assert!(matches!(
@@ -3123,12 +3117,10 @@ mod tests {
 
         match config.execution_mode {
             ExecutionMode::Yolo | ExecutionMode::Daemon => false,
-            ExecutionMode::AutoEdit => {
-                !matches!(
-                    tool_name,
-                    "file_write" | "file_edit" | "file_create" | "directory_tree" | "glob_find"
-                )
-            }
+            ExecutionMode::AutoEdit => !matches!(
+                tool_name,
+                "file_write" | "file_edit" | "file_create" | "directory_tree" | "glob_find"
+            ),
             ExecutionMode::Normal => !safe_tools.contains(&tool_name),
         }
     }

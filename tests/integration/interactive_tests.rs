@@ -544,7 +544,10 @@ fn test_output_format_json() {
 
     // JSON should contain expected fields
     let json = parsed.unwrap();
-    assert!(json.get("model").is_some(), "JSON should have 'model' field");
+    assert!(
+        json.get("model").is_some(),
+        "JSON should have 'model' field"
+    );
     assert!(
         json.get("journal").is_some(),
         "JSON should have 'journal' field"

@@ -64,50 +64,170 @@ pub struct ThemeColors {
 impl ThemeColors {
     /// Warm amber theme (default) - like aged paper, wood grain, and amber resin
     pub const AMBER: ThemeColors = ThemeColors {
-        primary: CustomColor { r: 212, g: 163, b: 115 },   // #D4A373 - Warm amber
-        success: CustomColor { r: 144, g: 190, b: 109 },   // #90BE6D - Fresh growth
-        warning: CustomColor { r: 188, g: 108, b: 37 },    // #BC6C25 - Soil brown
-        error: CustomColor { r: 100, g: 100, b: 120 },     // #646478 - Frost
-        muted: CustomColor { r: 128, g: 128, b: 128 },     // #808080 - Stone gray
-        accent: CustomColor { r: 184, g: 115, b: 51 },     // #B87333 - Copper
-        tool: CustomColor { r: 184, g: 115, b: 51 },       // #B87333 - Copper
-        path: CustomColor { r: 143, g: 151, b: 121 },      // #8F9779 - Sage
+        primary: CustomColor {
+            r: 212,
+            g: 163,
+            b: 115,
+        }, // #D4A373 - Warm amber
+        success: CustomColor {
+            r: 144,
+            g: 190,
+            b: 109,
+        }, // #90BE6D - Fresh growth
+        warning: CustomColor {
+            r: 188,
+            g: 108,
+            b: 37,
+        }, // #BC6C25 - Soil brown
+        error: CustomColor {
+            r: 100,
+            g: 100,
+            b: 120,
+        }, // #646478 - Frost
+        muted: CustomColor {
+            r: 128,
+            g: 128,
+            b: 128,
+        }, // #808080 - Stone gray
+        accent: CustomColor {
+            r: 184,
+            g: 115,
+            b: 51,
+        }, // #B87333 - Copper
+        tool: CustomColor {
+            r: 184,
+            g: 115,
+            b: 51,
+        }, // #B87333 - Copper
+        path: CustomColor {
+            r: 143,
+            g: 151,
+            b: 121,
+        }, // #8F9779 - Sage
     };
 
     /// Cool ocean theme - blues and teals like deep water
     pub const OCEAN: ThemeColors = ThemeColors {
-        primary: CustomColor { r: 100, g: 149, b: 237 },   // #6495ED - Cornflower blue
-        success: CustomColor { r: 32, g: 178, b: 170 },    // #20B2AA - Light sea green
-        warning: CustomColor { r: 255, g: 165, b: 0 },     // #FFA500 - Orange
-        error: CustomColor { r: 255, g: 99, b: 71 },       // #FF6347 - Tomato
-        muted: CustomColor { r: 119, g: 136, b: 153 },     // #778899 - Light slate gray
-        accent: CustomColor { r: 0, g: 206, b: 209 },      // #00CED1 - Dark turquoise
-        tool: CustomColor { r: 72, g: 209, b: 204 },       // #48D1CC - Medium turquoise
-        path: CustomColor { r: 176, g: 196, b: 222 },      // #B0C4DE - Light steel blue
+        primary: CustomColor {
+            r: 100,
+            g: 149,
+            b: 237,
+        }, // #6495ED - Cornflower blue
+        success: CustomColor {
+            r: 32,
+            g: 178,
+            b: 170,
+        }, // #20B2AA - Light sea green
+        warning: CustomColor {
+            r: 255,
+            g: 165,
+            b: 0,
+        }, // #FFA500 - Orange
+        error: CustomColor {
+            r: 255,
+            g: 99,
+            b: 71,
+        }, // #FF6347 - Tomato
+        muted: CustomColor {
+            r: 119,
+            g: 136,
+            b: 153,
+        }, // #778899 - Light slate gray
+        accent: CustomColor {
+            r: 0,
+            g: 206,
+            b: 209,
+        }, // #00CED1 - Dark turquoise
+        tool: CustomColor {
+            r: 72,
+            g: 209,
+            b: 204,
+        }, // #48D1CC - Medium turquoise
+        path: CustomColor {
+            r: 176,
+            g: 196,
+            b: 222,
+        }, // #B0C4DE - Light steel blue
     };
 
     /// Minimal grayscale theme - clean and simple
     pub const MINIMAL: ThemeColors = ThemeColors {
-        primary: CustomColor { r: 220, g: 220, b: 220 },   // #DCDCDC - Gainsboro
-        success: CustomColor { r: 180, g: 180, b: 180 },   // #B4B4B4 - Silver
-        warning: CustomColor { r: 160, g: 160, b: 160 },   // #A0A0A0 - Dark gray
-        error: CustomColor { r: 140, g: 140, b: 140 },     // #8C8C8C - Gray
-        muted: CustomColor { r: 100, g: 100, b: 100 },     // #646464 - Dim gray
-        accent: CustomColor { r: 200, g: 200, b: 200 },    // #C8C8C8 - Light gray
-        tool: CustomColor { r: 180, g: 180, b: 180 },      // #B4B4B4 - Silver
-        path: CustomColor { r: 160, g: 160, b: 160 },      // #A0A0A0 - Dark gray
+        primary: CustomColor {
+            r: 220,
+            g: 220,
+            b: 220,
+        }, // #DCDCDC - Gainsboro
+        success: CustomColor {
+            r: 180,
+            g: 180,
+            b: 180,
+        }, // #B4B4B4 - Silver
+        warning: CustomColor {
+            r: 160,
+            g: 160,
+            b: 160,
+        }, // #A0A0A0 - Dark gray
+        error: CustomColor {
+            r: 140,
+            g: 140,
+            b: 140,
+        }, // #8C8C8C - Gray
+        muted: CustomColor {
+            r: 100,
+            g: 100,
+            b: 100,
+        }, // #646464 - Dim gray
+        accent: CustomColor {
+            r: 200,
+            g: 200,
+            b: 200,
+        }, // #C8C8C8 - Light gray
+        tool: CustomColor {
+            r: 180,
+            g: 180,
+            b: 180,
+        }, // #B4B4B4 - Silver
+        path: CustomColor {
+            r: 160,
+            g: 160,
+            b: 160,
+        }, // #A0A0A0 - Dark gray
     };
 
     /// High contrast theme - accessibility focused
     pub const HIGH_CONTRAST: ThemeColors = ThemeColors {
-        primary: CustomColor { r: 255, g: 255, b: 255 },   // #FFFFFF - White
-        success: CustomColor { r: 0, g: 255, b: 0 },       // #00FF00 - Lime
-        warning: CustomColor { r: 255, g: 255, b: 0 },     // #FFFF00 - Yellow
-        error: CustomColor { r: 255, g: 0, b: 0 },         // #FF0000 - Red
-        muted: CustomColor { r: 192, g: 192, b: 192 },     // #C0C0C0 - Silver
-        accent: CustomColor { r: 0, g: 255, b: 255 },      // #00FFFF - Cyan
-        tool: CustomColor { r: 255, g: 0, b: 255 },        // #FF00FF - Magenta
-        path: CustomColor { r: 0, g: 255, b: 255 },        // #00FFFF - Cyan
+        primary: CustomColor {
+            r: 255,
+            g: 255,
+            b: 255,
+        }, // #FFFFFF - White
+        success: CustomColor { r: 0, g: 255, b: 0 }, // #00FF00 - Lime
+        warning: CustomColor {
+            r: 255,
+            g: 255,
+            b: 0,
+        }, // #FFFF00 - Yellow
+        error: CustomColor { r: 255, g: 0, b: 0 },   // #FF0000 - Red
+        muted: CustomColor {
+            r: 192,
+            g: 192,
+            b: 192,
+        }, // #C0C0C0 - Silver
+        accent: CustomColor {
+            r: 0,
+            g: 255,
+            b: 255,
+        }, // #00FFFF - Cyan
+        tool: CustomColor {
+            r: 255,
+            g: 0,
+            b: 255,
+        }, // #FF00FF - Magenta
+        path: CustomColor {
+            r: 0,
+            g: 255,
+            b: 255,
+        }, // #00FFFF - Cyan
     };
 }
 

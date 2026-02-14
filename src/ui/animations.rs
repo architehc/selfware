@@ -1029,8 +1029,8 @@ impl MultiStepProgress {
 
     /// Render the progress display
     pub fn render(&self) -> String {
-        use colored::Colorize;
         use super::theme::current_theme;
+        use colored::Colorize;
 
         let theme = current_theme();
         let mut result = String::new();
@@ -1055,11 +1055,13 @@ impl MultiStepProgress {
                 "{} Phase {}: {}{}",
                 icon.custom_color(color),
                 phase_num.custom_color(theme.muted),
-                phase.name.custom_color(if phase.status == PhaseStatus::Active {
-                    theme.primary
-                } else {
-                    theme.muted
-                }),
+                phase
+                    .name
+                    .custom_color(if phase.status == PhaseStatus::Active {
+                        theme.primary
+                    } else {
+                        theme.muted
+                    }),
                 progress_str.custom_color(theme.accent)
             ));
             result.push('\n');

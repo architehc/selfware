@@ -4,8 +4,8 @@
 //! Like aged paper, wood grain, and amber resin.
 //! Supports multiple themes via the theme module.
 
-use colored::{Colorize, CustomColor};
 use super::theme::current_theme;
+use colored::{Colorize, CustomColor};
 
 /// The Selfware color palette - warm, organic, hand-crafted
 pub struct Palette;

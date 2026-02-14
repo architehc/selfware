@@ -3,8 +3,8 @@
 //! A friendly fox mascot that reacts to agent state with different poses and moods.
 //! Adds personality to the terminal experience.
 
-use colored::Colorize;
 use super::theme::current_theme;
+use colored::Colorize;
 
 /// Mascot mood/state
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -166,11 +166,7 @@ pub fn render_mascot_with_message(mood: MascotMood, message: &str) -> String {
         _ => theme.primary,
     };
 
-    format!(
-        "{}\n  {}\n",
-        mascot,
-        message.custom_color(msg_color)
-    )
+    format!("{}\n  {}\n", mascot, message.custom_color(msg_color))
 }
 
 /// Get a thinking animation frame
