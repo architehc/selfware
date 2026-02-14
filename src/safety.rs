@@ -219,20 +219,16 @@ impl SafetyChecker {
                 if let std::path::Component::Normal(name) = component {
                     let name_str = name.to_string_lossy();
                     // Check if pattern is a simple filename pattern (no path separators)
-                    if !pattern.contains('/') && !pattern.contains('\\') {
-                        if glob_pattern.matches(&name_str) {
-                            anyhow::bail!("Path component matches denied pattern: {}", pattern);
-                        }
+                    if !pattern.contains('/') && !pattern.contains('\\') && glob_pattern.matches(&name_str) {
+                        anyhow::bail!("Path component matches denied pattern: {}", pattern);
                     }
                 }
             }
         }
 
         // Check against allowed paths
-        if !self.config.allowed_paths.is_empty() {
-            if !self.is_path_in_allowed_list(&canonical_str, path)? {
-                anyhow::bail!("Path not in allowed list: {}", canonical_str);
-            }
+        if !self.config.allowed_paths.is_empty() && !self.is_path_in_allowed_list(&canonical_str, path)? {
+            anyhow::bail!("Path not in allowed list: {}", canonical_str);
         }
 
         Ok(())
@@ -526,13 +522,7 @@ fn split_shell_commands(cmd: &str) -> Vec<&str> {
                 start = i + 1;
             }
             // Check for && or ||
-            else if c == '&' && i + 1 < chars.len() && chars[i + 1] == '&' {
-                if start < i {
-                    parts.push(&cmd[start..i]);
-                }
-                start = i + 2;
-                i += 1;
-            } else if c == '|' && i + 1 < chars.len() && chars[i + 1] == '|' {
+            else if (c == '&' || c == '|') && i + 1 < chars.len() && chars[i + 1] == c {
                 if start < i {
                     parts.push(&cmd[start..i]);
                 }
