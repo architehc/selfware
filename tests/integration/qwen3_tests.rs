@@ -10,7 +10,9 @@ use tokio::sync::Semaphore;
 use selfware::api::types::Message;
 use selfware::api::ApiClient;
 use selfware::api::ThinkingMode;
-use selfware::config::{AgentConfig, Config, ExecutionMode, SafetyConfig, YoloFileConfig};
+use selfware::config::{
+    AgentConfig, Config, ExecutionMode, SafetyConfig, UiConfig, YoloFileConfig,
+};
 
 /// Get Qwen3-Coder test configuration
 fn qwen3_config() -> Config {
@@ -31,7 +33,11 @@ fn qwen3_config() -> Config {
             streaming: true,
         },
         yolo: YoloFileConfig::default(),
+        ui: UiConfig::default(),
         execution_mode: ExecutionMode::Normal,
+        compact_mode: false,
+        verbose_mode: false,
+        show_tokens: false,
     }
 }
 

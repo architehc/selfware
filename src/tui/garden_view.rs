@@ -12,7 +12,10 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{
+        Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState,
+    },
     Frame,
 };
 use std::time::Instant;
@@ -284,7 +287,9 @@ impl GardenView {
 
     /// Check if a path has recent changes
     fn has_recent_changes(&self, path: &str) -> bool {
-        self.recent_changes.iter().any(|p| p.contains(path) || path.contains(p))
+        self.recent_changes
+            .iter()
+            .any(|p| p.contains(path) || path.contains(p))
     }
 
     /// Render the garden view
@@ -296,14 +301,17 @@ impl GardenView {
         };
 
         // Get season and stats from garden
-        let (season_glyph, season_desc, total_plants, total_lines) = self.garden
+        let (season_glyph, season_desc, total_plants, total_lines) = self
+            .garden
             .as_ref()
-            .map(|g| (
-                g.season.glyph(),
-                g.season.description(),
-                g.total_plants,
-                g.total_lines,
-            ))
+            .map(|g| {
+                (
+                    g.season.glyph(),
+                    g.season.description(),
+                    g.total_plants,
+                    g.total_lines,
+                )
+            })
             .unwrap_or(("🌱", "unknown", 0, 0));
 
         let title = format!(" 🌳 Garden View {} ", season_glyph);
@@ -326,10 +334,7 @@ impl GardenView {
         // Split into tree view (70%) and details (30%)
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(70),
-                Constraint::Percentage(30),
-            ])
+            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
             .split(inner);
 
         // Render tree view
@@ -341,14 +346,21 @@ impl GardenView {
 
     /// Render the tree view
     fn render_tree(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self.items
+        let items: Vec<ListItem> = self
+            .items
             .iter()
             .enumerate()
             .map(|(i, item)| {
                 let is_selected = i == self.selected;
 
                 match item {
-                    GardenItem::Bed { name, plant_count, health, expanded, path } => {
+                    GardenItem::Bed {
+                        name,
+                        plant_count,
+                        health,
+                        expanded,
+                        path,
+                    } => {
                         let expand_icon = if *expanded { "▼" } else { "▶" };
                         let health_icon = if *health > 0.8 {
                             "🌸"
@@ -376,7 +388,7 @@ impl GardenView {
                             Span::styled(name, style.add_modifier(Modifier::BOLD)),
                             Span::styled(
                                 format!(" ({} plants){}", plant_count, growth_anim),
-                                TuiPalette::muted_style()
+                                TuiPalette::muted_style(),
                             ),
                         ]))
                     }
@@ -401,8 +413,9 @@ impl GardenView {
                             GrowthStage::Wilting => TuiPalette::FROST,
                         };
 
-                        let growth_anim = if self.has_recent_changes(&plant.path) ||
-                                           self.has_recent_changes(bed_path) {
+                        let growth_anim = if self.has_recent_changes(&plant.path)
+                            || self.has_recent_changes(bed_path)
+                        {
                             format!(" {}", self.growth_char())
                         } else {
                             String::new()
@@ -420,7 +433,7 @@ impl GardenView {
                             Span::styled(&plant.name, style),
                             Span::styled(
                                 format!(" {} lines{}", plant.lines, growth_anim),
-                                TuiPalette::muted_style()
+                                TuiPalette::muted_style(),
                             ),
                         ]))
                     }
@@ -428,26 +441,27 @@ impl GardenView {
             })
             .collect();
 
-        let list = List::new(items)
-            .highlight_style(TuiPalette::selected_style());
+        let list = List::new(items).highlight_style(TuiPalette::selected_style());
 
         frame.render_stateful_widget(list, area, &mut self.list_state);
 
         // Render scrollbar if needed
         if self.items.len() > area.height as usize {
             let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
-            let mut scrollbar_state = ScrollbarState::new(self.items.len())
-                .position(self.selected);
-            frame.render_stateful_widget(
-                scrollbar,
-                area,
-                &mut scrollbar_state,
-            );
+            let mut scrollbar_state = ScrollbarState::new(self.items.len()).position(self.selected);
+            frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
         }
     }
 
     /// Render the details panel
-    fn render_details(&self, frame: &mut Frame, area: Rect, season: &str, total_plants: usize, total_lines: usize) {
+    fn render_details(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        season: &str,
+        total_plants: usize,
+        total_lines: usize,
+    ) {
         let block = Block::default()
             .borders(Borders::LEFT)
             .border_style(TuiPalette::border_style())
@@ -457,7 +471,13 @@ impl GardenView {
         frame.render_widget(block, area);
 
         let details = match self.selected_item() {
-            Some(GardenItem::Bed { name, path, plant_count, health, .. }) => {
+            Some(GardenItem::Bed {
+                name,
+                path,
+                plant_count,
+                health,
+                ..
+            }) => {
                 let health_bar = self.render_health_bar(*health, 15);
                 let health_pct = format!("{:.0}%", health * 100.0);
 
@@ -467,30 +487,39 @@ impl GardenView {
                         Span::styled(name, TuiPalette::title_style()),
                     ]),
                     Line::from(""),
-                    Line::from(vec![
-                        Span::styled("Path: ", TuiPalette::muted_style()),
-                    ]),
+                    Line::from(vec![Span::styled("Path: ", TuiPalette::muted_style())]),
                     Line::from(Span::styled(path, TuiPalette::path_style())),
                     Line::from(""),
                     Line::from(vec![
                         Span::styled("Plants: ", TuiPalette::muted_style()),
-                        Span::styled(plant_count.to_string(), Style::default().fg(TuiPalette::AMBER)),
+                        Span::styled(
+                            plant_count.to_string(),
+                            Style::default().fg(TuiPalette::AMBER),
+                        ),
                     ]),
                     Line::from(""),
                     Line::from(vec![
                         Span::styled("Health: ", TuiPalette::muted_style()),
-                        Span::styled(health_pct, if *health > 0.7 {
-                            TuiPalette::success_style()
-                        } else if *health > 0.4 {
-                            TuiPalette::warning_style()
-                        } else {
-                            TuiPalette::error_style()
-                        }),
+                        Span::styled(
+                            health_pct,
+                            if *health > 0.7 {
+                                TuiPalette::success_style()
+                            } else if *health > 0.4 {
+                                TuiPalette::warning_style()
+                            } else {
+                                TuiPalette::error_style()
+                            },
+                        ),
                     ]),
                     Line::from(Span::raw(health_bar)),
                     Line::from(""),
                     Line::from(vec![
-                        Span::styled("Enter", Style::default().fg(TuiPalette::SAGE).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            "Enter",
+                            Style::default()
+                                .fg(TuiPalette::SAGE)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(" to expand/collapse", TuiPalette::muted_style()),
                     ]),
                 ]
@@ -530,13 +559,16 @@ impl GardenView {
                                 GrowthStage::Wilting => TuiPalette::warning_style(),
                                 GrowthStage::Ancient => Style::default().fg(TuiPalette::COPPER),
                                 _ => TuiPalette::success_style(),
-                            }
+                            },
                         ),
                     ]),
                     Line::from(""),
                     Line::from(vec![
                         Span::styled("Lines: ", TuiPalette::muted_style()),
-                        Span::styled(plant.lines.to_string(), Style::default().fg(TuiPalette::AMBER)),
+                        Span::styled(
+                            plant.lines.to_string(),
+                            Style::default().fg(TuiPalette::AMBER),
+                        ),
                     ]),
                     Line::from(""),
                     Line::from(vec![
@@ -546,11 +578,14 @@ impl GardenView {
                     Line::from(""),
                     Line::from(vec![
                         Span::styled("Last tended: ", TuiPalette::muted_style()),
-                        Span::styled(tended_str, if plant.last_tended_days > 30 {
-                            TuiPalette::warning_style()
-                        } else {
-                            TuiPalette::muted_style()
-                        }),
+                        Span::styled(
+                            tended_str,
+                            if plant.last_tended_days > 30 {
+                                TuiPalette::warning_style()
+                            } else {
+                                TuiPalette::muted_style()
+                            },
+                        ),
                     ]),
                 ]
             }
@@ -566,12 +601,18 @@ impl GardenView {
                     Line::from(""),
                     Line::from(vec![
                         Span::styled("Total plants: ", TuiPalette::muted_style()),
-                        Span::styled(total_plants.to_string(), Style::default().fg(TuiPalette::GARDEN_GREEN)),
+                        Span::styled(
+                            total_plants.to_string(),
+                            Style::default().fg(TuiPalette::GARDEN_GREEN),
+                        ),
                     ]),
                     Line::from(""),
                     Line::from(vec![
                         Span::styled("Total lines: ", TuiPalette::muted_style()),
-                        Span::styled(total_lines.to_string(), Style::default().fg(TuiPalette::BLOOM)),
+                        Span::styled(
+                            total_lines.to_string(),
+                            Style::default().fg(TuiPalette::BLOOM),
+                        ),
                     ]),
                     Line::from(""),
                     Line::from(Span::styled("Navigate with ↑↓", TuiPalette::muted_style())),
@@ -588,10 +629,7 @@ impl GardenView {
     fn render_health_bar(&self, health: f32, width: usize) -> String {
         let filled = ((health * width as f32) as usize).min(width);
         let empty = width - filled;
-        format!("{}{}",
-            "█".repeat(filled),
-            "░".repeat(empty)
-        )
+        format!("{}{}", "█".repeat(filled), "░".repeat(empty))
     }
 }
 
@@ -602,12 +640,7 @@ impl Default for GardenView {
 }
 
 /// Render the garden view pane (standalone function for integration)
-pub fn render_garden_view(
-    frame: &mut Frame,
-    area: Rect,
-    view: &mut GardenView,
-    focused: bool,
-) {
+pub fn render_garden_view(frame: &mut Frame, area: Rect, view: &mut GardenView, focused: bool) {
     view.set_focused(focused);
     view.tick();
     view.render(frame, area);

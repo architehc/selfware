@@ -13,11 +13,8 @@ mod scenarios;
 
 pub use runner::{DemoRunner, DemoState};
 pub use scenarios::{
-    archaeology::CodebaseArchaeologyScenario,
-    bug_hunt::BugHuntSafariScenario,
-    factory::FeatureFactoryScenario,
-    token_challenge::TokenChallengeScenario,
-    DemoScenario,
+    archaeology::CodebaseArchaeologyScenario, bug_hunt::BugHuntSafariScenario,
+    factory::FeatureFactoryScenario, token_challenge::TokenChallengeScenario, DemoScenario,
 };
 
 use std::time::Duration;
@@ -82,7 +79,11 @@ pub enum DemoEvent {
     /// Agent action occurred
     AgentAction { agent: String, action: String },
     /// Message sent between agents
-    MessageSent { from: String, to: String, msg_type: String },
+    MessageSent {
+        from: String,
+        to: String,
+        msg_type: String,
+    },
     /// Tokens processed
     TokensProcessed { count: u64, rate: f64 },
     /// Effect triggered

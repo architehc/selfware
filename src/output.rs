@@ -4,9 +4,15 @@
 //! - `compact_mode`: Minimal output, no decorative chrome
 //! - `verbose_mode`: Extra detail, show reasoning, debug info
 //! - `show_tokens`: Display token usage after responses
+//! - `show_mascot`: Display ASCII fox mascot during key moments
 
 use colored::*;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+// Re-export mascot types for convenience
+pub use crate::ui::mascot::{
+    render_inline_mascot, render_mascot, render_mascot_with_message, MascotMood,
+};
 
 /// Global output mode flags (set once at startup)
 static COMPACT_MODE: AtomicBool = AtomicBool::new(false);
@@ -148,12 +154,14 @@ pub fn thinking(text: &str, inline: bool) {
         } else {
             print!("{}", text.dimmed());
         }
+    } else if is_verbose() {
+        println!(
+            "{} {}",
+            "💭 Thinking:".bright_magenta(),
+            text.bright_black()
+        );
     } else {
-        if is_verbose() {
-            println!("{} {}", "💭 Thinking:".bright_magenta(), text.bright_black());
-        } else {
-            println!("{} {}", "Thinking:".dimmed(), text.dimmed());
-        }
+        println!("{} {}", "Thinking:".dimmed(), text.dimmed());
     }
 }
 
@@ -169,8 +177,7 @@ pub fn intent_without_action() {
     if !is_compact() {
         println!(
             "{}",
-            "🔄 Model described intent but didn't act - prompting for action..."
-                .bright_yellow()
+            "🔄 Model described intent but didn't act - prompting for action...".bright_yellow()
         );
     }
 }
@@ -188,6 +195,51 @@ pub fn final_answer(content: &str) {
 pub fn task_completed() {
     if !is_compact() {
         println!("{}", "✅ Task completed successfully!".bright_green());
+    }
+}
+
+/// Print task completed with mascot (verbose mode)
+pub fn task_completed_with_mascot() {
+    if is_verbose() {
+        println!(
+            "{}",
+            render_mascot_with_message(MascotMood::Success, "Task completed successfully!")
+        );
+    } else if !is_compact() {
+        println!("{}", "✅ Task completed successfully!".bright_green());
+    }
+}
+
+/// Print task failed with mascot (verbose mode)
+pub fn task_failed_with_mascot(reason: &str) {
+    if is_verbose() {
+        println!(
+            "{}",
+            render_mascot_with_message(MascotMood::Error, &format!("Task failed: {}", reason))
+        );
+    } else {
+        println!("{} {}", "❌ Task failed:".bright_red(), reason);
+    }
+}
+
+/// Print greeting mascot on startup (verbose mode only)
+pub fn greeting_mascot() {
+    if is_verbose() {
+        println!("{}", render_mascot(MascotMood::Greeting));
+    }
+}
+
+/// Print thinking mascot during LLM calls (verbose mode only)
+pub fn thinking_mascot() {
+    if is_verbose() {
+        println!("{}", render_inline_mascot(MascotMood::Thinking));
+    }
+}
+
+/// Print working mascot during tool execution (verbose mode only)
+pub fn working_mascot() {
+    if is_verbose() {
+        print!("{} ", render_inline_mascot(MascotMood::Working));
     }
 }
 
@@ -397,7 +449,9 @@ impl TaskProgress {
                 };
 
                 let progress_str = if phase.status == PhaseStatus::Active && phase.progress > 0.0 {
-                    format!(" [{:.0}%]", phase.progress * 100.0).cyan().to_string()
+                    format!(" [{:.0}%]", phase.progress * 100.0)
+                        .cyan()
+                        .to_string()
                 } else {
                     String::new()
                 };
@@ -414,11 +468,7 @@ impl TaskProgress {
 
             // Show ETA
             if let Some(eta) = self.format_eta() {
-                println!(
-                    "  {} {}",
-                    "ETA:".dimmed(),
-                    eta.bright_cyan()
-                );
+                println!("  {} {}", "ETA:".dimmed(), eta.bright_cyan());
             }
             println!();
         } else {

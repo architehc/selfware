@@ -43,11 +43,11 @@ impl MessageType {
     /// Get the color for this message type
     pub fn color(&self) -> Color {
         match self {
-            MessageType::Request => colors::SECONDARY,  // Blue
-            MessageType::Response => colors::SUCCESS,   // Green
-            MessageType::Broadcast => colors::WARNING,  // Yellow
-            MessageType::Consensus => colors::PRIMARY,  // Coral
-            MessageType::Error => colors::ERROR,        // Red
+            MessageType::Request => colors::SECONDARY, // Blue
+            MessageType::Response => colors::SUCCESS,  // Green
+            MessageType::Broadcast => colors::WARNING, // Yellow
+            MessageType::Consensus => colors::PRIMARY, // Coral
+            MessageType::Error => colors::ERROR,       // Red
         }
     }
 }
@@ -259,8 +259,8 @@ mod tests {
 
     #[test]
     fn test_message_flow_update() {
-        let mut flow = MessageFlow::new((0.0, 0.0), (10.0, 10.0), MessageType::Request)
-            .with_speed(2.0);
+        let mut flow =
+            MessageFlow::new((0.0, 0.0), (10.0, 10.0), MessageType::Request).with_speed(2.0);
 
         flow.update(0.25);
         assert!((flow.progress() - 0.5).abs() < 0.001);
@@ -268,8 +268,8 @@ mod tests {
 
     #[test]
     fn test_message_flow_completion() {
-        let mut flow = MessageFlow::new((0.0, 0.0), (10.0, 10.0), MessageType::Request)
-            .with_speed(10.0);
+        let mut flow =
+            MessageFlow::new((0.0, 0.0), (10.0, 10.0), MessageType::Request).with_speed(10.0);
 
         assert!(!flow.is_complete());
         flow.update(1.0);
@@ -290,7 +290,11 @@ mod tests {
     #[test]
     fn test_message_flow_manager() {
         let mut manager = MessageFlowManager::new();
-        manager.add(MessageFlow::new((0.0, 0.0), (10.0, 10.0), MessageType::Request));
+        manager.add(MessageFlow::new(
+            (0.0, 0.0),
+            (10.0, 10.0),
+            MessageType::Request,
+        ));
         assert_eq!(manager.flow_count(), 1);
 
         // Fast forward to completion

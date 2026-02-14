@@ -59,14 +59,14 @@ impl AgentRole {
     /// Get the primary color for this role
     pub fn color(&self) -> Color {
         match self {
-            AgentRole::Architect => colors::PRIMARY,     // Coral
-            AgentRole::Coder => colors::SECONDARY,       // Blue
-            AgentRole::Tester => colors::ACCENT,         // Mint
-            AgentRole::Reviewer => colors::PURPLE,       // Purple
-            AgentRole::Documenter => colors::WARNING,    // Yellow
-            AgentRole::DevOps => colors::ERROR,          // Red
-            AgentRole::Security => colors::SUCCESS,      // Green
-            AgentRole::Performance => colors::ORANGE,    // Orange
+            AgentRole::Architect => colors::PRIMARY,  // Coral
+            AgentRole::Coder => colors::SECONDARY,    // Blue
+            AgentRole::Tester => colors::ACCENT,      // Mint
+            AgentRole::Reviewer => colors::PURPLE,    // Purple
+            AgentRole::Documenter => colors::WARNING, // Yellow
+            AgentRole::DevOps => colors::ERROR,       // Red
+            AgentRole::Security => colors::SUCCESS,   // Green
+            AgentRole::Performance => colors::ORANGE, // Orange
         }
     }
 
@@ -270,24 +270,40 @@ impl Widget for &AgentAvatar {
 
         // Draw border
         // Top
-        buf.get_mut(area.x, area.y).set_symbol("┌").set_style(border_style);
+        buf.get_mut(area.x, area.y)
+            .set_symbol("┌")
+            .set_style(border_style);
         for x in area.x + 1..area.x + area.width - 1 {
-            buf.get_mut(x, area.y).set_symbol("─").set_style(border_style);
+            buf.get_mut(x, area.y)
+                .set_symbol("─")
+                .set_style(border_style);
         }
-        buf.get_mut(area.x + area.width - 1, area.y).set_symbol("┐").set_style(border_style);
+        buf.get_mut(area.x + area.width - 1, area.y)
+            .set_symbol("┐")
+            .set_style(border_style);
 
         // Sides
         for y in area.y + 1..area.y + area.height - 1 {
-            buf.get_mut(area.x, y).set_symbol("│").set_style(border_style);
-            buf.get_mut(area.x + area.width - 1, y).set_symbol("│").set_style(border_style);
+            buf.get_mut(area.x, y)
+                .set_symbol("│")
+                .set_style(border_style);
+            buf.get_mut(area.x + area.width - 1, y)
+                .set_symbol("│")
+                .set_style(border_style);
         }
 
         // Bottom
-        buf.get_mut(area.x, area.y + area.height - 1).set_symbol("└").set_style(border_style);
+        buf.get_mut(area.x, area.y + area.height - 1)
+            .set_symbol("└")
+            .set_style(border_style);
         for x in area.x + 1..area.x + area.width - 1 {
-            buf.get_mut(x, area.y + area.height - 1).set_symbol("─").set_style(border_style);
+            buf.get_mut(x, area.y + area.height - 1)
+                .set_symbol("─")
+                .set_style(border_style);
         }
-        buf.get_mut(area.x + area.width - 1, area.y + area.height - 1).set_symbol("┘").set_style(border_style);
+        buf.get_mut(area.x + area.width - 1, area.y + area.height - 1)
+            .set_symbol("┘")
+            .set_style(border_style);
 
         let inner_x = area.x + 2;
         let inner_y = area.y + 1;
@@ -348,7 +364,11 @@ impl Widget for &AgentAvatar {
             if status_x < area.x + area.width - 1 {
                 buf.get_mut(status_x, activity_y)
                     .set_symbol(status)
-                    .set_style(Style::default().fg(activity_color).add_modifier(Modifier::BOLD));
+                    .set_style(
+                        Style::default()
+                            .fg(activity_color)
+                            .add_modifier(Modifier::BOLD),
+                    );
             }
         }
 
@@ -399,8 +419,7 @@ mod tests {
 
     #[test]
     fn test_agent_avatar_with_activity() {
-        let avatar = AgentAvatar::new(AgentRole::Tester)
-            .with_activity(ActivityLevel::High);
+        let avatar = AgentAvatar::new(AgentRole::Tester).with_activity(ActivityLevel::High);
         assert_eq!(avatar.activity(), ActivityLevel::High);
     }
 

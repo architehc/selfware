@@ -264,11 +264,11 @@ pub fn is_key(event: &Event, key: KeyCode, modifiers: KeyModifiers) -> bool {
     )
 }
 
-/// Check for quit keys (q, Ctrl+C, Ctrl+D)
+/// Check for quit keys (q, Ctrl+C)
+/// Note: Ctrl+D is reserved for dashboard toggle
 pub fn is_quit(event: &Event) -> bool {
     is_key(event, KeyCode::Char('q'), KeyModifiers::NONE)
         || is_key(event, KeyCode::Char('c'), KeyModifiers::CONTROL)
-        || is_key(event, KeyCode::Char('d'), KeyModifiers::CONTROL)
 }
 
 /// Run the TUI application
@@ -444,6 +444,15 @@ pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
     let mut show_help = false;
     let mut paused = false;
 
+    // Scan current directory for garden view
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let garden = crate::ui::garden::scan_directory(&cwd);
+    dashboard_state.log(
+        LogLevel::Info,
+        &format!("Scanned garden: {} plants", garden.total_plants),
+    );
+    garden_view.set_garden(garden);
+
     // Apply dashboard layout preset
     layout_engine.apply_preset(LayoutPreset::Dashboard);
     dashboard_state.log(LogLevel::Info, "Dashboard initialized");
@@ -571,6 +580,16 @@ pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
                         layout_engine.toggle_zoom();
                     }
 
+                    // Animation speed controls
+                    KeyCode::Char('+') | KeyCode::Char('=') => {
+                        app.on_plus();
+                        dashboard_state.log(LogLevel::Info, &app.status);
+                    }
+                    KeyCode::Char('-') | KeyCode::Char('_') => {
+                        app.on_minus();
+                        dashboard_state.log(LogLevel::Info, &app.status);
+                    }
+
                     // Cycle focus
                     KeyCode::Tab => {
                         layout_engine.focus_next();
@@ -672,6 +691,18 @@ pub fn run_tui_dashboard_with_events(
     let mut user_inputs = Vec::new();
     let mut show_help = false;
     let mut paused = false;
+
+    // Scan current directory for garden view
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let garden = crate::ui::garden::scan_directory(&cwd);
+    {
+        let mut state = shared_state.lock().unwrap();
+        state.log(
+            LogLevel::Info,
+            &format!("Scanned garden: {} plants", garden.total_plants),
+        );
+    }
+    garden_view.set_garden(garden);
 
     // Apply dashboard layout preset
     layout_engine.apply_preset(LayoutPreset::Dashboard);
@@ -815,6 +846,21 @@ pub fn run_tui_dashboard_with_events(
                     }
                     KeyCode::Char('z') => {
                         layout_engine.toggle_zoom();
+                    }
+                    // Animation speed controls
+                    KeyCode::Char('+') | KeyCode::Char('=') => {
+                        app.on_plus();
+                        shared_state
+                            .lock()
+                            .unwrap()
+                            .log(LogLevel::Info, &app.status);
+                    }
+                    KeyCode::Char('-') | KeyCode::Char('_') => {
+                        app.on_minus();
+                        shared_state
+                            .lock()
+                            .unwrap()
+                            .log(LogLevel::Info, &app.status);
                     }
                     KeyCode::Tab => {
                         layout_engine.focus_next();

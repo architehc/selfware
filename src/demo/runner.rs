@@ -136,7 +136,8 @@ impl DemoRunner {
             });
 
             self.current_stage += 1;
-            self.progress_bar.set_progress(self.current_stage as f32 / self.total_stages as f32);
+            self.progress_bar
+                .set_progress(self.current_stage as f32 / self.total_stages as f32);
         }
 
         success
@@ -144,9 +145,14 @@ impl DemoRunner {
 
     /// Complete the scenario
     fn complete(&mut self, scenario: &mut dyn DemoScenario) {
-        let duration = self.start_time.map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.0);
+        let duration = self
+            .start_time
+            .map(|t| t.elapsed().as_secs_f32())
+            .unwrap_or(0.0);
 
-        self.emit_event(DemoEvent::ScenarioCompleted { duration_secs: duration });
+        self.emit_event(DemoEvent::ScenarioCompleted {
+            duration_secs: duration,
+        });
 
         scenario.cleanup(self);
         self.state = DemoState::Completed;
@@ -231,7 +237,14 @@ impl DemoRunner {
     // === Message Flow ===
 
     /// Send a message between agents
-    pub fn send_message(&mut self, from: &str, to: &str, msg_type: MessageType, from_pos: (f32, f32), to_pos: (f32, f32)) {
+    pub fn send_message(
+        &mut self,
+        from: &str,
+        to: &str,
+        msg_type: MessageType,
+        from_pos: (f32, f32),
+        to_pos: (f32, f32),
+    ) {
         let flow = MessageFlow::new(from_pos, to_pos, msg_type);
         self.message_flow_manager.add(flow);
 
@@ -250,7 +263,8 @@ impl DemoRunner {
             self.particle_system.sparkle(x, y, count);
             self.emit_event(DemoEvent::EffectTriggered {
                 effect_type: "sparkle".to_string(),
-                x, y,
+                x,
+                y,
             });
         }
     }
@@ -261,7 +275,8 @@ impl DemoRunner {
             self.particle_system.explode(x, y, count);
             self.emit_event(DemoEvent::EffectTriggered {
                 effect_type: "explode".to_string(),
-                x, y,
+                x,
+                y,
             });
         }
     }
@@ -272,7 +287,8 @@ impl DemoRunner {
             self.particle_system.celebrate(x, y);
             self.emit_event(DemoEvent::EffectTriggered {
                 effect_type: "celebrate".to_string(),
-                x, y,
+                x,
+                y,
             });
         }
     }
