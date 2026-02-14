@@ -6,6 +6,7 @@ mod test_agent;
 mod test_api;
 mod test_config;
 mod test_context;
+mod test_error_paths;
 mod test_file_extended;
 mod test_git;
 mod test_safety;
