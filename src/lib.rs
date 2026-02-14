@@ -136,22 +136,15 @@ pub use config::typed as typed_config;
 pub mod browser_automation;
 #[cfg(feature = "resilience")]
 pub mod degradation;
-#[cfg(feature = "tui")]
-pub mod demo;
 pub mod doc_generator;
-pub mod dyslexia_friendly;
 pub mod extensions;
-pub mod image_understanding;
 pub mod intent;
-pub mod literate;
 pub mod mcp;
 pub mod memory;
 pub mod model_router;
 pub mod output;
-pub mod screen_reader;
 #[cfg(feature = "resilience")]
 pub mod self_healing;
-pub mod session_recording;
 pub mod shell_hooks;
 #[cfg(feature = "speculative")]
 pub mod speculative;
@@ -159,7 +152,21 @@ pub mod streaming;
 #[cfg(feature = "tokens")]
 pub mod tokens;
 pub mod tool_parser;
+
+// ============================================================================
+// Backward-compatible re-exports for UI submodules
+// ============================================================================
+// TUI and demo modules (moved to ui/)
 #[cfg(feature = "tui")]
-pub mod tui;
-pub mod voice_interface;
-pub mod wellness;
+pub use ui::tui;
+#[cfg(feature = "tui")]
+pub use ui::demo;
+
+// Accessibility modules (moved to ui/accessibility/)
+pub use ui::accessibility::dyslexia_friendly;
+pub use ui::accessibility::wellness;
+pub use ui::accessibility::screen_reader;
+pub use ui::accessibility::voice_interface;
+pub use ui::accessibility::image_understanding;
+pub use ui::accessibility::literate;
+pub use ui::accessibility::session_recording;

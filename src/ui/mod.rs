@@ -11,3 +11,12 @@ pub mod garden;
 pub mod mascot;
 pub mod style;
 pub mod theme;
+
+// TUI and demo modules
+#[cfg(feature = "tui")]
+pub mod tui;
+#[cfg(feature = "tui")]
+pub mod demo;
+
+// Accessibility features
+pub mod accessibility;
