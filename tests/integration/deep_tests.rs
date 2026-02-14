@@ -14,7 +14,9 @@ use super::helpers::*;
 use selfware::agent::Agent;
 use selfware::api::types::Message;
 use selfware::api::ApiClient;
-use selfware::config::{AgentConfig, Config, ExecutionMode, SafetyConfig, YoloFileConfig};
+use selfware::config::{
+    AgentConfig, Config, ExecutionMode, SafetyConfig, UiConfig, YoloFileConfig,
+};
 use selfware::tools::ToolRegistry;
 use serde_json::json;
 use std::env;
@@ -67,7 +69,11 @@ fn slow_model_config() -> Config {
             streaming: true,
         },
         yolo: YoloFileConfig::default(),
+        ui: UiConfig::default(),
         execution_mode: ExecutionMode::Normal,
+        compact_mode: false,
+        verbose_mode: false,
+        show_tokens: false,
     }
 }
 
