@@ -56,6 +56,12 @@ pub struct TaskProgress {
     pub elapsed_secs: u64,
 }
 
+/// Animation speed settings
+pub const ANIMATION_SPEED_MIN: f64 = 0.25;
+pub const ANIMATION_SPEED_MAX: f64 = 4.0;
+pub const ANIMATION_SPEED_STEP: f64 = 0.25;
+pub const ANIMATION_SPEED_DEFAULT: f64 = 1.0;
+
 /// The main TUI application
 pub struct App {
     /// Current state
@@ -80,6 +86,8 @@ pub struct App {
     pub scroll: usize,
     /// Selected item in lists
     pub selected: usize,
+    /// Animation speed multiplier (1.0 = normal, 2.0 = faster, 0.5 = slower)
+    pub animation_speed: f64,
 }
 
 impl App {
@@ -102,6 +110,7 @@ impl App {
             connected: true,
             scroll: 0,
             selected: 0,
+            animation_speed: ANIMATION_SPEED_DEFAULT,
         }
     }
 
@@ -371,6 +380,31 @@ impl App {
             AppState::Confirming(_) => self.state = AppState::Chatting,
             _ => {}
         }
+    }
+
+    /// Increase animation speed (+ key)
+    pub fn on_plus(&mut self) {
+        self.animation_speed = (self.animation_speed + ANIMATION_SPEED_STEP).min(ANIMATION_SPEED_MAX);
+        self.status = format!("Animation speed: {:.0}%", self.animation_speed * 100.0);
+    }
+
+    /// Decrease animation speed (- key)
+    pub fn on_minus(&mut self) {
+        self.animation_speed = (self.animation_speed - ANIMATION_SPEED_STEP).max(ANIMATION_SPEED_MIN);
+        self.status = format!("Animation speed: {:.0}%", self.animation_speed * 100.0);
+    }
+
+    /// Get animation delay based on current speed
+    /// Returns the delay in milliseconds to use between animation frames
+    pub fn animation_delay_ms(&self) -> u64 {
+        // Base delay is 100ms, adjusted by speed (faster = shorter delay)
+        let base_delay = 100.0;
+        (base_delay / self.animation_speed) as u64
+    }
+
+    /// Get animation speed as percentage string
+    pub fn animation_speed_display(&self) -> String {
+        format!("{:.0}%", self.animation_speed * 100.0)
     }
 }
 
@@ -694,5 +728,67 @@ mod tests {
             AppState::Confirming("a".into()),
             AppState::Confirming("a".into())
         );
+    }
+
+    #[test]
+    fn test_animation_speed_default() {
+        let app = App::new("test");
+        assert!((app.animation_speed - ANIMATION_SPEED_DEFAULT).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_on_plus_increases_speed() {
+        let mut app = App::new("test");
+        let original = app.animation_speed;
+        app.on_plus();
+        assert!(app.animation_speed > original);
+    }
+
+    #[test]
+    fn test_on_minus_decreases_speed() {
+        let mut app = App::new("test");
+        app.on_plus(); // First increase so we can decrease
+        let speed_after_plus = app.animation_speed;
+        app.on_minus();
+        assert!(app.animation_speed < speed_after_plus);
+    }
+
+    #[test]
+    fn test_animation_speed_max_cap() {
+        let mut app = App::new("test");
+        // Increase many times
+        for _ in 0..20 {
+            app.on_plus();
+        }
+        assert!(app.animation_speed <= ANIMATION_SPEED_MAX);
+    }
+
+    #[test]
+    fn test_animation_speed_min_cap() {
+        let mut app = App::new("test");
+        // Decrease many times
+        for _ in 0..20 {
+            app.on_minus();
+        }
+        assert!(app.animation_speed >= ANIMATION_SPEED_MIN);
+    }
+
+    #[test]
+    fn test_animation_delay_inversely_proportional() {
+        let mut app = App::new("test");
+        let normal_delay = app.animation_delay_ms();
+
+        app.animation_speed = 2.0;
+        let fast_delay = app.animation_delay_ms();
+
+        // Faster speed should mean shorter delay
+        assert!(fast_delay < normal_delay);
+    }
+
+    #[test]
+    fn test_animation_speed_display() {
+        let mut app = App::new("test");
+        app.animation_speed = 1.5;
+        assert_eq!(app.animation_speed_display(), "150%");
     }
 }

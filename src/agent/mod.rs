@@ -1129,14 +1129,15 @@ To call a tool, use this EXACT XML structure:
                 }
                 AgentState::Executing { step } => {
                     let _span = enter_agent_step("Executing", step);
-                    println!(
-                        "{} Executing...",
-                        format!("📝 Step {}", step + 1).bright_blue()
-                    );
+                    output::step_start(step + 1, "Executing");
+                    // Update progress based on step
+                    let step_progress = ((step + 1) as f64 * 0.1).min(0.9);
+                    progress.update_progress(step_progress);
                     match self.execute_step_with_logging(&task_description).await {
                         Ok(completed) => {
                             if completed {
                                 record_state_transition("Executing", "Completed");
+                                progress.complete_phase();
                                 output::task_completed();
                                 if let Err(e) = self.complete_checkpoint() {
                                     warn!("Failed to save completed checkpoint: {}", e);
@@ -1211,6 +1212,7 @@ To call a tool, use this EXACT XML structure:
                 }
                 AgentState::Completed => {
                     record_state_transition("Executing", "Completed");
+                    progress.complete_phase();
                     output::task_completed();
                     if let Err(e) = self.complete_checkpoint() {
                         warn!("Failed to save completed checkpoint: {}", e);
@@ -1219,6 +1221,7 @@ To call a tool, use this EXACT XML structure:
                 }
                 AgentState::Failed { reason } => {
                     record_state_transition("Executing", "Failed");
+                    progress.fail_phase();
                     println!("{} {}", "❌ Task failed:".bright_red(), reason);
                     if let Err(e) = self.fail_checkpoint(&reason) {
                         warn!("Failed to save failed checkpoint: {}", e);
@@ -1229,6 +1232,7 @@ To call a tool, use this EXACT XML structure:
 
             iteration += 1;
             if iteration > self.config.agent.max_iterations {
+                progress.fail_phase();
                 if let Err(e) = self.fail_checkpoint("Max iterations reached") {
                     warn!("Failed to save failed checkpoint: {}", e);
                 }

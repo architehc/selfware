@@ -28,7 +28,7 @@
 //! 4. Programmatic overrides
 
 use anyhow::Result;
-use selfware::config::{AgentConfig, Config, ExecutionMode, SafetyConfig, YoloFileConfig};
+use selfware::config::{AgentConfig, Config, ExecutionMode, SafetyConfig, UiConfig, YoloFileConfig};
 use std::path::PathBuf;
 
 fn main() -> Result<()> {
@@ -144,6 +144,16 @@ fn build_custom_config() -> Config {
             allow_destructive_shell: false,
             audit_log_path: Some(PathBuf::from("/tmp/selfware-audit.log")),
             status_interval: 50,
+        },
+
+        // UI settings
+        ui: UiConfig {
+            theme: "amber".to_string(),
+            animations: true,
+            compact_mode: false,
+            verbose_mode: false,
+            show_tokens: false,
+            animation_speed: 1.0,
         },
 
         // Default execution mode

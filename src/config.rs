@@ -58,21 +58,67 @@ pub struct Config {
     #[serde(default)]
     pub yolo: YoloFileConfig,
 
+    #[serde(default)]
+    pub ui: UiConfig,
+
     /// Runtime execution mode (set via CLI, not persisted)
     #[serde(skip)]
     pub execution_mode: ExecutionMode,
 
-    /// Compact output mode (less visual chrome)
+    /// Compact output mode (less visual chrome) - CLI override
     #[serde(skip)]
     pub compact_mode: bool,
 
-    /// Verbose output mode (detailed tool output)
+    /// Verbose output mode (detailed tool output) - CLI override
     #[serde(skip)]
     pub verbose_mode: bool,
 
-    /// Always show token usage after responses
+    /// Always show token usage after responses - CLI override
     #[serde(skip)]
     pub show_tokens: bool,
+}
+
+/// UI configuration for themes, animations, and output
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiConfig {
+    /// Color theme: "amber", "ocean", "minimal", "high-contrast"
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// Enable animations (spinners, progress bars)
+    #[serde(default = "default_true")]
+    pub animations: bool,
+    /// Default to compact mode
+    #[serde(default)]
+    pub compact_mode: bool,
+    /// Default to verbose mode
+    #[serde(default)]
+    pub verbose_mode: bool,
+    /// Always show token usage
+    #[serde(default)]
+    pub show_tokens: bool,
+    /// Animation speed multiplier (1.0 = normal, 2.0 = faster)
+    #[serde(default = "default_animation_speed")]
+    pub animation_speed: f64,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            theme: default_theme(),
+            animations: true,
+            compact_mode: false,
+            verbose_mode: false,
+            show_tokens: false,
+            animation_speed: 1.0,
+        }
+    }
+}
+
+fn default_theme() -> String {
+    "amber".to_string()
+}
+fn default_animation_speed() -> f64 {
+    1.0
 }
 
 /// YOLO mode configuration (loaded from config file)
@@ -164,6 +210,7 @@ impl Default for Config {
             safety: SafetyConfig::default(),
             agent: AgentConfig::default(),
             yolo: YoloFileConfig::default(),
+            ui: UiConfig::default(),
             execution_mode: ExecutionMode::default(),
             compact_mode: false,
             verbose_mode: false,
@@ -291,7 +338,32 @@ impl Config {
             }
         }
 
+        // Apply UI defaults from config (CLI flags will override later)
+        config.compact_mode = config.ui.compact_mode;
+        config.verbose_mode = config.ui.verbose_mode;
+        config.show_tokens = config.ui.show_tokens;
+
         Ok(config)
+    }
+
+    /// Apply UI settings to the global theme and output systems
+    ///
+    /// This should be called after loading config and before starting the agent.
+    /// CLI flags can override the config file settings before calling this.
+    pub fn apply_ui_settings(&self) {
+        use crate::ui::theme::{set_theme, ThemeId};
+
+        // Set theme from config
+        let theme_id = match self.ui.theme.to_lowercase().as_str() {
+            "ocean" => ThemeId::Ocean,
+            "minimal" => ThemeId::Minimal,
+            "high-contrast" | "highcontrast" | "high_contrast" => ThemeId::HighContrast,
+            _ => ThemeId::Amber, // Default
+        };
+        set_theme(theme_id);
+
+        // Initialize output module with current settings
+        crate::output::init(self.compact_mode, self.verbose_mode, self.show_tokens);
     }
 }
 
@@ -630,6 +702,14 @@ mod tests {
                 audit_log_path: Some(PathBuf::from("/tmp/audit.log")),
                 status_interval: 25,
             },
+            ui: UiConfig {
+                theme: "ocean".to_string(),
+                animations: true,
+                compact_mode: true,
+                verbose_mode: false,
+                show_tokens: true,
+                animation_speed: 1.5,
+            },
             execution_mode: ExecutionMode::default(),
             compact_mode: false,
             verbose_mode: false,
@@ -895,5 +975,68 @@ mod tests {
             .safety
             .allowed_paths
             .contains(&"/home/用户/**".to_string()));
+    }
+
+    #[test]
+    fn test_ui_config_default() {
+        let config = UiConfig::default();
+        assert_eq!(config.theme, "amber");
+        assert!(config.animations);
+        assert!(!config.compact_mode);
+        assert!(!config.verbose_mode);
+        assert!(!config.show_tokens);
+        assert!((config.animation_speed - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_config_with_ui_section() {
+        let toml_str = r#"
+            endpoint = "http://localhost:8000/v1"
+
+            [ui]
+            theme = "ocean"
+            animations = true
+            compact_mode = true
+            show_tokens = true
+            animation_speed = 1.5
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.ui.theme, "ocean");
+        assert!(config.ui.animations);
+        assert!(config.ui.compact_mode);
+        assert!(config.ui.show_tokens);
+        assert!((config.ui.animation_speed - 1.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_ui_config_serialization() {
+        let config = UiConfig {
+            theme: "high-contrast".to_string(),
+            animations: false,
+            compact_mode: true,
+            verbose_mode: true,
+            show_tokens: true,
+            animation_speed: 2.0,
+        };
+        let toml_str = toml::to_string(&config).unwrap();
+        assert!(toml_str.contains("theme = \"high-contrast\""));
+        assert!(toml_str.contains("animations = false"));
+        assert!(toml_str.contains("compact_mode = true"));
+    }
+
+    #[test]
+    fn test_config_ui_defaults_applied() {
+        let toml_str = r#"
+            endpoint = "http://localhost:8000/v1"
+
+            [ui]
+            compact_mode = true
+            show_tokens = true
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        // UI defaults should be present
+        assert_eq!(config.ui.theme, "amber"); // default
+        assert!(config.ui.compact_mode);
+        assert!(config.ui.show_tokens);
     }
 }

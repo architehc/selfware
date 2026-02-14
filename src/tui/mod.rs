@@ -49,72 +49,129 @@ use ratatui::{
 use std::io::{self, Stdout};
 
 /// The Selfware color palette for TUI
+///
+/// Colors are derived from the current UI theme. Use the static methods
+/// to get theme-appropriate styles, or the const colors for the default
+/// amber theme when performance is critical.
 pub struct TuiPalette;
 
 impl TuiPalette {
-    // Primary colors - warm and inviting
+    // Default colors (Amber theme) - used for const contexts
     pub const AMBER: Color = Color::Rgb(212, 163, 115);
     pub const GARDEN_GREEN: Color = Color::Rgb(96, 108, 56);
     pub const SOIL_BROWN: Color = Color::Rgb(188, 108, 37);
     pub const INK: Color = Color::Rgb(40, 54, 24);
     pub const PARCHMENT: Color = Color::Rgb(254, 250, 224);
 
-    // Accent colors
+    // Accent colors (default theme)
     pub const RUST: Color = Color::Rgb(139, 69, 19);
     pub const COPPER: Color = Color::Rgb(184, 115, 51);
     pub const SAGE: Color = Color::Rgb(143, 151, 121);
     pub const STONE: Color = Color::Rgb(128, 128, 128);
 
-    // Status colors
+    // Status colors (default theme)
     pub const BLOOM: Color = Color::Rgb(144, 190, 109);
     pub const WILT: Color = Color::Rgb(188, 108, 37);
     pub const FROST: Color = Color::Rgb(100, 100, 120);
 
-    /// Style for titles
+    /// Convert a colored::CustomColor to a ratatui Color
+    fn to_ratatui_color(c: colored::CustomColor) -> Color {
+        Color::Rgb(c.r, c.g, c.b)
+    }
+
+    /// Get the current theme's primary color
+    pub fn primary() -> Color {
+        let theme = crate::ui::theme::current_theme();
+        Self::to_ratatui_color(theme.primary)
+    }
+
+    /// Get the current theme's success color
+    pub fn success() -> Color {
+        let theme = crate::ui::theme::current_theme();
+        Self::to_ratatui_color(theme.success)
+    }
+
+    /// Get the current theme's warning color
+    pub fn warning() -> Color {
+        let theme = crate::ui::theme::current_theme();
+        Self::to_ratatui_color(theme.warning)
+    }
+
+    /// Get the current theme's error color
+    pub fn error() -> Color {
+        let theme = crate::ui::theme::current_theme();
+        Self::to_ratatui_color(theme.error)
+    }
+
+    /// Get the current theme's muted color
+    pub fn muted() -> Color {
+        let theme = crate::ui::theme::current_theme();
+        Self::to_ratatui_color(theme.muted)
+    }
+
+    /// Get the current theme's accent color
+    pub fn accent() -> Color {
+        let theme = crate::ui::theme::current_theme();
+        Self::to_ratatui_color(theme.accent)
+    }
+
+    /// Get the current theme's tool color
+    pub fn tool() -> Color {
+        let theme = crate::ui::theme::current_theme();
+        Self::to_ratatui_color(theme.tool)
+    }
+
+    /// Get the current theme's path color
+    pub fn path() -> Color {
+        let theme = crate::ui::theme::current_theme();
+        Self::to_ratatui_color(theme.path)
+    }
+
+    /// Style for titles (uses current theme)
     pub fn title_style() -> Style {
         Style::default()
-            .fg(Self::AMBER)
+            .fg(Self::primary())
             .add_modifier(Modifier::BOLD)
     }
 
     /// Style for selected items
     pub fn selected_style() -> Style {
         Style::default()
-            .bg(Self::GARDEN_GREEN)
+            .bg(Self::success())
             .fg(Self::PARCHMENT)
             .add_modifier(Modifier::BOLD)
     }
 
     /// Style for success messages
     pub fn success_style() -> Style {
-        Style::default().fg(Self::BLOOM)
+        Style::default().fg(Self::success())
     }
 
     /// Style for warning messages
     pub fn warning_style() -> Style {
-        Style::default().fg(Self::WILT)
+        Style::default().fg(Self::warning())
     }
 
     /// Style for error messages
     pub fn error_style() -> Style {
-        Style::default().fg(Self::FROST)
+        Style::default().fg(Self::error())
     }
 
     /// Style for muted text
     pub fn muted_style() -> Style {
-        Style::default().fg(Self::STONE)
+        Style::default().fg(Self::muted())
     }
 
     /// Style for paths
     pub fn path_style() -> Style {
         Style::default()
-            .fg(Self::SAGE)
+            .fg(Self::path())
             .add_modifier(Modifier::ITALIC)
     }
 
     /// Border style
     pub fn border_style() -> Style {
-        Style::default().fg(Self::SAGE)
+        Style::default().fg(Self::path())
     }
 }
 
@@ -1011,8 +1068,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_palette_colors() {
-        // Just verify the colors are defined correctly
+    fn test_palette_default_colors() {
+        // Verify default amber theme colors are defined correctly
         assert_eq!(TuiPalette::AMBER, Color::Rgb(212, 163, 115));
         assert_eq!(TuiPalette::GARDEN_GREEN, Color::Rgb(96, 108, 56));
     }
@@ -1021,6 +1078,29 @@ mod tests {
     fn test_palette_styles() {
         let title = TuiPalette::title_style();
         assert!(title.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn test_palette_theme_integration() {
+        use crate::ui::theme::{set_theme, ThemeId};
+
+        // Test with Amber theme
+        set_theme(ThemeId::Amber);
+        let primary = TuiPalette::primary();
+        assert_eq!(primary, Color::Rgb(212, 163, 115)); // Amber primary
+
+        // Test with Ocean theme
+        set_theme(ThemeId::Ocean);
+        let primary = TuiPalette::primary();
+        assert_eq!(primary, Color::Rgb(100, 149, 237)); // Ocean primary (Cornflower blue)
+
+        // Test success style respects theme
+        set_theme(ThemeId::HighContrast);
+        let success = TuiPalette::success();
+        assert_eq!(success, Color::Rgb(0, 255, 0)); // High contrast lime green
+
+        // Reset to default
+        set_theme(ThemeId::Amber);
     }
 
     #[test]

@@ -516,4 +516,64 @@ mod tests {
         assert_eq!(prompt, 0);
         assert_eq!(completion, 0);
     }
+
+    #[test]
+    fn test_task_progress_creation() {
+        let progress = TaskProgress::new(&["Planning", "Executing", "Verifying"]);
+        assert_eq!(progress.phases.len(), 3);
+        assert_eq!(progress.overall_progress(), 0.0);
+    }
+
+    #[test]
+    fn test_task_progress_phases() {
+        let mut progress = TaskProgress::new(&["Phase 1", "Phase 2"]);
+
+        // Start first phase
+        progress.start_phase();
+        assert_eq!(progress.phases[0].status, PhaseStatus::Active);
+
+        // Complete first phase
+        progress.complete_phase();
+        assert_eq!(progress.phases[0].status, PhaseStatus::Completed);
+        assert_eq!(progress.phases[1].status, PhaseStatus::Active);
+
+        // Check overall progress (50% = 1 out of 2 phases)
+        assert!((progress.overall_progress() - 0.5).abs() < 0.01);
+
+        // Complete second phase
+        progress.complete_phase();
+        assert_eq!(progress.overall_progress(), 1.0);
+    }
+
+    #[test]
+    fn test_task_progress_update() {
+        let mut progress = TaskProgress::new(&["Build"]);
+        progress.start_phase();
+
+        progress.update_progress(0.5);
+        assert!((progress.phases[0].progress - 0.5).abs() < 0.01);
+
+        // Clamp values
+        progress.update_progress(1.5);
+        assert!((progress.phases[0].progress - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_task_progress_failure() {
+        let mut progress = TaskProgress::new(&["Test"]);
+        progress.start_phase();
+        progress.fail_phase();
+        assert_eq!(progress.phases[0].status, PhaseStatus::Failed);
+    }
+
+    #[test]
+    fn test_task_progress_add_phase() {
+        let mut progress = TaskProgress::new(&["Phase 1"]);
+        assert_eq!(progress.phases.len(), 1);
+
+        progress.add_phase("Phase 2");
+        assert_eq!(progress.phases.len(), 2);
+        assert_eq!(progress.phases[1].name, "Phase 2");
+        assert_eq!(progress.phases[1].status, PhaseStatus::Pending);
+    }
 }

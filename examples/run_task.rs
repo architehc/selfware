@@ -82,6 +82,9 @@ async fn main() -> Result<()> {
         // YOLO mode settings (not used in AutoEdit mode)
         yolo: Default::default(),
 
+        // UI settings
+        ui: Default::default(),
+
         // CLI-only flags (not persisted in config)
         compact_mode: false,
         verbose_mode: false,
