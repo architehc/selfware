@@ -231,6 +231,254 @@ pub fn confirmation_preview(tool_name: &str, args: &str) {
     );
 }
 
+// ============================================================================
+// Multi-Phase Progress Display
+// ============================================================================
+
+use std::time::{Duration, Instant};
+
+/// Phase status for progress tracking
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PhaseStatus {
+    Pending,
+    Active,
+    Completed,
+    Failed,
+}
+
+/// A phase in the multi-step progress
+#[derive(Debug, Clone)]
+pub struct ProgressPhase {
+    pub name: String,
+    pub status: PhaseStatus,
+    pub progress: f64,
+}
+
+/// Multi-step progress tracker with ETA
+pub struct TaskProgress {
+    phases: Vec<ProgressPhase>,
+    current_phase: usize,
+    start_time: Instant,
+}
+
+impl TaskProgress {
+    /// Create a new task progress tracker with given phase names
+    pub fn new(phase_names: &[&str]) -> Self {
+        Self {
+            phases: phase_names
+                .iter()
+                .map(|name| ProgressPhase {
+                    name: name.to_string(),
+                    status: PhaseStatus::Pending,
+                    progress: 0.0,
+                })
+                .collect(),
+            current_phase: 0,
+            start_time: Instant::now(),
+        }
+    }
+
+    /// Start the current phase
+    pub fn start_phase(&mut self) {
+        if self.current_phase < self.phases.len() {
+            self.phases[self.current_phase].status = PhaseStatus::Active;
+            self.print_progress();
+        }
+    }
+
+    /// Update progress of current phase (0.0 to 1.0)
+    pub fn update_progress(&mut self, progress: f64) {
+        if self.current_phase < self.phases.len() {
+            self.phases[self.current_phase].progress = progress.clamp(0.0, 1.0);
+            // Only print in verbose mode for incremental updates
+            if is_verbose() {
+                self.print_progress();
+            }
+        }
+    }
+
+    /// Complete current phase and move to next
+    pub fn complete_phase(&mut self) {
+        if self.current_phase < self.phases.len() {
+            self.phases[self.current_phase].status = PhaseStatus::Completed;
+            self.phases[self.current_phase].progress = 1.0;
+            self.current_phase += 1;
+            if self.current_phase < self.phases.len() {
+                self.phases[self.current_phase].status = PhaseStatus::Active;
+            }
+            self.print_progress();
+        }
+    }
+
+    /// Mark current phase as failed
+    pub fn fail_phase(&mut self) {
+        if self.current_phase < self.phases.len() {
+            self.phases[self.current_phase].status = PhaseStatus::Failed;
+            self.print_progress();
+        }
+    }
+
+    /// Add a new phase dynamically
+    pub fn add_phase(&mut self, name: &str) {
+        self.phases.push(ProgressPhase {
+            name: name.to_string(),
+            status: PhaseStatus::Pending,
+            progress: 0.0,
+        });
+    }
+
+    /// Get overall progress (0.0 to 1.0)
+    pub fn overall_progress(&self) -> f64 {
+        if self.phases.is_empty() {
+            return 0.0;
+        }
+        let completed: f64 = self
+            .phases
+            .iter()
+            .map(|p| match p.status {
+                PhaseStatus::Completed => 1.0,
+                PhaseStatus::Active => p.progress,
+                _ => 0.0,
+            })
+            .sum();
+        completed / self.phases.len() as f64
+    }
+
+    /// Estimate remaining time based on elapsed time and progress
+    pub fn estimated_remaining(&self) -> Option<Duration> {
+        let progress = self.overall_progress();
+        if progress > 0.05 {
+            let elapsed = self.start_time.elapsed();
+            let estimated_total = elapsed.as_secs_f64() / progress;
+            let remaining = estimated_total - elapsed.as_secs_f64();
+            if remaining > 0.0 {
+                return Some(Duration::from_secs_f64(remaining));
+            }
+        }
+        None
+    }
+
+    /// Format ETA as human-readable string
+    fn format_eta(&self) -> Option<String> {
+        self.estimated_remaining().map(|remaining| {
+            let secs = remaining.as_secs();
+            if secs >= 60 {
+                format!("~{}m {}s", secs / 60, secs % 60)
+            } else {
+                format!("~{}s", secs)
+            }
+        })
+    }
+
+    /// Print current progress state
+    pub fn print_progress(&self) {
+        if is_compact() {
+            // Compact: single line with overall progress
+            let pct = (self.overall_progress() * 100.0) as u32;
+            let current_name = self
+                .phases
+                .get(self.current_phase)
+                .map(|p| p.name.as_str())
+                .unwrap_or("Done");
+            if let Some(eta) = self.format_eta() {
+                println!("[{}% {} ETA:{}]", pct, current_name, eta);
+            } else {
+                println!("[{}% {}]", pct, current_name);
+            }
+        } else if is_verbose() {
+            // Verbose: full multi-line progress with all phases
+            println!();
+            for (i, phase) in self.phases.iter().enumerate() {
+                let (icon, name_color) = match phase.status {
+                    PhaseStatus::Pending => ("○".dimmed(), phase.name.dimmed()),
+                    PhaseStatus::Active => ("●".bright_cyan(), phase.name.bright_white()),
+                    PhaseStatus::Completed => ("✓".bright_green(), phase.name.green()),
+                    PhaseStatus::Failed => ("✗".bright_red(), phase.name.red()),
+                };
+
+                let progress_str = if phase.status == PhaseStatus::Active && phase.progress > 0.0 {
+                    format!(" [{:.0}%]", phase.progress * 100.0).cyan().to_string()
+                } else {
+                    String::new()
+                };
+
+                println!(
+                    "  {} {}/{} {}{}",
+                    icon,
+                    (i + 1).to_string().dimmed(),
+                    self.phases.len().to_string().dimmed(),
+                    name_color,
+                    progress_str
+                );
+            }
+
+            // Show ETA
+            if let Some(eta) = self.format_eta() {
+                println!(
+                    "  {} {}",
+                    "ETA:".dimmed(),
+                    eta.bright_cyan()
+                );
+            }
+            println!();
+        } else {
+            // Normal: show current phase with progress bar
+            if let Some(phase) = self.phases.get(self.current_phase) {
+                let pct = (self.overall_progress() * 100.0) as u32;
+                let bar_width = 20;
+                let filled = (pct as usize * bar_width) / 100;
+                let empty = bar_width - filled;
+                let bar = format!(
+                    "{}{}",
+                    "█".repeat(filled).bright_cyan(),
+                    "░".repeat(empty).dimmed()
+                );
+
+                let eta_str = self
+                    .format_eta()
+                    .map(|e| format!(" ETA: {}", e.cyan()))
+                    .unwrap_or_default();
+
+                println!(
+                    "{} [{}/{}] {} [{}] {}%{}",
+                    "📊".bright_blue(),
+                    (self.current_phase + 1).to_string().bright_white(),
+                    self.phases.len().to_string().dimmed(),
+                    phase.name.bright_white(),
+                    bar,
+                    pct.to_string().bright_cyan(),
+                    eta_str
+                );
+            }
+        }
+    }
+}
+
+/// Print step announcement (used by agent)
+pub fn step_start(step: usize, name: &str) {
+    if is_compact() {
+        print!("[Step {}] ", step);
+    } else {
+        println!(
+            "{} {}...",
+            format!("📝 Step {}", step).bright_blue(),
+            name.bright_white()
+        );
+    }
+}
+
+/// Print phase transition
+pub fn phase_transition(from: &str, to: &str) {
+    if is_verbose() {
+        println!(
+            "{} {} → {}",
+            "🔄".bright_yellow(),
+            from.dimmed(),
+            to.bright_white()
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

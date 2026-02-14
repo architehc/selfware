@@ -1051,12 +1051,16 @@ To call a tool, use this EXACT XML structure:
         let mut iteration = 0;
         let task_description = task.to_string();
 
+        // Initialize multi-phase progress tracker
+        let mut progress = output::TaskProgress::new(&["Planning", "Executing"]);
+        progress.start_phase();
+
         while let Some(state) = self.loop_control.next_state() {
             match state {
                 AgentState::Planning => {
                     let _span = enter_agent_step("Planning", 0);
                     record_state_transition("Start", "Planning");
-                    println!("{}", "📋 Planning...".bright_yellow());
+                    output::phase_transition("Start", "Planning");
 
                     // Set cognitive state to Plan phase
                     self.cognitive_state.set_phase(CyclePhase::Plan);
@@ -1066,13 +1070,15 @@ To call a tool, use this EXACT XML structure:
 
                     // Transition to Do phase
                     record_state_transition("Planning", "Executing");
+                    output::phase_transition("Planning", "Executing");
+                    progress.complete_phase(); // Complete planning phase
                     self.cognitive_state.set_phase(CyclePhase::Do);
                     self.loop_control
                         .set_state(AgentState::Executing { step: 0 });
 
                     // If planning response contained tool calls, execute them now
                     if has_tool_calls {
-                        println!("{} Executing...", format!("📝 Step {}", 1).bright_blue());
+                        output::step_start(1, "Executing");
                         match self.execute_pending_tool_calls(&task_description).await {
                             Ok(completed) => {
                                 if completed {
