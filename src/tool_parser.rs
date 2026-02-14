@@ -25,7 +25,7 @@ pub struct ParsedToolCall {
 pub enum ParseMethod {
     /// Native API function calling
     Native,
-    /// XML-style <tool> tags
+    /// XML-style `<tool>` tags
     Xml,
     /// JSON code block
     Json,

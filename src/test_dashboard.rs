@@ -93,7 +93,7 @@ pub struct Test {
     pub failure_message: Option<String>,
     /// Failure location
     pub failure_location: Option<String>,
-    /// Is this test #[ignore]d?
+    /// Is this test ignored?
     pub ignored: bool,
     /// Tags/attributes
     pub tags: Vec<String>,

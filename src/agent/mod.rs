@@ -2926,7 +2926,7 @@ mod tests {
     fn test_context_compressor_threshold_calculation() {
         let compressor = ContextCompressor::new(100000);
         // Threshold is 85% of budget
-        assert!(compressor.should_compress(&[]) == false);
+        assert!(!compressor.should_compress(&[]));
 
         // Create messages that exceed threshold
         let mut large_messages = vec![Message::system("System prompt")];
