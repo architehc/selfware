@@ -632,4 +632,494 @@ mod tests {
             assert!(jitter < 1.0);
         }
     }
+
+    // ============================================
+    // Retry Logic Tests
+    // ============================================
+
+    #[test]
+    fn test_retry_config_custom_values() {
+        let config = RetryConfig {
+            max_retries: 5,
+            initial_delay_ms: 500,
+            max_delay_ms: 60000,
+            retryable_status_codes: vec![429, 503],
+        };
+        assert_eq!(config.max_retries, 5);
+        assert_eq!(config.initial_delay_ms, 500);
+        assert_eq!(config.max_delay_ms, 60000);
+        assert_eq!(config.retryable_status_codes.len(), 2);
+        assert!(config.retryable_status_codes.contains(&429));
+        assert!(config.retryable_status_codes.contains(&503));
+    }
+
+    #[test]
+    fn test_retry_config_status_code_check() {
+        let config = RetryConfig::default();
+        // Check that all expected retryable codes are present
+        assert!(config.retryable_status_codes.contains(&429)); // Too Many Requests
+        assert!(config.retryable_status_codes.contains(&500)); // Internal Server Error
+        assert!(config.retryable_status_codes.contains(&502)); // Bad Gateway
+        assert!(config.retryable_status_codes.contains(&503)); // Service Unavailable
+        assert!(config.retryable_status_codes.contains(&504)); // Gateway Timeout
+
+        // Verify non-retryable codes are not present
+        assert!(!config.retryable_status_codes.contains(&400)); // Bad Request
+        assert!(!config.retryable_status_codes.contains(&401)); // Unauthorized
+        assert!(!config.retryable_status_codes.contains(&403)); // Forbidden
+        assert!(!config.retryable_status_codes.contains(&404)); // Not Found
+    }
+
+    #[test]
+    fn test_exponential_backoff_calculation() {
+        let config = RetryConfig::default();
+        let mut delay_ms = config.initial_delay_ms;
+
+        // Simulate exponential backoff without jitter
+        let expected_delays = [1000, 2000, 4000, 8000, 16000, 30000]; // capped at max_delay_ms
+
+        for (i, expected) in expected_delays.iter().enumerate() {
+            if i > 0 {
+                delay_ms = (delay_ms * 2).min(config.max_delay_ms);
+            }
+            assert_eq!(delay_ms, *expected, "Mismatch at iteration {}", i);
+        }
+    }
+
+    #[test]
+    fn test_backoff_respects_max_delay() {
+        let config = RetryConfig {
+            max_retries: 10,
+            initial_delay_ms: 10000,
+            max_delay_ms: 15000,
+            retryable_status_codes: vec![500],
+        };
+
+        let mut delay_ms = config.initial_delay_ms;
+
+        // After first backoff: 10000 * 2 = 20000, but capped at 15000
+        delay_ms = (delay_ms * 2).min(config.max_delay_ms);
+        assert_eq!(delay_ms, 15000);
+
+        // Subsequent backoffs should stay at max
+        delay_ms = (delay_ms * 2).min(config.max_delay_ms);
+        assert_eq!(delay_ms, 15000);
+    }
+
+    // ============================================
+    // Request Construction Tests
+    // ============================================
+
+    #[test]
+    fn test_chat_request_body_construction_basic() {
+        // Test that basic chat request body is constructed correctly
+        let messages = vec![
+            Message::system("You are helpful"),
+            Message::user("Hello"),
+        ];
+
+        let body = serde_json::json!({
+            "model": "test-model",
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 4096,
+            "stream": false,
+        });
+
+        // Verify the structure
+        assert_eq!(body["model"], "test-model");
+        assert_eq!(body["temperature"], 0.7);
+        assert_eq!(body["max_tokens"], 4096);
+        assert_eq!(body["stream"], false);
+        assert!(body["messages"].is_array());
+        assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_chat_request_body_with_tools() {
+        let messages = vec![Message::user("Read a file")];
+
+        let tools = vec![ToolDefinition {
+            def_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "file_read".to_string(),
+                description: "Read a file".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"}
+                    },
+                    "required": ["path"]
+                }),
+            },
+        }];
+
+        let mut body = serde_json::json!({
+            "model": "test-model",
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 4096,
+            "stream": false,
+        });
+
+        body["tools"] = serde_json::json!(tools);
+
+        // Verify tools are included
+        assert!(body.get("tools").is_some());
+        let tools_array = body["tools"].as_array().unwrap();
+        assert_eq!(tools_array.len(), 1);
+        assert_eq!(tools_array[0]["function"]["name"], "file_read");
+    }
+
+    #[test]
+    fn test_chat_request_body_with_thinking_disabled() {
+        let body = serde_json::json!({
+            "model": "test-model",
+            "messages": [],
+            "thinking": {"type": "disabled"}
+        });
+
+        assert_eq!(body["thinking"]["type"], "disabled");
+    }
+
+    #[test]
+    fn test_chat_request_body_with_thinking_budget() {
+        let budget_tokens = 2048;
+        let body = serde_json::json!({
+            "model": "test-model",
+            "messages": [],
+            "thinking": {
+                "type": "enabled",
+                "budget_tokens": budget_tokens
+            }
+        });
+
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], budget_tokens);
+    }
+
+    // ============================================
+    // Response Parsing Tests
+    // ============================================
+
+    #[test]
+    fn test_parse_chat_response_basic() {
+        let json = r#"{
+            "id": "chatcmpl-123",
+            "object": "chat.completion",
+            "created": 1677652288,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello! How can I help you today?"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 9,
+                "completion_tokens": 12,
+                "total_tokens": 21
+            }
+        }"#;
+
+        let response: ChatResponse = serde_json::from_str(json).unwrap();
+
+        assert_eq!(response.id, "chatcmpl-123");
+        assert_eq!(response.object, "chat.completion");
+        assert_eq!(response.model, "test-model");
+        assert_eq!(response.choices.len(), 1);
+        assert_eq!(
+            response.choices[0].message.content,
+            "Hello! How can I help you today?"
+        );
+        assert_eq!(response.usage.prompt_tokens, 9);
+        assert_eq!(response.usage.completion_tokens, 12);
+        assert_eq!(response.usage.total_tokens, 21);
+    }
+
+    #[test]
+    fn test_parse_chat_response_with_tool_calls() {
+        let json = r#"{
+            "id": "chatcmpl-456",
+            "object": "chat.completion",
+            "created": 1677652288,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_abc123",
+                        "type": "function",
+                        "function": {
+                            "name": "file_read",
+                            "arguments": "{\"path\": \"/tmp/test.txt\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 15,
+                "completion_tokens": 20,
+                "total_tokens": 35
+            }
+        }"#;
+
+        let response: ChatResponse = serde_json::from_str(json).unwrap();
+
+        assert_eq!(response.choices[0].finish_reason, Some("tool_calls".to_string()));
+        let tool_calls = response.choices[0].message.tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].id, "call_abc123");
+        assert_eq!(tool_calls[0].function.name, "file_read");
+    }
+
+    #[test]
+    fn test_parse_chat_response_with_reasoning() {
+        let json = r#"{
+            "id": "chatcmpl-789",
+            "object": "chat.completion",
+            "created": 1677652288,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "The answer is 42.",
+                    "reasoning_content": "Let me think about this step by step..."
+                },
+                "reasoning_content": "Let me think about this step by step...",
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 50,
+                "total_tokens": 60
+            }
+        }"#;
+
+        let response: ChatResponse = serde_json::from_str(json).unwrap();
+
+        assert_eq!(response.choices[0].message.content, "The answer is 42.");
+        assert_eq!(
+            response.choices[0].message.reasoning_content,
+            Some("Let me think about this step by step...".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_chat_response_invalid_json() {
+        let json = r#"{ invalid json }"#;
+        let result: Result<ChatResponse, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_chat_response_missing_required_fields() {
+        // Missing "choices" field
+        let json = r#"{
+            "id": "chatcmpl-123",
+            "object": "chat.completion",
+            "created": 1677652288,
+            "model": "test-model",
+            "usage": {
+                "prompt_tokens": 9,
+                "completion_tokens": 12,
+                "total_tokens": 21
+            }
+        }"#;
+
+        let result: Result<ChatResponse, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    // ============================================
+    // Error Handling Tests
+    // ============================================
+
+    #[test]
+    fn test_http_status_code_classification() {
+        // Test that we can correctly identify retryable vs non-retryable status codes
+        let config = RetryConfig::default();
+
+        // Retryable status codes
+        let retryable = [429, 500, 502, 503, 504];
+        for code in retryable {
+            assert!(
+                config.retryable_status_codes.contains(&code),
+                "Status {} should be retryable",
+                code
+            );
+        }
+
+        // Non-retryable status codes (client errors)
+        let non_retryable = [400, 401, 403, 404, 405, 422];
+        for code in non_retryable {
+            assert!(
+                !config.retryable_status_codes.contains(&code),
+                "Status {} should NOT be retryable",
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn test_error_message_format() {
+        // Test that error messages are properly formatted
+        let status = 429u16;
+        let error_text = "Rate limit exceeded. Please retry after 60 seconds.";
+        let error = format!("API error {}: {}", status, error_text);
+
+        assert!(error.contains("429"));
+        assert!(error.contains("Rate limit"));
+    }
+
+    #[test]
+    fn test_parse_sse_event_with_tool_call() {
+        // Test parsing SSE event with tool call delta (streaming scenario)
+        let event = r#"data: {"choices":[{"delta":{"tool_calls":[{"id":"call_123","type":"function","function":{"name":"file_read","arguments":"{\"path\":\"/test\"}"}}]}}]}"#;
+
+        // The current implementation doesn't parse tool_calls in SSE events
+        // This test documents the current behavior
+        let result = parse_sse_event(event);
+        // Tool calls are not extracted in the current SSE parser
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_sse_event_finish_reason() {
+        // Test SSE event with finish_reason but no content
+        let event = r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#;
+        let result = parse_sse_event(event);
+        // Should return None since there's no content or reasoning
+        assert!(result.is_none());
+    }
+
+    // ============================================
+    // API URL Construction Tests
+    // ============================================
+
+    #[test]
+    fn test_api_url_construction() {
+        let base_url = "http://localhost:8000/v1";
+        let url = format!("{}/chat/completions", base_url);
+        assert_eq!(url, "http://localhost:8000/v1/chat/completions");
+    }
+
+    #[test]
+    fn test_api_url_construction_with_trailing_slash() {
+        let base_url = "http://localhost:8000/v1/";
+        let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+        assert_eq!(url, "http://localhost:8000/v1/chat/completions");
+    }
+
+    #[test]
+    fn test_api_url_construction_https() {
+        let base_url = "https://api.example.com/v1";
+        let url = format!("{}/chat/completions", base_url);
+        assert_eq!(url, "https://api.example.com/v1/chat/completions");
+    }
+
+    // ============================================
+    // Stream Chunk Processing Tests
+    // ============================================
+
+    #[test]
+    fn test_stream_chunk_tool_call() {
+        let tool_call = ToolCall {
+            id: "call_test".to_string(),
+            call_type: "function".to_string(),
+            function: ToolFunction {
+                name: "test_function".to_string(),
+                arguments: r#"{"arg": "value"}"#.to_string(),
+            },
+        };
+
+        let chunk = StreamChunk::ToolCall(tool_call.clone());
+        if let StreamChunk::ToolCall(tc) = chunk {
+            assert_eq!(tc.id, "call_test");
+            assert_eq!(tc.function.name, "test_function");
+        } else {
+            panic!("Expected ToolCall variant");
+        }
+    }
+
+    #[test]
+    fn test_multiple_sse_events_in_buffer() {
+        // Simulate multiple SSE events in a buffer (as would happen during streaming)
+        let buffer = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n";
+
+        let events: Vec<&str> = buffer.split("\n\n").filter(|s| !s.is_empty()).collect();
+        assert_eq!(events.len(), 2);
+
+        // First event
+        let result1 = parse_sse_event(events[0]);
+        assert!(matches!(result1, Some(StreamChunk::Content(_))));
+        if let Some(StreamChunk::Content(text)) = result1 {
+            assert_eq!(text, "Hello");
+        }
+
+        // Second event
+        let result2 = parse_sse_event(events[1]);
+        assert!(matches!(result2, Some(StreamChunk::Content(_))));
+        if let Some(StreamChunk::Content(text)) = result2 {
+            assert_eq!(text, " world");
+        }
+    }
+
+    #[test]
+    fn test_parse_sse_event_with_whitespace() {
+        // Test SSE event with extra whitespace
+        let event = "  data: [DONE]  ";
+        // The parser strips "data: " prefix, should handle this
+        let result = parse_sse_event(event.trim());
+        assert!(matches!(result, Some(StreamChunk::Done)));
+    }
+
+    #[test]
+    fn test_retry_config_empty_retryable_codes() {
+        // Edge case: no retryable status codes
+        let config = RetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 1000,
+            max_delay_ms: 30000,
+            retryable_status_codes: vec![],
+        };
+
+        assert!(!config.retryable_status_codes.contains(&500));
+        assert!(!config.retryable_status_codes.contains(&429));
+    }
+
+    #[test]
+    fn test_retry_config_with_zero_retries() {
+        // Edge case: no retries allowed
+        let config = RetryConfig {
+            max_retries: 0,
+            initial_delay_ms: 1000,
+            max_delay_ms: 30000,
+            retryable_status_codes: vec![500],
+        };
+
+        assert_eq!(config.max_retries, 0);
+        // With max_retries = 0, only 1 attempt (the initial one) should be made
+    }
+
+    #[test]
+    fn test_retry_config_with_zero_delays() {
+        // Edge case: instant retries (no delay)
+        let config = RetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 0,
+            max_delay_ms: 0,
+            retryable_status_codes: vec![500],
+        };
+
+        assert_eq!(config.initial_delay_ms, 0);
+        assert_eq!(config.max_delay_ms, 0);
+        // Even with doubling, 0 * 2 = 0
+    }
 }

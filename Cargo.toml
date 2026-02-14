@@ -81,3 +81,20 @@ path = "src/main.rs"
 name = "integration"
 path = "tests/integration/mod.rs"
 required-features = ["integration"]
+
+# Examples
+[[example]]
+name = "basic_chat"
+path = "examples/basic_chat.rs"
+
+[[example]]
+name = "run_task"
+path = "examples/run_task.rs"
+
+[[example]]
+name = "multi_agent"
+path = "examples/multi_agent.rs"
+
+[[example]]
+name = "custom_config"
+path = "examples/custom_config.rs"
