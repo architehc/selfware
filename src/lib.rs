@@ -80,6 +80,7 @@ pub mod model_router;
 pub mod monorepo;
 pub mod multiagent;
 pub mod observability;
+pub mod output;
 #[cfg(feature = "extras")]
 pub mod parallel;
 pub mod planning;

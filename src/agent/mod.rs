@@ -7,6 +7,7 @@ use tracing::{debug, info, warn};
 use crate::analyzer::ErrorAnalyzer;
 use crate::api::types::{Message, ToolCall};
 use crate::api::{ApiClient, StreamChunk, ThinkingMode};
+use crate::output;
 use crate::checkpoint::{
     capture_git_state, CheckpointManager, TaskCheckpoint, TaskStatus, ToolCallLog,
 };
@@ -236,19 +237,23 @@ To call a tool, use this EXACT XML structure:
                     if in_reasoning {
                         // Finished reasoning, now showing content
                         in_reasoning = false;
-                        println!(); // End reasoning line
+                        if !output::is_compact() {
+                            println!(); // End reasoning line
+                        }
                     }
                     print!("{}", text);
                     io::stdout().flush().ok();
                     content.push_str(&text);
                 }
                 StreamChunk::Reasoning(text) => {
-                    if !in_reasoning {
-                        in_reasoning = true;
-                        print!("{} ", "Thinking:".dimmed());
+                    if !output::is_compact() {
+                        if !in_reasoning {
+                            in_reasoning = true;
+                            output::thinking_prefix();
+                        }
+                        output::thinking(&text, true);
+                        io::stdout().flush().ok();
                     }
-                    print!("{}", text.dimmed());
-                    io::stdout().flush().ok();
                     reasoning.push_str(&text);
                 }
                 StreamChunk::ToolCall(call) => {
@@ -259,6 +264,8 @@ To call a tool, use this EXACT XML structure:
                         "Token usage: {} prompt, {} completion",
                         u.prompt_tokens, u.completion_tokens
                     );
+                    output::record_tokens(u.prompt_tokens as u64, u.completion_tokens as u64);
+                    output::print_token_usage(u.prompt_tokens as u64, u.completion_tokens as u64);
                 }
                 StreamChunk::Done => break,
             }
@@ -1070,7 +1077,7 @@ To call a tool, use this EXACT XML structure:
                             Ok(completed) => {
                                 if completed {
                                     record_state_transition("Executing", "Completed");
-                                    println!("{}", "✅ Task completed!".bright_green());
+                                    output::task_completed();
                                     if let Err(e) = self.complete_checkpoint() {
                                         warn!("Failed to save completed checkpoint: {}", e);
                                     }
@@ -1124,7 +1131,7 @@ To call a tool, use this EXACT XML structure:
                         Ok(completed) => {
                             if completed {
                                 record_state_transition("Executing", "Completed");
-                                println!("{}", "✅ Task completed!".bright_green());
+                                output::task_completed();
                                 if let Err(e) = self.complete_checkpoint() {
                                     warn!("Failed to save completed checkpoint: {}", e);
                                 }
@@ -1198,7 +1205,7 @@ To call a tool, use this EXACT XML structure:
                 }
                 AgentState::Completed => {
                     record_state_transition("Executing", "Completed");
-                    println!("{}", "✅ Task completed successfully!".bright_green());
+                    output::task_completed();
                     if let Err(e) = self.complete_checkpoint() {
                         warn!("Failed to save completed checkpoint: {}", e);
                     }
@@ -1479,11 +1486,7 @@ To call a tool, use this EXACT XML structure:
         // If no tool calls but content suggests intent to act, prompt for action
         if tool_calls.is_empty() && has_intent && content.len() < 1000 && !use_last_message {
             info!("Detected intent without action, prompting model to use tools");
-            println!(
-                "{}",
-                "🔄 Model described intent but didn't act - prompting for action..."
-                    .bright_yellow()
-            );
+            output::intent_without_action();
             self.messages.push(Message::user(
                 "Please use the appropriate tools to take action now. Don't just describe what you'll do - actually execute the tools."
             ));
@@ -1493,11 +1496,7 @@ To call a tool, use this EXACT XML structure:
         if !tool_calls.is_empty() {
             // Execute tools with logging
             for (name, args_str, tool_call_id) in tool_calls {
-                println!(
-                    "{} Calling tool: {}",
-                    "🔧".bright_blue(),
-                    name.bright_cyan()
-                );
+                output::tool_call(&name);
 
                 let start_time = std::time::Instant::now();
                 let use_native_fc =
@@ -1518,7 +1517,7 @@ To call a tool, use this EXACT XML structure:
 
                 if let Err(e) = self.safety.check_tool_call(&fake_call) {
                     let error_msg = format!("Safety check failed: {}", e);
-                    println!("{} {}", "🚫".bright_red(), error_msg);
+                    output::safety_blocked(&error_msg);
 
                     // Push result with appropriate message type
                     if use_native_fc {
@@ -1654,7 +1653,7 @@ To call a tool, use this EXACT XML structure:
                     Some(tool) => {
                         match tool.execute(args.clone()).await {
                             Ok(result) => {
-                                println!("{} Tool succeeded", "✓".bright_green());
+                                output::tool_success(&name);
                                 let result_str = serde_json::to_string(&result)?;
 
                                 // Log successful tool call
@@ -1693,7 +1692,7 @@ To call a tool, use this EXACT XML structure:
                                                                 path
                                                             ),
                                                         );
-                                                    println!("{}", report);
+                                                    output::verification_report(&format!("{}", report), true);
                                                     None
                                                 } else {
                                                     self.cognitive_state
@@ -1705,7 +1704,7 @@ To call a tool, use this EXACT XML structure:
                                                                 path
                                                             ),
                                                         );
-                                                    println!("{}", report);
+                                                    output::verification_report(&format!("{}", report), false);
                                                     Some(format!("\n\n<verification_failed>\n{}\n</verification_failed>", report))
                                                 }
                                             }
@@ -1739,7 +1738,7 @@ To call a tool, use this EXACT XML structure:
                                 (true, final_result)
                             }
                             Err(e) => {
-                                println!("{} Tool failed: {}", "✗".bright_red(), e);
+                                output::tool_failure(&name, &e.to_string());
 
                                 // Log failed tool call
                                 if let Some(ref mut checkpoint) = self.current_checkpoint {
@@ -1805,7 +1804,7 @@ To call a tool, use this EXACT XML structure:
             Ok(false) // Continue loop
         } else {
             // No tool calls, task complete
-            println!("{} {}", "Final answer:".bright_green(), content);
+            output::final_answer(&content);
             // Note: assistant message was already added above when not using last message
             Ok(true)
         }
@@ -1841,12 +1840,8 @@ To call a tool, use this EXACT XML structure:
             content
         );
 
-        // Verbose logging when SELFWARE_DEBUG is set
-        if std::env::var("SELFWARE_DEBUG").is_ok() {
-            println!("{}", "=== DEBUG: Planning Response ===".bright_magenta());
-            println!("{}", content);
-            println!("{}", "=== END DEBUG ===".bright_magenta());
-        }
+        // Verbose logging when SELFWARE_DEBUG is set or verbose mode
+        output::debug_output("Planning Response", content);
 
         if content.is_empty() {
             warn!("Model returned empty planning content!");
@@ -1858,7 +1853,7 @@ To call a tool, use this EXACT XML structure:
                 reasoning
             );
             if let Some(r) = &assistant_msg.reasoning_content {
-                println!("{} {}", "Thinking:".dimmed(), r.dimmed());
+                output::thinking(r, false);
             }
         }
 
@@ -2536,7 +2531,7 @@ To call a tool, use this EXACT XML structure:
                         Ok(completed) => {
                             if completed {
                                 record_state_transition("Executing", "Completed");
-                                println!("{}", "✅ Task completed!".bright_green());
+                                output::task_completed();
                                 if let Err(e) = self.complete_checkpoint() {
                                     warn!("Failed to save completed checkpoint: {}", e);
                                 }
@@ -2602,7 +2597,7 @@ To call a tool, use this EXACT XML structure:
                 }
                 AgentState::Completed => {
                     record_state_transition("Executing", "Completed");
-                    println!("{}", "✅ Task completed successfully!".bright_green());
+                    output::task_completed();
                     if let Err(e) = self.complete_checkpoint() {
                         warn!("Failed to save completed checkpoint: {}", e);
                     }

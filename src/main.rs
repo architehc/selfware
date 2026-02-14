@@ -11,6 +11,7 @@ use selfware::agent::Agent;
 use selfware::checkpoint;
 use selfware::config::{Config, ExecutionMode};
 use selfware::multiagent;
+use selfware::output;
 use selfware::telemetry::init_tracing;
 use selfware::ui;
 use selfware::ui::components::{
@@ -269,6 +270,9 @@ async fn main() -> Result<()> {
     config.compact_mode = cli.compact;
     config.verbose_mode = cli.verbose;
     config.show_tokens = cli.show_tokens;
+
+    // Initialize output control with CLI flags
+    output::init(cli.compact, cli.verbose, cli.show_tokens);
 
     let ctx = WorkshopContext::from_config(&config.endpoint, &config.model).with_mode(exec_mode);
 
