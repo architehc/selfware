@@ -21,12 +21,40 @@
 //! agent.run_task("Tend to the garden").await?;
 //! ```
 
+// ============================================================================
+// Core modules
+// ============================================================================
 pub mod agent;
+pub mod api;
+pub mod config;
+pub mod input;
+pub mod tools;
+pub mod ui;
+
+// ============================================================================
+// Reorganized modules (Phase 2+)
+// ============================================================================
+pub mod safety;
+
+// Backward-compatible re-exports for safety module
+pub use safety::autonomy;
+#[cfg(feature = "execution-modes")]
+pub use safety::confirm;
+#[cfg(feature = "execution-modes")]
+pub use safety::dry_run;
+pub use safety::redact;
+pub use safety::sandbox;
+pub use safety::scanner as security_scanner;
+pub use safety::threat_modeling;
+#[cfg(feature = "execution-modes")]
+pub use safety::yolo;
+
+// ============================================================================
+// Modules to be reorganized (kept for now)
+// ============================================================================
 pub mod analytics;
 pub mod analyzer;
-pub mod api;
 pub mod api_testing;
-pub mod autonomy;
 pub mod bm25;
 pub mod browser_automation;
 #[cfg(feature = "cache")]
@@ -40,9 +68,6 @@ pub mod code_review;
 pub mod cognitive;
 pub mod cognitive_load;
 pub mod communication;
-pub mod config;
-#[cfg(feature = "execution-modes")]
-pub mod confirm;
 pub mod container;
 pub mod contract_testing;
 pub mod database;
@@ -53,8 +78,6 @@ pub mod degradation;
 pub mod demo;
 pub mod distributed;
 pub mod doc_generator;
-#[cfg(feature = "execution-modes")]
-pub mod dry_run;
 pub mod dyslexia_friendly;
 pub mod edit_history;
 pub mod embedded;
@@ -62,7 +85,6 @@ pub mod episodic;
 pub mod extensions;
 pub mod ide_plugin;
 pub mod image_understanding;
-pub mod input;
 pub mod intelligence;
 pub mod intent;
 pub mod issue_tracker;
@@ -87,11 +109,7 @@ pub mod planning;
 pub mod process_manager;
 pub mod rag;
 pub mod realtime_collaboration;
-pub mod redact;
-pub mod safety;
-pub mod sandbox;
 pub mod screen_reader;
-pub mod security_scanner;
 #[cfg(feature = "resilience")]
 pub mod self_healing;
 pub mod self_improvement;
@@ -105,16 +123,13 @@ pub mod team_knowledge;
 pub mod tech_debt;
 pub mod telemetry;
 pub mod test_dashboard;
-pub mod threat_modeling;
 pub mod time_travel;
 #[cfg(feature = "tokens")]
 pub mod tokens;
 pub mod tool_parser;
-pub mod tools;
 #[cfg(feature = "tui")]
 pub mod tui;
 pub mod typed_config;
-pub mod ui;
 pub mod vector_store;
 pub mod verification;
 pub mod voice_interface;
@@ -122,5 +137,3 @@ pub mod wellness;
 #[cfg(feature = "workflows")]
 pub mod workflow_dsl;
 pub mod workflows;
-#[cfg(feature = "execution-modes")]
-pub mod yolo;
