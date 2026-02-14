@@ -1,4 +1,4 @@
-use selfware::tools::{ToolRegistry, file::FileRead, shell::ShellExec};
+use selfware::tools::{Tool, ToolRegistry, file::FileRead, shell::ShellExec};
 use serde_json::json;
 
 #[tokio::test]
