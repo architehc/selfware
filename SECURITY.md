@@ -86,9 +86,25 @@ require_confirmation = ["git push", "rm"]
 
 ## Known Limitations
 
-1. **Shell command validation** uses pattern matching - sophisticated obfuscation may bypass it
-2. **TOCTOU** (Time-of-Check-Time-of-Use) race conditions are possible in high-concurrency scenarios
+1. **Shell command validation** uses regex-based pattern matching with obfuscation detection - while significantly more robust than simple string matching, extremely sophisticated obfuscation may still bypass it
+2. **TOCTOU** (Time-of-Check-Time-of-Use) race conditions are mitigated by symlink chain validation but cannot be completely eliminated
 3. **LLM output sanitization** is best-effort - malicious prompts may produce unexpected tool calls
+
+## Security Enhancements (v0.1.0)
+
+### Shell Command Validation
+- Regex-based pattern matching instead of simple string contains
+- Command normalization to detect obfuscation (whitespace collapsing, slash normalization)
+- Command chain detection (`;`, `&&`, `||` separated commands are individually validated)
+- Base64-encoded command execution detection
+- Netcat reverse shell detection
+- Eval with command substitution detection
+
+### Path Traversal Protection
+- Symlink chain validation (detects loops and chains to protected paths)
+- Canonical path validation only (original path not checked against allowed patterns)
+- Protected system path detection via symlinks
+- Maximum symlink depth enforcement (40 levels, matching Linux default)
 
 ## Security Updates
 
