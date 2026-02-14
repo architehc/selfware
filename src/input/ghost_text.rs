@@ -161,6 +161,7 @@ impl Hinter for GhostTextHinter {
         _pos: usize,
         history: &dyn History,
         _use_ansi_coloring: bool,
+        _cwd: &str,
     ) -> String {
         // First try pattern hints
         if let Some(hint) = self.find_pattern_hint(line) {
