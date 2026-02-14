@@ -58,6 +58,19 @@ cargo build --release
 ./target/release/selfware --help
 ```
 
+### Option 4: Docker
+
+```bash
+# Build the image
+docker build -t selfware .
+
+# Run interactively
+docker run --rm -it -v $(pwd):/workspace selfware chat
+
+# Run a specific task
+docker run --rm -it -v $(pwd):/workspace selfware run "Add unit tests"
+```
+
 ## Quick Start
 
 ### 1. Set Up Your LLM Backend

@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Dependabot configuration for automated dependency updates
 - Codecov integration for coverage tracking
 - Release notes categorization template
+- Docker support with multi-stage build (Dockerfile, .dockerignore)
+- Examples directory with 4 usage examples (basic_chat, run_task, multi_agent, custom_config)
+- 53 new tests for agent module (state transitions, tool handling, error recovery)
+- 24 new tests for API client (retry logic, request construction, response parsing)
 
 ### Changed
 - CI workflow now runs tests with `--all-features`
