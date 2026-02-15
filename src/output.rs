@@ -532,6 +532,10 @@ pub fn phase_transition(from: &str, to: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Mutex to serialize tests that access global token state
+    static TOKEN_TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_init_and_check_modes() {
@@ -548,6 +552,7 @@ mod tests {
 
     #[test]
     fn test_token_tracking() {
+        let _lock = TOKEN_TEST_MUTEX.lock().unwrap();
         reset_tokens();
         record_tokens(100, 50);
         record_tokens(200, 100);
@@ -559,6 +564,8 @@ mod tests {
 
     #[test]
     fn test_reset_tokens() {
+        let _lock = TOKEN_TEST_MUTEX.lock().unwrap();
+        reset_tokens();
         record_tokens(100, 50);
         reset_tokens();
 
