@@ -21,9 +21,6 @@ mod execution;
 pub mod loop_control;
 pub mod planning;
 
-#[cfg(test)]
-use crate::tool_parser::parse_tool_calls;
-
 use context::ContextCompressor;
 use loop_control::{AgentLoop, AgentState};
 use planning::Planner;
