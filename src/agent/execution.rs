@@ -16,6 +16,8 @@ struct AssistantStepResponse {
     native_tool_calls: Option<Vec<crate::api::types::ToolCall>>,
 }
 
+type CollectedToolCall = (String, String, Option<String>);
+
 impl Agent {
     /// Execute a step with tool call logging for checkpoints
     /// If `use_last_message` is true, process tool calls from the last assistant message
@@ -39,7 +41,7 @@ impl Agent {
     /// If `use_last_message` is true, process tool calls from the last assistant message
     async fn execute_step_internal(&mut self, use_last_message: bool) -> Result<bool> {
         let response = self.get_assistant_step_response(use_last_message).await?;
-        let content = response.content.clone();
+        let content = response.content;
         let tool_calls = self.collect_tool_calls(
             &content,
             response.reasoning_content.as_deref(),
@@ -47,8 +49,22 @@ impl Agent {
         );
 
         debug!("Total tool calls to execute: {}", tool_calls.len());
+        self.warn_on_unparsed_tool_content(&content, &tool_calls);
 
-        // If no tool calls found, check if content looks like it should have them
+        if self.maybe_prompt_for_action(&content, tool_calls.is_empty(), use_last_message) {
+            return Ok(false);
+        }
+
+        if tool_calls.is_empty() {
+            output::final_answer(&content);
+            return Ok(true);
+        }
+
+        self.execute_tool_batch(tool_calls).await?;
+        Ok(false)
+    }
+
+    fn warn_on_unparsed_tool_content(&self, content: &str, tool_calls: &[CollectedToolCall]) {
         if tool_calls.is_empty()
             && (content.contains("<tool")
                 || content.contains("tool_name")
@@ -60,337 +76,306 @@ impl Agent {
                 &content.chars().take(500).collect::<String>()
             );
         }
+    }
 
-        // If no tool calls but content suggests intent to act, prompt for action
-        if self.should_prompt_for_action(&content, tool_calls.is_empty(), use_last_message) {
-            info!("Detected intent without action, prompting model to use tools");
-            output::intent_without_action();
-            self.messages.push(Message::user(
-                "Please use the appropriate tools to take action now. Don't just describe what you'll do - actually execute the tools."
-            ));
-            return Ok(false); // Continue loop to get actual tool calls
+    fn maybe_prompt_for_action(
+        &mut self,
+        content: &str,
+        has_no_tool_calls: bool,
+        use_last_message: bool,
+    ) -> bool {
+        if !self.should_prompt_for_action(content, has_no_tool_calls, use_last_message) {
+            return false;
         }
 
-        if !tool_calls.is_empty() {
-            // Execute tools with logging
-            for (name, args_str, tool_call_id) in tool_calls {
-                output::tool_call(&name);
+        info!("Detected intent without action, prompting model to use tools");
+        output::intent_without_action();
+        self.messages.push(Message::user(
+            "Please use the appropriate tools to take action now. Don't just describe what you'll do - actually execute the tools."
+        ));
+        true
+    }
 
-                let start_time = std::time::Instant::now();
-                let use_native_fc =
-                    self.config.agent.native_function_calling && tool_call_id.is_some();
+    async fn execute_tool_batch(&mut self, tool_calls: Vec<CollectedToolCall>) -> Result<()> {
+        for (name, args_str, tool_call_id) in tool_calls {
+            output::tool_call(&name);
+            let start_time = std::time::Instant::now();
+            let (call_id, use_native_fc, fake_call) =
+                self.build_tool_call_context(&name, &args_str, tool_call_id);
 
-                // Safety check
-                let call_id = tool_call_id
-                    .clone()
-                    .unwrap_or_else(|| format!("call_{}", uuid::Uuid::new_v4()));
-                let fake_call = crate::api::types::ToolCall {
-                    id: call_id.clone(),
-                    call_type: "function".to_string(),
-                    function: crate::api::types::ToolFunction {
-                        name: name.clone(),
-                        arguments: args_str.clone(),
-                    },
-                };
-
-                if let Err(e) = self.safety.check_tool_call(&fake_call) {
-                    let error_msg = format!("Safety check failed: {}", e);
-                    output::safety_blocked(&error_msg);
-
-                    // Push result with appropriate message type
-                    if use_native_fc {
-                        self.messages.push(Message::tool(
-                            serde_json::json!({"error": error_msg}).to_string(),
-                            &call_id,
-                        ));
-                    } else {
-                        self.messages.push(Message::user(format!(
-                            "<tool_result><error>{}</error></tool_result>",
-                            error_msg
-                        )));
-                    }
-
-                    // Log failed tool call
-                    if let Some(ref mut checkpoint) = self.current_checkpoint {
-                        checkpoint.log_tool_call(ToolCallLog {
-                            timestamp: Utc::now(),
-                            tool_name: name.clone(),
-                            arguments: args_str.clone(),
-                            result: Some(error_msg),
-                            success: false,
-                            duration_ms: Some(start_time.elapsed().as_millis() as u64),
-                        });
-                    }
-                    continue;
-                }
-
-                // Check execution mode for confirmation
-                if self.needs_confirmation(&name) {
-                    use std::io::{self, Write};
-
-                    // Show tool call preview
-                    let args_preview: String = args_str.chars().take(100).collect();
-                    let args_display = if args_str.len() > 100 {
-                        format!("{}...", args_preview)
-                    } else {
-                        args_preview
-                    };
-
-                    // In non-interactive mode, fail fast - don't silently skip tools
-                    if !self.is_interactive() {
-                        return Err(AgentError::ConfirmationRequired {
-                            tool_name: name.clone(),
-                        }
-                        .into());
-                    }
-
-                    println!(
-                        "{} Tool: {} Args: {}",
-                        "⚠️".bright_yellow(),
-                        name.bright_cyan(),
-                        args_display.bright_white()
-                    );
-                    print!("{}", "Execute? [y/N/s(kip all)]: ".bright_yellow());
-                    io::stdout().flush().ok();
-
-                    let mut response = String::new();
-                    if io::stdin().read_line(&mut response).is_ok() {
-                        let response = response.trim().to_lowercase();
-                        match response.as_str() {
-                            "y" | "yes" => {
-                                // Proceed with execution
-                            }
-                            "s" | "skip" => {
-                                // Switch to yolo mode for this session
-                                self.set_execution_mode(crate::config::ExecutionMode::Yolo);
-                                println!(
-                                    "{} Switched to YOLO mode for this session",
-                                    "⚡".bright_yellow()
-                                );
-                            }
-                            _ => {
-                                // User rejected - skip this tool
-                                let skip_msg = "Tool execution skipped by user";
-                                println!("{} {}", "⏭️".bright_yellow(), skip_msg);
-
-                                if use_native_fc {
-                                    self.messages.push(Message::tool(
-                                        serde_json::json!({"skipped": skip_msg}).to_string(),
-                                        &call_id,
-                                    ));
-                                } else {
-                                    self.messages.push(Message::user(format!(
-                                        "<tool_result><skipped>{}</skipped></tool_result>",
-                                        skip_msg
-                                    )));
-                                }
-                                continue;
-                            }
-                        }
-                    }
-                }
-
-                // Parse and execute
-                let args: Value = match serde_json::from_str(&args_str) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let err = format!("Invalid JSON arguments: {}", e);
-                        println!("{} {}", "✗".bright_red(), err);
-
-                        // Push result with appropriate message type
-                        if use_native_fc {
-                            self.messages.push(Message::tool(
-                                serde_json::json!({"error": err}).to_string(),
-                                &call_id,
-                            ));
-                        } else {
-                            self.messages.push(Message::user(format!(
-                                "<tool_result><error>{}</error></tool_result>",
-                                err
-                            )));
-                        }
-
-                        // Log failed tool call
-                        if let Some(ref mut checkpoint) = self.current_checkpoint {
-                            checkpoint.log_tool_call(ToolCallLog {
-                                timestamp: Utc::now(),
-                                tool_name: name.clone(),
-                                arguments: args_str.clone(),
-                                result: Some(err),
-                                success: false,
-                                duration_ms: Some(start_time.elapsed().as_millis() as u64),
-                            });
-                        }
-                        continue;
-                    }
-                };
-
-                debug!("Tool arguments: {}", args);
-
-                let (success, result) = match self.tools.get(&name) {
-                    Some(tool) => {
-                        match tool.execute(args.clone()).await {
-                            Ok(result) => {
-                                output::tool_success(&name);
-                                let result_str = serde_json::to_string(&result)?;
-
-                                // Log successful tool call
-                                if let Some(ref mut checkpoint) = self.current_checkpoint {
-                                    checkpoint.log_tool_call(ToolCallLog {
-                                        timestamp: Utc::now(),
-                                        tool_name: name.clone(),
-                                        arguments: args_str.clone(),
-                                        result: Some(result_str.chars().take(1000).collect()),
-                                        success: true,
-                                        duration_ms: Some(start_time.elapsed().as_millis() as u64),
-                                    });
-                                }
-
-                                // Run verification after file_edit tool
-                                let verification_result = if name == "file_edit" {
-                                    if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                                        info!("Running verification after file_edit on {}", path);
-                                        self.cognitive_state.set_phase(CyclePhase::Verify);
-                                        match self
-                                            .verification_gate
-                                            .verify_change(
-                                                &[path.to_string()],
-                                                &format!("file_edit:{}", path),
-                                            )
-                                            .await
-                                        {
-                                            Ok(report) => {
-                                                if report.overall_passed {
-                                                    self.cognitive_state
-                                                        .episodic_memory
-                                                        .what_worked(
-                                                            "file_edit",
-                                                            &format!(
-                                                                "Edit to {} passed verification",
-                                                                path
-                                                            ),
-                                                        );
-                                                    output::verification_report(
-                                                        &format!("{}", report),
-                                                        true,
-                                                    );
-                                                    None
-                                                } else {
-                                                    self.cognitive_state
-                                                        .episodic_memory
-                                                        .what_failed(
-                                                            "file_edit",
-                                                            &format!(
-                                                                "Edit to {} failed verification",
-                                                                path
-                                                            ),
-                                                        );
-                                                    output::verification_report(
-                                                        &format!("{}", report),
-                                                        false,
-                                                    );
-                                                    Some(format!("\n\n<verification_failed>\n{}\n</verification_failed>", report))
-                                                }
-                                            }
-                                            Err(e) => {
-                                                warn!("Verification failed to run: {}", e);
-                                                None
-                                            }
-                                        }
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                };
-
-                                // Enhance cargo_check output with error analysis
-                                let enhanced_result = if name == "cargo_check"
-                                    && result_str.contains("\"success\":false")
-                                {
-                                    self.enhance_cargo_errors(&result_str)
-                                } else {
-                                    result_str.clone()
-                                };
-
-                                // Combine result with verification if applicable
-                                let final_result = match verification_result {
-                                    Some(ver_msg) => format!("{}{}", enhanced_result, ver_msg),
-                                    None => enhanced_result,
-                                };
-
-                                (true, final_result)
-                            }
-                            Err(e) => {
-                                output::tool_failure(&name, &e.to_string());
-
-                                // Log failed tool call
-                                if let Some(ref mut checkpoint) = self.current_checkpoint {
-                                    checkpoint.log_tool_call(ToolCallLog {
-                                        timestamp: Utc::now(),
-                                        tool_name: name.clone(),
-                                        arguments: args_str.clone(),
-                                        result: Some(e.to_string()),
-                                        success: false,
-                                        duration_ms: Some(start_time.elapsed().as_millis() as u64),
-                                    });
-                                }
-
-                                // Record failure in cognitive state
-                                self.cognitive_state
-                                    .episodic_memory
-                                    .what_failed(&name, &e.to_string());
-
-                                (false, e.to_string())
-                            }
-                        }
-                    }
-                    None => {
-                        let err = format!("Unknown tool: {}", name);
-                        println!("{} {}", "✗".bright_red(), err);
-
-                        // Log unknown tool call
-                        if let Some(ref mut checkpoint) = self.current_checkpoint {
-                            checkpoint.log_tool_call(ToolCallLog {
-                                timestamp: Utc::now(),
-                                tool_name: name.clone(),
-                                arguments: args_str.clone(),
-                                result: Some(err.clone()),
-                                success: false,
-                                duration_ms: Some(start_time.elapsed().as_millis() as u64),
-                            });
-                        }
-
-                        (false, err)
-                    }
-                };
-
-                // Push result with appropriate message type
-                if use_native_fc {
-                    // For native function calling, send JSON result with tool role
-                    let result_json = if success {
-                        result
-                    } else {
-                        serde_json::json!({"error": result}).to_string()
-                    };
-                    self.messages.push(Message::tool(result_json, &call_id));
-                } else {
-                    // For XML-based calling, wrap in tool_result tags
-                    let formatted = if success {
-                        format!("<tool_result>{}</tool_result>", result)
-                    } else {
-                        format!("<tool_result><error>{}</error></tool_result>", result)
-                    };
-                    self.messages.push(Message::user(formatted));
-                }
+            if let Err(e) = self.safety.check_tool_call(&fake_call) {
+                let error_msg = format!("Safety check failed: {}", e);
+                output::safety_blocked(&error_msg);
+                self.push_tool_result_message(use_native_fc, &call_id, false, &error_msg);
+                self.log_tool_call(&name, &args_str, &error_msg, false, start_time, false);
+                continue;
             }
 
-            Ok(false) // Continue loop
+            if !self.confirm_tool_execution(&name, &args_str, &call_id, use_native_fc)? {
+                continue;
+            }
+
+            let args =
+                match self.parse_tool_args(&name, &args_str, &call_id, use_native_fc, start_time) {
+                    Some(args) => args,
+                    None => continue,
+                };
+
+            let (success, result) = self
+                .execute_single_tool(&name, &args_str, &args, start_time)
+                .await?;
+            self.push_tool_result_message(use_native_fc, &call_id, success, &result);
+        }
+
+        Ok(())
+    }
+
+    fn build_tool_call_context(
+        &self,
+        name: &str,
+        args_str: &str,
+        tool_call_id: Option<String>,
+    ) -> (String, bool, crate::api::types::ToolCall) {
+        let use_native_fc = self.config.agent.native_function_calling && tool_call_id.is_some();
+        let call_id = tool_call_id.unwrap_or_else(|| format!("call_{}", uuid::Uuid::new_v4()));
+        let fake_call = crate::api::types::ToolCall {
+            id: call_id.clone(),
+            call_type: "function".to_string(),
+            function: crate::api::types::ToolFunction {
+                name: name.to_string(),
+                arguments: args_str.to_string(),
+            },
+        };
+        (call_id, use_native_fc, fake_call)
+    }
+
+    fn confirm_tool_execution(
+        &mut self,
+        name: &str,
+        args_str: &str,
+        call_id: &str,
+        use_native_fc: bool,
+    ) -> Result<bool> {
+        if !self.needs_confirmation(name) {
+            return Ok(true);
+        }
+
+        use std::io::{self, Write};
+
+        let args_preview: String = args_str.chars().take(100).collect();
+        let args_display = if args_str.len() > 100 {
+            format!("{}...", args_preview)
         } else {
-            // No tool calls, task complete
-            output::final_answer(&content);
-            // Note: assistant message was already added above when not using last message
-            Ok(true)
+            args_preview
+        };
+
+        if !self.is_interactive() {
+            return Err(AgentError::ConfirmationRequired {
+                tool_name: name.to_string(),
+            }
+            .into());
+        }
+
+        println!(
+            "{} Tool: {} Args: {}",
+            "⚠️".bright_yellow(),
+            name.bright_cyan(),
+            args_display.bright_white()
+        );
+        print!("{}", "Execute? [y/N/s(kip all)]: ".bright_yellow());
+        io::stdout().flush().ok();
+
+        let mut response = String::new();
+        if io::stdin().read_line(&mut response).is_ok() {
+            let response = response.trim().to_lowercase();
+            match response.as_str() {
+                "y" | "yes" => return Ok(true),
+                "s" | "skip" => {
+                    self.set_execution_mode(crate::config::ExecutionMode::Yolo);
+                    println!(
+                        "{} Switched to YOLO mode for this session",
+                        "⚡".bright_yellow()
+                    );
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+
+        let skip_msg = "Tool execution skipped by user";
+        println!("{} {}", "⏭️".bright_yellow(), skip_msg);
+        if use_native_fc {
+            self.messages.push(Message::tool(
+                serde_json::json!({"skipped": skip_msg}).to_string(),
+                call_id,
+            ));
+        } else {
+            self.messages.push(Message::user(format!(
+                "<tool_result><skipped>{}</skipped></tool_result>",
+                skip_msg
+            )));
+        }
+        Ok(false)
+    }
+
+    fn parse_tool_args(
+        &mut self,
+        name: &str,
+        args_str: &str,
+        call_id: &str,
+        use_native_fc: bool,
+        start_time: std::time::Instant,
+    ) -> Option<Value> {
+        match serde_json::from_str(args_str) {
+            Ok(args) => {
+                debug!("Tool arguments: {}", args);
+                Some(args)
+            }
+            Err(e) => {
+                let err = format!("Invalid JSON arguments: {}", e);
+                println!("{} {}", "✗".bright_red(), err);
+                self.push_tool_result_message(use_native_fc, call_id, false, &err);
+                self.log_tool_call(name, args_str, &err, false, start_time, false);
+                None
+            }
+        }
+    }
+
+    async fn execute_single_tool(
+        &mut self,
+        name: &str,
+        args_str: &str,
+        args: &Value,
+        start_time: std::time::Instant,
+    ) -> Result<(bool, String)> {
+        let Some(tool) = self.tools.get(name) else {
+            let err = format!("Unknown tool: {}", name);
+            println!("{} {}", "✗".bright_red(), err);
+            self.log_tool_call(name, args_str, &err, false, start_time, false);
+            return Ok((false, err));
+        };
+
+        match tool.execute(args.clone()).await {
+            Ok(result) => {
+                output::tool_success(name);
+                let result_str = serde_json::to_string(&result)?;
+                self.log_tool_call(name, args_str, &result_str, true, start_time, true);
+
+                let verification_result = self.maybe_verify_edit(name, args).await;
+                let enhanced_result = self.maybe_enhance_tool_result(name, &result_str);
+                let final_result = match verification_result {
+                    Some(ver_msg) => format!("{}{}", enhanced_result, ver_msg),
+                    None => enhanced_result,
+                };
+                Ok((true, final_result))
+            }
+            Err(e) => {
+                output::tool_failure(name, &e.to_string());
+                self.log_tool_call(name, args_str, &e.to_string(), false, start_time, false);
+                self.cognitive_state
+                    .episodic_memory
+                    .what_failed(name, &e.to_string());
+                Ok((false, e.to_string()))
+            }
+        }
+    }
+
+    async fn maybe_verify_edit(&mut self, tool_name: &str, args: &Value) -> Option<String> {
+        if tool_name != "file_edit" {
+            return None;
+        }
+
+        let path = args.get("path").and_then(|v| v.as_str())?;
+        info!("Running verification after file_edit on {}", path);
+        self.cognitive_state.set_phase(CyclePhase::Verify);
+
+        match self
+            .verification_gate
+            .verify_change(&[path.to_string()], &format!("file_edit:{}", path))
+            .await
+        {
+            Ok(report) => {
+                if report.overall_passed {
+                    self.cognitive_state.episodic_memory.what_worked(
+                        "file_edit",
+                        &format!("Edit to {} passed verification", path),
+                    );
+                    output::verification_report(&format!("{}", report), true);
+                    None
+                } else {
+                    self.cognitive_state.episodic_memory.what_failed(
+                        "file_edit",
+                        &format!("Edit to {} failed verification", path),
+                    );
+                    output::verification_report(&format!("{}", report), false);
+                    Some(format!(
+                        "\n\n<verification_failed>\n{}\n</verification_failed>",
+                        report
+                    ))
+                }
+            }
+            Err(e) => {
+                warn!("Verification failed to run: {}", e);
+                None
+            }
+        }
+    }
+
+    fn maybe_enhance_tool_result(&self, name: &str, result_str: &str) -> String {
+        if name == "cargo_check" && result_str.contains("\"success\":false") {
+            self.enhance_cargo_errors(result_str)
+        } else {
+            result_str.to_string()
+        }
+    }
+
+    fn push_tool_result_message(
+        &mut self,
+        use_native_fc: bool,
+        call_id: &str,
+        success: bool,
+        result: &str,
+    ) {
+        if use_native_fc {
+            let result_json = if success {
+                result.to_string()
+            } else {
+                serde_json::json!({"error": result}).to_string()
+            };
+            self.messages.push(Message::tool(result_json, call_id));
+        } else {
+            let formatted = if success {
+                format!("<tool_result>{}</tool_result>", result)
+            } else {
+                format!("<tool_result><error>{}</error></tool_result>", result)
+            };
+            self.messages.push(Message::user(formatted));
+        }
+    }
+
+    fn log_tool_call(
+        &mut self,
+        tool_name: &str,
+        arguments: &str,
+        result: &str,
+        success: bool,
+        start_time: std::time::Instant,
+        truncate_result: bool,
+    ) {
+        if let Some(ref mut checkpoint) = self.current_checkpoint {
+            let logged_result = if truncate_result {
+                result.chars().take(1000).collect()
+            } else {
+                result.to_string()
+            };
+            checkpoint.log_tool_call(ToolCallLog {
+                timestamp: Utc::now(),
+                tool_name: tool_name.to_string(),
+                arguments: arguments.to_string(),
+                result: Some(logged_result),
+                success,
+                duration_ms: Some(start_time.elapsed().as_millis() as u64),
+            });
         }
     }
 

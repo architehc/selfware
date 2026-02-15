@@ -61,7 +61,7 @@ struct Cli {
     #[arg(long)]
     no_color: bool,
 
-    /// Launch full TUI dashboard mode (requires --features extras)
+    /// Launch full TUI dashboard mode (requires --features tui)
     /// This is the default when no subcommand is specified
     #[arg(long)]
     tui: bool,
@@ -111,6 +111,16 @@ pub enum OutputFormat {
     Json,
 }
 
+/// Demo scenario selection for `selfware demo`
+#[cfg(feature = "tui")]
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum DemoScenarioKind {
+    Archaeology,
+    FeatureFactory,
+    BugHunt,
+    TokenChallenge,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Open your workshop for an interactive session
@@ -145,6 +155,25 @@ enum Commands {
         /// Path to visualize
         #[arg(default_value = ".")]
         path: String,
+    },
+
+    /// Run an animated multi-agent demo scenario
+    #[cfg(feature = "tui")]
+    Demo {
+        /// Demo scenario to run
+        #[arg(value_enum, default_value_t = DemoScenarioKind::FeatureFactory)]
+        scenario: DemoScenarioKind,
+        /// Use faster timings for CI/smoke runs
+        #[arg(long)]
+        fast: bool,
+    },
+
+    /// Launch dashboard mode explicitly
+    #[cfg(feature = "tui")]
+    Dashboard {
+        /// Enable swarm-oriented dashboard hints
+        #[arg(long)]
+        swarm_mode: bool,
     },
 
     /// Resume tending from a journal entry
@@ -319,23 +348,21 @@ pub async fn run() -> Result<()> {
     }
 
     // Handle TUI dashboard mode
-    // Default to TUI when extras feature is enabled and no subcommand specified
+    // Default to TUI when tui feature is enabled and no subcommand specified
     // Use --no-tui to force classic CLI mode
-    #[cfg(feature = "extras")]
+    #[cfg(feature = "tui")]
     {
         let should_use_tui = cli.tui || (cli.command.is_none() && !cli.no_tui);
         if should_use_tui {
-            use crate::tui;
-
-            let _user_inputs = tui::run_tui_dashboard(&config.model)?;
+            let _user_inputs = crate::ui::tui::run_tui_dashboard(&config.model)?;
             return Ok(());
         }
     }
 
-    #[cfg(not(feature = "extras"))]
+    #[cfg(not(feature = "tui"))]
     if cli.tui {
-        eprintln!("Error: TUI dashboard requires the 'extras' feature.");
-        eprintln!("Rebuild with: cargo build --features extras");
+        eprintln!("Error: TUI dashboard requires the 'tui' feature.");
+        eprintln!("Rebuild with: cargo build --features tui");
         std::process::exit(1);
     }
 
@@ -412,6 +439,26 @@ pub async fn run() -> Result<()> {
             // Build garden visualization
             let garden = build_garden_from_path(&path)?;
             println!("{}", garden.render());
+        }
+
+        #[cfg(feature = "tui")]
+        Commands::Demo { scenario, fast } => {
+            if !cli.quiet {
+                println!("{}", render_header(&ctx));
+            }
+            run_demo_scenario(scenario, fast, cli.quiet)?;
+        }
+
+        #[cfg(feature = "tui")]
+        Commands::Dashboard { swarm_mode } => {
+            if swarm_mode && !cli.quiet {
+                println!(
+                    "{} {}",
+                    Glyphs::GEAR,
+                    "Swarm mode enabled for dashboard session".craftsman_voice()
+                );
+            }
+            let _user_inputs = crate::ui::tui::run_tui_dashboard(&config.model)?;
         }
 
         Commands::Resume { task_id } => {
@@ -763,6 +810,61 @@ pub async fn run() -> Result<()> {
             }
             println!();
         }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "tui")]
+fn run_demo_scenario(scenario: DemoScenarioKind, fast: bool, quiet: bool) -> Result<()> {
+    use crate::ui::demo::{
+        BugHuntSafariScenario, CodebaseArchaeologyScenario, DemoConfig, DemoRunner, DemoScenario,
+        FeatureFactoryScenario, TokenChallengeScenario,
+    };
+
+    let config = if fast {
+        DemoConfig::fast()
+    } else {
+        DemoConfig::default()
+    };
+    let step_delay = config.step_delay;
+    let mut runner = DemoRunner::new(config);
+
+    let mut scenario_impl: Box<dyn DemoScenario> = match scenario {
+        DemoScenarioKind::Archaeology => Box::new(CodebaseArchaeologyScenario::new()),
+        DemoScenarioKind::FeatureFactory => Box::new(FeatureFactoryScenario::new()),
+        DemoScenarioKind::BugHunt => Box::new(BugHuntSafariScenario::new()),
+        DemoScenarioKind::TokenChallenge => Box::new(TokenChallengeScenario::new()),
+    };
+
+    if !quiet {
+        println!(
+            "\n{} Running demo: {}\n",
+            Glyphs::GEAR,
+            scenario_impl.name().emphasis()
+        );
+    }
+
+    runner.start(scenario_impl.as_mut());
+    while runner.next_stage(scenario_impl.as_mut()) {
+        runner.update(0.16);
+        if !quiet {
+            println!(
+                "   {} Stage {}/{}",
+                Glyphs::BRANCH,
+                runner.current_stage(),
+                runner.total_stages()
+            );
+        }
+        std::thread::sleep(step_delay);
+    }
+
+    if !quiet {
+        println!(
+            "\n{} Demo complete in {:.2}s\n",
+            Glyphs::BLOOM,
+            runner.elapsed().as_secs_f64()
+        );
     }
 
     Ok(())

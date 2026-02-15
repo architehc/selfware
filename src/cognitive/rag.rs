@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
+use crate::token_count::estimate_content_tokens;
 use crate::vector_store::{
     ChunkType, CodeChunker, CollectionScope, EmbeddingProvider, SearchFilter, SearchResult,
     VectorStore,
@@ -428,9 +429,9 @@ impl RagEngine {
                     *files_by_lang.entry(lang.clone()).or_insert(0) += 1;
                     total_chunks += chunk_count;
 
-                    // Rough token estimate
+                    // Token estimate via shared tokenizer utility
                     if let Ok(content) = std::fs::read_to_string(path) {
-                        total_tokens += content.len() / 4;
+                        total_tokens += estimate_content_tokens(&content);
                     }
 
                     // Track indexed file
@@ -675,8 +676,7 @@ impl RagEngine {
                 formatted.push('\n');
             }
 
-            // Estimate tokens
-            let chunk_tokens = formatted.len() / 4;
+            let chunk_tokens = estimate_content_tokens(&formatted);
             if total_tokens + chunk_tokens > self.config.max_context_tokens {
                 break;
             }
@@ -866,18 +866,18 @@ impl ContextBuilder {
 
     /// Get estimated token count
     pub fn token_count(&self) -> usize {
-        let mut count = self.system_prompt.len() / 4;
+        let mut count = estimate_content_tokens(&self.system_prompt);
 
         if let Some(ref ctx) = self.context {
             count += ctx.token_count;
         }
 
         for inst in &self.instructions {
-            count += inst.len() / 4;
+            count += estimate_content_tokens(inst);
         }
 
         if let Some(ref q) = self.query {
-            count += q.len() / 4;
+            count += estimate_content_tokens(q);
         }
 
         count

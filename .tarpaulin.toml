@@ -3,9 +3,9 @@
 # Note: agent/mod.rs (Agent) and api/mod.rs (ApiClient) contain network I/O
 # and cannot be easily unit tested without mocking.
 # Actual coverage of testable code is much higher than the reported overall percentage.
-fail-under = 40
+fail-under = 90
 # Output formats
-out = ["Html", "Stdout"]
+out = ["Html", "Stdout", "Xml"]
 # Line coverage mode
 line-coverage = true
 # Branch coverage

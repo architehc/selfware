@@ -13,6 +13,8 @@ use crate::config::Config;
 use crate::memory::AgentMemory;
 use crate::output;
 use crate::safety::SafetyChecker;
+#[cfg(feature = "resilience")]
+use crate::self_healing::{ErrorOccurrence, SelfHealingConfig, SelfHealingEngine};
 use crate::telemetry::{enter_agent_step, record_state_transition};
 use crate::tools::ToolRegistry;
 use crate::verification::{VerificationConfig, VerificationGate};
@@ -80,6 +82,9 @@ pub struct Agent {
     last_checkpoint_tool_calls: usize,
     /// Whether at least one checkpoint has been persisted in this session
     checkpoint_persisted_once: bool,
+    /// Self-healing engine for automatic recovery attempts
+    #[cfg(feature = "resilience")]
+    self_healing: SelfHealingEngine,
 }
 
 impl Agent {
@@ -186,6 +191,14 @@ To call a tool, use this EXACT XML structure:
         // Initialize error analyzer
         let error_analyzer = ErrorAnalyzer::new();
 
+        #[cfg(feature = "resilience")]
+        let self_healing = SelfHealingEngine::new(SelfHealingConfig {
+            enabled: config.continuous_work.auto_recovery,
+            max_healing_attempts: config.continuous_work.max_recovery_attempts,
+            checkpoint_interval_secs: config.continuous_work.checkpoint_interval_secs,
+            ..Default::default()
+        });
+
         info!("Agent initialized with cognitive state, verification gate, and error analyzer");
 
         Ok(Self {
@@ -206,6 +219,8 @@ To call a tool, use this EXACT XML structure:
             last_checkpoint_persisted_at: Instant::now(),
             last_checkpoint_tool_calls: 0,
             checkpoint_persisted_once: false,
+            #[cfg(feature = "resilience")]
+            self_healing,
         })
     }
 
@@ -1025,6 +1040,8 @@ To call a tool, use this EXACT XML structure:
             self.last_checkpoint_persisted_at = Instant::now();
             self.checkpoint_persisted_once = true;
             self.current_checkpoint = Some(checkpoint);
+            #[cfg(feature = "resilience")]
+            self.record_self_healing_checkpoint(task_description);
             debug!("Checkpoint saved for task: {}", task_id);
         }
         Ok(())
@@ -1089,6 +1106,81 @@ To call a tool, use this EXACT XML structure:
         Ok(())
     }
 
+    #[cfg(feature = "resilience")]
+    fn record_self_healing_checkpoint(&self, task_description: &str) {
+        if !self.config.continuous_work.auto_recovery {
+            return;
+        }
+
+        let state = serde_json::json!({
+            "task_description": task_description,
+            "current_step": self.loop_control.current_step(),
+            "messages": self.messages,
+        });
+
+        let checkpoint_id = self.self_healing.checkpoint("agent_loop_checkpoint", state);
+        debug!("Self-healing checkpoint saved: {}", checkpoint_id);
+    }
+
+    #[cfg(feature = "resilience")]
+    fn restore_from_self_healing_checkpoint(&mut self) -> bool {
+        let Some(state) = self.self_healing.restore(None) else {
+            return false;
+        };
+
+        let Some(messages_value) = state.get("messages").cloned() else {
+            return false;
+        };
+
+        let Ok(messages) = serde_json::from_value::<Vec<Message>>(messages_value) else {
+            return false;
+        };
+        self.messages = messages;
+
+        if let Some(step) = state.get("current_step").and_then(|v| v.as_u64()) {
+            self.loop_control.set_state(AgentState::Executing {
+                step: step as usize,
+            });
+        }
+
+        true
+    }
+
+    #[cfg(feature = "resilience")]
+    fn try_self_healing_recovery(&mut self, error: &str, context: &str) -> bool {
+        if !self.config.continuous_work.auto_recovery {
+            return false;
+        }
+
+        let occurrence = ErrorOccurrence::new("agent_execution_error", error, context);
+        let Some(execution) = self.self_healing.handle_error(occurrence) else {
+            return false;
+        };
+
+        if !execution.success {
+            warn!(
+                "Self-healing strategy '{}' failed: {:?}",
+                execution.strategy, execution.error
+            );
+            return false;
+        }
+
+        let restored = self.restore_from_self_healing_checkpoint();
+        if restored {
+            info!(
+                "Self-healing strategy '{}' restored agent state",
+                execution.strategy
+            );
+        } else {
+            info!(
+                "Self-healing strategy '{}' succeeded without state restore",
+                execution.strategy
+            );
+        }
+
+        true
+    }
+
     pub async fn run_task(&mut self, task: &str) -> Result<()> {
         println!("{}", "🦊 Selfware starting task...".bright_cyan());
         println!("Task: {}", task.bright_white());
@@ -1104,6 +1196,8 @@ To call a tool, use this EXACT XML structure:
         self.messages.push(msg);
 
         let mut iteration = 0;
+        #[cfg(feature = "resilience")]
+        let mut recovery_attempts = 0u32;
         let task_description = task.to_string();
 
         // Initialize multi-phase progress tracker
@@ -1143,6 +1237,10 @@ To call a tool, use this EXACT XML structure:
                                         warn!("Failed to save completed checkpoint: {}", e);
                                     }
                                     return Ok(());
+                                }
+                                #[cfg(feature = "resilience")]
+                                {
+                                    recovery_attempts = 0;
                                 }
                                 self.loop_control.increment_step();
                                 self.cognitive_state.set_phase(CyclePhase::Reflect);
@@ -1190,6 +1288,10 @@ To call a tool, use this EXACT XML structure:
                     progress.update_progress(step_progress);
                     match self.execute_step_with_logging(&task_description).await {
                         Ok(completed) => {
+                            #[cfg(feature = "resilience")]
+                            {
+                                recovery_attempts = 0;
+                            }
                             if completed {
                                 record_state_transition("Executing", "Completed");
                                 progress.complete_phase();
@@ -1252,6 +1354,33 @@ To call a tool, use this EXACT XML structure:
                     let _span = enter_agent_step("ErrorRecovery", self.loop_control.current_step());
 
                     println!("{} {}", "⚠️ Recovering from error:".bright_red(), error);
+
+                    #[cfg(feature = "resilience")]
+                    let mut recovered = false;
+                    #[cfg(not(feature = "resilience"))]
+                    let recovered = false;
+                    #[cfg(feature = "resilience")]
+                    {
+                        if recovery_attempts < self.config.continuous_work.max_recovery_attempts {
+                            recovered = self.try_self_healing_recovery(&error, "run_task");
+                            if recovered {
+                                recovery_attempts += 1;
+                            }
+                        } else {
+                            warn!(
+                                "Auto-recovery attempts exhausted ({})",
+                                self.config.continuous_work.max_recovery_attempts
+                            );
+                        }
+                    }
+
+                    if recovered {
+                        record_state_transition("ErrorRecovery", "Executing");
+                        self.loop_control.set_state(AgentState::Executing {
+                            step: self.loop_control.current_step(),
+                        });
+                        continue;
+                    }
 
                     // Add cognitive context about the error
                     let cognitive_summary = self.cognitive_state.summary();
@@ -1915,6 +2044,8 @@ To call a tool, use this EXACT XML structure:
             .unwrap_or_default();
 
         let mut iteration = 0;
+        #[cfg(feature = "resilience")]
+        let mut recovery_attempts = 0u32;
 
         while let Some(state) = self.loop_control.next_state() {
             match state {
@@ -1941,6 +2072,10 @@ To call a tool, use this EXACT XML structure:
                     );
                     match self.execute_step_with_logging(&task_description).await {
                         Ok(completed) => {
+                            #[cfg(feature = "resilience")]
+                            {
+                                recovery_attempts = 0;
+                            }
                             if completed {
                                 record_state_transition("Executing", "Completed");
                                 output::task_completed();
@@ -1995,6 +2130,34 @@ To call a tool, use this EXACT XML structure:
                     let _span = enter_agent_step("ErrorRecovery", self.loop_control.current_step());
 
                     println!("{} {}", "⚠️ Recovering from error:".bright_red(), error);
+
+                    #[cfg(feature = "resilience")]
+                    let mut recovered = false;
+                    #[cfg(not(feature = "resilience"))]
+                    let recovered = false;
+                    #[cfg(feature = "resilience")]
+                    {
+                        if recovery_attempts < self.config.continuous_work.max_recovery_attempts {
+                            recovered =
+                                self.try_self_healing_recovery(&error, "continue_execution");
+                            if recovered {
+                                recovery_attempts += 1;
+                            }
+                        } else {
+                            warn!(
+                                "Auto-recovery attempts exhausted ({})",
+                                self.config.continuous_work.max_recovery_attempts
+                            );
+                        }
+                    }
+
+                    if recovered {
+                        record_state_transition("ErrorRecovery", "Executing");
+                        self.loop_control.set_state(AgentState::Executing {
+                            step: self.loop_control.current_step(),
+                        });
+                        continue;
+                    }
 
                     let cognitive_summary = self.cognitive_state.summary();
                     self.messages.push(Message::user(format!(
