@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use tracing::{debug, warn};
+use tracing::warn;
 
 // Use library exports instead of redeclaring modules
 // This avoids duplicate compilation and maintains consistency
@@ -469,7 +469,7 @@ async fn handle_command(
             }
 
             // Build garden visualization
-            let garden = build_garden_from_path(&path)?;
+            let garden = ui::garden::build_garden_from_path(&path)?;
             println!("{}", garden.render());
         }
 
@@ -908,133 +908,6 @@ fn run_demo_scenario(scenario: DemoScenarioKind, fast: bool, quiet: bool) -> Res
     }
 
     Ok(())
-}
-
-/// Build a digital garden visualization from a path
-fn build_garden_from_path(path: &str) -> Result<ui::garden::DigitalGarden> {
-    use std::fs;
-    use std::time::SystemTime;
-    use walkdir::WalkDir;
-
-    let project_name = std::path::Path::new(path)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| {
-            warn!(
-                "Could not derive project name from path '{}'; using fallback name",
-                path
-            );
-            "your garden".to_string()
-        });
-
-    let mut garden = ui::garden::DigitalGarden::new(&project_name);
-
-    for entry in WalkDir::new(path)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-    {
-        let path_str = entry.path().display().to_string();
-
-        // Skip hidden, target, node_modules, etc.
-        if path_str.contains("/.")
-            || path_str.contains("/target/")
-            || path_str.contains("/node_modules/")
-            || path_str.contains("/__pycache__/")
-        {
-            continue;
-        }
-
-        // Only include source files
-        let ext = entry
-            .path()
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or_else(|| {
-                debug!(
-                    "Skipping file with non-UTF8 extension: {}",
-                    entry.path().display()
-                );
-                ""
-            });
-
-        if !matches!(
-            ext,
-            "rs" | "py"
-                | "js"
-                | "ts"
-                | "tsx"
-                | "jsx"
-                | "go"
-                | "rb"
-                | "java"
-                | "c"
-                | "cpp"
-                | "h"
-                | "hpp"
-                | "md"
-                | "toml"
-                | "yaml"
-                | "yml"
-                | "json"
-        ) {
-            continue;
-        }
-
-        let metadata = fs::metadata(entry.path()).ok();
-        let lines = fs::read_to_string(entry.path())
-            .map(|c| c.lines().count())
-            .unwrap_or_else(|err| {
-                debug!(
-                    "Failed to read '{}' when computing garden metrics: {}",
-                    entry.path().display(),
-                    err
-                );
-                0
-            });
-
-        let modified = metadata
-            .as_ref()
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or_else(|| {
-                debug!(
-                    "Could not read modified time for '{}'; using epoch fallback",
-                    entry.path().display()
-                );
-                0
-            });
-
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or_else(|err| {
-                warn!(
-                    "System clock appears invalid when building garden view: {}",
-                    err
-                );
-                0
-            });
-
-        // Use saturating_sub to handle clock skew/future mtimes
-        let age_days = now.saturating_sub(modified) / 86400;
-
-        let plant = ui::garden::GardenPlant {
-            path: path_str.clone(),
-            name: entry.file_name().to_string_lossy().to_string(),
-            extension: ext.to_string(),
-            lines,
-            age_days,
-            last_tended_days: age_days, // Simplified
-            growth_stage: ui::garden::GrowthStage::from_metrics(lines, age_days, age_days),
-            plant_type: ui::garden::PlantType::from_path(&path_str),
-        };
-
-        garden.add_plant(plant);
-    }
-
-    Ok(garden)
 }
 
 fn truncate_with_ellipsis(input: &str, max_chars: usize) -> String {
