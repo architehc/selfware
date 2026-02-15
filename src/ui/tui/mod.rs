@@ -1165,4 +1165,225 @@ mod tests {
         assert_eq!(left.width, 30);
         assert_eq!(right.width, 70);
     }
+
+    #[test]
+    fn test_split_layout_50_50() {
+        let area = Rect::new(0, 0, 100, 50);
+        let (left, right) = split_layout(area, 50);
+        assert_eq!(left.width, 50);
+        assert_eq!(right.width, 50);
+    }
+
+    #[test]
+    fn test_split_layout_extreme_left() {
+        let area = Rect::new(0, 0, 100, 50);
+        let (left, right) = split_layout(area, 90);
+        assert_eq!(left.width, 90);
+        assert_eq!(right.width, 10);
+    }
+
+    #[test]
+    fn test_standard_layout_small_area() {
+        let area = Rect::new(0, 0, 50, 20);
+        let layout = standard_layout(area);
+        assert_eq!(layout.len(), 3);
+        assert_eq!(layout[0].height, 3);
+        assert_eq!(layout[2].height, 1);
+    }
+
+    #[test]
+    fn test_palette_accent_colors() {
+        assert_eq!(TuiPalette::RUST, Color::Rgb(139, 69, 19));
+        assert_eq!(TuiPalette::COPPER, Color::Rgb(184, 115, 51));
+        assert_eq!(TuiPalette::SAGE, Color::Rgb(143, 151, 121));
+        assert_eq!(TuiPalette::STONE, Color::Rgb(128, 128, 128));
+    }
+
+    #[test]
+    fn test_palette_status_colors() {
+        assert_eq!(TuiPalette::BLOOM, Color::Rgb(144, 190, 109));
+        assert_eq!(TuiPalette::WILT, Color::Rgb(188, 108, 37));
+        assert_eq!(TuiPalette::FROST, Color::Rgb(100, 100, 120));
+    }
+
+    #[test]
+    fn test_palette_selected_style() {
+        let style = TuiPalette::selected_style();
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn test_palette_success_style() {
+        let style = TuiPalette::success_style();
+        // Style should have a foreground color set
+        assert!(style.fg.is_some());
+    }
+
+    #[test]
+    fn test_palette_warning_style() {
+        let style = TuiPalette::warning_style();
+        assert!(style.fg.is_some());
+    }
+
+    #[test]
+    fn test_palette_error_style() {
+        let style = TuiPalette::error_style();
+        assert!(style.fg.is_some());
+    }
+
+    #[test]
+    fn test_palette_muted_style() {
+        let style = TuiPalette::muted_style();
+        assert!(style.fg.is_some());
+    }
+
+    #[test]
+    fn test_palette_path_style() {
+        let style = TuiPalette::path_style();
+        assert!(style.fg.is_some());
+        assert!(style.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn test_palette_border_style() {
+        let style = TuiPalette::border_style();
+        assert!(style.fg.is_some());
+    }
+
+    #[test]
+    fn test_palette_ink_parchment() {
+        assert_eq!(TuiPalette::INK, Color::Rgb(40, 54, 24));
+        assert_eq!(TuiPalette::PARCHMENT, Color::Rgb(254, 250, 224));
+    }
+
+    #[test]
+    fn test_palette_soil_brown() {
+        assert_eq!(TuiPalette::SOIL_BROWN, Color::Rgb(188, 108, 37));
+    }
+
+    #[test]
+    fn test_is_quit_q() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(is_quit(&event));
+    }
+
+    #[test]
+    fn test_is_quit_ctrl_c() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(is_quit(&event));
+    }
+
+    #[test]
+    fn test_is_quit_other_key() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(!is_quit(&event));
+    }
+
+    #[test]
+    fn test_is_key_match() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let event = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(is_key(&event, KeyCode::Enter, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn test_is_key_no_match_code() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let event = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!is_key(&event, KeyCode::Esc, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn test_is_key_no_match_modifiers() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(!is_key(&event, KeyCode::Char('a'), KeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn test_is_key_with_ctrl() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let event = Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert!(is_key(&event, KeyCode::Char('p'), KeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn test_standard_layout_large_area() {
+        let area = Rect::new(0, 0, 200, 100);
+        let layout = standard_layout(area);
+        assert_eq!(layout.len(), 3);
+        // Main content should get most space
+        assert!(layout[1].height > layout[0].height);
+        assert!(layout[1].height > layout[2].height);
+    }
+
+    #[test]
+    fn test_split_layout_preserves_y() {
+        let area = Rect::new(10, 20, 100, 50);
+        let (left, right) = split_layout(area, 30);
+        assert_eq!(left.y, 20);
+        assert_eq!(right.y, 20);
+    }
+
+    #[test]
+    fn test_palette_primary() {
+        let primary = TuiPalette::primary();
+        // Should return a valid RGB color
+        if let Color::Rgb(r, g, b) = primary {
+            assert!(r <= 255 && g <= 255 && b <= 255);
+        } else {
+            panic!("Expected RGB color");
+        }
+    }
+
+    #[test]
+    fn test_palette_accent() {
+        let accent = TuiPalette::accent();
+        if let Color::Rgb(r, g, b) = accent {
+            assert!(r <= 255 && g <= 255 && b <= 255);
+        } else {
+            panic!("Expected RGB color");
+        }
+    }
+
+    #[test]
+    fn test_palette_tool() {
+        let tool = TuiPalette::tool();
+        if let Color::Rgb(r, g, b) = tool {
+            assert!(r <= 255 && g <= 255 && b <= 255);
+        } else {
+            panic!("Expected RGB color");
+        }
+    }
+
+    #[test]
+    fn test_palette_path() {
+        let path = TuiPalette::path();
+        if let Color::Rgb(r, g, b) = path {
+            assert!(r <= 255 && g <= 255 && b <= 255);
+        } else {
+            panic!("Expected RGB color");
+        }
+    }
+
+    #[test]
+    fn test_create_event_channel() {
+        let (tx, rx) = create_event_channel();
+        // Should be able to send and receive
+        tx.send(TuiEvent::Log {
+            level: LogLevel::Info,
+            message: "test".to_string(),
+        })
+        .unwrap();
+        let event = rx.recv().unwrap();
+        if let TuiEvent::Log { level, message } = event {
+            assert_eq!(message, "test");
+            assert!(matches!(level, LogLevel::Info));
+        } else {
+            panic!("Wrong event type");
+        }
+    }
 }

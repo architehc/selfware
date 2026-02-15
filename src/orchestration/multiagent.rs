@@ -1157,4 +1157,249 @@ mod tests {
         let config = MultiAgentConfig::default().with_roles(roles);
         assert_eq!(config.roles.len(), 9);
     }
+
+    #[test]
+    fn test_agent_status_copy() {
+        let status = AgentStatus::Working;
+        let copy = status;
+        assert_eq!(copy, AgentStatus::Working);
+        assert_eq!(status, AgentStatus::Working);
+    }
+
+    #[test]
+    fn test_agent_status_clone() {
+        let status = AgentStatus::Completed;
+        #[allow(clippy::clone_on_copy)]
+        let cloned = status.clone();
+        assert_eq!(cloned, AgentStatus::Completed);
+    }
+
+    #[test]
+    fn test_agent_result_duration() {
+        let result = AgentResult {
+            agent_id: 0,
+            agent_name: "Test".to_string(),
+            role: AgentRole::Coder,
+            content: "Done".to_string(),
+            tool_calls: vec![],
+            duration: Duration::from_millis(1500),
+            success: true,
+            error: None,
+        };
+        assert_eq!(result.duration.as_millis(), 1500);
+        assert_eq!(result.duration.as_secs(), 1);
+    }
+
+    #[test]
+    fn test_multiagent_config_chain() {
+        let config = MultiAgentConfig::default()
+            .with_concurrency(8)
+            .with_roles(vec![AgentRole::Coder]);
+        assert_eq!(config.max_concurrency, 8);
+        assert_eq!(config.roles.len(), 1);
+    }
+
+    #[test]
+    fn test_multiagent_config_clone() {
+        let original = MultiAgentConfig::default();
+        let cloned = original.clone();
+        assert_eq!(original.max_concurrency, cloned.max_concurrency);
+        assert_eq!(original.roles.len(), cloned.roles.len());
+        assert_eq!(original.streaming, cloned.streaming);
+        assert_eq!(original.timeout_secs, cloned.timeout_secs);
+    }
+
+    #[test]
+    fn test_aggregate_results_only_failures() {
+        let results = vec![
+            AgentResult {
+                agent_id: 0,
+                agent_name: "Failed1".to_string(),
+                role: AgentRole::Coder,
+                content: "".to_string(),
+                tool_calls: vec![],
+                duration: Duration::from_secs(1),
+                success: false,
+                error: Some("Error 1".to_string()),
+            },
+            AgentResult {
+                agent_id: 1,
+                agent_name: "Failed2".to_string(),
+                role: AgentRole::Tester,
+                content: "".to_string(),
+                tool_calls: vec![],
+                duration: Duration::from_secs(2),
+                success: false,
+                error: Some("Error 2".to_string()),
+            },
+        ];
+        let summary = MultiAgentChat::aggregate_results(&results);
+        assert!(summary.contains("FAILED"));
+        assert!(summary.contains("Error 1"));
+        assert!(summary.contains("Error 2"));
+    }
+
+    #[test]
+    fn test_aggregate_results_mixed() {
+        let results = vec![
+            AgentResult {
+                agent_id: 0,
+                agent_name: "Success".to_string(),
+                role: AgentRole::Architect,
+                content: "Architecture done".to_string(),
+                tool_calls: vec!["tool1".to_string()],
+                duration: Duration::from_secs(5),
+                success: true,
+                error: None,
+            },
+            AgentResult {
+                agent_id: 1,
+                agent_name: "Failed".to_string(),
+                role: AgentRole::Security,
+                content: "".to_string(),
+                tool_calls: vec![],
+                duration: Duration::from_secs(3),
+                success: false,
+                error: None, // No error message
+            },
+        ];
+        let summary = MultiAgentChat::aggregate_results(&results);
+        assert!(summary.contains("Success"));
+        assert!(summary.contains("Architecture done"));
+        // Failed without error message shouldn't have FAILED section
+        assert!(!summary.contains("Failed (FAILED)"));
+    }
+
+    #[test]
+    fn test_multiagent_event_progress_clone() {
+        let event = MultiAgentEvent::AgentProgress {
+            agent_id: 5,
+            content: "Processing...".to_string(),
+        };
+        let cloned = event.clone();
+        if let MultiAgentEvent::AgentProgress { agent_id, content } = cloned {
+            assert_eq!(agent_id, 5);
+            assert_eq!(content, "Processing...");
+        } else {
+            panic!("Wrong event type after clone");
+        }
+    }
+
+    #[test]
+    fn test_multiagent_event_tool_call_clone() {
+        let event = MultiAgentEvent::AgentToolCall {
+            agent_id: 3,
+            tool: "file_read".to_string(),
+        };
+        let cloned = event.clone();
+        if let MultiAgentEvent::AgentToolCall { agent_id, tool } = cloned {
+            assert_eq!(agent_id, 3);
+            assert_eq!(tool, "file_read");
+        } else {
+            panic!("Wrong event type");
+        }
+    }
+
+    #[test]
+    fn test_agent_instance_with_messages() {
+        use crate::api::types::Message;
+        let agent = AgentInstance {
+            id: 0,
+            role: AgentRole::Documenter,
+            name: "Doc Agent".to_string(),
+            messages: vec![
+                Message::system("You are a documenter"),
+                Message::user("Document this code"),
+            ],
+            status: AgentStatus::Idle,
+        };
+        assert_eq!(agent.messages.len(), 2);
+    }
+
+    #[test]
+    fn test_max_concurrent_agents_constant() {
+        // Verify the constant is reasonable
+        assert!(MAX_CONCURRENT_AGENTS >= 1);
+        assert!(MAX_CONCURRENT_AGENTS <= 100);
+    }
+
+    #[test]
+    fn test_config_with_concurrency_boundaries() {
+        // Test boundary at MAX
+        let config = MultiAgentConfig::default().with_concurrency(MAX_CONCURRENT_AGENTS);
+        assert_eq!(config.max_concurrency, MAX_CONCURRENT_AGENTS);
+
+        // Test boundary at MAX - 1
+        let config = MultiAgentConfig::default().with_concurrency(MAX_CONCURRENT_AGENTS - 1);
+        assert_eq!(config.max_concurrency, MAX_CONCURRENT_AGENTS - 1);
+
+        // Test boundary at MAX + 1 (should cap)
+        let config = MultiAgentConfig::default().with_concurrency(MAX_CONCURRENT_AGENTS + 1);
+        assert_eq!(config.max_concurrency, MAX_CONCURRENT_AGENTS);
+    }
+
+    #[test]
+    fn test_agent_result_long_content() {
+        let long_content = "x".repeat(10000);
+        let result = AgentResult {
+            agent_id: 0,
+            agent_name: "Test".to_string(),
+            role: AgentRole::Coder,
+            content: long_content.clone(),
+            tool_calls: vec![],
+            duration: Duration::from_secs(1),
+            success: true,
+            error: None,
+        };
+        assert_eq!(result.content.len(), 10000);
+    }
+
+    #[test]
+    fn test_agent_result_many_tool_calls() {
+        let result = AgentResult {
+            agent_id: 0,
+            agent_name: "Test".to_string(),
+            role: AgentRole::DevOps,
+            content: "Done".to_string(),
+            tool_calls: vec![
+                "tool1".to_string(),
+                "tool2".to_string(),
+                "tool3".to_string(),
+                "tool4".to_string(),
+                "tool5".to_string(),
+            ],
+            duration: Duration::from_secs(10),
+            success: true,
+            error: None,
+        };
+        assert_eq!(result.tool_calls.len(), 5);
+    }
+
+    #[test]
+    fn test_all_agent_roles_in_result() {
+        let roles = vec![
+            AgentRole::Architect,
+            AgentRole::Coder,
+            AgentRole::Tester,
+            AgentRole::Reviewer,
+            AgentRole::Documenter,
+            AgentRole::DevOps,
+            AgentRole::Security,
+            AgentRole::Performance,
+            AgentRole::General,
+        ];
+        for (i, role) in roles.iter().enumerate() {
+            let result = AgentResult {
+                agent_id: i,
+                agent_name: format!("Agent-{}", i),
+                role: *role,
+                content: "Test".to_string(),
+                tool_calls: vec![],
+                duration: Duration::from_secs(1),
+                success: true,
+                error: None,
+            };
+            assert_eq!(result.role, *role);
+        }
+    }
 }
