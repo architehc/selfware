@@ -323,7 +323,7 @@ impl TraceAnalyzer {
         };
 
         let lineno = match span.attributes.get("code.lineno") {
-            Some(SpanValue::Int(n)) => Some(*n as u32),
+            Some(SpanValue::Int(n)) if *n >= 0 => u32::try_from(*n).ok(),
             _ => None,
         };
 

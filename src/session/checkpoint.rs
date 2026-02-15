@@ -14,6 +14,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 
 use crate::api::types::Message;
@@ -232,8 +233,19 @@ impl CheckpointManager {
             std::process::id(),
             suffix
         ));
-        fs::write(&tmp_path, json)
-            .with_context(|| format!("Failed to write checkpoint temp file {:?}", tmp_path))?;
+        {
+            let mut tmp_file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_path)
+                .with_context(|| format!("Failed to create checkpoint temp file {:?}", tmp_path))?;
+            tmp_file
+                .write_all(json.as_bytes())
+                .with_context(|| format!("Failed to write checkpoint temp file {:?}", tmp_path))?;
+            tmp_file
+                .sync_all()
+                .with_context(|| format!("Failed to fsync checkpoint temp file {:?}", tmp_path))?;
+        }
         if let Err(err) = fs::rename(&tmp_path, &path) {
             let _ = fs::remove_file(&tmp_path);
             return Err(err).with_context(|| {
@@ -242,6 +254,20 @@ impl CheckpointManager {
                     path, tmp_path
                 )
             });
+        }
+        #[cfg(unix)]
+        {
+            if let Some(parent) = path.parent() {
+                let dir = fs::OpenOptions::new()
+                    .read(true)
+                    .open(parent)
+                    .with_context(|| {
+                        format!("Failed to open checkpoint directory for fsync {:?}", parent)
+                    })?;
+                dir.sync_all().with_context(|| {
+                    format!("Failed to fsync checkpoint directory {:?}", parent)
+                })?;
+            }
         }
         Ok(())
     }

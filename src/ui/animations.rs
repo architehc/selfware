@@ -320,10 +320,17 @@ impl ProgressAnimation {
 
     /// Render the progress bar
     fn render_bar(&self) -> String {
-        let fill_width = (self.progress * self.width as f64) as usize;
-        let partial = ((self.progress * self.width as f64) - fill_width as f64)
-            * (self.chars.len() - 1) as f64;
-        let partial_idx = partial as usize;
+        let progress = if self.progress.is_finite() {
+            self.progress.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let scaled = progress * self.width as f64;
+        let fill_width = scaled.floor() as usize;
+
+        let max_partial = self.chars.len().saturating_sub(1) as f64;
+        let partial = (scaled - fill_width as f64) * max_partial;
+        let partial_idx = partial.clamp(0.0, max_partial) as usize;
 
         let mut result = String::with_capacity(self.width + 10);
 

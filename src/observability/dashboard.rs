@@ -268,7 +268,13 @@ impl LatencyHistogram {
         }
         let mut values: Vec<i64> = self.measurements.iter().map(|m| m.ms()).collect();
         values.sort();
-        let idx = ((p / 100.0) * (values.len() - 1) as f64) as usize;
+        let percentile = if p.is_finite() {
+            p.clamp(0.0, 100.0)
+        } else {
+            0.0
+        };
+        let idx =
+            (((percentile / 100.0) * (values.len() - 1) as f64) as usize).min(values.len() - 1);
         Some(Duration::milliseconds(values[idx]))
     }
 

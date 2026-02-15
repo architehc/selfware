@@ -38,6 +38,7 @@ fn qwen3_config() -> Config {
         compact_mode: false,
         verbose_mode: false,
         show_tokens: false,
+        ..Config::default()
     }
 }
 

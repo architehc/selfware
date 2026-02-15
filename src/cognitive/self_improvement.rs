@@ -126,7 +126,12 @@ impl PromptPattern {
         self.usage_count += 1;
         self.avg_quality = (old_total + quality) / self.usage_count as f32;
 
-        let old_success = (self.success_rate * (self.usage_count - 1) as f32) as usize;
+        let previous_count = self.usage_count.saturating_sub(1);
+        let old_success = if self.success_rate.is_finite() {
+            (self.success_rate.clamp(0.0, 1.0) * previous_count as f32).round() as usize
+        } else {
+            0
+        };
         let new_success = if outcome.is_positive() {
             old_success + 1
         } else {
