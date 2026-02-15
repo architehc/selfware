@@ -371,8 +371,10 @@ mod config_integration_tests {
 
     #[test]
     fn test_config_execution_mode_not_serialized() {
-        let mut config = Config::default();
-        config.execution_mode = ExecutionMode::Yolo;
+        let config = Config {
+            execution_mode: ExecutionMode::Yolo,
+            ..Default::default()
+        };
 
         let toml = toml::to_string(&config).unwrap();
         // execution_mode should be skipped during serialization
@@ -381,8 +383,10 @@ mod config_integration_tests {
 
     #[test]
     fn test_config_execution_mode_not_in_toml() {
-        let mut config = Config::default();
-        config.execution_mode = ExecutionMode::Yolo;
+        let config = Config {
+            execution_mode: ExecutionMode::Yolo,
+            ..Default::default()
+        };
 
         let toml = toml::to_string(&config).unwrap();
         // execution_mode is marked with #[serde(skip)] so should not appear
