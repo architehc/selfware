@@ -204,6 +204,17 @@ impl Default for RetryConfig {
     }
 }
 
+impl RetryConfig {
+    pub fn from_settings(settings: &crate::config::RetrySettings) -> Self {
+        Self {
+            max_retries: settings.max_retries,
+            initial_delay_ms: settings.base_delay_ms,
+            max_delay_ms: settings.max_delay_ms,
+            retryable_status_codes: vec![429, 500, 502, 503, 504],
+        }
+    }
+}
+
 pub struct ApiClient {
     client: Client,
     config: crate::config::Config,
@@ -226,7 +237,7 @@ impl ApiClient {
             client,
             base_url: config.endpoint.clone(),
             config: config.clone(),
-            retry_config: RetryConfig::default(),
+            retry_config: RetryConfig::from_settings(&config.retry),
         })
     }
 
@@ -606,6 +617,22 @@ mod tests {
         assert!(config.retryable_status_codes.contains(&429));
         assert!(config.retryable_status_codes.contains(&500));
         assert!(config.retryable_status_codes.contains(&503));
+    }
+
+    #[test]
+    fn test_retry_config_from_settings() {
+        let settings = crate::config::RetrySettings {
+            max_retries: 9,
+            base_delay_ms: 250,
+            max_delay_ms: 12000,
+        };
+        let config = RetryConfig::from_settings(&settings);
+
+        assert_eq!(config.max_retries, 9);
+        assert_eq!(config.initial_delay_ms, 250);
+        assert_eq!(config.max_delay_ms, 12000);
+        assert!(config.retryable_status_codes.contains(&429));
+        assert!(config.retryable_status_codes.contains(&500));
     }
 
     #[test]

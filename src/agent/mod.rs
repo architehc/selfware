@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use colored::*;
 use serde_json::Value;
+use std::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::analyzer::ErrorAnalyzer;
@@ -73,6 +74,12 @@ pub struct Agent {
     error_analyzer: ErrorAnalyzer,
     /// Files loaded into context for reload functionality
     context_files: Vec<String>,
+    /// Last time a checkpoint was persisted to disk
+    last_checkpoint_persisted_at: Instant,
+    /// Tool call count at last persisted checkpoint
+    last_checkpoint_tool_calls: usize,
+    /// Whether at least one checkpoint has been persisted in this session
+    checkpoint_persisted_once: bool,
 }
 
 impl Agent {
@@ -196,6 +203,9 @@ To call a tool, use this EXACT XML structure:
             verification_gate,
             error_analyzer,
             context_files: Vec::new(),
+            last_checkpoint_persisted_at: Instant::now(),
+            last_checkpoint_tool_calls: 0,
+            checkpoint_persisted_once: false,
         })
     }
 
@@ -960,8 +970,12 @@ To call a tool, use this EXACT XML structure:
             agent.loop_control.increment_step();
         }
 
+        let checkpoint_tool_calls = checkpoint.tool_calls.len();
         agent.current_checkpoint = Some(checkpoint);
         agent.checkpoint_manager = Some(checkpoint_manager);
+        agent.last_checkpoint_tool_calls = checkpoint_tool_calls;
+        agent.last_checkpoint_persisted_at = Instant::now();
+        agent.checkpoint_persisted_once = true;
 
         // Set cognitive state to Do phase since we're resuming execution
         agent.cognitive_state.set_phase(CyclePhase::Do);
@@ -994,6 +1008,11 @@ To call a tool, use this EXACT XML structure:
     /// Save current state to checkpoint
     fn save_checkpoint(&mut self, task_description: &str) -> Result<()> {
         if let Some(ref manager) = self.checkpoint_manager {
+            if !self.should_persist_checkpoint() {
+                debug!("Checkpoint skipped by continuous-work policy");
+                return Ok(());
+            }
+
             let task_id = self
                 .current_checkpoint
                 .as_ref()
@@ -1002,10 +1021,43 @@ To call a tool, use this EXACT XML structure:
 
             let checkpoint = self.to_checkpoint(&task_id, task_description);
             manager.save(&checkpoint)?;
+            self.last_checkpoint_tool_calls = checkpoint.tool_calls.len();
+            self.last_checkpoint_persisted_at = Instant::now();
+            self.checkpoint_persisted_once = true;
             self.current_checkpoint = Some(checkpoint);
             debug!("Checkpoint saved for task: {}", task_id);
         }
         Ok(())
+    }
+
+    fn should_persist_checkpoint(&self) -> bool {
+        if !self.config.continuous_work.enabled {
+            return true;
+        }
+
+        if !self.checkpoint_persisted_once {
+            return true;
+        }
+
+        let tools_interval = self.config.continuous_work.checkpoint_interval_tools;
+        let secs_interval = self.config.continuous_work.checkpoint_interval_secs;
+
+        if tools_interval == 0 && secs_interval == 0 {
+            return true;
+        }
+
+        let current_tool_calls = self
+            .current_checkpoint
+            .as_ref()
+            .map(|c| c.tool_calls.len())
+            .unwrap_or(0);
+        let tool_calls_elapsed = current_tool_calls.saturating_sub(self.last_checkpoint_tool_calls);
+        let time_elapsed = self.last_checkpoint_persisted_at.elapsed().as_secs();
+
+        let reached_tool_interval = tools_interval > 0 && tool_calls_elapsed >= tools_interval;
+        let reached_time_interval = secs_interval > 0 && time_elapsed >= secs_interval;
+
+        reached_tool_interval || reached_time_interval
     }
 
     /// Mark current task as completed
@@ -1014,6 +1066,9 @@ To call a tool, use this EXACT XML structure:
             checkpoint.set_status(TaskStatus::Completed);
             if let Some(ref manager) = self.checkpoint_manager {
                 manager.save(checkpoint)?;
+                self.last_checkpoint_tool_calls = checkpoint.tool_calls.len();
+                self.last_checkpoint_persisted_at = Instant::now();
+                self.checkpoint_persisted_once = true;
             }
         }
         Ok(())
@@ -1026,6 +1081,9 @@ To call a tool, use this EXACT XML structure:
             checkpoint.log_error(self.loop_control.current_step(), reason.to_string(), false);
             if let Some(ref manager) = self.checkpoint_manager {
                 manager.save(checkpoint)?;
+                self.last_checkpoint_tool_calls = checkpoint.tool_calls.len();
+                self.last_checkpoint_persisted_at = Instant::now();
+                self.checkpoint_persisted_once = true;
             }
         }
         Ok(())
