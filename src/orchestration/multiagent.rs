@@ -1318,9 +1318,8 @@ mod tests {
 
     #[test]
     fn test_max_concurrent_agents_constant() {
-        // Verify the constant is reasonable
-        assert!(MAX_CONCURRENT_AGENTS >= 1);
-        assert!(MAX_CONCURRENT_AGENTS <= 100);
+        // Verify the constant is 16 as documented
+        assert_eq!(MAX_CONCURRENT_AGENTS, 16);
     }
 
     #[test]
