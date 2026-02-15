@@ -1,26 +1,26 @@
 use anyhow::{Context, Result};
-use chrono::Utc;
 use colored::*;
 use serde_json::Value;
+use std::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::analyzer::ErrorAnalyzer;
 use crate::api::types::{Message, ToolCall};
 use crate::api::{ApiClient, StreamChunk, ThinkingMode};
-use crate::checkpoint::{
-    capture_git_state, CheckpointManager, TaskCheckpoint, TaskStatus, ToolCallLog,
-};
+use crate::checkpoint::{capture_git_state, CheckpointManager, TaskCheckpoint, TaskStatus};
 use crate::cognitive::{CognitiveState, CyclePhase};
 use crate::config::Config;
 use crate::memory::AgentMemory;
 use crate::output;
 use crate::safety::SafetyChecker;
+#[cfg(feature = "resilience")]
+use crate::self_healing::{ErrorOccurrence, SelfHealingConfig, SelfHealingEngine};
 use crate::telemetry::{enter_agent_step, record_state_transition};
-use crate::tool_parser::parse_tool_calls;
 use crate::tools::ToolRegistry;
 use crate::verification::{VerificationConfig, VerificationGate};
 
 pub mod context;
+mod execution;
 pub mod loop_control;
 pub mod planning;
 
@@ -76,6 +76,15 @@ pub struct Agent {
     error_analyzer: ErrorAnalyzer,
     /// Files loaded into context for reload functionality
     context_files: Vec<String>,
+    /// Last time a checkpoint was persisted to disk
+    last_checkpoint_persisted_at: Instant,
+    /// Tool call count at last persisted checkpoint
+    last_checkpoint_tool_calls: usize,
+    /// Whether at least one checkpoint has been persisted in this session
+    checkpoint_persisted_once: bool,
+    /// Self-healing engine for automatic recovery attempts
+    #[cfg(feature = "resilience")]
+    self_healing: SelfHealingEngine,
 }
 
 impl Agent {
@@ -182,6 +191,14 @@ To call a tool, use this EXACT XML structure:
         // Initialize error analyzer
         let error_analyzer = ErrorAnalyzer::new();
 
+        #[cfg(feature = "resilience")]
+        let self_healing = SelfHealingEngine::new(SelfHealingConfig {
+            enabled: config.continuous_work.auto_recovery,
+            max_healing_attempts: config.continuous_work.max_recovery_attempts,
+            checkpoint_interval_secs: config.continuous_work.checkpoint_interval_secs,
+            ..Default::default()
+        });
+
         info!("Agent initialized with cognitive state, verification gate, and error analyzer");
 
         Ok(Self {
@@ -199,6 +216,11 @@ To call a tool, use this EXACT XML structure:
             verification_gate,
             error_analyzer,
             context_files: Vec::new(),
+            last_checkpoint_persisted_at: Instant::now(),
+            last_checkpoint_tool_calls: 0,
+            checkpoint_persisted_once: false,
+            #[cfg(feature = "resilience")]
+            self_healing,
         })
     }
 
@@ -963,8 +985,12 @@ To call a tool, use this EXACT XML structure:
             agent.loop_control.increment_step();
         }
 
+        let checkpoint_tool_calls = checkpoint.tool_calls.len();
         agent.current_checkpoint = Some(checkpoint);
         agent.checkpoint_manager = Some(checkpoint_manager);
+        agent.last_checkpoint_tool_calls = checkpoint_tool_calls;
+        agent.last_checkpoint_persisted_at = Instant::now();
+        agent.checkpoint_persisted_once = true;
 
         // Set cognitive state to Do phase since we're resuming execution
         agent.cognitive_state.set_phase(CyclePhase::Do);
@@ -997,6 +1023,11 @@ To call a tool, use this EXACT XML structure:
     /// Save current state to checkpoint
     fn save_checkpoint(&mut self, task_description: &str) -> Result<()> {
         if let Some(ref manager) = self.checkpoint_manager {
+            if !self.should_persist_checkpoint() {
+                debug!("Checkpoint skipped by continuous-work policy");
+                return Ok(());
+            }
+
             let task_id = self
                 .current_checkpoint
                 .as_ref()
@@ -1005,10 +1036,45 @@ To call a tool, use this EXACT XML structure:
 
             let checkpoint = self.to_checkpoint(&task_id, task_description);
             manager.save(&checkpoint)?;
+            self.last_checkpoint_tool_calls = checkpoint.tool_calls.len();
+            self.last_checkpoint_persisted_at = Instant::now();
+            self.checkpoint_persisted_once = true;
             self.current_checkpoint = Some(checkpoint);
+            #[cfg(feature = "resilience")]
+            self.record_self_healing_checkpoint(task_description);
             debug!("Checkpoint saved for task: {}", task_id);
         }
         Ok(())
+    }
+
+    fn should_persist_checkpoint(&self) -> bool {
+        if !self.config.continuous_work.enabled {
+            return true;
+        }
+
+        if !self.checkpoint_persisted_once {
+            return true;
+        }
+
+        let tools_interval = self.config.continuous_work.checkpoint_interval_tools;
+        let secs_interval = self.config.continuous_work.checkpoint_interval_secs;
+
+        if tools_interval == 0 && secs_interval == 0 {
+            return true;
+        }
+
+        let current_tool_calls = self
+            .current_checkpoint
+            .as_ref()
+            .map(|c| c.tool_calls.len())
+            .unwrap_or(0);
+        let tool_calls_elapsed = current_tool_calls.saturating_sub(self.last_checkpoint_tool_calls);
+        let time_elapsed = self.last_checkpoint_persisted_at.elapsed().as_secs();
+
+        let reached_tool_interval = tools_interval > 0 && tool_calls_elapsed >= tools_interval;
+        let reached_time_interval = secs_interval > 0 && time_elapsed >= secs_interval;
+
+        reached_tool_interval || reached_time_interval
     }
 
     /// Mark current task as completed
@@ -1017,6 +1083,9 @@ To call a tool, use this EXACT XML structure:
             checkpoint.set_status(TaskStatus::Completed);
             if let Some(ref manager) = self.checkpoint_manager {
                 manager.save(checkpoint)?;
+                self.last_checkpoint_tool_calls = checkpoint.tool_calls.len();
+                self.last_checkpoint_persisted_at = Instant::now();
+                self.checkpoint_persisted_once = true;
             }
         }
         Ok(())
@@ -1029,9 +1098,87 @@ To call a tool, use this EXACT XML structure:
             checkpoint.log_error(self.loop_control.current_step(), reason.to_string(), false);
             if let Some(ref manager) = self.checkpoint_manager {
                 manager.save(checkpoint)?;
+                self.last_checkpoint_tool_calls = checkpoint.tool_calls.len();
+                self.last_checkpoint_persisted_at = Instant::now();
+                self.checkpoint_persisted_once = true;
             }
         }
         Ok(())
+    }
+
+    #[cfg(feature = "resilience")]
+    fn record_self_healing_checkpoint(&self, task_description: &str) {
+        if !self.config.continuous_work.auto_recovery {
+            return;
+        }
+
+        let state = serde_json::json!({
+            "task_description": task_description,
+            "current_step": self.loop_control.current_step(),
+            "messages": self.messages,
+        });
+
+        let checkpoint_id = self.self_healing.checkpoint("agent_loop_checkpoint", state);
+        debug!("Self-healing checkpoint saved: {}", checkpoint_id);
+    }
+
+    #[cfg(feature = "resilience")]
+    fn restore_from_self_healing_checkpoint(&mut self) -> bool {
+        let Some(state) = self.self_healing.restore(None) else {
+            return false;
+        };
+
+        let Some(messages_value) = state.get("messages").cloned() else {
+            return false;
+        };
+
+        let Ok(messages) = serde_json::from_value::<Vec<Message>>(messages_value) else {
+            return false;
+        };
+        self.messages = messages;
+
+        if let Some(step) = state.get("current_step").and_then(|v| v.as_u64()) {
+            self.loop_control.set_state(AgentState::Executing {
+                step: step as usize,
+            });
+        }
+
+        true
+    }
+
+    #[cfg(feature = "resilience")]
+    fn try_self_healing_recovery(&mut self, error: &str, context: &str) -> bool {
+        if !self.config.continuous_work.auto_recovery {
+            return false;
+        }
+
+        let occurrence = ErrorOccurrence::new("agent_execution_error", error, context);
+        let Some(execution) = self.self_healing.handle_error(occurrence) else {
+            return false;
+        };
+
+        if !execution.success {
+            warn!(
+                "Self-healing strategy '{}' failed: {:?}",
+                execution.strategy, execution.error
+            );
+            return false;
+        }
+
+        let restored = self.restore_from_self_healing_checkpoint();
+        if restored {
+            info!(
+                "Self-healing strategy '{}' restored agent state",
+                execution.strategy
+            );
+        } else {
+            info!(
+                "Self-healing strategy '{}' succeeded without state restore",
+                execution.strategy
+            );
+        }
+
+        true
     }
 
     pub async fn run_task(&mut self, task: &str) -> Result<()> {
@@ -1049,6 +1196,8 @@ To call a tool, use this EXACT XML structure:
         self.messages.push(msg);
 
         let mut iteration = 0;
+        #[cfg(feature = "resilience")]
+        let mut recovery_attempts = 0u32;
         let task_description = task.to_string();
 
         // Initialize multi-phase progress tracker
@@ -1088,6 +1237,10 @@ To call a tool, use this EXACT XML structure:
                                         warn!("Failed to save completed checkpoint: {}", e);
                                     }
                                     return Ok(());
+                                }
+                                #[cfg(feature = "resilience")]
+                                {
+                                    recovery_attempts = 0;
                                 }
                                 self.loop_control.increment_step();
                                 self.cognitive_state.set_phase(CyclePhase::Reflect);
@@ -1135,6 +1288,10 @@ To call a tool, use this EXACT XML structure:
                     progress.update_progress(step_progress);
                     match self.execute_step_with_logging(&task_description).await {
                         Ok(completed) => {
+                            #[cfg(feature = "resilience")]
+                            {
+                                recovery_attempts = 0;
+                            }
                             if completed {
                                 record_state_transition("Executing", "Completed");
                                 progress.complete_phase();
@@ -1198,6 +1355,33 @@ To call a tool, use this EXACT XML structure:
 
                     println!("{} {}", "⚠️ Recovering from error:".bright_red(), error);
 
+                    #[cfg(feature = "resilience")]
+                    let mut recovered = false;
+                    #[cfg(not(feature = "resilience"))]
+                    let recovered = false;
+                    #[cfg(feature = "resilience")]
+                    {
+                        if recovery_attempts < self.config.continuous_work.max_recovery_attempts {
+                            recovered = self.try_self_healing_recovery(&error, "run_task");
+                            if recovered {
+                                recovery_attempts += 1;
+                            }
+                        } else {
+                            warn!(
+                                "Auto-recovery attempts exhausted ({})",
+                                self.config.continuous_work.max_recovery_attempts
+                            );
+                        }
+                    }
+
+                    if recovered {
+                        record_state_transition("ErrorRecovery", "Executing");
+                        self.loop_control.set_state(AgentState::Executing {
+                            step: self.loop_control.current_step(),
+                        });
+                        continue;
+                    }
+
                     // Add cognitive context about the error
                     let cognitive_summary = self.cognitive_state.summary();
                     self.messages.push(Message::user(format!(
@@ -1241,665 +1425,6 @@ To call a tool, use this EXACT XML structure:
         }
 
         Ok(())
-    }
-
-    /// Execute a step with tool call logging for checkpoints
-    /// If `use_last_message` is true, process tool calls from the last assistant message
-    /// instead of making a new API call (used after planning phase)
-    async fn execute_step_with_logging(&mut self, _task_description: &str) -> Result<bool> {
-        self.execute_step_internal(false).await
-    }
-
-    /// Execute tool calls from the last assistant message (after planning)
-    async fn execute_pending_tool_calls(&mut self, _task_description: &str) -> Result<bool> {
-        self.execute_step_internal(true).await
-    }
-
-    /// Internal execution logic
-    /// If `use_last_message` is true, process tool calls from the last assistant message
-    async fn execute_step_internal(&mut self, use_last_message: bool) -> Result<bool> {
-        // For native function calling, we track tool_calls separately
-        let mut native_tool_calls: Option<Vec<crate::api::types::ToolCall>> = None;
-
-        let (content, reasoning_content) = if use_last_message {
-            // Extract content from the last assistant message
-            let last_msg = self
-                .messages
-                .iter()
-                .rev()
-                .find(|m| m.role == "assistant")
-                .context("No previous assistant message found")?;
-            debug!(
-                "Using content from last assistant message ({} chars)",
-                last_msg.content.len()
-            );
-            // Also check for native tool calls in the last message
-            if self.config.agent.native_function_calling {
-                native_tool_calls = last_msg.tool_calls.clone();
-            }
-            (last_msg.content.clone(), last_msg.reasoning_content.clone())
-        } else {
-            // Check compression before adding more context
-            if self.compressor.should_compress(&self.messages) {
-                info!("Context compression triggered");
-                match self.compressor.compress(&self.client, &self.messages).await {
-                    Ok(compressed) => {
-                        self.messages = compressed;
-                    }
-                    Err(e) => {
-                        warn!("Compression failed, using hard limit: {}", e);
-                        self.messages = self.compressor.hard_compress(&self.messages);
-                    }
-                }
-            }
-
-            // Use streaming or regular chat based on config
-            let (content, reasoning) = if self.config.agent.streaming {
-                let (content, reasoning, stream_tool_calls) = self
-                    .chat_streaming(
-                        self.messages.clone(),
-                        self.api_tools(),
-                        ThinkingMode::Enabled,
-                    )
-                    .await?;
-
-                // Handle native tool calls from stream
-                if self.config.agent.native_function_calling && stream_tool_calls.is_some() {
-                    native_tool_calls = stream_tool_calls.clone();
-                    info!(
-                        "Received {} native tool calls from stream",
-                        native_tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
-                    );
-                }
-
-                // Add assistant message to history
-                self.messages.push(Message {
-                    role: "assistant".to_string(),
-                    content: content.clone(),
-                    reasoning_content: reasoning.clone(),
-                    tool_calls: native_tool_calls.clone(),
-                    tool_call_id: None,
-                    name: None,
-                });
-
-                (content, reasoning)
-            } else {
-                // Non-streaming path
-                let response = self
-                    .client
-                    .chat(
-                        self.messages.clone(),
-                        self.api_tools(),
-                        ThinkingMode::Enabled,
-                    )
-                    .await?;
-
-                let choice = response
-                    .choices
-                    .into_iter()
-                    .next()
-                    .context("No response from model")?;
-
-                let message = choice.message;
-                let content = message.content.clone();
-                let reasoning = message.reasoning_content.clone();
-
-                // Check for native tool calls in response
-                if self.config.agent.native_function_calling && message.tool_calls.is_some() {
-                    native_tool_calls = message.tool_calls.clone();
-                    info!(
-                        "Received {} native tool calls from API",
-                        native_tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
-                    );
-                }
-
-                // Debug: print raw response content for troubleshooting
-                debug!(
-                    "Raw model response content ({} chars): {}",
-                    content.len(),
-                    content
-                );
-
-                // Verbose logging when SELFWARE_DEBUG is set
-                if std::env::var("SELFWARE_DEBUG").is_ok() {
-                    println!("{}", "=== DEBUG: Raw Model Response ===".bright_magenta());
-                    println!("{}", content);
-                    println!("{}", "=== END DEBUG ===".bright_magenta());
-                }
-
-                if content.is_empty() {
-                    warn!("Model returned empty content!");
-                }
-
-                // Print reasoning if present (non-streaming only, streaming prints inline)
-                if let Some(ref r) = reasoning {
-                    println!("{} {}", "Thinking:".dimmed(), r.dimmed());
-                    debug!("Reasoning content ({} chars): {}", r.len(), r);
-                }
-
-                // Add assistant message to history
-                self.messages.push(Message {
-                    role: "assistant".to_string(),
-                    content: content.clone(),
-                    reasoning_content: reasoning.clone(),
-                    tool_calls: native_tool_calls.clone(),
-                    tool_call_id: None,
-                    name: None,
-                });
-
-                (content, reasoning)
-            };
-
-            (content, reasoning)
-        };
-
-        // Tool calls with their IDs (for native function calling)
-        // Format: (name, args_str, tool_call_id)
-        let mut tool_calls: Vec<(String, String, Option<String>)> = Vec::new();
-
-        // Check for native function calling first (only if tool_calls is non-empty)
-        if self.config.agent.native_function_calling
-            && native_tool_calls.as_ref().is_some_and(|tc| !tc.is_empty())
-        {
-            let native_calls = native_tool_calls.as_ref().unwrap();
-            info!("Using {} native tool calls from API", native_calls.len());
-            for tc in native_calls {
-                debug!(
-                    "Native tool call: {} (id: {}) with args: {}",
-                    tc.function.name, tc.id, tc.function.arguments
-                );
-                tool_calls.push((
-                    tc.function.name.clone(),
-                    tc.function.arguments.clone(),
-                    Some(tc.id.clone()),
-                ));
-            }
-        } else {
-            // Fall back to parsing tool calls from content using robust multi-format parser
-            // This happens when native FC is disabled OR the API returns empty tool_calls
-            info!(
-                "Falling back to XML parsing (native FC returned {} tool calls)",
-                native_tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
-            );
-            debug!("Looking for tool calls with multi-format parser...");
-            let parse_result = parse_tool_calls(&content);
-            tool_calls = parse_result
-                .tool_calls
-                .iter()
-                .map(|tc| {
-                    debug!(
-                        "Found tool call in content: {} with args: {}",
-                        tc.tool_name, tc.arguments
-                    );
-                    (tc.tool_name.clone(), tc.arguments.to_string(), None)
-                })
-                .collect();
-
-            // Log any parse errors
-            for error in &parse_result.parse_errors {
-                warn!("Tool parse error: {}", error);
-            }
-
-            // Also check reasoning content for tool calls (some models put tools there)
-            if tool_calls.is_empty() {
-                if let Some(ref reasoning_text) = reasoning_content {
-                    let reasoning_result = parse_tool_calls(reasoning_text);
-                    let reasoning_tools: Vec<(String, String, Option<String>)> = reasoning_result
-                        .tool_calls
-                        .iter()
-                        .map(|tc| {
-                            debug!(
-                                "Found tool call in reasoning: {} with args: {}",
-                                tc.tool_name, tc.arguments
-                            );
-                            (tc.tool_name.clone(), tc.arguments.to_string(), None)
-                        })
-                        .collect();
-                    if !reasoning_tools.is_empty() {
-                        info!(
-                            "Found {} tool calls in reasoning content",
-                            reasoning_tools.len()
-                        );
-                        tool_calls = reasoning_tools;
-                    }
-                }
-            }
-        }
-
-        debug!("Total tool calls to execute: {}", tool_calls.len());
-
-        // If no tool calls found, check if content looks like it should have them
-        if tool_calls.is_empty()
-            && (content.contains("<tool")
-                || content.contains("tool_name")
-                || content.contains("function"))
-        {
-            warn!("Content appears to contain tool-related keywords but no valid tool calls were parsed:");
-            warn!(
-                "Content preview: {}",
-                &content.chars().take(500).collect::<String>()
-            );
-        }
-
-        // Keep reasoning for use outside this block
-        let _reasoning = reasoning_content;
-
-        // Detect "intent to act" responses that should trigger follow-up
-        // These are responses where the model says it will do something but doesn't use tools
-        let intent_phrases = [
-            "let me", "i'll ", "i will", "let's", "first,", "starting", "begin by", "going to",
-            "need to", "start by", "help you",
-        ];
-        let content_lower = content.to_lowercase();
-        let has_intent = intent_phrases.iter().any(|p| content_lower.contains(p));
-
-        // If no tool calls but content suggests intent to act, prompt for action
-        if tool_calls.is_empty() && has_intent && content.len() < 1000 && !use_last_message {
-            info!("Detected intent without action, prompting model to use tools");
-            output::intent_without_action();
-            self.messages.push(Message::user(
-                "Please use the appropriate tools to take action now. Don't just describe what you'll do - actually execute the tools."
-            ));
-            return Ok(false); // Continue loop to get actual tool calls
-        }
-
-        if !tool_calls.is_empty() {
-            // Execute tools with logging
-            for (name, args_str, tool_call_id) in tool_calls {
-                output::tool_call(&name);
-
-                let start_time = std::time::Instant::now();
-                let use_native_fc =
-                    self.config.agent.native_function_calling && tool_call_id.is_some();
-
-                // Safety check
-                let call_id = tool_call_id
-                    .clone()
-                    .unwrap_or_else(|| format!("call_{}", uuid::Uuid::new_v4()));
-                let fake_call = crate::api::types::ToolCall {
-                    id: call_id.clone(),
-                    call_type: "function".to_string(),
-                    function: crate::api::types::ToolFunction {
-                        name: name.clone(),
-                        arguments: args_str.clone(),
-                    },
-                };
-
-                if let Err(e) = self.safety.check_tool_call(&fake_call) {
-                    let error_msg = format!("Safety check failed: {}", e);
-                    output::safety_blocked(&error_msg);
-
-                    // Push result with appropriate message type
-                    if use_native_fc {
-                        self.messages.push(Message::tool(
-                            serde_json::json!({"error": error_msg}).to_string(),
-                            &call_id,
-                        ));
-                    } else {
-                        self.messages.push(Message::user(format!(
-                            "<tool_result><error>{}</error></tool_result>",
-                            error_msg
-                        )));
-                    }
-
-                    // Log failed tool call
-                    if let Some(ref mut checkpoint) = self.current_checkpoint {
-                        checkpoint.log_tool_call(ToolCallLog {
-                            timestamp: Utc::now(),
-                            tool_name: name.clone(),
-                            arguments: args_str.clone(),
-                            result: Some(error_msg),
-                            success: false,
-                            duration_ms: Some(start_time.elapsed().as_millis() as u64),
-                        });
-                    }
-                    continue;
-                }
-
-                // Check execution mode for confirmation
-                if self.needs_confirmation(&name) {
-                    use std::io::{self, Write};
-
-                    // Show tool call preview
-                    let args_preview: String = args_str.chars().take(100).collect();
-                    let args_display = if args_str.len() > 100 {
-                        format!("{}...", args_preview)
-                    } else {
-                        args_preview
-                    };
-
-                    // In non-interactive mode, fail fast - don't silently skip tools
-                    if !self.is_interactive() {
-                        return Err(AgentError::ConfirmationRequired {
-                            tool_name: name.clone(),
-                        }
-                        .into());
-                    }
-
-                    println!(
-                        "{} Tool: {} Args: {}",
-                        "⚠️".bright_yellow(),
-                        name.bright_cyan(),
-                        args_display.bright_white()
-                    );
-                    print!("{}", "Execute? [y/N/s(kip all)]: ".bright_yellow());
-                    io::stdout().flush().ok();
-
-                    let mut response = String::new();
-                    if io::stdin().read_line(&mut response).is_ok() {
-                        let response = response.trim().to_lowercase();
-                        match response.as_str() {
-                            "y" | "yes" => {
-                                // Proceed with execution
-                            }
-                            "s" | "skip" => {
-                                // Switch to yolo mode for this session
-                                self.set_execution_mode(crate::config::ExecutionMode::Yolo);
-                                println!(
-                                    "{} Switched to YOLO mode for this session",
-                                    "⚡".bright_yellow()
-                                );
-                            }
-                            _ => {
-                                // User rejected - skip this tool
-                                let skip_msg = "Tool execution skipped by user";
-                                println!("{} {}", "⏭️".bright_yellow(), skip_msg);
-
-                                if use_native_fc {
-                                    self.messages.push(Message::tool(
-                                        serde_json::json!({"skipped": skip_msg}).to_string(),
-                                        &call_id,
-                                    ));
-                                } else {
-                                    self.messages.push(Message::user(format!(
-                                        "<tool_result><skipped>{}</skipped></tool_result>",
-                                        skip_msg
-                                    )));
-                                }
-                                continue;
-                            }
-                        }
-                    }
-                }
-
-                // Parse and execute
-                let args: Value = match serde_json::from_str(&args_str) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let err = format!("Invalid JSON arguments: {}", e);
-                        println!("{} {}", "✗".bright_red(), err);
-
-                        // Push result with appropriate message type
-                        if use_native_fc {
-                            self.messages.push(Message::tool(
-                                serde_json::json!({"error": err}).to_string(),
-                                &call_id,
-                            ));
-                        } else {
-                            self.messages.push(Message::user(format!(
-                                "<tool_result><error>{}</error></tool_result>",
-                                err
-                            )));
-                        }
-
-                        // Log failed tool call
-                        if let Some(ref mut checkpoint) = self.current_checkpoint {
-                            checkpoint.log_tool_call(ToolCallLog {
-                                timestamp: Utc::now(),
-                                tool_name: name.clone(),
-                                arguments: args_str.clone(),
-                                result: Some(err),
-                                success: false,
-                                duration_ms: Some(start_time.elapsed().as_millis() as u64),
-                            });
-                        }
-                        continue;
-                    }
-                };
-
-                debug!("Tool arguments: {}", args);
-
-                let (success, result) = match self.tools.get(&name) {
-                    Some(tool) => {
-                        match tool.execute(args.clone()).await {
-                            Ok(result) => {
-                                output::tool_success(&name);
-                                let result_str = serde_json::to_string(&result)?;
-
-                                // Log successful tool call
-                                if let Some(ref mut checkpoint) = self.current_checkpoint {
-                                    checkpoint.log_tool_call(ToolCallLog {
-                                        timestamp: Utc::now(),
-                                        tool_name: name.clone(),
-                                        arguments: args_str.clone(),
-                                        result: Some(result_str.chars().take(1000).collect()),
-                                        success: true,
-                                        duration_ms: Some(start_time.elapsed().as_millis() as u64),
-                                    });
-                                }
-
-                                // Run verification after file_edit tool
-                                let verification_result = if name == "file_edit" {
-                                    if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                                        info!("Running verification after file_edit on {}", path);
-                                        self.cognitive_state.set_phase(CyclePhase::Verify);
-                                        match self
-                                            .verification_gate
-                                            .verify_change(
-                                                &[path.to_string()],
-                                                &format!("file_edit:{}", path),
-                                            )
-                                            .await
-                                        {
-                                            Ok(report) => {
-                                                if report.overall_passed {
-                                                    self.cognitive_state
-                                                        .episodic_memory
-                                                        .what_worked(
-                                                            "file_edit",
-                                                            &format!(
-                                                                "Edit to {} passed verification",
-                                                                path
-                                                            ),
-                                                        );
-                                                    output::verification_report(
-                                                        &format!("{}", report),
-                                                        true,
-                                                    );
-                                                    None
-                                                } else {
-                                                    self.cognitive_state
-                                                        .episodic_memory
-                                                        .what_failed(
-                                                            "file_edit",
-                                                            &format!(
-                                                                "Edit to {} failed verification",
-                                                                path
-                                                            ),
-                                                        );
-                                                    output::verification_report(
-                                                        &format!("{}", report),
-                                                        false,
-                                                    );
-                                                    Some(format!("\n\n<verification_failed>\n{}\n</verification_failed>", report))
-                                                }
-                                            }
-                                            Err(e) => {
-                                                warn!("Verification failed to run: {}", e);
-                                                None
-                                            }
-                                        }
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                };
-
-                                // Enhance cargo_check output with error analysis
-                                let enhanced_result = if name == "cargo_check"
-                                    && result_str.contains("\"success\":false")
-                                {
-                                    self.enhance_cargo_errors(&result_str)
-                                } else {
-                                    result_str.clone()
-                                };
-
-                                // Combine result with verification if applicable
-                                let final_result = match verification_result {
-                                    Some(ver_msg) => format!("{}{}", enhanced_result, ver_msg),
-                                    None => enhanced_result,
-                                };
-
-                                (true, final_result)
-                            }
-                            Err(e) => {
-                                output::tool_failure(&name, &e.to_string());
-
-                                // Log failed tool call
-                                if let Some(ref mut checkpoint) = self.current_checkpoint {
-                                    checkpoint.log_tool_call(ToolCallLog {
-                                        timestamp: Utc::now(),
-                                        tool_name: name.clone(),
-                                        arguments: args_str.clone(),
-                                        result: Some(e.to_string()),
-                                        success: false,
-                                        duration_ms: Some(start_time.elapsed().as_millis() as u64),
-                                    });
-                                }
-
-                                // Record failure in cognitive state
-                                self.cognitive_state
-                                    .episodic_memory
-                                    .what_failed(&name, &e.to_string());
-
-                                (false, e.to_string())
-                            }
-                        }
-                    }
-                    None => {
-                        let err = format!("Unknown tool: {}", name);
-                        println!("{} {}", "✗".bright_red(), err);
-
-                        // Log unknown tool call
-                        if let Some(ref mut checkpoint) = self.current_checkpoint {
-                            checkpoint.log_tool_call(ToolCallLog {
-                                timestamp: Utc::now(),
-                                tool_name: name.clone(),
-                                arguments: args_str.clone(),
-                                result: Some(err.clone()),
-                                success: false,
-                                duration_ms: Some(start_time.elapsed().as_millis() as u64),
-                            });
-                        }
-
-                        (false, err)
-                    }
-                };
-
-                // Push result with appropriate message type
-                if use_native_fc {
-                    // For native function calling, send JSON result with tool role
-                    let result_json = if success {
-                        result
-                    } else {
-                        serde_json::json!({"error": result}).to_string()
-                    };
-                    self.messages.push(Message::tool(result_json, &call_id));
-                } else {
-                    // For XML-based calling, wrap in tool_result tags
-                    let formatted = if success {
-                        format!("<tool_result>{}</tool_result>", result)
-                    } else {
-                        format!("<tool_result><error>{}</error></tool_result>", result)
-                    };
-                    self.messages.push(Message::user(formatted));
-                }
-            }
-
-            Ok(false) // Continue loop
-        } else {
-            // No tool calls, task complete
-            output::final_answer(&content);
-            // Note: assistant message was already added above when not using last message
-            Ok(true)
-        }
-    }
-
-    /// Plan phase - returns true if model wants to execute tools (should continue to execution)
-    /// This now combines planning with initial tool extraction to avoid double API calls
-    async fn plan(&mut self) -> Result<bool> {
-        // Tools are embedded in system prompt - see WORKAROUND comment in Agent::new()
-        debug!("Sending planning request to model...");
-        let response = self
-            .client
-            .chat(
-                self.messages.clone(),
-                self.api_tools(),
-                ThinkingMode::Enabled,
-            )
-            .await?;
-
-        let choice = response
-            .choices
-            .into_iter()
-            .next()
-            .context("No response from model")?;
-
-        let assistant_msg = choice.message;
-        let content = &assistant_msg.content;
-
-        // Debug logging for planning response
-        debug!(
-            "Planning response content ({} chars): {}",
-            content.len(),
-            content
-        );
-
-        // Verbose logging when SELFWARE_DEBUG is set or verbose mode
-        output::debug_output("Planning Response", content);
-
-        if content.is_empty() {
-            warn!("Model returned empty planning content!");
-        }
-        if let Some(ref reasoning) = assistant_msg.reasoning_content {
-            debug!(
-                "Planning reasoning ({} chars): {}",
-                reasoning.len(),
-                reasoning
-            );
-            if let Some(r) = &assistant_msg.reasoning_content {
-                output::thinking(r, false);
-            }
-        }
-
-        // Check if the planning response contains tool calls
-        // For native function calling, check tool_calls field; otherwise parse from content
-        let (has_tool_calls, native_tool_calls) =
-            if self.config.agent.native_function_calling && assistant_msg.tool_calls.is_some() {
-                let tool_calls = assistant_msg.tool_calls.as_ref().unwrap();
-                info!(
-                    "Planning response has {} native tool calls",
-                    tool_calls.len()
-                );
-                (!tool_calls.is_empty(), assistant_msg.tool_calls.clone())
-            } else {
-                let parsed = !parse_tool_calls(content).tool_calls.is_empty();
-                debug!("Planning response has tool calls (parsed): {}", parsed);
-                (parsed, None)
-            };
-
-        self.messages.push(Message {
-            role: "assistant".to_string(),
-            content: content.clone(),
-            reasoning_content: assistant_msg.reasoning_content,
-            tool_calls: native_tool_calls,
-            tool_call_id: None,
-            name: None,
-        });
-
-        // Return whether there are tool calls to execute
-        Ok(has_tool_calls)
     }
 
     pub async fn interactive(&mut self) -> Result<()> {
@@ -2519,6 +2044,8 @@ To call a tool, use this EXACT XML structure:
             .unwrap_or_default();
 
         let mut iteration = 0;
+        #[cfg(feature = "resilience")]
+        let mut recovery_attempts = 0u32;
 
         while let Some(state) = self.loop_control.next_state() {
             match state {
@@ -2545,6 +2072,10 @@ To call a tool, use this EXACT XML structure:
                     );
                     match self.execute_step_with_logging(&task_description).await {
                         Ok(completed) => {
+                            #[cfg(feature = "resilience")]
+                            {
+                                recovery_attempts = 0;
+                            }
                             if completed {
                                 record_state_transition("Executing", "Completed");
                                 output::task_completed();
@@ -2599,6 +2130,34 @@ To call a tool, use this EXACT XML structure:
                     let _span = enter_agent_step("ErrorRecovery", self.loop_control.current_step());
 
                     println!("{} {}", "⚠️ Recovering from error:".bright_red(), error);
+
+                    #[cfg(feature = "resilience")]
+                    let mut recovered = false;
+                    #[cfg(not(feature = "resilience"))]
+                    let recovered = false;
+                    #[cfg(feature = "resilience")]
+                    {
+                        if recovery_attempts < self.config.continuous_work.max_recovery_attempts {
+                            recovered =
+                                self.try_self_healing_recovery(&error, "continue_execution");
+                            if recovered {
+                                recovery_attempts += 1;
+                            }
+                        } else {
+                            warn!(
+                                "Auto-recovery attempts exhausted ({})",
+                                self.config.continuous_work.max_recovery_attempts
+                            );
+                        }
+                    }
+
+                    if recovered {
+                        record_state_transition("ErrorRecovery", "Executing");
+                        self.loop_control.set_state(AgentState::Executing {
+                            step: self.loop_control.current_step(),
+                        });
+                        continue;
+                    }
 
                     let cognitive_summary = self.cognitive_state.summary();
                     self.messages.push(Message::user(format!(

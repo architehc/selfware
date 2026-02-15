@@ -9,6 +9,7 @@
 
 use crate::api::types::Message;
 use crate::config::Config;
+use crate::token_count::estimate_tokens_with_overhead;
 use anyhow::Result;
 use chrono::Utc;
 
@@ -37,13 +38,7 @@ impl MemoryEntry {
 }
 
 fn estimate_tokens(content: &str) -> usize {
-    // Rough estimate: 1 token per 4 chars for prose, 3 for code
-    let factor = if content.contains('{') || content.contains(';') {
-        3
-    } else {
-        4
-    };
-    content.len() / factor + 10
+    estimate_tokens_with_overhead(content, 10)
 }
 
 impl AgentMemory {
@@ -169,8 +164,8 @@ mod tests {
         config.agent.token_budget = 100; // Very small budget
         let mut memory = AgentMemory::new(&config).unwrap();
 
-        // Add a lot of content to exceed 85% threshold
-        memory.add_message(&Message::user("x".repeat(500)));
+        // Add enough content to exceed 85% threshold with tokenizer-based counting.
+        memory.add_message(&Message::user("x".repeat(10000)));
 
         assert!(memory.is_near_limit());
     }
@@ -321,10 +316,11 @@ mod tests {
     #[test]
     fn test_estimate_tokens_long_text() {
         let long_text = "a".repeat(1000);
+        let short_text = "a".repeat(100);
         let tokens = estimate_tokens(&long_text);
-        // 1000 / 4 + 10 = 260 tokens for prose
-        assert!(tokens > 200);
-        assert!(tokens < 300);
+        let short_tokens = estimate_tokens(&short_text);
+        assert!(tokens > short_tokens);
+        assert!(tokens > 10);
     }
 
     #[test]
@@ -421,10 +417,8 @@ mod tests {
         config.agent.token_budget = 1000;
         let mut memory = AgentMemory::new(&config).unwrap();
 
-        // Add content that's well above 85% (850 tokens)
-        // With factor 4 and base 10: need more than (850-10)*4 = 3360 chars
-        // Use 4000 chars to be safely over
-        let content = "a".repeat(4000);
+        // Add content that's well above 85% threshold with tokenizer-based counting.
+        let content = "a".repeat(20000);
         memory.add_message(&Message::user(&content));
 
         assert!(memory.is_near_limit());

@@ -182,8 +182,8 @@ impl SelfwareEditor {
             ReedlineEvent::UntilFound(vec![
                 ReedlineEvent::HistoryHintComplete, // Complete history hint first
                 ReedlineEvent::Edit(vec![EditCommand::Complete]), // Try inline completion
-                ReedlineEvent::MenuNext,            // If menu open, go to next item
-                ReedlineEvent::Menu("completion_menu".to_string()), // Otherwise open menu
+                ReedlineEvent::Menu("completion_menu".to_string()), // Open menu for visibility
+                ReedlineEvent::MenuNext,            // Then cycle entries
             ]),
         );
 

@@ -1,4 +1,6 @@
 use super::Tool;
+use crate::config::SafetyConfig;
+use crate::safety::path_validator::PathValidator;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -49,6 +51,7 @@ impl Tool for FileRead {
         }
 
         let args: Args = serde_json::from_value(args)?;
+        validate_tool_path(&args.path)?;
         let path = Path::new(&args.path);
 
         let content = fs::read_to_string(path)
@@ -105,6 +108,7 @@ impl Tool for FileWrite {
         }
 
         let args: Args = serde_json::from_value(args)?;
+        validate_tool_path(&args.path)?;
         let path = Path::new(&args.path);
 
         // Create backup if exists
@@ -159,6 +163,7 @@ impl Tool for FileEdit {
         }
 
         let args: Args = serde_json::from_value(args)?;
+        validate_tool_path(&args.path)?;
         let content = fs::read_to_string(&args.path)?;
 
         // Check for exactly one match
@@ -214,6 +219,7 @@ impl Tool for DirectoryTree {
         }
 
         let args: Args = serde_json::from_value(args)?;
+        validate_tool_path(&args.path)?;
 
         let mut entries = vec![];
         for entry in walkdir::WalkDir::new(&args.path)
@@ -254,6 +260,15 @@ fn default_true() -> bool {
 }
 fn default_three() -> usize {
     3
+}
+
+fn validate_tool_path(path: &str) -> Result<()> {
+    // SafetyChecker enforces user-configured policy; tools still apply shared path
+    // validation as defense-in-depth for direct tool invocation paths.
+    let mut config = SafetyConfig::default();
+    config.allowed_paths.clear();
+    let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    PathValidator::new(&config, working_dir).validate(path)
 }
 
 #[cfg(test)]
@@ -820,5 +835,29 @@ mod tests {
         let has_file = entries.iter().any(|e| e["type"] == "file");
         assert!(has_dir);
         assert!(has_file);
+    }
+
+    #[tokio::test]
+    async fn test_file_read_blocks_traversal() {
+        let tool = FileRead;
+        let args = serde_json::json!({"path": "../should_not_escape.txt"});
+        let result = tool.execute(args).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Path traversal detected"));
+    }
+
+    #[tokio::test]
+    async fn test_directory_tree_blocks_traversal() {
+        let tool = DirectoryTree;
+        let args = serde_json::json!({"path": "../"});
+        let result = tool.execute(args).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Path traversal detected"));
     }
 }

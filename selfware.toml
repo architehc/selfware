@@ -14,3 +14,14 @@ step_timeout_secs = 600
 # Enable native function calling (requires backend support like sglang --tool-call-parser)
 native_function_calling = true
 
+[continuous_work]
+enabled = true
+checkpoint_interval_tools = 10
+checkpoint_interval_secs = 300
+auto_recovery = true
+max_recovery_attempts = 3
+
+[retry]
+max_retries = 5
+base_delay_ms = 1000
+max_delay_ms = 60000

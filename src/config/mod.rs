@@ -63,6 +63,12 @@ pub struct Config {
     #[serde(default)]
     pub ui: UiConfig,
 
+    #[serde(default)]
+    pub continuous_work: ContinuousWorkConfig,
+
+    #[serde(default)]
+    pub retry: RetrySettings,
+
     /// Runtime execution mode (set via CLI, not persisted)
     #[serde(skip)]
     pub execution_mode: ExecutionMode,
@@ -103,6 +109,62 @@ pub struct UiConfig {
     pub animation_speed: f64,
 }
 
+/// Continuous work configuration for long-running sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContinuousWorkConfig {
+    /// Enable periodic checkpointing policy.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Save checkpoint after this many tool calls.
+    #[serde(default = "default_checkpoint_interval_tools")]
+    pub checkpoint_interval_tools: usize,
+    /// Save checkpoint after this many seconds.
+    #[serde(default = "default_checkpoint_interval_secs")]
+    pub checkpoint_interval_secs: u64,
+    /// Enable automatic recovery attempts when available.
+    #[serde(default = "default_true")]
+    pub auto_recovery: bool,
+    /// Maximum recovery attempts per failure.
+    #[serde(default = "default_max_recovery_attempts")]
+    pub max_recovery_attempts: u32,
+}
+
+impl Default for ContinuousWorkConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            checkpoint_interval_tools: default_checkpoint_interval_tools(),
+            checkpoint_interval_secs: default_checkpoint_interval_secs(),
+            auto_recovery: true,
+            max_recovery_attempts: default_max_recovery_attempts(),
+        }
+    }
+}
+
+/// Retry configuration for API/network operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrySettings {
+    /// Maximum retries before failing.
+    #[serde(default = "default_retry_max_retries")]
+    pub max_retries: u32,
+    /// Initial delay before first retry.
+    #[serde(default = "default_retry_base_delay_ms")]
+    pub base_delay_ms: u64,
+    /// Upper bound for retry delay.
+    #[serde(default = "default_retry_max_delay_ms")]
+    pub max_delay_ms: u64,
+}
+
+impl Default for RetrySettings {
+    fn default() -> Self {
+        Self {
+            max_retries: default_retry_max_retries(),
+            base_delay_ms: default_retry_base_delay_ms(),
+            max_delay_ms: default_retry_max_delay_ms(),
+        }
+    }
+}
+
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
@@ -121,6 +183,24 @@ fn default_theme() -> String {
 }
 fn default_animation_speed() -> f64 {
     1.0
+}
+fn default_checkpoint_interval_tools() -> usize {
+    10
+}
+fn default_checkpoint_interval_secs() -> u64 {
+    300
+}
+fn default_max_recovery_attempts() -> u32 {
+    3
+}
+fn default_retry_max_retries() -> u32 {
+    5
+}
+fn default_retry_base_delay_ms() -> u64 {
+    1000
+}
+fn default_retry_max_delay_ms() -> u64 {
+    60000
 }
 
 /// YOLO mode configuration (loaded from config file)
@@ -213,6 +293,8 @@ impl Default for Config {
             agent: AgentConfig::default(),
             yolo: YoloFileConfig::default(),
             ui: UiConfig::default(),
+            continuous_work: ContinuousWorkConfig::default(),
+            retry: RetrySettings::default(),
             execution_mode: ExecutionMode::default(),
             compact_mode: false,
             verbose_mode: false,
@@ -712,6 +794,18 @@ mod tests {
                 show_tokens: true,
                 animation_speed: 1.5,
             },
+            continuous_work: ContinuousWorkConfig {
+                enabled: true,
+                checkpoint_interval_tools: 8,
+                checkpoint_interval_secs: 180,
+                auto_recovery: true,
+                max_recovery_attempts: 4,
+            },
+            retry: RetrySettings {
+                max_retries: 6,
+                base_delay_ms: 500,
+                max_delay_ms: 20000,
+            },
             execution_mode: ExecutionMode::default(),
             compact_mode: false,
             verbose_mode: false,
@@ -1040,5 +1134,52 @@ mod tests {
         assert_eq!(config.ui.theme, "amber"); // default
         assert!(config.ui.compact_mode);
         assert!(config.ui.show_tokens);
+    }
+
+    #[test]
+    fn test_continuous_work_defaults() {
+        let config = Config::default();
+        assert!(config.continuous_work.enabled);
+        assert_eq!(config.continuous_work.checkpoint_interval_tools, 10);
+        assert_eq!(config.continuous_work.checkpoint_interval_secs, 300);
+        assert!(config.continuous_work.auto_recovery);
+        assert_eq!(config.continuous_work.max_recovery_attempts, 3);
+    }
+
+    #[test]
+    fn test_retry_defaults() {
+        let config = Config::default();
+        assert_eq!(config.retry.max_retries, 5);
+        assert_eq!(config.retry.base_delay_ms, 1000);
+        assert_eq!(config.retry.max_delay_ms, 60000);
+    }
+
+    #[test]
+    fn test_config_with_continuous_work_and_retry_sections() {
+        let toml_str = r#"
+            endpoint = "http://localhost:8000/v1"
+
+            [continuous_work]
+            enabled = true
+            checkpoint_interval_tools = 7
+            checkpoint_interval_secs = 120
+            auto_recovery = false
+            max_recovery_attempts = 9
+
+            [retry]
+            max_retries = 11
+            base_delay_ms = 250
+            max_delay_ms = 20000
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.continuous_work.enabled);
+        assert_eq!(config.continuous_work.checkpoint_interval_tools, 7);
+        assert_eq!(config.continuous_work.checkpoint_interval_secs, 120);
+        assert!(!config.continuous_work.auto_recovery);
+        assert_eq!(config.continuous_work.max_recovery_attempts, 9);
+        assert_eq!(config.retry.max_retries, 11);
+        assert_eq!(config.retry.base_delay_ms, 250);
+        assert_eq!(config.retry.max_delay_ms, 20000);
     }
 }

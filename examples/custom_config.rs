@@ -158,6 +158,12 @@ fn build_custom_config() -> Config {
             animation_speed: 1.0,
         },
 
+        // Continuous-work settings
+        continuous_work: Default::default(),
+
+        // API retry settings
+        retry: Default::default(),
+
         // Default execution mode
         execution_mode: ExecutionMode::Normal,
 

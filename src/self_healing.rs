@@ -31,6 +31,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+mod executor;
+
+pub use executor::{ExecutorSummary, RecoveryExecution, RecoveryExecutor};
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -874,182 +878,6 @@ impl Default for HealthPredictor {
 }
 
 // ============================================================================
-// Recovery Executor
-// ============================================================================
-
-/// Recovery execution result
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecoveryExecution {
-    /// Strategy used
-    pub strategy: String,
-    /// Started at
-    pub started_at: u64,
-    /// Completed at
-    pub completed_at: Option<u64>,
-    /// Success
-    pub success: bool,
-    /// Actions executed
-    pub actions_executed: Vec<String>,
-    /// Error if failed
-    pub error: Option<String>,
-}
-
-/// Recovery executor
-pub struct RecoveryExecutor {
-    config: SelfHealingConfig,
-    /// Execution history
-    history: RwLock<VecDeque<RecoveryExecution>>,
-    /// Statistics
-    stats: ExecutorStats,
-}
-
-/// Executor statistics
-#[derive(Debug, Default)]
-pub struct ExecutorStats {
-    pub executions: AtomicU64,
-    pub successes: AtomicU64,
-    pub failures: AtomicU64,
-}
-
-impl RecoveryExecutor {
-    pub fn new(config: SelfHealingConfig) -> Self {
-        Self {
-            history: RwLock::new(VecDeque::with_capacity(100)),
-            config,
-            stats: ExecutorStats::default(),
-        }
-    }
-
-    /// Execute a recovery strategy
-    ///
-    /// NOTE: This is currently a simulation. Actions are logged but not actually
-    /// executed. Success is determined by the strategy's success_probability threshold.
-    /// In production, this would integrate with actual system recovery mechanisms.
-    pub fn execute(&self, strategy: &RecoveryStrategy) -> RecoveryExecution {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        // Check if self-healing is enabled
-        if !self.config.enabled {
-            return RecoveryExecution {
-                strategy: strategy.name.clone(),
-                started_at: now,
-                completed_at: Some(now),
-                success: false,
-                actions_executed: vec![],
-                error: Some("Self-healing is disabled".to_string()),
-            };
-        }
-
-        self.stats.executions.fetch_add(1, Ordering::Relaxed);
-
-        let mut actions_executed = Vec::new();
-        let mut success = true;
-        let mut error = None;
-
-        for action in &strategy.actions {
-            let action_name = match action {
-                RecoveryAction::Retry { .. } => "retry",
-                RecoveryAction::Restart { .. } => "restart",
-                RecoveryAction::Fallback { .. } => "fallback",
-                RecoveryAction::RestoreCheckpoint { .. } => "restore",
-                RecoveryAction::ClearCache { .. } => "clear_cache",
-                RecoveryAction::ResetState { .. } => "reset_state",
-                RecoveryAction::Custom { name, .. } => name.as_str(),
-            };
-            actions_executed.push(action_name.to_string());
-
-            // Simulation: success based on strategy's probability threshold
-            // A high success_probability (e.g., 0.9) means actions usually succeed
-            // This is deterministic for testing - real implementation would execute actual actions
-            if strategy.success_probability < 0.5 {
-                success = false;
-                error = Some(format!(
-                    "Action {} failed (low success probability)",
-                    action_name
-                ));
-                break;
-            }
-        }
-
-        if success {
-            self.stats.successes.fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.stats.failures.fetch_add(1, Ordering::Relaxed);
-        }
-
-        let completed_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-
-        let execution = RecoveryExecution {
-            strategy: strategy.name.clone(),
-            started_at: now,
-            completed_at: Some(completed_at),
-            success,
-            actions_executed,
-            error,
-        };
-
-        if let Ok(mut history) = self.history.write() {
-            history.push_back(execution.clone());
-            while history.len() > 100 {
-                history.pop_front();
-            }
-        }
-
-        execution
-    }
-
-    /// Get success rate
-    pub fn success_rate(&self) -> f32 {
-        let total = self.stats.executions.load(Ordering::Relaxed) as f32;
-        let successes = self.stats.successes.load(Ordering::Relaxed) as f32;
-        if total > 0.0 {
-            successes / total
-        } else {
-            0.0
-        }
-    }
-
-    /// Get history
-    pub fn history(&self) -> Vec<RecoveryExecution> {
-        self.history
-            .read()
-            .map(|h| h.iter().cloned().collect())
-            .unwrap_or_default()
-    }
-
-    /// Get summary
-    pub fn summary(&self) -> ExecutorSummary {
-        ExecutorSummary {
-            executions: self.stats.executions.load(Ordering::Relaxed),
-            successes: self.stats.successes.load(Ordering::Relaxed),
-            failures: self.stats.failures.load(Ordering::Relaxed),
-            success_rate: self.success_rate(),
-        }
-    }
-}
-
-impl Default for RecoveryExecutor {
-    fn default() -> Self {
-        Self::new(SelfHealingConfig::default())
-    }
-}
-
-/// Executor summary
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutorSummary {
-    pub executions: u64,
-    pub successes: u64,
-    pub failures: u64,
-    pub success_rate: f32,
-}
-
-// ============================================================================
 // Self-Healing Engine
 // ============================================================================
 
@@ -1093,7 +921,7 @@ impl SelfHealingEngine {
             .unwrap_or_else(RecoveryStrategy::retry);
 
         // Execute recovery
-        let execution = self.executor.execute(&strategy);
+        let execution = self.executor.execute_with_state(&strategy, &self.state);
 
         // Record outcome for learning
         self.learner.record_recovery(
@@ -1289,6 +1117,51 @@ mod tests {
         let result = executor.execute(&strategy);
         assert_eq!(result.strategy, "retry");
         assert!(result.completed_at.is_some());
+        assert!(result.success);
+    }
+
+    #[test]
+    fn test_recovery_executor_restore_requires_state_manager() {
+        let executor = RecoveryExecutor::default();
+        let strategy = RecoveryStrategy::restore();
+
+        let result = executor.execute(&strategy);
+        assert_eq!(result.strategy, "restore");
+        assert!(!result.success);
+        assert!(result.error.is_some());
+    }
+
+    #[test]
+    fn test_recovery_executor_restore_with_state_manager() {
+        let config = SelfHealingConfig::default();
+        let executor = RecoveryExecutor::new(config.clone());
+        let state = StateManager::new(config);
+        state.checkpoint("before_restore", serde_json::json!({"ok": true}));
+
+        let result = executor.execute_with_state(&RecoveryStrategy::restore(), &state);
+        assert!(result.success);
+    }
+
+    #[test]
+    fn test_recovery_executor_clear_cache_clears_checkpoints() {
+        let config = SelfHealingConfig::default();
+        let executor = RecoveryExecutor::new(config.clone());
+        let state = StateManager::new(config);
+        state.checkpoint("to_clear", serde_json::json!({"x": 1}));
+
+        let strategy = RecoveryStrategy {
+            name: "clear_cache".to_string(),
+            description: "clear".to_string(),
+            actions: vec![RecoveryAction::ClearCache {
+                scope: "all".to_string(),
+            }],
+            success_probability: 1.0,
+            estimated_duration_ms: 1,
+        };
+
+        let result = executor.execute_with_state(&strategy, &state);
+        assert!(result.success);
+        assert!(state.restore(None).is_none());
     }
 
     #[test]

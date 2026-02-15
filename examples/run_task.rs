@@ -86,6 +86,12 @@ async fn main() -> Result<()> {
         // UI settings
         ui: Default::default(),
 
+        // Continuous-work settings
+        continuous_work: Default::default(),
+
+        // API retry settings
+        retry: Default::default(),
+
         // CLI-only flags (not persisted in config)
         compact_mode: false,
         verbose_mode: false,

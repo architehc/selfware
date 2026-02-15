@@ -1,6 +1,7 @@
 use crate::api::types::Message;
 use crate::api::ApiClient;
 use crate::api::ThinkingMode;
+use crate::token_count::estimate_tokens_with_overhead;
 use anyhow::Result;
 use tracing::{debug, info, warn};
 
@@ -32,15 +33,7 @@ impl ContextCompressor {
     pub fn estimate_tokens(&self, messages: &[Message]) -> usize {
         messages
             .iter()
-            .map(|m| {
-                let chars = m.content.len();
-                let factor = if m.content.contains('{') || m.content.contains(';') {
-                    3
-                } else {
-                    4
-                };
-                chars / factor + 50
-            })
+            .map(|m| estimate_tokens_with_overhead(&m.content, 50))
             .sum()
     }
 
@@ -476,11 +469,14 @@ mod tests {
     fn test_estimate_tokens_large_message() {
         let compressor = ContextCompressor::new(100000);
         let large_content = "a".repeat(10000);
+        let small_content = "a".repeat(100);
         let messages = vec![Message::user(large_content)];
+        let small_messages = vec![Message::user(small_content)];
 
         let estimate = compressor.estimate_tokens(&messages);
-        // 10000 / 4 + 50 = 2550
-        assert!(estimate > 2500 && estimate < 3000);
+        let small_estimate = compressor.estimate_tokens(&small_messages);
+        assert!(estimate > small_estimate);
+        assert!(estimate > 50);
     }
 
     #[test]

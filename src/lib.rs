@@ -26,6 +26,7 @@
 // ============================================================================
 pub mod agent;
 pub mod api;
+pub mod cli;
 pub mod config;
 pub mod input;
 pub mod tools;
@@ -149,6 +150,7 @@ pub mod shell_hooks;
 #[cfg(feature = "speculative")]
 pub mod speculative;
 pub mod streaming;
+pub mod token_count;
 #[cfg(feature = "tokens")]
 pub mod tokens;
 pub mod tool_parser;

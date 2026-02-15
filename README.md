@@ -110,6 +110,18 @@ protected_branches = ["main"]
 max_iterations = 100
 step_timeout_secs = 600     # 10 min for fast models
 token_budget = 500000
+
+[continuous_work]
+enabled = true
+checkpoint_interval_tools = 10
+checkpoint_interval_secs = 300
+auto_recovery = true
+max_recovery_attempts = 3
+
+[retry]
+max_retries = 5
+base_delay_ms = 1000
+max_delay_ms = 60000
 ```
 
 ### 3. Start Coding
