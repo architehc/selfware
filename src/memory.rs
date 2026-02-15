@@ -9,6 +9,7 @@
 
 use crate::api::types::Message;
 use crate::config::Config;
+use crate::token_count::estimate_tokens_with_overhead;
 use anyhow::Result;
 use chrono::Utc;
 
@@ -37,13 +38,7 @@ impl MemoryEntry {
 }
 
 fn estimate_tokens(content: &str) -> usize {
-    // Rough estimate: 1 token per 4 chars for prose, 3 for code
-    let factor = if content.contains('{') || content.contains(';') {
-        3
-    } else {
-        4
-    };
-    content.len() / factor + 10
+    estimate_tokens_with_overhead(content, 10)
 }
 
 impl AgentMemory {

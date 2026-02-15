@@ -36,6 +36,7 @@ hex = "0.4"
 toml = "1.0"
 uuid = { version = "1.6", features = ["v4"] }
 once_cell = "1.19"
+tiktoken-rs = "0.7"
 whoami = "2.1"
 
 # Modern CLI/TUI
@@ -88,6 +89,7 @@ extras = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-ana
 [dev-dependencies]
 tokio-test = "0.4"
 criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1.5"
 
 [lib]
 name = "selfware"

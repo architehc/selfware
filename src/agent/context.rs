@@ -1,6 +1,7 @@
 use crate::api::types::Message;
 use crate::api::ApiClient;
 use crate::api::ThinkingMode;
+use crate::token_count::estimate_tokens_with_overhead;
 use anyhow::Result;
 use tracing::{debug, info, warn};
 
@@ -32,15 +33,7 @@ impl ContextCompressor {
     pub fn estimate_tokens(&self, messages: &[Message]) -> usize {
         messages
             .iter()
-            .map(|m| {
-                let chars = m.content.len();
-                let factor = if m.content.contains('{') || m.content.contains(';') {
-                    3
-                } else {
-                    4
-                };
-                chars / factor + 50
-            })
+            .map(|m| estimate_tokens_with_overhead(&m.content, 50))
             .sum()
     }
 

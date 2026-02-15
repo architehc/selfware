@@ -35,6 +35,12 @@ pub enum AgentError {
     ConfirmationRequired { tool_name: String },
 }
 
+struct AssistantStepResponse {
+    content: String,
+    reasoning_content: Option<String>,
+    native_tool_calls: Option<Vec<crate::api::types::ToolCall>>,
+}
+
 impl std::fmt::Display for AgentError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1258,213 +1264,13 @@ To call a tool, use this EXACT XML structure:
     /// Internal execution logic
     /// If `use_last_message` is true, process tool calls from the last assistant message
     async fn execute_step_internal(&mut self, use_last_message: bool) -> Result<bool> {
-        // For native function calling, we track tool_calls separately
-        let mut native_tool_calls: Option<Vec<crate::api::types::ToolCall>> = None;
-
-        let (content, reasoning_content) = if use_last_message {
-            // Extract content from the last assistant message
-            let last_msg = self
-                .messages
-                .iter()
-                .rev()
-                .find(|m| m.role == "assistant")
-                .context("No previous assistant message found")?;
-            debug!(
-                "Using content from last assistant message ({} chars)",
-                last_msg.content.len()
-            );
-            // Also check for native tool calls in the last message
-            if self.config.agent.native_function_calling {
-                native_tool_calls = last_msg.tool_calls.clone();
-            }
-            (last_msg.content.clone(), last_msg.reasoning_content.clone())
-        } else {
-            // Check compression before adding more context
-            if self.compressor.should_compress(&self.messages) {
-                info!("Context compression triggered");
-                match self.compressor.compress(&self.client, &self.messages).await {
-                    Ok(compressed) => {
-                        self.messages = compressed;
-                    }
-                    Err(e) => {
-                        warn!("Compression failed, using hard limit: {}", e);
-                        self.messages = self.compressor.hard_compress(&self.messages);
-                    }
-                }
-            }
-
-            // Use streaming or regular chat based on config
-            let (content, reasoning) = if self.config.agent.streaming {
-                let (content, reasoning, stream_tool_calls) = self
-                    .chat_streaming(
-                        self.messages.clone(),
-                        self.api_tools(),
-                        ThinkingMode::Enabled,
-                    )
-                    .await?;
-
-                // Handle native tool calls from stream
-                if self.config.agent.native_function_calling && stream_tool_calls.is_some() {
-                    native_tool_calls = stream_tool_calls.clone();
-                    info!(
-                        "Received {} native tool calls from stream",
-                        native_tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
-                    );
-                }
-
-                // Add assistant message to history
-                self.messages.push(Message {
-                    role: "assistant".to_string(),
-                    content: content.clone(),
-                    reasoning_content: reasoning.clone(),
-                    tool_calls: native_tool_calls.clone(),
-                    tool_call_id: None,
-                    name: None,
-                });
-
-                (content, reasoning)
-            } else {
-                // Non-streaming path
-                let response = self
-                    .client
-                    .chat(
-                        self.messages.clone(),
-                        self.api_tools(),
-                        ThinkingMode::Enabled,
-                    )
-                    .await?;
-
-                let choice = response
-                    .choices
-                    .into_iter()
-                    .next()
-                    .context("No response from model")?;
-
-                let message = choice.message;
-                let content = message.content.clone();
-                let reasoning = message.reasoning_content.clone();
-
-                // Check for native tool calls in response
-                if self.config.agent.native_function_calling && message.tool_calls.is_some() {
-                    native_tool_calls = message.tool_calls.clone();
-                    info!(
-                        "Received {} native tool calls from API",
-                        native_tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
-                    );
-                }
-
-                // Debug: print raw response content for troubleshooting
-                debug!(
-                    "Raw model response content ({} chars): {}",
-                    content.len(),
-                    content
-                );
-
-                // Verbose logging when SELFWARE_DEBUG is set
-                if std::env::var("SELFWARE_DEBUG").is_ok() {
-                    println!("{}", "=== DEBUG: Raw Model Response ===".bright_magenta());
-                    println!("{}", content);
-                    println!("{}", "=== END DEBUG ===".bright_magenta());
-                }
-
-                if content.is_empty() {
-                    warn!("Model returned empty content!");
-                }
-
-                // Print reasoning if present (non-streaming only, streaming prints inline)
-                if let Some(ref r) = reasoning {
-                    println!("{} {}", "Thinking:".dimmed(), r.dimmed());
-                    debug!("Reasoning content ({} chars): {}", r.len(), r);
-                }
-
-                // Add assistant message to history
-                self.messages.push(Message {
-                    role: "assistant".to_string(),
-                    content: content.clone(),
-                    reasoning_content: reasoning.clone(),
-                    tool_calls: native_tool_calls.clone(),
-                    tool_call_id: None,
-                    name: None,
-                });
-
-                (content, reasoning)
-            };
-
-            (content, reasoning)
-        };
-
-        // Tool calls with their IDs (for native function calling)
-        // Format: (name, args_str, tool_call_id)
-        let mut tool_calls: Vec<(String, String, Option<String>)> = Vec::new();
-
-        // Check for native function calling first (only if tool_calls is non-empty)
-        if self.config.agent.native_function_calling
-            && native_tool_calls.as_ref().is_some_and(|tc| !tc.is_empty())
-        {
-            let native_calls = native_tool_calls.as_ref().unwrap();
-            info!("Using {} native tool calls from API", native_calls.len());
-            for tc in native_calls {
-                debug!(
-                    "Native tool call: {} (id: {}) with args: {}",
-                    tc.function.name, tc.id, tc.function.arguments
-                );
-                tool_calls.push((
-                    tc.function.name.clone(),
-                    tc.function.arguments.clone(),
-                    Some(tc.id.clone()),
-                ));
-            }
-        } else {
-            // Fall back to parsing tool calls from content using robust multi-format parser
-            // This happens when native FC is disabled OR the API returns empty tool_calls
-            info!(
-                "Falling back to XML parsing (native FC returned {} tool calls)",
-                native_tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
-            );
-            debug!("Looking for tool calls with multi-format parser...");
-            let parse_result = parse_tool_calls(&content);
-            tool_calls = parse_result
-                .tool_calls
-                .iter()
-                .map(|tc| {
-                    debug!(
-                        "Found tool call in content: {} with args: {}",
-                        tc.tool_name, tc.arguments
-                    );
-                    (tc.tool_name.clone(), tc.arguments.to_string(), None)
-                })
-                .collect();
-
-            // Log any parse errors
-            for error in &parse_result.parse_errors {
-                warn!("Tool parse error: {}", error);
-            }
-
-            // Also check reasoning content for tool calls (some models put tools there)
-            if tool_calls.is_empty() {
-                if let Some(ref reasoning_text) = reasoning_content {
-                    let reasoning_result = parse_tool_calls(reasoning_text);
-                    let reasoning_tools: Vec<(String, String, Option<String>)> = reasoning_result
-                        .tool_calls
-                        .iter()
-                        .map(|tc| {
-                            debug!(
-                                "Found tool call in reasoning: {} with args: {}",
-                                tc.tool_name, tc.arguments
-                            );
-                            (tc.tool_name.clone(), tc.arguments.to_string(), None)
-                        })
-                        .collect();
-                    if !reasoning_tools.is_empty() {
-                        info!(
-                            "Found {} tool calls in reasoning content",
-                            reasoning_tools.len()
-                        );
-                        tool_calls = reasoning_tools;
-                    }
-                }
-            }
-        }
+        let response = self.get_assistant_step_response(use_last_message).await?;
+        let content = response.content.clone();
+        let tool_calls = self.collect_tool_calls(
+            &content,
+            response.reasoning_content.as_deref(),
+            response.native_tool_calls.as_ref(),
+        );
 
         debug!("Total tool calls to execute: {}", tool_calls.len());
 
@@ -1481,20 +1287,8 @@ To call a tool, use this EXACT XML structure:
             );
         }
 
-        // Keep reasoning for use outside this block
-        let _reasoning = reasoning_content;
-
-        // Detect "intent to act" responses that should trigger follow-up
-        // These are responses where the model says it will do something but doesn't use tools
-        let intent_phrases = [
-            "let me", "i'll ", "i will", "let's", "first,", "starting", "begin by", "going to",
-            "need to", "start by", "help you",
-        ];
-        let content_lower = content.to_lowercase();
-        let has_intent = intent_phrases.iter().any(|p| content_lower.contains(p));
-
         // If no tool calls but content suggests intent to act, prompt for action
-        if tool_calls.is_empty() && has_intent && content.len() < 1000 && !use_last_message {
+        if self.should_prompt_for_action(&content, tool_calls.is_empty(), use_last_message) {
             info!("Detected intent without action, prompting model to use tools");
             output::intent_without_action();
             self.messages.push(Message::user(
@@ -1824,6 +1618,227 @@ To call a tool, use this EXACT XML structure:
             // Note: assistant message was already added above when not using last message
             Ok(true)
         }
+    }
+
+    async fn get_assistant_step_response(
+        &mut self,
+        use_last_message: bool,
+    ) -> Result<AssistantStepResponse> {
+        let mut native_tool_calls: Option<Vec<crate::api::types::ToolCall>> = None;
+
+        if use_last_message {
+            let last_msg = self
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == "assistant")
+                .context("No previous assistant message found")?;
+            debug!(
+                "Using content from last assistant message ({} chars)",
+                last_msg.content.len()
+            );
+            if self.config.agent.native_function_calling {
+                native_tool_calls = last_msg.tool_calls.clone();
+            }
+            return Ok(AssistantStepResponse {
+                content: last_msg.content.clone(),
+                reasoning_content: last_msg.reasoning_content.clone(),
+                native_tool_calls,
+            });
+        }
+
+        if self.compressor.should_compress(&self.messages) {
+            info!("Context compression triggered");
+            match self.compressor.compress(&self.client, &self.messages).await {
+                Ok(compressed) => {
+                    self.messages = compressed;
+                }
+                Err(e) => {
+                    warn!("Compression failed, using hard limit: {}", e);
+                    self.messages = self.compressor.hard_compress(&self.messages);
+                }
+            }
+        }
+
+        let (content, reasoning) = if self.config.agent.streaming {
+            let (content, reasoning, stream_tool_calls) = self
+                .chat_streaming(
+                    self.messages.clone(),
+                    self.api_tools(),
+                    ThinkingMode::Enabled,
+                )
+                .await?;
+
+            if self.config.agent.native_function_calling && stream_tool_calls.is_some() {
+                native_tool_calls = stream_tool_calls.clone();
+                info!(
+                    "Received {} native tool calls from stream",
+                    native_tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
+                );
+            }
+
+            (content, reasoning)
+        } else {
+            let response = self
+                .client
+                .chat(
+                    self.messages.clone(),
+                    self.api_tools(),
+                    ThinkingMode::Enabled,
+                )
+                .await?;
+
+            let choice = response
+                .choices
+                .into_iter()
+                .next()
+                .context("No response from model")?;
+
+            let message = choice.message;
+            let content = message.content.clone();
+            let reasoning = message.reasoning_content.clone();
+
+            if self.config.agent.native_function_calling && message.tool_calls.is_some() {
+                native_tool_calls = message.tool_calls.clone();
+                info!(
+                    "Received {} native tool calls from API",
+                    native_tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
+                );
+            }
+
+            debug!(
+                "Raw model response content ({} chars): {}",
+                content.len(),
+                content
+            );
+
+            if std::env::var("SELFWARE_DEBUG").is_ok() {
+                println!("{}", "=== DEBUG: Raw Model Response ===".bright_magenta());
+                println!("{}", content);
+                println!("{}", "=== END DEBUG ===".bright_magenta());
+            }
+
+            if content.is_empty() {
+                warn!("Model returned empty content!");
+            }
+
+            if let Some(ref r) = reasoning {
+                println!("{} {}", "Thinking:".dimmed(), r.dimmed());
+                debug!("Reasoning content ({} chars): {}", r.len(), r);
+            }
+
+            (content, reasoning)
+        };
+
+        self.messages.push(Message {
+            role: "assistant".to_string(),
+            content: content.clone(),
+            reasoning_content: reasoning.clone(),
+            tool_calls: native_tool_calls.clone(),
+            tool_call_id: None,
+            name: None,
+        });
+
+        Ok(AssistantStepResponse {
+            content,
+            reasoning_content: reasoning,
+            native_tool_calls,
+        })
+    }
+
+    fn collect_tool_calls(
+        &self,
+        content: &str,
+        reasoning_content: Option<&str>,
+        native_tool_calls: Option<&Vec<crate::api::types::ToolCall>>,
+    ) -> Vec<(String, String, Option<String>)> {
+        if self.config.agent.native_function_calling
+            && native_tool_calls.is_some_and(|calls| !calls.is_empty())
+        {
+            let native_calls = native_tool_calls.unwrap();
+            info!("Using {} native tool calls from API", native_calls.len());
+            return native_calls
+                .iter()
+                .map(|tc| {
+                    debug!(
+                        "Native tool call: {} (id: {}) with args: {}",
+                        tc.function.name, tc.id, tc.function.arguments
+                    );
+                    (
+                        tc.function.name.clone(),
+                        tc.function.arguments.clone(),
+                        Some(tc.id.clone()),
+                    )
+                })
+                .collect();
+        }
+
+        info!(
+            "Falling back to XML parsing (native FC returned {} tool calls)",
+            native_tool_calls.map(|t| t.len()).unwrap_or(0)
+        );
+        debug!("Looking for tool calls with multi-format parser...");
+
+        let parse_result = parse_tool_calls(content);
+        let mut tool_calls: Vec<(String, String, Option<String>)> = parse_result
+            .tool_calls
+            .iter()
+            .map(|tc| {
+                debug!(
+                    "Found tool call in content: {} with args: {}",
+                    tc.tool_name, tc.arguments
+                );
+                (tc.tool_name.clone(), tc.arguments.to_string(), None)
+            })
+            .collect();
+
+        for error in &parse_result.parse_errors {
+            warn!("Tool parse error: {}", error);
+        }
+
+        if tool_calls.is_empty() {
+            if let Some(reasoning_text) = reasoning_content {
+                let reasoning_result = parse_tool_calls(reasoning_text);
+                let reasoning_tools: Vec<(String, String, Option<String>)> = reasoning_result
+                    .tool_calls
+                    .iter()
+                    .map(|tc| {
+                        debug!(
+                            "Found tool call in reasoning: {} with args: {}",
+                            tc.tool_name, tc.arguments
+                        );
+                        (tc.tool_name.clone(), tc.arguments.to_string(), None)
+                    })
+                    .collect();
+                if !reasoning_tools.is_empty() {
+                    info!(
+                        "Found {} tool calls in reasoning content",
+                        reasoning_tools.len()
+                    );
+                    tool_calls = reasoning_tools;
+                }
+            }
+        }
+
+        tool_calls
+    }
+
+    fn should_prompt_for_action(
+        &self,
+        content: &str,
+        has_no_tool_calls: bool,
+        use_last_message: bool,
+    ) -> bool {
+        if !has_no_tool_calls || use_last_message || content.len() >= 1000 {
+            return false;
+        }
+
+        let intent_phrases = [
+            "let me", "i'll ", "i will", "let's", "first,", "starting", "begin by", "going to",
+            "need to", "start by", "help you",
+        ];
+        let content_lower = content.to_lowercase();
+        intent_phrases.iter().any(|p| content_lower.contains(p))
     }
 
     /// Plan phase - returns true if model wants to execute tools (should continue to execution)
