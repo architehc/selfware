@@ -3,7 +3,7 @@
 //! This example demonstrates how to create a simple chat interaction with Selfware.
 //! It shows the fundamental pattern of:
 //! 1. Loading configuration
-//! 2. Creating an agent
+//! 2. Creating an API client
 //! 3. Sending a message and receiving a response
 //!
 //! # Running this example
@@ -26,7 +26,8 @@
 //! 4. Built-in defaults
 
 use anyhow::Result;
-use selfware::agent::Agent;
+use selfware::api::types::Message;
+use selfware::api::{ApiClient, ThinkingMode};
 use selfware::config::Config;
 
 #[tokio::main]
@@ -49,27 +50,24 @@ async fn main() -> Result<()> {
     println!("Using model: {}", config.model);
     println!();
 
-    // Create the agent
-    // The agent initializes with:
-    // - API client for LLM communication
-    // - Tool registry with 53+ built-in tools
-    // - Safety checker for path/command validation
-    // - Memory system for context management
-    let mut agent = Agent::new(config).await?;
+    // Create a direct API client.
+    // Using direct chat in this example avoids tool/confirmation behavior
+    // so it works reliably in non-interactive environments.
+    let client = ApiClient::new(&config)?;
 
-    // Run a simple task
-    // The agent will:
-    // 1. Send the task to the LLM
-    // 2. Parse any tool calls from the response
-    // 3. Execute tools with safety checks
-    // 4. Continue the conversation until the task is complete
-    println!("Sending task to agent...\n");
+    println!("Sending prompt to model...\n");
+    let messages = vec![
+        Message::system(
+            "You are a helpful Rust assistant. Reply directly without using tools or external actions.",
+        ),
+        Message::user("What's a simple way to check if a number is prime in Rust? Show me the code."),
+    ];
 
-    agent
-        .run_task("What's a simple way to check if a number is prime in Rust? Show me the code.")
-        .await?;
+    let response = client.chat(messages, None, ThinkingMode::Disabled).await?;
+    let answer = &response.choices[0].message.content;
 
-    println!("\n=== Task Complete ===");
+    println!("Assistant response:\n{}\n", answer);
+    println!("=== Task Complete ===");
 
     Ok(())
 }

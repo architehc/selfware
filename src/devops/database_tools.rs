@@ -1329,15 +1329,6 @@ impl DataPipeline {
 /// - `ChangeColumnType` - Change column data type
 /// - `AddNotNull` - Add NOT NULL constraint with default value migration
 ///
-/// # Not Yet Implemented
-///
-/// The following operations exist in the enum for schema completeness but
-/// will return errors if used. Call `validate()` before `generate_migrations()`
-/// to check for unsupported operations:
-///
-/// - `MergeTable` - Merge multiple tables (complex join logic required)
-/// - `ExtractColumn` - Extract column to new table (requires data migration)
-/// - `Denormalize` - Denormalize for performance (requires careful analysis)
 #[derive(Debug, Clone)]
 pub enum RefactoringOperation {
     /// Split a table by extracting columns to a new table with FK relationship
@@ -1347,13 +1338,13 @@ pub enum RefactoringOperation {
         columns: Vec<String>,
         foreign_key: String,
     },
-    /// Merge multiple tables (NOT IMPLEMENTED - returns error)
+    /// Merge multiple tables into a single target table
     MergeTable {
         source_tables: Vec<String>,
         target_table: String,
         join_columns: Vec<(String, String)>,
     },
-    /// Extract a column to a new table (NOT IMPLEMENTED - returns error)
+    /// Extract a column to a new lookup table
     ExtractColumn {
         source_table: String,
         column: String,
@@ -1378,7 +1369,7 @@ pub enum RefactoringOperation {
         column: String,
         default_value: String,
     },
-    /// Denormalize for performance (NOT IMPLEMENTED - returns error)
+    /// Denormalize for performance by copying selected columns
     Denormalize {
         source_table: String,
         target_table: String,
@@ -1408,9 +1399,6 @@ impl RefactoringPlanner {
     }
 
     /// Generate migrations for all operations
-    ///
-    /// Returns an error if any operation is not implemented.
-    /// Call `validate()` first to check for unimplemented operations.
     pub fn generate_migrations(&self) -> Result<Vec<Migration>, String> {
         self.operations
             .iter()
@@ -1519,30 +1507,98 @@ impl RefactoringPlanner {
                 );
                 Ok(Migration::new(version, name).up(up_sql).down(down_sql))
             }
-            // Unimplemented operations - return error instead of panicking
-            RefactoringOperation::MergeTable { target_table, .. } => Err(format!(
-                "MergeTable operation for '{}' is not implemented - \
-                 call validate() first to check for unsupported operations",
-                target_table
-            )),
+            RefactoringOperation::MergeTable {
+                source_tables,
+                target_table,
+                join_columns,
+            } => {
+                if source_tables.len() < 2 {
+                    return Err("MergeTable requires at least two source tables".to_string());
+                }
+                if join_columns.len() != source_tables.len().saturating_sub(1) {
+                    return Err(format!(
+                        "MergeTable requires {} join definitions, got {}",
+                        source_tables.len() - 1,
+                        join_columns.len()
+                    ));
+                }
+
+                let mut up_sql = format!("CREATE TABLE {} AS\nSELECT t0.*", target_table);
+                for i in 1..source_tables.len() {
+                    up_sql.push_str(&format!(", t{}.*", i));
+                }
+                up_sql.push_str(&format!("\nFROM {} t0", source_tables[0]));
+
+                for (i, source_table) in source_tables.iter().enumerate().skip(1) {
+                    let (left_col, right_col) = &join_columns[i - 1];
+                    up_sql.push_str(&format!(
+                        "\nLEFT JOIN {} t{} ON t0.{} = t{}.{}",
+                        source_table, i, left_col, i, right_col
+                    ));
+                }
+                up_sql.push(';');
+
+                let down_sql = format!("DROP TABLE IF EXISTS {};", target_table);
+                let name = format!("merge_{}_into_{}", source_tables.join("_"), target_table);
+                Ok(Migration::new(version, name).up(up_sql).down(down_sql))
+            }
             RefactoringOperation::ExtractColumn {
                 source_table,
                 column,
-                ..
-            } => Err(format!(
-                "ExtractColumn operation for '{}.{}' is not implemented - \
-                 call validate() first to check for unsupported operations",
-                source_table, column
-            )),
+                new_table,
+                new_column,
+            } => {
+                let name = format!("extract_{}_{}_to_{}", source_table, column, new_table);
+                let up_sql = format!(
+                    "CREATE TABLE {} AS\n\
+                     SELECT DISTINCT {} AS {} FROM {}\n\
+                     WHERE {} IS NOT NULL;",
+                    new_table, column, new_column, source_table, column
+                );
+                let down_sql = format!("DROP TABLE IF EXISTS {};", new_table);
+                Ok(Migration::new(version, name).up(up_sql).down(down_sql))
+            }
             RefactoringOperation::Denormalize {
                 source_table,
                 target_table,
-                ..
-            } => Err(format!(
-                "Denormalize operation '{}' -> '{}' is not implemented - \
-                 call validate() first to check for unsupported operations",
-                source_table, target_table
-            )),
+                columns,
+            } => {
+                if columns.is_empty() {
+                    return Err("Denormalize requires at least one column".to_string());
+                }
+
+                let add_columns = columns
+                    .iter()
+                    .map(|col| format!("ADD COLUMN IF NOT EXISTS {} TEXT", col))
+                    .collect::<Vec<_>>()
+                    .join(",\n    ");
+
+                let set_clauses = columns
+                    .iter()
+                    .map(|col| format!("{} = s.{}", col, col))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                let name = format!("denormalize_{}_to_{}", source_table, target_table);
+                let up_sql = format!(
+                    "ALTER TABLE {}\n    {};\n\
+                     UPDATE {} t\n\
+                     SET {}\n\
+                     FROM {} s\n\
+                     WHERE t.id = s.id;",
+                    target_table, add_columns, target_table, set_clauses, source_table
+                );
+                let down_sql = format!(
+                    "ALTER TABLE {}\n    {};",
+                    target_table,
+                    columns
+                        .iter()
+                        .map(|col| format!("DROP COLUMN IF EXISTS {}", col))
+                        .collect::<Vec<_>>()
+                        .join(",\n    ")
+                );
+                Ok(Migration::new(version, name).up(up_sql).down(down_sql))
+            }
         }
     }
 
@@ -1550,7 +1606,6 @@ impl RefactoringPlanner {
     ///
     /// Returns errors for:
     /// - Invalid operation parameters
-    /// - Unimplemented operations (MergeTable, ExtractColumn, Denormalize)
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
 
@@ -1568,40 +1623,65 @@ impl RefactoringPlanner {
                         errors.push("RenameColumn: old and new names are the same".to_string());
                     }
                 }
-                // Explicitly reject unimplemented operations at validation time
                 RefactoringOperation::MergeTable {
                     source_tables,
                     target_table,
-                    ..
+                    join_columns,
                 } => {
-                    errors.push(format!(
-                        "MergeTable operation not implemented: cannot merge {} into {}",
-                        source_tables.join(", "),
-                        target_table
-                    ));
+                    if source_tables.len() < 2 {
+                        errors.push("MergeTable requires at least two source tables".to_string());
+                    }
+                    if target_table.trim().is_empty() {
+                        errors.push("MergeTable target table cannot be empty".to_string());
+                    }
+                    if join_columns.len() != source_tables.len().saturating_sub(1) {
+                        errors.push(format!(
+                            "MergeTable requires {} join definitions, got {}",
+                            source_tables.len().saturating_sub(1),
+                            join_columns.len()
+                        ));
+                    }
+                    for (left, right) in join_columns {
+                        if left.trim().is_empty() || right.trim().is_empty() {
+                            errors.push("MergeTable join column names cannot be empty".to_string());
+                        }
+                    }
                 }
                 RefactoringOperation::ExtractColumn {
                     source_table,
                     column,
                     new_table,
-                    ..
+                    new_column,
                 } => {
-                    errors.push(format!(
-                        "ExtractColumn operation not implemented: cannot extract {}.{} to {}",
-                        source_table, column, new_table
-                    ));
+                    if source_table.trim().is_empty() {
+                        errors.push("ExtractColumn source table cannot be empty".to_string());
+                    }
+                    if column.trim().is_empty() {
+                        errors.push("ExtractColumn column cannot be empty".to_string());
+                    }
+                    if new_table.trim().is_empty() {
+                        errors.push("ExtractColumn new table cannot be empty".to_string());
+                    }
+                    if new_column.trim().is_empty() {
+                        errors.push("ExtractColumn new column cannot be empty".to_string());
+                    }
                 }
                 RefactoringOperation::Denormalize {
                     source_table,
                     target_table,
                     columns,
                 } => {
-                    errors.push(format!(
-                        "Denormalize operation not implemented: cannot denormalize {} ({}) to {}",
-                        source_table,
-                        columns.join(", "),
-                        target_table
-                    ));
+                    if source_table.trim().is_empty() || target_table.trim().is_empty() {
+                        errors.push(
+                            "Denormalize source and target tables cannot be empty".to_string(),
+                        );
+                    }
+                    if columns.is_empty() {
+                        errors.push("Denormalize requires at least one column".to_string());
+                    }
+                    if columns.iter().any(|col| col.trim().is_empty()) {
+                        errors.push("Denormalize column names cannot be empty".to_string());
+                    }
                 }
                 _ => {}
             }
@@ -1975,6 +2055,114 @@ mod tests {
         let migrations = planner.generate_migrations().unwrap();
         assert!(migrations[0].up_sql.contains("UPDATE"));
         assert!(migrations[0].up_sql.contains("SET NOT NULL"));
+    }
+
+    #[test]
+    fn test_refactoring_merge_table() {
+        let mut planner = RefactoringPlanner::new(DatabaseType::PostgreSQL);
+        planner.add_operation(RefactoringOperation::MergeTable {
+            source_tables: vec!["users".to_string(), "profiles".to_string()],
+            target_table: "user_profiles".to_string(),
+            join_columns: vec![("id".to_string(), "user_id".to_string())],
+        });
+
+        let migrations = planner.generate_migrations().unwrap();
+        assert_eq!(migrations.len(), 1);
+        assert!(migrations[0]
+            .up_sql
+            .contains("CREATE TABLE user_profiles AS"));
+        assert!(migrations[0]
+            .up_sql
+            .contains("LEFT JOIN profiles t1 ON t0.id = t1.user_id"));
+        assert!(migrations[0]
+            .down_sql
+            .contains("DROP TABLE IF EXISTS user_profiles"));
+    }
+
+    #[test]
+    fn test_refactoring_extract_column() {
+        let mut planner = RefactoringPlanner::new(DatabaseType::PostgreSQL);
+        planner.add_operation(RefactoringOperation::ExtractColumn {
+            source_table: "orders".to_string(),
+            column: "status".to_string(),
+            new_table: "order_statuses".to_string(),
+            new_column: "name".to_string(),
+        });
+
+        let migrations = planner.generate_migrations().unwrap();
+        assert_eq!(migrations.len(), 1);
+        assert!(migrations[0]
+            .up_sql
+            .contains("CREATE TABLE order_statuses AS"));
+        assert!(migrations[0]
+            .up_sql
+            .contains("SELECT DISTINCT status AS name FROM orders"));
+        assert!(migrations[0]
+            .down_sql
+            .contains("DROP TABLE IF EXISTS order_statuses"));
+    }
+
+    #[test]
+    fn test_refactoring_denormalize() {
+        let mut planner = RefactoringPlanner::new(DatabaseType::PostgreSQL);
+        planner.add_operation(RefactoringOperation::Denormalize {
+            source_table: "users".to_string(),
+            target_table: "orders".to_string(),
+            columns: vec!["email".to_string(), "plan".to_string()],
+        });
+
+        let migrations = planner.generate_migrations().unwrap();
+        assert_eq!(migrations.len(), 1);
+        assert!(migrations[0]
+            .up_sql
+            .contains("ALTER TABLE orders\n    ADD COLUMN IF NOT EXISTS email TEXT"));
+        assert!(migrations[0].up_sql.contains("UPDATE orders t"));
+        assert!(migrations[0]
+            .up_sql
+            .contains("SET email = s.email, plan = s.plan"));
+        assert!(migrations[0]
+            .down_sql
+            .contains("DROP COLUMN IF EXISTS email"));
+    }
+
+    #[test]
+    fn test_refactoring_validation_for_new_operations() {
+        let mut planner = RefactoringPlanner::new(DatabaseType::PostgreSQL);
+        planner.add_operation(RefactoringOperation::MergeTable {
+            source_tables: vec!["users".to_string(), "profiles".to_string()],
+            target_table: "user_profiles".to_string(),
+            join_columns: vec![("id".to_string(), "user_id".to_string())],
+        });
+        planner.add_operation(RefactoringOperation::ExtractColumn {
+            source_table: "orders".to_string(),
+            column: "status".to_string(),
+            new_table: "order_statuses".to_string(),
+            new_column: "name".to_string(),
+        });
+        planner.add_operation(RefactoringOperation::Denormalize {
+            source_table: "users".to_string(),
+            target_table: "orders".to_string(),
+            columns: vec!["email".to_string()],
+        });
+
+        assert!(planner.validate().is_ok());
+    }
+
+    #[test]
+    fn test_refactoring_validation_merge_table_join_mismatch() {
+        let mut planner = RefactoringPlanner::new(DatabaseType::PostgreSQL);
+        planner.add_operation(RefactoringOperation::MergeTable {
+            source_tables: vec!["users".to_string(), "profiles".to_string()],
+            target_table: "user_profiles".to_string(),
+            join_columns: vec![],
+        });
+
+        let result = planner.validate();
+        assert!(result.is_err());
+        let errors = result.unwrap_err();
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("requires 1 join definitions")));
     }
 
     #[test]

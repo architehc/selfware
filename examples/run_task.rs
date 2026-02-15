@@ -76,8 +76,9 @@ async fn main() -> Result<()> {
             streaming: true,
         },
 
-        // Use AutoEdit mode for this example (auto-approve file edits)
-        execution_mode: ExecutionMode::AutoEdit,
+        // Use YOLO mode for this example so verification tools can run
+        // in non-interactive environments.
+        execution_mode: ExecutionMode::Yolo,
 
         // YOLO mode settings (not used in AutoEdit mode)
         yolo: Default::default(),
@@ -123,18 +124,18 @@ async fn main() -> Result<()> {
     // 3. Verify compilation
     // 4. Report completion
     let start = std::time::Instant::now();
-    agent.run_task(task).await?;
+    let task_result = agent.run_task(task).await;
     let duration = start.elapsed();
+
+    // Always clean up generated file, even on failure.
+    if std::path::Path::new("calculator.rs").exists() {
+        let _ = std::fs::remove_file("calculator.rs");
+    }
+
+    task_result?;
 
     println!("\n--- Task Complete ---");
     println!("Duration: {:.2}s", duration.as_secs_f64());
-
-    // Clean up (optional) - remove the created file
-    if std::path::Path::new("calculator.rs").exists() {
-        println!("\nNote: calculator.rs was created. You can:");
-        println!("  - Run: cargo check --lib (to verify)");
-        println!("  - Run: rm calculator.rs (to clean up)");
-    }
 
     Ok(())
 }

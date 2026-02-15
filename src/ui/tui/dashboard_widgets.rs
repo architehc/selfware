@@ -481,7 +481,7 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect) {
     frame.render_widget(block, help_area);
 
     let shortcuts = vec![
-        ("q / Ctrl+C", "Quit"),
+        ("q / Ctrl+C", "Quit (q twice)"),
         ("?", "Toggle this help"),
         ("Ctrl+D", "Toggle dashboard view"),
         ("Ctrl+G", "Toggle garden view"),
