@@ -949,7 +949,9 @@ impl CommunicationBridge {
         let thread = MessageThread::new(channel_id);
         let thread_id = thread.id.clone();
         self.threads.insert(thread_id.clone(), thread);
-        Ok(self.threads.get(&thread_id).unwrap())
+        self.threads
+            .get(&thread_id)
+            .ok_or_else(|| format!("Failed to create thread {}", thread_id))
     }
 
     /// Get thread

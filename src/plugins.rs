@@ -421,10 +421,7 @@ impl PluginInstance {
 
     /// Get current state
     pub fn state(&self) -> PluginState {
-        *self
-            .state
-            .read()
-            .unwrap_or_else(|_| panic!("lock poisoned"))
+        *self.state.read().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Set state
