@@ -7,8 +7,8 @@
 //! - Vector storage
 //! - Technical debt tracking
 
-pub mod code_graph;
 pub mod analyzer;
 pub mod bm25;
-pub mod vector_store;
+pub mod code_graph;
 pub mod tech_debt;
+pub mod vector_store;

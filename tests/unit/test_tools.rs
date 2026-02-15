@@ -1,11 +1,11 @@
-use selfware::tools::{Tool, ToolRegistry, file::FileRead, shell::ShellExec};
+use selfware::tools::{file::FileRead, shell::ShellExec, Tool, ToolRegistry};
 use serde_json::json;
 
 #[tokio::test]
 async fn test_file_read_success() {
     let tool = FileRead;
     let args = json!({"path": "Cargo.toml"});
-    
+
     let result = tool.execute(args).await.unwrap();
     assert!(result.get("content").is_some());
     assert_eq!(result.get("encoding").unwrap(), "utf-8");
@@ -15,7 +15,7 @@ async fn test_file_read_success() {
 async fn test_file_read_not_found() {
     let tool = FileRead;
     let args = json!({"path": "/nonexistent/file.txt"});
-    
+
     let result = tool.execute(args).await;
     assert!(result.is_err());
 }
@@ -24,10 +24,15 @@ async fn test_file_read_not_found() {
 async fn test_shell_exec_echo() {
     let tool = ShellExec;
     let args = json!({"command": "echo 'hello'", "timeout_secs": 5});
-    
+
     let result = tool.execute(args).await.unwrap();
     assert_eq!(result.get("exit_code").unwrap(), 0);
-    assert!(result.get("stdout").unwrap().as_str().unwrap().contains("hello"));
+    assert!(result
+        .get("stdout")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .contains("hello"));
 }
 
 #[tokio::test]

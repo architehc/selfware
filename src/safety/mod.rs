@@ -7,12 +7,12 @@
 //! - Sandboxing
 //! - Execution control modes
 
+pub mod autonomy;
 pub mod checker;
+pub mod redact;
+pub mod sandbox;
 pub mod scanner;
 pub mod threat_modeling;
-pub mod sandbox;
-pub mod autonomy;
-pub mod redact;
 
 #[cfg(feature = "execution-modes")]
 pub mod confirm;
@@ -22,8 +22,10 @@ pub mod dry_run;
 pub mod yolo;
 
 // Re-exports for convenience
+pub use autonomy::{AutonomyContext, AutonomyController, AutonomyLevel};
 pub use checker::SafetyChecker;
-pub use scanner::{SecurityScanner, SecuritySeverity, SecurityCategory, SecurityFinding, SecretScanner};
 pub use sandbox::{FilesystemPolicy, NetworkPolicy, ResourceLimits};
-pub use autonomy::{AutonomyLevel, AutonomyController, AutonomyContext};
-pub use threat_modeling::{StrideCategory, Threat, Asset, SecurityControl};
+pub use scanner::{
+    SecretScanner, SecurityCategory, SecurityFinding, SecurityScanner, SecuritySeverity,
+};
+pub use threat_modeling::{Asset, SecurityControl, StrideCategory, Threat};

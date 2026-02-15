@@ -1099,8 +1099,8 @@ async fn qwen3_test_continuous_dialogue() {
             .unwrap_or_else(|_| panic!("Turn {} failed", i + 1));
 
         let content = response.choices[0].message.content.clone();
-        let preview = if content.len() > 150 {
-            format!("{}...", &content[..150])
+        let preview = if content.chars().count() > 150 {
+            format!("{}...", content.chars().take(150).collect::<String>())
         } else {
             content.clone()
         };

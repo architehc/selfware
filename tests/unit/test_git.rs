@@ -206,7 +206,11 @@ async fn test_git_status_with_multiple_changes() {
     let unstaged = result.get("unstaged").unwrap().as_array().unwrap();
 
     assert!(!staged.is_empty(), "Should have staged files: {:?}", result);
-    assert!(!unstaged.is_empty(), "Should have unstaged files: {:?}", result);
+    assert!(
+        !unstaged.is_empty(),
+        "Should have unstaged files: {:?}",
+        result
+    );
 }
 
 #[tokio::test]
@@ -352,7 +356,10 @@ fn test_git_commit_metadata() {
     assert!(tool.description().contains("commit"));
     let schema = tool.schema();
     assert!(schema["properties"]["message"].is_object());
-    assert!(schema["required"].as_array().unwrap().contains(&json!("message")));
+    assert!(schema["required"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("message")));
 }
 
 #[test]
@@ -383,7 +390,11 @@ async fn test_git_status_with_deleted_file() {
     let unstaged = result.get("unstaged").unwrap().as_array().unwrap();
 
     // Should detect the deleted file
-    assert!(!unstaged.is_empty(), "Should detect deleted file: {:?}", result);
+    assert!(
+        !unstaged.is_empty(),
+        "Should detect deleted file: {:?}",
+        result
+    );
 }
 
 #[tokio::test]
@@ -405,7 +416,11 @@ async fn test_git_status_with_index_deleted() {
     let staged = result.get("staged").unwrap().as_array().unwrap();
 
     // Should detect the staged deletion
-    assert!(!staged.is_empty(), "Should detect staged deletion: {:?}", result);
+    assert!(
+        !staged.is_empty(),
+        "Should detect staged deletion: {:?}",
+        result
+    );
 }
 
 #[tokio::test]
@@ -436,7 +451,10 @@ async fn test_git_status_staged_and_unstaged() {
     assert!(!unstaged.is_empty(), "Should have unstaged files");
 
     // Verify untracked array exists (may or may not contain files based on StatusOptions)
-    assert!(result.get("untracked").is_some(), "Should have untracked array");
+    assert!(
+        result.get("untracked").is_some(),
+        "Should have untracked array"
+    );
 }
 
 // ==================== GitDiff Additional Tests ====================
@@ -470,7 +488,13 @@ async fn test_git_diff_multiple_files_changed() {
         .expect("Failed to add file2");
 
     Command::new("git")
-        .args(["-C", dir.path().to_str().unwrap(), "commit", "-m", "add file2"])
+        .args([
+            "-C",
+            dir.path().to_str().unwrap(),
+            "commit",
+            "-m",
+            "add file2",
+        ])
         .output()
         .expect("Failed to commit");
 
@@ -582,8 +606,17 @@ fn test_all_git_tools_have_object_schema() {
 
     for tool in tools {
         let schema = tool.schema();
-        assert_eq!(schema["type"], "object", "Tool {} should have object schema", tool.name());
-        assert!(schema.get("properties").is_some(), "Tool {} should have properties", tool.name());
+        assert_eq!(
+            schema["type"],
+            "object",
+            "Tool {} should have object schema",
+            tool.name()
+        );
+        assert!(
+            schema.get("properties").is_some(),
+            "Tool {} should have properties",
+            tool.name()
+        );
     }
 }
 
@@ -597,6 +630,10 @@ fn test_git_tools_have_descriptions() {
     ];
 
     for tool in tools {
-        assert!(!tool.description().is_empty(), "Tool {} should have description", tool.name());
+        assert!(
+            !tool.description().is_empty(),
+            "Tool {} should have description",
+            tool.name()
+        );
     }
 }

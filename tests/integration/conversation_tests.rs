@@ -6,8 +6,6 @@
 use super::helpers::*;
 use selfware::api::types::Message;
 use selfware::api::ApiClient;
-#[allow(unused_imports)]
-use std::time::Duration;
 use tokio::time::timeout;
 
 // Re-import the macros from the test crate root

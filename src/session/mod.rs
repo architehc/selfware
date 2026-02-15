@@ -8,9 +8,9 @@
 //! - Edit history
 
 pub mod checkpoint;
-pub mod time_travel;
-pub mod local_first;
 pub mod edit_history;
+pub mod local_first;
+pub mod time_travel;
 
 #[cfg(feature = "cache")]
 pub mod cache;

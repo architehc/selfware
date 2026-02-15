@@ -3,7 +3,10 @@
 //! Tests for FileWrite, FileEdit, and DirectoryTree tools
 //! with comprehensive coverage of success and error paths.
 
-use selfware::tools::{file::{FileRead, FileWrite, FileEdit, DirectoryTree}, Tool};
+use selfware::tools::{
+    file::{DirectoryTree, FileEdit, FileRead, FileWrite},
+    Tool,
+};
 use serde_json::json;
 use std::fs;
 use tempfile::TempDir;
@@ -306,7 +309,8 @@ async fn test_directory_tree_max_depth() {
     let entries = result.get("entries").unwrap().as_array().unwrap();
 
     // Should not contain the deep file
-    let paths: Vec<&str> = entries.iter()
+    let paths: Vec<&str> = entries
+        .iter()
         .map(|e| e.get("path").unwrap().as_str().unwrap())
         .collect();
     assert!(!paths.iter().any(|p| p.contains("deep.txt")));
@@ -327,9 +331,9 @@ async fn test_directory_tree_hidden_files() {
     });
     let result = tool.execute(args).await.unwrap();
     let entries = result.get("entries").unwrap().as_array().unwrap();
-    let has_hidden = entries.iter().any(|e|
-        e.get("path").unwrap().as_str().unwrap().contains(".hidden")
-    );
+    let has_hidden = entries
+        .iter()
+        .any(|e| e.get("path").unwrap().as_str().unwrap().contains(".hidden"));
     assert!(!has_hidden);
 
     // With hidden files
@@ -339,9 +343,9 @@ async fn test_directory_tree_hidden_files() {
     });
     let result = tool.execute(args).await.unwrap();
     let entries = result.get("entries").unwrap().as_array().unwrap();
-    let has_hidden = entries.iter().any(|e|
-        e.get("path").unwrap().as_str().unwrap().contains(".hidden")
-    );
+    let has_hidden = entries
+        .iter()
+        .any(|e| e.get("path").unwrap().as_str().unwrap().contains(".hidden"));
     assert!(has_hidden);
 }
 
@@ -372,8 +376,15 @@ async fn test_directory_tree_file_metadata() {
     let result = tool.execute(args).await.unwrap();
     let entries = result.get("entries").unwrap().as_array().unwrap();
 
-    let file_entry = entries.iter()
-        .find(|e| e.get("path").unwrap().as_str().unwrap().contains("file.txt"))
+    let file_entry = entries
+        .iter()
+        .find(|e| {
+            e.get("path")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .contains("file.txt")
+        })
         .unwrap();
 
     assert_eq!(file_entry.get("type").unwrap(), "file");

@@ -7,6 +7,6 @@
 //! - Code review
 
 pub mod api_testing;
+pub mod code_review;
 pub mod contract_testing;
 pub mod verification;
-pub mod code_review;

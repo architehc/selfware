@@ -151,7 +151,9 @@ mod safety_config_tests {
 
         let config: SafetyConfig = toml::from_str(toml).unwrap();
         assert_eq!(config.allowed_paths.len(), 2);
-        assert!(config.allowed_paths.contains(&"/home/user/projects".to_string()));
+        assert!(config
+            .allowed_paths
+            .contains(&"/home/user/projects".to_string()));
         assert!(config.denied_paths.contains(&"/etc".to_string()));
     }
 

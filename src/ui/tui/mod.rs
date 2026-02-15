@@ -274,7 +274,7 @@ pub fn is_quit(event: &Event) -> bool {
 /// Run the TUI application
 ///
 /// This creates a full terminal UI with chat, command palette, and status bar.
-/// Returns when the user quits (q, Ctrl+C, or Ctrl+D).
+/// Returns when the user quits (q or Ctrl+C).
 pub fn run_tui(model: &str) -> Result<Vec<String>> {
     let mut terminal = TuiTerminal::new()?;
     let mut app = App::new(model);
@@ -430,7 +430,7 @@ where
 /// - ?: Toggle help overlay
 /// - Ctrl+D: Toggle dashboard/focus mode
 /// - Ctrl+G: Toggle garden view zoom
-/// - l: Toggle logs view zoom
+/// - Ctrl+L: Toggle logs view zoom
 /// - Tab: Cycle focus between panes
 /// - z: Toggle zoom on focused pane
 /// - Alt+1-6: Quick layout presets

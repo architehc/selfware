@@ -271,10 +271,7 @@ mod context_compressor_tests {
     #[test]
     fn test_should_compress_small_messages() {
         let compressor = ContextCompressor::new(10000);
-        let messages = vec![
-            create_message("Hello"),
-            create_message("World"),
-        ];
+        let messages = vec![create_message("Hello"), create_message("World")];
         // Small messages should not need compression
         assert!(!compressor.should_compress(&messages));
     }
@@ -390,10 +387,7 @@ mod agent_state_tests {
         let cloned = original.clone();
 
         match (original, cloned) {
-            (
-                AgentState::Failed { reason: r1 },
-                AgentState::Failed { reason: r2 },
-            ) => {
+            (AgentState::Failed { reason: r1 }, AgentState::Failed { reason: r2 }) => {
                 assert_eq!(r1, r2);
             }
             _ => panic!("Clone failed"),

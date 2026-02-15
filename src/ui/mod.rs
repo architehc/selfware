@@ -14,9 +14,9 @@ pub mod theme;
 
 // TUI and demo modules
 #[cfg(feature = "tui")]
-pub mod tui;
-#[cfg(feature = "tui")]
 pub mod demo;
+#[cfg(feature = "tui")]
+pub mod tui;
 
 // Accessibility features
 pub mod accessibility;

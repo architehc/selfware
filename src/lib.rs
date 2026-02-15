@@ -34,14 +34,14 @@ pub mod ui;
 // ============================================================================
 // Reorganized modules
 // ============================================================================
-pub mod safety;
 pub mod analysis;
-pub mod session;
-pub mod observability;
 pub mod cognitive;
-pub mod orchestration;
-pub mod devops;
 pub mod collaboration;
+pub mod devops;
+pub mod observability;
+pub mod orchestration;
+pub mod safety;
+pub mod session;
 pub mod testing;
 
 // Backward-compatible re-exports for safety module
@@ -65,67 +65,67 @@ pub use analysis::tech_debt;
 pub use analysis::vector_store;
 
 // Backward-compatible re-exports for session module
-pub use session::checkpoint;
-pub use session::time_travel;
-pub use session::local_first;
-pub use session::edit_history;
 #[cfg(feature = "cache")]
 pub use session::cache;
+pub use session::checkpoint;
+pub use session::edit_history;
+pub use session::local_first;
+pub use session::time_travel;
 
 // Backward-compatible re-exports for observability module
-pub use observability::telemetry;
 pub use observability::analytics;
 pub use observability::carbon_tracker;
 pub use observability::dashboard as observability_dashboard;
-pub use observability::test_dashboard;
 #[cfg(feature = "log-analysis")]
 pub use observability::log_analysis;
+pub use observability::telemetry;
+pub use observability::test_dashboard;
 
 // Backward-compatible re-exports for cognitive module
-pub use cognitive::state as cognitive_state;
+pub use cognitive::episodic;
+pub use cognitive::intelligence;
+pub use cognitive::knowledge_graph;
+pub use cognitive::learning;
 pub use cognitive::load as cognitive_load;
 pub use cognitive::rag;
-pub use cognitive::learning;
-pub use cognitive::episodic;
-pub use cognitive::knowledge_graph;
-pub use cognitive::intelligence;
 pub use cognitive::self_improvement;
+pub use cognitive::state as cognitive_state;
 
 // Backward-compatible re-exports for orchestration module
-pub use orchestration::workflows;
-pub use orchestration::swarm;
 pub use orchestration::multiagent;
-pub use orchestration::planning;
-#[cfg(feature = "workflows")]
-pub use orchestration::workflow_dsl;
 #[cfg(feature = "workflows")]
 pub use orchestration::parallel;
+pub use orchestration::planning;
+pub use orchestration::swarm;
+#[cfg(feature = "workflows")]
+pub use orchestration::workflow_dsl;
+pub use orchestration::workflows;
 
 // Backward-compatible re-exports for devops module
 pub use devops::cicd;
-pub use devops::kubernetes;
 pub use devops::cloud_infra;
 pub use devops::container;
-pub use devops::distributed;
-pub use devops::monorepo;
-pub use devops::mlops;
 pub use devops::database;
 pub use devops::database_tools;
-pub use devops::process_manager;
+pub use devops::distributed;
 pub use devops::embedded;
+pub use devops::kubernetes;
+pub use devops::mlops;
+pub use devops::monorepo;
+pub use devops::process_manager;
 
 // Backward-compatible re-exports for collaboration module
 pub use collaboration::communication;
+pub use collaboration::ide_plugin;
+pub use collaboration::issue_tracker;
 pub use collaboration::realtime as realtime_collaboration;
 pub use collaboration::team_knowledge;
-pub use collaboration::issue_tracker;
-pub use collaboration::ide_plugin;
 
 // Backward-compatible re-exports for testing module
 pub use testing::api_testing;
+pub use testing::code_review;
 pub use testing::contract_testing;
 pub use testing::verification;
-pub use testing::code_review;
 
 // Backward-compatible re-export for config module
 pub use config::typed as typed_config;
@@ -158,15 +158,15 @@ pub mod tool_parser;
 // ============================================================================
 // TUI and demo modules (moved to ui/)
 #[cfg(feature = "tui")]
-pub use ui::tui;
-#[cfg(feature = "tui")]
 pub use ui::demo;
+#[cfg(feature = "tui")]
+pub use ui::tui;
 
 // Accessibility modules (moved to ui/accessibility/)
 pub use ui::accessibility::dyslexia_friendly;
-pub use ui::accessibility::wellness;
-pub use ui::accessibility::screen_reader;
-pub use ui::accessibility::voice_interface;
 pub use ui::accessibility::image_understanding;
 pub use ui::accessibility::literate;
+pub use ui::accessibility::screen_reader;
 pub use ui::accessibility::session_recording;
+pub use ui::accessibility::voice_interface;
+pub use ui::accessibility::wellness;

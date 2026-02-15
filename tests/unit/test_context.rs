@@ -66,22 +66,25 @@ fn test_hard_compress_preserves_recent() {
 
     let compressed = compressor.hard_compress(&messages);
     // Should preserve: system + min_messages_to_keep(6) recent + compression note
-    assert!(compressed.len() >= 2, "Should preserve at least system and some recent");
+    assert!(
+        compressed.len() >= 2,
+        "Should preserve at least system and some recent"
+    );
     assert_eq!(compressed[0].role, "system");
 }
 
 #[test]
 fn test_hard_compress_adds_compression_note() {
     let compressor = ContextCompressor::new(100000);
-    let messages = vec![
-        Message::system("system"),
-        Message::user("user1"),
-    ];
+    let messages = vec![Message::system("system"), Message::user("user1")];
 
     // hard_compress always adds compression note
     let compressed = compressor.hard_compress(&messages);
     // Result: system + compression note + last 3 messages + potential continuation prompt
-    assert!(compressed.len() >= 2, "Should have at least system and note");
+    assert!(
+        compressed.len() >= 2,
+        "Should have at least system and note"
+    );
     assert_eq!(compressed[0].role, "system");
     // Second message should be the compression note
     assert!(compressed[1].content.contains("compressed"));

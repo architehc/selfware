@@ -7,14 +7,17 @@
 //! - Episodic memory
 //! - Knowledge graphs
 
-pub mod state;
+pub mod episodic;
+pub mod intelligence;
+pub mod knowledge_graph;
+pub mod learning;
 pub mod load;
 pub mod rag;
-pub mod learning;
-pub mod episodic;
-pub mod knowledge_graph;
-pub mod intelligence;
 pub mod self_improvement;
+pub mod state;
 
 // Re-exports for backward compatibility (cognitive.rs used to export these directly)
-pub use state::{CognitiveState, CognitiveStateBuilder, WorkingMemory, CyclePhase, PlanStep, StepStatus, ApproachAttempt, ApproachOutcome, EpisodicMemory, Lesson, LessonCategory, Pattern};
+pub use state::{
+    ApproachAttempt, ApproachOutcome, CognitiveState, CognitiveStateBuilder, CyclePhase,
+    EpisodicMemory, Lesson, LessonCategory, Pattern, PlanStep, StepStatus, WorkingMemory,
+};

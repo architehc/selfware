@@ -185,7 +185,10 @@ mod file_write_error_tests {
         // Check backup exists
         let backup_path = dir.path().join("original.txt.bak");
         assert!(backup_path.exists());
-        assert_eq!(fs::read_to_string(&backup_path).unwrap(), "original content");
+        assert_eq!(
+            fs::read_to_string(&backup_path).unwrap(),
+            "original content"
+        );
     }
 
     #[tokio::test]
@@ -459,7 +462,10 @@ mod safety_checker_tests {
         let config = SafetyConfig::default();
         let checker = SafetyChecker::new(&config);
 
-        let call = create_tool_call("shell_exec", r#"{"command": "dd if=/dev/zero of=/dev/sda"}"#);
+        let call = create_tool_call(
+            "shell_exec",
+            r#"{"command": "dd if=/dev/zero of=/dev/sda"}"#,
+        );
         let result = checker.check_tool_call(&call);
         assert!(result.is_err());
     }
@@ -651,7 +657,9 @@ mod context_edge_cases {
     #[test]
     fn test_many_small_messages() {
         let compressor = ContextCompressor::new(1000);
-        let messages: Vec<Message> = (0..100).map(|i| Message::user(format!("msg {}", i))).collect();
+        let messages: Vec<Message> = (0..100)
+            .map(|i| Message::user(format!("msg {}", i)))
+            .collect();
         // Many messages should trigger compression due to overhead
         let tokens = compressor.estimate_tokens(&messages);
         assert!(tokens > 0);

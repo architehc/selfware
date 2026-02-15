@@ -8,7 +8,7 @@
 //! - IDE plugins
 
 pub mod communication;
+pub mod ide_plugin;
+pub mod issue_tracker;
 pub mod realtime;
 pub mod team_knowledge;
-pub mod issue_tracker;
-pub mod ide_plugin;
