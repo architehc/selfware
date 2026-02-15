@@ -263,8 +263,8 @@ impl Completer for SelfwareCompleter {
                 self.complete_paths_with_span(&prefix, word_start, pos)
             }
             CompletionContext::None => {
-                // If empty or very short, show commands but with correct span
-                if before_cursor.is_empty() || before_cursor.len() < 2 {
+                // Show all commands on empty input to aid discoverability
+                if before_cursor.is_empty() {
                     self.complete_commands_with_span("/", 0, pos)
                 } else {
                     Vec::new()

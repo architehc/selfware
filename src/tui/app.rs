@@ -301,16 +301,15 @@ impl App {
         self.palette.render(frame, palette_area, self.selected);
     }
 
-    /// Request quit. If a task is active, show confirmation; otherwise return true
-    /// to indicate the caller should exit immediately.
+    /// Request quit. Always shows a confirmation dialog to prevent accidental exits.
     pub fn request_quit(&mut self) -> bool {
-        if self.task_progress.is_some() {
-            self.state =
-                AppState::Confirming("A task is still running. Quit anyway? (y/n)".into());
-            false
+        let message = if self.task_progress.is_some() {
+            "A task is still running. Quit anyway? (y/n)"
         } else {
-            true // safe to exit immediately
-        }
+            "Quit selfware? (y/n)"
+        };
+        self.state = AppState::Confirming(message.into());
+        false // never quit immediately; always wait for confirmation
     }
 
     /// Handle a confirmation response. Returns true if the user confirmed (pressed 'y').
@@ -905,8 +904,9 @@ mod tests {
     #[test]
     fn test_request_quit_when_idle() {
         let mut app = App::new("test");
-        // No active task, so quit should be immediate
-        assert!(app.request_quit());
+        // Quit always shows confirmation now
+        assert!(!app.request_quit());
+        assert!(matches!(app.state, AppState::Confirming(_)));
     }
 
     #[test]

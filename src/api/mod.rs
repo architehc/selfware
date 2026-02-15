@@ -1,13 +1,125 @@
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use reqwest::{Client, StatusCode};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 pub mod types;
 
 use types::*;
+
+// ─── Circuit Breaker ─────────────────────────────────────────────────
+
+/// Circuit breaker states
+const CB_CLOSED: u8 = 0; // Normal operation — requests flow through
+const CB_OPEN: u8 = 1; // Tripped — requests are rejected immediately
+const CB_HALF_OPEN: u8 = 2; // Probing — one request allowed to test recovery
+
+/// Circuit breaker for LLM API calls.
+///
+/// Prevents cascading failures when the upstream LLM endpoint is down or
+/// overloaded.  After `failure_threshold` consecutive failures the breaker
+/// *opens* and rejects calls instantly for `open_timeout`.  After the
+/// timeout it moves to *half-open* and allows a single probe request.
+pub struct CircuitBreaker {
+    state: AtomicU8,
+    consecutive_failures: AtomicU32,
+    failure_threshold: u32,
+    open_timeout: Duration,
+    last_failure_time: Mutex<Option<Instant>>,
+}
+
+impl CircuitBreaker {
+    /// Create a new circuit breaker.
+    ///
+    /// * `failure_threshold` — consecutive failures before opening (default 5).
+    /// * `open_timeout` — how long to stay open before probing (default 30 s).
+    pub fn new(failure_threshold: u32, open_timeout: Duration) -> Self {
+        Self {
+            state: AtomicU8::new(CB_CLOSED),
+            consecutive_failures: AtomicU32::new(0),
+            failure_threshold,
+            open_timeout,
+            last_failure_time: Mutex::new(None),
+        }
+    }
+
+    /// Check whether a request is allowed.
+    ///
+    /// Returns `true` if the request should proceed (closed or half-open probe),
+    /// `false` if the breaker is open.
+    pub fn allow_request(&self) -> bool {
+        let state = self.state.load(Ordering::Acquire);
+        match state {
+            CB_CLOSED => true,
+            CB_OPEN => {
+                // Check if the open timeout has elapsed
+                let should_probe = {
+                    let guard = self.last_failure_time.lock().unwrap();
+                    guard
+                        .map(|t| t.elapsed() >= self.open_timeout)
+                        .unwrap_or(true)
+                };
+                if should_probe {
+                    // Transition to half-open (only one probe)
+                    self.state
+                        .compare_exchange(CB_OPEN, CB_HALF_OPEN, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                } else {
+                    false
+                }
+            }
+            CB_HALF_OPEN => false, // Only one probe at a time
+            _ => true,
+        }
+    }
+
+    /// Record a successful response, resetting the breaker to closed.
+    pub fn record_success(&self) {
+        self.consecutive_failures.store(0, Ordering::Release);
+        let prev = self.state.swap(CB_CLOSED, Ordering::AcqRel);
+        if prev != CB_CLOSED {
+            info!("Circuit breaker closed — LLM endpoint recovered");
+        }
+    }
+
+    /// Record a failed response.  If failures exceed the threshold the
+    /// breaker opens.
+    pub fn record_failure(&self) {
+        let failures = self.consecutive_failures.fetch_add(1, Ordering::AcqRel) + 1;
+        *self.last_failure_time.lock().unwrap() = Some(Instant::now());
+
+        if failures >= self.failure_threshold {
+            let prev = self.state.swap(CB_OPEN, Ordering::AcqRel);
+            if prev != CB_OPEN {
+                warn!(
+                    "Circuit breaker OPEN after {} consecutive failures — \
+                     rejecting requests for {:?}",
+                    failures, self.open_timeout
+                );
+            }
+        }
+    }
+
+    /// Current state name (for diagnostics / logging).
+    pub fn state_name(&self) -> &'static str {
+        match self.state.load(Ordering::Acquire) {
+            CB_CLOSED => "closed",
+            CB_OPEN => "open",
+            CB_HALF_OPEN => "half-open",
+            _ => "unknown",
+        }
+    }
+}
+
+impl Default for CircuitBreaker {
+    fn default() -> Self {
+        Self::new(5, Duration::from_secs(30))
+    }
+}
 
 /// A streaming response that yields chunks as they arrive
 #[allow(dead_code)]
@@ -209,6 +321,7 @@ pub struct ApiClient {
     config: crate::config::Config,
     base_url: String,
     retry_config: RetryConfig,
+    circuit_breaker: CircuitBreaker,
 }
 
 impl ApiClient {
@@ -226,6 +339,7 @@ impl ApiClient {
             base_url: config.endpoint.clone(),
             config: config.clone(),
             retry_config: RetryConfig::default(),
+            circuit_breaker: CircuitBreaker::default(),
         })
     }
 
@@ -327,8 +441,18 @@ impl ApiClient {
         Ok(StreamingResponse::new(response))
     }
 
-    /// Send request with exponential backoff retry logic
+    /// Send request with exponential backoff retry logic and circuit breaker protection.
     async fn send_with_retry(&self, body: &serde_json::Value) -> Result<ChatResponse> {
+        // Circuit breaker check — fail fast when the endpoint is known to be down.
+        if !self.circuit_breaker.allow_request() {
+            anyhow::bail!(
+                "Circuit breaker is {} — LLM endpoint temporarily unavailable. \
+                 Will probe again in {:?}.",
+                self.circuit_breaker.state_name(),
+                Duration::from_secs(30)
+            );
+        }
+
         let url = format!("{}/chat/completions", self.base_url);
         let mut last_error: Option<anyhow::Error> = None;
         let mut delay_ms = self.retry_config.initial_delay_ms;
@@ -377,6 +501,7 @@ impl ApiClient {
 
                         let chat_response: ChatResponse = serde_json::from_str(&body_text)
                             .context("Failed to parse response JSON")?;
+                        self.circuit_breaker.record_success();
                         return Ok(chat_response);
                     }
 
@@ -399,6 +524,7 @@ impl ApiClient {
 
                     // Non-retryable error
                     let error_text = response.text().await.unwrap_or_default();
+                    self.circuit_breaker.record_failure();
                     anyhow::bail!("API error {}: {}", status, error_text);
                 }
                 Err(e) => {
@@ -630,5 +756,90 @@ mod tests {
             assert!(jitter >= 0.0);
             assert!(jitter < 1.0);
         }
+    }
+
+    // ─── Circuit Breaker Tests ───────────────────────────────────────
+
+    #[test]
+    fn test_circuit_breaker_starts_closed() {
+        let cb = CircuitBreaker::default();
+        assert_eq!(cb.state_name(), "closed");
+        assert!(cb.allow_request());
+    }
+
+    #[test]
+    fn test_circuit_breaker_opens_after_threshold() {
+        let cb = CircuitBreaker::new(3, Duration::from_secs(60));
+
+        // Three consecutive failures should trip the breaker
+        cb.record_failure();
+        assert!(cb.allow_request()); // still closed
+        cb.record_failure();
+        assert!(cb.allow_request()); // still closed
+        cb.record_failure(); // threshold reached
+        assert_eq!(cb.state_name(), "open");
+        assert!(!cb.allow_request()); // now open — blocked
+    }
+
+    #[test]
+    fn test_circuit_breaker_success_resets_failures() {
+        let cb = CircuitBreaker::new(3, Duration::from_secs(60));
+
+        cb.record_failure();
+        cb.record_failure();
+        // Two failures, one more would trip it
+        cb.record_success(); // reset counter
+        cb.record_failure();
+        cb.record_failure();
+        // Still only 2 failures since the reset
+        assert_eq!(cb.state_name(), "closed");
+        assert!(cb.allow_request());
+    }
+
+    #[test]
+    fn test_circuit_breaker_half_open_after_timeout() {
+        // Use a 0ms timeout so it expires immediately
+        let cb = CircuitBreaker::new(1, Duration::from_millis(0));
+
+        cb.record_failure(); // opens the breaker
+        assert_eq!(cb.state_name(), "open");
+
+        // Timeout is 0ms, so next allow_request should transition to half-open
+        std::thread::sleep(Duration::from_millis(1));
+        assert!(cb.allow_request()); // transitions to half-open, allows probe
+        assert_eq!(cb.state_name(), "half-open");
+        assert!(!cb.allow_request()); // second request blocked in half-open
+    }
+
+    #[test]
+    fn test_circuit_breaker_closes_on_probe_success() {
+        let cb = CircuitBreaker::new(1, Duration::from_millis(0));
+
+        cb.record_failure();
+        std::thread::sleep(Duration::from_millis(1));
+        assert!(cb.allow_request()); // half-open probe
+
+        cb.record_success(); // probe succeeded — close the breaker
+        assert_eq!(cb.state_name(), "closed");
+        assert!(cb.allow_request());
+    }
+
+    #[test]
+    fn test_circuit_breaker_reopens_on_probe_failure() {
+        let cb = CircuitBreaker::new(1, Duration::from_millis(0));
+
+        cb.record_failure(); // open
+        std::thread::sleep(Duration::from_millis(1));
+        assert!(cb.allow_request()); // half-open probe
+
+        cb.record_failure(); // probe failed — back to open
+        assert_eq!(cb.state_name(), "open");
+    }
+
+    #[test]
+    fn test_circuit_breaker_default_values() {
+        let cb = CircuitBreaker::default();
+        assert_eq!(cb.failure_threshold, 5);
+        assert_eq!(cb.open_timeout, Duration::from_secs(30));
     }
 }

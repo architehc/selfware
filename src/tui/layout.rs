@@ -64,6 +64,29 @@ impl PaneType {
             PaneType::Help => "Help",
         }
     }
+
+    /// Whether this pane type has a fully implemented renderer.
+    /// Placeholder panes show a "Coming soon" message instead of real content.
+    pub fn is_implemented(&self) -> bool {
+        matches!(self, PaneType::Chat | PaneType::Help)
+    }
+
+    /// Get placeholder text for pane types that are not yet implemented.
+    /// Returns `None` for fully implemented pane types.
+    pub fn placeholder_text(&self) -> Option<&'static str> {
+        if self.is_implemented() {
+            None
+        } else {
+            Some(match self {
+                PaneType::Editor => "Editor pane — coming soon",
+                PaneType::Terminal => "Terminal pane — coming soon",
+                PaneType::Explorer => "File explorer pane — coming soon",
+                PaneType::Diff => "Diff viewer pane — coming soon",
+                PaneType::Debug => "Debug/logs pane — coming soon",
+                _ => unreachable!(),
+            })
+        }
+    }
 }
 
 /// A pane in the layout
@@ -129,12 +152,17 @@ impl LayoutPreset {
     pub fn description(&self) -> &'static str {
         match self {
             LayoutPreset::Focus => "Full-screen chat (distraction-free)",
-            LayoutPreset::Coding => "Chat + Editor side-by-side",
-            LayoutPreset::Debugging => "Chat + Code + Terminal",
-            LayoutPreset::Review => "Full-screen diff view",
-            LayoutPreset::Explore => "Chat with file explorer",
-            LayoutPreset::FullWorkspace => "Explorer + Editor + Chat",
+            LayoutPreset::Coding => "Chat + Editor side-by-side [WIP: editor placeholder]",
+            LayoutPreset::Debugging => "Chat + Code + Terminal [WIP: editor/terminal placeholder]",
+            LayoutPreset::Review => "Full-screen diff view [WIP: diff placeholder]",
+            LayoutPreset::Explore => "Chat with file explorer [WIP: explorer placeholder]",
+            LayoutPreset::FullWorkspace => "Explorer + Editor + Chat [WIP: explorer/editor placeholder]",
         }
+    }
+
+    /// Whether this preset is fully implemented (all panes have real renderers)
+    pub fn is_fully_implemented(&self) -> bool {
+        matches!(self, LayoutPreset::Focus)
     }
 
     /// Get the keyboard shortcut for this preset
@@ -685,5 +713,34 @@ mod tests {
         let h = SplitDirection::Horizontal;
         let v = SplitDirection::Vertical;
         assert_ne!(h, v);
+    }
+
+    #[test]
+    fn test_pane_type_is_implemented() {
+        assert!(PaneType::Chat.is_implemented());
+        assert!(PaneType::Help.is_implemented());
+        assert!(!PaneType::Editor.is_implemented());
+        assert!(!PaneType::Terminal.is_implemented());
+        assert!(!PaneType::Explorer.is_implemented());
+        assert!(!PaneType::Diff.is_implemented());
+        assert!(!PaneType::Debug.is_implemented());
+    }
+
+    #[test]
+    fn test_pane_type_placeholder_text() {
+        assert!(PaneType::Chat.placeholder_text().is_none());
+        assert!(PaneType::Help.placeholder_text().is_none());
+        assert!(PaneType::Editor.placeholder_text().unwrap().contains("coming soon"));
+        assert!(PaneType::Explorer.placeholder_text().unwrap().contains("coming soon"));
+    }
+
+    #[test]
+    fn test_preset_is_fully_implemented() {
+        assert!(LayoutPreset::Focus.is_fully_implemented());
+        assert!(!LayoutPreset::Coding.is_fully_implemented());
+        assert!(!LayoutPreset::Debugging.is_fully_implemented());
+        assert!(!LayoutPreset::Review.is_fully_implemented());
+        assert!(!LayoutPreset::Explore.is_fully_implemented());
+        assert!(!LayoutPreset::FullWorkspace.is_fully_implemented());
     }
 }

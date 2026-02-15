@@ -2,7 +2,7 @@
 # Coverage threshold - targeting 90% for testable code
 # Note: agent/mod.rs and api/mod.rs contain network I/O
 # that requires mocking for proper unit testing.
-fail-under = 60
+fail-under = 70
 # Output formats - HTML for local viewing, XML for CI/Codecov
 out = ["Html", "Stdout", "Xml"]
 # Line coverage mode

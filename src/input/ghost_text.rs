@@ -97,6 +97,11 @@ impl GhostTextHinter {
 
     /// Find a matching pattern hint (returns owned String to avoid borrow issues)
     fn find_pattern_hint(&self, input: &str) -> Option<String> {
+        // Show discoverability hint on empty input
+        if input.is_empty() {
+            return Some("Type / for commands, or describe a task...".to_string());
+        }
+
         let input_lower = input.to_lowercase();
         for pattern in &self.patterns {
             if pattern.prefix.to_lowercase().starts_with(&input_lower)
