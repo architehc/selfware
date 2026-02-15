@@ -3,8 +3,6 @@
 //! Tools for building and querying a knowledge graph of code entities,
 //! relationships, and facts discovered during analysis.
 
-#![allow(dead_code)]
-
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
@@ -56,7 +54,7 @@ impl std::fmt::Display for NodeType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             NodeType::Custom(s) => write!(f, "{}", s),
-            _ => write!(f, "{:?}", self).map(|_| ()).and_then(|_| Ok(())),
+            _ => write!(f, "{:?}", self).map(|_| ()).map(|_| ()),
         }
     }
 }

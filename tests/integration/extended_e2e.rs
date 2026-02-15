@@ -9,6 +9,8 @@
 //!
 //! Run with: SELFWARE_TIMEOUT=28800 cargo test --features integration extended_
 
+#![allow(dead_code)]
+
 use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -28,6 +30,7 @@ pub struct ExtendedTestHarness {
     pub config: selfware::config::Config,
     pub metrics: Arc<TestMetrics>,
     pub checkpoint_dir: PathBuf,
+    pub start_time: Instant,
 }
 
 /// Metrics collected during extended tests
@@ -102,6 +105,7 @@ pub struct TestReport {
 pub struct CheckpointInfo {
     pub timestamp: u64,
     pub requests_at_checkpoint: u64,
+    pub state_size_bytes: u64,
 }
 
 impl ExtendedTestHarness {
@@ -114,6 +118,7 @@ impl ExtendedTestHarness {
             config,
             metrics: Arc::new(TestMetrics::new()),
             checkpoint_dir,
+            start_time: Instant::now(),
         })
     }
 
@@ -146,6 +151,7 @@ impl ExtendedTestHarness {
                 let checkpoint = CheckpointInfo {
                     timestamp: start.elapsed().as_secs(),
                     requests_at_checkpoint: self.metrics.request_count(),
+                    state_size_bytes: 0, // Would be actual state size in real impl
                 };
                 checkpoints.push(checkpoint);
                 println!(
@@ -730,8 +736,7 @@ async fn extended_timeout_handling() {
 // Test Utilities
 // ============================================================================
 
-/// Print a formatted test report (kept for manual debugging)
-#[allow(dead_code)]
+/// Print a formatted test report
 pub fn print_report(report: &TestReport) {
     println!("\n╔══════════════════════════════════════════════════╗");
     println!("║            TEST REPORT: {}           ", report.test_name);
@@ -844,6 +849,7 @@ mod tests {
         let checkpoint = CheckpointInfo {
             timestamp: 1000,
             requests_at_checkpoint: 50,
+            state_size_bytes: 1024,
         };
 
         assert_eq!(checkpoint.timestamp, 1000);

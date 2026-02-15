@@ -3,8 +3,6 @@
 //! Validates input before submission, including bracket matching
 //! and JSON validation.
 
-#![allow(dead_code)]
-
 use reedline::{ValidationResult, Validator};
 
 /// Bracket-aware validator that ensures matching pairs
@@ -92,7 +90,7 @@ impl Default for BracketValidator {
 
 /// State of bracket matching
 #[derive(Debug, Clone, PartialEq)]
-pub enum BracketState {
+pub(crate) enum BracketState {
     /// All brackets are balanced
     Balanced,
     /// Missing closing brackets

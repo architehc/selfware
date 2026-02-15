@@ -1,8 +1,10 @@
 # Selfware
 
 [![CI](https://github.com/architehc/selfware/actions/workflows/ci.yml/badge.svg)](https://github.com/architehc/selfware/actions/workflows/ci.yml)
-[![Release](https://github.com/architehc/selfware/actions/workflows/release.yml/badge.svg)](https://github.com/architehc/selfware/releases)
+[![Crates.io](https://img.shields.io/crates/v/selfware)](https://crates.io/crates/selfware)
+[![Docs.rs](https://docs.rs/selfware/badge.svg)](https://docs.rs/selfware)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![codecov](https://codecov.io/gh/architehc/selfware/branch/main/graph/badge.svg)](https://codecov.io/gh/architehc/selfware)
 
 ```
     🦊 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -37,7 +39,10 @@ Download the latest release for your platform:
 
 ```bash
 # Linux/macOS quick install
-curl -fsSL https://github.com/architehc/selfware/releases/latest/download/selfware-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m).tar.gz | tar -xz
+# Translates platform names: Darwin->macos, arm64->aarch64
+OS=$(uname -s | tr '[:upper:]' '[:lower:]' | sed 's/darwin/macos/')
+ARCH=$(uname -m | sed 's/arm64/aarch64/')
+curl -fsSL "https://github.com/architehc/selfware/releases/latest/download/selfware-${OS}-${ARCH}.tar.gz" | tar -xz
 sudo mv selfware /usr/local/bin/
 
 # Verify installation
@@ -57,6 +62,19 @@ git clone https://github.com/architehc/selfware.git
 cd selfware
 cargo build --release
 ./target/release/selfware --help
+```
+
+### Option 4: Docker
+
+```bash
+# Build the image
+docker build -t selfware .
+
+# Run interactively
+docker run --rm -it -v $(pwd):/workspace selfware chat
+
+# Run a specific task
+docker run --rm -it -v $(pwd):/workspace selfware run "Add unit tests"
 ```
 
 ## Quick Start
@@ -92,6 +110,18 @@ protected_branches = ["main"]
 max_iterations = 100
 step_timeout_secs = 600     # 10 min for fast models
 token_budget = 500000
+
+[continuous_work]
+enabled = true
+checkpoint_interval_tools = 10
+checkpoint_interval_secs = 300
+auto_recovery = true
+max_recovery_attempts = 3
+
+[retry]
+max_retries = 5
+base_delay_ms = 1000
+max_delay_ms = 60000
 ```
 
 ### 3. Start Coding

@@ -1775,6 +1775,254 @@ mod tests {
     }
 
     #[test]
+    fn test_container_runtime_both_variants() {
+        let docker = ContainerRuntime::Docker;
+        let podman = ContainerRuntime::Podman;
+        assert_ne!(docker, podman);
+        assert_eq!(docker.command(), "docker");
+        assert_eq!(podman.command(), "podman");
+    }
+
+    #[test]
+    fn test_truncate_output_one_char_over() {
+        let output = "123456";
+        let result = truncate_output(output, 5);
+        assert!(result.contains("truncated"));
+        assert!(result.contains("6 total chars"));
+    }
+
+    #[test]
+    fn test_container_info_all_fields() {
+        let info = ContainerInfo {
+            id: "container123".to_string(),
+            image: "myimage:v1".to_string(),
+            command: "/bin/bash".to_string(),
+            created: "2025-01-01 10:00:00".to_string(),
+            status: "Up 2 hours".to_string(),
+            ports: "0.0.0.0:8080->80/tcp".to_string(),
+            names: "my_container".to_string(),
+        };
+        assert_eq!(info.id, "container123");
+        assert_eq!(info.image, "myimage:v1");
+        assert_eq!(info.command, "/bin/bash");
+        assert_eq!(info.created, "2025-01-01 10:00:00");
+        assert_eq!(info.status, "Up 2 hours");
+        assert_eq!(info.ports, "0.0.0.0:8080->80/tcp");
+        assert_eq!(info.names, "my_container");
+    }
+
+    #[test]
+    fn test_image_info_all_fields() {
+        let info = ImageInfo {
+            id: "sha256:abcdef123456".to_string(),
+            repository: "myregistry/myapp".to_string(),
+            tag: "v2.0.0".to_string(),
+            created: "3 days ago".to_string(),
+            size: "250MB".to_string(),
+        };
+        assert_eq!(info.id, "sha256:abcdef123456");
+        assert_eq!(info.repository, "myregistry/myapp");
+        assert_eq!(info.tag, "v2.0.0");
+        assert_eq!(info.created, "3 days ago");
+        assert_eq!(info.size, "250MB");
+    }
+
+    #[test]
+    fn test_parse_build_output_no_sha256_prefix() {
+        let stdout = "Building...\nSuccessfully built finalimage123";
+        let result = parse_build_output(stdout, "");
+        assert_eq!(result, Some("finalimage123".to_string()));
+    }
+
+    #[test]
+    fn test_container_run_schema_all_options() {
+        let tool = ContainerRun;
+        let schema = tool.schema();
+        let props = &schema["properties"];
+        // Verify all expected properties exist
+        assert!(props.get("image").is_some());
+        assert!(props.get("name").is_some());
+        assert!(props.get("command").is_some());
+        assert!(props.get("ports").is_some());
+        assert!(props.get("volumes").is_some());
+        assert!(props.get("env").is_some());
+        assert!(props.get("detach").is_some());
+        assert!(props.get("rm").is_some());
+        assert!(props.get("network").is_some());
+        assert!(props.get("workdir").is_some());
+        assert!(props.get("runtime").is_some());
+    }
+
+    #[test]
+    fn test_container_exec_schema_all_options() {
+        let tool = ContainerExec;
+        let schema = tool.schema();
+        let props = &schema["properties"];
+        assert!(props.get("container").is_some());
+        assert!(props.get("command").is_some());
+        assert!(props.get("workdir").is_some());
+        assert!(props.get("env").is_some());
+        assert!(props.get("user").is_some());
+        assert!(props.get("runtime").is_some());
+    }
+
+    #[test]
+    fn test_container_build_schema_all_options() {
+        let tool = ContainerBuild;
+        let schema = tool.schema();
+        let props = &schema["properties"];
+        assert!(props.get("tag").is_some());
+        assert!(props.get("path").is_some());
+        assert!(props.get("dockerfile").is_some());
+        assert!(props.get("build_args").is_some());
+        assert!(props.get("no_cache").is_some());
+        assert!(props.get("target").is_some());
+        assert!(props.get("runtime").is_some());
+    }
+
+    #[test]
+    fn test_compose_up_schema_all_options() {
+        let tool = ComposeUp;
+        let schema = tool.schema();
+        let props = &schema["properties"];
+        assert!(props.get("path").is_some());
+        assert!(props.get("file").is_some());
+        assert!(props.get("services").is_some());
+        assert!(props.get("detach").is_some());
+        assert!(props.get("build").is_some());
+        assert!(props.get("runtime").is_some());
+    }
+
+    #[test]
+    fn test_compose_down_schema_all_options() {
+        let tool = ComposeDown;
+        let schema = tool.schema();
+        let props = &schema["properties"];
+        assert!(props.get("path").is_some());
+        assert!(props.get("file").is_some());
+        assert!(props.get("volumes").is_some());
+        assert!(props.get("rmi").is_some());
+        assert!(props.get("runtime").is_some());
+    }
+
+    #[test]
+    fn test_all_tools_have_properties() {
+        let tools: Vec<Box<dyn Tool + Send + Sync>> = vec![
+            Box::new(ContainerRun),
+            Box::new(ContainerStop),
+            Box::new(ContainerList),
+            Box::new(ContainerLogs),
+            Box::new(ContainerExec),
+            Box::new(ContainerBuild),
+            Box::new(ContainerImages),
+            Box::new(ContainerPull),
+            Box::new(ContainerRemove),
+            Box::new(ComposeUp),
+            Box::new(ComposeDown),
+        ];
+        for tool in tools {
+            let schema = tool.schema();
+            assert!(
+                schema.get("properties").is_some(),
+                "Tool {} missing properties",
+                tool.name()
+            );
+        }
+    }
+
+    #[test]
+    fn test_truncate_output_newlines() {
+        let output = "line1\nline2\nline3\nline4\nline5";
+        let result = truncate_output(output, 10);
+        assert!(result.contains("truncated"));
+    }
+
+    #[test]
+    fn test_parse_build_output_sha256_no_suffix() {
+        let stderr = "writing image sha256:abc123";
+        let result = parse_build_output("", stderr);
+        assert_eq!(result, Some("abc123".to_string()));
+    }
+
+    #[test]
+    fn test_container_info_empty_ports() {
+        let info = ContainerInfo {
+            id: "abc".to_string(),
+            image: "test".to_string(),
+            command: "sh".to_string(),
+            created: "now".to_string(),
+            status: "exited".to_string(),
+            ports: "".to_string(),
+            names: "test".to_string(),
+        };
+        assert!(info.ports.is_empty());
+    }
+
+    #[test]
+    fn test_image_info_none_tag() {
+        let info = ImageInfo {
+            id: "sha".to_string(),
+            repository: "test".to_string(),
+            tag: "<none>".to_string(),
+            created: "now".to_string(),
+            size: "0B".to_string(),
+        };
+        assert_eq!(info.tag, "<none>");
+    }
+
+    #[test]
+    fn test_runtime_eq_reflexive() {
+        let runtime = ContainerRuntime::Docker;
+        assert_eq!(runtime, runtime);
+    }
+
+    #[test]
+    fn test_runtime_ne_different() {
+        assert!(ContainerRuntime::Docker != ContainerRuntime::Podman);
+    }
+
+    #[test]
+    fn test_container_stop_schema_has_container() {
+        let tool = ContainerStop;
+        let schema = tool.schema();
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.contains(&json!("container")));
+    }
+
+    #[test]
+    fn test_container_logs_schema_has_container() {
+        let tool = ContainerLogs;
+        let schema = tool.schema();
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.contains(&json!("container")));
+    }
+
+    #[test]
+    fn test_container_exec_schema_has_required() {
+        let tool = ContainerExec;
+        let schema = tool.schema();
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.contains(&json!("container")));
+        assert!(required.contains(&json!("command")));
+    }
+
+    #[test]
+    fn test_container_build_schema_has_tag() {
+        let tool = ContainerBuild;
+        let schema = tool.schema();
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.contains(&json!("tag")));
+    }
+
+    #[test]
+    fn test_container_remove_schema_has_container() {
+        let tool = ContainerRemove;
+        let schema = tool.schema();
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.contains(&json!("container")));
+    }
+
+    #[test]
     fn test_truncate_output_multibyte_boundary() {
         // Test truncation near multibyte char boundary
         let output = "a".repeat(100);

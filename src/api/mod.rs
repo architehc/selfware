@@ -1,128 +1,16 @@
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use reqwest::{Client, StatusCode};
-use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 pub mod types;
 
 use types::*;
 
-// ─── Circuit Breaker ─────────────────────────────────────────────────
-
-/// Circuit breaker states
-const CB_CLOSED: u8 = 0; // Normal operation — requests flow through
-const CB_OPEN: u8 = 1; // Tripped — requests are rejected immediately
-const CB_HALF_OPEN: u8 = 2; // Probing — one request allowed to test recovery
-
-/// Circuit breaker for LLM API calls.
-///
-/// Prevents cascading failures when the upstream LLM endpoint is down or
-/// overloaded.  After `failure_threshold` consecutive failures the breaker
-/// *opens* and rejects calls instantly for `open_timeout`.  After the
-/// timeout it moves to *half-open* and allows a single probe request.
-pub struct CircuitBreaker {
-    state: AtomicU8,
-    consecutive_failures: AtomicU32,
-    failure_threshold: u32,
-    open_timeout: Duration,
-    last_failure_time: Mutex<Option<Instant>>,
-}
-
-impl CircuitBreaker {
-    /// Create a new circuit breaker.
-    ///
-    /// * `failure_threshold` — consecutive failures before opening (default 5).
-    /// * `open_timeout` — how long to stay open before probing (default 30 s).
-    pub fn new(failure_threshold: u32, open_timeout: Duration) -> Self {
-        Self {
-            state: AtomicU8::new(CB_CLOSED),
-            consecutive_failures: AtomicU32::new(0),
-            failure_threshold,
-            open_timeout,
-            last_failure_time: Mutex::new(None),
-        }
-    }
-
-    /// Check whether a request is allowed.
-    ///
-    /// Returns `true` if the request should proceed (closed or half-open probe),
-    /// `false` if the breaker is open.
-    pub fn allow_request(&self) -> bool {
-        let state = self.state.load(Ordering::Acquire);
-        match state {
-            CB_CLOSED => true,
-            CB_OPEN => {
-                // Check if the open timeout has elapsed
-                let should_probe = {
-                    let guard = self.last_failure_time.lock().unwrap();
-                    guard
-                        .map(|t| t.elapsed() >= self.open_timeout)
-                        .unwrap_or(true)
-                };
-                if should_probe {
-                    // Transition to half-open (only one probe)
-                    self.state
-                        .compare_exchange(CB_OPEN, CB_HALF_OPEN, Ordering::AcqRel, Ordering::Acquire)
-                        .is_ok()
-                } else {
-                    false
-                }
-            }
-            CB_HALF_OPEN => false, // Only one probe at a time
-            _ => true,
-        }
-    }
-
-    /// Record a successful response, resetting the breaker to closed.
-    pub fn record_success(&self) {
-        self.consecutive_failures.store(0, Ordering::Release);
-        let prev = self.state.swap(CB_CLOSED, Ordering::AcqRel);
-        if prev != CB_CLOSED {
-            info!("Circuit breaker closed — LLM endpoint recovered");
-        }
-    }
-
-    /// Record a failed response.  If failures exceed the threshold the
-    /// breaker opens.
-    pub fn record_failure(&self) {
-        let failures = self.consecutive_failures.fetch_add(1, Ordering::AcqRel) + 1;
-        *self.last_failure_time.lock().unwrap() = Some(Instant::now());
-
-        if failures >= self.failure_threshold {
-            let prev = self.state.swap(CB_OPEN, Ordering::AcqRel);
-            if prev != CB_OPEN {
-                warn!(
-                    "Circuit breaker OPEN after {} consecutive failures — \
-                     rejecting requests for {:?}",
-                    failures, self.open_timeout
-                );
-            }
-        }
-    }
-
-    /// Current state name (for diagnostics / logging).
-    pub fn state_name(&self) -> &'static str {
-        match self.state.load(Ordering::Acquire) {
-            CB_CLOSED => "closed",
-            CB_OPEN => "open",
-            CB_HALF_OPEN => "half-open",
-            _ => "unknown",
-        }
-    }
-}
-
-impl Default for CircuitBreaker {
-    fn default() -> Self {
-        Self::new(5, Duration::from_secs(30))
-    }
-}
-
 /// A streaming response that yields chunks as they arrive
-#[allow(dead_code)]
+// Streaming infrastructure (used by chat_streaming)
 pub struct StreamingResponse {
     response: reqwest::Response,
 }
@@ -133,7 +21,7 @@ impl StreamingResponse {
     }
 
     /// Process the stream and send chunks through a channel
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Streaming API - used by chat_streaming
     pub async fn into_channel(self) -> mpsc::Receiver<Result<StreamChunk>> {
         let (tx, rx) = mpsc::channel(32);
 
@@ -170,7 +58,7 @@ impl StreamingResponse {
     }
 
     /// Collect all chunks into a complete response
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Streaming API - collects stream into response
     pub async fn collect(self) -> Result<ChatResponse> {
         let mut rx = self.into_channel().await;
         let mut content = String::new();
@@ -230,7 +118,7 @@ impl StreamingResponse {
 
 /// A chunk from a streaming response
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+// Streaming infrastructure (used by chat_streaming)
 pub enum StreamChunk {
     /// Text content
     Content(String),
@@ -245,7 +133,7 @@ pub enum StreamChunk {
 }
 
 /// Parse a Server-Sent Events (SSE) event
-#[allow(dead_code)]
+// Streaming infrastructure (used by chat_streaming)
 fn parse_sse_event(event: &str) -> Option<StreamChunk> {
     for line in event.lines() {
         if let Some(data) = line.strip_prefix("data: ") {
@@ -316,20 +204,31 @@ impl Default for RetryConfig {
     }
 }
 
+impl RetryConfig {
+    pub fn from_settings(settings: &crate::config::RetrySettings) -> Self {
+        Self {
+            max_retries: settings.max_retries,
+            initial_delay_ms: settings.base_delay_ms,
+            max_delay_ms: settings.max_delay_ms,
+            retryable_status_codes: vec![429, 500, 502, 503, 504],
+        }
+    }
+}
+
 pub struct ApiClient {
     client: Client,
     config: crate::config::Config,
     base_url: String,
     retry_config: RetryConfig,
-    circuit_breaker: CircuitBreaker,
 }
 
 impl ApiClient {
     pub fn new(config: &crate::config::Config) -> Result<Self> {
-        // Use step_timeout from config, with 4 hour default for slow local models
-        let request_timeout = config.agent.step_timeout_secs.max(14400);
+        // Use step_timeout from config with reasonable 60s minimum
+        // Users can configure longer timeouts for slow models
+        let request_timeout = config.agent.step_timeout_secs.max(60);
         let client = Client::builder()
-            .timeout(Duration::from_secs(request_timeout)) // From config, min 4 hours
+            .timeout(Duration::from_secs(request_timeout))
             .connect_timeout(Duration::from_secs(30))
             .build()
             .context("Failed to build HTTP client")?;
@@ -338,13 +237,12 @@ impl ApiClient {
             client,
             base_url: config.endpoint.clone(),
             config: config.clone(),
-            retry_config: RetryConfig::default(),
-            circuit_breaker: CircuitBreaker::default(),
+            retry_config: RetryConfig::from_settings(&config.retry),
         })
     }
 
     /// Create client with custom retry configuration
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Builder method for API configuration
     pub fn with_retry_config(mut self, retry_config: RetryConfig) -> Self {
         self.retry_config = retry_config;
         self
@@ -388,7 +286,7 @@ impl ApiClient {
 
     /// Stream a chat completion response
     /// Returns a receiver that yields chunks as they arrive
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Streaming API endpoint
     pub async fn chat_stream(
         &self,
         messages: Vec<Message>,
@@ -441,18 +339,8 @@ impl ApiClient {
         Ok(StreamingResponse::new(response))
     }
 
-    /// Send request with exponential backoff retry logic and circuit breaker protection.
+    /// Send request with exponential backoff retry logic
     async fn send_with_retry(&self, body: &serde_json::Value) -> Result<ChatResponse> {
-        // Circuit breaker check — fail fast when the endpoint is known to be down.
-        if !self.circuit_breaker.allow_request() {
-            anyhow::bail!(
-                "Circuit breaker is {} — LLM endpoint temporarily unavailable. \
-                 Will probe again in {:?}.",
-                self.circuit_breaker.state_name(),
-                Duration::from_secs(30)
-            );
-        }
-
         let url = format!("{}/chat/completions", self.base_url);
         let mut last_error: Option<anyhow::Error> = None;
         let mut delay_ms = self.retry_config.initial_delay_ms;
@@ -501,7 +389,6 @@ impl ApiClient {
 
                         let chat_response: ChatResponse = serde_json::from_str(&body_text)
                             .context("Failed to parse response JSON")?;
-                        self.circuit_breaker.record_success();
                         return Ok(chat_response);
                     }
 
@@ -524,7 +411,6 @@ impl ApiClient {
 
                     // Non-retryable error
                     let error_text = response.text().await.unwrap_or_default();
-                    self.circuit_breaker.record_failure();
                     anyhow::bail!("API error {}: {}", status, error_text);
                 }
                 Err(e) => {
@@ -562,7 +448,7 @@ pub enum ThinkingMode {
     /// Thinking disabled for faster responses
     Disabled,
     /// Thinking with a specific token budget
-    #[allow(dead_code)]
+    #[allow(dead_code)] // For models supporting thinking budget
     Budget(usize),
 }
 
@@ -734,6 +620,22 @@ mod tests {
     }
 
     #[test]
+    fn test_retry_config_from_settings() {
+        let settings = crate::config::RetrySettings {
+            max_retries: 9,
+            base_delay_ms: 250,
+            max_delay_ms: 12000,
+        };
+        let config = RetryConfig::from_settings(&settings);
+
+        assert_eq!(config.max_retries, 9);
+        assert_eq!(config.initial_delay_ms, 250);
+        assert_eq!(config.max_delay_ms, 12000);
+        assert!(config.retryable_status_codes.contains(&429));
+        assert!(config.retryable_status_codes.contains(&500));
+    }
+
+    #[test]
     fn test_retry_config_clone() {
         let config = RetryConfig::default();
         let cloned = config.clone();
@@ -758,88 +660,493 @@ mod tests {
         }
     }
 
-    // ─── Circuit Breaker Tests ───────────────────────────────────────
+    // ============================================
+    // Retry Logic Tests
+    // ============================================
 
     #[test]
-    fn test_circuit_breaker_starts_closed() {
-        let cb = CircuitBreaker::default();
-        assert_eq!(cb.state_name(), "closed");
-        assert!(cb.allow_request());
+    fn test_retry_config_custom_values() {
+        let config = RetryConfig {
+            max_retries: 5,
+            initial_delay_ms: 500,
+            max_delay_ms: 60000,
+            retryable_status_codes: vec![429, 503],
+        };
+        assert_eq!(config.max_retries, 5);
+        assert_eq!(config.initial_delay_ms, 500);
+        assert_eq!(config.max_delay_ms, 60000);
+        assert_eq!(config.retryable_status_codes.len(), 2);
+        assert!(config.retryable_status_codes.contains(&429));
+        assert!(config.retryable_status_codes.contains(&503));
     }
 
     #[test]
-    fn test_circuit_breaker_opens_after_threshold() {
-        let cb = CircuitBreaker::new(3, Duration::from_secs(60));
+    fn test_retry_config_status_code_check() {
+        let config = RetryConfig::default();
+        // Check that all expected retryable codes are present
+        assert!(config.retryable_status_codes.contains(&429)); // Too Many Requests
+        assert!(config.retryable_status_codes.contains(&500)); // Internal Server Error
+        assert!(config.retryable_status_codes.contains(&502)); // Bad Gateway
+        assert!(config.retryable_status_codes.contains(&503)); // Service Unavailable
+        assert!(config.retryable_status_codes.contains(&504)); // Gateway Timeout
 
-        // Three consecutive failures should trip the breaker
-        cb.record_failure();
-        assert!(cb.allow_request()); // still closed
-        cb.record_failure();
-        assert!(cb.allow_request()); // still closed
-        cb.record_failure(); // threshold reached
-        assert_eq!(cb.state_name(), "open");
-        assert!(!cb.allow_request()); // now open — blocked
+        // Verify non-retryable codes are not present
+        assert!(!config.retryable_status_codes.contains(&400)); // Bad Request
+        assert!(!config.retryable_status_codes.contains(&401)); // Unauthorized
+        assert!(!config.retryable_status_codes.contains(&403)); // Forbidden
+        assert!(!config.retryable_status_codes.contains(&404)); // Not Found
     }
 
     #[test]
-    fn test_circuit_breaker_success_resets_failures() {
-        let cb = CircuitBreaker::new(3, Duration::from_secs(60));
+    fn test_exponential_backoff_calculation() {
+        let config = RetryConfig::default();
+        let mut delay_ms = config.initial_delay_ms;
 
-        cb.record_failure();
-        cb.record_failure();
-        // Two failures, one more would trip it
-        cb.record_success(); // reset counter
-        cb.record_failure();
-        cb.record_failure();
-        // Still only 2 failures since the reset
-        assert_eq!(cb.state_name(), "closed");
-        assert!(cb.allow_request());
+        // Simulate exponential backoff without jitter
+        let expected_delays = [1000, 2000, 4000, 8000, 16000, 30000]; // capped at max_delay_ms
+
+        for (i, expected) in expected_delays.iter().enumerate() {
+            if i > 0 {
+                delay_ms = (delay_ms * 2).min(config.max_delay_ms);
+            }
+            assert_eq!(delay_ms, *expected, "Mismatch at iteration {}", i);
+        }
     }
 
     #[test]
-    fn test_circuit_breaker_half_open_after_timeout() {
-        // Use a 0ms timeout so it expires immediately
-        let cb = CircuitBreaker::new(1, Duration::from_millis(0));
+    fn test_backoff_respects_max_delay() {
+        let config = RetryConfig {
+            max_retries: 10,
+            initial_delay_ms: 10000,
+            max_delay_ms: 15000,
+            retryable_status_codes: vec![500],
+        };
 
-        cb.record_failure(); // opens the breaker
-        assert_eq!(cb.state_name(), "open");
+        let mut delay_ms = config.initial_delay_ms;
 
-        // Timeout is 0ms, so next allow_request should transition to half-open
-        std::thread::sleep(Duration::from_millis(1));
-        assert!(cb.allow_request()); // transitions to half-open, allows probe
-        assert_eq!(cb.state_name(), "half-open");
-        assert!(!cb.allow_request()); // second request blocked in half-open
+        // After first backoff: 10000 * 2 = 20000, but capped at 15000
+        delay_ms = (delay_ms * 2).min(config.max_delay_ms);
+        assert_eq!(delay_ms, 15000);
+
+        // Subsequent backoffs should stay at max
+        delay_ms = (delay_ms * 2).min(config.max_delay_ms);
+        assert_eq!(delay_ms, 15000);
+    }
+
+    // ============================================
+    // Request Construction Tests
+    // ============================================
+
+    #[test]
+    fn test_chat_request_body_construction_basic() {
+        // Test that basic chat request body is constructed correctly
+        let messages = vec![Message::system("You are helpful"), Message::user("Hello")];
+
+        let body = serde_json::json!({
+            "model": "test-model",
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 4096,
+            "stream": false,
+        });
+
+        // Verify the structure
+        assert_eq!(body["model"], "test-model");
+        assert_eq!(body["temperature"], 0.7);
+        assert_eq!(body["max_tokens"], 4096);
+        assert_eq!(body["stream"], false);
+        assert!(body["messages"].is_array());
+        assert_eq!(body["messages"].as_array().unwrap().len(), 2);
     }
 
     #[test]
-    fn test_circuit_breaker_closes_on_probe_success() {
-        let cb = CircuitBreaker::new(1, Duration::from_millis(0));
+    fn test_chat_request_body_with_tools() {
+        let messages = vec![Message::user("Read a file")];
 
-        cb.record_failure();
-        std::thread::sleep(Duration::from_millis(1));
-        assert!(cb.allow_request()); // half-open probe
+        let tools = vec![ToolDefinition {
+            def_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "file_read".to_string(),
+                description: "Read a file".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"}
+                    },
+                    "required": ["path"]
+                }),
+            },
+        }];
 
-        cb.record_success(); // probe succeeded — close the breaker
-        assert_eq!(cb.state_name(), "closed");
-        assert!(cb.allow_request());
+        let mut body = serde_json::json!({
+            "model": "test-model",
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 4096,
+            "stream": false,
+        });
+
+        body["tools"] = serde_json::json!(tools);
+
+        // Verify tools are included
+        assert!(body.get("tools").is_some());
+        let tools_array = body["tools"].as_array().unwrap();
+        assert_eq!(tools_array.len(), 1);
+        assert_eq!(tools_array[0]["function"]["name"], "file_read");
     }
 
     #[test]
-    fn test_circuit_breaker_reopens_on_probe_failure() {
-        let cb = CircuitBreaker::new(1, Duration::from_millis(0));
+    fn test_chat_request_body_with_thinking_disabled() {
+        let body = serde_json::json!({
+            "model": "test-model",
+            "messages": [],
+            "thinking": {"type": "disabled"}
+        });
 
-        cb.record_failure(); // open
-        std::thread::sleep(Duration::from_millis(1));
-        assert!(cb.allow_request()); // half-open probe
-
-        cb.record_failure(); // probe failed — back to open
-        assert_eq!(cb.state_name(), "open");
+        assert_eq!(body["thinking"]["type"], "disabled");
     }
 
     #[test]
-    fn test_circuit_breaker_default_values() {
-        let cb = CircuitBreaker::default();
-        assert_eq!(cb.failure_threshold, 5);
-        assert_eq!(cb.open_timeout, Duration::from_secs(30));
+    fn test_chat_request_body_with_thinking_budget() {
+        let budget_tokens = 2048;
+        let body = serde_json::json!({
+            "model": "test-model",
+            "messages": [],
+            "thinking": {
+                "type": "enabled",
+                "budget_tokens": budget_tokens
+            }
+        });
+
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], budget_tokens);
+    }
+
+    // ============================================
+    // Response Parsing Tests
+    // ============================================
+
+    #[test]
+    fn test_parse_chat_response_basic() {
+        let json = r#"{
+            "id": "chatcmpl-123",
+            "object": "chat.completion",
+            "created": 1677652288,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello! How can I help you today?"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 9,
+                "completion_tokens": 12,
+                "total_tokens": 21
+            }
+        }"#;
+
+        let response: ChatResponse = serde_json::from_str(json).unwrap();
+
+        assert_eq!(response.id, "chatcmpl-123");
+        assert_eq!(response.object, "chat.completion");
+        assert_eq!(response.model, "test-model");
+        assert_eq!(response.choices.len(), 1);
+        assert_eq!(
+            response.choices[0].message.content,
+            "Hello! How can I help you today?"
+        );
+        assert_eq!(response.usage.prompt_tokens, 9);
+        assert_eq!(response.usage.completion_tokens, 12);
+        assert_eq!(response.usage.total_tokens, 21);
+    }
+
+    #[test]
+    fn test_parse_chat_response_with_tool_calls() {
+        let json = r#"{
+            "id": "chatcmpl-456",
+            "object": "chat.completion",
+            "created": 1677652288,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_abc123",
+                        "type": "function",
+                        "function": {
+                            "name": "file_read",
+                            "arguments": "{\"path\": \"/tmp/test.txt\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {
+                "prompt_tokens": 15,
+                "completion_tokens": 20,
+                "total_tokens": 35
+            }
+        }"#;
+
+        let response: ChatResponse = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            response.choices[0].finish_reason,
+            Some("tool_calls".to_string())
+        );
+        let tool_calls = response.choices[0].message.tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].id, "call_abc123");
+        assert_eq!(tool_calls[0].function.name, "file_read");
+    }
+
+    #[test]
+    fn test_parse_chat_response_with_reasoning() {
+        let json = r#"{
+            "id": "chatcmpl-789",
+            "object": "chat.completion",
+            "created": 1677652288,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "The answer is 42.",
+                    "reasoning_content": "Let me think about this step by step..."
+                },
+                "reasoning_content": "Let me think about this step by step...",
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 50,
+                "total_tokens": 60
+            }
+        }"#;
+
+        let response: ChatResponse = serde_json::from_str(json).unwrap();
+
+        assert_eq!(response.choices[0].message.content, "The answer is 42.");
+        assert_eq!(
+            response.choices[0].message.reasoning_content,
+            Some("Let me think about this step by step...".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_chat_response_invalid_json() {
+        let json = r#"{ invalid json }"#;
+        let result: Result<ChatResponse, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_chat_response_missing_required_fields() {
+        // Missing "choices" field
+        let json = r#"{
+            "id": "chatcmpl-123",
+            "object": "chat.completion",
+            "created": 1677652288,
+            "model": "test-model",
+            "usage": {
+                "prompt_tokens": 9,
+                "completion_tokens": 12,
+                "total_tokens": 21
+            }
+        }"#;
+
+        let result: Result<ChatResponse, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    // ============================================
+    // Error Handling Tests
+    // ============================================
+
+    #[test]
+    fn test_http_status_code_classification() {
+        // Test that we can correctly identify retryable vs non-retryable status codes
+        let config = RetryConfig::default();
+
+        // Retryable status codes
+        let retryable = [429, 500, 502, 503, 504];
+        for code in retryable {
+            assert!(
+                config.retryable_status_codes.contains(&code),
+                "Status {} should be retryable",
+                code
+            );
+        }
+
+        // Non-retryable status codes (client errors)
+        let non_retryable = [400, 401, 403, 404, 405, 422];
+        for code in non_retryable {
+            assert!(
+                !config.retryable_status_codes.contains(&code),
+                "Status {} should NOT be retryable",
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn test_error_message_format() {
+        // Test that error messages are properly formatted
+        let status = 429u16;
+        let error_text = "Rate limit exceeded. Please retry after 60 seconds.";
+        let error = format!("API error {}: {}", status, error_text);
+
+        assert!(error.contains("429"));
+        assert!(error.contains("Rate limit"));
+    }
+
+    #[test]
+    fn test_parse_sse_event_with_tool_call() {
+        // Test parsing SSE event with tool call delta (streaming scenario)
+        let event = r#"data: {"choices":[{"delta":{"tool_calls":[{"id":"call_123","type":"function","function":{"name":"file_read","arguments":"{\"path\":\"/test\"}"}}]}}]}"#;
+
+        // The current implementation doesn't parse tool_calls in SSE events
+        // This test documents the current behavior
+        let result = parse_sse_event(event);
+        // Tool calls are not extracted in the current SSE parser
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_sse_event_finish_reason() {
+        // Test SSE event with finish_reason but no content
+        let event = r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#;
+        let result = parse_sse_event(event);
+        // Should return None since there's no content or reasoning
+        assert!(result.is_none());
+    }
+
+    // ============================================
+    // API URL Construction Tests
+    // ============================================
+
+    #[test]
+    fn test_api_url_construction() {
+        let base_url = "http://localhost:8000/v1";
+        let url = format!("{}/chat/completions", base_url);
+        assert_eq!(url, "http://localhost:8000/v1/chat/completions");
+    }
+
+    #[test]
+    fn test_api_url_construction_with_trailing_slash() {
+        let base_url = "http://localhost:8000/v1/";
+        let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+        assert_eq!(url, "http://localhost:8000/v1/chat/completions");
+    }
+
+    #[test]
+    fn test_api_url_construction_https() {
+        let base_url = "https://api.example.com/v1";
+        let url = format!("{}/chat/completions", base_url);
+        assert_eq!(url, "https://api.example.com/v1/chat/completions");
+    }
+
+    // ============================================
+    // Stream Chunk Processing Tests
+    // ============================================
+
+    #[test]
+    fn test_stream_chunk_tool_call() {
+        let tool_call = ToolCall {
+            id: "call_test".to_string(),
+            call_type: "function".to_string(),
+            function: ToolFunction {
+                name: "test_function".to_string(),
+                arguments: r#"{"arg": "value"}"#.to_string(),
+            },
+        };
+
+        let chunk = StreamChunk::ToolCall(tool_call.clone());
+        if let StreamChunk::ToolCall(tc) = chunk {
+            assert_eq!(tc.id, "call_test");
+            assert_eq!(tc.function.name, "test_function");
+        } else {
+            panic!("Expected ToolCall variant");
+        }
+    }
+
+    #[test]
+    fn test_multiple_sse_events_in_buffer() {
+        // Simulate multiple SSE events in a buffer (as would happen during streaming)
+        let buffer = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n";
+
+        let events: Vec<&str> = buffer.split("\n\n").filter(|s| !s.is_empty()).collect();
+        assert_eq!(events.len(), 2);
+
+        // First event
+        let result1 = parse_sse_event(events[0]);
+        assert!(matches!(result1, Some(StreamChunk::Content(_))));
+        if let Some(StreamChunk::Content(text)) = result1 {
+            assert_eq!(text, "Hello");
+        }
+
+        // Second event
+        let result2 = parse_sse_event(events[1]);
+        assert!(matches!(result2, Some(StreamChunk::Content(_))));
+        if let Some(StreamChunk::Content(text)) = result2 {
+            assert_eq!(text, " world");
+        }
+    }
+
+    #[test]
+    fn test_parse_sse_event_with_whitespace() {
+        // Test SSE event with extra whitespace
+        let event = "  data: [DONE]  ";
+        // The parser strips "data: " prefix, should handle this
+        let result = parse_sse_event(event.trim());
+        assert!(matches!(result, Some(StreamChunk::Done)));
+    }
+
+    #[test]
+    fn test_retry_config_empty_retryable_codes() {
+        // Edge case: no retryable status codes
+        let config = RetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 1000,
+            max_delay_ms: 30000,
+            retryable_status_codes: vec![],
+        };
+
+        assert!(!config.retryable_status_codes.contains(&500));
+        assert!(!config.retryable_status_codes.contains(&429));
+    }
+
+    #[test]
+    fn test_retry_config_with_zero_retries() {
+        // Edge case: no retries allowed
+        let config = RetryConfig {
+            max_retries: 0,
+            initial_delay_ms: 1000,
+            max_delay_ms: 30000,
+            retryable_status_codes: vec![500],
+        };
+
+        assert_eq!(config.max_retries, 0);
+        // With max_retries = 0, only 1 attempt (the initial one) should be made
+    }
+
+    #[test]
+    fn test_retry_config_with_zero_delays() {
+        // Edge case: instant retries (no delay)
+        let config = RetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 0,
+            max_delay_ms: 0,
+            retryable_status_codes: vec![500],
+        };
+
+        assert_eq!(config.initial_delay_ms, 0);
+        assert_eq!(config.max_delay_ms, 0);
+        // Even with doubling, 0 * 2 = 0
     }
 }

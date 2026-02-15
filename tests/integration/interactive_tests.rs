@@ -3,13 +3,26 @@
 //! Tests all command paths and edge cases in the interactive CLI mode.
 //! These tests use subprocess execution to simulate real user interaction.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-/// Helper to run selfware with input and capture output
-fn run_interactive(input: &str, _timeout_secs: u64) -> (String, String, i32) {
-    let mut child = Command::new("./target/release/selfware")
+/// Get the selfware binary path using Cargo-provided path (ensures freshly built binary)
+fn get_binary_path() -> String {
+    // Allow override via environment variable
+    if let Ok(path) = std::env::var("SELFWARE_BINARY") {
+        return path;
+    }
+
+    // Use Cargo-provided binary path when running via `cargo test`
+    // This ensures we always use the binary that was just built
+    env!("CARGO_BIN_EXE_selfware").to_string()
+}
+
+/// Helper to run selfware with input and capture output with timeout enforcement
+fn run_interactive(input: &str, timeout_secs: u64) -> (String, String, i32) {
+    let binary = get_binary_path();
+    let mut child = Command::new(&binary)
         .arg("chat")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -23,31 +36,87 @@ fn run_interactive(input: &str, _timeout_secs: u64) -> (String, String, i32) {
         stdin.write_all(b"\n").ok();
     }
 
-    // Wait with timeout
-    let output = std::thread::spawn(move || child.wait_with_output());
+    let timeout = Duration::from_secs(timeout_secs);
+    let start = Instant::now();
+    let poll_interval = Duration::from_millis(100);
 
-    match output.join() {
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let code = output.status.code().unwrap_or(-1);
-            (stdout, stderr, code)
+    // Poll for completion with timeout
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // Child exited, read output
+                let mut stdout_buf = Vec::new();
+                let mut stderr_buf = Vec::new();
+                if let Some(mut stdout) = child.stdout.take() {
+                    stdout.read_to_end(&mut stdout_buf).ok();
+                }
+                if let Some(mut stderr) = child.stderr.take() {
+                    stderr.read_to_end(&mut stderr_buf).ok();
+                }
+                let stdout = String::from_utf8_lossy(&stdout_buf).to_string();
+                let stderr = String::from_utf8_lossy(&stderr_buf).to_string();
+                let code = status.code().unwrap_or(-1);
+                return (stdout, stderr, code);
+            }
+            Ok(None) => {
+                // Still running, check timeout
+                if start.elapsed() >= timeout {
+                    child.kill().ok();
+                    child.wait().ok();
+                    return ("".to_string(), "timeout".to_string(), -1);
+                }
+                std::thread::sleep(poll_interval);
+            }
+            Err(_) => {
+                return ("".to_string(), "process error".to_string(), -1);
+            }
         }
-        _ => ("".to_string(), "timeout or error".to_string(), -1),
     }
 }
 
-/// Helper to run selfware 'run' command (non-interactive)
-fn run_task(task: &str, _timeout_secs: u64) -> (String, String, i32) {
-    let output = Command::new("./target/release/selfware")
-        .args(["run", task])
-        .output()
-        .expect("Failed to run selfware");
+/// Helper to run selfware 'run' command (non-interactive) with timeout enforcement
+/// Uses --yolo to auto-approve tools since non-interactive mode requires it
+fn run_task(task: &str, timeout_secs: u64) -> (String, String, i32) {
+    let mut child = Command::new(get_binary_path())
+        .args(["--yolo", "run", task])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn selfware");
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let code = output.status.code().unwrap_or(-1);
-    (stdout, stderr, code)
+    let timeout = Duration::from_secs(timeout_secs);
+    let start = Instant::now();
+    let poll_interval = Duration::from_millis(100);
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout_buf = Vec::new();
+                let mut stderr_buf = Vec::new();
+                if let Some(mut stdout) = child.stdout.take() {
+                    stdout.read_to_end(&mut stdout_buf).ok();
+                }
+                if let Some(mut stderr) = child.stderr.take() {
+                    stderr.read_to_end(&mut stderr_buf).ok();
+                }
+                let stdout = String::from_utf8_lossy(&stdout_buf).to_string();
+                let stderr = String::from_utf8_lossy(&stderr_buf).to_string();
+                let code = status.code().unwrap_or(-1);
+                return (stdout, stderr, code);
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    child.kill().ok();
+                    child.wait().ok();
+                    return ("".to_string(), "timeout".to_string(), -1);
+                }
+                std::thread::sleep(poll_interval);
+            }
+            Err(_) => {
+                return ("".to_string(), "process error".to_string(), -1);
+            }
+        }
+    }
 }
 
 /// Test the /help command
@@ -185,7 +254,7 @@ fn test_run_command_simple_task() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_analyze_command() {
-    let output = Command::new("./target/release/selfware")
+    let output = Command::new(get_binary_path())
         .args(["analyze", "./src"])
         .output()
         .expect("Failed to run selfware");
@@ -204,7 +273,7 @@ fn test_analyze_command() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_help_flag() {
-    let output = Command::new("./target/release/selfware")
+    let output = Command::new(get_binary_path())
         .arg("--help")
         .output()
         .expect("Failed to run selfware");
@@ -225,7 +294,7 @@ fn test_help_flag() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_version_flag() {
-    let output = Command::new("./target/release/selfware")
+    let output = Command::new(get_binary_path())
         .arg("--version")
         .output()
         .expect("Failed to run selfware");
@@ -244,7 +313,7 @@ fn test_version_flag() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_journal_command() {
-    let output = Command::new("./target/release/selfware")
+    let output = Command::new(get_binary_path())
         .arg("journal")
         .output()
         .expect("Failed to run selfware");
@@ -265,7 +334,7 @@ fn test_journal_command() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_status_command() {
-    let output = Command::new("./target/release/selfware")
+    let output = Command::new(get_binary_path())
         .arg("status")
         .output()
         .expect("Failed to run selfware");
@@ -284,7 +353,7 @@ fn test_status_command() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_garden_command() {
-    let output = Command::new("./target/release/selfware")
+    let output = Command::new(get_binary_path())
         .args(["garden", "."])
         .output()
         .expect("Failed to run selfware");
@@ -305,7 +374,7 @@ fn test_garden_command() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_multi_chat_init() {
-    let mut child = Command::new("./target/release/selfware")
+    let mut child = Command::new(get_binary_path())
         .args(["multi-chat", "-n", "2"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -333,7 +402,7 @@ fn test_multi_chat_init() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_config_flag() {
-    let output = Command::new("./target/release/selfware")
+    let output = Command::new(get_binary_path())
         .args(["-c", "selfware.toml", "--help"])
         .output()
         .expect("Failed to run selfware");
@@ -348,7 +417,7 @@ fn test_config_flag() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_workdir_flag() {
-    let output = Command::new("./target/release/selfware")
+    let output = Command::new(get_binary_path())
         .args(["-C", "/tmp", "--help"])
         .output()
         .expect("Failed to run selfware");
@@ -363,7 +432,7 @@ fn test_workdir_flag() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_invalid_command() {
-    let output = Command::new("./target/release/selfware")
+    let output = Command::new(get_binary_path())
         .arg("invalid_command_xyz")
         .output()
         .expect("Failed to run selfware");
@@ -383,7 +452,7 @@ fn test_invalid_command() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_quiet_mode() {
-    let output = Command::new("./target/release/selfware")
+    let output = Command::new(get_binary_path())
         .args(["-q", "status"])
         .output()
         .expect("Failed to run selfware");
@@ -400,7 +469,7 @@ fn test_quiet_mode() {
 #[cfg(feature = "integration")]
 fn test_interrupt_handling() {
     // This tests that the process can be killed cleanly
-    let mut child = Command::new("./target/release/selfware")
+    let mut child = Command::new(get_binary_path())
         .arg("chat")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -426,12 +495,12 @@ fn test_interrupt_handling() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_binary_exists() {
-    use std::path::Path;
-
-    let path = Path::new("./target/release/selfware");
+    let binary_path = get_binary_path();
+    let path = std::path::Path::new(&binary_path);
     assert!(
         path.exists(),
-        "Binary should exist at ./target/release/selfware"
+        "Binary should exist at {} (run: cargo test to build)",
+        binary_path
     );
 }
 
@@ -439,7 +508,7 @@ fn test_binary_exists() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_env_var_config() {
-    let output = Command::new("./target/release/selfware")
+    let output = Command::new(get_binary_path())
         .env("SELFWARE_DEBUG", "1")
         .arg("--help")
         .output()
@@ -449,4 +518,167 @@ fn test_env_var_config() {
 
     // Should accept env var
     assert!(code == 0, "Should work with env var");
+}
+
+/// Test --output-format json produces valid JSON
+#[test]
+#[cfg(feature = "integration")]
+fn test_output_format_json() {
+    let output = Command::new(get_binary_path())
+        .args(["status", "--output-format", "json"])
+        .output()
+        .expect("Failed to run selfware");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let code = output.status.code().unwrap_or(-1);
+
+    assert!(code == 0, "Should exit successfully");
+
+    // Output should be valid JSON
+    let parsed: Result<serde_json::Value, _> = serde_json::from_str(&stdout);
+    assert!(
+        parsed.is_ok(),
+        "Output should be valid JSON. Got: {}",
+        stdout
+    );
+
+    // JSON should contain expected fields
+    let json = parsed.unwrap();
+    assert!(
+        json.get("model").is_some(),
+        "JSON should have 'model' field"
+    );
+    assert!(
+        json.get("journal").is_some(),
+        "JSON should have 'journal' field"
+    );
+}
+
+/// Test --no-color disables color codes
+#[test]
+#[cfg(feature = "integration")]
+fn test_no_color_flag() {
+    let output = Command::new(get_binary_path())
+        .args(["--no-color", "status"])
+        .output()
+        .expect("Failed to run selfware");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+
+    // Should not contain ANSI escape codes
+    assert!(
+        !stdout.contains("\x1b["),
+        "Output should not contain ANSI escape codes with --no-color"
+    );
+}
+
+/// Test NO_COLOR env var disables color codes
+#[test]
+#[cfg(feature = "integration")]
+fn test_no_color_env_var() {
+    let output = Command::new(get_binary_path())
+        .env("NO_COLOR", "1")
+        .arg("status")
+        .output()
+        .expect("Failed to run selfware");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+
+    // Should not contain ANSI escape codes
+    assert!(
+        !stdout.contains("\x1b["),
+        "Output should not contain ANSI escape codes with NO_COLOR env var"
+    );
+}
+
+/// Test SELFWARE_TIMEOUT env var is applied
+#[test]
+#[cfg(feature = "integration")]
+fn test_selfware_timeout_env_var() {
+    // This just checks the env var is accepted without error
+    // Actual timeout behavior is hard to test without a slow endpoint
+    let output = Command::new(get_binary_path())
+        .env("SELFWARE_TIMEOUT", "120")
+        .arg("--help")
+        .output()
+        .expect("Failed to run selfware");
+
+    let code = output.status.code().unwrap_or(-1);
+    assert!(code == 0, "Should accept SELFWARE_TIMEOUT env var");
+}
+
+/// Test that non-interactive mode fails fast without recovery loop when confirmation is required
+/// This validates the AgentError::ConfirmationRequired path
+/// Note: Model-dependent test - may be flaky if model doesn't call confirmation-required tools
+#[test]
+#[ignore] // Model-dependent: run with --include-ignored for E2E coverage
+#[cfg(feature = "integration")]
+fn test_non_interactive_fails_fast_on_confirmation() {
+    // Run without --yolo, piping empty stdin to ensure non-interactive mode
+    let mut child = Command::new(get_binary_path())
+        .args(["run", "use shell_exec to run pwd"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn selfware");
+
+    // Close stdin immediately to simulate non-interactive
+    drop(child.stdin.take());
+
+    let timeout = Duration::from_secs(60);
+    let start = Instant::now();
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout_buf = Vec::new();
+                let mut stderr_buf = Vec::new();
+                if let Some(mut stdout) = child.stdout.take() {
+                    use std::io::Read;
+                    stdout.read_to_end(&mut stdout_buf).ok();
+                }
+                if let Some(mut stderr) = child.stderr.take() {
+                    use std::io::Read;
+                    stderr.read_to_end(&mut stderr_buf).ok();
+                }
+                let stdout = String::from_utf8_lossy(&stdout_buf);
+                let stderr = String::from_utf8_lossy(&stderr_buf);
+                let combined = format!("{}{}", stdout, stderr);
+
+                // Should fail (non-zero exit code)
+                assert!(
+                    !status.success(),
+                    "Non-interactive mode should fail when confirmation required"
+                );
+
+                // Should mention confirmation/non-interactive in output
+                assert!(
+                    combined.contains("confirmation")
+                        || combined.contains("non-interactive")
+                        || combined.contains("--yolo"),
+                    "Error should mention confirmation issue. Output: {}",
+                    combined
+                );
+
+                // Should NOT show multiple recovery attempts
+                let recovery_count = combined.matches("Recovering from error").count();
+                assert!(
+                    recovery_count == 0,
+                    "Should fail immediately without recovery loop, but found {} recovery attempts",
+                    recovery_count
+                );
+
+                return;
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    child.kill().ok();
+                    panic!("Test timed out - possible infinite loop in error handling");
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => panic!("Error waiting for process: {}", e),
+        }
+    }
 }

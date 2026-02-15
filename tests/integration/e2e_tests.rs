@@ -4,12 +4,9 @@
 //! They are designed to be tolerant of slow response times.
 
 use super::helpers::*;
-#[allow(unused_imports)]
 use selfware::agent::Agent;
 use selfware::api::types::Message;
 use selfware::api::ApiClient;
-#[allow(unused_imports)]
-use selfware::config::Config;
 use tokio::time::timeout;
 
 // Re-import the macros from the test crate root

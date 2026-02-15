@@ -1688,7 +1688,7 @@ impl EfficientModelSelector {
             .unwrap_or_else(|| complexity.min_model_tier());
 
         // Get local/cloud decision
-        let _decision = self.decider.decide(task, &criteria);
+        let decision = self.decider.decide(task, &criteria);
 
         // Filter models by criteria
         let candidates: Vec<_> = self
@@ -1696,10 +1696,11 @@ impl EfficientModelSelector {
             .iter()
             .filter(|m| m.meets_tier(min_tier))
             .filter(|m| {
-                if criteria.require_local {
+                if criteria.require_local || decision.location == ExecutionLocation::Local {
                     m.is_local
+                } else if decision.location == ExecutionLocation::Cloud {
+                    !m.is_local
                 } else {
-                    // No location requirement, accept any
                     true
                 }
             })

@@ -14,7 +14,9 @@ use super::helpers::*;
 use selfware::agent::Agent;
 use selfware::api::types::Message;
 use selfware::api::ApiClient;
-use selfware::config::{AgentConfig, Config, SafetyConfig, YoloFileConfig};
+use selfware::config::{
+    AgentConfig, Config, ExecutionMode, SafetyConfig, UiConfig, YoloFileConfig,
+};
 use selfware::tools::ToolRegistry;
 use serde_json::json;
 use std::env;
@@ -64,9 +66,14 @@ fn slow_model_config() -> Config {
             step_timeout_secs: timeout,
             token_budget: 100000,          // Larger token budget
             native_function_calling: true, // Use native FC when available
+            streaming: true,
         },
         yolo: YoloFileConfig::default(),
-        execution_mode: Default::default(),
+        ui: UiConfig::default(),
+        execution_mode: ExecutionMode::Normal,
+        compact_mode: false,
+        verbose_mode: false,
+        show_tokens: false,
     }
 }
 
@@ -303,7 +310,7 @@ fn fibonacci(n: u32) -> u32 {
 
     let messages = vec![
         Message::system("You are a Rust programming expert. Analyze code concisely."),
-        Message::user(&format!(
+        Message::user(format!(
             "What does this Rust function do? What is fibonacci(10)?\n\n```rust\n{}\n```",
             code
         )),
@@ -756,7 +763,7 @@ error[E0382]: use of moved value: `data`
 
     let messages = vec![
         Message::system("You are a Rust expert. Explain errors clearly and provide fixes."),
-        Message::user(&format!(
+        Message::user(format!(
             "Explain this Rust error and how to fix it:\n{}",
             error_message
         )),
@@ -818,7 +825,7 @@ let a=x+y;let b=a*z;let c=b-x;c+1}
         Message::system(
             "You are a Rust code reviewer. Format and refactor code to be clean and readable.",
         ),
-        Message::user(&format!(
+        Message::user(format!(
             "Refactor this messy Rust code to be clean and readable:\n```rust\n{}\n```",
             messy_code
         )),
@@ -873,7 +880,7 @@ pub fn is_valid_email(email: &str) -> bool {
 
     let messages = vec![
         Message::system("You are a Rust testing expert. Write comprehensive unit tests."),
-        Message::user(&format!("Write unit tests for this Rust function:\n```rust\n{}\n```\nInclude tests for valid emails, invalid emails, and edge cases.", function_code)),
+        Message::user(format!("Write unit tests for this Rust function:\n```rust\n{}\n```\nInclude tests for valid emails, invalid emails, and edge cases.", function_code)),
     ];
 
     let start = Instant::now();
@@ -935,7 +942,7 @@ where
 
     let messages = vec![
         Message::system("You are a Rust expert. Explain advanced patterns clearly."),
-        Message::user(&format!(
+        Message::user(format!(
             "Explain what this Rust code does and why it's useful:\n```rust\n{}\n```",
             complex_code
         )),

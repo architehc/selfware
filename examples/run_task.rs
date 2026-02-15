@@ -1,87 +1,147 @@
-//! Example: running a task non-interactively with Selfware.
+//! Run Task Example
 //!
-//! Demonstrates proper unattended execution:
-//! - Uses `ExecutionMode::Yolo` so tools never block on confirmation.
-//! - Runs inside a temporary directory to avoid polluting the workspace.
-//! - Cleans up the temp directory on success *and* on failure.
+//! This example demonstrates running a specific coding task with Selfware.
+//! It shows how to:
+//! 1. Configure the agent programmatically
+//! 2. Run a task that involves file operations
+//! 3. Use checkpointing for task persistence
 //!
-//! ```sh
-//! # Run with a 60-second timeout (requires SELFWARE_API_KEY or config):
-//! SELFWARE_TIMEOUT=60 cargo run --example run_task
+//! # Running this example
+//!
+//! ```bash
+//! # Ensure your LLM backend is running
+//! cargo run --example run_task
 //! ```
+//!
+//! # What this example does
+//!
+//! The agent will create a simple Rust function, demonstrating:
+//! - File creation with `file_write` tool
+//! - Code verification with `cargo_check` tool
+//! - Test execution with `cargo_test` tool (if tests are created)
 
 use anyhow::Result;
-use selfware::config::{Config, ExecutionMode};
-use std::env;
-use std::time::Duration;
-use tempfile::TempDir;
+use selfware::agent::Agent;
+use selfware::config::{AgentConfig, Config, ExecutionMode, SafetyConfig};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialise tracing so that agent progress is visible in logs.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "selfware=info".into()),
-        )
-        .init();
+    println!("=== Selfware Run Task Example ===\n");
 
-    // Parse optional timeout from the environment (seconds, default 120).
-    let timeout_secs: u64 = env::var("SELFWARE_TIMEOUT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(120);
+    // Create configuration programmatically
+    // This is useful when you want to override defaults
+    let config = Config {
+        // LLM endpoint - change this to your backend
+        endpoint: std::env::var("SELFWARE_ENDPOINT")
+            .unwrap_or_else(|_| "http://localhost:8000/v1".to_string()),
 
-    // Create a temporary working directory.  This is cleaned up
-    // automatically when `_workdir` is dropped — even on early `?` returns.
-    let _workdir = TempDir::new()?;
-    let workdir_path = _workdir.path().to_path_buf();
+        // Model name
+        model: std::env::var("SELFWARE_MODEL")
+            .unwrap_or_else(|_| "Qwen/Qwen3-Coder-Next-FP8".to_string()),
 
-    println!(
-        "Working directory: {} (will be cleaned up automatically)",
-        workdir_path.display()
-    );
+        // Token limits
+        max_tokens: 65536,
+        temperature: 0.7,
 
-    // Load config from the usual selfware.toml search path.
-    let mut config = Config::load(None)?;
+        // API key (if required by your backend)
+        api_key: std::env::var("SELFWARE_API_KEY").ok(),
 
-    // Key: use Yolo mode so no tool requires interactive confirmation.
-    // AutoEdit only auto-approves file operations — shell/cargo commands
-    // still block, which causes failures in unattended mode.
-    config.execution_mode = ExecutionMode::Yolo;
+        // Safety configuration
+        safety: SafetyConfig {
+            // Allow operations in current directory and subdirectories
+            allowed_paths: vec!["./**".to_string()],
+            // Prevent access to sensitive files
+            denied_paths: vec!["**/.env".to_string(), "**/secrets/**".to_string()],
+            // Protect main branches from direct pushes
+            protected_branches: vec!["main".to_string(), "master".to_string()],
+            // Tools that require explicit confirmation in normal mode
+            require_confirmation: vec![
+                "git_push".to_string(),
+                "file_delete".to_string(),
+                "shell_exec".to_string(),
+            ],
+        },
 
-    // Limit iterations so a runaway agent cannot loop forever.
-    config.agent.max_iterations = 20;
+        // Agent behavior
+        agent: AgentConfig {
+            // Maximum iterations before stopping
+            max_iterations: 50,
+            // Timeout per LLM request (5 minutes for slow models)
+            step_timeout_secs: 300,
+            // Total token budget for the session
+            token_budget: 500000,
+            // Use XML-based tool parsing (works with all backends)
+            native_function_calling: false,
+            // Enable streaming for real-time output
+            streaming: true,
+        },
 
-    // Build the agent.
-    let mut agent = selfware::agent::Agent::new(config).await?;
+        // Use YOLO mode for this example so verification tools can run
+        // in non-interactive environments.
+        execution_mode: ExecutionMode::Yolo,
 
-    // Define a self-contained task that does not depend on external state.
-    let task = "\
-        Create a file called hello.rs in the current directory containing a \
-        Rust program that prints 'Hello from Selfware!'. \
-        Then compile it with `rustc hello.rs` and run `./hello`. \
-        Report the output.";
+        // YOLO mode settings (not used in AutoEdit mode)
+        yolo: Default::default(),
 
-    // Run the task with a timeout.
-    let result = tokio::time::timeout(Duration::from_secs(timeout_secs), agent.run_task(task)).await;
+        // UI settings
+        ui: Default::default(),
 
-    match result {
-        Ok(Ok(())) => {
-            println!("Task completed successfully.");
-        }
-        Ok(Err(e)) => {
-            eprintln!("Task failed: {e:#}");
-            // _workdir drops here, cleaning up artifacts.
-            return Err(e);
-        }
-        Err(_) => {
-            eprintln!("Task timed out after {timeout_secs}s.");
-            // _workdir drops here, cleaning up artifacts.
-            anyhow::bail!("Task timed out after {timeout_secs}s");
-        }
+        // Continuous-work settings
+        continuous_work: Default::default(),
+
+        // API retry settings
+        retry: Default::default(),
+
+        // CLI-only flags (not persisted in config)
+        compact_mode: false,
+        verbose_mode: false,
+        show_tokens: false,
+    };
+
+    println!("Configuration:");
+    println!("  Endpoint: {}", config.endpoint);
+    println!("  Model: {}", config.model);
+    println!("  Mode: {:?}", config.execution_mode);
+    println!("  Max iterations: {}", config.agent.max_iterations);
+    println!();
+
+    // Create the agent with our configuration
+    let mut agent = Agent::new(config).await?;
+
+    // Define the task
+    let task = r#"
+        Create a simple Rust module that implements a basic calculator.
+        The module should:
+        1. Create a file called 'calculator.rs' in the current directory
+        2. Implement add, subtract, multiply, and divide functions
+        3. Include proper error handling for division by zero
+        4. Add documentation comments for each function
+
+        After creating the file, verify it compiles correctly.
+    "#;
+
+    println!("Running task:\n{}\n", task.trim());
+    println!("--- Agent Output ---\n");
+
+    // Run the task
+    // The agent will:
+    // 1. Plan the approach
+    // 2. Create the calculator.rs file
+    // 3. Verify compilation
+    // 4. Report completion
+    let start = std::time::Instant::now();
+    let task_result = agent.run_task(task).await;
+    let duration = start.elapsed();
+
+    // Always clean up generated file, even on failure.
+    if std::path::Path::new("calculator.rs").exists() {
+        let _ = std::fs::remove_file("calculator.rs");
     }
 
-    // _workdir is dropped here, removing the temp directory and any artifacts.
+    task_result?;
+
+    println!("\n--- Task Complete ---");
+    println!("Duration: {:.2}s", duration.as_secs_f64());
+
     Ok(())
 }

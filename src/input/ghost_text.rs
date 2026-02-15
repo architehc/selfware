@@ -3,8 +3,6 @@
 //! AI-powered inline suggestions like GitHub Copilot.
 //! Shows dimmed text predicting what the user might type next.
 
-#![allow(dead_code)]
-
 use nu_ansi_term::{Color, Style};
 use reedline::{Hinter, History};
 
@@ -26,6 +24,7 @@ struct PatternHint {
     /// Suggested completion
     completion: String,
     /// Description
+    #[allow(dead_code)] // For future tooltip display
     description: String,
 }
 
@@ -97,11 +96,6 @@ impl GhostTextHinter {
 
     /// Find a matching pattern hint (returns owned String to avoid borrow issues)
     fn find_pattern_hint(&self, input: &str) -> Option<String> {
-        // Show discoverability hint on empty input
-        if input.is_empty() {
-            return Some("Type / for commands, or describe a task...".to_string());
-        }
-
         let input_lower = input.to_lowercase();
         for pattern in &self.patterns {
             if pattern.prefix.to_lowercase().starts_with(&input_lower)
@@ -125,12 +119,26 @@ impl GhostTextHinter {
         None
     }
 
-    /// Get hint from history - simplified version
-    /// Note: Full history search requires more complex API usage
-    fn get_history_hint(&self, _line: &str, _history: &dyn History) -> Option<String> {
-        // History search is complex in reedline - the DefaultHinter handles this
-        // For now, we focus on pattern-based hints
-        // TODO: Implement proper history search when reedline API stabilizes
+    /// Get hint from history by searching for entries starting with input
+    fn get_history_hint(&self, line: &str, history: &dyn History) -> Option<String> {
+        if line.is_empty() {
+            return None;
+        }
+
+        // Use reedline's search API to find matching history entries
+        // last_with_prefix(prefix, session_id) - use None for global search
+        let query = reedline::SearchQuery::last_with_prefix(line.to_string(), None);
+
+        if let Ok(results) = history.search(query) {
+            if let Some(entry) = results.first() {
+                // Return the completion (part after the current input)
+                let entry_str = entry.command_line.as_str();
+                if entry_str.len() > line.len() && entry_str.starts_with(line) {
+                    return Some(entry_str[line.len()..].to_string());
+                }
+            }
+        }
+
         None
     }
 
@@ -153,6 +161,7 @@ impl Hinter for GhostTextHinter {
         _pos: usize,
         history: &dyn History,
         _use_ansi_coloring: bool,
+        _cwd: &str,
     ) -> String {
         // First try pattern hints
         if let Some(hint) = self.find_pattern_hint(line) {

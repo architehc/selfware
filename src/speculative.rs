@@ -24,7 +24,7 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
-#![allow(dead_code)]
+// Feature-gated module - dead_code lint disabled at crate level
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};

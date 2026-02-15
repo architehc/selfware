@@ -3,6 +3,7 @@
 //! Provides a first-party extension API, community skill packages,
 //! and custom tool definitions for extending agent capabilities.
 
+use crate::bm25::BM25Index;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -639,6 +640,8 @@ pub struct SkillRegistry {
     pub skills: HashMap<String, Skill>,
     /// Installed packages
     pub packages: HashMap<String, SkillPackage>,
+    /// BM25 index for ranked search
+    bm25: BM25Index,
 }
 
 impl SkillRegistry {
@@ -646,15 +649,32 @@ impl SkillRegistry {
         Self {
             skills: HashMap::new(),
             packages: HashMap::new(),
+            bm25: BM25Index::new(),
         }
     }
 
     pub fn register_skill(&mut self, skill: Skill) {
+        // Add to BM25 index
+        let searchable = format!(
+            "{} {} {}",
+            skill.name,
+            skill.description,
+            skill.tags.join(" ")
+        );
+        self.bm25.add(&skill.id, searchable);
         self.skills.insert(skill.id.clone(), skill);
     }
 
     pub fn install_package(&mut self, package: SkillPackage) {
         for skill in &package.skills {
+            // Add to BM25 index
+            let searchable = format!(
+                "{} {} {}",
+                skill.name,
+                skill.description,
+                skill.tags.join(" ")
+            );
+            self.bm25.add(&skill.id, searchable);
             self.skills.insert(skill.id.clone(), skill.clone());
         }
         self.packages.insert(package.id.clone(), package);
@@ -664,6 +684,7 @@ impl SkillRegistry {
         if let Some(package) = self.packages.remove(package_id) {
             for skill in &package.skills {
                 self.skills.remove(&skill.id);
+                self.bm25.remove(&skill.id);
             }
             Some(package)
         } else {
@@ -682,7 +703,17 @@ impl SkillRegistry {
             .collect()
     }
 
-    pub fn search(&self, query: &str) -> Vec<&Skill> {
+    /// Search skills using BM25 ranking
+    pub fn search(&mut self, query: &str) -> Vec<&Skill> {
+        let results = self.bm25.search(query, 50);
+        results
+            .iter()
+            .filter_map(|r| self.skills.get(&r.id))
+            .collect()
+    }
+
+    /// Search skills using simple substring matching (legacy)
+    pub fn search_contains(&self, query: &str) -> Vec<&Skill> {
         let query_lower = query.to_lowercase();
         self.skills
             .values()
@@ -950,20 +981,27 @@ impl CustomTool {
 pub struct ToolRegistry {
     /// Registered tools
     pub tools: HashMap<String, CustomTool>,
+    /// BM25 index for ranked search
+    bm25: BM25Index,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
+            bm25: BM25Index::new(),
         }
     }
 
     pub fn register(&mut self, tool: CustomTool) {
+        // Add to BM25 index
+        let searchable = format!("{} {} {}", tool.name, tool.description, tool.tags.join(" "));
+        self.bm25.add(&tool.id, searchable);
         self.tools.insert(tool.id.clone(), tool);
     }
 
     pub fn unregister(&mut self, tool_id: &str) -> Option<CustomTool> {
+        self.bm25.remove(tool_id);
         self.tools.remove(tool_id)
     }
 
@@ -979,7 +1017,17 @@ impl ToolRegistry {
         self.tools.values().collect()
     }
 
-    pub fn search(&self, query: &str) -> Vec<&CustomTool> {
+    /// Search tools using BM25 ranking
+    pub fn search(&mut self, query: &str) -> Vec<&CustomTool> {
+        let results = self.bm25.search(query, 50);
+        results
+            .iter()
+            .filter_map(|r| self.tools.get(&r.id))
+            .collect()
+    }
+
+    /// Search tools using simple substring matching (legacy)
+    pub fn search_contains(&self, query: &str) -> Vec<&CustomTool> {
         let query_lower = query.to_lowercase();
         self.tools
             .values()

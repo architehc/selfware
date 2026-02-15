@@ -1,5 +1,33 @@
+# Build artifacts
 /target
+
+# Coverage reports
+/coverage/
 tarpaulin-report.html
-cobertura.xml
-coverage/
-logs/
+*.profraw
+*.profdata
+lcov.info
+
+# Logs
+/logs/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+/tmp/
+*.tmp
+
+# Local config overrides (keep examples)
+selfware-local.toml
+.env
+.env.local

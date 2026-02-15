@@ -4,10 +4,6 @@
 //! and handle responses from the local model.
 
 use super::helpers::*;
-#[allow(unused_imports)]
-use selfware::api::types::Message;
-#[allow(unused_imports)]
-use selfware::api::ApiClient;
 use selfware::tools::ToolRegistry;
 use serde_json::json;
 use std::time::Duration;

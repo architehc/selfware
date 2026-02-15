@@ -951,9 +951,16 @@ impl SolutionSynthesizer {
         } else if desc_lower.contains("run") || desc_lower.contains("execute") {
             self.synthesize_command(goal)
         } else {
-            // Generic code solution
-            Solution::code(&goal.id, "rust", &format!("// TODO: {}", goal.description))
-                .with_confidence(0.5)
+            // Generic solution - describe what needs to be done
+            Solution::code(
+                &goal.id,
+                "text",
+                &format!(
+                    "Task: {}\n\nThis task requires manual implementation. Please provide more specific instructions.",
+                    goal.description
+                ),
+            )
+            .with_confidence(0.3)
         };
 
         // Check constraints
@@ -1807,7 +1814,7 @@ mod tests {
             Priority::Optional,
         ];
         for p in &priorities {
-            assert!(format!("{:?}", p).len() > 0);
+            assert!(!format!("{:?}", p).is_empty());
         }
         // Test ordering
         assert!(Priority::Critical > Priority::High);
@@ -1835,7 +1842,7 @@ mod tests {
             ConstraintType::Custom("custom".to_string()),
         ];
         for ct in &types {
-            assert!(format!("{:?}", ct).len() > 0);
+            assert!(!format!("{:?}", ct).is_empty());
         }
     }
 
@@ -1857,7 +1864,7 @@ mod tests {
             GoalStatus::Abandoned,
         ];
         for s in &statuses {
-            assert!(format!("{:?}", s).len() > 0);
+            assert!(!format!("{:?}", s).is_empty());
         }
     }
 
@@ -1927,7 +1934,7 @@ mod tests {
             StepStatus::Skipped,
         ];
         for s in &statuses {
-            assert!(format!("{:?}", s).len() > 0);
+            assert!(!format!("{:?}", s).is_empty());
         }
     }
 

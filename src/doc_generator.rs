@@ -1495,11 +1495,26 @@ impl DocumentationGenerator {
     }
 
     /// Helper to collect source files
-    fn collect_source_files(&self, _dir: &Path, callback: &mut impl FnMut(&Path)) {
-        // Implementation that calls callback for each file
-        // (Actually implemented in the concrete type)
-        let _ = _dir;
-        let _ = callback;
+    fn collect_source_files(&self, dir: &Path, callback: &mut impl FnMut(&Path)) {
+        collect_source_files_recursive(dir, callback);
+    }
+}
+
+/// Recursively collect source files, skipping hidden/build directories
+fn collect_source_files_recursive(dir: &Path, callback: &mut impl FnMut(&Path)) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // Skip hidden directories and common non-source dirs
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if !name.starts_with('.') && name != "target" && name != "node_modules" {
+                    collect_source_files_recursive(&path, callback);
+                }
+            } else if path.is_file() {
+                callback(&path);
+            }
+        }
     }
 }
 
@@ -1926,7 +1941,7 @@ type ServerConfig struct {
     #[test]
     fn test_doc_sync_checker_creation() {
         let checker = DocSyncChecker::new();
-        assert!(checker.extractor.languages.len() > 0);
+        assert!(!checker.extractor.languages.is_empty());
     }
 
     #[test]

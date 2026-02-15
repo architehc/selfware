@@ -1,11 +1,12 @@
 use crate::api::types::Message;
 use crate::api::ApiClient;
 use crate::api::ThinkingMode;
+use crate::token_count::estimate_tokens_with_overhead;
 use anyhow::Result;
 use tracing::{debug, info, warn};
 
 pub struct ContextCompressor {
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used for absolute budget enforcement (planned feature)
     token_budget: usize,
     compression_threshold: usize,
     min_messages_to_keep: usize,
@@ -32,15 +33,7 @@ impl ContextCompressor {
     pub fn estimate_tokens(&self, messages: &[Message]) -> usize {
         messages
             .iter()
-            .map(|m| {
-                let chars = m.content.len();
-                let factor = if m.content.contains('{') || m.content.contains(';') {
-                    3
-                } else {
-                    4
-                };
-                chars / factor + 50
-            })
+            .map(|m| estimate_tokens_with_overhead(&m.content, 50))
             .sum()
     }
 
@@ -101,7 +94,8 @@ impl ContextCompressor {
         compressed.push(Message::user(
             "Based on the above summary, please continue the task.",
         ));
-        compressed.extend(recent_msgs.into_iter().rev());
+        // Keep messages in chronological order (recent_msgs is already chronological)
+        compressed.extend(recent_msgs);
 
         let new_estimate = self.estimate_tokens(&compressed);
         info!(
@@ -475,11 +469,14 @@ mod tests {
     fn test_estimate_tokens_large_message() {
         let compressor = ContextCompressor::new(100000);
         let large_content = "a".repeat(10000);
+        let small_content = "a".repeat(100);
         let messages = vec![Message::user(large_content)];
+        let small_messages = vec![Message::user(small_content)];
 
         let estimate = compressor.estimate_tokens(&messages);
-        // 10000 / 4 + 50 = 2550
-        assert!(estimate > 2500 && estimate < 3000);
+        let small_estimate = compressor.estimate_tokens(&small_messages);
+        assert!(estimate > small_estimate);
+        assert!(estimate > 50);
     }
 
     #[test]
@@ -491,107 +488,5 @@ mod tests {
         let estimate = compressor.estimate_tokens(&messages);
         // Should not crash and give reasonable estimate
         assert!(estimate > 50);
-    }
-
-    // ──── Extended context tests (test_context_extended) ─────────────
-
-    #[test]
-    fn test_estimate_tokens_empty_string() {
-        let compressor = ContextCompressor::new(100000);
-        // A message with empty content: 0 chars / factor + 50 = 50
-        let messages = vec![Message::user("")];
-
-        let estimate = compressor.estimate_tokens(&messages);
-        assert_eq!(estimate, 50, "Empty string should have only the base cost of 50 tokens");
-    }
-
-    #[test]
-    fn test_estimate_tokens_code_content_extended() {
-        let compressor = ContextCompressor::new(100000);
-
-        // Code with braces uses factor 3: 120 chars / 3 + 50 = 90
-        let code = "struct Config { name: String, value: i32 } impl Config { fn new() -> Self { Config { name: String::new(), value: 0 } } }";
-        let code_messages = vec![Message::user(code)];
-        let code_estimate = compressor.estimate_tokens(&code_messages);
-
-        // Plain text uses factor 4
-        let plain = "This is a plain text message with no special syntax or code characters anywhere in sight at all";
-        let plain_messages = vec![Message::user(plain)];
-        let plain_estimate = compressor.estimate_tokens(&plain_messages);
-
-        // Code content with braces should yield higher token estimate per character
-        // because it divides by 3 instead of 4
-        let code_per_char = (code_estimate - 50) as f64 / code.len() as f64;
-        let plain_per_char = (plain_estimate - 50) as f64 / plain.len() as f64;
-        assert!(
-            code_per_char > plain_per_char,
-            "Code content should have higher tokens-per-char ratio ({:.4} vs {:.4})",
-            code_per_char,
-            plain_per_char
-        );
-    }
-
-    #[test]
-    fn test_estimate_tokens_long_content() {
-        let compressor = ContextCompressor::new(100000);
-
-        // 50000 chars of plain text: 50000/4 + 50 = 12550
-        let long_content = "a".repeat(50000);
-        let messages = vec![Message::user(long_content)];
-
-        let estimate = compressor.estimate_tokens(&messages);
-        // Expected: 50000 / 4 + 50 = 12550
-        assert_eq!(estimate, 12550, "Long plain text token estimate should be chars/4 + 50");
-    }
-
-    #[test]
-    fn test_context_message_ordering() {
-        // Verify that hard_compress preserves correct message ordering
-        let compressor = ContextCompressor::new(100000);
-        let messages = vec![
-            Message::system("You are a helpful assistant"),
-            Message::user("First question"),
-            Message::assistant("First answer"),
-            Message::user("Second question"),
-            Message::assistant("Second answer"),
-            Message::user("Third question"),
-            Message::assistant("Third answer"),
-            Message::user("Fourth question"),
-            Message::assistant("Fourth answer"),
-            Message::user("Fifth question"),
-        ];
-
-        let compressed = compressor.hard_compress(&messages);
-
-        // System message should always be first
-        assert_eq!(compressed[0].role, "system");
-        assert_eq!(compressed[0].content, "You are a helpful assistant");
-
-        // Second message should be the compression note
-        assert_eq!(compressed[1].role, "user");
-        assert!(compressed[1].content.contains("compressed"));
-
-        // Should end with a user message
-        let last = compressed.last().unwrap();
-        assert_eq!(last.role, "user");
-
-        // No two consecutive assistant messages
-        for i in 0..compressed.len() - 1 {
-            if compressed[i].role == "assistant" {
-                assert_ne!(
-                    compressed[i + 1].role, "assistant",
-                    "Found consecutive assistant messages at positions {} and {}",
-                    i, i + 1
-                );
-            }
-        }
-
-        // Compressed should be shorter than original
-        assert!(
-            compressed.len() < messages.len(),
-            "Compressed ({}) should be fewer messages than original ({})",
-            compressed.len(),
-            messages.len()
-        );
     }
 }

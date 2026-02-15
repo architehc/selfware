@@ -7,10 +7,11 @@
 //! - Safety settings (allowed paths, blocked commands)
 //! - Tool-specific options
 
+pub mod typed;
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tracing::warn;
 
 /// Execution mode for tool approval
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
@@ -59,9 +60,147 @@ pub struct Config {
     #[serde(default)]
     pub yolo: YoloFileConfig,
 
+    #[serde(default)]
+    pub ui: UiConfig,
+
+    #[serde(default)]
+    pub continuous_work: ContinuousWorkConfig,
+
+    #[serde(default)]
+    pub retry: RetrySettings,
+
     /// Runtime execution mode (set via CLI, not persisted)
     #[serde(skip)]
     pub execution_mode: ExecutionMode,
+
+    /// Compact output mode (less visual chrome) - CLI override
+    #[serde(skip)]
+    pub compact_mode: bool,
+
+    /// Verbose output mode (detailed tool output) - CLI override
+    #[serde(skip)]
+    pub verbose_mode: bool,
+
+    /// Always show token usage after responses - CLI override
+    #[serde(skip)]
+    pub show_tokens: bool,
+}
+
+/// UI configuration for themes, animations, and output
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiConfig {
+    /// Color theme: "amber", "ocean", "minimal", "high-contrast"
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// Enable animations (spinners, progress bars)
+    #[serde(default = "default_true")]
+    pub animations: bool,
+    /// Default to compact mode
+    #[serde(default)]
+    pub compact_mode: bool,
+    /// Default to verbose mode
+    #[serde(default)]
+    pub verbose_mode: bool,
+    /// Always show token usage
+    #[serde(default)]
+    pub show_tokens: bool,
+    /// Animation speed multiplier (1.0 = normal, 2.0 = faster)
+    #[serde(default = "default_animation_speed")]
+    pub animation_speed: f64,
+}
+
+/// Continuous work configuration for long-running sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContinuousWorkConfig {
+    /// Enable periodic checkpointing policy.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Save checkpoint after this many tool calls.
+    #[serde(default = "default_checkpoint_interval_tools")]
+    pub checkpoint_interval_tools: usize,
+    /// Save checkpoint after this many seconds.
+    #[serde(default = "default_checkpoint_interval_secs")]
+    pub checkpoint_interval_secs: u64,
+    /// Enable automatic recovery attempts when available.
+    #[serde(default = "default_true")]
+    pub auto_recovery: bool,
+    /// Maximum recovery attempts per failure.
+    #[serde(default = "default_max_recovery_attempts")]
+    pub max_recovery_attempts: u32,
+}
+
+impl Default for ContinuousWorkConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            checkpoint_interval_tools: default_checkpoint_interval_tools(),
+            checkpoint_interval_secs: default_checkpoint_interval_secs(),
+            auto_recovery: true,
+            max_recovery_attempts: default_max_recovery_attempts(),
+        }
+    }
+}
+
+/// Retry configuration for API/network operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetrySettings {
+    /// Maximum retries before failing.
+    #[serde(default = "default_retry_max_retries")]
+    pub max_retries: u32,
+    /// Initial delay before first retry.
+    #[serde(default = "default_retry_base_delay_ms")]
+    pub base_delay_ms: u64,
+    /// Upper bound for retry delay.
+    #[serde(default = "default_retry_max_delay_ms")]
+    pub max_delay_ms: u64,
+}
+
+impl Default for RetrySettings {
+    fn default() -> Self {
+        Self {
+            max_retries: default_retry_max_retries(),
+            base_delay_ms: default_retry_base_delay_ms(),
+            max_delay_ms: default_retry_max_delay_ms(),
+        }
+    }
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            theme: default_theme(),
+            animations: true,
+            compact_mode: false,
+            verbose_mode: false,
+            show_tokens: false,
+            animation_speed: 1.0,
+        }
+    }
+}
+
+fn default_theme() -> String {
+    "amber".to_string()
+}
+fn default_animation_speed() -> f64 {
+    1.0
+}
+fn default_checkpoint_interval_tools() -> usize {
+    10
+}
+fn default_checkpoint_interval_secs() -> u64 {
+    300
+}
+fn default_max_recovery_attempts() -> u32 {
+    3
+}
+fn default_retry_max_retries() -> u32 {
+    5
+}
+fn default_retry_base_delay_ms() -> u64 {
+    1000
+}
+fn default_retry_max_delay_ms() -> u64 {
+    60000
 }
 
 /// YOLO mode configuration (loaded from config file)
@@ -115,7 +254,7 @@ fn default_status_interval() -> usize {
 pub struct SafetyConfig {
     #[serde(default = "default_allowed_paths")]
     pub allowed_paths: Vec<String>,
-    #[serde(default = "default_denied_paths")]
+    #[serde(default)]
     pub denied_paths: Vec<String>,
     #[serde(default = "default_protected_branches")]
     pub protected_branches: Vec<String>,
@@ -136,6 +275,10 @@ pub struct AgentConfig {
     /// When false (default), tools are embedded in system prompt and parsed from content
     #[serde(default)]
     pub native_function_calling: bool,
+    /// Enable streaming responses for real-time output
+    /// When true, LLM responses are displayed as they arrive
+    #[serde(default = "default_true")]
+    pub streaming: bool,
 }
 
 impl Default for Config {
@@ -149,7 +292,13 @@ impl Default for Config {
             safety: SafetyConfig::default(),
             agent: AgentConfig::default(),
             yolo: YoloFileConfig::default(),
+            ui: UiConfig::default(),
+            continuous_work: ContinuousWorkConfig::default(),
+            retry: RetrySettings::default(),
             execution_mode: ExecutionMode::default(),
+            compact_mode: false,
+            verbose_mode: false,
+            show_tokens: false,
         }
     }
 }
@@ -158,7 +307,7 @@ impl Default for SafetyConfig {
     fn default() -> Self {
         Self {
             allowed_paths: default_allowed_paths(),
-            denied_paths: default_denied_paths(),
+            denied_paths: vec![],
             protected_branches: default_protected_branches(),
             require_confirmation: default_require_confirmation(),
         }
@@ -172,6 +321,7 @@ impl Default for AgentConfig {
             step_timeout_secs: default_step_timeout(),
             token_budget: default_token_budget(),
             native_function_calling: false,
+            streaming: true,
         }
     }
 }
@@ -200,17 +350,6 @@ fn default_token_budget() -> usize {
 fn default_allowed_paths() -> Vec<String> {
     vec!["./**".to_string()]
 }
-fn default_denied_paths() -> Vec<String> {
-    vec![
-        "**/.env".to_string(),
-        "**/.ssh/**".to_string(),
-        "**/.aws/**".to_string(),
-        "**/secrets/**".to_string(),
-        "**/.git/config".to_string(),
-        "**/.gnupg/**".to_string(),
-        "**/id_rsa*".to_string(),
-    ]
-}
 fn default_protected_branches() -> Vec<String> {
     vec!["main".to_string(), "master".to_string()]
 }
@@ -231,8 +370,18 @@ impl Config {
                 toml::from_str(&content).context("Failed to parse config")?
             }
             None => {
-                // Try default locations
-                let default_paths = ["selfware.toml", "~/.config/selfware/config.toml"];
+                // Try default locations - expand ~ to actual home directory
+                let home_config = dirs::home_dir()
+                    .map(|h| h.join(".config/selfware/config.toml"))
+                    .and_then(|p| p.to_str().map(String::from));
+
+                let mut default_paths: Vec<&str> = vec!["selfware.toml"];
+                let home_config_str: String;
+                if let Some(ref hc) = home_config {
+                    home_config_str = hc.clone();
+                    default_paths.push(&home_config_str);
+                }
+
                 let mut loaded = None;
                 for p in &default_paths {
                     if let Ok(content) = std::fs::read_to_string(p) {
@@ -254,13 +403,8 @@ impl Config {
         if let Ok(model) = std::env::var("SELFWARE_MODEL") {
             config.model = model;
         }
-        // Prioritize env var SELFWARE_API_KEY over config file
         if let Ok(api_key) = std::env::var("SELFWARE_API_KEY") {
             config.api_key = Some(api_key);
-        } else if config.api_key.is_some() {
-            warn!(
-                "API key found in config file. Consider using the SELFWARE_API_KEY environment variable instead for better security."
-            );
         }
         if let Ok(max_tokens) = std::env::var("SELFWARE_MAX_TOKENS") {
             if let Ok(n) = max_tokens.parse::<usize>() {
@@ -272,32 +416,38 @@ impl Config {
                 config.temperature = t;
             }
         }
+        if let Ok(timeout) = std::env::var("SELFWARE_TIMEOUT") {
+            if let Ok(t) = timeout.parse::<u64>() {
+                config.agent.step_timeout_secs = t;
+            }
+        }
+
+        // Apply UI defaults from config (CLI flags will override later)
+        config.compact_mode = config.ui.compact_mode;
+        config.verbose_mode = config.ui.verbose_mode;
+        config.show_tokens = config.ui.show_tokens;
 
         Ok(config)
     }
-}
 
-/// Redact an API key for safe display, showing only the first 4 and last 4 characters.
-/// Returns "****" for keys that are too short to partially reveal.
-pub fn redact_api_key(key: &str) -> String {
-    if key.len() <= 8 {
-        "****".to_string()
-    } else {
-        format!("{}...{}", &key[..4], &key[key.len() - 4..])
-    }
-}
+    /// Apply UI settings to the global theme and output systems
+    ///
+    /// This should be called after loading config and before starting the agent.
+    /// CLI flags can override the config file settings before calling this.
+    pub fn apply_ui_settings(&self) {
+        use crate::ui::theme::{set_theme, ThemeId};
 
-impl std::fmt::Display for Config {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let redacted_key = match &self.api_key {
-            Some(key) => redact_api_key(key),
-            None => "<not set>".to_string(),
+        // Set theme from config
+        let theme_id = match self.ui.theme.to_lowercase().as_str() {
+            "ocean" => ThemeId::Ocean,
+            "minimal" => ThemeId::Minimal,
+            "high-contrast" | "highcontrast" | "high_contrast" => ThemeId::HighContrast,
+            _ => ThemeId::Amber, // Default
         };
-        write!(
-            f,
-            "Config {{ endpoint: {}, model: {}, api_key: {}, max_tokens: {} }}",
-            self.endpoint, self.model, redacted_key, self.max_tokens
-        )
+        set_theme(theme_id);
+
+        // Initialize output module with current settings
+        crate::output::init(self.compact_mode, self.verbose_mode, self.show_tokens);
     }
 }
 
@@ -319,8 +469,7 @@ mod tests {
     fn test_safety_config_default() {
         let config = SafetyConfig::default();
         assert_eq!(config.allowed_paths, vec!["./**".to_string()]);
-        assert!(!config.denied_paths.is_empty());
-        assert!(config.denied_paths.contains(&"**/.env".to_string()));
+        assert!(config.denied_paths.is_empty());
         assert_eq!(
             config.protected_branches,
             vec!["main".to_string(), "master".to_string()]
@@ -626,6 +775,7 @@ mod tests {
                 step_timeout_secs: 120,
                 token_budget: 100000,
                 native_function_calling: false,
+                streaming: true,
             },
             yolo: YoloFileConfig {
                 enabled: true,
@@ -636,7 +786,30 @@ mod tests {
                 audit_log_path: Some(PathBuf::from("/tmp/audit.log")),
                 status_interval: 25,
             },
+            ui: UiConfig {
+                theme: "ocean".to_string(),
+                animations: true,
+                compact_mode: true,
+                verbose_mode: false,
+                show_tokens: true,
+                animation_speed: 1.5,
+            },
+            continuous_work: ContinuousWorkConfig {
+                enabled: true,
+                checkpoint_interval_tools: 8,
+                checkpoint_interval_secs: 180,
+                auto_recovery: true,
+                max_recovery_attempts: 4,
+            },
+            retry: RetrySettings {
+                max_retries: 6,
+                base_delay_ms: 500,
+                max_delay_ms: 20000,
+            },
             execution_mode: ExecutionMode::default(),
+            compact_mode: false,
+            verbose_mode: false,
+            show_tokens: false,
         };
 
         let toml_str = toml::to_string(&config).unwrap();
@@ -900,74 +1073,113 @@ mod tests {
             .contains(&"/home/用户/**".to_string()));
     }
 
-    // Security improvement tests
-
     #[test]
-    fn test_default_denied_paths_include_env_files() {
-        let config = SafetyConfig::default();
-        assert!(config.denied_paths.contains(&"**/.env".to_string()));
-        assert!(config.denied_paths.contains(&"**/.ssh/**".to_string()));
-        assert!(config.denied_paths.contains(&"**/.aws/**".to_string()));
-        assert!(config.denied_paths.contains(&"**/secrets/**".to_string()));
-        assert!(config.denied_paths.contains(&"**/.git/config".to_string()));
-        assert!(config.denied_paths.contains(&"**/.gnupg/**".to_string()));
-        assert!(config.denied_paths.contains(&"**/id_rsa*".to_string()));
+    fn test_ui_config_default() {
+        let config = UiConfig::default();
+        assert_eq!(config.theme, "amber");
+        assert!(config.animations);
+        assert!(!config.compact_mode);
+        assert!(!config.verbose_mode);
+        assert!(!config.show_tokens);
+        assert!((config.animation_speed - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn test_api_key_from_env_var_preferred() {
-        // Set env var, create config with api_key in file
+    fn test_config_with_ui_section() {
         let toml_str = r#"
             endpoint = "http://localhost:8000/v1"
-            api_key = "from-config-file"
+
+            [ui]
+            theme = "ocean"
+            animations = true
+            compact_mode = true
+            show_tokens = true
+            animation_speed = 1.5
         "#;
-        let mut config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.api_key, Some("from-config-file".to_string()));
-
-        // Simulate what Config::load does: env var overrides config file
-        let env_key = "from-env-var";
-        config.api_key = Some(env_key.to_string());
-        assert_eq!(config.api_key, Some("from-env-var".to_string()));
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.ui.theme, "ocean");
+        assert!(config.ui.animations);
+        assert!(config.ui.compact_mode);
+        assert!(config.ui.show_tokens);
+        assert!((config.ui.animation_speed - 1.5).abs() < f64::EPSILON);
     }
 
     #[test]
-    fn test_api_key_redacted_in_debug() {
-        let config = Config {
-            api_key: Some("sk-1234567890abcdef".to_string()),
-            ..Config::default()
+    fn test_ui_config_serialization() {
+        let config = UiConfig {
+            theme: "high-contrast".to_string(),
+            animations: false,
+            compact_mode: true,
+            verbose_mode: true,
+            show_tokens: true,
+            animation_speed: 2.0,
         };
-        let display_str = format!("{}", config);
-        // Should NOT contain the full key
-        assert!(!display_str.contains("sk-1234567890abcdef"));
-        // Should contain redacted form
-        assert!(display_str.contains("sk-1...cdef"));
+        let toml_str = toml::to_string(&config).unwrap();
+        assert!(toml_str.contains("theme = \"high-contrast\""));
+        assert!(toml_str.contains("animations = false"));
+        assert!(toml_str.contains("compact_mode = true"));
     }
 
     #[test]
-    fn test_api_key_redacted_short_key() {
-        let redacted = redact_api_key("short");
-        assert_eq!(redacted, "****");
+    fn test_config_ui_defaults_applied() {
+        let toml_str = r#"
+            endpoint = "http://localhost:8000/v1"
+
+            [ui]
+            compact_mode = true
+            show_tokens = true
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        // UI defaults should be present
+        assert_eq!(config.ui.theme, "amber"); // default
+        assert!(config.ui.compact_mode);
+        assert!(config.ui.show_tokens);
     }
 
     #[test]
-    fn test_api_key_redacted_long_key() {
-        let redacted = redact_api_key("sk-abcdefghijklmnop");
-        assert_eq!(redacted, "sk-a...mnop");
+    fn test_continuous_work_defaults() {
+        let config = Config::default();
+        assert!(config.continuous_work.enabled);
+        assert_eq!(config.continuous_work.checkpoint_interval_tools, 10);
+        assert_eq!(config.continuous_work.checkpoint_interval_secs, 300);
+        assert!(config.continuous_work.auto_recovery);
+        assert_eq!(config.continuous_work.max_recovery_attempts, 3);
     }
 
     #[test]
-    fn test_api_key_display_none() {
-        let config = Config {
-            api_key: None,
-            ..Config::default()
-        };
-        let display_str = format!("{}", config);
-        assert!(display_str.contains("<not set>"));
+    fn test_retry_defaults() {
+        let config = Config::default();
+        assert_eq!(config.retry.max_retries, 5);
+        assert_eq!(config.retry.base_delay_ms, 1000);
+        assert_eq!(config.retry.max_delay_ms, 60000);
     }
 
     #[test]
-    fn test_default_denied_paths_helper() {
-        let paths = default_denied_paths();
-        assert_eq!(paths.len(), 7);
+    fn test_config_with_continuous_work_and_retry_sections() {
+        let toml_str = r#"
+            endpoint = "http://localhost:8000/v1"
+
+            [continuous_work]
+            enabled = true
+            checkpoint_interval_tools = 7
+            checkpoint_interval_secs = 120
+            auto_recovery = false
+            max_recovery_attempts = 9
+
+            [retry]
+            max_retries = 11
+            base_delay_ms = 250
+            max_delay_ms = 20000
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.continuous_work.enabled);
+        assert_eq!(config.continuous_work.checkpoint_interval_tools, 7);
+        assert_eq!(config.continuous_work.checkpoint_interval_secs, 120);
+        assert!(!config.continuous_work.auto_recovery);
+        assert_eq!(config.continuous_work.max_recovery_attempts, 9);
+        assert_eq!(config.retry.max_retries, 11);
+        assert_eq!(config.retry.base_delay_ms, 250);
+        assert_eq!(config.retry.max_delay_ms, 20000);
     }
 }

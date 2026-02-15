@@ -25,7 +25,7 @@ pub struct WorkshopContext {
 impl Default for WorkshopContext {
     fn default() -> Self {
         Self {
-            owner_name: whoami::username(),
+            owner_name: whoami::username().unwrap_or_else(|_| "friend".to_string()),
             companion_name: "Selfware".to_string(),
             project_name: std::env::current_dir()
                 .ok()
@@ -217,136 +217,6 @@ pub fn render_error(message: &str) -> String {
     )
 }
 
-/// Format a raw error into a user-friendly message with actionable suggestions.
-/// This translates technical error strings into language the user can act on.
-pub fn format_user_friendly_error(error: &str) -> String {
-    let error_lower = error.to_lowercase();
-
-    // Connection refused
-    if error_lower.contains("connection refused") || error_lower.contains("connrefused") {
-        return format!(
-            "{}\n   {} {}",
-            "Could not connect to the API server.",
-            Glyphs::BRANCH,
-            "Suggestion: Check that your model server is running and the endpoint in your config is correct.".muted()
-        );
-    }
-
-    // DNS / host resolution errors
-    if error_lower.contains("dns error")
-        || error_lower.contains("name or service not known")
-        || error_lower.contains("no such host")
-        || error_lower.contains("resolve")
-    {
-        return format!(
-            "{}\n   {} {}",
-            "Could not resolve the API server address.",
-            Glyphs::BRANCH,
-            "Suggestion: Verify the endpoint URL in your config. If using a local model, try http://localhost:<port>.".muted()
-        );
-    }
-
-    // Rate limiting (check before generic status codes)
-    if error_lower.contains("429") || error_lower.contains("too many requests") || error_lower.contains("rate limit") {
-        return format!(
-            "{}\n   {} {}",
-            "Rate limited by the API server.",
-            Glyphs::BRANCH,
-            "Suggestion: Wait a moment and try again. The server is receiving too many requests.".muted()
-        );
-    }
-
-    // Authentication errors
-    if error_lower.contains("401") || error_lower.contains("unauthorized") || error_lower.contains("api key") {
-        return format!(
-            "{}\n   {} {}",
-            "Authentication failed.",
-            Glyphs::BRANCH,
-            "Suggestion: Check that your API key is set correctly in the config or environment.".muted()
-        );
-    }
-
-    // HTTP status code errors (check before generic "timeout" since "Gateway Timeout" contains "timeout")
-    if error_lower.contains("504") || error_lower.contains("gateway timeout") {
-        return format!(
-            "{}\n   {} {}",
-            "Gateway timeout -- the model took too long to respond.",
-            Glyphs::BRANCH,
-            "Suggestion: Try a simpler prompt or check if the model server is responsive.".muted()
-        );
-    }
-
-    if error_lower.contains("503") || error_lower.contains("service unavailable") {
-        return format!(
-            "{}\n   {} {}",
-            "The API service is temporarily unavailable.",
-            Glyphs::BRANCH,
-            "Suggestion: The server may be starting up or under maintenance. Retry shortly.".muted()
-        );
-    }
-
-    if error_lower.contains("502") || error_lower.contains("bad gateway") {
-        return format!(
-            "{}\n   {} {}",
-            "Bad gateway -- the API server's upstream is unreachable.",
-            Glyphs::BRANCH,
-            "Suggestion: The model backend may be restarting. Wait a moment and try again.".muted()
-        );
-    }
-
-    if error_lower.contains("500") || error_lower.contains("internal server error") {
-        return format!(
-            "{}\n   {} {}",
-            "The API server encountered an internal error.",
-            Glyphs::BRANCH,
-            "Suggestion: This is a server-side issue. Wait and retry, or check server logs.".muted()
-        );
-    }
-
-    // Generic timeout (after specific HTTP timeouts)
-    if error_lower.contains("timed out") || error_lower.contains("timeout") || error_lower.contains("deadline") {
-        return format!(
-            "{}\n   {} {}",
-            "The request timed out waiting for a response.",
-            Glyphs::BRANCH,
-            "Suggestion: The model may be overloaded or the request too large. Try a shorter prompt or increase step_timeout_secs in config.".muted()
-        );
-    }
-
-    // JSON parse errors
-    if error_lower.contains("parse") && (error_lower.contains("json") || error_lower.contains("response")) {
-        return format!(
-            "{}\n   {} {}",
-            "Received an unexpected response from the API.",
-            Glyphs::BRANCH,
-            "Suggestion: The API endpoint may not be OpenAI-compatible. Check your endpoint configuration.".muted()
-        );
-    }
-
-    // File not found
-    if error_lower.contains("no such file") || error_lower.contains("file not found") || error_lower.contains("notfound") {
-        return format!(
-            "{}\n   {} {}",
-            "A file or path was not found.",
-            Glyphs::BRANCH,
-            "Suggestion: Double-check the file path. Use /analyze to survey your project structure.".muted()
-        );
-    }
-
-    // Permission denied
-    if error_lower.contains("permission denied") || error_lower.contains("access denied") {
-        return format!(
-            "{}\n   {} {}",
-            "Permission denied.",
-            Glyphs::BRANCH,
-            "Suggestion: Check file permissions or run with appropriate access rights.".muted()
-        );
-    }
-
-    // Default: return the original error without suggestion
-    error.to_string()
-}
-
 /// Render a warning message
 pub fn render_warning(message: &str) -> String {
     format!(
@@ -496,6 +366,45 @@ pub fn render_box(title: &str, content: &str) -> String {
     }
     result.push_str(&bottom);
     result
+}
+
+/// Render welcome message with mascot
+pub fn render_welcome_with_mascot(ctx: &WorkshopContext) -> String {
+    use super::mascot::{render_mascot, MascotMood};
+
+    let mascot = render_mascot(MascotMood::Greeting);
+    let header = render_header(ctx);
+
+    format!(
+        "{}\n{}\n\n  {} Ready to tend your garden!\n",
+        mascot,
+        header,
+        Glyphs::FLOWER.garden_healthy()
+    )
+}
+
+/// Render thinking state with mascot
+pub fn render_thinking_with_mascot(message: &str) -> String {
+    use super::mascot::{render_mascot, MascotMood};
+
+    let mascot = render_mascot(MascotMood::Thinking);
+    format!("{}\n  {}\n", mascot, message.craftsman_voice())
+}
+
+/// Render success state with mascot
+pub fn render_success_with_mascot(message: &str) -> String {
+    use super::mascot::{render_mascot, MascotMood};
+
+    let mascot = render_mascot(MascotMood::Success);
+    format!("{}\n  {}\n", mascot, message.garden_healthy())
+}
+
+/// Render error state with mascot
+pub fn render_error_with_mascot(message: &str) -> String {
+    use super::mascot::{render_mascot, MascotMood};
+
+    let mascot = render_mascot(MascotMood::Error);
+    format!("{}\n  {}\n", mascot, message.garden_wilting())
 }
 
 #[cfg(test)]
@@ -749,96 +658,5 @@ mod tests {
         let boxed = render_box("Long", &long_content);
         assert!(boxed.contains("Long"));
         assert!(boxed.contains(&long_content));
-    }
-
-    #[test]
-    fn test_format_user_friendly_error_connection_refused() {
-        let msg = format_user_friendly_error("Connection refused (os error 111)");
-        assert!(msg.contains("Could not connect"));
-        assert!(msg.contains("Suggestion"));
-    }
-
-    #[test]
-    fn test_format_user_friendly_error_timeout() {
-        let msg = format_user_friendly_error("request timed out after 30s");
-        assert!(msg.contains("timed out"));
-        assert!(msg.contains("Suggestion"));
-    }
-
-    #[test]
-    fn test_format_user_friendly_error_rate_limit() {
-        let msg = format_user_friendly_error("API error 429: too many requests");
-        assert!(msg.contains("Rate limited"));
-        assert!(msg.contains("Suggestion"));
-    }
-
-    #[test]
-    fn test_format_user_friendly_error_unauthorized() {
-        let msg = format_user_friendly_error("API error 401: Unauthorized");
-        assert!(msg.contains("Authentication failed"));
-        assert!(msg.contains("Suggestion"));
-    }
-
-    #[test]
-    fn test_format_user_friendly_error_server_error() {
-        let msg = format_user_friendly_error("API error 500: Internal Server Error");
-        assert!(msg.contains("internal error"));
-        assert!(msg.contains("Suggestion"));
-    }
-
-    #[test]
-    fn test_format_user_friendly_error_bad_gateway() {
-        let msg = format_user_friendly_error("API error 502: Bad Gateway");
-        assert!(msg.contains("Bad gateway"));
-        assert!(msg.contains("Suggestion"));
-    }
-
-    #[test]
-    fn test_format_user_friendly_error_service_unavailable() {
-        let msg = format_user_friendly_error("API error 503: Service Unavailable");
-        assert!(msg.contains("temporarily unavailable"));
-        assert!(msg.contains("Suggestion"));
-    }
-
-    #[test]
-    fn test_format_user_friendly_error_gateway_timeout() {
-        let msg = format_user_friendly_error("API error 504: Gateway Timeout");
-        assert!(msg.contains("Gateway timeout"));
-        assert!(msg.contains("Suggestion"));
-    }
-
-    #[test]
-    fn test_format_user_friendly_error_dns() {
-        let msg = format_user_friendly_error("dns error: Name or service not known");
-        assert!(msg.contains("Could not resolve"));
-        assert!(msg.contains("Suggestion"));
-    }
-
-    #[test]
-    fn test_format_user_friendly_error_json_parse() {
-        let msg = format_user_friendly_error("Failed to parse response JSON");
-        assert!(msg.contains("unexpected response"));
-        assert!(msg.contains("Suggestion"));
-    }
-
-    #[test]
-    fn test_format_user_friendly_error_file_not_found() {
-        let msg = format_user_friendly_error("No such file or directory");
-        assert!(msg.contains("not found"));
-        assert!(msg.contains("Suggestion"));
-    }
-
-    #[test]
-    fn test_format_user_friendly_error_permission_denied() {
-        let msg = format_user_friendly_error("Permission denied");
-        assert!(msg.contains("Permission denied"));
-        assert!(msg.contains("Suggestion"));
-    }
-
-    #[test]
-    fn test_format_user_friendly_error_unknown() {
-        let msg = format_user_friendly_error("Some unknown random error");
-        // Should return original error as-is
-        assert_eq!(msg, "Some unknown random error");
     }
 }

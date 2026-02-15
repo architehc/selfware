@@ -1357,10 +1357,12 @@ mod tests {
 
     #[test]
     fn test_shell_context_right_prompt() {
-        let mut ctx = ShellContext::default();
-        ctx.git_branch = Some("main".to_string());
-        ctx.git_dirty = true;
-        ctx.venv = Some("myenv".to_string());
+        let ctx = ShellContext {
+            git_branch: Some("main".to_string()),
+            git_dirty: true,
+            venv: Some("myenv".to_string()),
+            ..Default::default()
+        };
 
         let prompt = ctx.right_prompt();
         assert!(prompt.contains("main*"));

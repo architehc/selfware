@@ -24,7 +24,7 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
-#![allow(dead_code)]
+// Feature-gated module - dead_code lint disabled at crate level
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -397,11 +397,7 @@ impl ContextPruner {
 
     /// Calculate how many tokens to remove
     pub fn tokens_to_remove(&self, current_tokens: usize) -> usize {
-        if current_tokens > self.config.target_tokens {
-            current_tokens - self.config.target_tokens
-        } else {
-            0
-        }
+        current_tokens.saturating_sub(self.config.target_tokens)
     }
 
     /// Prune messages using the configured strategy

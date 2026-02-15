@@ -6,8 +6,6 @@
 //! 3. JSON code blocks with tool schema
 //! 4. Markdown code blocks with tool invocations
 
-#![allow(dead_code)]
-
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -27,7 +25,7 @@ pub struct ParsedToolCall {
 pub enum ParseMethod {
     /// Native API function calling
     Native,
-    /// XML-style <tool> tags
+    /// XML-style `<tool>` tags
     Xml,
     /// JSON code block
     Json,
@@ -55,6 +53,7 @@ static XML_TOOL_FUNCTION_REGEX: OnceLock<Regex> = OnceLock::new();
 static XML_TOOL_FUNCTION_TAG_REGEX: OnceLock<Regex> = OnceLock::new();
 static QWEN3_TOOL_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static QWEN3_PARAMETER_REGEX: OnceLock<Regex> = OnceLock::new();
+static BARE_FUNCTION_REGEX: OnceLock<Regex> = OnceLock::new();
 
 fn xml_tool_regex() -> &'static Regex {
     XML_TOOL_REGEX.get_or_init(|| {
@@ -118,6 +117,15 @@ fn qwen3_parameter_regex() -> &'static Regex {
     QWEN3_PARAMETER_REGEX.get_or_init(|| {
         Regex::new(r"<parameter=([a-zA-Z_][a-zA-Z0-9_]*)>\s*([\s\S]*?)\s*</parameter>")
             .expect("Invalid Qwen3 parameter regex")
+    })
+}
+
+/// Bare function format (without tool_call wrapper)
+/// Format: <function=name><parameter=key>value</parameter>...</function>
+fn bare_function_regex() -> &'static Regex {
+    BARE_FUNCTION_REGEX.get_or_init(|| {
+        Regex::new(r"(?s)<function=([a-zA-Z_][a-zA-Z0-9_]*)>\s*([\s\S]*?)\s*</function>")
+            .expect("Invalid bare function regex")
     })
 }
 
@@ -291,6 +299,29 @@ fn try_parse_xml(content: &str) -> Option<Vec<(Result<ParsedToolCall>, String)>>
     if results.is_empty() {
         let qwen3_regex = qwen3_tool_call_regex();
         results = qwen3_regex
+            .captures_iter(content)
+            .map(|cap| {
+                let raw = cap[0].to_string();
+                let name = cap[1].trim().to_string();
+                let params_str = &cap[2];
+
+                let result = parse_qwen3_parameters(params_str).map(|arguments| ParsedToolCall {
+                    tool_name: name,
+                    arguments,
+                    raw_text: raw.clone(),
+                    parse_method: ParseMethod::Xml,
+                });
+
+                (result, raw)
+            })
+            .collect();
+    }
+
+    // If still no matches, try bare function format (without tool_call wrapper)
+    // Format: <function=name><parameter=key>value</parameter>...</function>
+    if results.is_empty() {
+        let bare_func_regex = bare_function_regex();
+        results = bare_func_regex
             .captures_iter(content)
             .map(|cap| {
                 let raw = cap[0].to_string();
@@ -689,7 +720,7 @@ More text here."#;
     #[test]
     fn test_parse_method_clone() {
         let method = ParseMethod::Xml;
-        let cloned = method.clone();
+        let cloned = method;
         assert_eq!(method, cloned);
     }
 
@@ -1118,5 +1149,62 @@ Finally, I'll commit."#;
         assert_eq!(result.tool_calls[0].arguments["path"], "./src/lib.rs");
         assert_eq!(result.tool_calls[1].arguments["path"], "./src/main.rs");
         assert_eq!(result.tool_calls[2].arguments["path"], "./README.md");
+    }
+
+    #[test]
+    fn test_bare_function_format() {
+        // Format used by Qwen3-Coder without tool_call wrapper
+        let content = r#"<function=file_edit>
+<parameter=path>
+./tests/integration/helpers.rs
+</parameter>
+<parameter=old_str>
+        yolo: YoloFileConfig::default(),
+    }
+}
+</parameter>
+<parameter=new_str>
+        yolo: YoloFileConfig::default(),
+        execution_mode: Default::default(),
+    }
+}
+</parameter>
+</function>"#;
+
+        let result = parse_tool_calls(content);
+
+        assert_eq!(
+            result.tool_calls.len(),
+            1,
+            "Should parse bare function format"
+        );
+        assert_eq!(result.tool_calls[0].tool_name, "file_edit");
+        assert!(result.tool_calls[0].arguments["path"]
+            .as_str()
+            .unwrap()
+            .contains("helpers.rs"));
+        assert!(result.tool_calls[0].arguments["old_str"].as_str().is_some());
+        assert!(result.tool_calls[0].arguments["new_str"].as_str().is_some());
+    }
+
+    #[test]
+    fn test_bare_function_file_read() {
+        let content = r#"<function=file_read>
+<parameter=path>
+./tests/integration/helpers.rs
+</parameter>
+<parameter=line_range>
+[35, 55]
+</parameter>
+</function>"#;
+
+        let result = parse_tool_calls(content);
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool_name, "file_read");
+        assert!(result.tool_calls[0].arguments["path"]
+            .as_str()
+            .unwrap()
+            .contains("helpers.rs"));
     }
 }

@@ -4,10 +4,19 @@
 //! Built around the philosophy: software you own, software that knows you,
 //! software that lasts.
 
-#![allow(dead_code)]
-
 pub mod animations;
 pub mod banners;
 pub mod components;
 pub mod garden;
+pub mod mascot;
 pub mod style;
+pub mod theme;
+
+// TUI and demo modules
+#[cfg(feature = "tui")]
+pub mod demo;
+#[cfg(feature = "tui")]
+pub mod tui;
+
+// Accessibility features
+pub mod accessibility;

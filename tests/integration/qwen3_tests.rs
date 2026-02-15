@@ -10,7 +10,9 @@ use tokio::sync::Semaphore;
 use selfware::api::types::Message;
 use selfware::api::ApiClient;
 use selfware::api::ThinkingMode;
-use selfware::config::{AgentConfig, Config, SafetyConfig, YoloFileConfig};
+use selfware::config::{
+    AgentConfig, Config, ExecutionMode, SafetyConfig, UiConfig, YoloFileConfig,
+};
 
 /// Get Qwen3-Coder test configuration
 fn qwen3_config() -> Config {
@@ -28,9 +30,14 @@ fn qwen3_config() -> Config {
             step_timeout_secs: 120,
             token_budget: 100000,
             native_function_calling: true, // Use native FC with Qwen3
+            streaming: true,
         },
         yolo: YoloFileConfig::default(),
-        execution_mode: Default::default(),
+        ui: UiConfig::default(),
+        execution_mode: ExecutionMode::Normal,
+        compact_mode: false,
+        verbose_mode: false,
+        show_tokens: false,
     }
 }
 
@@ -1075,7 +1082,7 @@ async fn qwen3_test_continuous_dialogue() {
         "You are a Rust tutor. Help the student learn step by step.",
     )];
 
-    let questions = vec![
+    let questions = [
         "What is ownership in Rust?",
         "Can you give me a simple example?",
         "What happens if I try to use a moved value?",
@@ -1089,11 +1096,11 @@ async fn qwen3_test_continuous_dialogue() {
         let response = client
             .chat(messages.clone(), None, ThinkingMode::Disabled)
             .await
-            .expect(&format!("Turn {} failed", i + 1));
+            .unwrap_or_else(|_| panic!("Turn {} failed", i + 1));
 
         let content = response.choices[0].message.content.clone();
-        let preview = if content.len() > 150 {
-            format!("{}...", &content[..150])
+        let preview = if content.chars().count() > 150 {
+            format!("{}...", content.chars().take(150).collect::<String>())
         } else {
             content.clone()
         };

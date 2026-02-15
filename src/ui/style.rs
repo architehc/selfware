@@ -2,7 +2,9 @@
 //!
 //! Warm, organic palette for the personal workshop aesthetic.
 //! Like aged paper, wood grain, and amber resin.
+//! Supports multiple themes via the theme module.
 
+use super::theme::current_theme;
 use colored::{Colorize, CustomColor};
 
 /// The Selfware color palette - warm, organic, hand-crafted
@@ -91,39 +93,39 @@ pub trait SelfwareStyle {
 
 impl SelfwareStyle for &str {
     fn workshop_title(self) -> colored::ColoredString {
-        self.custom_color(Palette::AMBER).bold()
+        self.custom_color(current_theme().primary).bold()
     }
 
     fn garden_healthy(self) -> colored::ColoredString {
-        self.custom_color(Palette::GARDEN_GREEN)
+        self.custom_color(current_theme().success)
     }
 
     fn garden_wilting(self) -> colored::ColoredString {
-        self.custom_color(Palette::SOIL_BROWN)
+        self.custom_color(current_theme().warning)
     }
 
     fn tool_name(self) -> colored::ColoredString {
-        self.custom_color(Palette::COPPER).bold()
+        self.custom_color(current_theme().tool).bold()
     }
 
     fn path_local(self) -> colored::ColoredString {
-        self.custom_color(Palette::SAGE).italic()
+        self.custom_color(current_theme().path).italic()
     }
 
     fn timestamp(self) -> colored::ColoredString {
-        self.custom_color(Palette::STONE).dimmed()
+        self.custom_color(current_theme().muted).dimmed()
     }
 
     fn muted(self) -> colored::ColoredString {
-        self.custom_color(Palette::STONE)
+        self.custom_color(current_theme().muted)
     }
 
     fn emphasis(self) -> colored::ColoredString {
-        self.custom_color(Palette::AMBER)
+        self.custom_color(current_theme().primary)
     }
 
     fn craftsman_voice(self) -> colored::ColoredString {
-        self.custom_color(Palette::INK).italic()
+        self.custom_color(current_theme().muted).italic()
     }
 }
 
@@ -304,6 +306,7 @@ pub enum ToolStatus<'a> {
 }
 
 #[cfg(test)]
+#[allow(clippy::const_is_empty)]
 mod tests {
     use super::*;
 

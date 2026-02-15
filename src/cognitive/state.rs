@@ -5,8 +5,6 @@
 //! - Episodic Memory: Lessons learned, patterns that worked/didn't
 //! - Reflection: Plan-Do-Verify-Reflect cycle state
 
-#![allow(dead_code)]
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -2,8 +2,6 @@
 //!
 //! Context-aware completion for commands, tools, and file paths.
 
-#![allow(dead_code)]
-
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use reedline::{Completer, Span, Suggestion};
@@ -30,6 +28,7 @@ impl SelfwareCompleter {
     }
 
     /// Get command completions
+    #[allow(dead_code)] // Convenience wrapper
     fn complete_commands(&self, prefix: &str) -> Vec<Suggestion> {
         self.complete_commands_with_span(prefix, 0, prefix.len())
     }
@@ -55,6 +54,7 @@ impl SelfwareCompleter {
                             extra: None,
                             span: Span::new(span_start, span_end),
                             append_whitespace: true,
+                            match_indices: None,
                         },
                     )
                 })
@@ -66,6 +66,7 @@ impl SelfwareCompleter {
     }
 
     /// Get tool completions
+    #[allow(dead_code)] // Convenience wrapper
     fn complete_tools(&self, prefix: &str) -> Vec<Suggestion> {
         self.complete_tools_with_span(prefix, 0, prefix.len())
     }
@@ -91,6 +92,7 @@ impl SelfwareCompleter {
                             extra: None,
                             span: Span::new(span_start, span_end),
                             append_whitespace: true,
+                            match_indices: None,
                         },
                     )
                 })
@@ -102,6 +104,7 @@ impl SelfwareCompleter {
     }
 
     /// Get file path completions
+    #[allow(dead_code)] // Convenience wrapper
     fn complete_paths(&self, prefix: &str) -> Vec<Suggestion> {
         self.complete_paths_with_span(prefix, 0, prefix.len())
     }
@@ -148,13 +151,10 @@ impl SelfwareCompleter {
                         } else {
                             name.clone()
                         }
+                    } else if is_dir {
+                        format!("{}/{}/", dir.trim_end_matches('/'), name)
                     } else {
-                        format!(
-                            "{}/{}{}",
-                            dir.trim_end_matches('/'),
-                            name,
-                            if is_dir { "/" } else { "" }
-                        )
+                        format!("{}/{}", dir.trim_end_matches('/'), name)
                     };
 
                     suggestions.push((
@@ -170,6 +170,7 @@ impl SelfwareCompleter {
                             extra: None,
                             span: Span::new(span_start, span_end),
                             append_whitespace: !is_dir,
+                            match_indices: None,
                         },
                     ));
                 }
@@ -263,8 +264,8 @@ impl Completer for SelfwareCompleter {
                 self.complete_paths_with_span(&prefix, word_start, pos)
             }
             CompletionContext::None => {
-                // Show all commands on empty input to aid discoverability
-                if before_cursor.is_empty() {
+                // If empty or very short, show commands but with correct span
+                if before_cursor.is_empty() || before_cursor.len() < 2 {
                     self.complete_commands_with_span("/", 0, pos)
                 } else {
                     Vec::new()

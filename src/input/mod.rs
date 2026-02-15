@@ -3,8 +3,6 @@
 //! Rich terminal input with autocomplete, history, and vim keybindings.
 //! Built on reedline for a professional IDE-like experience.
 
-#![allow(dead_code)]
-
 mod completer;
 mod ghost_text;
 mod highlighter;
@@ -63,12 +61,14 @@ impl Default for InputConfig {
             commands: vec![
                 "/help".into(),
                 "/status".into(),
+                "/stats".into(),
                 "/mode".into(),
                 "/ctx".into(),
                 "/ctx clear".into(),
                 "/ctx load".into(),
                 "/ctx reload".into(),
                 "/ctx copy".into(),
+                "/compress".into(),
                 "/context".into(),
                 "/memory".into(),
                 "/clear".into(),
@@ -80,6 +80,7 @@ impl Default for InputConfig {
                 "/journal".into(),
                 "/palette".into(),
                 "exit".into(),
+                "quit".into(),
             ],
         }
     }
@@ -268,8 +269,10 @@ mod tests {
 
         assert!(config.commands.contains(&"/help".into()));
         assert!(config.commands.contains(&"/status".into()));
+        assert!(config.commands.contains(&"/stats".into()));
         assert!(config.commands.contains(&"/mode".into()));
         assert!(config.commands.contains(&"/ctx".into()));
+        assert!(config.commands.contains(&"/compress".into()));
         assert!(config.commands.contains(&"/context".into()));
         assert!(config.commands.contains(&"/memory".into()));
         assert!(config.commands.contains(&"/clear".into()));
@@ -281,6 +284,7 @@ mod tests {
         assert!(config.commands.contains(&"/journal".into()));
         assert!(config.commands.contains(&"/palette".into()));
         assert!(config.commands.contains(&"exit".into()));
+        assert!(config.commands.contains(&"quit".into()));
     }
 
     #[test]

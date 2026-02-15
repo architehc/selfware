@@ -19,6 +19,9 @@ use std::task::Waker;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
+/// Type alias for render callback function
+pub type RenderCallback = Box<dyn Fn(&str) + Send + Sync>;
+
 /// Stream event types
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
@@ -672,7 +675,7 @@ pub struct ProgressiveRenderer {
     /// Current rendered content
     rendered: Mutex<String>,
     /// Render callback
-    callback: Option<Box<dyn Fn(&str) + Send + Sync>>,
+    callback: Option<RenderCallback>,
     /// Minimum update interval
     min_interval: Duration,
     /// Last render time
@@ -1335,7 +1338,7 @@ mod tests {
     #[test]
     fn test_backpressure_strategy_clone() {
         let strategy = BackpressureStrategy::DropOldest;
-        let cloned = strategy.clone();
+        let cloned = strategy;
         assert_eq!(cloned, strategy);
     }
 
@@ -1838,8 +1841,8 @@ mod tests {
 
         let stats = pipeline.stats();
         assert_eq!(stats.tokens_received, 2);
-        // Duration can be 0 if operations complete within same millisecond
-        assert!(stats.duration_ms >= u64::MIN);
+        // duration_ms is u64 - checking it exists validates the stat tracking
+        let _ = stats.duration_ms;
     }
 
     #[test]

@@ -2,7 +2,9 @@
 
 use anyhow::Result;
 use selfware::api::types::Message;
-use selfware::config::{AgentConfig, Config, SafetyConfig, YoloFileConfig};
+use selfware::config::{
+    AgentConfig, Config, ExecutionMode, SafetyConfig, UiConfig, YoloFileConfig,
+};
 use std::env;
 use std::time::Duration;
 
@@ -33,9 +35,14 @@ pub fn test_config() -> Config {
             step_timeout_secs: timeout,
             token_budget: 50000,
             native_function_calling: false,
+            streaming: false, // Disable for tests
         },
         yolo: YoloFileConfig::default(),
-        execution_mode: Default::default(),
+        ui: UiConfig::default(),
+        execution_mode: ExecutionMode::Normal,
+        compact_mode: false,
+        verbose_mode: false,
+        show_tokens: false,
     }
 }
 

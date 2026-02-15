@@ -8,9 +8,6 @@ use std::time::Duration;
 
 pub struct ShellExec;
 
-/// Maximum output size in bytes (10MB) to prevent memory exhaustion
-const MAX_OUTPUT_SIZE: usize = 10 * 1024 * 1024;
-
 #[async_trait]
 impl Tool for ShellExec {
     fn name(&self) -> &str {
@@ -64,27 +61,15 @@ impl Tool for ShellExec {
         let output =
             tokio::time::timeout(Duration::from_secs(args.timeout_secs), cmd.output()).await;
 
-        let (exit_code, stdout, stderr, timed_out, truncated) = match output {
-            Ok(Ok(output)) => {
-                let stdout_bytes = &output.stdout;
-                let stderr_bytes = &output.stderr;
-                let total_size = stdout_bytes.len() + stderr_bytes.len();
-                let was_truncated = total_size > MAX_OUTPUT_SIZE;
-
-                // Truncate raw bytes before converting to string to prevent memory exhaustion
-                let stdout_limit = MAX_OUTPUT_SIZE.min(stdout_bytes.len());
-                let stderr_limit = MAX_OUTPUT_SIZE.saturating_sub(stdout_limit).min(stderr_bytes.len());
-
-                (
-                    output.status.code().unwrap_or(-1),
-                    String::from_utf8_lossy(&stdout_bytes[..stdout_limit]).to_string(),
-                    String::from_utf8_lossy(&stderr_bytes[..stderr_limit]).to_string(),
-                    false,
-                    was_truncated,
-                )
-            }
+        let (exit_code, stdout, stderr, timed_out) = match output {
+            Ok(Ok(output)) => (
+                output.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&output.stdout).to_string(),
+                String::from_utf8_lossy(&output.stderr).to_string(),
+                false,
+            ),
             Ok(Err(e)) => return Err(e.into()),
-            Err(_) => (-1, "".to_string(), "Command timed out".to_string(), true, false),
+            Err(_) => (-1, "".to_string(), "Command timed out".to_string(), true),
         };
 
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -94,8 +79,7 @@ impl Tool for ShellExec {
             "stdout": stdout.chars().take(10000).collect::<String>(),
             "stderr": stderr.chars().take(10000).collect::<String>(),
             "duration_ms": duration_ms,
-            "timed_out": timed_out,
-            "output_truncated": truncated
+            "timed_out": timed_out
         }))
     }
 }

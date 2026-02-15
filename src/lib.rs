@@ -21,111 +21,154 @@
 //! agent.run_task("Tend to the garden").await?;
 //! ```
 
-// ─── Core modules (always available) ───────────────────────────────
+// ============================================================================
+// Core modules
+// ============================================================================
 pub mod agent;
 pub mod api;
-pub mod checkpoint;
-pub mod cognitive;
+pub mod cli;
 pub mod config;
-pub mod confirm;
-pub mod memory;
-pub mod planning;
-pub mod redact;
-pub mod safety;
-pub mod telemetry;
-pub mod tool_parser;
-pub mod tools;
-pub mod tokens;
-
-// ─── UI & Input ────────────────────────────────────────────────────
 pub mod input;
-pub mod tui;
+pub mod tools;
 pub mod ui;
 
-// ─── Analysis & Code Intelligence ─────────────────────────────────
-pub mod analytics;
-pub mod analyzer;
-pub mod code_graph;
-pub mod code_review;
-pub mod cognitive_load;
-pub mod tech_debt;
-pub mod log_analysis;
+// ============================================================================
+// Reorganized modules
+// ============================================================================
+pub mod analysis;
+pub mod cognitive;
+pub mod collaboration;
+pub mod devops;
+pub mod observability;
+pub mod orchestration;
+pub mod safety;
+pub mod session;
+pub mod testing;
 
-// ─── Memory & Knowledge Systems ───────────────────────────────────
-pub mod episodic;
-pub mod knowledge_graph;
-pub mod rag;
-pub mod vector_store;
+// Backward-compatible re-exports for safety module
+pub use safety::autonomy;
+#[cfg(feature = "execution-modes")]
+pub use safety::confirm;
+#[cfg(feature = "execution-modes")]
+pub use safety::dry_run;
+pub use safety::redact;
+pub use safety::sandbox;
+pub use safety::scanner as security_scanner;
+pub use safety::threat_modeling;
+#[cfg(feature = "execution-modes")]
+pub use safety::yolo;
 
-// ─── Execution & Workflows ────────────────────────────────────────
-pub mod autonomy;
-pub mod dry_run;
-pub mod parallel;
-pub mod speculative;
-pub mod streaming;
-pub mod workflow_dsl;
-pub mod workflows;
-pub mod yolo;
+// Backward-compatible re-exports for analysis module
+pub use analysis::analyzer;
+pub use analysis::bm25;
+pub use analysis::code_graph;
+pub use analysis::tech_debt;
+pub use analysis::vector_store;
 
-// ─── Multi-Agent & Collaboration ──────────────────────────────────
-pub mod communication;
-pub mod multiagent;
-pub mod realtime_collaboration;
-pub mod swarm;
-pub mod team_knowledge;
+// Backward-compatible re-exports for session module
+#[cfg(feature = "cache")]
+pub use session::cache;
+pub use session::checkpoint;
+pub use session::edit_history;
+pub use session::local_first;
+pub use session::time_travel;
 
-// ─── Infrastructure & DevOps ──────────────────────────────────────
-pub mod cicd;
-pub mod cloud_infra;
-pub mod container;
-pub mod distributed;
-pub mod kubernetes;
-pub mod mlops;
+// Backward-compatible re-exports for observability module
+pub use observability::analytics;
+pub use observability::carbon_tracker;
+pub use observability::dashboard as observability_dashboard;
+#[cfg(feature = "log-analysis")]
+pub use observability::log_analysis;
+pub use observability::telemetry;
+pub use observability::test_dashboard;
 
-// ─── Quality & Security ──────────────────────────────────────────
-pub mod api_testing;
-pub mod contract_testing;
-pub mod sandbox;
-pub mod security_scanner;
-pub mod threat_modeling;
-pub mod verification;
-pub mod test_dashboard;
+// Backward-compatible re-exports for cognitive module
+pub use cognitive::episodic;
+pub use cognitive::intelligence;
+pub use cognitive::knowledge_graph;
+pub use cognitive::learning;
+pub use cognitive::load as cognitive_load;
+pub use cognitive::rag;
+pub use cognitive::self_improvement;
+pub use cognitive::state as cognitive_state;
 
-// ─── Extensions & Optional Features ──────────────────────────────
+// Backward-compatible re-exports for orchestration module
+pub use orchestration::multiagent;
+#[cfg(feature = "workflows")]
+pub use orchestration::parallel;
+pub use orchestration::planning;
+pub use orchestration::swarm;
+#[cfg(feature = "workflows")]
+pub use orchestration::workflow_dsl;
+pub use orchestration::workflows;
+
+// Backward-compatible re-exports for devops module
+pub use devops::cicd;
+pub use devops::cloud_infra;
+pub use devops::container;
+pub use devops::database;
+pub use devops::database_tools;
+pub use devops::distributed;
+pub use devops::embedded;
+pub use devops::kubernetes;
+pub use devops::mlops;
+pub use devops::monorepo;
+pub use devops::process_manager;
+
+// Backward-compatible re-exports for collaboration module
+pub use collaboration::communication;
+pub use collaboration::ide_plugin;
+pub use collaboration::issue_tracker;
+pub use collaboration::realtime as realtime_collaboration;
+pub use collaboration::team_knowledge;
+
+// Backward-compatible re-exports for testing module
+pub use testing::api_testing;
+pub use testing::code_review;
+pub use testing::contract_testing;
+pub use testing::verification;
+
+// Backward-compatible re-export for config module
+pub use config::typed as typed_config;
+
+// ============================================================================
+// Modules to be reorganized (kept for now)
+// ============================================================================
 pub mod browser_automation;
-pub mod cache;
-pub mod carbon_tracker;
-pub mod database;
-pub mod database_tools;
+#[cfg(feature = "resilience")]
 pub mod degradation;
 pub mod doc_generator;
-pub mod dyslexia_friendly;
-pub mod edit_history;
-pub mod embedded;
 pub mod extensions;
-pub mod ide_plugin;
-pub mod image_understanding;
-pub mod intelligence;
 pub mod intent;
-pub mod issue_tracker;
-pub mod learning;
-pub mod literate;
-pub mod local_first;
 pub mod mcp;
+pub mod memory;
 pub mod model_router;
-pub mod monorepo;
-pub mod observability;
-pub mod plugins;
-pub mod process_manager;
-pub mod qwen_features;
-#[cfg(test)]
-pub mod qwen_features_test;
-pub mod screen_reader;
+pub mod output;
+#[cfg(feature = "resilience")]
 pub mod self_healing;
-pub mod self_improvement;
-pub mod session_recording;
 pub mod shell_hooks;
-pub mod time_travel;
-pub mod typed_config;
-pub mod voice_interface;
-pub mod wellness;
+#[cfg(feature = "speculative")]
+pub mod speculative;
+pub mod streaming;
+pub mod token_count;
+#[cfg(feature = "tokens")]
+pub mod tokens;
+pub mod tool_parser;
+
+// ============================================================================
+// Backward-compatible re-exports for UI submodules
+// ============================================================================
+// TUI and demo modules (moved to ui/)
+#[cfg(feature = "tui")]
+pub use ui::demo;
+#[cfg(feature = "tui")]
+pub use ui::tui;
+
+// Accessibility modules (moved to ui/accessibility/)
+pub use ui::accessibility::dyslexia_friendly;
+pub use ui::accessibility::image_understanding;
+pub use ui::accessibility::literate;
+pub use ui::accessibility::screen_reader;
+pub use ui::accessibility::session_recording;
+pub use ui::accessibility::voice_interface;
+pub use ui::accessibility::wellness;

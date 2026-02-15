@@ -4,64 +4,18 @@
 # Run extended tests with:
 #   SELFWARE_TIMEOUT=28800 cargo test --features integration extended_
 
-[endpoint]
-url = "http://localhost:8000/v1"
+# Top-level config fields (match Config struct schema)
+endpoint = "http://localhost:8000/v1"
 model = "Qwen/Qwen3-Coder-Next-FP8"
-api_key = ""  # Optional, leave empty for local endpoints
-
-[model]
+# api_key = ""  # Optional, uncomment if needed
 max_tokens = 65536
 temperature = 0.7
-top_p = 0.95
 
 [agent]
 max_iterations = 500
 step_timeout_secs = 1800    # 30 minutes per step
 token_budget = 500000
-
-[extended_test]
-# Maximum duration for extended tests
-max_duration_hours = 4
-
-# How often to create checkpoints
-checkpoint_interval_mins = 15
-
-# Progress report every N requests
-progress_report_interval = 25
-
-# Memory limit before warning
-memory_limit_mb = 4096
-
-# Concurrent agent limits
-max_concurrent_agents = 16
-default_concurrent_agents = 4
-
-[extended_test.stress]
-# Stress test configuration
-request_count = 100
-concurrent_workers = 10
-requests_per_worker = 20
-
-[extended_test.long_context]
-# Long context test configuration
-turn_count = 50
-initial_message_length = 100
-message_growth_rate = 50
-
-[extended_test.checkpoints]
-# Checkpoint configuration
-enabled = true
-directory = "/tmp/selfware-extended-tests"
-compress = false
-max_checkpoints = 10
-
-[timeouts]
-# Various timeout settings (in seconds)
-default = 600
-health_check = 10
-short_operation = 60
-long_operation = 1800
-extended_session = 14400
+native_function_calling = true
 
 [safety]
 # Safety settings for extended tests
@@ -73,6 +27,17 @@ require_confirmation = []
 [yolo]
 # YOLO mode settings for automated testing
 enabled = true
-operations_enabled = ["file_read", "file_write", "shell_exec"]
-auto_approve_writes = true
-max_file_size_kb = 1024
+max_operations = 1000
+max_hours = 4.0
+allow_git_push = false
+audit_log_path = "/tmp/selfware-extended-audit.log"
+
+# Extended test metadata (not part of Config struct, used by test harness)
+# These are documented here for reference but ignored by the runtime
+#
+# [extended_test]
+# max_duration_hours = 4
+# checkpoint_interval_mins = 15
+# progress_report_interval = 25
+# memory_limit_mb = 4096
+# max_concurrent_agents = 16

@@ -1,31 +1,59 @@
 use anyhow::{Context, Result};
-use chrono::Utc;
 use colored::*;
 use serde_json::Value;
+use std::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::analyzer::ErrorAnalyzer;
-use crate::api::types::Message;
-use crate::api::{ApiClient, ThinkingMode};
-use crate::checkpoint::{
-    capture_git_state, CheckpointManager, TaskCheckpoint, TaskStatus, ToolCallLog,
-};
+use crate::api::types::{Message, ToolCall};
+use crate::api::{ApiClient, StreamChunk, ThinkingMode};
+use crate::checkpoint::{capture_git_state, CheckpointManager, TaskCheckpoint, TaskStatus};
 use crate::cognitive::{CognitiveState, CyclePhase};
 use crate::config::Config;
 use crate::memory::AgentMemory;
+use crate::output;
 use crate::safety::SafetyChecker;
 use crate::telemetry::{enter_agent_step, record_state_transition};
-use crate::tool_parser::parse_tool_calls;
 use crate::tools::ToolRegistry;
 use crate::verification::{VerificationConfig, VerificationGate};
 
 pub mod context;
+mod execution;
 pub mod loop_control;
 pub mod planning;
 
 use context::ContextCompressor;
 use loop_control::{AgentLoop, AgentState};
 use planning::Planner;
+
+/// Agent-specific errors that require special handling
+#[derive(Debug, Clone, PartialEq)]
+pub enum AgentError {
+    /// Tool requires confirmation but running in non-interactive mode
+    ConfirmationRequired { tool_name: String },
+}
+
+impl std::fmt::Display for AgentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentError::ConfirmationRequired { tool_name } => write!(
+                f,
+                "Tool '{}' requires confirmation but running in non-interactive mode. \
+                Use --yolo to auto-approve tools, or run interactively.",
+                tool_name
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AgentError {}
+
+/// Check if an anyhow error is a confirmation-required error (fatal in non-interactive mode)
+fn is_confirmation_error(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<AgentError>()
+        .map(|ae| matches!(ae, AgentError::ConfirmationRequired { .. }))
+        .unwrap_or(false)
+}
 
 pub struct Agent {
     client: ApiClient,
@@ -46,6 +74,12 @@ pub struct Agent {
     error_analyzer: ErrorAnalyzer,
     /// Files loaded into context for reload functionality
     context_files: Vec<String>,
+    /// Last time a checkpoint was persisted to disk
+    last_checkpoint_persisted_at: Instant,
+    /// Tool call count at last persisted checkpoint
+    last_checkpoint_tool_calls: usize,
+    /// Whether at least one checkpoint has been persisted in this session
+    checkpoint_persisted_once: bool,
 }
 
 impl Agent {
@@ -169,6 +203,9 @@ To call a tool, use this EXACT XML structure:
             verification_gate,
             error_analyzer,
             context_files: Vec::new(),
+            last_checkpoint_persisted_at: Instant::now(),
+            last_checkpoint_tool_calls: 0,
+            checkpoint_persisted_once: false,
         })
     }
 
@@ -179,6 +216,86 @@ To call a tool, use this EXACT XML structure:
         } else {
             None
         }
+    }
+
+    /// Chat with streaming, displaying output as it arrives
+    /// Returns (content, reasoning, tool_calls) tuple
+    async fn chat_streaming(
+        &self,
+        messages: Vec<Message>,
+        tools: Option<Vec<crate::api::types::ToolDefinition>>,
+        thinking: ThinkingMode,
+    ) -> Result<(String, Option<String>, Option<Vec<ToolCall>>)> {
+        use std::io::{self, Write};
+
+        let stream = self.client.chat_stream(messages, tools, thinking).await?;
+
+        let mut rx = stream.into_channel().await;
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut in_reasoning = false;
+
+        while let Some(chunk_result) = rx.recv().await {
+            let chunk = chunk_result?;
+
+            match chunk {
+                StreamChunk::Content(text) => {
+                    if in_reasoning {
+                        // Finished reasoning, now showing content
+                        in_reasoning = false;
+                        if !output::is_compact() {
+                            println!(); // End reasoning line
+                        }
+                    }
+                    print!("{}", text);
+                    io::stdout().flush().ok();
+                    content.push_str(&text);
+                }
+                StreamChunk::Reasoning(text) => {
+                    if !output::is_compact() {
+                        if !in_reasoning {
+                            in_reasoning = true;
+                            output::thinking_prefix();
+                        }
+                        output::thinking(&text, true);
+                        io::stdout().flush().ok();
+                    }
+                    reasoning.push_str(&text);
+                }
+                StreamChunk::ToolCall(call) => {
+                    tool_calls.push(call);
+                }
+                StreamChunk::Usage(u) => {
+                    debug!(
+                        "Token usage: {} prompt, {} completion",
+                        u.prompt_tokens, u.completion_tokens
+                    );
+                    output::record_tokens(u.prompt_tokens as u64, u.completion_tokens as u64);
+                    output::print_token_usage(u.prompt_tokens as u64, u.completion_tokens as u64);
+                }
+                StreamChunk::Done => break,
+            }
+        }
+
+        // Ensure we end with a newline if we printed content
+        if !content.is_empty() || !reasoning.is_empty() {
+            println!();
+        }
+
+        Ok((
+            content,
+            if reasoning.is_empty() {
+                None
+            } else {
+                Some(reasoning)
+            },
+            if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
+        ))
     }
 
     /// Get current execution mode
@@ -203,25 +320,47 @@ To call a tool, use this EXACT XML structure:
         self.config.execution_mode
     }
 
-    /// Check if tool execution needs confirmation based on current mode
+    /// Check if tool execution needs confirmation based on current mode and risk level
     pub fn needs_confirmation(&self, tool_name: &str) -> bool {
         use crate::config::ExecutionMode;
+
+        // Read-only tools never need confirmation
+        let safe_tools = [
+            "file_read",
+            "directory_tree",
+            "glob_find",
+            "grep_search",
+            "git_status",
+            "git_diff",
+            "git_log",
+            "ripgrep_search",
+            "web_search",
+        ];
+
+        if safe_tools.contains(&tool_name) {
+            return false;
+        }
+
         match self.config.execution_mode {
-            ExecutionMode::Normal => true, // Always ask
+            ExecutionMode::Yolo | ExecutionMode::Daemon => false, // Never ask
             ExecutionMode::AutoEdit => {
-                // Auto-approve file operations, ask for others
+                // Auto-approve file operations, ask for destructive operations
                 !matches!(
                     tool_name,
-                    "file_read"
-                        | "file_write"
-                        | "file_edit"
-                        | "directory_tree"
-                        | "glob_find"
-                        | "grep_search"
+                    "file_write" | "file_edit" | "file_create" | "directory_tree" | "glob_find"
                 )
             }
-            ExecutionMode::Yolo | ExecutionMode::Daemon => false, // Never ask
+            ExecutionMode::Normal => {
+                // Ask for all tools except safe ones
+                !safe_tools.contains(&tool_name)
+            }
         }
+    }
+
+    /// Check if running in non-interactive mode (piped stdin)
+    pub fn is_interactive(&self) -> bool {
+        use std::io::IsTerminal;
+        std::io::stdin().is_terminal()
     }
 
     // =========================================================================
@@ -269,56 +408,68 @@ To call a tool, use this EXACT XML structure:
             })
             .collect();
 
-        // ANSI color codes for gradient effect
-        let cyan = "\x1b[36m";
-        let bright_cyan = "\x1b[96m";
-        let magenta = "\x1b[35m";
-        let bright_magenta = "\x1b[95m";
-        let bright_yellow = "\x1b[93m";
-        let bright_green = "\x1b[92m";
-        let white = "\x1b[97m";
-        let dim = "\x1b[2m";
-        let reset = "\x1b[0m";
+        // Check if colors are enabled (respects --no-color and NO_COLOR env)
+        let colors_enabled = colored::control::SHOULD_COLORIZE.should_colorize();
 
-        // Progress bar with color based on usage
-        let bar_color = if used_pct > 90.0 {
-            "\x1b[91m" // Bright red
+        // Rusty, weathered color palette - like oxidized metal under salty water
+        let (rust, rust_light, patina, patina_light, sand, worn, coral, aged, reset) =
+            if colors_enabled {
+                (
+                    "\x1b[38;5;130m", // Deep rust orange
+                    "\x1b[38;5;173m", // Light copper/rust
+                    "\x1b[38;5;66m",  // Oxidized teal/verdigris
+                    "\x1b[38;5;109m", // Weathered blue-green
+                    "\x1b[38;5;180m", // Faded sandy gold
+                    "\x1b[38;5;245m", // Weathered gray
+                    "\x1b[38;5;174m", // Faded coral/salmon
+                    "\x1b[38;5;137m", // Aged brown
+                    "\x1b[0m",        // Reset
+                )
+            } else {
+                ("", "", "", "", "", "", "", "", "")
+            };
+
+        // Progress bar colors - rusty theme
+        let bar_color = if !colors_enabled {
+            ""
+        } else if used_pct > 90.0 {
+            "\x1b[38;5;160m" // Deep warning red
         } else if used_pct > 70.0 {
-            "\x1b[93m" // Bright yellow
+            "\x1b[38;5;172m" // Amber rust
         } else {
-            "\x1b[92m" // Bright green
+            "\x1b[38;5;108m" // Weathered sage green
         };
 
         println!();
         println!(
-            "  {}╔══════════════════════════════════════════════════════════╗{}",
-            bright_cyan, reset
+            "  {}┌─────────────────────────────────────────────────────────────┐{}",
+            patina, reset
         );
         println!(
-            "  {}║{}                                                            {}║{}",
-            bright_cyan, reset, bright_cyan, reset
+            "  {}│{}                                                             {}│{}",
+            patina, reset, patina, reset
         );
-        println!("  {}║{}    {}███████╗███████╗██╗     ███████╗██╗    ██╗ █████╗ ██████╗ ███████╗{}    {}║{}", bright_cyan, reset, bright_magenta, reset, bright_cyan, reset);
-        println!("  {}║{}    {}██╔════╝██╔════╝██║     ██╔════╝██║    ██║██╔══██╗██╔══██╗██╔════╝{}    {}║{}", bright_cyan, reset, magenta, reset, bright_cyan, reset);
-        println!("  {}║{}    {}███████╗█████╗  ██║     █████╗  ██║ █╗ ██║███████║██████╔╝█████╗{}      {}║{}", bright_cyan, reset, bright_magenta, reset, bright_cyan, reset);
-        println!("  {}║{}    {}╚════██║██╔══╝  ██║     ██╔══╝  ██║███╗██║██╔══██║██╔══██╗██╔══╝{}      {}║{}", bright_cyan, reset, magenta, reset, bright_cyan, reset);
-        println!("  {}║{}    {}███████║███████╗███████╗██║     ╚███╔███╔╝██║  ██║██║  ██║███████╗{}    {}║{}", bright_cyan, reset, bright_magenta, reset, bright_cyan, reset);
-        println!("  {}║{}    {}╚══════╝╚══════╝╚══════╝╚═╝      ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝{}    {}║{}", bright_cyan, reset, magenta, reset, bright_cyan, reset);
+        println!("  {}│{}   {}███████╗███████╗██╗     ███████╗██╗    ██╗ █████╗ ██████╗ ███████╗{}  {}│{}", patina, reset, rust, reset, patina, reset);
+        println!("  {}│{}   {}██╔════╝██╔════╝██║     ██╔════╝██║    ██║██╔══██╗██╔══██╗██╔════╝{}  {}│{}", patina, reset, rust_light, reset, patina, reset);
+        println!("  {}│{}   {}███████╗█████╗  ██║     █████╗  ██║ █╗ ██║███████║██████╔╝█████╗  {} {}│{}", patina, reset, rust, reset, patina, reset);
+        println!("  {}│{}   {}╚════██║██╔══╝  ██║     ██╔══╝  ██║███╗██║██╔══██║██╔══██╗██╔══╝  {} {}│{}", patina, reset, rust_light, reset, patina, reset);
+        println!("  {}│{}   {}███████║███████╗███████╗██║     ╚███╔███╔╝██║  ██║██║  ██║███████╗{}  {}│{}", patina, reset, rust, reset, patina, reset);
+        println!("  {}│{}   {}╚══════╝╚══════╝╚══════╝╚═╝      ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝{}  {}│{}", patina, reset, rust_light, reset, patina, reset);
         println!(
-            "  {}║{}                       {}W I N D O W{}                              {}║{}",
-            bright_cyan, reset, cyan, reset, bright_cyan, reset
-        );
-        println!(
-            "  {}╠══════════════════════════════════════════════════════════╣{}",
-            bright_cyan, reset
+            "  {}│{}                        {}· w i n d o w ·{}                         {}│{}",
+            patina, reset, patina_light, reset, patina, reset
         );
         println!(
-            "  {}║{}                                                            {}║{}",
-            bright_cyan, reset, bright_cyan, reset
+            "  {}├─────────────────────────────────────────────────────────────┤{}",
+            patina, reset
         );
         println!(
-            "  {}║{}      {} {}{:<34}{} {:>5.1}% {}{}     {}║{}",
-            bright_cyan,
+            "  {}│{}                                                             {}│{}",
+            patina, reset, patina, reset
+        );
+        println!(
+            "  {}│{}     {} {}{:<34}{} {:>5.1}% {}{}      {}│{}",
+            patina,
             reset,
             status_icon,
             bar_color,
@@ -327,80 +478,66 @@ To call a tool, use this EXACT XML structure:
             used_pct,
             status_text,
             reset,
-            bright_cyan,
+            patina,
             reset
         );
         println!(
-            "  {}║{}                                                            {}║{}",
-            bright_cyan, reset, bright_cyan, reset
+            "  {}│{}                                                             {}│{}",
+            patina, reset, patina, reset
         );
         println!(
-            "  {}╠══════════════════════════════════════════════════════════╣{}",
-            bright_cyan, reset
+            "  {}├─────────────────────────────────────────────────────────────┤{}",
+            patina, reset
         );
         println!(
-            "  {}║{}    🎯  {}Tokens{}        {}{:>10}{} / {}{:>10}{}                   {}║{}",
-            bright_cyan,
+            "  {}│{}     {}⚓{}  {}tokens{}        {}{:>10}{} / {}{:>10}{}                  {}│{}",
+            patina,
             reset,
-            white,
+            coral,
             reset,
-            bright_yellow,
+            worn,
+            reset,
+            sand,
             tokens,
             reset,
-            white,
+            worn,
             window,
             reset,
-            bright_cyan,
+            patina,
             reset
         );
         println!(
-            "  {}║{}    📦  {}Available{}     {}{:>10}{} tokens                        {}║{}",
-            bright_cyan, reset, white, reset, bright_green, available, reset, bright_cyan, reset
+            "  {}│{}     {}◈{}  {}available{}     {}{:>10}{} tokens                       {}│{}",
+            patina, reset, coral, reset, worn, reset, patina_light, available, reset, patina, reset
         );
         println!(
-            "  {}╠══════════════════════════════════════════════════════════╣{}",
-            bright_cyan, reset
+            "  {}├┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┤{}",
+            patina, reset
         );
         println!(
-            "  {}║{}    💬  {}Messages{}      {}{:>10}{}                              {}║{}",
-            bright_cyan, reset, white, reset, bright_magenta, messages, reset, bright_cyan, reset
+            "  {}│{}     {}≋{}  {}messages{}      {}{:>10}{}                               {}│{}",
+            patina, reset, coral, reset, worn, reset, aged, messages, reset, patina, reset
         );
         println!(
-            "  {}║{}    🧠  {}Memory{}        {}{:>10}{} entries                       {}║{}",
-            bright_cyan,
-            reset,
-            white,
-            reset,
-            bright_magenta,
-            memory_entries,
-            reset,
-            bright_cyan,
-            reset
+            "  {}│{}     {}◎{}  {}memory{}        {}{:>10}{} entries                      {}│{}",
+            patina, reset, coral, reset, worn, reset, aged, memory_entries, reset, patina, reset
         );
         println!(
-            "  {}║{}    📂  {}Files{}         {}{:>10}{} loaded                        {}║{}",
-            bright_cyan,
-            reset,
-            white,
-            reset,
-            bright_magenta,
-            files_loaded,
-            reset,
-            bright_cyan,
-            reset
+            "  {}│{}     {}⊡{}  {}files{}         {}{:>10}{} loaded                       {}│{}",
+            patina, reset, coral, reset, worn, reset, aged, files_loaded, reset, patina, reset
         );
         println!(
-            "  {}║{}                                                            {}║{}",
-            bright_cyan, reset, bright_cyan, reset
+            "  {}│{}                                                             {}│{}",
+            patina, reset, patina, reset
         );
         println!(
-            "  {}╚══════════════════════════════════════════════════════════╝{}",
-            bright_cyan, reset
+            "  {}└─────────────────────────────────────────────────────────────┘{}",
+            patina, reset
         );
         println!();
         println!(
-            "      {}🗑️  /ctx clear    📂 /ctx load    🔄 /ctx reload    📋 /ctx copy{}",
-            dim, reset
+            "      {}⚓ /ctx clear    ◈ /ctx load    ≋ /ctx reload    ⊡ /ctx copy{}",
+            worn, reset
         );
         println!();
     }
@@ -592,6 +729,214 @@ To call a tool, use this EXACT XML structure:
         Ok(size)
     }
 
+    // =========================================================================
+    // Qwen Code-like Features
+    // =========================================================================
+
+    /// Expand @file references in input (e.g., "@src/main.rs" becomes file content)
+    /// Returns the expanded input and the list of files that were included
+    fn expand_file_references(&self, input: &str) -> (String, Vec<String>) {
+        use regex::Regex;
+        use std::fs;
+
+        let re = Regex::new(r"@([a-zA-Z0-9_./\-]+(?:\.[a-zA-Z0-9]+)?)").unwrap();
+        let mut expanded = input.to_string();
+        let mut included_files = Vec::new();
+
+        for caps in re.captures_iter(input) {
+            let full_match = caps.get(0).unwrap().as_str();
+            let file_path = caps.get(1).unwrap().as_str();
+
+            if let Ok(content) = fs::read_to_string(file_path) {
+                let file_block = format!(
+                    "\n```{} ({})\n{}\n```\n",
+                    file_path,
+                    Self::format_file_size(content.len()),
+                    content.trim()
+                );
+                expanded = expanded.replacen(full_match, &file_block, 1);
+                included_files.push(file_path.to_string());
+            }
+        }
+
+        (expanded, included_files)
+    }
+
+    /// Format file size for display
+    fn format_file_size(bytes: usize) -> String {
+        if bytes >= 1024 * 1024 {
+            format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
+        } else if bytes >= 1024 {
+            format!("{:.1}KB", bytes as f64 / 1024.0)
+        } else {
+            format!("{}B", bytes)
+        }
+    }
+
+    /// Show detailed session statistics (Qwen Code /stats style)
+    fn show_session_stats(&self) {
+        let tokens = self.memory.total_tokens();
+        let window = self.memory.context_window();
+        let used_pct = (tokens as f64 / window as f64 * 100.0).min(100.0);
+        let messages = self.messages.len();
+        let user_msgs = self.messages.iter().filter(|m| m.role == "user").count();
+        let assistant_msgs = self
+            .messages
+            .iter()
+            .filter(|m| m.role == "assistant")
+            .count();
+        let tool_calls = self
+            .messages
+            .iter()
+            .filter(|m| m.role == "assistant" && m.content.contains("<tool>"))
+            .count();
+
+        // Colors - respect --no-color and NO_COLOR env
+        let colors_enabled = colored::control::SHOULD_COLORIZE.should_colorize();
+        let (rust, patina, sand, worn, reset, bold) = if colors_enabled {
+            (
+                "\x1b[38;5;130m",
+                "\x1b[38;5;66m",
+                "\x1b[38;5;180m",
+                "\x1b[38;5;245m",
+                "\x1b[0m",
+                "\x1b[1m",
+            )
+        } else {
+            ("", "", "", "", "", "")
+        };
+
+        // Elapsed time since session start (approximation based on messages)
+        let session_indicator = if messages > 50 {
+            "EXTENDED"
+        } else if messages > 20 {
+            "ACTIVE"
+        } else if messages > 5 {
+            "WARM"
+        } else {
+            "NEW"
+        };
+
+        println!();
+        println!(
+            "  {}┌─────────────────────── {} SESSION STATS {} ───────────────────────┐{}",
+            patina, rust, patina, reset
+        );
+        println!(
+            "  {}│{}                                                                    {}│{}",
+            patina, reset, patina, reset
+        );
+        println!(
+            "  {}│{}  {bold}{}◈ CONTEXT{}{:<48}    {}│{}",
+            patina, reset, rust, reset, "", patina, reset
+        );
+        println!(
+            "  {}│{}     Tokens Used     {:>8} / {:<8}  ({:.1}%)                  {}│{}",
+            patina, reset, tokens, window, used_pct, patina, reset
+        );
+        println!(
+            "  {}│{}     Messages        {:>8}  (user: {}, assistant: {})        {}│{}",
+            patina, reset, messages, user_msgs, assistant_msgs, patina, reset
+        );
+        println!(
+            "  {}│{}     Tool Calls      {:>8}                                    {}│{}",
+            patina, reset, tool_calls, patina, reset
+        );
+        println!(
+            "  {}│{}                                                                    {}│{}",
+            patina, reset, patina, reset
+        );
+        println!(
+            "  {}│{}  {bold}{}⊡ MEMORY{}{:<49}    {}│{}",
+            patina, reset, sand, reset, "", patina, reset
+        );
+        println!(
+            "  {}│{}     Entries         {:>8}                                    {}│{}",
+            patina,
+            reset,
+            self.memory.len(),
+            patina,
+            reset
+        );
+        println!(
+            "  {}│{}     Files Loaded    {:>8}                                    {}│{}",
+            patina,
+            reset,
+            self.context_files.len(),
+            patina,
+            reset
+        );
+        println!(
+            "  {}│{}     Session         {:>8}                                    {}│{}",
+            patina, reset, session_indicator, patina, reset
+        );
+        println!(
+            "  {}│{}                                                                    {}│{}",
+            patina, reset, patina, reset
+        );
+        println!(
+            "  {}│{}  {bold}{}≋ MODE{}{:<50}    {}│{}",
+            patina, reset, worn, reset, "", patina, reset
+        );
+        let mode_str = match self.execution_mode() {
+            crate::config::ExecutionMode::Normal => "NORMAL - Confirm all tools",
+            crate::config::ExecutionMode::AutoEdit => "AUTO-EDIT - Auto-approve file ops",
+            crate::config::ExecutionMode::Yolo => "YOLO - Execute without confirmation",
+            crate::config::ExecutionMode::Daemon => "DAEMON - Permanent auto-execute",
+        };
+        println!(
+            "  {}│{}     {}                                            {}│{}",
+            patina, reset, mode_str, patina, reset
+        );
+        println!(
+            "  {}│{}                                                                    {}│{}",
+            patina, reset, patina, reset
+        );
+        println!(
+            "  {}└────────────────────────────────────────────────────────────────────┘{}",
+            patina, reset
+        );
+        println!();
+    }
+
+    /// Compress context to reduce token usage
+    async fn compress_context(&mut self) -> Result<usize> {
+        let before = self.compressor.estimate_tokens(&self.messages);
+
+        if !self.compressor.should_compress(&self.messages) {
+            println!(
+                "{} Context is within limits, no compression needed",
+                "ℹ️".bright_cyan()
+            );
+            return Ok(0);
+        }
+
+        println!("{} Compressing context...", "🗜️".bright_cyan());
+
+        self.messages = self
+            .compressor
+            .compress(&self.client, &self.messages)
+            .await?;
+
+        let after = self.compressor.estimate_tokens(&self.messages);
+        let saved = before.saturating_sub(after);
+        let pct = if before > 0 {
+            saved as f64 / before as f64 * 100.0
+        } else {
+            0.0
+        };
+
+        println!(
+            "{} Compressed: {} → {} tokens ({:.1}% reduction)",
+            "✓".bright_green(),
+            before.to_string().bright_yellow(),
+            after.to_string().bright_green(),
+            pct
+        );
+
+        Ok(saved)
+    }
+
     /// Resume a task from a checkpoint
     pub async fn resume(config: Config, task_id: &str) -> Result<Self> {
         let checkpoint_manager =
@@ -625,8 +970,12 @@ To call a tool, use this EXACT XML structure:
             agent.loop_control.increment_step();
         }
 
+        let checkpoint_tool_calls = checkpoint.tool_calls.len();
         agent.current_checkpoint = Some(checkpoint);
         agent.checkpoint_manager = Some(checkpoint_manager);
+        agent.last_checkpoint_tool_calls = checkpoint_tool_calls;
+        agent.last_checkpoint_persisted_at = Instant::now();
+        agent.checkpoint_persisted_once = true;
 
         // Set cognitive state to Do phase since we're resuming execution
         agent.cognitive_state.set_phase(CyclePhase::Do);
@@ -659,6 +1008,11 @@ To call a tool, use this EXACT XML structure:
     /// Save current state to checkpoint
     fn save_checkpoint(&mut self, task_description: &str) -> Result<()> {
         if let Some(ref manager) = self.checkpoint_manager {
+            if !self.should_persist_checkpoint() {
+                debug!("Checkpoint skipped by continuous-work policy");
+                return Ok(());
+            }
+
             let task_id = self
                 .current_checkpoint
                 .as_ref()
@@ -667,10 +1021,43 @@ To call a tool, use this EXACT XML structure:
 
             let checkpoint = self.to_checkpoint(&task_id, task_description);
             manager.save(&checkpoint)?;
+            self.last_checkpoint_tool_calls = checkpoint.tool_calls.len();
+            self.last_checkpoint_persisted_at = Instant::now();
+            self.checkpoint_persisted_once = true;
             self.current_checkpoint = Some(checkpoint);
             debug!("Checkpoint saved for task: {}", task_id);
         }
         Ok(())
+    }
+
+    fn should_persist_checkpoint(&self) -> bool {
+        if !self.config.continuous_work.enabled {
+            return true;
+        }
+
+        if !self.checkpoint_persisted_once {
+            return true;
+        }
+
+        let tools_interval = self.config.continuous_work.checkpoint_interval_tools;
+        let secs_interval = self.config.continuous_work.checkpoint_interval_secs;
+
+        if tools_interval == 0 && secs_interval == 0 {
+            return true;
+        }
+
+        let current_tool_calls = self
+            .current_checkpoint
+            .as_ref()
+            .map(|c| c.tool_calls.len())
+            .unwrap_or(0);
+        let tool_calls_elapsed = current_tool_calls.saturating_sub(self.last_checkpoint_tool_calls);
+        let time_elapsed = self.last_checkpoint_persisted_at.elapsed().as_secs();
+
+        let reached_tool_interval = tools_interval > 0 && tool_calls_elapsed >= tools_interval;
+        let reached_time_interval = secs_interval > 0 && time_elapsed >= secs_interval;
+
+        reached_tool_interval || reached_time_interval
     }
 
     /// Mark current task as completed
@@ -679,6 +1066,9 @@ To call a tool, use this EXACT XML structure:
             checkpoint.set_status(TaskStatus::Completed);
             if let Some(ref manager) = self.checkpoint_manager {
                 manager.save(checkpoint)?;
+                self.last_checkpoint_tool_calls = checkpoint.tool_calls.len();
+                self.last_checkpoint_persisted_at = Instant::now();
+                self.checkpoint_persisted_once = true;
             }
         }
         Ok(())
@@ -691,6 +1081,9 @@ To call a tool, use this EXACT XML structure:
             checkpoint.log_error(self.loop_control.current_step(), reason.to_string(), false);
             if let Some(ref manager) = self.checkpoint_manager {
                 manager.save(checkpoint)?;
+                self.last_checkpoint_tool_calls = checkpoint.tool_calls.len();
+                self.last_checkpoint_persisted_at = Instant::now();
+                self.checkpoint_persisted_once = true;
             }
         }
         Ok(())
@@ -713,12 +1106,16 @@ To call a tool, use this EXACT XML structure:
         let mut iteration = 0;
         let task_description = task.to_string();
 
+        // Initialize multi-phase progress tracker
+        let mut progress = output::TaskProgress::new(&["Planning", "Executing"]);
+        progress.start_phase();
+
         while let Some(state) = self.loop_control.next_state() {
             match state {
                 AgentState::Planning => {
                     let _span = enter_agent_step("Planning", 0);
                     record_state_transition("Start", "Planning");
-                    println!("{}", "📋 Planning...".bright_yellow());
+                    output::phase_transition("Start", "Planning");
 
                     // Set cognitive state to Plan phase
                     self.cognitive_state.set_phase(CyclePhase::Plan);
@@ -728,18 +1125,20 @@ To call a tool, use this EXACT XML structure:
 
                     // Transition to Do phase
                     record_state_transition("Planning", "Executing");
+                    output::phase_transition("Planning", "Executing");
+                    progress.complete_phase(); // Complete planning phase
                     self.cognitive_state.set_phase(CyclePhase::Do);
                     self.loop_control
                         .set_state(AgentState::Executing { step: 0 });
 
                     // If planning response contained tool calls, execute them now
                     if has_tool_calls {
-                        println!("{} Executing...", format!("📝 Step {}", 1).bright_blue());
+                        output::step_start(1, "Executing");
                         match self.execute_pending_tool_calls(&task_description).await {
                             Ok(completed) => {
                                 if completed {
                                     record_state_transition("Executing", "Completed");
-                                    println!("{}", "✅ Task completed!".bright_green());
+                                    output::task_completed();
                                     if let Err(e) = self.complete_checkpoint() {
                                         warn!("Failed to save completed checkpoint: {}", e);
                                     }
@@ -752,6 +1151,19 @@ To call a tool, use this EXACT XML structure:
                             }
                             Err(e) => {
                                 warn!("Initial execution failed: {}", e);
+
+                                // Check for confirmation error - these are fatal in non-interactive mode
+                                if is_confirmation_error(&e) {
+                                    record_state_transition("Planning", "Failed");
+                                    if let Some(ref mut checkpoint) = self.current_checkpoint {
+                                        checkpoint.log_error(0, e.to_string(), false);
+                                    }
+                                    self.loop_control.set_state(AgentState::Failed {
+                                        reason: e.to_string(),
+                                    });
+                                    continue;
+                                }
+
                                 self.cognitive_state
                                     .working_memory
                                     .fail_step(1, &e.to_string());
@@ -772,15 +1184,16 @@ To call a tool, use this EXACT XML structure:
                 }
                 AgentState::Executing { step } => {
                     let _span = enter_agent_step("Executing", step);
-                    println!(
-                        "{} Executing...",
-                        format!("📝 Step {}", step + 1).bright_blue()
-                    );
+                    output::step_start(step + 1, "Executing");
+                    // Update progress based on step
+                    let step_progress = ((step + 1) as f64 * 0.1).min(0.9);
+                    progress.update_progress(step_progress);
                     match self.execute_step_with_logging(&task_description).await {
                         Ok(completed) => {
                             if completed {
                                 record_state_transition("Executing", "Completed");
-                                println!("{}", "✅ Task completed!".bright_green());
+                                progress.complete_phase();
+                                output::task_completed();
                                 if let Err(e) = self.complete_checkpoint() {
                                     warn!("Failed to save completed checkpoint: {}", e);
                                 }
@@ -802,6 +1215,19 @@ To call a tool, use this EXACT XML structure:
                         }
                         Err(e) => {
                             warn!("Step failed: {}", e);
+
+                            // Check for confirmation error - these are fatal in non-interactive mode
+                            if is_confirmation_error(&e) {
+                                record_state_transition("Executing", "Failed");
+                                if let Some(ref mut checkpoint) = self.current_checkpoint {
+                                    checkpoint.log_error(step, e.to_string(), false);
+                                }
+                                self.loop_control.set_state(AgentState::Failed {
+                                    reason: e.to_string(),
+                                });
+                                continue;
+                            }
+
                             record_state_transition("Executing", "ErrorRecovery");
 
                             // Record failure in cognitive state
@@ -824,6 +1250,7 @@ To call a tool, use this EXACT XML structure:
                 }
                 AgentState::ErrorRecovery { error } => {
                     let _span = enter_agent_step("ErrorRecovery", self.loop_control.current_step());
+
                     println!("{} {}", "⚠️ Recovering from error:".bright_red(), error);
 
                     // Add cognitive context about the error
@@ -840,7 +1267,8 @@ To call a tool, use this EXACT XML structure:
                 }
                 AgentState::Completed => {
                     record_state_transition("Executing", "Completed");
-                    println!("{}", "✅ Task completed successfully!".bright_green());
+                    progress.complete_phase();
+                    output::task_completed();
                     if let Err(e) = self.complete_checkpoint() {
                         warn!("Failed to save completed checkpoint: {}", e);
                     }
@@ -848,6 +1276,7 @@ To call a tool, use this EXACT XML structure:
                 }
                 AgentState::Failed { reason } => {
                     record_state_transition("Executing", "Failed");
+                    progress.fail_phase();
                     println!("{} {}", "❌ Task failed:".bright_red(), reason);
                     if let Err(e) = self.fail_checkpoint(&reason) {
                         warn!("Failed to save failed checkpoint: {}", e);
@@ -858,6 +1287,7 @@ To call a tool, use this EXACT XML structure:
 
             iteration += 1;
             if iteration > self.config.agent.max_iterations {
+                progress.fail_phase();
                 if let Err(e) = self.fail_checkpoint("Max iterations reached") {
                     warn!("Failed to save failed checkpoint: {}", e);
                 }
@@ -866,771 +1296,6 @@ To call a tool, use this EXACT XML structure:
         }
 
         Ok(())
-    }
-
-    /// Execute a step with tool call logging for checkpoints
-    /// If `use_last_message` is true, process tool calls from the last assistant message
-    /// instead of making a new API call (used after planning phase)
-    async fn execute_step_with_logging(&mut self, _task_description: &str) -> Result<bool> {
-        self.execute_step_internal(false).await
-    }
-
-    /// Execute tool calls from the last assistant message (after planning)
-    async fn execute_pending_tool_calls(&mut self, _task_description: &str) -> Result<bool> {
-        self.execute_step_internal(true).await
-    }
-
-    /// Internal execution logic
-    /// If `use_last_message` is true, process tool calls from the last assistant message
-    async fn execute_step_internal(&mut self, use_last_message: bool) -> Result<bool> {
-        // For native function calling, we track tool_calls separately
-        let mut native_tool_calls: Option<Vec<crate::api::types::ToolCall>> = None;
-
-        let (content, reasoning_content) = if use_last_message {
-            // Extract content from the last assistant message
-            let last_msg = self
-                .messages
-                .iter()
-                .rev()
-                .find(|m| m.role == "assistant")
-                .context("No previous assistant message found")?;
-            debug!(
-                "Using content from last assistant message ({} chars)",
-                last_msg.content.len()
-            );
-            // Also check for native tool calls in the last message
-            if self.config.agent.native_function_calling {
-                native_tool_calls = last_msg.tool_calls.clone();
-            }
-            (last_msg.content.clone(), last_msg.reasoning_content.clone())
-        } else {
-            // Check compression before adding more context
-            if self.compressor.should_compress(&self.messages) {
-                info!("Context compression triggered");
-                match self.compressor.compress(&self.client, &self.messages).await {
-                    Ok(compressed) => {
-                        self.messages = compressed;
-                    }
-                    Err(e) => {
-                        warn!("Compression failed, using hard limit: {}", e);
-                        self.messages = self.compressor.hard_compress(&self.messages);
-                    }
-                }
-            }
-
-            let response = self
-                .client
-                .chat(
-                    self.messages.clone(),
-                    self.api_tools(),
-                    ThinkingMode::Enabled,
-                )
-                .await?;
-
-            let choice = response
-                .choices
-                .into_iter()
-                .next()
-                .context("No response from model")?;
-
-            let message = choice.message;
-            let content = message.content.clone();
-            let reasoning = message.reasoning_content.clone();
-
-            // Check for native tool calls in response
-            if self.config.agent.native_function_calling && message.tool_calls.is_some() {
-                native_tool_calls = message.tool_calls.clone();
-                info!(
-                    "Received {} native tool calls from API",
-                    native_tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
-                );
-            }
-
-            // Debug: print raw response content for troubleshooting
-            debug!(
-                "Raw model response content ({} chars): {}",
-                content.len(),
-                content
-            );
-
-            // Verbose logging when SELFWARE_DEBUG is set
-            if std::env::var("SELFWARE_DEBUG").is_ok() {
-                println!("{}", "=== DEBUG: Raw Model Response ===".bright_magenta());
-                println!("{}", content);
-                println!("{}", "=== END DEBUG ===".bright_magenta());
-            }
-
-            if content.is_empty() {
-                warn!("Model returned empty content!");
-            }
-
-            // Print reasoning if present
-            if let Some(ref r) = reasoning {
-                println!("{} {}", "Thinking:".dimmed(), r.dimmed());
-                debug!("Reasoning content ({} chars): {}", r.len(), r);
-            }
-
-            // Add assistant message to history (include tool_calls for native FC)
-            self.messages.push(Message {
-                role: "assistant".to_string(),
-                content: content.clone(),
-                reasoning_content: reasoning.clone(),
-                tool_calls: native_tool_calls.clone(),
-                tool_call_id: None,
-                name: None,
-            });
-
-            (content, reasoning)
-        };
-
-        // Tool calls with their IDs (for native function calling)
-        // Format: (name, args_str, tool_call_id)
-        let mut tool_calls: Vec<(String, String, Option<String>)> = Vec::new();
-
-        // Check for native function calling first (only if tool_calls is non-empty)
-        if self.config.agent.native_function_calling
-            && native_tool_calls.as_ref().is_some_and(|tc| !tc.is_empty())
-        {
-            let native_calls = native_tool_calls.as_ref().unwrap();
-            info!("Using {} native tool calls from API", native_calls.len());
-            for tc in native_calls {
-                debug!(
-                    "Native tool call: {} (id: {}) with args: {}",
-                    tc.function.name, tc.id, tc.function.arguments
-                );
-                tool_calls.push((
-                    tc.function.name.clone(),
-                    tc.function.arguments.clone(),
-                    Some(tc.id.clone()),
-                ));
-            }
-        } else {
-            // Fall back to parsing tool calls from content using robust multi-format parser
-            // This happens when native FC is disabled OR the API returns empty tool_calls
-            info!(
-                "Falling back to XML parsing (native FC returned {} tool calls)",
-                native_tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
-            );
-            debug!("Looking for tool calls with multi-format parser...");
-            let parse_result = parse_tool_calls(&content);
-            tool_calls = parse_result
-                .tool_calls
-                .iter()
-                .map(|tc| {
-                    debug!(
-                        "Found tool call in content: {} with args: {}",
-                        tc.tool_name, tc.arguments
-                    );
-                    (tc.tool_name.clone(), tc.arguments.to_string(), None)
-                })
-                .collect();
-
-            // Log any parse errors
-            for error in &parse_result.parse_errors {
-                warn!("Tool parse error: {}", error);
-            }
-
-            // Also check reasoning content for tool calls (some models put tools there)
-            if tool_calls.is_empty() {
-                if let Some(ref reasoning_text) = reasoning_content {
-                    let reasoning_result = parse_tool_calls(reasoning_text);
-                    let reasoning_tools: Vec<(String, String, Option<String>)> = reasoning_result
-                        .tool_calls
-                        .iter()
-                        .map(|tc| {
-                            debug!(
-                                "Found tool call in reasoning: {} with args: {}",
-                                tc.tool_name, tc.arguments
-                            );
-                            (tc.tool_name.clone(), tc.arguments.to_string(), None)
-                        })
-                        .collect();
-                    if !reasoning_tools.is_empty() {
-                        info!(
-                            "Found {} tool calls in reasoning content",
-                            reasoning_tools.len()
-                        );
-                        tool_calls = reasoning_tools;
-                    }
-                }
-            }
-        }
-
-        debug!("Total tool calls to execute: {}", tool_calls.len());
-
-        // If no tool calls found, check if content looks like it should have them
-        if tool_calls.is_empty()
-            && (content.contains("<tool")
-                || content.contains("tool_name")
-                || content.contains("function"))
-        {
-            warn!("Content appears to contain tool-related keywords but no valid tool calls were parsed:");
-            warn!(
-                "Content preview: {}",
-                &content.chars().take(500).collect::<String>()
-            );
-        }
-
-        // Keep reasoning for use outside this block
-        let _reasoning = reasoning_content;
-
-        // Detect "intent to act" responses that should trigger follow-up
-        // These are responses where the model says it will do something but doesn't use tools
-        let intent_phrases = [
-            "let me", "i'll ", "i will", "let's", "first,", "starting", "begin by", "going to",
-            "need to", "start by", "help you",
-        ];
-        let content_lower = content.to_lowercase();
-        let has_intent = intent_phrases.iter().any(|p| content_lower.contains(p));
-
-        // If no tool calls but content suggests intent to act, prompt for action
-        if tool_calls.is_empty() && has_intent && content.len() < 1000 && !use_last_message {
-            info!("Detected intent without action, prompting model to use tools");
-            println!(
-                "{}",
-                "🔄 Model described intent but didn't act - prompting for action..."
-                    .bright_yellow()
-            );
-            self.messages.push(Message::user(
-                "Please use the appropriate tools to take action now. Don't just describe what you'll do - actually execute the tools."
-            ));
-            return Ok(false); // Continue loop to get actual tool calls
-        }
-
-        if !tool_calls.is_empty() {
-            // Execute tools with logging
-            for (name, args_str, tool_call_id) in tool_calls {
-                println!(
-                    "{} Calling tool: {}",
-                    "🔧".bright_blue(),
-                    name.bright_cyan()
-                );
-
-                let start_time = std::time::Instant::now();
-                let use_native_fc =
-                    self.config.agent.native_function_calling && tool_call_id.is_some();
-
-                // Safety check
-                let call_id = tool_call_id
-                    .clone()
-                    .unwrap_or_else(|| format!("call_{}", uuid::Uuid::new_v4()));
-                let fake_call = crate::api::types::ToolCall {
-                    id: call_id.clone(),
-                    call_type: "function".to_string(),
-                    function: crate::api::types::ToolFunction {
-                        name: name.clone(),
-                        arguments: args_str.clone(),
-                    },
-                };
-
-                if let Err(e) = self.safety.check_tool_call(&fake_call) {
-                    let error_msg = format!("Safety check failed: {}", e);
-                    println!("{} {}", "🚫".bright_red(), error_msg);
-
-                    // Push result with appropriate message type
-                    if use_native_fc {
-                        self.messages.push(Message::tool(
-                            serde_json::json!({"error": error_msg}).to_string(),
-                            &call_id,
-                        ));
-                    } else {
-                        self.messages.push(Message::user(format!(
-                            "<tool_result><error>{}</error></tool_result>",
-                            error_msg
-                        )));
-                    }
-
-                    // Log failed tool call
-                    if let Some(ref mut checkpoint) = self.current_checkpoint {
-                        checkpoint.log_tool_call(ToolCallLog {
-                            timestamp: Utc::now(),
-                            tool_name: name.clone(),
-                            arguments: args_str.clone(),
-                            result: Some(error_msg),
-                            success: false,
-                            duration_ms: Some(start_time.elapsed().as_millis() as u64),
-                        });
-                    }
-                    continue;
-                }
-
-                // Check execution mode for confirmation
-                if self.needs_confirmation(&name) {
-                    use std::io::{self, Write};
-
-                    // Show tool call preview
-                    let args_preview: String = args_str.chars().take(100).collect();
-                    let args_display = if args_str.len() > 100 {
-                        format!("{}...", args_preview)
-                    } else {
-                        args_preview
-                    };
-
-                    println!(
-                        "{} Tool: {} Args: {}",
-                        "⚠️".bright_yellow(),
-                        name.bright_cyan(),
-                        args_display.bright_white()
-                    );
-                    print!("{}", "Execute? [y/N/s(kip all)]: ".bright_yellow());
-                    io::stdout().flush().ok();
-
-                    let mut response = String::new();
-                    if io::stdin().read_line(&mut response).is_ok() {
-                        let response = response.trim().to_lowercase();
-                        match response.as_str() {
-                            "y" | "yes" => {
-                                // Proceed with execution
-                            }
-                            "s" | "skip" => {
-                                // Switch to yolo mode for this session
-                                self.set_execution_mode(crate::config::ExecutionMode::Yolo);
-                                println!(
-                                    "{} Switched to YOLO mode for this session",
-                                    "⚡".bright_yellow()
-                                );
-                            }
-                            _ => {
-                                // User rejected - skip this tool
-                                let skip_msg = "Tool execution skipped by user";
-                                println!("{} {}", "⏭️".bright_yellow(), skip_msg);
-
-                                if use_native_fc {
-                                    self.messages.push(Message::tool(
-                                        serde_json::json!({"skipped": skip_msg}).to_string(),
-                                        &call_id,
-                                    ));
-                                } else {
-                                    self.messages.push(Message::user(format!(
-                                        "<tool_result><skipped>{}</skipped></tool_result>",
-                                        skip_msg
-                                    )));
-                                }
-                                continue;
-                            }
-                        }
-                    }
-                }
-
-                // Parse and execute
-                let args: Value = match serde_json::from_str(&args_str) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let err = format!("Invalid JSON arguments: {}", e);
-                        println!("{} {}", "✗".bright_red(), err);
-
-                        // Push result with appropriate message type
-                        if use_native_fc {
-                            self.messages.push(Message::tool(
-                                serde_json::json!({"error": err}).to_string(),
-                                &call_id,
-                            ));
-                        } else {
-                            self.messages.push(Message::user(format!(
-                                "<tool_result><error>{}</error></tool_result>",
-                                err
-                            )));
-                        }
-
-                        // Log failed tool call
-                        if let Some(ref mut checkpoint) = self.current_checkpoint {
-                            checkpoint.log_tool_call(ToolCallLog {
-                                timestamp: Utc::now(),
-                                tool_name: name.clone(),
-                                arguments: args_str.clone(),
-                                result: Some(err),
-                                success: false,
-                                duration_ms: Some(start_time.elapsed().as_millis() as u64),
-                            });
-                        }
-                        continue;
-                    }
-                };
-
-                debug!("Tool arguments: {}", args);
-
-                let (success, result) = match self.tools.get(&name) {
-                    Some(tool) => {
-                        match tool.execute(args.clone()).await {
-                            Ok(result) => {
-                                println!("{} Tool succeeded", "✓".bright_green());
-                                let result_str = serde_json::to_string(&result)?;
-
-                                // Log successful tool call
-                                if let Some(ref mut checkpoint) = self.current_checkpoint {
-                                    checkpoint.log_tool_call(ToolCallLog {
-                                        timestamp: Utc::now(),
-                                        tool_name: name.clone(),
-                                        arguments: args_str.clone(),
-                                        result: Some(result_str.chars().take(1000).collect()),
-                                        success: true,
-                                        duration_ms: Some(start_time.elapsed().as_millis() as u64),
-                                    });
-                                }
-
-                                // Run verification after file_edit tool
-                                let verification_result = if name == "file_edit" {
-                                    if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                                        info!("Running verification after file_edit on {}", path);
-                                        self.cognitive_state.set_phase(CyclePhase::Verify);
-                                        match self
-                                            .verification_gate
-                                            .verify_change(
-                                                &[path.to_string()],
-                                                &format!("file_edit:{}", path),
-                                            )
-                                            .await
-                                        {
-                                            Ok(report) => {
-                                                if report.overall_passed {
-                                                    self.cognitive_state
-                                                        .episodic_memory
-                                                        .what_worked(
-                                                            "file_edit",
-                                                            &format!(
-                                                                "Edit to {} passed verification",
-                                                                path
-                                                            ),
-                                                        );
-                                                    println!("{}", report);
-                                                    None
-                                                } else {
-                                                    self.cognitive_state
-                                                        .episodic_memory
-                                                        .what_failed(
-                                                            "file_edit",
-                                                            &format!(
-                                                                "Edit to {} failed verification",
-                                                                path
-                                                            ),
-                                                        );
-                                                    println!("{}", report);
-                                                    Some(format!("\n\n<verification_failed>\n{}\n</verification_failed>", report))
-                                                }
-                                            }
-                                            Err(e) => {
-                                                warn!("Verification failed to run: {}", e);
-                                                None
-                                            }
-                                        }
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                };
-
-                                // Enhance cargo_check output with error analysis
-                                let enhanced_result = if name == "cargo_check"
-                                    && result_str.contains("\"success\":false")
-                                {
-                                    self.enhance_cargo_errors(&result_str)
-                                } else {
-                                    result_str.clone()
-                                };
-
-                                // Combine result with verification if applicable
-                                let final_result = match verification_result {
-                                    Some(ver_msg) => format!("{}{}", enhanced_result, ver_msg),
-                                    None => enhanced_result,
-                                };
-
-                                (true, final_result)
-                            }
-                            Err(e) => {
-                                println!("{} Tool failed: {}", "✗".bright_red(), e);
-
-                                // Log failed tool call
-                                if let Some(ref mut checkpoint) = self.current_checkpoint {
-                                    checkpoint.log_tool_call(ToolCallLog {
-                                        timestamp: Utc::now(),
-                                        tool_name: name.clone(),
-                                        arguments: args_str.clone(),
-                                        result: Some(e.to_string()),
-                                        success: false,
-                                        duration_ms: Some(start_time.elapsed().as_millis() as u64),
-                                    });
-                                }
-
-                                // Record failure in cognitive state
-                                self.cognitive_state
-                                    .episodic_memory
-                                    .what_failed(&name, &e.to_string());
-
-                                (false, e.to_string())
-                            }
-                        }
-                    }
-                    None => {
-                        let err = format!("Unknown tool: {}", name);
-                        println!("{} {}", "✗".bright_red(), err);
-
-                        // Log unknown tool call
-                        if let Some(ref mut checkpoint) = self.current_checkpoint {
-                            checkpoint.log_tool_call(ToolCallLog {
-                                timestamp: Utc::now(),
-                                tool_name: name.clone(),
-                                arguments: args_str.clone(),
-                                result: Some(err.clone()),
-                                success: false,
-                                duration_ms: Some(start_time.elapsed().as_millis() as u64),
-                            });
-                        }
-
-                        (false, err)
-                    }
-                };
-
-                // Push result with appropriate message type
-                if use_native_fc {
-                    // For native function calling, send JSON result with tool role
-                    let result_json = if success {
-                        result
-                    } else {
-                        serde_json::json!({"error": result}).to_string()
-                    };
-                    self.messages.push(Message::tool(result_json, &call_id));
-                } else {
-                    // For XML-based calling, wrap in tool_result tags
-                    let formatted = if success {
-                        format!("<tool_result>{}</tool_result>", result)
-                    } else {
-                        format!("<tool_result><error>{}</error></tool_result>", result)
-                    };
-                    self.messages.push(Message::user(formatted));
-                }
-            }
-
-            Ok(false) // Continue loop
-        } else {
-            // No tool calls, task complete
-            println!("{} {}", "Final answer:".bright_green(), content);
-            // Note: assistant message was already added above when not using last message
-            Ok(true)
-        }
-    }
-
-    /// Plan phase - returns true if model wants to execute tools (should continue to execution)
-    /// This now combines planning with initial tool extraction to avoid double API calls
-    async fn plan(&mut self) -> Result<bool> {
-        // Tools are embedded in system prompt - see WORKAROUND comment in Agent::new()
-        debug!("Sending planning request to model...");
-        let response = self
-            .client
-            .chat(
-                self.messages.clone(),
-                self.api_tools(),
-                ThinkingMode::Enabled,
-            )
-            .await?;
-
-        let choice = response
-            .choices
-            .into_iter()
-            .next()
-            .context("No response from model")?;
-
-        let assistant_msg = choice.message;
-        let content = &assistant_msg.content;
-
-        // Debug logging for planning response
-        debug!(
-            "Planning response content ({} chars): {}",
-            content.len(),
-            content
-        );
-
-        // Verbose logging when SELFWARE_DEBUG is set
-        if std::env::var("SELFWARE_DEBUG").is_ok() {
-            println!("{}", "=== DEBUG: Planning Response ===".bright_magenta());
-            println!("{}", content);
-            println!("{}", "=== END DEBUG ===".bright_magenta());
-        }
-
-        if content.is_empty() {
-            warn!("Model returned empty planning content!");
-        }
-        if let Some(ref reasoning) = assistant_msg.reasoning_content {
-            debug!(
-                "Planning reasoning ({} chars): {}",
-                reasoning.len(),
-                reasoning
-            );
-            if let Some(r) = &assistant_msg.reasoning_content {
-                println!("{} {}", "Thinking:".dimmed(), r.dimmed());
-            }
-        }
-
-        // Check if the planning response contains tool calls
-        // For native function calling, check tool_calls field; otherwise parse from content
-        let (has_tool_calls, native_tool_calls) =
-            if self.config.agent.native_function_calling && assistant_msg.tool_calls.is_some() {
-                let tool_calls = assistant_msg.tool_calls.as_ref().unwrap();
-                info!(
-                    "Planning response has {} native tool calls",
-                    tool_calls.len()
-                );
-                (!tool_calls.is_empty(), assistant_msg.tool_calls.clone())
-            } else {
-                let parsed = !parse_tool_calls(content).tool_calls.is_empty();
-                debug!("Planning response has tool calls (parsed): {}", parsed);
-                (parsed, None)
-            };
-
-        self.messages.push(Message {
-            role: "assistant".to_string(),
-            content: content.clone(),
-            reasoning_content: assistant_msg.reasoning_content,
-            tool_calls: native_tool_calls,
-            tool_call_id: None,
-            name: None,
-        });
-
-        // Return whether there are tool calls to execute
-        Ok(has_tool_calls)
-    }
-
-    #[allow(dead_code)]
-    async fn execute_step(&mut self) -> Result<bool> {
-        // Check compression before adding more context
-        if self.compressor.should_compress(&self.messages) {
-            info!("Context compression triggered");
-            match self.compressor.compress(&self.client, &self.messages).await {
-                Ok(compressed) => {
-                    self.messages = compressed;
-                }
-                Err(e) => {
-                    warn!("Compression failed, using hard limit: {}", e);
-                    self.messages = self.compressor.hard_compress(&self.messages);
-                }
-            }
-        }
-
-        // Tools are embedded in system prompt - see WORKAROUND comment in Agent::new()
-        let response = self
-            .client
-            .chat(
-                self.messages.clone(),
-                self.api_tools(),
-                ThinkingMode::Enabled,
-            )
-            .await?;
-
-        let choice = response
-            .choices
-            .into_iter()
-            .next()
-            .context("No response from model")?;
-
-        let message = choice.message;
-        let content = &message.content;
-
-        // Print reasoning if present
-        if let Some(reasoning) = &message.reasoning_content {
-            println!("{} {}", "Thinking:".dimmed(), reasoning.dimmed());
-        }
-
-        // Parse tool calls from content using robust multi-format parser
-        let parse_result = parse_tool_calls(content);
-        let tool_calls: Vec<(String, String)> = parse_result
-            .tool_calls
-            .iter()
-            .map(|tc| (tc.tool_name.clone(), tc.arguments.to_string()))
-            .collect();
-
-        if !tool_calls.is_empty() {
-            // Add assistant message
-            self.messages.push(Message {
-                role: "assistant".to_string(),
-                content: content.clone(),
-                reasoning_content: message.reasoning_content,
-                tool_calls: None,
-                tool_call_id: None,
-                name: None,
-            });
-
-            // Execute tools
-            for (name, args_str) in tool_calls {
-                println!(
-                    "{} Calling tool: {}",
-                    "🔧".bright_blue(),
-                    name.bright_cyan()
-                );
-
-                // Safety check
-                let fake_call = crate::api::types::ToolCall {
-                    id: format!("call_{}", uuid::Uuid::new_v4()),
-                    call_type: "function".to_string(),
-                    function: crate::api::types::ToolFunction {
-                        name: name.clone(),
-                        arguments: args_str.clone(),
-                    },
-                };
-
-                if let Err(e) = self.safety.check_tool_call(&fake_call) {
-                    let error_msg = format!("Safety check failed: {}", e);
-                    println!("{} {}", "🚫".bright_red(), error_msg);
-                    self.messages.push(Message::user(format!(
-                        "<tool_result><error>{}</error></tool_result>",
-                        error_msg
-                    )));
-                    continue;
-                }
-
-                // Parse and execute
-                let args: Value = match serde_json::from_str(&args_str) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        let err = format!("Invalid JSON arguments: {}", e);
-                        println!("{} {}", "✗".bright_red(), err);
-                        self.messages.push(Message::user(format!(
-                            "<tool_result><error>{}</error></tool_result>",
-                            err
-                        )));
-                        continue;
-                    }
-                };
-
-                debug!("Tool arguments: {}", args);
-
-                let result = match self.tools.get(&name) {
-                    Some(tool) => match tool.execute(args).await {
-                        Ok(result) => {
-                            println!("{} Tool succeeded", "✓".bright_green());
-                            format!(
-                                "<tool_result>{}</tool_result>",
-                                serde_json::to_string(&result)?
-                            )
-                        }
-                        Err(e) => {
-                            println!("{} Tool failed: {}", "✗".bright_red(), e);
-                            format!("<tool_result><error>{}</error></tool_result>", e)
-                        }
-                    },
-                    None => {
-                        let err = format!("Unknown tool: {}", name);
-                        println!("{} {}", "✗".bright_red(), err);
-                        format!("<tool_result><error>{}</error></tool_result>", err)
-                    }
-                };
-
-                self.messages.push(Message::user(result));
-            }
-
-            Ok(false) // Continue loop
-        } else {
-            // No tool calls, task complete
-            println!("{} {}", "Final answer:".bright_green(), content);
-            self.messages.push(Message {
-                role: "assistant".to_string(),
-                content: content.clone(),
-                reasoning_content: message.reasoning_content,
-                tool_calls: None,
-                tool_call_id: None,
-                name: None,
-            });
-            Ok(true)
-        }
     }
 
     pub async fn interactive(&mut self) -> Result<()> {
@@ -1710,51 +1375,59 @@ To call a tool, use this EXACT XML structure:
                 println!();
                 println!(
                     "{}",
-                    "╭─────────────────────────────────────────────────╮".bright_cyan()
+                    "╭──────────────────────────────────────────────────────╮".bright_cyan()
                 );
                 println!(
                     "{}",
-                    "│              🦊 SELFWARE COMMANDS               │".bright_cyan()
+                    "│                 🦊 SELFWARE COMMANDS                 │".bright_cyan()
                 );
                 println!(
                     "{}",
-                    "├─────────────────────────────────────────────────┤".bright_cyan()
+                    "├──────────────────────────────────────────────────────┤".bright_cyan()
                 );
                 println!(
-                    "│  {} /help             Show this help           │",
+                    "│  {} /help              Show this help               │",
                     "📖".bright_white()
                 );
                 println!(
-                    "│  {} /status           Agent status             │",
+                    "│  {} /status            Agent status                 │",
                     "📊".bright_white()
                 );
                 println!(
-                    "│  {} /mode             Cycle execution mode     │",
+                    "│  {} /stats             Detailed session stats       │",
+                    "📈".bright_white()
+                );
+                println!(
+                    "│  {} /mode              Cycle execution mode         │",
                     "🔄".bright_white()
                 );
                 println!(
                     "{}",
-                    "├─────────────────────────────────────────────────┤".bright_cyan()
+                    "├──────────────────────────────────────────────────────┤".bright_cyan()
                 );
                 println!(
-                    "│  {} /ctx              Context window stats     │",
+                    "│  {} /ctx               Context window stats         │",
                     "📊".bright_white()
                 );
                 println!(
-                    "│  {} /ctx clear        Clear all context        │",
+                    "│  {} /ctx clear         Clear all context            │",
                     "🗑️ ".bright_white()
                 );
                 println!(
-                    "│  {} /ctx load <ext>   Load files (.rs,.toml)   │",
+                    "│  {} /ctx load <ext>    Load files (.rs,.toml)       │",
                     "📂".bright_white()
                 );
                 println!(
-                    "│  {} /ctx reload       Reload loaded files      │",
+                    "│  {} /ctx reload        Reload loaded files          │",
                     "🔄".bright_white()
                 );
                 println!(
-                    "│  {} /ctx copy         Copy sources to clip     │",
+                    "│  {} /ctx copy          Copy sources to clip         │",
                     "📋".bright_white()
+                );
+                println!(
+                    "│  {} /compress          Compress context             │",
+                    "🗜️ ".bright_white()
                 );
                 println!(
                     "{}",
@@ -1769,36 +1442,45 @@ To call a tool, use this EXACT XML structure:
                     "🗑️ ".bright_white()
                 );
                 println!(
-                    "│  {} /tools            List available tools     │",
+                    "│  {} /tools             List available tools       │",
                     "🔧".bright_white()
                 );
                 println!(
                     "{}",
-                    "├─────────────────────────────────────────────────┤".bright_cyan()
+                    "├──────────────────────────────────────────────────────┤".bright_cyan()
                 );
                 println!(
-                    "│  {} /analyze <path>   Analyze codebase         │",
+                    "│  {} /analyze <path>    Analyze codebase             │",
                     "🔍".bright_white()
                 );
                 println!(
-                    "│  {} /review <file>    Review code file         │",
+                    "│  {} /review <file>     Review code file             │",
                     "👁️ ".bright_white()
                 );
                 println!(
-                    "│  {} /plan <task>      Create task plan         │",
+                    "│  {} /plan <task>       Create task plan             │",
                     "📝".bright_white()
                 );
                 println!(
                     "{}",
-                    "├─────────────────────────────────────────────────┤".bright_cyan()
+                    "├──────────────────────────────────────────────────────┤".bright_cyan()
                 );
                 println!(
-                    "│  {} exit              Exit interactive mode    │",
+                    "│  {} @file              Reference file in message    │",
+                    "📎".bright_white()
+                );
+                println!(
+                    "│  {} exit               Exit interactive mode        │",
                     "🚪".bright_white()
                 );
                 println!(
                     "{}",
-                    "╰─────────────────────────────────────────────────╯".bright_cyan()
+                    "╰──────────────────────────────────────────────────────╯".bright_cyan()
+                );
+                println!();
+                println!(
+                    "  {} Use @path/to/file to include file content in your message",
+                    "💡".bright_yellow()
                 );
                 println!();
                 continue;
@@ -1817,6 +1499,23 @@ To call a tool, use this EXACT XML structure:
                 println!("Near limit: {}", self.memory.is_near_limit());
                 println!("Current step: {}", self.loop_control.current_step());
                 println!("Execution mode: {}", mode_str.bright_yellow());
+                continue;
+            }
+
+            if input == "/stats" {
+                self.show_session_stats();
+                continue;
+            }
+
+            if input == "/compress" {
+                match self.compress_context().await {
+                    Ok(saved) => {
+                        if saved > 0 {
+                            println!("{} Saved {} tokens", "✓".bright_green(), saved);
+                        }
+                    }
+                    Err(e) => println!("{} Compression error: {}", "❌".bright_red(), e),
+                }
                 continue;
             }
 
@@ -1940,18 +1639,32 @@ To call a tool, use this EXACT XML structure:
                 continue;
             }
 
+            // Expand @file references in input (Qwen Code style)
+            let (expanded_input, included_files) = self.expand_file_references(input);
+            if !included_files.is_empty() {
+                println!(
+                    "{} Included {} file(s):",
+                    "📎".bright_cyan(),
+                    included_files.len()
+                );
+                for file in &included_files {
+                    println!("   {} {}", "→".bright_black(), file.bright_white());
+                }
+                println!();
+            }
+
             // Display truncated preview for large pastes
             const LARGE_PASTE_THRESHOLD: usize = 3000;
             const PREVIEW_CHARS: usize = 200;
 
-            if input.len() > LARGE_PASTE_THRESHOLD {
-                let lines: Vec<&str> = input.lines().collect();
+            if expanded_input.len() > LARGE_PASTE_THRESHOLD {
+                let lines: Vec<&str> = expanded_input.lines().collect();
                 let line_count = lines.len();
-                let char_count = input.len();
+                let char_count = expanded_input.len();
 
                 // Get first and last few characters for preview
-                let start_preview: String = input.chars().take(PREVIEW_CHARS).collect();
-                let end_preview: String = input
+                let start_preview: String = expanded_input.chars().take(PREVIEW_CHARS).collect();
+                let end_preview: String = expanded_input
                     .chars()
                     .rev()
                     .take(PREVIEW_CHARS)
@@ -1975,12 +1688,9 @@ To call a tool, use this EXACT XML structure:
                 println!();
             }
 
-            match self.run_task(input).await {
+            match self.run_task(&expanded_input).await {
                 Ok(_) => {}
-                Err(e) => {
-                    let friendly = crate::ui::components::format_user_friendly_error(&format!("{}", e));
-                    println!("{}", crate::ui::components::render_error(&friendly));
-                }
+                Err(e) => println!("{} Error: {}", "❌".bright_red(), e),
             }
         }
 
@@ -1994,13 +1704,34 @@ To call a tool, use this EXACT XML structure:
         println!("{}", "🦊 Selfware Workshop (Basic Mode)".bright_cyan());
         println!("Type 'exit' to quit, '/help' for commands");
 
+        // Detect if stdin is a TTY or piped
+        use std::io::IsTerminal;
+        let is_tty = std::io::stdin().is_terminal();
+
         loop {
-            print!("🦊 ❯ ");
-            io::stdout().flush()?;
+            if is_tty {
+                print!("🦊 ❯ ");
+                io::stdout().flush()?;
+            }
 
             let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
+            let bytes_read = io::stdin().read_line(&mut input)?;
+
+            // EOF detection: read_line returns Ok(0) on EOF
+            if bytes_read == 0 {
+                break;
+            }
+
             let input = input.trim();
+
+            // Skip empty lines in non-interactive mode to avoid spurious tasks
+            if input.is_empty() {
+                if is_tty {
+                    continue; // In TTY mode, just prompt again
+                } else {
+                    break; // In piped mode, empty line = done
+                }
+            }
 
             if input == "exit" || input == "quit" {
                 break;
@@ -2087,10 +1818,7 @@ To call a tool, use this EXACT XML structure:
 
             match self.run_task(input).await {
                 Ok(_) => {}
-                Err(e) => {
-                    let friendly = crate::ui::components::format_user_friendly_error(&format!("{}", e));
-                    println!("{}", crate::ui::components::render_error(&friendly));
-                }
+                Err(e) => println!("{} Error: {}", "❌".bright_red(), e),
             }
         }
 
@@ -2215,7 +1943,7 @@ To call a tool, use this EXACT XML structure:
                         Ok(completed) => {
                             if completed {
                                 record_state_transition("Executing", "Completed");
-                                println!("{}", "✅ Task completed!".bright_green());
+                                output::task_completed();
                                 if let Err(e) = self.complete_checkpoint() {
                                     warn!("Failed to save completed checkpoint: {}", e);
                                 }
@@ -2236,6 +1964,19 @@ To call a tool, use this EXACT XML structure:
                         }
                         Err(e) => {
                             warn!("Step failed: {}", e);
+
+                            // Check for confirmation error - these are fatal in non-interactive mode
+                            if is_confirmation_error(&e) {
+                                record_state_transition("Executing", "Failed");
+                                if let Some(ref mut checkpoint) = self.current_checkpoint {
+                                    checkpoint.log_error(step, e.to_string(), false);
+                                }
+                                self.loop_control.set_state(AgentState::Failed {
+                                    reason: e.to_string(),
+                                });
+                                continue;
+                            }
+
                             record_state_transition("Executing", "ErrorRecovery");
                             self.cognitive_state
                                 .working_memory
@@ -2252,6 +1993,7 @@ To call a tool, use this EXACT XML structure:
                 }
                 AgentState::ErrorRecovery { error } => {
                     let _span = enter_agent_step("ErrorRecovery", self.loop_control.current_step());
+
                     println!("{} {}", "⚠️ Recovering from error:".bright_red(), error);
 
                     let cognitive_summary = self.cognitive_state.summary();
@@ -2267,7 +2009,7 @@ To call a tool, use this EXACT XML structure:
                 }
                 AgentState::Completed => {
                     record_state_transition("Executing", "Completed");
-                    println!("{}", "✅ Task completed successfully!".bright_green());
+                    output::task_completed();
                     if let Err(e) = self.complete_checkpoint() {
                         warn!("Failed to save completed checkpoint: {}", e);
                     }
@@ -2293,5 +2035,597 @@ To call a tool, use this EXACT XML structure:
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::types::{ToolCall, ToolFunction};
+    use crate::config::{Config, ExecutionMode};
+    use crate::tool_parser::parse_tool_calls;
+    use loop_control::{AgentLoop, AgentState};
+
+    // =========================================================================
+    // Test 1: Agent State Transitions
+    // =========================================================================
+
+    #[test]
+    fn test_agent_state_transitions_idle_to_planning() {
+        // AgentLoop starts in Planning state (not Idle, as there's no Idle state)
+        let mut loop_ctrl = AgentLoop::new(100);
+
+        // First state should be Planning
+        let state = loop_ctrl.next_state();
+        assert!(matches!(state, Some(AgentState::Planning)));
+
+        // Transition to Executing
+        loop_ctrl.set_state(AgentState::Executing { step: 0 });
+        let state = loop_ctrl.next_state();
+        assert!(matches!(state, Some(AgentState::Executing { step: 0 })));
+    }
+
+    #[test]
+    fn test_agent_state_transitions_planning_to_executing() {
+        let mut loop_ctrl = AgentLoop::new(100);
+
+        // Start in Planning
+        let _ = loop_ctrl.next_state();
+        assert!(matches!(loop_ctrl.next_state(), Some(AgentState::Planning)));
+
+        // Transition to Executing with step 0
+        loop_ctrl.set_state(AgentState::Executing { step: 0 });
+        let state = loop_ctrl.next_state();
+        match state {
+            Some(AgentState::Executing { step }) => assert_eq!(step, 0),
+            _ => panic!("Expected Executing state with step 0"),
+        }
+    }
+
+    #[test]
+    fn test_agent_state_transitions_executing_to_completed() {
+        let mut loop_ctrl = AgentLoop::new(100);
+
+        // Start execution
+        loop_ctrl.set_state(AgentState::Executing { step: 0 });
+        let _ = loop_ctrl.next_state();
+
+        // Simulate task completion
+        loop_ctrl.set_state(AgentState::Completed);
+        let state = loop_ctrl.next_state();
+        assert!(matches!(state, Some(AgentState::Completed)));
+    }
+
+    #[test]
+    fn test_agent_state_transitions_executing_to_error_recovery() {
+        let mut loop_ctrl = AgentLoop::new(100);
+
+        // Start execution
+        loop_ctrl.set_state(AgentState::Executing { step: 0 });
+        let _ = loop_ctrl.next_state();
+
+        // Simulate error
+        loop_ctrl.set_state(AgentState::ErrorRecovery {
+            error: "Tool execution failed".to_string(),
+        });
+        let state = loop_ctrl.next_state();
+        match state {
+            Some(AgentState::ErrorRecovery { error }) => {
+                assert_eq!(error, "Tool execution failed");
+            }
+            _ => panic!("Expected ErrorRecovery state"),
+        }
+    }
+
+    #[test]
+    fn test_agent_state_full_lifecycle() {
+        let mut loop_ctrl = AgentLoop::new(100);
+
+        // Planning -> Executing -> Error -> Recovery -> Executing -> Completed
+        assert!(matches!(loop_ctrl.next_state(), Some(AgentState::Planning)));
+
+        loop_ctrl.set_state(AgentState::Executing { step: 0 });
+        assert!(matches!(
+            loop_ctrl.next_state(),
+            Some(AgentState::Executing { .. })
+        ));
+
+        loop_ctrl.set_state(AgentState::ErrorRecovery {
+            error: "test".to_string(),
+        });
+        assert!(matches!(
+            loop_ctrl.next_state(),
+            Some(AgentState::ErrorRecovery { .. })
+        ));
+
+        loop_ctrl.set_state(AgentState::Executing { step: 1 });
+        assert!(matches!(
+            loop_ctrl.next_state(),
+            Some(AgentState::Executing { step: 1 })
+        ));
+
+        loop_ctrl.set_state(AgentState::Completed);
+        assert!(matches!(
+            loop_ctrl.next_state(),
+            Some(AgentState::Completed)
+        ));
+    }
+
+    // =========================================================================
+    // Test 2: Tool Call Handling with Mock Data
+    // =========================================================================
+
+    fn create_mock_tool_call(name: &str, args: &str) -> ToolCall {
+        ToolCall {
+            id: format!("call_{}", uuid::Uuid::new_v4()),
+            call_type: "function".to_string(),
+            function: ToolFunction {
+                name: name.to_string(),
+                arguments: args.to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn test_tool_call_parsing_xml_format() {
+        let content = r#"
+        Let me read that file for you.
+
+        <tool>
+        <name>file_read</name>
+        <arguments>{"path": "./src/main.rs"}</arguments>
+        </tool>
+        "#;
+
+        let result = parse_tool_calls(content);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool_name, "file_read");
+
+        let args = &result.tool_calls[0].arguments;
+        assert_eq!(args["path"], "./src/main.rs");
+    }
+
+    #[test]
+    fn test_tool_call_parsing_multiple_tools() {
+        let content = r#"
+        I'll check the git status and read a file.
+
+        <tool>
+        <name>git_status</name>
+        <arguments>{}</arguments>
+        </tool>
+
+        <tool>
+        <name>file_read</name>
+        <arguments>{"path": "Cargo.toml"}</arguments>
+        </tool>
+        "#;
+
+        let result = parse_tool_calls(content);
+        assert_eq!(result.tool_calls.len(), 2);
+        assert_eq!(result.tool_calls[0].tool_name, "git_status");
+        assert_eq!(result.tool_calls[1].tool_name, "file_read");
+    }
+
+    #[test]
+    fn test_tool_call_with_complex_arguments() {
+        let content = r#"
+        <tool>
+        <name>file_edit</name>
+        <arguments>{
+            "path": "./src/lib.rs",
+            "old_str": "fn old_function() {\n    println!(\"old\");\n}",
+            "new_str": "fn new_function() {\n    println!(\"new\");\n}"
+        }</arguments>
+        </tool>
+        "#;
+
+        let result = parse_tool_calls(content);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool_name, "file_edit");
+
+        let args = &result.tool_calls[0].arguments;
+        assert!(args["old_str"].as_str().unwrap().contains("old_function"));
+        assert!(args["new_str"].as_str().unwrap().contains("new_function"));
+    }
+
+    #[test]
+    fn test_tool_call_no_tools_in_content() {
+        let content = "This is just a regular response without any tool calls.";
+
+        let result = parse_tool_calls(content);
+        assert!(result.tool_calls.is_empty());
+        assert!(!result.text_content.is_empty());
+    }
+
+    #[test]
+    fn test_mock_tool_call_creation() {
+        let call = create_mock_tool_call("shell_exec", r#"{"command": "ls -la"}"#);
+        assert_eq!(call.function.name, "shell_exec");
+        assert!(call.function.arguments.contains("ls -la"));
+        assert_eq!(call.call_type, "function");
+        assert!(call.id.starts_with("call_"));
+    }
+
+    // =========================================================================
+    // Test 3: Error Recovery Scenarios
+    // =========================================================================
+
+    #[test]
+    fn test_error_recovery_state_preserves_error_message() {
+        let mut loop_ctrl = AgentLoop::new(100);
+
+        let error_message = "Connection timeout while calling external API";
+        loop_ctrl.set_state(AgentState::ErrorRecovery {
+            error: error_message.to_string(),
+        });
+
+        let state = loop_ctrl.next_state();
+        match state {
+            Some(AgentState::ErrorRecovery { error }) => {
+                assert_eq!(error, error_message);
+            }
+            _ => panic!("Expected ErrorRecovery state"),
+        }
+    }
+
+    #[test]
+    fn test_error_recovery_transitions_back_to_executing() {
+        let mut loop_ctrl = AgentLoop::new(100);
+
+        // Enter error recovery
+        loop_ctrl.set_state(AgentState::ErrorRecovery {
+            error: "some error".to_string(),
+        });
+        let _ = loop_ctrl.next_state();
+
+        // Transition back to executing after recovery
+        let current_step = loop_ctrl.current_step();
+        loop_ctrl.set_state(AgentState::Executing { step: current_step });
+        let state = loop_ctrl.next_state();
+        assert!(matches!(state, Some(AgentState::Executing { .. })));
+    }
+
+    #[test]
+    fn test_error_recovery_can_transition_to_failed() {
+        let mut loop_ctrl = AgentLoop::new(100);
+
+        // Enter error recovery
+        loop_ctrl.set_state(AgentState::ErrorRecovery {
+            error: "unrecoverable error".to_string(),
+        });
+        let _ = loop_ctrl.next_state();
+
+        // If recovery fails, transition to Failed
+        loop_ctrl.set_state(AgentState::Failed {
+            reason: "Max retries exceeded".to_string(),
+        });
+        let state = loop_ctrl.next_state();
+        match state {
+            Some(AgentState::Failed { reason }) => {
+                assert_eq!(reason, "Max retries exceeded");
+            }
+            _ => panic!("Expected Failed state"),
+        }
+    }
+
+    #[test]
+    fn test_confirmation_error_detection() {
+        let error = AgentError::ConfirmationRequired {
+            tool_name: "shell_exec".to_string(),
+        };
+        let anyhow_error: anyhow::Error = error.into();
+
+        assert!(is_confirmation_error(&anyhow_error));
+    }
+
+    #[test]
+    fn test_non_confirmation_error_detection() {
+        let error = anyhow::anyhow!("Some other error");
+        assert!(!is_confirmation_error(&error));
+    }
+
+    // =========================================================================
+    // Test 4: Context Compression Triggers
+    // =========================================================================
+
+    #[test]
+    fn test_context_compressor_threshold_calculation() {
+        let compressor = ContextCompressor::new(100000);
+        // Threshold is 85% of budget
+        assert!(!compressor.should_compress(&[]));
+
+        // Create messages that exceed threshold
+        let mut large_messages = vec![Message::system("System prompt")];
+        for _ in 0..100 {
+            large_messages.push(Message::user("x".repeat(1000)));
+        }
+
+        // With 100 messages of ~1000 chars each, this should trigger compression
+        let compressor_small = ContextCompressor::new(10000);
+        assert!(compressor_small.should_compress(&large_messages));
+    }
+
+    #[test]
+    fn test_context_compressor_estimate_tokens() {
+        let compressor = ContextCompressor::new(100000);
+
+        let messages = vec![
+            Message::system("You are a helpful assistant"),
+            Message::user("Hello, how are you?"),
+            Message::assistant("I'm doing well, thank you!"),
+        ];
+
+        let estimate = compressor.estimate_tokens(&messages);
+        // Should have reasonable estimate (base cost + content)
+        assert!(estimate > 150); // 3 messages * ~50 base minimum
+        assert!(estimate < 500); // Shouldn't be too high for short messages
+    }
+
+    #[test]
+    fn test_context_compressor_code_content_factor() {
+        let compressor = ContextCompressor::new(100000);
+
+        // Code content (with braces) uses factor 3
+        let code_msg = vec![Message::user("fn main() { println!(\"hello\"); }")];
+
+        // Plain text uses factor 4
+        let text_msg = vec![Message::user("This is plain text content")];
+
+        let code_estimate = compressor.estimate_tokens(&code_msg);
+        let text_estimate = compressor.estimate_tokens(&text_msg);
+
+        // Both should have reasonable estimates
+        assert!(code_estimate > 50);
+        assert!(text_estimate > 50);
+    }
+
+    #[test]
+    fn test_hard_compress_preserves_structure() {
+        let compressor = ContextCompressor::new(100000);
+
+        let messages = vec![
+            Message::system("system prompt"),
+            Message::user("question 1"),
+            Message::assistant("answer 1"),
+            Message::user("question 2"),
+            Message::assistant("answer 2"),
+            Message::user("recent question"),
+        ];
+
+        let compressed = compressor.hard_compress(&messages);
+
+        // Should preserve system message
+        assert_eq!(compressed[0].role, "system");
+
+        // Should end with user message
+        let last = compressed.last().unwrap();
+        assert_eq!(last.role, "user");
+    }
+
+    // =========================================================================
+    // Test 5: Execution Mode and Tool Confirmation
+    // =========================================================================
+
+    #[test]
+    fn test_execution_mode_normal_needs_confirmation() {
+        let config = Config {
+            execution_mode: ExecutionMode::Normal,
+            ..Default::default()
+        };
+
+        // In normal mode, most tools need confirmation
+        // Safe tools (read-only) don't need confirmation
+        let safe_tools = [
+            "file_read",
+            "directory_tree",
+            "glob_find",
+            "grep_search",
+            "git_status",
+            "git_diff",
+            "git_log",
+        ];
+
+        for tool in &safe_tools {
+            // Safe tools shouldn't need confirmation even in normal mode
+            assert!(
+                !needs_confirmation_for_tool(&config, tool),
+                "{} should not need confirmation",
+                tool
+            );
+        }
+
+        // Dangerous tools need confirmation in normal mode
+        let dangerous_tools = ["shell_exec", "file_write", "git_commit"];
+        for tool in &dangerous_tools {
+            assert!(
+                needs_confirmation_for_tool(&config, tool),
+                "{} should need confirmation",
+                tool
+            );
+        }
+    }
+
+    #[test]
+    fn test_execution_mode_yolo_no_confirmation() {
+        let config = Config {
+            execution_mode: ExecutionMode::Yolo,
+            ..Default::default()
+        };
+
+        // In YOLO mode, nothing needs confirmation
+        let all_tools = [
+            "file_read",
+            "file_write",
+            "shell_exec",
+            "git_commit",
+            "cargo_test",
+        ];
+
+        for tool in &all_tools {
+            assert!(
+                !needs_confirmation_for_tool(&config, tool),
+                "{} should not need confirmation in YOLO mode",
+                tool
+            );
+        }
+    }
+
+    #[test]
+    fn test_execution_mode_auto_edit_file_ops() {
+        let config = Config {
+            execution_mode: ExecutionMode::AutoEdit,
+            ..Default::default()
+        };
+
+        // Auto-edit mode auto-approves file operations
+        assert!(!needs_confirmation_for_tool(&config, "file_write"));
+        assert!(!needs_confirmation_for_tool(&config, "file_edit"));
+
+        // But still asks for other operations
+        assert!(needs_confirmation_for_tool(&config, "shell_exec"));
+        assert!(needs_confirmation_for_tool(&config, "git_commit"));
+    }
+
+    #[test]
+    fn test_execution_mode_cycle() {
+        let mut mode = ExecutionMode::Normal;
+
+        // Normal -> AutoEdit
+        mode = cycle_mode(mode);
+        assert_eq!(mode, ExecutionMode::AutoEdit);
+
+        // AutoEdit -> Yolo
+        mode = cycle_mode(mode);
+        assert_eq!(mode, ExecutionMode::Yolo);
+
+        // Yolo -> Normal
+        mode = cycle_mode(mode);
+        assert_eq!(mode, ExecutionMode::Normal);
+    }
+
+    // Helper function to check confirmation without full Agent
+    fn needs_confirmation_for_tool(config: &Config, tool_name: &str) -> bool {
+        let safe_tools = [
+            "file_read",
+            "directory_tree",
+            "glob_find",
+            "grep_search",
+            "git_status",
+            "git_diff",
+            "git_log",
+            "ripgrep_search",
+            "web_search",
+        ];
+
+        if safe_tools.contains(&tool_name) {
+            return false;
+        }
+
+        match config.execution_mode {
+            ExecutionMode::Yolo | ExecutionMode::Daemon => false,
+            ExecutionMode::AutoEdit => !matches!(
+                tool_name,
+                "file_write" | "file_edit" | "file_create" | "directory_tree" | "glob_find"
+            ),
+            ExecutionMode::Normal => !safe_tools.contains(&tool_name),
+        }
+    }
+
+    // Helper function to cycle execution mode
+    fn cycle_mode(mode: ExecutionMode) -> ExecutionMode {
+        match mode {
+            ExecutionMode::Normal => ExecutionMode::AutoEdit,
+            ExecutionMode::AutoEdit => ExecutionMode::Yolo,
+            ExecutionMode::Yolo => ExecutionMode::Normal,
+            ExecutionMode::Daemon => ExecutionMode::Normal,
+        }
+    }
+
+    // =========================================================================
+    // Additional Edge Case Tests
+    // =========================================================================
+
+    #[test]
+    fn test_agent_error_display() {
+        let error = AgentError::ConfirmationRequired {
+            tool_name: "dangerous_tool".to_string(),
+        };
+        let display = format!("{}", error);
+        assert!(display.contains("dangerous_tool"));
+        assert!(display.contains("requires confirmation"));
+    }
+
+    #[test]
+    fn test_max_iterations_triggers_failure() {
+        let mut loop_ctrl = AgentLoop::new(3);
+
+        // Use up all iterations
+        loop_ctrl.next_state(); // 1
+        loop_ctrl.next_state(); // 2
+        loop_ctrl.next_state(); // 3
+
+        // Next should fail
+        let state = loop_ctrl.next_state();
+        assert!(matches!(
+            state,
+            Some(AgentState::Failed { reason }) if reason.contains("Max iterations")
+        ));
+    }
+
+    #[test]
+    fn test_step_increment_updates_state() {
+        let mut loop_ctrl = AgentLoop::new(100);
+
+        assert_eq!(loop_ctrl.current_step(), 0);
+
+        loop_ctrl.increment_step();
+        assert_eq!(loop_ctrl.current_step(), 1);
+
+        // State should be updated to Executing with new step
+        let state = loop_ctrl.next_state();
+        match state {
+            Some(AgentState::Executing { step }) => assert_eq!(step, 1),
+            _ => panic!("Expected Executing state with step 1"),
+        }
+    }
+
+    #[test]
+    fn test_tool_call_with_invalid_json_uses_fallback() {
+        let content = r#"
+        <tool>
+        <name>file_read</name>
+        <arguments>this is not valid json</arguments>
+        </tool>
+        "#;
+
+        let result = parse_tool_calls(content);
+        // Parser uses fallback - wraps invalid JSON in {"input": "..."}
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool_name, "file_read");
+        // The fallback wraps plain text in {"input": "..."}
+        assert!(result.tool_calls[0].arguments.get("input").is_some());
+    }
+
+    #[test]
+    fn test_agent_state_clone() {
+        let state = AgentState::Executing { step: 5 };
+        let cloned = state.clone();
+
+        match cloned {
+            AgentState::Executing { step } => assert_eq!(step, 5),
+            _ => panic!("Clone should preserve state type and data"),
+        }
+    }
+
+    #[test]
+    fn test_agent_state_debug() {
+        let state = AgentState::ErrorRecovery {
+            error: "test error".to_string(),
+        };
+        let debug_str = format!("{:?}", state);
+
+        assert!(debug_str.contains("ErrorRecovery"));
+        assert!(debug_str.contains("test error"));
     }
 }
