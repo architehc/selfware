@@ -220,8 +220,29 @@ impl CheckpointManager {
         let json = serde_json::to_string_pretty(&json_value)
             .context("Failed to format checkpoint JSON")?;
 
-        fs::write(&path, json)
-            .with_context(|| format!("Failed to write checkpoint to {:?}", path))?;
+        // Atomic write: write to a temp file in the same directory, then rename.
+        // `rename` within the same filesystem is atomic on Unix/Windows.
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let tmp_path = path.with_extension(format!(
+            "json.tmp.{}.{}.{}",
+            checkpoint.task_id,
+            std::process::id(),
+            suffix
+        ));
+        fs::write(&tmp_path, json)
+            .with_context(|| format!("Failed to write checkpoint temp file {:?}", tmp_path))?;
+        if let Err(err) = fs::rename(&tmp_path, &path) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(err).with_context(|| {
+                format!(
+                    "Failed to atomically replace checkpoint {:?} from {:?}",
+                    path, tmp_path
+                )
+            });
+        }
         Ok(())
     }
 

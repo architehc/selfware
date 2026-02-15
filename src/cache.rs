@@ -609,14 +609,19 @@ impl LlmCache {
 
     /// Store a response in the cache
     pub fn store(&self, entry: LlmCacheEntry) {
+        let entry_id = entry.id.clone();
+        self.invalidator.remove_entry(&entry_id);
+
         // Register file paths for invalidation tracking
         for path in &entry.file_paths {
-            self.invalidator.register_path(&entry.id, path);
+            self.invalidator.register_path(&entry_id, path);
         }
 
         // Store embedding for similarity search
         if let Ok(mut embeddings) = self.embeddings.write() {
-            embeddings.push((entry.id.clone(), entry.embedding.clone()));
+            // Replace existing embedding for the same entry ID to avoid orphan growth.
+            embeddings.retain(|(id, _)| id != &entry_id);
+            embeddings.push((entry_id.clone(), entry.embedding.clone()));
         }
 
         // Store the entry
@@ -625,7 +630,7 @@ impl LlmCache {
             if entries.len() >= self.config.max_entries {
                 self.evict_oldest(&mut entries);
             }
-            entries.insert(entry.id.clone(), entry);
+            entries.insert(entry_id, entry);
         }
 
         self.analytics.record_store();
@@ -637,16 +642,24 @@ impl LlmCache {
             .iter()
             .map(|(k, v)| (k.clone(), v.created_at))
             .collect();
-        by_age.sort_by(|a, b| a.1.cmp(&b.1));
+        by_age.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
 
         // Remove oldest 10%
-        let to_remove = self.config.max_entries / 10;
-        for (id, _) in by_age.iter().take(to_remove) {
+        let to_remove = (self.config.max_entries / 10).max(1);
+        let ids_to_remove: Vec<String> = by_age
+            .into_iter()
+            .take(to_remove)
+            .map(|(id, _)| id)
+            .collect();
+
+        for id in &ids_to_remove {
             entries.remove(id);
-            // Also remove from embeddings
-            if let Ok(mut embeddings) = self.embeddings.write() {
-                embeddings.retain(|(e_id, _)| e_id != id);
-            }
+            self.invalidator.remove_entry(id);
+        }
+
+        // Also remove from embeddings
+        if let Ok(mut embeddings) = self.embeddings.write() {
+            embeddings.retain(|(e_id, _)| !ids_to_remove.contains(e_id));
         }
     }
 
@@ -656,6 +669,7 @@ impl LlmCache {
         if let Ok(mut entries) = self.entries.write() {
             for id in &ids_to_remove {
                 entries.remove(id);
+                self.invalidator.remove_entry(id);
             }
         }
         if let Ok(mut embeddings) = self.embeddings.write() {
@@ -1180,6 +1194,16 @@ impl CacheInvalidator {
                     }
                 }
             }
+        }
+    }
+
+    /// Remove an entry ID from all path mappings.
+    pub fn remove_entry(&self, entry_id: &str) {
+        if let Ok(mut map) = self.path_to_entries.write() {
+            for ids in map.values_mut() {
+                ids.retain(|id| id != entry_id);
+            }
+            map.retain(|_, ids| !ids.is_empty());
         }
     }
 

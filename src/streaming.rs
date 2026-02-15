@@ -260,8 +260,8 @@ impl StreamBuffer {
             return Err(anyhow!("Stream cancelled"));
         }
 
-        let mut buffer = self.buffer.lock().unwrap();
-        let mut stats = self.stats.lock().unwrap();
+        let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
 
         // Check backpressure
         if buffer.len() >= self.config.high_watermark {
@@ -304,7 +304,7 @@ impl StreamBuffer {
         buffer.push_back(event);
 
         // Wake consumer
-        if let Some(waker) = self.waker.lock().unwrap().take() {
+        if let Some(waker) = self.waker.lock().unwrap_or_else(|e| e.into_inner()).take() {
             waker.wake();
         }
 
@@ -313,7 +313,7 @@ impl StreamBuffer {
 
     /// Pop event from buffer
     pub fn pop(&self) -> Option<StreamEvent> {
-        let mut buffer = self.buffer.lock().unwrap();
+        let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
         let event = buffer.pop_front();
 
         // Check if we can release backpressure
@@ -326,7 +326,7 @@ impl StreamBuffer {
 
     /// Pop multiple events (for batching)
     pub fn pop_batch(&self, max: usize) -> Vec<StreamEvent> {
-        let mut buffer = self.buffer.lock().unwrap();
+        let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
         let count = max.min(buffer.len());
         let mut batch = Vec::with_capacity(count);
 
@@ -345,12 +345,15 @@ impl StreamBuffer {
 
     /// Check if buffer is empty
     pub fn is_empty(&self) -> bool {
-        self.buffer.lock().unwrap().is_empty()
+        self.buffer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
     }
 
     /// Get buffer length
     pub fn len(&self) -> usize {
-        self.buffer.lock().unwrap().len()
+        self.buffer.lock().unwrap_or_else(|e| e.into_inner()).len()
     }
 
     /// Check if under backpressure
@@ -360,13 +363,13 @@ impl StreamBuffer {
 
     /// Get statistics
     pub fn stats(&self) -> StreamStats {
-        self.stats.lock().unwrap().clone()
+        self.stats.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Cancel the stream
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Relaxed);
-        if let Some(waker) = self.waker.lock().unwrap().take() {
+        if let Some(waker) = self.waker.lock().unwrap_or_else(|e| e.into_inner()).take() {
             waker.wake();
         }
     }
@@ -378,7 +381,7 @@ impl StreamBuffer {
 
     /// Register waker for async notification
     pub fn register_waker(&self, waker: Waker) {
-        *self.waker.lock().unwrap() = Some(waker);
+        *self.waker.lock().unwrap_or_else(|e| e.into_inner()) = Some(waker);
     }
 }
 
@@ -427,7 +430,7 @@ impl StreamTransformer for TokenBatcher {
     fn transform(&self, event: StreamEvent) -> Option<StreamEvent> {
         match event {
             StreamEvent::Token(token) => {
-                let mut buffer = self.buffer.lock().unwrap();
+                let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
                 buffer.push_str(&token);
 
                 if buffer.len() >= self.threshold {
@@ -438,7 +441,7 @@ impl StreamTransformer for TokenBatcher {
                 }
             }
             StreamEvent::Done => {
-                let buffer = self.buffer.lock().unwrap();
+                let buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
                 if buffer.is_empty() {
                     Some(StreamEvent::Done)
                 } else {
@@ -451,7 +454,7 @@ impl StreamTransformer for TokenBatcher {
     }
 
     fn flush(&self) -> Vec<StreamEvent> {
-        let mut buffer = self.buffer.lock().unwrap();
+        let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
         if buffer.is_empty() {
             Vec::new()
         } else {
@@ -516,13 +519,13 @@ impl StreamTransformer for RateLimiter {
             return Some(event);
         }
 
-        let mut last = self.last_emit.lock().unwrap();
+        let mut last = self.last_emit.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
 
         if now.duration_since(*last) >= self.min_interval {
             *last = now;
             // Emit any pending event first, then this one
-            let mut pending = self.pending.lock().unwrap();
+            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             if pending.is_some() {
                 let p = pending.take();
                 *pending = Some(event);
@@ -531,13 +534,18 @@ impl StreamTransformer for RateLimiter {
             Some(event)
         } else {
             // Store as pending
-            *self.pending.lock().unwrap() = Some(event);
+            *self.pending.lock().unwrap_or_else(|e| e.into_inner()) = Some(event);
             None
         }
     }
 
     fn flush(&self) -> Vec<StreamEvent> {
-        self.pending.lock().unwrap().take().into_iter().collect()
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .into_iter()
+            .collect()
     }
 }
 
@@ -569,7 +577,7 @@ impl StreamPipeline {
     pub fn process(&self, event: StreamEvent) -> Result<()> {
         // Record start time on first event
         {
-            let mut start = self.start_time.lock().unwrap();
+            let mut start = self.start_time.lock().unwrap_or_else(|e| e.into_inner());
             if start.is_none() {
                 *start = Some(Instant::now());
             }
@@ -588,7 +596,10 @@ impl StreamPipeline {
         // Push to buffer
         if let Some(e) = current {
             // Update accumulator
-            self.accumulator.lock().unwrap().process(&e);
+            self.accumulator
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .process(&e);
             self.buffer.push(e)?;
         }
 
@@ -617,17 +628,28 @@ impl StreamPipeline {
 
     /// Get accumulated content
     pub fn content(&self) -> String {
-        self.accumulator.lock().unwrap().content().to_string()
+        self.accumulator
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .content()
+            .to_string()
     }
 
     /// Get token count
     pub fn token_count(&self) -> usize {
-        self.accumulator.lock().unwrap().token_count()
+        self.accumulator
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .token_count()
     }
 
     /// Get tool calls
     pub fn tool_calls(&self) -> Vec<CompletedToolCall> {
-        self.accumulator.lock().unwrap().tool_calls().to_vec()
+        self.accumulator
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .tool_calls()
+            .to_vec()
     }
 
     /// Get statistics
@@ -635,7 +657,7 @@ impl StreamPipeline {
         let mut stats = self.buffer.stats();
 
         // Calculate duration
-        if let Some(start) = *self.start_time.lock().unwrap() {
+        if let Some(start) = *self.start_time.lock().unwrap_or_else(|e| e.into_inner()) {
             stats.duration_ms = start.elapsed().as_millis() as u64;
 
             // Calculate tokens per second
@@ -713,11 +735,11 @@ impl ProgressiveRenderer {
 
     /// Append content
     pub fn append(&self, content: &str) {
-        let mut pending = self.pending.lock().unwrap();
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         pending.push_str(content);
 
         // Check if we should render
-        let mut last = self.last_render.lock().unwrap();
+        let mut last = self.last_render.lock().unwrap_or_else(|e| e.into_inner());
         if last.elapsed() >= self.min_interval {
             self.do_render(&pending);
             pending.clear();
@@ -727,17 +749,17 @@ impl ProgressiveRenderer {
 
     /// Force render any pending content
     pub fn flush(&self) {
-        let mut pending = self.pending.lock().unwrap();
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         if !pending.is_empty() {
             self.do_render(&pending);
             pending.clear();
-            *self.last_render.lock().unwrap() = Instant::now();
+            *self.last_render.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
         }
     }
 
     /// Internal render
     fn do_render(&self, content: &str) {
-        let mut rendered = self.rendered.lock().unwrap();
+        let mut rendered = self.rendered.lock().unwrap_or_else(|e| e.into_inner());
         rendered.push_str(content);
 
         if let Some(ref callback) = self.callback {
@@ -747,15 +769,21 @@ impl ProgressiveRenderer {
 
     /// Get full rendered content
     pub fn content(&self) -> String {
-        let rendered = self.rendered.lock().unwrap();
-        let pending = self.pending.lock().unwrap();
+        let rendered = self.rendered.lock().unwrap_or_else(|e| e.into_inner());
+        let pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         format!("{}{}", rendered, pending)
     }
 
     /// Clear renderer
     pub fn clear(&self) {
-        self.rendered.lock().unwrap().clear();
-        self.pending.lock().unwrap().clear();
+        self.rendered
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 }
 
@@ -820,7 +848,7 @@ impl StreamProducer {
 
         // Update stats
         {
-            let mut stats = self.stats.lock().unwrap();
+            let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(content) = event.content() {
                 stats.tokens_received += 1;
                 stats.bytes_received += content.len() as u64;
@@ -862,7 +890,7 @@ impl StreamProducer {
 
     /// Get statistics
     pub fn stats(&self) -> StreamStats {
-        let mut stats = self.stats.lock().unwrap().clone();
+        let mut stats = self.stats.lock().unwrap_or_else(|e| e.into_inner()).clone();
 
         if let Some(start) = self.start_time {
             stats.duration_ms = start.elapsed().as_millis() as u64;
@@ -1106,7 +1134,10 @@ mod tests {
 
         let renderer = ProgressiveRenderer::new()
             .with_callback(move |s| {
-                rendered_clone.lock().unwrap().push(s.to_string());
+                rendered_clone
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(s.to_string());
             })
             .with_interval(Duration::from_millis(0)); // Immediate for testing
 

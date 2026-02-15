@@ -242,7 +242,9 @@ impl BM25Index {
 
     /// Search without modifying self (requires index to be up-to-date)
     pub fn search_immutable(&self, query: &str, limit: usize) -> Vec<BM25Result> {
-        if self.documents.is_empty() || self.dirty {
+        // Immutable search should still provide best-effort results even if the
+        // mutable index is marked dirty.
+        if self.documents.is_empty() {
             return Vec::new();
         }
 

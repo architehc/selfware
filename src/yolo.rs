@@ -365,7 +365,7 @@ impl YoloManager {
 
     /// Get audit log summary
     pub fn audit_summary(&self) -> AuditSummary {
-        let log = self.audit_log.read().unwrap();
+        let log = self.audit_log.read().unwrap_or_else(|e| e.into_inner());
 
         let mut tools_used: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
@@ -397,7 +397,7 @@ impl YoloManager {
 
     /// Export audit log to file
     pub fn export_audit_log(&self, path: &std::path::Path) -> std::io::Result<()> {
-        let log = self.audit_log.read().unwrap();
+        let log = self.audit_log.read().unwrap_or_else(|e| e.into_inner());
         let json = serde_json::to_string_pretty(&*log).unwrap_or_default();
         fs::write(path, json)
     }

@@ -37,7 +37,10 @@ impl Tool for GitCheckpoint {
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
-        let msg = args.get("message").and_then(|v| v.as_str()).unwrap();
+        let msg = args
+            .get("message")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: message"))?;
         let tag = args.get("tag").and_then(|v| v.as_str());
         let auto_branch = args
             .get("auto_branch")
@@ -251,7 +254,10 @@ impl Tool for GitCommit {
 
     async fn execute(&self, args: Value) -> Result<Value> {
         let repo_path = ".";
-        let message = args.get("message").and_then(|v| v.as_str()).unwrap();
+        let message = args
+            .get("message")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: message"))?;
         let files = args
             .get("files")
             .and_then(|v| v.as_array())

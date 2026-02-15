@@ -426,7 +426,12 @@ impl TaskProgress {
     pub fn print_progress(&self) {
         if is_compact() {
             // Compact: single line with overall progress
-            let pct = (self.overall_progress() * 100.0) as u32;
+            let progress = self.overall_progress();
+            let pct = if progress.is_finite() {
+                (progress.clamp(0.0, 1.0) * 100.0).round() as u32
+            } else {
+                0
+            };
             let current_name = self
                 .phases
                 .get(self.current_phase)
@@ -474,7 +479,14 @@ impl TaskProgress {
         } else {
             // Normal: show current phase with progress bar
             if let Some(phase) = self.phases.get(self.current_phase) {
-                let pct = (self.overall_progress() * 100.0) as u32;
+                let pct = {
+                    let p = self.overall_progress();
+                    if !p.is_finite() {
+                        0
+                    } else {
+                        (p.clamp(0.0, 1.0) * 100.0).round() as u32
+                    }
+                };
                 let bar_width = 20;
                 let filled = (pct as usize * bar_width) / 100;
                 let empty = bar_width - filled;

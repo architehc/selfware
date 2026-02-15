@@ -259,6 +259,7 @@ impl EditHistory {
         // Truncate future history if we're not at the end
         if self.current < self.checkpoints.len() {
             self.checkpoints.truncate(self.current);
+            self.current = self.current.min(self.checkpoints.len());
         }
 
         self.checkpoints.push(checkpoint);
@@ -283,11 +284,10 @@ impl EditHistory {
 
     /// Get current checkpoint
     pub fn current_checkpoint(&self) -> Option<&EditCheckpoint> {
-        if self.current > 0 && self.current <= self.checkpoints.len() {
-            Some(&self.checkpoints[self.current - 1])
-        } else {
-            None
+        if self.current == 0 {
+            return None;
         }
+        self.checkpoints.get(self.current - 1)
     }
 
     /// Get checkpoint by ID

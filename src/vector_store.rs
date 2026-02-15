@@ -549,13 +549,13 @@ impl TfIdfEmbeddingProvider {
     }
 
     fn get_or_create_index(&self, token: &str) -> usize {
-        let read = self.vocabulary.read().unwrap();
+        let read = self.vocabulary.read().unwrap_or_else(|e| e.into_inner());
         if let Some(&idx) = read.get(token) {
             return idx;
         }
         drop(read);
 
-        let mut write = self.vocabulary.write().unwrap();
+        let mut write = self.vocabulary.write().unwrap_or_else(|e| e.into_inner());
         let idx = write.len() % self.dimension;
         write.insert(token.to_string(), idx);
         idx
