@@ -307,20 +307,20 @@ fn normalize_shell_command(cmd: &str) -> String {
 /// Split a shell command on command separators (; && ||)
 /// Returns individual commands for separate analysis
 fn split_shell_commands(cmd: &str) -> Vec<&str> {
-    // This is a simplified split - a full shell parser would be more accurate
-    // but this catches the common cases
+    // This is a simplified split - a full shell parser would be more accurate.
+    // Operate on bytes to avoid panics from mixing char indices and byte slices.
     let mut parts = Vec::new();
     let mut start = 0;
     let mut in_quotes = false;
-    let mut quote_char = ' ';
-    let chars: Vec<char> = cmd.chars().collect();
+    let mut quote_char = b' ';
+    let bytes = cmd.as_bytes();
 
     let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
+    while i < bytes.len() {
+        let c = bytes[i];
 
         // Track quote state
-        if (c == '"' || c == '\'') && (i == 0 || chars[i - 1] != '\\') {
+        if (c == b'"' || c == b'\'') && (i == 0 || bytes[i - 1] != b'\\') {
             if !in_quotes {
                 in_quotes = true;
                 quote_char = c;
@@ -332,14 +332,14 @@ fn split_shell_commands(cmd: &str) -> Vec<&str> {
         // Only split outside of quotes
         if !in_quotes {
             // Check for ;
-            if c == ';' {
+            if c == b';' {
                 if start < i {
                     parts.push(&cmd[start..i]);
                 }
                 start = i + 1;
             }
             // Check for && or ||
-            else if (c == '&' || c == '|') && i + 1 < chars.len() && chars[i + 1] == c {
+            else if (c == b'&' || c == b'|') && i + 1 < bytes.len() && bytes[i + 1] == c {
                 if start < i {
                     parts.push(&cmd[start..i]);
                 }
