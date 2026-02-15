@@ -1,32 +1,80 @@
 [package]
-name = "kimi-agent"
+name = "selfware"
 version = "0.1.0"
 edition = "2021"
-description = "Agentic harness for Kimi K2.5"
+description = "Your personal AI workshop — software you own, software that lasts"
 authors = ["Trebuchet Network"]
+homepage = "https://selfware.me"
+repository = "https://github.com/architehc/selfware"
+keywords = ["ai", "agent", "local-first", "cli", "automation"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 tokio = { version = "1.35", features = ["full"] }
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-reqwest = { version = "0.11", features = ["json", "stream"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 clap = { version = "4.4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-git2 = "0.18"
+git2 = "0.20"
 walkdir = "2.4"
 regex = "1.10"
 colored = "2.1"
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1.0"
 futures = "0.3"
 async-trait = "0.1"
 tempfile = "3.9"
-base64 = "0.21"
+base64 = "0.22"
 glob = "0.3"
 rusqlite = { version = "0.31", features = ["bundled"], optional = true }
 sha2 = "0.10"
 hex = "0.4"
 toml = "0.8"
+uuid = { version = "1.6", features = ["v4"] }
+once_cell = "1.19"
+whoami = "1.4"
 
+# Modern CLI/TUI
+reedline = "0.32"
+crossterm = "0.27"
+ratatui = "0.26"
+fuzzy-matcher = "0.3"
+syntect = "5.2"
+nu-ansi-term = "0.50"
+dirs = "5.0"
+nucleo = "0.5"  # Fast fuzzy matcher
+pulldown-cmark = "0.9"  # Markdown parsing
+similar = "2.4"  # Diff algorithm
+
+# Vector Memory & RAG
+hnsw_rs = "0.3"  # Hierarchical Navigable Small World graphs (embedded vector search)
+bincode = "1.3"  # Fast binary serialization
+
+# Workflows
+serde_yaml = "0.9"  # YAML workflow definitions
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.28", features = ["signal"] }
+
+[features]
+default = []
+integration = []  # Enable with: cargo test --features integration
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[lib]
+name = "selfware"
+path = "src/lib.rs"
+
+[[bin]]
+name = "selfware"
+path = "src/main.rs"
+
+[[test]]
+name = "integration"
+path = "tests/integration/mod.rs"
+required-features = ["integration"]

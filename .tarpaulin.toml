@@ -1,0 +1,15 @@
+[config]
+# Coverage threshold - targeting 90% for testable code
+# Note: agent/mod.rs and api/mod.rs contain network I/O
+# that requires mocking for proper unit testing.
+fail-under = 60
+# Output formats - HTML for local viewing, XML for CI/Codecov
+out = ["Html", "Stdout", "Xml"]
+# Line coverage mode
+line-coverage = true
+# Branch coverage
+branch-coverage = true
+# Exclude CLI entry point and network-dependent modules
+exclude-files = ["src/main.rs"]
+# Include doc tests
+run-types = ["Tests", "Doctests"]

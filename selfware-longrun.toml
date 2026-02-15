@@ -1,0 +1,27 @@
+# Long-running autonomous configuration (6+ hours)
+# Usage: selfware --config selfware-longrun.toml run "your task"
+
+endpoint = "http://localhost:8888/v1"
+model = "kimi-k2.5"
+max_tokens = 198304
+temperature = 1.0
+
+[safety]
+allowed_paths = ["./**", "/home/thread/**"]
+denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**"]
+protected_branches = ["main", "master"]
+require_confirmation = []  # Empty = no confirmations (YOLO handles)
+
+[agent]
+max_iterations = 2000        # High limit for long runs
+step_timeout_secs = 600      # 10 min per step max
+token_budget = 1000000       # Large context budget
+
+[yolo]
+enabled = true               # Enable autonomous mode
+max_operations = 0           # 0 = unlimited
+max_hours = 8.0              # Auto-stop after 8 hours (safety)
+allow_git_push = false       # Manual push only
+allow_destructive_shell = false  # Safe mode (no rm -rf, etc.)
+audit_log_path = "./selfware-audit.log"  # Log all operations
+status_interval = 50         # Print status every 50 ops

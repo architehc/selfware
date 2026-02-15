@@ -1,0 +1,150 @@
+//! Test helpers and utilities for integration tests
+
+use anyhow::Result;
+use selfware::api::types::Message;
+use selfware::config::{AgentConfig, Config, SafetyConfig, YoloFileConfig};
+use std::env;
+use std::time::Duration;
+
+/// Get test configuration from environment variables
+pub fn test_config() -> Config {
+    let endpoint =
+        env::var("SELFWARE_ENDPOINT").unwrap_or_else(|_| "http://localhost:8888/v1".to_string());
+    let model = env::var("SELFWARE_MODEL").unwrap_or_else(|_| "unsloth/Kimi-K2.5-GGUF".to_string());
+    let timeout: u64 = env::var("SELFWARE_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(300);
+
+    Config {
+        endpoint,
+        model,
+        max_tokens: 4096, // Keep small for faster responses
+        temperature: 0.7,
+        api_key: env::var("SELFWARE_API_KEY").ok(),
+        safety: SafetyConfig {
+            allowed_paths: vec!["/tmp/**".to_string(), "./**".to_string()],
+            denied_paths: vec![],
+            protected_branches: vec!["main".to_string()],
+            require_confirmation: vec![],
+        },
+        agent: AgentConfig {
+            max_iterations: 10, // Limit for tests
+            step_timeout_secs: timeout,
+            token_budget: 50000,
+            native_function_calling: false,
+        },
+        yolo: YoloFileConfig::default(),
+        execution_mode: Default::default(),
+    }
+}
+
+/// Check if slow tests should be skipped
+pub fn skip_slow_tests() -> bool {
+    env::var("SELFWARE_SKIP_SLOW")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// Check if the model endpoint is available
+pub async fn check_model_health(config: &Config) -> Result<bool> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+
+    let response = client
+        .get(format!("{}/models", config.endpoint))
+        .send()
+        .await;
+
+    match response {
+        Ok(r) => Ok(r.status().is_success()),
+        Err(_) => Ok(false),
+    }
+}
+
+/// Skip test if model is not available
+#[macro_export]
+macro_rules! skip_if_no_model {
+    ($config:expr) => {
+        if !check_model_health($config).await.unwrap_or(false) {
+            eprintln!("Skipping test: model endpoint not available");
+            return;
+        }
+    };
+}
+
+/// Skip test if SELFWARE_SKIP_SLOW is set
+#[macro_export]
+macro_rules! skip_if_slow {
+    () => {
+        if skip_slow_tests() {
+            eprintln!("Skipping slow test (SELFWARE_SKIP_SLOW=1)");
+            return;
+        }
+    };
+}
+
+/// Simple prompt that should trigger a tool call
+pub fn file_read_prompt() -> &'static str {
+    "Read the file at ./Cargo.toml and tell me the package name. Use the file_read tool."
+}
+
+/// Simple prompt for shell execution
+pub fn shell_prompt() -> &'static str {
+    "Run 'echo hello' using the shell_exec tool and tell me the output."
+}
+
+/// Simple prompt that should complete without tools
+pub fn simple_question() -> &'static str {
+    "What is 2 + 2? Answer with just the number."
+}
+
+/// Create a minimal test message
+pub fn user_message(content: &str) -> Message {
+    Message::user(content)
+}
+
+/// Create system prompt for testing
+pub fn test_system_prompt() -> Message {
+    Message::system(
+        "You are a helpful assistant being tested. Respond concisely. \
+         When asked to use a tool, use the XML format: \
+         <tool><name>TOOL_NAME</name><arguments>{...}</arguments></tool>",
+    )
+}
+
+/// Timeout duration for tests (from env or default 600s for slow models)
+pub fn test_timeout() -> Duration {
+    let secs: u64 = env::var("SELFWARE_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(600); // 10 minutes default for slow local models
+    Duration::from_secs(secs)
+}
+
+/// Extended timeout for particularly slow operations (2x normal timeout)
+pub fn extended_timeout() -> Duration {
+    Duration::from_secs(test_timeout().as_secs() * 2)
+}
+
+/// Assert that a response contains expected text (case-insensitive)
+pub fn assert_contains(response: &str, expected: &str) {
+    assert!(
+        response.to_lowercase().contains(&expected.to_lowercase()),
+        "Expected response to contain '{}', got: {}",
+        expected,
+        &response[..response.len().min(200)]
+    );
+}
+
+/// Assert that a response contains a tool call
+pub fn assert_has_tool_call(response: &str, tool_name: &str) {
+    assert!(
+        response.contains(&format!("<name>{}</name>", tool_name))
+            || response.contains(&format!("\"name\": \"{}\"", tool_name)),
+        "Expected tool call to '{}', got: {}",
+        tool_name,
+        &response[..response.len().min(300)]
+    );
+}
