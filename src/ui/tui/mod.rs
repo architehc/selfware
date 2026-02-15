@@ -1332,41 +1332,25 @@ mod tests {
     fn test_palette_primary() {
         let primary = TuiPalette::primary();
         // Should return a valid RGB color
-        if let Color::Rgb(r, g, b) = primary {
-            assert!(r <= 255 && g <= 255 && b <= 255);
-        } else {
-            panic!("Expected RGB color");
-        }
+        assert!(matches!(primary, Color::Rgb(_, _, _)));
     }
 
     #[test]
     fn test_palette_accent() {
         let accent = TuiPalette::accent();
-        if let Color::Rgb(r, g, b) = accent {
-            assert!(r <= 255 && g <= 255 && b <= 255);
-        } else {
-            panic!("Expected RGB color");
-        }
+        assert!(matches!(accent, Color::Rgb(_, _, _)));
     }
 
     #[test]
     fn test_palette_tool() {
         let tool = TuiPalette::tool();
-        if let Color::Rgb(r, g, b) = tool {
-            assert!(r <= 255 && g <= 255 && b <= 255);
-        } else {
-            panic!("Expected RGB color");
-        }
+        assert!(matches!(tool, Color::Rgb(_, _, _)));
     }
 
     #[test]
     fn test_palette_path() {
         let path = TuiPalette::path();
-        if let Color::Rgb(r, g, b) = path {
-            assert!(r <= 255 && g <= 255 && b <= 255);
-        } else {
-            panic!("Expected RGB color");
-        }
+        assert!(matches!(path, Color::Rgb(_, _, _)));
     }
 
     #[test]
