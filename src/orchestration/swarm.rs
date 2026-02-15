@@ -217,7 +217,8 @@ impl Agent {
             self.trust_score = (self.trust_score + 0.1).min(1.0);
         } else {
             self.tasks_failed += 1;
-            self.trust_score = (self.trust_score - 0.15).max(0.0);
+            // Keep a non-zero floor so agents can recover after failure streaks.
+            self.trust_score = (self.trust_score - 0.1).max(0.05);
         }
         self.status = AgentStatus::Completed;
         self.last_active = SystemTime::now()
@@ -636,7 +637,7 @@ pub struct SwarmTask {
     pub description: String,
     /// Required roles
     pub required_roles: Vec<AgentRole>,
-    /// Priority
+    /// Priority where higher values represent higher priority.
     pub priority: u8,
     /// Status
     pub status: TaskStatus,
@@ -867,8 +868,8 @@ impl Swarm {
     /// Queue a task
     pub fn queue_task(&mut self, task: SwarmTask) {
         self.task_queue.push(task);
-        // Sort by ascending priority so pop() returns highest priority
-        self.task_queue.sort_by(|a, b| a.priority.cmp(&b.priority));
+        // Keep ascending order so `pop()` returns the highest numeric priority.
+        self.task_queue.sort_unstable_by_key(|task| task.priority);
     }
 
     /// Get next task (highest priority)

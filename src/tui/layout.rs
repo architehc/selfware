@@ -83,7 +83,7 @@ impl PaneType {
                 PaneType::Explorer => "File explorer pane — coming soon",
                 PaneType::Diff => "Diff viewer pane — coming soon",
                 PaneType::Debug => "Debug/logs pane — coming soon",
-                _ => unreachable!(),
+                PaneType::Chat | PaneType::Help => "Pane content available",
             })
         }
     }
@@ -156,7 +156,9 @@ impl LayoutPreset {
             LayoutPreset::Debugging => "Chat + Code + Terminal [WIP: editor/terminal placeholder]",
             LayoutPreset::Review => "Full-screen diff view [WIP: diff placeholder]",
             LayoutPreset::Explore => "Chat with file explorer [WIP: explorer placeholder]",
-            LayoutPreset::FullWorkspace => "Explorer + Editor + Chat [WIP: explorer/editor placeholder]",
+            LayoutPreset::FullWorkspace => {
+                "Explorer + Editor + Chat [WIP: explorer/editor placeholder]"
+            }
         }
     }
 
@@ -730,8 +732,14 @@ mod tests {
     fn test_pane_type_placeholder_text() {
         assert!(PaneType::Chat.placeholder_text().is_none());
         assert!(PaneType::Help.placeholder_text().is_none());
-        assert!(PaneType::Editor.placeholder_text().unwrap().contains("coming soon"));
-        assert!(PaneType::Explorer.placeholder_text().unwrap().contains("coming soon"));
+        assert!(PaneType::Editor
+            .placeholder_text()
+            .unwrap()
+            .contains("coming soon"));
+        assert!(PaneType::Explorer
+            .placeholder_text()
+            .unwrap()
+            .contains("coming soon"));
     }
 
     #[test]

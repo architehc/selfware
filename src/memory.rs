@@ -61,7 +61,7 @@ impl AgentMemory {
 
     /// Check if memory is approaching the context window limit
     pub fn is_near_limit(&self) -> bool {
-        self.total_tokens() > (self.context_window as f32 * 0.85) as usize
+        self.total_tokens().saturating_mul(100) > self.context_window.saturating_mul(85)
     }
 
     /// Get the context window size

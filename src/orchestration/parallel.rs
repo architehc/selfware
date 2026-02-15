@@ -171,7 +171,19 @@ impl ParallelExecutor {
 
             let handle = tokio::spawn(async move {
                 // Acquire semaphore permit
-                let _permit = semaphore.acquire().await.unwrap();
+                let _permit = match semaphore.acquire().await {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        return ParallelResult {
+                            tool_name,
+                            tool_call_id,
+                            result: Err(anyhow::anyhow!(
+                                "Parallel execution cancelled: semaphore closed"
+                            )),
+                            duration_ms: 0,
+                        };
+                    }
+                };
                 let start = Instant::now();
 
                 let result = registry.execute(&tool_name, arguments).await;
@@ -1186,7 +1198,19 @@ impl EnhancedParallelExecutor {
             let arguments = call.arguments.clone();
 
             let handle = tokio::spawn(async move {
-                let _permit = semaphore.acquire().await.unwrap();
+                let _permit = match semaphore.acquire().await {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        return ParallelResult {
+                            tool_name,
+                            tool_call_id,
+                            result: Err(anyhow::anyhow!(
+                                "Parallel execution cancelled: semaphore closed"
+                            )),
+                            duration_ms: 0,
+                        };
+                    }
+                };
                 let start = Instant::now();
                 let result = registry.execute(&tool_name, arguments).await;
                 let duration_ms = start.elapsed().as_millis() as u64;

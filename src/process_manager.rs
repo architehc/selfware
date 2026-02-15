@@ -398,7 +398,15 @@ impl ProcessManager {
                         use nix::sys::signal::{kill, Signal};
                         use nix::unistd::Pid;
                         if let Some(pid) = proc.pid {
-                            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
+                            if let Ok(raw_pid) = i32::try_from(pid) {
+                                let _ = kill(Pid::from_raw(raw_pid), Signal::SIGTERM);
+                            } else {
+                                warn!(
+                                    "Skipping SIGTERM for pid {}: does not fit into platform pid_t",
+                                    pid
+                                );
+                                let _ = child.kill().await;
+                            }
                         }
                     }
                     #[cfg(not(unix))]
