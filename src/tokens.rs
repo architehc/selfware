@@ -206,19 +206,9 @@ impl std::fmt::Display for TokenSummary {
     }
 }
 
-/// Estimate tokens for a string (rough approximation)
-/// Based on the common rule of ~4 characters per token for English text
+/// Estimate tokens for a string.
 pub fn estimate_tokens(text: &str) -> usize {
-    // More sophisticated estimation
-    let char_count = text.len();
-    let word_count = text.split_whitespace().count();
-
-    // Use a weighted average of character-based and word-based estimation
-    let char_estimate = char_count / 4;
-    let word_estimate = (word_count as f64 * 1.3) as usize;
-
-    // Take the average, with a minimum of 1 token
-    ((char_estimate + word_estimate) / 2).max(1)
+    crate::token_count::estimate_content_tokens(text).max(1)
 }
 
 /// Estimate tokens for a JSON value

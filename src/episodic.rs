@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::token_count::estimate_content_tokens;
 use crate::vector_store::{EmbeddingProvider, VectorIndex};
 
 /// Episode type
@@ -815,7 +816,7 @@ impl EpisodicMemory {
                 episode.content
             );
 
-            let estimated_tokens = text.len() / 4;
+            let estimated_tokens = estimate_content_tokens(&text);
             if token_count + estimated_tokens > max_tokens {
                 break;
             }

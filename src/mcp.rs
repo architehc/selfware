@@ -609,10 +609,9 @@ impl ContextWindow {
         }
     }
 
-    /// Estimate token count for text (rough approximation)
+    /// Estimate token count for text using shared tokenizer utilities.
     fn estimate_tokens(text: &str) -> usize {
-        // Rough estimate: ~4 characters per token for English
-        text.len() / 4 + 1
+        crate::token_count::estimate_content_tokens(text).max(1)
     }
 }
 
