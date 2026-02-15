@@ -4,6 +4,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use tracing::{debug, warn};
 
 // Use library exports instead of redeclaring modules
 // This avoids duplicate compilation and maintains consistency
@@ -20,6 +21,12 @@ use crate::ui::components::{
 use crate::ui::style::{Glyphs, SelfwareStyle};
 use crate::ui::theme::{self, ThemeId};
 use crate::workflows::{VarValue, WorkflowExecutor};
+
+const DEFAULT_MULTI_CHAT_CONCURRENCY: usize = 4;
+const JOURNAL_DESC_MAX_CHARS: usize = 50;
+const COMMIT_HASH_PREFIX_CHARS: usize = 8;
+const MAX_JOURNAL_ERRORS_DISPLAY: usize = 3;
+const DEFAULT_WORKFLOW_NAME: &str = "default";
 
 #[derive(Parser)]
 #[command(name = "selfware")]
@@ -121,7 +128,7 @@ enum DemoScenarioKind {
     TokenChallenge,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum Commands {
     /// Open your workshop for an interactive session
     #[command(alias = "c")]
@@ -131,7 +138,7 @@ enum Commands {
     #[command(alias = "m")]
     MultiChat {
         /// Maximum concurrent agents (1-16)
-        #[arg(short = 'n', long, default_value = "4")]
+        #[arg(short = 'n', long, default_value_t = DEFAULT_MULTI_CHAT_CONCURRENCY)]
         concurrency: usize,
     },
 
@@ -253,10 +260,17 @@ pub async fn run() -> Result<()> {
     // Resolve config path (after -C so relative paths work correctly)
     let config_path: Option<String> = cli.config.map(|p| {
         // Expand ~ to home directory
-        let expanded = if p.starts_with("~/") {
-            dirs::home_dir()
-                .map(|h| h.join(&p[2..]).to_string_lossy().to_string())
-                .unwrap_or(p.clone())
+        let expanded = if let Some(rest) = p.strip_prefix("~/") {
+            match dirs::home_dir() {
+                Some(home) => home.join(rest).to_string_lossy().to_string(),
+                None => {
+                    warn!(
+                        "Could not resolve home directory for config path '{}'; using raw value",
+                        p
+                    );
+                    p.clone()
+                }
+            }
         } else {
             p.clone()
         };
@@ -267,7 +281,13 @@ pub async fn run() -> Result<()> {
         } else {
             std::env::current_dir()
                 .map(|cwd| cwd.join(&expanded).to_string_lossy().to_string())
-                .unwrap_or(expanded)
+                .unwrap_or_else(|err| {
+                    warn!(
+                        "Could not resolve current directory for config path '{}': {}",
+                        expanded, err
+                    );
+                    expanded
+                })
         }
     });
 
@@ -290,7 +310,11 @@ pub async fn run() -> Result<()> {
 
     // CLI flags override config file settings
     // For theme, check if --theme was explicitly provided (not default)
-    let theme_explicitly_set = std::env::args().any(|arg| arg.starts_with("--theme"));
+    let theme_explicitly_set = std::env::args_os().any(|arg| {
+        arg.to_str()
+            .map(|s| s == "--theme" || s.starts_with("--theme="))
+            .unwrap_or(false)
+    });
     if theme_explicitly_set {
         let theme_id = match cli.theme {
             Theme::Amber => ThemeId::Amber,
@@ -328,8 +352,7 @@ pub async fn run() -> Result<()> {
         };
 
         if actual_prompt.is_empty() {
-            eprintln!("Error: Empty prompt provided");
-            std::process::exit(1);
+            anyhow::bail!("Empty prompt provided");
         }
 
         if !cli.quiet {
@@ -361,26 +384,35 @@ pub async fn run() -> Result<()> {
 
     #[cfg(not(feature = "tui"))]
     if cli.tui {
-        eprintln!("Error: TUI dashboard requires the 'tui' feature.");
-        eprintln!("Rebuild with: cargo build --features tui");
-        std::process::exit(1);
+        anyhow::bail!(
+            "TUI dashboard requires the 'tui' feature. Rebuild with: cargo build --features tui"
+        );
     }
 
     // Default to Chat if no subcommand specified (non-extras builds)
     let command = cli.command.unwrap_or(Commands::Chat);
+    handle_command(command, cli.quiet, config, &ctx, exec_mode).await
+}
 
+async fn handle_command(
+    command: Commands,
+    quiet: bool,
+    config: Config,
+    ctx: &WorkshopContext,
+    exec_mode: ExecutionMode,
+) -> Result<()> {
     match command {
         Commands::Chat => {
-            if !cli.quiet {
-                println!("{}", ui::components::render_welcome(&ctx));
+            if !quiet {
+                println!("{}", ui::components::render_welcome(ctx));
             }
             let mut agent = Agent::new(config).await?;
             agent.interactive().await?;
         }
 
         Commands::MultiChat { concurrency } => {
-            if !cli.quiet {
-                println!("{}", render_header(&ctx));
+            if !quiet {
+                println!("{}", render_header(ctx));
                 println!(
                     "\n{} {} with {} concurrent streams\n",
                     Glyphs::GEAR,
@@ -396,8 +428,8 @@ pub async fn run() -> Result<()> {
         }
 
         Commands::Run { task } => {
-            if !cli.quiet {
-                println!("{}", render_header(&ctx));
+            if !quiet {
+                println!("{}", render_header(ctx));
                 println!("{}", render_task_start(&task));
             }
 
@@ -405,14 +437,14 @@ pub async fn run() -> Result<()> {
             let mut agent = Agent::new(config).await?;
             agent.run_task(&task).await?;
 
-            if !cli.quiet {
+            if !quiet {
                 println!("{}", render_task_complete(start.elapsed()));
             }
         }
 
         Commands::Analyze { path } => {
-            if !cli.quiet {
-                println!("{}", render_header(&ctx));
+            if !quiet {
+                println!("{}", render_header(ctx));
                 println!(
                     "{} {} your garden at {}...\n",
                     Glyphs::MAGNIFIER,
@@ -426,8 +458,8 @@ pub async fn run() -> Result<()> {
         }
 
         Commands::Garden { path } => {
-            if !cli.quiet {
-                println!("{}", render_header(&ctx));
+            if !quiet {
+                println!("{}", render_header(ctx));
                 println!(
                     "\n{} {} at {}...\n",
                     Glyphs::TREE,
@@ -443,15 +475,15 @@ pub async fn run() -> Result<()> {
 
         #[cfg(feature = "tui")]
         Commands::Demo { scenario, fast } => {
-            if !cli.quiet {
-                println!("{}", render_header(&ctx));
+            if !quiet {
+                println!("{}", render_header(ctx));
             }
-            run_demo_scenario(scenario, fast, cli.quiet)?;
+            run_demo_scenario(scenario, fast, quiet)?;
         }
 
         #[cfg(feature = "tui")]
         Commands::Dashboard { swarm_mode } => {
-            if swarm_mode && !cli.quiet {
+            if swarm_mode && !quiet {
                 println!(
                     "{} {}",
                     Glyphs::GEAR,
@@ -462,8 +494,8 @@ pub async fn run() -> Result<()> {
         }
 
         Commands::Resume { task_id } => {
-            if !cli.quiet {
-                println!("{}", render_header(&ctx));
+            if !quiet {
+                println!("{}", render_header(ctx));
                 println!(
                     "{} {} journal entry {}...",
                     Glyphs::BOOKMARK,
@@ -475,7 +507,7 @@ pub async fn run() -> Result<()> {
             let mut agent = Agent::resume(config, &task_id).await?;
             if let Some(checkpoint) = &agent.current_checkpoint {
                 let task = checkpoint.task_description.clone();
-                if !cli.quiet {
+                if !quiet {
                     println!(
                         "{} Continuing: {}\n",
                         Glyphs::SPROUT,
@@ -487,8 +519,8 @@ pub async fn run() -> Result<()> {
         }
 
         Commands::Journal => {
-            if !cli.quiet {
-                println!("{}", render_header(&ctx));
+            if !quiet {
+                println!("{}", render_header(ctx));
             }
             let tasks = Agent::list_tasks()?;
 
@@ -513,11 +545,8 @@ pub async fn run() -> Result<()> {
                         checkpoint::TaskStatus::Paused => Glyphs::BOOKMARK,
                     };
 
-                    let desc = if task.task_description.len() > 50 {
-                        format!("{}...", &task.task_description[..47])
-                    } else {
-                        task.task_description.clone()
-                    };
+                    let desc =
+                        truncate_with_ellipsis(&task.task_description, JOURNAL_DESC_MAX_CHARS);
 
                     println!(
                         "   {} {} {}",
@@ -537,8 +566,8 @@ pub async fn run() -> Result<()> {
         }
 
         Commands::JournalEntry { task_id } => {
-            if !cli.quiet {
-                println!("{}", render_header(&ctx));
+            if !quiet {
+                println!("{}", render_header(ctx));
             }
             let checkpoint = Agent::task_status(&task_id)?;
 
@@ -586,7 +615,9 @@ pub async fn run() -> Result<()> {
                 println!("      Branch: {}", git.branch.as_str().path_local());
                 println!(
                     "      Commit: {}",
-                    git.commit_hash[..8.min(git.commit_hash.len())].muted()
+                    take_prefix_chars(&git.commit_hash, COMMIT_HASH_PREFIX_CHARS)
+                        .as_str()
+                        .muted()
                 );
                 if git.dirty {
                     println!("      {} Uncommitted changes", Glyphs::WILT);
@@ -607,7 +638,12 @@ pub async fn run() -> Result<()> {
                     Glyphs::FROST,
                     "Frost damage:".garden_wilting()
                 );
-                for error in checkpoint.errors.iter().rev().take(3) {
+                for error in checkpoint
+                    .errors
+                    .iter()
+                    .rev()
+                    .take(MAX_JOURNAL_ERRORS_DISPLAY)
+                {
                     println!(
                         "      Step {}: {}",
                         error.step,
@@ -620,7 +656,7 @@ pub async fn run() -> Result<()> {
 
         Commands::JournalDelete { task_id } => {
             Agent::delete_task(&task_id)?;
-            if !cli.quiet {
+            if !quiet {
                 println!(
                     "{} Journal entry {} has been composted.",
                     Glyphs::FALLEN_LEAF,
@@ -631,7 +667,13 @@ pub async fn run() -> Result<()> {
 
         Commands::Status { output_format } => {
             // Count journal entries
-            let tasks = Agent::list_tasks().unwrap_or_default();
+            let tasks = match Agent::list_tasks() {
+                Ok(tasks) => tasks,
+                Err(err) => {
+                    warn!("Failed to list journal entries for status: {}", err);
+                    Vec::new()
+                }
+            };
             let completed = tasks
                 .iter()
                 .filter(|t| matches!(t.status, checkpoint::TaskStatus::Completed))
@@ -663,8 +705,8 @@ pub async fn run() -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&status)?);
                 }
                 OutputFormat::Text => {
-                    if !cli.quiet {
-                        println!("{}", render_header(&ctx));
+                    if !quiet {
+                        println!("{}", render_header(ctx));
                     }
                     println!(
                         "\n{} {}\n",
@@ -679,12 +721,16 @@ pub async fn run() -> Result<()> {
                         format!("{} Connected to remote model", Glyphs::COMPASS).garden_wilting()
                     };
 
-                    println!("   {} Model: {}", Glyphs::GEAR, ctx.model_name.emphasis());
+                    println!(
+                        "   {} Model: {}",
+                        Glyphs::GEAR,
+                        ctx.model_name.as_str().emphasis()
+                    );
                     println!("   {}", hosting);
                     println!(
                         "   {} Garden: {}",
                         Glyphs::SPROUT,
-                        ctx.project_path.path_local()
+                        ctx.project_path.as_str().path_local()
                     );
 
                     println!(
@@ -709,8 +755,8 @@ pub async fn run() -> Result<()> {
             input,
             dry_run,
         } => {
-            if !cli.quiet {
-                println!("{}", render_header(&ctx));
+            if !quiet {
+                println!("{}", render_header(ctx));
             }
 
             // Load workflow file
@@ -738,13 +784,7 @@ pub async fn run() -> Result<()> {
             executor.load_file(path)?;
 
             // Determine which workflow to run
-            let workflow_name = name.unwrap_or_else(|| {
-                // Use filename without extension as default
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("default")
-                    .to_string()
-            });
+            let workflow_name = name.unwrap_or_else(|| default_workflow_name(path));
 
             // Parse input variables
             let mut inputs = std::collections::HashMap::new();
@@ -879,7 +919,13 @@ fn build_garden_from_path(path: &str) -> Result<ui::garden::DigitalGarden> {
     let project_name = std::path::Path::new(path)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "your garden".to_string());
+        .unwrap_or_else(|| {
+            warn!(
+                "Could not derive project name from path '{}'; using fallback name",
+                path
+            );
+            "your garden".to_string()
+        });
 
     let mut garden = ui::garden::DigitalGarden::new(&project_name);
 
@@ -904,7 +950,13 @@ fn build_garden_from_path(path: &str) -> Result<ui::garden::DigitalGarden> {
             .path()
             .extension()
             .and_then(|e| e.to_str())
-            .unwrap_or("");
+            .unwrap_or_else(|| {
+                debug!(
+                    "Skipping file with non-UTF8 extension: {}",
+                    entry.path().display()
+                );
+                ""
+            });
 
         if !matches!(
             ext,
@@ -932,19 +984,38 @@ fn build_garden_from_path(path: &str) -> Result<ui::garden::DigitalGarden> {
         let metadata = fs::metadata(entry.path()).ok();
         let lines = fs::read_to_string(entry.path())
             .map(|c| c.lines().count())
-            .unwrap_or(0);
+            .unwrap_or_else(|err| {
+                debug!(
+                    "Failed to read '{}' when computing garden metrics: {}",
+                    entry.path().display(),
+                    err
+                );
+                0
+            });
 
         let modified = metadata
             .as_ref()
             .and_then(|m| m.modified().ok())
             .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .unwrap_or_else(|| {
+                debug!(
+                    "Could not read modified time for '{}'; using epoch fallback",
+                    entry.path().display()
+                );
+                0
+            });
 
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_secs())
-            .unwrap_or(0);
+            .unwrap_or_else(|err| {
+                warn!(
+                    "System clock appears invalid when building garden view: {}",
+                    err
+                );
+                0
+            });
 
         // Use saturating_sub to handle clock skew/future mtimes
         let age_days = now.saturating_sub(modified) / 86400;
@@ -964,4 +1035,33 @@ fn build_garden_from_path(path: &str) -> Result<ui::garden::DigitalGarden> {
     }
 
     Ok(garden)
+}
+
+fn truncate_with_ellipsis(input: &str, max_chars: usize) -> String {
+    if input.chars().count() <= max_chars {
+        return input.to_string();
+    }
+
+    let keep_chars = max_chars.saturating_sub(3);
+    let mut out: String = input.chars().take(keep_chars).collect();
+    out.push_str("...");
+    out
+}
+
+fn take_prefix_chars(input: &str, max_chars: usize) -> String {
+    input.chars().take(max_chars).collect()
+}
+
+fn default_workflow_name(path: &std::path::Path) -> String {
+    match path.file_stem().and_then(|s| s.to_str()) {
+        Some(name) => name.to_string(),
+        None => {
+            warn!(
+                "Could not infer workflow name from file '{}'; using '{}'",
+                path.display(),
+                DEFAULT_WORKFLOW_NAME
+            );
+            DEFAULT_WORKFLOW_NAME.to_string()
+        }
+    }
 }
