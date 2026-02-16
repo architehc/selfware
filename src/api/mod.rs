@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest::{Client, StatusCode};
 use std::time::Duration;
@@ -9,10 +10,38 @@ pub mod types;
 
 use types::*;
 
+/// Trait abstraction over the LLM API client, enabling test mocking.
+#[async_trait]
+pub trait LlmClient: Send + Sync {
+    /// Send a chat completion request (non-streaming).
+    async fn chat(
+        &self,
+        messages: Vec<Message>,
+        tools: Option<Vec<ToolDefinition>>,
+        thinking: ThinkingMode,
+    ) -> Result<ChatResponse>;
+
+    /// Send a streaming chat completion request.
+    async fn chat_stream(
+        &self,
+        messages: Vec<Message>,
+        tools: Option<Vec<ToolDefinition>>,
+        thinking: ThinkingMode,
+    ) -> Result<StreamingResponse>;
+}
+
 /// A streaming response that yields chunks as they arrive
 // Streaming infrastructure (used by chat_streaming)
 pub struct StreamingResponse {
     response: reqwest::Response,
+}
+
+impl std::fmt::Debug for StreamingResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamingResponse")
+            .field("status", &self.response.status())
+            .finish()
+    }
 }
 
 impl StreamingResponse {
@@ -428,6 +457,27 @@ impl ApiClient {
 
         // All retries exhausted
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Request failed after retries")))
+    }
+}
+
+#[async_trait]
+impl LlmClient for ApiClient {
+    async fn chat(
+        &self,
+        messages: Vec<Message>,
+        tools: Option<Vec<ToolDefinition>>,
+        thinking: ThinkingMode,
+    ) -> Result<ChatResponse> {
+        self.chat(messages, tools, thinking).await
+    }
+
+    async fn chat_stream(
+        &self,
+        messages: Vec<Message>,
+        tools: Option<Vec<ToolDefinition>>,
+        thinking: ThinkingMode,
+    ) -> Result<StreamingResponse> {
+        self.chat_stream(messages, tools, thinking).await
     }
 }
 
@@ -1148,5 +1198,140 @@ mod tests {
         assert_eq!(config.initial_delay_ms, 0);
         assert_eq!(config.max_delay_ms, 0);
         // Even with doubling, 0 * 2 = 0
+    }
+}
+
+/// Mock LLM client for unit testing.
+///
+/// Provides a queue-based mock that returns pre-configured `ChatResponse`
+/// values from `chat()` calls. Streaming is not supported and will return
+/// an error.
+#[cfg(test)]
+pub mod mock {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    pub struct MockLlmClient {
+        responses: Mutex<VecDeque<ChatResponse>>,
+    }
+
+    impl MockLlmClient {
+        /// Create a new mock client with an empty response queue.
+        pub fn new() -> Self {
+            Self {
+                responses: Mutex::new(VecDeque::new()),
+            }
+        }
+
+        /// Create a mock client pre-loaded with a sequence of responses.
+        ///
+        /// Each call to `chat()` pops the next response from the front of the
+        /// queue. If the queue is exhausted, `chat()` returns an error.
+        pub fn with_responses(responses: Vec<ChatResponse>) -> Self {
+            Self {
+                responses: Mutex::new(VecDeque::from(responses)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for MockLlmClient {
+        async fn chat(
+            &self,
+            _messages: Vec<Message>,
+            _tools: Option<Vec<ToolDefinition>>,
+            _thinking: ThinkingMode,
+        ) -> Result<ChatResponse> {
+            let mut queue = self
+                .responses
+                .lock()
+                .map_err(|e| anyhow::anyhow!("MockLlmClient lock poisoned: {}", e))?;
+            queue
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("MockLlmClient: no more responses in queue"))
+        }
+
+        async fn chat_stream(
+            &self,
+            _messages: Vec<Message>,
+            _tools: Option<Vec<ToolDefinition>>,
+            _thinking: ThinkingMode,
+        ) -> Result<StreamingResponse> {
+            anyhow::bail!("Streaming not supported in MockLlmClient")
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn sample_response(content: &str) -> ChatResponse {
+            ChatResponse {
+                id: "mock-id".to_string(),
+                object: "chat.completion".to_string(),
+                created: 0,
+                model: "mock-model".to_string(),
+                choices: vec![Choice {
+                    index: 0,
+                    message: Message::assistant(content),
+                    reasoning_content: None,
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: Usage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                },
+            }
+        }
+
+        #[tokio::test]
+        async fn test_mock_returns_queued_responses() {
+            let mock = MockLlmClient::with_responses(vec![
+                sample_response("first"),
+                sample_response("second"),
+            ]);
+
+            let r1 = mock
+                .chat(vec![], None, ThinkingMode::Disabled)
+                .await
+                .unwrap();
+            assert_eq!(r1.choices[0].message.content, "first");
+
+            let r2 = mock
+                .chat(vec![], None, ThinkingMode::Disabled)
+                .await
+                .unwrap();
+            assert_eq!(r2.choices[0].message.content, "second");
+        }
+
+        #[tokio::test]
+        async fn test_mock_errors_when_queue_exhausted() {
+            let mock = MockLlmClient::new();
+            let result = mock.chat(vec![], None, ThinkingMode::Disabled).await;
+            assert!(result.is_err());
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("no more responses")
+            );
+        }
+
+        #[tokio::test]
+        async fn test_mock_stream_returns_error() {
+            let mock = MockLlmClient::new();
+            let result = mock
+                .chat_stream(vec![], None, ThinkingMode::Disabled)
+                .await;
+            assert!(result.is_err());
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Streaming not supported")
+            );
+        }
     }
 }

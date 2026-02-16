@@ -24,35 +24,35 @@ static TOTAL_PROMPT_TOKENS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_COMPLETION_TOKENS: AtomicU64 = AtomicU64::new(0);
 
 /// Initialize output modes from config
-pub fn init(compact: bool, verbose: bool, show_tokens: bool) {
+pub(crate) fn init(compact: bool, verbose: bool, show_tokens: bool) {
     COMPACT_MODE.store(compact, Ordering::SeqCst);
     VERBOSE_MODE.store(verbose, Ordering::SeqCst);
     SHOW_TOKENS.store(show_tokens, Ordering::SeqCst);
 }
 
 /// Check if compact mode is enabled
-pub fn is_compact() -> bool {
+pub(crate) fn is_compact() -> bool {
     COMPACT_MODE.load(Ordering::SeqCst)
 }
 
 /// Check if verbose mode is enabled
-pub fn is_verbose() -> bool {
+pub(crate) fn is_verbose() -> bool {
     VERBOSE_MODE.load(Ordering::SeqCst)
 }
 
 /// Check if show_tokens is enabled
-pub fn should_show_tokens() -> bool {
+pub(crate) fn should_show_tokens() -> bool {
     SHOW_TOKENS.load(Ordering::SeqCst)
 }
 
 /// Record token usage
-pub fn record_tokens(prompt: u64, completion: u64) {
+pub(crate) fn record_tokens(prompt: u64, completion: u64) {
     TOTAL_PROMPT_TOKENS.fetch_add(prompt, Ordering::SeqCst);
     TOTAL_COMPLETION_TOKENS.fetch_add(completion, Ordering::SeqCst);
 }
 
 /// Get total token usage
-pub fn get_total_tokens() -> (u64, u64) {
+pub(crate) fn get_total_tokens() -> (u64, u64) {
     (
         TOTAL_PROMPT_TOKENS.load(Ordering::SeqCst),
         TOTAL_COMPLETION_TOKENS.load(Ordering::SeqCst),
@@ -60,13 +60,13 @@ pub fn get_total_tokens() -> (u64, u64) {
 }
 
 /// Reset token counters (for new sessions)
-pub fn reset_tokens() {
+pub(crate) fn reset_tokens() {
     TOTAL_PROMPT_TOKENS.store(0, Ordering::SeqCst);
     TOTAL_COMPLETION_TOKENS.store(0, Ordering::SeqCst);
 }
 
 /// Print token usage summary
-pub fn print_token_usage(prompt: u64, completion: u64) {
+pub(crate) fn print_token_usage(prompt: u64, completion: u64) {
     if should_show_tokens() {
         let total = prompt + completion;
         if is_compact() {
@@ -84,7 +84,7 @@ pub fn print_token_usage(prompt: u64, completion: u64) {
 }
 
 /// Print session token summary (at end of session)
-pub fn print_session_summary() {
+pub(crate) fn print_session_summary() {
     if should_show_tokens() {
         let (prompt, completion) = get_total_tokens();
         let total = prompt + completion;
@@ -106,7 +106,7 @@ pub fn print_session_summary() {
 }
 
 /// Print tool call announcement
-pub fn tool_call(name: &str) {
+pub(crate) fn tool_call(name: &str) {
     if !is_compact() {
         println!(
             "{} Calling tool: {}",
@@ -117,7 +117,7 @@ pub fn tool_call(name: &str) {
 }
 
 /// Print tool success
-pub fn tool_success(name: &str) {
+pub(crate) fn tool_success(name: &str) {
     if !is_compact() {
         println!("{} Tool succeeded", "✓".bright_green());
     } else if is_verbose() {
@@ -126,7 +126,7 @@ pub fn tool_success(name: &str) {
 }
 
 /// Print tool failure (always shown, but format varies)
-pub fn tool_failure(name: &str, error: &str) {
+pub(crate) fn tool_failure(name: &str, error: &str) {
     if is_compact() {
         println!("{} {}: {}", "✗".red(), name, error);
     } else {
@@ -135,12 +135,12 @@ pub fn tool_failure(name: &str, error: &str) {
 }
 
 /// Print safety check failure (always shown)
-pub fn safety_blocked(message: &str) {
+pub(crate) fn safety_blocked(message: &str) {
     println!("{} {}", "🚫".bright_red(), message);
 }
 
 /// Print thinking/reasoning output
-pub fn thinking(text: &str, inline: bool) {
+pub(crate) fn thinking(text: &str, inline: bool) {
     // In compact mode, skip thinking entirely
     // In normal mode, show thinking
     // In verbose mode, show full thinking with emphasis
@@ -166,14 +166,14 @@ pub fn thinking(text: &str, inline: bool) {
 }
 
 /// Print thinking prefix (for streaming)
-pub fn thinking_prefix() {
+pub(crate) fn thinking_prefix() {
     if !is_compact() {
         print!("{} ", "Thinking:".dimmed());
     }
 }
 
 /// Print intent detection message
-pub fn intent_without_action() {
+pub(crate) fn intent_without_action() {
     if !is_compact() {
         println!(
             "{}",
@@ -183,7 +183,7 @@ pub fn intent_without_action() {
 }
 
 /// Print final answer
-pub fn final_answer(content: &str) {
+pub(crate) fn final_answer(content: &str) {
     if is_compact() {
         println!("{}", content);
     } else {
@@ -192,14 +192,14 @@ pub fn final_answer(content: &str) {
 }
 
 /// Print task completed message
-pub fn task_completed() {
+pub(crate) fn task_completed() {
     if !is_compact() {
         println!("{}", "✅ Task completed successfully!".bright_green());
     }
 }
 
 /// Print task completed with mascot (verbose mode)
-pub fn task_completed_with_mascot() {
+pub(crate) fn task_completed_with_mascot() {
     if is_verbose() {
         println!(
             "{}",
@@ -211,7 +211,7 @@ pub fn task_completed_with_mascot() {
 }
 
 /// Print task failed with mascot (verbose mode)
-pub fn task_failed_with_mascot(reason: &str) {
+pub(crate) fn task_failed_with_mascot(reason: &str) {
     if is_verbose() {
         println!(
             "{}",
@@ -223,28 +223,28 @@ pub fn task_failed_with_mascot(reason: &str) {
 }
 
 /// Print greeting mascot on startup (verbose mode only)
-pub fn greeting_mascot() {
+pub(crate) fn greeting_mascot() {
     if is_verbose() {
         println!("{}", render_mascot(MascotMood::Greeting));
     }
 }
 
 /// Print thinking mascot during LLM calls (verbose mode only)
-pub fn thinking_mascot() {
+pub(crate) fn thinking_mascot() {
     if is_verbose() {
         println!("{}", render_inline_mascot(MascotMood::Thinking));
     }
 }
 
 /// Print working mascot during tool execution (verbose mode only)
-pub fn working_mascot() {
+pub(crate) fn working_mascot() {
     if is_verbose() {
         print!("{} ", render_inline_mascot(MascotMood::Working));
     }
 }
 
 /// Print verification report
-pub fn verification_report(report: &str, passed: bool) {
+pub(crate) fn verification_report(report: &str, passed: bool) {
     if is_verbose() {
         // Full report in verbose mode
         println!("{}", report);
@@ -265,7 +265,7 @@ pub fn verification_report(report: &str, passed: bool) {
 }
 
 /// Print debug output (only in verbose mode or with SELFWARE_DEBUG)
-pub fn debug_output(label: &str, content: &str) {
+pub(crate) fn debug_output(label: &str, content: &str) {
     if is_verbose() || std::env::var("SELFWARE_DEBUG").is_ok() {
         println!("{}", format!("=== DEBUG: {} ===", label).bright_magenta());
         println!("{}", content);
@@ -274,7 +274,7 @@ pub fn debug_output(label: &str, content: &str) {
 }
 
 /// Print confirmation prompt preview
-pub fn confirmation_preview(tool_name: &str, args: &str) {
+pub(crate) fn confirmation_preview(tool_name: &str, args: &str) {
     println!(
         "{} Tool: {} Args: {}",
         "⚠️".bright_yellow(),
@@ -315,7 +315,7 @@ pub struct TaskProgress {
 
 impl TaskProgress {
     /// Create a new task progress tracker with given phase names
-    pub fn new(phase_names: &[&str]) -> Self {
+    pub(crate) fn new(phase_names: &[&str]) -> Self {
         Self {
             phases: phase_names
                 .iter()
@@ -331,7 +331,7 @@ impl TaskProgress {
     }
 
     /// Start the current phase
-    pub fn start_phase(&mut self) {
+    pub(crate) fn start_phase(&mut self) {
         if self.current_phase < self.phases.len() {
             self.phases[self.current_phase].status = PhaseStatus::Active;
             self.print_progress();
@@ -339,7 +339,7 @@ impl TaskProgress {
     }
 
     /// Update progress of current phase (0.0 to 1.0)
-    pub fn update_progress(&mut self, progress: f64) {
+    pub(crate) fn update_progress(&mut self, progress: f64) {
         if self.current_phase < self.phases.len() {
             self.phases[self.current_phase].progress = progress.clamp(0.0, 1.0);
             // Only print in verbose mode for incremental updates
@@ -350,7 +350,7 @@ impl TaskProgress {
     }
 
     /// Complete current phase and move to next
-    pub fn complete_phase(&mut self) {
+    pub(crate) fn complete_phase(&mut self) {
         if self.current_phase < self.phases.len() {
             self.phases[self.current_phase].status = PhaseStatus::Completed;
             self.phases[self.current_phase].progress = 1.0;
@@ -363,7 +363,7 @@ impl TaskProgress {
     }
 
     /// Mark current phase as failed
-    pub fn fail_phase(&mut self) {
+    pub(crate) fn fail_phase(&mut self) {
         if self.current_phase < self.phases.len() {
             self.phases[self.current_phase].status = PhaseStatus::Failed;
             self.print_progress();
@@ -371,7 +371,7 @@ impl TaskProgress {
     }
 
     /// Add a new phase dynamically
-    pub fn add_phase(&mut self, name: &str) {
+    pub(crate) fn add_phase(&mut self, name: &str) {
         self.phases.push(ProgressPhase {
             name: name.to_string(),
             status: PhaseStatus::Pending,
@@ -380,7 +380,7 @@ impl TaskProgress {
     }
 
     /// Get overall progress (0.0 to 1.0)
-    pub fn overall_progress(&self) -> f64 {
+    pub(crate) fn overall_progress(&self) -> f64 {
         if self.phases.is_empty() {
             return 0.0;
         }
@@ -397,7 +397,7 @@ impl TaskProgress {
     }
 
     /// Estimate remaining time based on elapsed time and progress
-    pub fn estimated_remaining(&self) -> Option<Duration> {
+    pub(crate) fn estimated_remaining(&self) -> Option<Duration> {
         let progress = self.overall_progress();
         if progress > 0.05 {
             let elapsed = self.start_time.elapsed();
@@ -423,7 +423,7 @@ impl TaskProgress {
     }
 
     /// Print current progress state
-    pub fn print_progress(&self) {
+    pub(crate) fn print_progress(&self) {
         if is_compact() {
             // Compact: single line with overall progress
             let progress = self.overall_progress();
@@ -517,7 +517,7 @@ impl TaskProgress {
 }
 
 /// Print step announcement (used by agent)
-pub fn step_start(step: usize, name: &str) {
+pub(crate) fn step_start(step: usize, name: &str) {
     if is_compact() {
         print!("[Step {}] ", step);
     } else {
@@ -530,7 +530,7 @@ pub fn step_start(step: usize, name: &str) {
 }
 
 /// Print phase transition
-pub fn phase_transition(from: &str, to: &str) {
+pub(crate) fn phase_transition(from: &str, to: &str) {
     if is_verbose() {
         println!(
             "{} {} → {}",

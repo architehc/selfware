@@ -14,7 +14,7 @@
 //! - Collection management (project, session, global)
 //! - Persistence to disk
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -747,38 +747,20 @@ impl CodeChunker {
         let lines: Vec<&str> = content.lines().collect();
 
         // Patterns for Rust constructs
-        let patterns = [
-            (
-                regex::Regex::new(r"^\s*(pub\s+)?(async\s+)?fn\s+").unwrap(),
-                ChunkType::Function,
-            ),
-            (
-                regex::Regex::new(r"^\s*(pub\s+)?struct\s+").unwrap(),
-                ChunkType::Struct,
-            ),
-            (
-                regex::Regex::new(r"^\s*(pub\s+)?enum\s+").unwrap(),
-                ChunkType::Enum,
-            ),
-            (
-                regex::Regex::new(r"^\s*(pub\s+)?trait\s+").unwrap(),
-                ChunkType::Trait,
-            ),
-            (regex::Regex::new(r"^\s*impl\s+").unwrap(), ChunkType::Impl),
-            (
-                regex::Regex::new(r"^\s*(pub\s+)?mod\s+").unwrap(),
-                ChunkType::Module,
-            ),
-            (
-                regex::Regex::new(r"^\s*#\[test\]").unwrap(),
-                ChunkType::Test,
-            ),
-            (
-                regex::Regex::new(r"^\s*(pub\s+)?const\s+").unwrap(),
-                ChunkType::Constant,
-            ),
-            (regex::Regex::new(r"^\s*use\s+").unwrap(), ChunkType::Import),
-        ];
+        let patterns: Vec<(regex::Regex, ChunkType)> = [
+            (r"^\s*(pub\s+)?(async\s+)?fn\s+", ChunkType::Function),
+            (r"^\s*(pub\s+)?struct\s+", ChunkType::Struct),
+            (r"^\s*(pub\s+)?enum\s+", ChunkType::Enum),
+            (r"^\s*(pub\s+)?trait\s+", ChunkType::Trait),
+            (r"^\s*impl\s+", ChunkType::Impl),
+            (r"^\s*(pub\s+)?mod\s+", ChunkType::Module),
+            (r"^\s*#\[test\]", ChunkType::Test),
+            (r"^\s*(pub\s+)?const\s+", ChunkType::Constant),
+            (r"^\s*use\s+", ChunkType::Import),
+        ]
+        .into_iter()
+        .filter_map(|(pat, ct)| regex::Regex::new(pat).ok().map(|re| (re, ct)))
+        .collect();
 
         let mut current_start = 0;
         let mut current_type = ChunkType::CodeBlock;
@@ -1014,7 +996,9 @@ impl VectorStore {
             self.collections.insert(name.to_string(), collection);
             self.indices.insert(name.to_string(), index);
         }
-        self.collections.get_mut(name).unwrap()
+        self.collections
+            .get_mut(name)
+            .unwrap_or_else(|| unreachable!("collection was just inserted"))
     }
 
     /// Get collection by name
@@ -1048,8 +1032,14 @@ impl VectorStore {
             self.collection(collection_name, CollectionScope::Project);
         }
 
-        let collection = self.collections.get_mut(collection_name).unwrap();
-        let index = self.indices.get_mut(collection_name).unwrap();
+        let collection = self
+            .collections
+            .get_mut(collection_name)
+            .with_context(|| format!("collection '{}' not found after creation", collection_name))?;
+        let index = self
+            .indices
+            .get_mut(collection_name)
+            .with_context(|| format!("index for collection '{}' not found", collection_name))?;
 
         // Add chunks with embeddings
         for (chunk, embedding) in chunks.into_iter().zip(embeddings.into_iter()) {

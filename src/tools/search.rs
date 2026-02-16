@@ -421,7 +421,7 @@ impl Tool for SymbolSearch {
             .unwrap_or(50) as usize;
 
         // Build patterns for different symbol types
-        let patterns = build_symbol_patterns(symbol_type, name_pattern);
+        let patterns = build_symbol_patterns(symbol_type, name_pattern)?;
 
         let mut symbols = Vec::new();
 
@@ -492,32 +492,40 @@ impl Tool for SymbolSearch {
 }
 
 /// Build regex patterns for different Rust symbol types
-fn build_symbol_patterns(symbol_type: &str, _name_pattern: &str) -> Vec<(Regex, &'static str)> {
+fn build_symbol_patterns(symbol_type: &str, _name_pattern: &str) -> Result<Vec<(Regex, &'static str)>> {
     let mut patterns = Vec::new();
 
     // Function pattern: pub/pub(crate)/async fn name
-    let fn_pattern = Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)").unwrap();
+    let fn_pattern = Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)")
+        .context("Failed to compile function symbol regex")?;
 
     // Struct pattern: pub struct Name
-    let struct_pattern = Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?struct\s+(\w+)").unwrap();
+    let struct_pattern = Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?struct\s+(\w+)")
+        .context("Failed to compile struct symbol regex")?;
 
     // Enum pattern: pub enum Name
-    let enum_pattern = Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?enum\s+(\w+)").unwrap();
+    let enum_pattern = Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?enum\s+(\w+)")
+        .context("Failed to compile enum symbol regex")?;
 
     // Trait pattern: pub trait Name
-    let trait_pattern = Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?trait\s+(\w+)").unwrap();
+    let trait_pattern = Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?trait\s+(\w+)")
+        .context("Failed to compile trait symbol regex")?;
 
     // Impl pattern: impl Name or impl<T> Name
-    let impl_pattern = Regex::new(r"impl(?:<[^>]*>)?\s+(?:(\w+)|(?:\w+\s+for\s+(\w+)))").unwrap();
+    let impl_pattern = Regex::new(r"impl(?:<[^>]*>)?\s+(?:(\w+)|(?:\w+\s+for\s+(\w+)))")
+        .context("Failed to compile impl symbol regex")?;
 
     // Const pattern: const NAME
-    let const_pattern = Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?const\s+(\w+)").unwrap();
+    let const_pattern = Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?const\s+(\w+)")
+        .context("Failed to compile const symbol regex")?;
 
     // Type alias pattern: type Name
-    let type_pattern = Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?type\s+(\w+)").unwrap();
+    let type_pattern = Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?type\s+(\w+)")
+        .context("Failed to compile type symbol regex")?;
 
     // Module pattern: mod name
-    let mod_pattern = Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+(\w+)").unwrap();
+    let mod_pattern = Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+(\w+)")
+        .context("Failed to compile mod symbol regex")?;
 
     match symbol_type {
         "function" => patterns.push((fn_pattern, "function")),
@@ -540,7 +548,7 @@ fn build_symbol_patterns(symbol_type: &str, _name_pattern: &str) -> Vec<(Regex, 
         }
     }
 
-    patterns
+    Ok(patterns)
 }
 
 #[cfg(test)]
