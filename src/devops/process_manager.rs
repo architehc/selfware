@@ -874,21 +874,21 @@ mod tests {
         assert!(is_port_available(port).await);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_find_available_port() {
         // Find a port in a high range that's likely free
         let port = find_available_port(50000, 50100).await;
         assert!(port.is_some());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_manager_new() {
         let manager = ProcessManager::new();
         let list = manager.list().await;
         assert!(list.is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_manager_start_simple() {
         let manager = ProcessManager::new();
 
@@ -913,7 +913,7 @@ mod tests {
         assert!(summary.pid.is_some());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_manager_list() {
         let manager = ProcessManager::new();
 
@@ -937,7 +937,7 @@ mod tests {
         assert!(list.iter().any(|p| p.id == "list-test"));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_manager_stop() {
         let manager = ProcessManager::new();
 
@@ -963,7 +963,7 @@ mod tests {
         assert_eq!(summary.status, ProcessStatus::Stopped);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_manager_get() {
         let manager = ProcessManager::new();
 
@@ -987,14 +987,14 @@ mod tests {
         assert_eq!(result.unwrap().id, "get-test");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_manager_get_not_found() {
         let manager = ProcessManager::new();
         let result = manager.get("nonexistent").await;
         assert!(result.is_err());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_manager_logs() {
         let manager = ProcessManager::new();
 
@@ -1020,7 +1020,7 @@ mod tests {
         assert!(logs.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_manager_duplicate_start() {
         let manager = ProcessManager::new();
 
@@ -1468,7 +1468,7 @@ mod tests {
         assert_eq!(summary.recent_logs[1].content, "line 3");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_manager_stop_nonexistent() {
         let manager = ProcessManager::new();
         let result = manager.stop("nonexistent", false).await;
@@ -1476,14 +1476,14 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_manager_logs_nonexistent() {
         let manager = ProcessManager::new();
         let result = manager.logs("nonexistent", 10).await;
         assert!(result.is_err());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_manager_remove_nonexistent() {
         let manager = ProcessManager::new();
         let result = manager.remove("nonexistent").await;
@@ -1599,14 +1599,14 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_manager_default() {
         let manager = ProcessManager::default();
         let list = manager.list().await;
         assert!(list.is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_manager_force_stop() {
         let manager = ProcessManager::new();
 
@@ -1633,7 +1633,7 @@ mod tests {
         assert_eq!(summary.status, ProcessStatus::Stopped);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_manager_stop_already_stopped() {
         let manager = ProcessManager::new();
 
@@ -1658,7 +1658,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_manager_restart() {
         let manager = ProcessManager::new();
 
@@ -1688,7 +1688,7 @@ mod tests {
         let _ = manager.stop("restart-test", true).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_manager_restart_nonexistent() {
         let manager = ProcessManager::new();
         let result = manager.restart("nonexistent").await;
@@ -1696,7 +1696,7 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_manager_remove_running() {
         let manager = ProcessManager::new();
 
@@ -1750,7 +1750,7 @@ mod tests {
         assert!(logs.iter().any(|l| l.content.contains("/tmp")));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_manager_with_health_check() {
         let manager = ProcessManager::new();
 
@@ -1774,7 +1774,7 @@ mod tests {
         assert!(summary.health_matched);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_summary_uptime() {
         let config = ProcessConfig {
             id: "uptime-test".to_string(),
@@ -1939,7 +1939,7 @@ mod tests {
         assert_eq!(summary.recent_logs.len(), 2);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_is_port_available_high_port() {
         // High ports should be more likely available
         let high_port = 59999;
@@ -1958,7 +1958,7 @@ mod tests {
         // If not available, that's also a valid response (port in use)
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_find_available_port_narrow_range() {
         // Use a narrow range of high ports
         let port = find_available_port(51000, 51010).await;
@@ -1967,7 +1967,7 @@ mod tests {
         assert!(port.unwrap() >= 51000 && port.unwrap() <= 51010);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_find_available_port_all_used() {
         // Bind a port, then search only that port range
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1978,7 +1978,7 @@ mod tests {
         assert!(result.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     #[cfg(unix)]
     async fn test_port_info_unused_port() {
         // Port info for an unused high port
@@ -1987,7 +1987,7 @@ mod tests {
         assert!(info.is_none() || info.as_ref().map(|s| s.is_empty()).unwrap_or(true));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_manager_multiple_processes() {
         let manager = ProcessManager::new();
 
@@ -2151,7 +2151,7 @@ mod tests {
         assert_eq!(config.args[3], "--nocapture");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_process_manager_invalid_command() {
         let manager = ProcessManager::new();
 
