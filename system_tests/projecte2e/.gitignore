@@ -1,0 +1,12 @@
+# Test runtime artifacts
+work/
+reports/
+results/
+
+# Build artifacts from test projects
+**/target/
+**/*.lock
+
+# Editor/OS
+.DS_Store
+*.swp

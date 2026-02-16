@@ -1,0 +1,10 @@
+You are fixing a small Rust library in the current directory.
+
+Task:
+1. Run tests and identify failing behavior.
+2. Fix the implementation so all tests pass.
+3. Keep all existing public function signatures unchanged.
+4. Do not add dependencies.
+5. Run cargo test before finishing.
+
+When done, summarize exactly what you changed.

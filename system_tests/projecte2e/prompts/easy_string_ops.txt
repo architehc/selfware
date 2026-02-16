@@ -1,0 +1,10 @@
+You are fixing a small Rust string utility library in the current directory.
+
+Task:
+1. Run cargo test to see which tests fail.
+2. Fix all bugs in the implementation so every test passes.
+3. Keep all public function signatures unchanged.
+4. Do not add any dependencies.
+5. Run cargo test before finishing to confirm green.
+
+When done, summarize exactly what you changed.

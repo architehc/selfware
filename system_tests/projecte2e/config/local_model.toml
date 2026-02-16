@@ -1,0 +1,12 @@
+endpoint = "http://localhost:8000/v1"
+model = "Qwen/Qwen3-Coder-Next-FP8"
+max_tokens = 98304
+
+[safety]
+allowed_paths = ["./**", "~/**"]
+denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
+
+[agent]
+max_iterations = 80
+step_timeout_secs = 600
+native_function_calling = true

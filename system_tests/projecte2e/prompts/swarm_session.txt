@@ -1,0 +1,8 @@
+/help
+/add coder
+/add tester
+/add reviewer
+/status
+Design a compact 4-step plan to safely add a new file-editing feature to a CLI agent. Mention tests, rollback strategy, and safety checks.
+/status
+exit

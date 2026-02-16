@@ -1,0 +1,15 @@
+You are fixing a multi-module Rust event bus library in the current directory.
+The crate has bugs spread across multiple source files: src/event.rs, src/subscriber.rs, and src/bus.rs.
+
+Task:
+1. Run cargo test to see failures.
+2. Read all source files to understand the architecture.
+3. Fix bugs in:
+   - event.rs: Display formatting
+   - subscriber.rs: topic filter matching
+   - bus.rs: sequence assignment and publish counting
+4. Keep all public struct/function signatures unchanged.
+5. Do not add dependencies.
+6. Run cargo test and cargo clippy before finishing.
+
+Provide a summary of each bug and fix.

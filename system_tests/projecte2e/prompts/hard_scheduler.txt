@@ -1,0 +1,15 @@
+You are fixing a scheduling utility crate in the current directory.
+
+Acceptance criteria:
+1. parse_duration supports s/m/h/d units.
+2. parse_duration trims surrounding whitespace.
+3. parse_duration rejects zero durations and invalid formats.
+4. next_run_at must not panic on overflow (return None instead).
+5. scheduler timing tests all pass.
+
+Process:
+- Run cargo test first.
+- Make minimal, high-quality code changes.
+- Run cargo test before finalizing.
+
+Provide a short summary of what changed.

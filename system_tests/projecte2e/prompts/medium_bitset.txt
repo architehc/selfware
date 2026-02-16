@@ -1,0 +1,12 @@
+You are fixing a Rust BitSet data structure in the current directory.
+The implementation has several logic bugs that cause tests to fail or panic.
+
+Task:
+1. Run cargo test to identify failures.
+2. Read the source in src/lib.rs carefully — it has bugs in set(), clear(), union(), and iter_ones().
+3. Fix all bugs so every test passes.
+4. Keep all public API signatures unchanged.
+5. Do not add any external dependencies.
+6. Run cargo test before finishing.
+
+Provide a brief summary of each bug you found and fixed.

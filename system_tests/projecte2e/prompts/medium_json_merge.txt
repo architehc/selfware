@@ -1,0 +1,10 @@
+You are working on a Rust crate in the current directory.
+
+Task:
+1. Run cargo test.
+2. Fix merge_json so nested JSON objects are merged recursively.
+3. Preserve expected replacement behavior for non-object patches.
+4. Keep function signature unchanged.
+5. Run cargo test again and finish only when green.
+
+Then provide a brief summary of the fix.
