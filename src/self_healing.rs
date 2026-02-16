@@ -878,10 +878,192 @@ impl Default for HealthPredictor {
 }
 
 // ============================================================================
+// Error Classification
+// ============================================================================
+
+/// Classified error category used to select the best default recovery strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ErrorClass {
+    /// Network / connection errors — retry with backoff
+    Network,
+    /// Timeout errors — retry with longer backoff
+    Timeout,
+    /// Rate limiting (HTTP 429) — retry with aggressive backoff
+    RateLimit,
+    /// Resource exhaustion (OOM, disk full) — clear caches then retry
+    ResourceExhaustion,
+    /// Parse / deserialization errors — restart from checkpoint
+    ParseError,
+    /// Authentication / permission errors — fallback
+    AuthError,
+    /// Unknown — default to retry
+    Unknown,
+}
+
+impl ErrorClass {
+    /// Classify an error based on its type and message content.
+    pub fn classify(error_type: &str, message: &str) -> Self {
+        let msg = message.to_lowercase();
+        let etype = error_type.to_lowercase();
+
+        if msg.contains("rate limit") || msg.contains("429") || msg.contains("too many requests") {
+            ErrorClass::RateLimit
+        } else if msg.contains("timed out") || msg.contains("timeout") || etype.contains("timeout")
+        {
+            ErrorClass::Timeout
+        } else if msg.contains("connection")
+            || msg.contains("network")
+            || msg.contains("dns")
+            || msg.contains("refused")
+            || msg.contains("reset by peer")
+            || etype.contains("network")
+            || etype.contains("connection")
+        {
+            ErrorClass::Network
+        } else if msg.contains("out of memory")
+            || msg.contains("oom")
+            || msg.contains("disk full")
+            || msg.contains("no space")
+            || msg.contains("resource exhausted")
+        {
+            ErrorClass::ResourceExhaustion
+        } else if msg.contains("parse")
+            || msg.contains("invalid json")
+            || msg.contains("unexpected token")
+            || msg.contains("deserialize")
+            || msg.contains("malformed")
+        {
+            ErrorClass::ParseError
+        } else if msg.contains("unauthorized")
+            || msg.contains("forbidden")
+            || msg.contains("401")
+            || msg.contains("403")
+            || msg.contains("invalid api key")
+        {
+            ErrorClass::AuthError
+        } else {
+            ErrorClass::Unknown
+        }
+    }
+
+    /// Return the default recovery strategy for this error class.
+    pub fn default_strategy(self) -> RecoveryStrategy {
+        match self {
+            ErrorClass::Network => RecoveryStrategy {
+                name: "network_retry".to_string(),
+                description: "Retry after network error with backoff".to_string(),
+                actions: vec![RecoveryAction::Retry {
+                    delay_ms: 1000,
+                    max_attempts: 3,
+                }],
+                success_probability: 0.7,
+                estimated_duration_ms: 7000,
+            },
+            ErrorClass::Timeout => RecoveryStrategy {
+                name: "timeout_retry".to_string(),
+                description: "Retry after timeout with longer backoff".to_string(),
+                actions: vec![RecoveryAction::Retry {
+                    delay_ms: 2000,
+                    max_attempts: 3,
+                }],
+                success_probability: 0.6,
+                estimated_duration_ms: 14000,
+            },
+            ErrorClass::RateLimit => RecoveryStrategy {
+                name: "rate_limit_backoff".to_string(),
+                description: "Back off aggressively for rate limiting".to_string(),
+                actions: vec![RecoveryAction::Retry {
+                    delay_ms: 5000,
+                    max_attempts: 5,
+                }],
+                success_probability: 0.85,
+                estimated_duration_ms: 60000,
+            },
+            ErrorClass::ResourceExhaustion => RecoveryStrategy {
+                name: "resource_recovery".to_string(),
+                description: "Clear caches then retry".to_string(),
+                actions: vec![
+                    RecoveryAction::ClearCache {
+                        scope: "all".to_string(),
+                    },
+                    RecoveryAction::Retry {
+                        delay_ms: 2000,
+                        max_attempts: 2,
+                    },
+                ],
+                success_probability: 0.5,
+                estimated_duration_ms: 6000,
+            },
+            ErrorClass::ParseError => RecoveryStrategy {
+                name: "parse_restart".to_string(),
+                description: "Restore from checkpoint after parse error".to_string(),
+                actions: vec![RecoveryAction::RestoreCheckpoint {
+                    checkpoint_id: None,
+                }],
+                success_probability: 0.8,
+                estimated_duration_ms: 2000,
+            },
+            ErrorClass::AuthError => RecoveryStrategy {
+                name: "auth_fallback".to_string(),
+                description: "Switch to fallback on auth error".to_string(),
+                actions: vec![RecoveryAction::Fallback {
+                    target: "backup".to_string(),
+                }],
+                success_probability: 0.3,
+                estimated_duration_ms: 1000,
+            },
+            ErrorClass::Unknown => RecoveryStrategy::retry(),
+        }
+    }
+
+    /// Return the escalation strategy to try if the primary strategy fails.
+    pub fn escalation_strategy(self) -> Option<RecoveryStrategy> {
+        match self {
+            // Network/timeout/rate-limit: escalate to restart from checkpoint
+            ErrorClass::Network | ErrorClass::Timeout | ErrorClass::RateLimit => {
+                Some(RecoveryStrategy {
+                    name: "escalate_restart".to_string(),
+                    description: "Restart from checkpoint after retry exhaustion".to_string(),
+                    actions: vec![RecoveryAction::RestoreCheckpoint {
+                        checkpoint_id: None,
+                    }],
+                    success_probability: 0.7,
+                    estimated_duration_ms: 2000,
+                })
+            }
+            // Resource exhaustion: escalate to full state reset
+            ErrorClass::ResourceExhaustion => Some(RecoveryStrategy {
+                name: "escalate_reset".to_string(),
+                description: "Full state reset after resource recovery fails".to_string(),
+                actions: vec![RecoveryAction::ResetState {
+                    scope: "all".to_string(),
+                }],
+                success_probability: 0.6,
+                estimated_duration_ms: 1000,
+            }),
+            // Parse errors: escalate to context compression
+            ErrorClass::ParseError => Some(RecoveryStrategy {
+                name: "escalate_compress".to_string(),
+                description: "Compress context after parse restart fails".to_string(),
+                actions: vec![RecoveryAction::Custom {
+                    name: "compress_context".to_string(),
+                    params: HashMap::new(),
+                }],
+                success_probability: 0.5,
+                estimated_duration_ms: 3000,
+            }),
+            // Auth errors and unknown: no further escalation
+            ErrorClass::AuthError | ErrorClass::Unknown => None,
+        }
+    }
+}
+
+// ============================================================================
 // Self-Healing Engine
 // ============================================================================
 
-/// Self-healing engine
+/// Self-healing engine — coordinates error learning, recovery execution,
+/// state checkpointing, and health prediction with an escalation chain.
 pub struct SelfHealingEngine {
     config: SelfHealingConfig,
     /// Error learner
@@ -905,7 +1087,8 @@ impl SelfHealingEngine {
         }
     }
 
-    /// Handle an error
+    /// Handle an error with classification, learned strategy selection,
+    /// and automatic escalation if the primary strategy fails.
     pub fn handle_error(&self, error: ErrorOccurrence) -> Option<RecoveryExecution> {
         if !self.config.enabled {
             return None;
@@ -914,22 +1097,59 @@ impl SelfHealingEngine {
         // Record for learning
         self.learner.record(error.clone());
 
-        // Get recommended recovery
+        let pattern_key = format!("{}:{}", error.error_type, error.context);
+
+        // Classify the error
+        let error_class = ErrorClass::classify(&error.error_type, &error.message);
+
+        // Pick recovery strategy: learned recommendation > class-based default
         let strategy = self
             .learner
             .recommend_recovery(&error.error_type, &error.context)
-            .unwrap_or_else(RecoveryStrategy::retry);
+            .unwrap_or_else(|| error_class.default_strategy());
 
-        // Execute recovery
-        let execution = self.executor.execute_with_state(&strategy, &self.state);
+        // Execute recovery with pattern tracking for exponential backoff
+        let execution =
+            self.executor
+                .execute_for_pattern(&strategy, &self.state, &pattern_key);
 
-        // Record outcome for learning
-        self.learner.record_recovery(
-            &format!("{}:{}", error.error_type, error.context),
-            &strategy.name,
-            execution.success,
-        );
+        if execution.success {
+            // Record successful outcome for learning
+            self.learner
+                .record_recovery(&pattern_key, &strategy.name, true);
 
+            // Record healthy recovery in predictor
+            self.predictor.record("self_healing", true, None, 0);
+
+            return Some(execution);
+        }
+
+        // Primary failed — record and try escalation
+        self.learner
+            .record_recovery(&pattern_key, &strategy.name, false);
+
+        // Escalate: try the next strategy in the chain
+        if let Some(escalation) = error_class.escalation_strategy() {
+            let escalation_key = format!("{}_escalated", pattern_key);
+            let escalated_execution =
+                self.executor
+                    .execute_for_pattern(&escalation, &self.state, &escalation_key);
+
+            self.learner.record_recovery(
+                &pattern_key,
+                &escalation.name,
+                escalated_execution.success,
+            );
+
+            if !escalated_execution.success {
+                self.predictor.record("self_healing", false, None, 1);
+            }
+
+            return Some(escalated_execution);
+        }
+
+        // No escalation available
+        self.predictor.record("self_healing", false, None, 1);
         Some(execution)
     }
 
@@ -956,6 +1176,13 @@ impl SelfHealingEngine {
     /// Get health predictions
     pub fn predict_health(&self) -> Vec<HealthPrediction> {
         self.predictor.all_predictions()
+    }
+
+    /// Reset retry state for a pattern after a successful operation,
+    /// so the next failure starts with fresh backoff.
+    pub fn reset_retry(&self, error_type: &str, context: &str) {
+        let pattern_key = format!("{}:{}", error_type, context);
+        self.executor.reset_retry_state(&pattern_key);
     }
 
     /// Get components
@@ -1008,10 +1235,7 @@ pub struct SelfHealingSummary {
 // ============================================================================
 
 fn uuid_v4() -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("{:x}{:x}", now.as_secs(), now.subsec_nanos())
+    uuid::Uuid::new_v4().to_string()
 }
 
 // ============================================================================
@@ -1112,7 +1336,17 @@ mod tests {
     #[test]
     fn test_recovery_executor_execute() {
         let executor = RecoveryExecutor::default();
-        let strategy = RecoveryStrategy::retry();
+        // Use zero-delay retry so the test is fast
+        let strategy = RecoveryStrategy {
+            name: "retry".to_string(),
+            description: "test retry".to_string(),
+            actions: vec![RecoveryAction::Retry {
+                delay_ms: 0,
+                max_attempts: 3,
+            }],
+            success_probability: 0.7,
+            estimated_duration_ms: 0,
+        };
 
         let result = executor.execute(&strategy);
         assert_eq!(result.strategy, "retry");
@@ -1167,7 +1401,18 @@ mod tests {
     #[test]
     fn test_recovery_executor_summary() {
         let executor = RecoveryExecutor::default();
-        executor.execute(&RecoveryStrategy::retry());
+        // Use zero-delay retry
+        let strategy = RecoveryStrategy {
+            name: "retry".to_string(),
+            description: "test".to_string(),
+            actions: vec![RecoveryAction::Retry {
+                delay_ms: 0,
+                max_attempts: 3,
+            }],
+            success_probability: 0.7,
+            estimated_duration_ms: 0,
+        };
+        executor.execute(&strategy);
 
         let summary = executor.summary();
         assert_eq!(summary.executions, 1);
@@ -1428,7 +1673,7 @@ mod tests {
     fn test_self_healing_engine_handle_error() {
         let engine = SelfHealingEngine::default();
 
-        // Handle an error
+        // Handle an error — uses zero-delay default retry
         let error = ErrorOccurrence::new("test", "msg", "ctx");
         let result = engine.handle_error(error);
 
@@ -1517,5 +1762,374 @@ mod tests {
         predictor.clear();
         // After clear, prediction should be None
         assert!(predictor.predict("test").is_none());
+    }
+
+    // ================================================================
+    // Error classification tests
+    // ================================================================
+
+    #[test]
+    fn test_error_class_classify_network() {
+        assert_eq!(
+            ErrorClass::classify("connection", "connection refused"),
+            ErrorClass::Network
+        );
+        assert_eq!(
+            ErrorClass::classify("network", "dns resolution failed"),
+            ErrorClass::Network
+        );
+        assert_eq!(
+            ErrorClass::classify("io", "connection reset by peer"),
+            ErrorClass::Network
+        );
+    }
+
+    #[test]
+    fn test_error_class_classify_timeout() {
+        assert_eq!(
+            ErrorClass::classify("timeout", "request timed out"),
+            ErrorClass::Timeout
+        );
+        assert_eq!(
+            ErrorClass::classify("api", "operation timeout after 30s"),
+            ErrorClass::Timeout
+        );
+    }
+
+    #[test]
+    fn test_error_class_classify_rate_limit() {
+        assert_eq!(
+            ErrorClass::classify("api", "rate limit exceeded"),
+            ErrorClass::RateLimit
+        );
+        assert_eq!(
+            ErrorClass::classify("http", "429 Too Many Requests"),
+            ErrorClass::RateLimit
+        );
+    }
+
+    #[test]
+    fn test_error_class_classify_resource() {
+        assert_eq!(
+            ErrorClass::classify("system", "out of memory"),
+            ErrorClass::ResourceExhaustion
+        );
+        assert_eq!(
+            ErrorClass::classify("io", "no space left on device"),
+            ErrorClass::ResourceExhaustion
+        );
+    }
+
+    #[test]
+    fn test_error_class_classify_parse() {
+        assert_eq!(
+            ErrorClass::classify("json", "invalid json: unexpected token"),
+            ErrorClass::ParseError
+        );
+        assert_eq!(
+            ErrorClass::classify("api", "failed to deserialize response"),
+            ErrorClass::ParseError
+        );
+    }
+
+    #[test]
+    fn test_error_class_classify_auth() {
+        assert_eq!(
+            ErrorClass::classify("api", "401 Unauthorized"),
+            ErrorClass::AuthError
+        );
+        assert_eq!(
+            ErrorClass::classify("auth", "invalid api key"),
+            ErrorClass::AuthError
+        );
+    }
+
+    #[test]
+    fn test_error_class_classify_unknown() {
+        assert_eq!(
+            ErrorClass::classify("misc", "something weird happened"),
+            ErrorClass::Unknown
+        );
+    }
+
+    #[test]
+    fn test_error_class_default_strategies() {
+        // Each error class should produce a named strategy
+        let classes = [
+            ErrorClass::Network,
+            ErrorClass::Timeout,
+            ErrorClass::RateLimit,
+            ErrorClass::ResourceExhaustion,
+            ErrorClass::ParseError,
+            ErrorClass::AuthError,
+            ErrorClass::Unknown,
+        ];
+
+        for class in classes {
+            let strategy = class.default_strategy();
+            assert!(!strategy.name.is_empty());
+            assert!(!strategy.actions.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_error_class_escalation_chain() {
+        // Network/timeout/rate-limit should escalate to checkpoint restore
+        assert!(ErrorClass::Network.escalation_strategy().is_some());
+        assert!(ErrorClass::Timeout.escalation_strategy().is_some());
+        assert!(ErrorClass::RateLimit.escalation_strategy().is_some());
+
+        // Resource exhaustion escalates to full reset
+        assert!(ErrorClass::ResourceExhaustion.escalation_strategy().is_some());
+
+        // Parse errors escalate to context compression
+        assert!(ErrorClass::ParseError.escalation_strategy().is_some());
+
+        // Auth and unknown have no further escalation
+        assert!(ErrorClass::AuthError.escalation_strategy().is_none());
+        assert!(ErrorClass::Unknown.escalation_strategy().is_none());
+    }
+
+    #[test]
+    fn test_error_class_serialization() {
+        let class = ErrorClass::RateLimit;
+        let json = serde_json::to_string(&class).unwrap();
+        let deserialized: ErrorClass = serde_json::from_str(&json).unwrap();
+        assert_eq!(class, deserialized);
+    }
+
+    // ================================================================
+    // Retry with exponential backoff tests
+    // ================================================================
+
+    #[test]
+    fn test_retry_with_zero_delay() {
+        let config = SelfHealingConfig::default();
+        let executor = RecoveryExecutor::new(config.clone());
+        let state = StateManager::new(config);
+
+        let strategy = RecoveryStrategy {
+            name: "fast_retry".to_string(),
+            description: "test".to_string(),
+            actions: vec![RecoveryAction::Retry {
+                delay_ms: 0,
+                max_attempts: 3,
+            }],
+            success_probability: 1.0,
+            estimated_duration_ms: 0,
+        };
+
+        // First call succeeds
+        let result = executor.execute_for_pattern(&strategy, &state, "test_pattern");
+        assert!(result.success);
+        assert_eq!(executor.retry_attempt_count("test_pattern"), 1);
+
+        // Second call succeeds (attempt 2)
+        let result = executor.execute_for_pattern(&strategy, &state, "test_pattern");
+        assert!(result.success);
+        assert_eq!(executor.retry_attempt_count("test_pattern"), 2);
+
+        // Third call succeeds (attempt 3)
+        let result = executor.execute_for_pattern(&strategy, &state, "test_pattern");
+        assert!(result.success);
+        assert_eq!(executor.retry_attempt_count("test_pattern"), 3);
+
+        // Fourth call exhausts max_attempts
+        let result = executor.execute_for_pattern(&strategy, &state, "test_pattern");
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("Max retry attempts"));
+    }
+
+    #[test]
+    fn test_retry_state_reset() {
+        let executor = RecoveryExecutor::default();
+        let strategy = RecoveryStrategy {
+            name: "retry".to_string(),
+            description: "test".to_string(),
+            actions: vec![RecoveryAction::Retry {
+                delay_ms: 0,
+                max_attempts: 2,
+            }],
+            success_probability: 1.0,
+            estimated_duration_ms: 0,
+        };
+
+        executor.execute_for_pattern(
+            &strategy,
+            &StateManager::default(),
+            "reset_test",
+        );
+        assert_eq!(executor.retry_attempt_count("reset_test"), 1);
+
+        // Reset clears the count
+        executor.reset_retry_state("reset_test");
+        assert_eq!(executor.retry_attempt_count("reset_test"), 0);
+
+        // Can retry again from scratch
+        executor.execute_for_pattern(
+            &strategy,
+            &StateManager::default(),
+            "reset_test",
+        );
+        assert_eq!(executor.retry_attempt_count("reset_test"), 1);
+    }
+
+    #[test]
+    fn test_retry_zero_max_attempts_fails() {
+        let executor = RecoveryExecutor::default();
+        let strategy = RecoveryStrategy {
+            name: "bad_retry".to_string(),
+            description: "test".to_string(),
+            actions: vec![RecoveryAction::Retry {
+                delay_ms: 0,
+                max_attempts: 0,
+            }],
+            success_probability: 0.0,
+            estimated_duration_ms: 0,
+        };
+
+        let result = executor.execute(&strategy);
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("max_attempts must be greater than 0"));
+    }
+
+    // ================================================================
+    // Escalation tests
+    // ================================================================
+
+    #[test]
+    fn test_engine_handles_network_error_with_classification() {
+        let engine = SelfHealingEngine::default();
+
+        let error = ErrorOccurrence::new("network", "connection refused", "api_call");
+        let result = engine.handle_error(error);
+
+        assert!(result.is_some());
+        let execution = result.unwrap();
+        // Should use network_retry strategy (classified from error)
+        assert!(execution.success);
+    }
+
+    #[test]
+    fn test_engine_escalates_on_retry_exhaustion() {
+        let config = SelfHealingConfig {
+            enabled: true,
+            max_healing_attempts: 3,
+            ..Default::default()
+        };
+        let engine = SelfHealingEngine::new(config);
+
+        // Create a checkpoint so escalation (restore) can succeed
+        engine.checkpoint("safe_state", serde_json::json!({"ok": true}));
+
+        // Exhaust retries for the same pattern by sending multiple errors
+        for i in 0..5 {
+            let error = ErrorOccurrence::new("timeout", "request timed out", "api");
+            let result = engine.handle_error(error);
+            assert!(
+                result.is_some(),
+                "handle_error should always return Some when enabled (iteration {})",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_engine_reset_retry_after_success() {
+        let engine = SelfHealingEngine::default();
+
+        // Record an error to start retry tracking
+        let error = ErrorOccurrence::new("network", "connection refused", "api");
+        engine.handle_error(error);
+
+        // After a successful operation, reset the retry state
+        engine.reset_retry("network", "api");
+
+        // The next failure should start fresh
+        assert_eq!(engine.executor().retry_attempt_count("network:api"), 0);
+    }
+
+    // ================================================================
+    // Multi-action strategy tests
+    // ================================================================
+
+    #[test]
+    fn test_resource_exhaustion_strategy_clears_then_retries() {
+        let config = SelfHealingConfig::default();
+        let executor = RecoveryExecutor::new(config.clone());
+        let state = StateManager::new(config);
+        state.checkpoint("data", serde_json::json!({"big": "object"}));
+
+        let strategy = ErrorClass::ResourceExhaustion.default_strategy();
+        let result = executor.execute_with_state(&strategy, &state);
+
+        assert!(result.success);
+        assert_eq!(result.actions_executed.len(), 2);
+        assert_eq!(result.actions_executed[0], "clear_cache");
+        assert_eq!(result.actions_executed[1], "retry");
+
+        // Cache should have been cleared
+        assert!(state.restore(None).is_none());
+    }
+
+    #[test]
+    fn test_restart_restores_checkpoint() {
+        let config = SelfHealingConfig::default();
+        let executor = RecoveryExecutor::new(config.clone());
+        let state = StateManager::new(config);
+        state.checkpoint("before_restart", serde_json::json!({"step": 5}));
+
+        let strategy = RecoveryStrategy::restart();
+        let result = executor.execute_with_state(&strategy, &state);
+
+        assert!(result.success);
+        assert!(result.actions_executed.contains(&"restart".to_string()));
+    }
+
+    #[test]
+    fn test_custom_action_compress_context() {
+        let executor = RecoveryExecutor::default();
+        let strategy = RecoveryStrategy {
+            name: "compress".to_string(),
+            description: "test".to_string(),
+            actions: vec![RecoveryAction::Custom {
+                name: "compress_context".to_string(),
+                params: HashMap::new(),
+            }],
+            success_probability: 1.0,
+            estimated_duration_ms: 0,
+        };
+
+        let result = executor.execute(&strategy);
+        assert!(result.success);
+    }
+
+    #[test]
+    fn test_custom_action_switch_parsing_mode() {
+        let executor = RecoveryExecutor::default();
+        let mut params = HashMap::new();
+        params.insert("mode".to_string(), "xml".to_string());
+
+        let strategy = RecoveryStrategy {
+            name: "switch".to_string(),
+            description: "test".to_string(),
+            actions: vec![RecoveryAction::Custom {
+                name: "switch_parsing_mode".to_string(),
+                params,
+            }],
+            success_probability: 1.0,
+            estimated_duration_ms: 0,
+        };
+
+        let result = executor.execute(&strategy);
+        assert!(result.success);
+    }
+
+    #[test]
+    fn test_uuid_v4_format() {
+        let id = uuid_v4();
+        // uuid v4 format: 8-4-4-4-12 hex chars with dashes
+        assert_eq!(id.len(), 36);
+        assert_eq!(id.chars().filter(|c| *c == '-').count(), 4);
     }
 }

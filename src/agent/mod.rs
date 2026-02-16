@@ -1067,6 +1067,7 @@ To call a tool, use this EXACT XML structure:
                             #[cfg(feature = "resilience")]
                             {
                                 recovery_attempts = 0;
+                                self.reset_self_healing_retry();
                             }
                             if completed {
                                 record_state_transition("Executing", "Completed");
@@ -1324,6 +1325,7 @@ To call a tool, use this EXACT XML structure:
                             #[cfg(feature = "resilience")]
                             {
                                 recovery_attempts = 0;
+                                self.reset_self_healing_retry();
                             }
                             if completed {
                                 record_state_transition("Executing", "Completed");

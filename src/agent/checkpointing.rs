@@ -227,16 +227,26 @@ impl Agent {
         let restored = self.restore_from_self_healing_checkpoint();
         if restored {
             info!(
-                "Self-healing strategy '{}' restored agent state",
-                execution.strategy
+                "Self-healing recovery '{}' restored agent state (actions: {:?})",
+                execution.strategy, execution.actions_executed
             );
         } else {
             info!(
-                "Self-healing strategy '{}' succeeded without state restore",
-                execution.strategy
+                "Self-healing recovery '{}' succeeded without state restore (actions: {:?})",
+                execution.strategy, execution.actions_executed
             );
         }
 
         true
+    }
+
+    /// Call after a successful agent step to reset retry backoff state,
+    /// so the next failure starts with a fresh retry count.
+    #[cfg(feature = "resilience")]
+    pub(super) fn reset_self_healing_retry(&self) {
+        self.self_healing
+            .reset_retry("agent_execution_error", "run_task");
+        self.self_healing
+            .reset_retry("agent_execution_error", "continue_execution");
     }
 }
