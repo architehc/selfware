@@ -1139,10 +1139,8 @@ To call a tool, use this EXACT XML structure:
                     #[cfg(feature = "resilience")]
                     {
                         if recovery_attempts < self.config.continuous_work.max_recovery_attempts {
+                            recovery_attempts += 1;
                             recovered = self.try_self_healing_recovery(&error, "run_task");
-                            if recovered {
-                                recovery_attempts += 1;
-                            }
                         } else {
                             warn!(
                                 "Auto-recovery attempts exhausted ({})",
@@ -1389,11 +1387,9 @@ To call a tool, use this EXACT XML structure:
                     #[cfg(feature = "resilience")]
                     {
                         if recovery_attempts < self.config.continuous_work.max_recovery_attempts {
+                            recovery_attempts += 1;
                             recovered =
                                 self.try_self_healing_recovery(&error, "continue_execution");
-                            if recovered {
-                                recovery_attempts += 1;
-                            }
                         } else {
                             warn!(
                                 "Auto-recovery attempts exhausted ({})",

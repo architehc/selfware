@@ -358,9 +358,21 @@ impl RecoveryExecutor {
                 ));
             }
 
-            // Exponential backoff: base_delay * 2^attempt, capped at 30s
+            // Exponential backoff with jitter: base_delay * 2^attempt ± 25%, capped at 30s
             let exponent = state.attempt_count.min(5);
-            let actual_delay = base_delay_ms.saturating_mul(1u64 << exponent).min(30_000);
+            let base = base_delay_ms.saturating_mul(1u64 << exponent).min(30_000);
+            // Simple jitter: ±25% using timestamp nanos as entropy source
+            let jitter_seed = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos() as u64;
+            let jitter_range = base / 4; // 25%
+            let jitter_offset = if jitter_range > 0 {
+                jitter_seed % (jitter_range * 2)
+            } else {
+                0
+            };
+            let actual_delay = base.saturating_sub(jitter_range).saturating_add(jitter_offset).min(30_000);
 
             state.attempt_count += 1;
             state.last_delay_ms = actual_delay;
