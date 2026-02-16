@@ -304,6 +304,25 @@ fn evaluate_quit_key(
     QuitDecision::None
 }
 
+fn with_dashboard_state<R>(
+    shared_state: &SharedDashboardState,
+    f: impl FnOnce(&mut DashboardState) -> R,
+) -> R {
+    let mut state = shared_state.lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut state)
+}
+
+fn dashboard_state_snapshot(shared_state: &SharedDashboardState) -> DashboardState {
+    shared_state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+fn truncate_for_display(input: &str, max_chars: usize) -> String {
+    input.chars().take(max_chars).collect()
+}
+
 /// Run the TUI application
 ///
 /// This creates a full terminal UI with chat, command palette, and status bar.
@@ -695,7 +714,7 @@ pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
                                 user_inputs.push(input.clone());
                                 dashboard_state.log(
                                     LogLevel::Info,
-                                    &format!("User: {}", &input[..input.len().min(50)]),
+                                    &format!("User: {}", truncate_for_display(&input, 50)),
                                 );
                             }
                         }
@@ -752,43 +771,41 @@ pub fn run_tui_dashboard_with_events(
     // Scan current directory for garden view
     let cwd = std::env::current_dir().unwrap_or_default();
     let garden = crate::ui::garden::scan_directory(&cwd);
-    {
-        let mut state = shared_state.lock().unwrap();
+    with_dashboard_state(&shared_state, |state| {
         state.log(
             LogLevel::Info,
             &format!("Scanned garden: {} plants", garden.total_plants),
         );
-    }
+    });
     garden_view.set_garden(garden);
 
     // Apply dashboard layout preset
     layout_engine.apply_preset(LayoutPreset::Dashboard);
-    {
-        let mut state = shared_state.lock().unwrap();
+    with_dashboard_state(&shared_state, |state| {
         state.log(LogLevel::Info, "Dashboard initialized");
         state.log(LogLevel::Success, "Connected to model");
-    }
+    });
 
     loop {
         // Process any pending events from the agent (non-blocking)
         loop {
             match event_rx.try_recv() {
                 Ok(event) => {
-                    let mut state = shared_state.lock().unwrap();
-                    state.process_event(event);
+                    with_dashboard_state(&shared_state, |state| state.process_event(event));
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     // Sender dropped, log and continue
-                    let mut state = shared_state.lock().unwrap();
-                    state.log(LogLevel::Warning, "Event channel disconnected");
+                    with_dashboard_state(&shared_state, |state| {
+                        state.log(LogLevel::Warning, "Event channel disconnected");
+                    });
                     break;
                 }
             }
         }
 
         // Get a copy of the dashboard state for rendering
-        let dashboard_state = shared_state.lock().unwrap().clone();
+        let dashboard_state = dashboard_state_snapshot(&shared_state);
 
         // Render the dashboard
         terminal.terminal().draw(|frame| {
@@ -854,15 +871,18 @@ pub fn run_tui_dashboard_with_events(
 
             match evaluate_quit_key(&key, allow_q_quit, &mut quit_armed_at) {
                 QuitDecision::Quit => {
-                    let mut state = shared_state.lock().unwrap();
-                    state.log(LogLevel::Info, "Shutting down...");
+                    with_dashboard_state(&shared_state, |state| {
+                        state.log(LogLevel::Info, "Shutting down...");
+                    });
                     break;
                 }
                 QuitDecision::Armed => {
-                    shared_state.lock().unwrap().log(
-                        LogLevel::Warning,
-                        "Press q again within 2s to quit (or Ctrl+C to force quit).",
-                    );
+                    with_dashboard_state(&shared_state, |state| {
+                        state.log(
+                            LogLevel::Warning,
+                            "Press q again within 2s to quit (or Ctrl+C to force quit).",
+                        )
+                    });
                     continue;
                 }
                 QuitDecision::None => {}
@@ -875,16 +895,14 @@ pub fn run_tui_dashboard_with_events(
                 KeyCode::Char('d') if key.modifiers == KeyModifiers::CONTROL => {
                     if layout_engine.current_preset() == LayoutPreset::Dashboard {
                         layout_engine.apply_preset(LayoutPreset::Focus);
-                        shared_state
-                            .lock()
-                            .unwrap()
-                            .log(LogLevel::Info, "Switched to focus mode");
+                        with_dashboard_state(&shared_state, |state| {
+                            state.log(LogLevel::Info, "Switched to focus mode");
+                        });
                     } else {
                         layout_engine.apply_preset(LayoutPreset::Dashboard);
-                        shared_state
-                            .lock()
-                            .unwrap()
-                            .log(LogLevel::Info, "Switched to dashboard mode");
+                        with_dashboard_state(&shared_state, |state| {
+                            state.log(LogLevel::Info, "Switched to dashboard mode");
+                        });
                     }
                 }
                 KeyCode::Char('g') if key.modifiers == KeyModifiers::CONTROL => {
@@ -893,10 +911,9 @@ pub fn run_tui_dashboard_with_events(
                             if pane.pane_type == PaneType::GardenView {
                                 layout_engine.set_focus(pane_id);
                                 layout_engine.toggle_zoom();
-                                shared_state
-                                    .lock()
-                                    .unwrap()
-                                    .log(LogLevel::Info, "Toggled garden view");
+                                with_dashboard_state(&shared_state, |state| {
+                                    state.log(LogLevel::Info, "Toggled garden view");
+                                });
                                 break;
                             }
                         }
@@ -908,10 +925,9 @@ pub fn run_tui_dashboard_with_events(
                             if pane.pane_type == PaneType::Logs {
                                 layout_engine.set_focus(pane_id);
                                 layout_engine.toggle_zoom();
-                                shared_state
-                                    .lock()
-                                    .unwrap()
-                                    .log(LogLevel::Info, "Toggled logs view");
+                                with_dashboard_state(&shared_state, |state| {
+                                    state.log(LogLevel::Info, "Toggled logs view");
+                                });
                                 break;
                             }
                         }
@@ -919,12 +935,13 @@ pub fn run_tui_dashboard_with_events(
                 }
                 KeyCode::Char(' ') if app.input.is_empty() => {
                     paused = !paused;
-                    let mut state = shared_state.lock().unwrap();
-                    if paused {
-                        state.log(LogLevel::Warning, "Streaming paused");
-                    } else {
-                        state.log(LogLevel::Info, "Streaming resumed");
-                    }
+                    with_dashboard_state(&shared_state, |state| {
+                        if paused {
+                            state.log(LogLevel::Warning, "Streaming paused");
+                        } else {
+                            state.log(LogLevel::Info, "Streaming resumed");
+                        }
+                    });
                 }
                 KeyCode::Char('z') => {
                     layout_engine.toggle_zoom();
@@ -932,17 +949,15 @@ pub fn run_tui_dashboard_with_events(
                 // Animation speed controls
                 KeyCode::Char('+') | KeyCode::Char('=') => {
                     app.on_plus();
-                    shared_state
-                        .lock()
-                        .unwrap()
-                        .log(LogLevel::Info, &app.status);
+                    with_dashboard_state(&shared_state, |state| {
+                        state.log(LogLevel::Info, &app.status);
+                    });
                 }
                 KeyCode::Char('-') | KeyCode::Char('_') => {
                     app.on_minus();
-                    shared_state
-                        .lock()
-                        .unwrap()
-                        .log(LogLevel::Info, &app.status);
+                    with_dashboard_state(&shared_state, |state| {
+                        state.log(LogLevel::Info, &app.status);
+                    });
                 }
                 KeyCode::Tab => {
                     layout_engine.focus_next();
@@ -952,45 +967,39 @@ pub fn run_tui_dashboard_with_events(
                 }
                 KeyCode::Char('1') if key.modifiers == KeyModifiers::ALT => {
                     layout_engine.apply_preset(LayoutPreset::Focus);
-                    shared_state
-                        .lock()
-                        .unwrap()
-                        .log(LogLevel::Info, "Layout: Focus");
+                    with_dashboard_state(&shared_state, |state| {
+                        state.log(LogLevel::Info, "Layout: Focus");
+                    });
                 }
                 KeyCode::Char('2') if key.modifiers == KeyModifiers::ALT => {
                     layout_engine.apply_preset(LayoutPreset::Coding);
-                    shared_state
-                        .lock()
-                        .unwrap()
-                        .log(LogLevel::Info, "Layout: Coding");
+                    with_dashboard_state(&shared_state, |state| {
+                        state.log(LogLevel::Info, "Layout: Coding");
+                    });
                 }
                 KeyCode::Char('3') if key.modifiers == KeyModifiers::ALT => {
                     layout_engine.apply_preset(LayoutPreset::Debugging);
-                    shared_state
-                        .lock()
-                        .unwrap()
-                        .log(LogLevel::Info, "Layout: Debugging");
+                    with_dashboard_state(&shared_state, |state| {
+                        state.log(LogLevel::Info, "Layout: Debugging");
+                    });
                 }
                 KeyCode::Char('4') if key.modifiers == KeyModifiers::ALT => {
                     layout_engine.apply_preset(LayoutPreset::Review);
-                    shared_state
-                        .lock()
-                        .unwrap()
-                        .log(LogLevel::Info, "Layout: Review");
+                    with_dashboard_state(&shared_state, |state| {
+                        state.log(LogLevel::Info, "Layout: Review");
+                    });
                 }
                 KeyCode::Char('5') if key.modifiers == KeyModifiers::ALT => {
                     layout_engine.apply_preset(LayoutPreset::Explore);
-                    shared_state
-                        .lock()
-                        .unwrap()
-                        .log(LogLevel::Info, "Layout: Explore");
+                    with_dashboard_state(&shared_state, |state| {
+                        state.log(LogLevel::Info, "Layout: Explore");
+                    });
                 }
                 KeyCode::Char('6') if key.modifiers == KeyModifiers::ALT => {
                     layout_engine.apply_preset(LayoutPreset::FullWorkspace);
-                    shared_state
-                        .lock()
-                        .unwrap()
-                        .log(LogLevel::Info, "Layout: Full Workspace");
+                    with_dashboard_state(&shared_state, |state| {
+                        state.log(LogLevel::Info, "Layout: Full Workspace");
+                    });
                 }
                 KeyCode::Enter => {
                     if !show_help {
@@ -998,17 +1007,18 @@ pub fn run_tui_dashboard_with_events(
                             if input.starts_with('/') {
                                 app.add_user_message(&input);
                                 app.status = format!("Executed: {}", input);
-                                shared_state
-                                    .lock()
-                                    .unwrap()
-                                    .log(LogLevel::Info, &format!("Command: {}", input));
+                                with_dashboard_state(&shared_state, |state| {
+                                    state.log(LogLevel::Info, &format!("Command: {}", input));
+                                });
                             } else {
                                 app.add_user_message(&input);
                                 user_inputs.push(input.clone());
-                                shared_state.lock().unwrap().log(
-                                    LogLevel::Info,
-                                    &format!("User: {}", &input[..input.len().min(50)]),
-                                );
+                                with_dashboard_state(&shared_state, |state| {
+                                    state.log(
+                                        LogLevel::Info,
+                                        &format!("User: {}", truncate_for_display(&input, 50)),
+                                    );
+                                });
                             }
                         }
                     }

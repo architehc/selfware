@@ -149,7 +149,7 @@ impl DashboardState {
                 self.log(LogLevel::Success, &format!("Completed: {}", message));
             }
             TuiEvent::AgentError { message } => {
-                self.status_message = format!("Error: {}", &message[..message.len().min(30)]);
+                self.status_message = format!("Error: {}", truncate_for_display(&message, 30));
                 self.log(LogLevel::Error, &message);
             }
             TuiEvent::ToolStarted { name } => {
@@ -196,6 +196,10 @@ impl DashboardState {
             }
         }
     }
+}
+
+fn truncate_for_display(input: &str, max_chars: usize) -> String {
+    input.chars().take(max_chars).collect()
 }
 
 /// Thread-safe wrapper for DashboardState
