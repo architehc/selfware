@@ -72,9 +72,12 @@ impl ContextCompressor {
             Message::user(summary_content)
         ];
 
-        let response = client
-            .chat(summary_request, None, ThinkingMode::Disabled)
-            .await?;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            client.chat(summary_request, None, ThinkingMode::Disabled),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Context compression API call timed out after 120s"))??;
 
         let summary = response.choices[0].message.content.clone();
         info!("Generated summary: {} chars", summary.len());

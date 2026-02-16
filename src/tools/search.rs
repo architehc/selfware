@@ -101,161 +101,165 @@ impl Tool for GrepSearch {
 
     #[instrument(level = "info", skip(self, args), fields(tool_name = self.name()))]
     async fn execute(&self, args: Value) -> Result<Value> {
-        let pattern_str = args
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .context("Missing required parameter: pattern")?;
+        let result = tokio::task::spawn_blocking(move || -> Result<Value> {
+            let pattern_str = args
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .context("Missing required parameter: pattern")?;
 
-        let path_str = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .context("Missing required parameter: path")?;
+            let path_str = args
+                .get("path")
+                .and_then(|v| v.as_str())
+                .context("Missing required parameter: path")?;
 
-        let recursive = args
-            .get("recursive")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        let case_insensitive = args
-            .get("case_insensitive")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let context_lines = args
-            .get("context_lines")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(2) as usize;
-        let max_matches = args
-            .get("max_matches")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(100) as usize;
-        let include_pattern = args.get("include").and_then(|v| v.as_str());
-        let exclude_pattern = args.get("exclude").and_then(|v| v.as_str());
+            let recursive = args
+                .get("recursive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let case_insensitive = args
+                .get("case_insensitive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let context_lines = args
+                .get("context_lines")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(2) as usize;
+            let max_matches = args
+                .get("max_matches")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(100) as usize;
+            let include_pattern = args.get("include").and_then(|v| v.as_str());
+            let exclude_pattern = args.get("exclude").and_then(|v| v.as_str());
 
-        // Build regex
-        let regex = if case_insensitive {
-            Regex::new(&format!("(?i){}", pattern_str))
-        } else {
-            Regex::new(pattern_str)
-        }
-        .context("Invalid regex pattern")?;
-
-        // Build include/exclude globs
-        let include_glob = include_pattern
-            .map(glob::Pattern::new)
-            .transpose()
-            .context("Invalid include pattern")?;
-        let exclude_glob = exclude_pattern
-            .map(glob::Pattern::new)
-            .transpose()
-            .context("Invalid exclude pattern")?;
-
-        let path = Path::new(path_str);
-        let mut matches = Vec::new();
-        let mut total_matches = 0;
-
-        // Collect files to search
-        let files: Vec<_> = if path.is_file() {
-            vec![path.to_path_buf()]
-        } else {
-            let walker = if recursive {
-                WalkDir::new(path)
+            // Build regex
+            let regex = if case_insensitive {
+                Regex::new(&format!("(?i){}", pattern_str))
             } else {
-                WalkDir::new(path).max_depth(1)
-            };
-
-            walker
-                .into_iter()
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().is_file())
-                .filter(|e| {
-                    let file_name = e.file_name().to_string_lossy();
-                    // Skip hidden files and common binary/build directories
-                    if file_name.starts_with('.') {
-                        return false;
-                    }
-                    let path_str = e.path().to_string_lossy();
-                    if path_str.contains("/target/")
-                        || path_str.contains("/.git/")
-                        || path_str.contains("/node_modules/")
-                    {
-                        return false;
-                    }
-                    // Apply include/exclude patterns
-                    if let Some(ref glob) = include_glob {
-                        if !glob.matches(&file_name) {
-                            return false;
-                        }
-                    }
-                    if let Some(ref glob) = exclude_glob {
-                        if glob.matches(&file_name) {
-                            return false;
-                        }
-                    }
-                    true
-                })
-                .map(|e| e.path().to_path_buf())
-                .collect()
-        };
-
-        // Search files
-        for file_path in files {
-            if matches.len() >= max_matches {
-                break;
+                Regex::new(pattern_str)
             }
+            .context("Invalid regex pattern")?;
 
-            let content = match std::fs::read_to_string(&file_path) {
-                Ok(c) => c,
-                Err(_) => continue, // Skip binary/unreadable files
+            // Build include/exclude globs
+            let include_glob = include_pattern
+                .map(glob::Pattern::new)
+                .transpose()
+                .context("Invalid include pattern")?;
+            let exclude_glob = exclude_pattern
+                .map(glob::Pattern::new)
+                .transpose()
+                .context("Invalid exclude pattern")?;
+
+            let path = Path::new(path_str);
+            let mut matches = Vec::new();
+            let mut total_matches = 0;
+
+            // Collect files to search
+            let files: Vec<_> = if path.is_file() {
+                vec![path.to_path_buf()]
+            } else {
+                let walker = if recursive {
+                    WalkDir::new(path)
+                } else {
+                    WalkDir::new(path).max_depth(1)
+                };
+
+                walker
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_file())
+                    .filter(|e| {
+                        let file_name = e.file_name().to_string_lossy();
+                        // Skip hidden files and common binary/build directories
+                        if file_name.starts_with('.') {
+                            return false;
+                        }
+                        let path_str = e.path().to_string_lossy();
+                        if path_str.contains("/target/")
+                            || path_str.contains("/.git/")
+                            || path_str.contains("/node_modules/")
+                        {
+                            return false;
+                        }
+                        // Apply include/exclude patterns
+                        if let Some(ref glob) = include_glob {
+                            if !glob.matches(&file_name) {
+                                return false;
+                            }
+                        }
+                        if let Some(ref glob) = exclude_glob {
+                            if glob.matches(&file_name) {
+                                return false;
+                            }
+                        }
+                        true
+                    })
+                    .map(|e| e.path().to_path_buf())
+                    .collect()
             };
 
-            let lines: Vec<&str> = content.lines().collect();
-
-            for (line_num, line) in lines.iter().enumerate() {
+            // Search files
+            for file_path in files {
                 if matches.len() >= max_matches {
                     break;
                 }
 
-                if let Some(m) = regex.find(line) {
-                    total_matches += 1;
+                let content = match std::fs::read_to_string(&file_path) {
+                    Ok(c) => c,
+                    Err(_) => continue, // Skip binary/unreadable files
+                };
 
-                    // Get context
-                    let start = line_num.saturating_sub(context_lines);
-                    let end = (line_num + context_lines + 1).min(lines.len());
+                let lines: Vec<&str> = content.lines().collect();
 
-                    let context_before: Vec<String> = lines[start..line_num]
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect();
+                for (line_num, line) in lines.iter().enumerate() {
+                    if matches.len() >= max_matches {
+                        break;
+                    }
 
-                    let context_after: Vec<String> = if line_num + 1 < lines.len() {
-                        lines[(line_num + 1)..end]
+                    if let Some(m) = regex.find(line) {
+                        total_matches += 1;
+
+                        // Get context
+                        let start = line_num.saturating_sub(context_lines);
+                        let end = (line_num + context_lines + 1).min(lines.len());
+
+                        let context_before: Vec<String> = lines[start..line_num]
                             .iter()
                             .map(|s| s.to_string())
-                            .collect()
-                    } else {
-                        vec![]
-                    };
+                            .collect();
 
-                    matches.push(GrepMatch {
-                        file: file_path.to_string_lossy().to_string(),
-                        line: (line_num + 1) as u32,
-                        column: (m.start() + 1) as u32,
-                        content: line.to_string(),
-                        context_before,
-                        context_after,
-                    });
+                        let context_after: Vec<String> = if line_num + 1 < lines.len() {
+                            lines[(line_num + 1)..end]
+                                .iter()
+                                .map(|s| s.to_string())
+                                .collect()
+                        } else {
+                            vec![]
+                        };
+
+                        matches.push(GrepMatch {
+                            file: file_path.to_string_lossy().to_string(),
+                            line: (line_num + 1) as u32,
+                            column: (m.start() + 1) as u32,
+                            content: line.to_string(),
+                            context_before,
+                            context_after,
+                        });
+                    }
                 }
             }
-        }
 
-        // We're truncated if we stopped early (matches reached max_matches while there might be more)
-        let truncated = matches.len() >= max_matches;
+            // We're truncated if we stopped early (matches reached max_matches while there might be more)
+            let truncated = matches.len() >= max_matches;
 
-        Ok(serde_json::json!({
-            "matches": matches,
-            "count": matches.len(),
-            "total_matches": total_matches,
-            "truncated": truncated
-        }))
+            Ok(serde_json::json!({
+                "matches": matches,
+                "count": matches.len(),
+                "total_matches": total_matches,
+                "truncated": truncated
+            }))
+        })
+        .await??;
+        Ok(result)
     }
 }
 
@@ -294,74 +298,79 @@ impl Tool for GlobFind {
 
     #[instrument(level = "info", skip(self, args), fields(tool_name = self.name()))]
     async fn execute(&self, args: Value) -> Result<Value> {
-        let pattern_str = args
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .context("Missing required parameter: pattern")?;
+        let result = tokio::task::spawn_blocking(move || -> Result<Value> {
+            let pattern_str = args
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .context("Missing required parameter: pattern")?;
 
-        let base_path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            let base_path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
-        let max_results = args
-            .get("max_results")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(100) as usize;
+            let max_results = args
+                .get("max_results")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(100) as usize;
 
-        // Combine base path with pattern
-        let full_pattern = if pattern_str.starts_with('/') || pattern_str.starts_with("./") {
-            pattern_str.to_string()
-        } else {
-            format!("{}/{}", base_path, pattern_str)
-        };
+            // Combine base path with pattern
+            let full_pattern = if pattern_str.starts_with('/') || pattern_str.starts_with("./") {
+                pattern_str.to_string()
+            } else {
+                format!("{}/{}", base_path, pattern_str)
+            };
 
-        let glob_pattern = glob::Pattern::new(&full_pattern).context("Invalid glob pattern")?;
+            let glob_pattern =
+                glob::Pattern::new(&full_pattern).context("Invalid glob pattern")?;
 
-        let mut files = Vec::new();
+            let mut files = Vec::new();
 
-        // Walk directory and match against pattern
-        for entry in WalkDir::new(base_path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-        {
-            if files.len() >= max_results {
-                break;
-            }
-
-            let path = entry.path();
-            let path_str = path.to_string_lossy();
-
-            // Skip common directories
-            if path_str.contains("/.git/")
-                || path_str.contains("/target/")
-                || path_str.contains("/node_modules/")
+            // Walk directory and match against pattern
+            for entry in WalkDir::new(base_path)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().is_file())
             {
-                continue;
+                if files.len() >= max_results {
+                    break;
+                }
+
+                let path = entry.path();
+                let path_str = path.to_string_lossy();
+
+                // Skip common directories
+                if path_str.contains("/.git/")
+                    || path_str.contains("/target/")
+                    || path_str.contains("/node_modules/")
+                {
+                    continue;
+                }
+
+                if glob_pattern.matches(&path_str) {
+                    let metadata = std::fs::metadata(path).ok();
+                    let modified = metadata.as_ref().and_then(|m| {
+                        m.modified().ok().map(|t| {
+                            let datetime: chrono::DateTime<chrono::Utc> = t.into();
+                            datetime.to_rfc3339()
+                        })
+                    });
+
+                    files.push(FileInfo {
+                        path: path_str.to_string(),
+                        size: metadata.map(|m| m.len()).unwrap_or(0),
+                        modified,
+                    });
+                }
             }
 
-            if glob_pattern.matches(&path_str) {
-                let metadata = std::fs::metadata(path).ok();
-                let modified = metadata.as_ref().and_then(|m| {
-                    m.modified().ok().map(|t| {
-                        let datetime: chrono::DateTime<chrono::Utc> = t.into();
-                        datetime.to_rfc3339()
-                    })
-                });
+            let truncated = files.len() >= max_results;
 
-                files.push(FileInfo {
-                    path: path_str.to_string(),
-                    size: metadata.map(|m| m.len()).unwrap_or(0),
-                    modified,
-                });
-            }
-        }
-
-        let truncated = files.len() >= max_results;
-
-        Ok(serde_json::json!({
-            "files": files,
-            "count": files.len(),
-            "truncated": truncated
-        }))
+            Ok(serde_json::json!({
+                "files": files,
+                "count": files.len(),
+                "truncated": truncated
+            }))
+        })
+        .await??;
+        Ok(result)
     }
 }
 
@@ -406,91 +415,95 @@ impl Tool for SymbolSearch {
 
     #[instrument(level = "info", skip(self, args), fields(tool_name = self.name()))]
     async fn execute(&self, args: Value) -> Result<Value> {
-        let name_pattern = args
-            .get("name")
-            .and_then(|v| v.as_str())
-            .context("Missing required parameter: name")?;
+        let result = tokio::task::spawn_blocking(move || -> Result<Value> {
+            let name_pattern = args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .context("Missing required parameter: name")?;
 
-        let base_path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            let base_path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
-        let symbol_type = args
-            .get("symbol_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("all");
+            let symbol_type = args
+                .get("symbol_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("all");
 
-        let max_results = args
-            .get("max_results")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(50) as usize;
+            let max_results = args
+                .get("max_results")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(50) as usize;
 
-        // Build patterns for different symbol types
-        let patterns = build_symbol_patterns(symbol_type, name_pattern)?;
+            // Build patterns for different symbol types
+            let patterns = build_symbol_patterns(symbol_type, name_pattern)?;
 
-        let mut symbols = Vec::new();
+            let mut symbols = Vec::new();
 
-        // Walk Rust files
-        for entry in WalkDir::new(base_path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_type().is_file()
-                    && e.path().extension().map(|ext| ext == "rs").unwrap_or(false)
-            })
-        {
-            if symbols.len() >= max_results {
-                break;
-            }
-
-            let path = entry.path();
-            let path_str = path.to_string_lossy();
-
-            // Skip target directory
-            if path_str.contains("/target/") {
-                continue;
-            }
-
-            let content = match std::fs::read_to_string(path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-
-            for (regex, sym_type) in &patterns {
+            // Walk Rust files
+            for entry in WalkDir::new(base_path)
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_type().is_file()
+                        && e.path().extension().map(|ext| ext == "rs").unwrap_or(false)
+                })
+            {
                 if symbols.len() >= max_results {
                     break;
                 }
 
-                for (line_num, line) in content.lines().enumerate() {
+                let path = entry.path();
+                let path_str = path.to_string_lossy();
+
+                // Skip target directory
+                if path_str.contains("/target/") {
+                    continue;
+                }
+
+                let content = match std::fs::read_to_string(path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+
+                for (regex, sym_type) in &patterns {
                     if symbols.len() >= max_results {
                         break;
                     }
 
-                    if let Some(caps) = regex.captures(line) {
-                        let symbol_name = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-
-                        // Verify the name matches our pattern
-                        if !symbol_name
-                            .to_lowercase()
-                            .contains(&name_pattern.to_lowercase())
-                        {
-                            continue;
+                    for (line_num, line) in content.lines().enumerate() {
+                        if symbols.len() >= max_results {
+                            break;
                         }
 
-                        symbols.push(Symbol {
-                            name: symbol_name.to_string(),
-                            symbol_type: sym_type.to_string(),
-                            file: path_str.to_string(),
-                            line: (line_num + 1) as u32,
-                            signature: line.trim().to_string(),
-                        });
+                        if let Some(caps) = regex.captures(line) {
+                            let symbol_name = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+
+                            // Verify the name matches our pattern
+                            if !symbol_name
+                                .to_lowercase()
+                                .contains(&name_pattern.to_lowercase())
+                            {
+                                continue;
+                            }
+
+                            symbols.push(Symbol {
+                                name: symbol_name.to_string(),
+                                symbol_type: sym_type.to_string(),
+                                file: path_str.to_string(),
+                                line: (line_num + 1) as u32,
+                                signature: line.trim().to_string(),
+                            });
+                        }
                     }
                 }
             }
-        }
 
-        Ok(serde_json::json!({
-            "symbols": symbols,
-            "count": symbols.len()
-        }))
+            Ok(serde_json::json!({
+                "symbols": symbols,
+                "count": symbols.len()
+            }))
+        })
+        .await??;
+        Ok(result)
     }
 }
 

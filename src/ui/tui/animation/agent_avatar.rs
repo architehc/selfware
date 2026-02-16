@@ -13,6 +13,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::Widget,
 };
+use unicode_width::UnicodeWidthChar;
 
 /// Agent roles with associated icons and colors
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -318,11 +319,12 @@ impl Widget for &AgentAvatar {
         // Write icon
         let mut x_offset = 0u16;
         for ch in icon.chars() {
-            if inner_x + x_offset < area.x + area.width - 1 {
+            let char_width = ch.width().unwrap_or(1) as u16;
+            if inner_x + x_offset + char_width <= area.x + area.width - 1 {
                 buf.get_mut(inner_x + x_offset, inner_y)
                     .set_symbol(&ch.to_string())
                     .set_style(Style::default().fg(self.role.color()));
-                x_offset += 1;
+                x_offset += char_width;
             }
         }
 
@@ -382,12 +384,14 @@ impl Widget for &AgentAvatar {
                 token_text
             };
 
-            for (i, ch) in display_text.chars().enumerate() {
-                let x = inner_x + i as u16;
-                if x < area.x + area.width - 1 {
-                    buf.get_mut(x, token_y)
+            let mut token_x_offset = 0u16;
+            for ch in display_text.chars() {
+                let char_width = ch.width().unwrap_or(1) as u16;
+                if inner_x + token_x_offset + char_width <= area.x + area.width - 1 {
+                    buf.get_mut(inner_x + token_x_offset, token_y)
                         .set_symbol(&ch.to_string())
                         .set_style(Style::default().fg(Color::Gray));
+                    token_x_offset += char_width;
                 }
             }
         }

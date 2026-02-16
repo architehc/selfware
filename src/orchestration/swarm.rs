@@ -13,7 +13,7 @@
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -419,13 +419,18 @@ impl Decision {
     }
 }
 
+/// Maximum number of entries retained in the access log before older entries
+/// are evicted. This prevents unbounded memory growth when many read/write/delete
+/// operations are performed on shared memory.
+const MAX_ACCESS_LOG_ENTRIES: usize = 10_000;
+
 /// Shared working memory for the swarm
 #[derive(Debug, Clone, Default)]
 pub struct SharedMemory {
     /// Key-value store
     data: HashMap<String, MemoryEntry>,
-    /// Access log
-    access_log: Vec<MemoryAccess>,
+    /// Access log (bounded ring buffer)
+    access_log: VecDeque<MemoryAccess>,
 }
 
 /// Memory entry
@@ -506,12 +511,15 @@ impl SharedMemory {
             );
         }
 
-        self.access_log.push(MemoryAccess {
+        self.access_log.push_back(MemoryAccess {
             key,
             agent_id,
             action: MemoryAction::Write,
             timestamp: now,
         });
+        if self.access_log.len() > MAX_ACCESS_LOG_ENTRIES {
+            self.access_log.pop_front();
+        }
     }
 
     /// Read a value
@@ -524,12 +532,15 @@ impl SharedMemory {
         if let Some(entry) = self.data.get_mut(key) {
             entry.access_count += 1;
 
-            self.access_log.push(MemoryAccess {
+            self.access_log.push_back(MemoryAccess {
                 key: key.to_string(),
                 agent_id: agent_id.into(),
                 action: MemoryAction::Read,
                 timestamp: now,
             });
+            if self.access_log.len() > MAX_ACCESS_LOG_ENTRIES {
+                self.access_log.pop_front();
+            }
 
             Some(entry.value.clone())
         } else {
@@ -549,12 +560,15 @@ impl SharedMemory {
             .unwrap_or_default()
             .as_secs();
 
-        self.access_log.push(MemoryAccess {
+        self.access_log.push_back(MemoryAccess {
             key: key.to_string(),
             agent_id: agent_id.into(),
             action: MemoryAction::Delete,
             timestamp: now,
         });
+        if self.access_log.len() > MAX_ACCESS_LOG_ENTRIES {
+            self.access_log.pop_front();
+        }
 
         self.data.remove(key).map(|e| e.value)
     }
@@ -585,7 +599,7 @@ impl SharedMemory {
     }
 
     /// Get access log
-    pub fn access_log(&self) -> &[MemoryAccess] {
+    pub fn access_log(&self) -> &VecDeque<MemoryAccess> {
         &self.access_log
     }
 
