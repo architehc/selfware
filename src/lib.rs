@@ -37,7 +37,6 @@ pub mod ui;
 // ============================================================================
 pub mod analysis;
 pub mod cognitive;
-pub mod collaboration;
 pub mod devops;
 pub mod observability;
 pub mod orchestration;

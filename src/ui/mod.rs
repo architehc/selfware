@@ -17,6 +17,3 @@ pub mod theme;
 pub mod demo;
 #[cfg(feature = "tui")]
 pub mod tui;
-
-// Accessibility features
-pub mod accessibility;
