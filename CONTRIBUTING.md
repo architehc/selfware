@@ -146,21 +146,31 @@ Place test fixtures in `tests/e2e-projects/`.
 
 ```
 src/
-├── agent/          # Core agent logic and execution loop
-├── api/            # API client for LLM backends
-├── tools/          # Built-in tool implementations
-├── tui/            # Terminal UI (feature-gated)
-├── ui/             # CLI UI components
-├── safety.rs       # Safety validation
-├── config.rs       # Configuration management
-└── lib.rs          # Library exports
+├── agent/          # Core agent logic, checkpointing, self-healing integration
+├── api/            # LLM API client with timeout and retry
+├── tools/          # 54 built-in tool implementations
+├── ui/             # CLI UI components (style, animations, banners, TUI)
+├── analysis/       # Code analysis, BM25 search, vector store
+├── cognitive/      # PDVR cycle, working/episodic memory
+├── config/         # Configuration management
+├── devops/         # Container support, process manager
+├── observability/  # Telemetry and tracing
+├── orchestration/  # Multi-agent swarm, planning, workflows
+├── safety/         # Path validation, sandboxing, threat modeling
+├── self_healing/   # Error classification, recovery executor (feature: resilience)
+├── session/        # Checkpoint persistence
+├── testing/        # Verification gates, contract testing, workflow DSL
+├── memory.rs       # Memory management
+├── tool_parser.rs  # Multi-format XML tool call parser
+└── token_count.rs  # Token estimation
 ```
 
 ### Key Abstractions
 
 - **Agent**: The main execution loop that coordinates LLM calls and tool execution
-- **Tool**: Interface for implementing new tools
+- **Tool**: Interface for implementing new tools (54 built-in)
 - **SafetyChecker**: Validates operations before execution
+- **SelfHealingEngine**: Error classification, recovery strategies, exponential backoff
 - **Config**: Runtime configuration management
 
 ## Adding New Tools
@@ -209,13 +219,27 @@ impl Tool for MyTool {
 
 Available feature flags in `Cargo.toml`:
 
-- `extras` - Enables TUI, caching, and advanced features
-- `integration` - Enables integration tests
+| Flag | Description |
+|------|-------------|
+| `tui` | TUI dashboard mode with animations and demos |
+| `workflows` | Workflow automation and parallel execution |
+| `resilience` | Self-healing, error classification, recovery strategies |
+| `execution-modes` | Execution control (dry-run, confirm, yolo) |
+| `cache` | Response caching layer |
+| `log-analysis` | Log analysis and diagnostics |
+| `tokens` | Token counting and management |
+| `extras` | Convenience flag enabling all optional modules |
+| `integration` | Enables integration tests |
 
 ```bash
+# Build with all features
+cargo build --all-features
+
 # Build with specific features
-cargo build --features extras
-cargo build --features integration
+cargo build --features "resilience,tui"
+
+# Run tests with resilience
+cargo test --features resilience
 ```
 
 ## Questions?

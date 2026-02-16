@@ -160,14 +160,16 @@ Files are **plants**, directories are **beds**, and your tools are **craftsman i
 
 ## Features
 
-- **53 Built-in Tools**: File tending, git cultivation, cargo crafting, code foraging
+- **54 Built-in Tools**: File tending, git cultivation, cargo crafting, code foraging
 - **Multi-Agent Swarm**: Up to 16 concurrent agents with role specialization
 - **Multi-layer Safety**: Path guardians, command sentinels, protected groves
 - **Task Persistence**: Checkpoint seeds survive frost (crashes)
+- **Self-Healing Recovery**: Error classification, exponential backoff with jitter, automatic escalation
 - **Cognitive Architecture**: PDVR cycle with working memory
 - **Selfware UI**: Warm amber tones, animated spinners, ASCII art banners
 - **Multi-Model Support**: Works with Qwen3-Coder, Kimi K2.5, DeepSeek, and other local LLMs
 - **Robust Tool Parser**: Handles multiple XML formats from different models
+- **E2E Test Harness**: 7-scenario automated benchmark suite with scoring and screenshots
 - **4-Hour Patience**: Tolerant of slow local models (0.1 tok/s supported)
 
 ## Environment Variables
@@ -302,85 +304,70 @@ The agent thinks in cycles:
 ### Run Tests
 
 ```bash
-# Unit tests (6,700+ tests, ~2 min)
-cargo test
+# All tests (~3,980 tests, ~2 min)
+cargo test --all-features
+
+# With resilience features (self-healing, recovery)
+cargo test --features resilience
 
 # Integration tests with real LLM
 cargo test --features integration
 
-# Extended E2E tests (multi-hour sessions)
-SELFWARE_TIMEOUT=7200 cargo test --features integration extended_
-
-# Deep tests for slow models (4 hour timeout)
-cargo test --features integration deep_
+# Specific test modules
+cargo test --test unit            # 238 unit tests
+cargo test --test e2e_tools_test  # 21 E2E tool tests
 ```
 
 ### Test Coverage
 
 ```bash
-cargo tarpaulin --out Html
+cargo tarpaulin --all-features --out Html
 ```
 
 | Metric | Value |
 |--------|-------|
-| **Total Tests** | 6,771 |
-| **Line Coverage** | ~77% |
-| **New Module Coverage** | 92-95% |
+| **Total Tests** | ~3,980 |
+| **Test Targets** | lib (3,615) + unit (238) + e2e (21) + integration (5) + property (100) + doc (1) |
 
-Key coverage areas:
-- `ui/animations.rs` — 92.8% (47 tests)
-- `ui/banners.rs` — 95.3% (38 tests)
-- `tool_parser.rs` — 94% (43 tests)
-- `multiagent.rs` — 85% (27 tests)
+### E2E System Tests
 
-### E2E Testing
-
-The agent can create projects of varying complexity:
-
-| Complexity | Example | Duration |
-|------------|---------|----------|
-| Simple | Hello World program | 3-5s |
-| Medium | Library with tests | 30-60s |
-| Complex | Multi-module CLI app | 2-5min |
+A full E2E benchmark suite tests the agent against broken Rust projects using a local LLM:
 
 ```bash
-# Run E2E test in isolated directory
-./target/release/selfware -C /tmp/test-project run "Create a Rust library"
+# Run all 7 scenarios (requires local model at localhost:8000)
+./system_tests/projecte2e/run_projecte2e.sh
 ```
 
-### Extended Test Configuration
+| Difficulty | Scenario | What it tests |
+|------------|----------|---------------|
+| Easy | Calculator, String ops | Simple bug fixes (3-4 bugs each) |
+| Medium | JSON merge, BitSet | Logic bugs requiring analysis |
+| Hard | Scheduler, Event bus | Multi-file bugs across modules |
+| Swarm | Multi-chat session | Agent spawning and coordination |
 
-For multi-hour test sessions, use `selfware-extended-test.toml`:
-
-```toml
-[agent]
-max_iterations = 500
-step_timeout_secs = 1800    # 30 min per step
-token_budget = 500000
-
-[extended_test]
-max_duration_hours = 4
-checkpoint_interval_mins = 15
-max_concurrent_agents = 16
-```
+Produces scored reports (0-100), ANSI terminal recordings, and error analysis under `system_tests/projecte2e/reports/`.
 
 ### Project Structure
 
 ```
 src/
-├── agent/          # Core agent logic
-├── tools/          # 53 tool implementations
-├── api/            # LLM client (4hr timeout)
-├── ui/             # Selfware aesthetic
-│   ├── style.rs    # Warm organic palette
-│   ├── animations.rs # Animated spinners, progress bars
-│   ├── banners.rs  # ASCII art banners
-│   └── components.rs # Workshop UI elements
-├── multiagent.rs   # Multi-agent swarm (16 concurrent)
-├── tool_parser.rs  # Robust multi-format parser
-├── checkpoint.rs   # Task persistence
-├── cognitive.rs    # PDVR cycle, memory
-└── safety.rs       # Path guardians
+├── agent/          # Core agent logic, checkpointing, execution
+├── tools/          # 54 tool implementations
+├── api/            # LLM client with timeout and retry
+├── ui/             # Selfware aesthetic (style, animations, banners)
+├── analysis/       # Code analysis, BM25 search, vector store
+├── cognitive/      # PDVR cycle, working/episodic memory
+├── config/         # Configuration management
+├── devops/         # Container support, process manager
+├── observability/  # Telemetry and tracing
+├── orchestration/  # Multi-agent swarm, planning, workflows
+├── safety/         # Path validation, sandboxing, threat modeling
+├── self_healing/   # Error classification, recovery executor, backoff
+├── session/        # Checkpoint persistence
+├── testing/        # Verification, contract testing, workflow DSL
+├── memory.rs       # Memory management
+├── tool_parser.rs  # Robust multi-format XML parser
+└── token_count.rs  # Token estimation
 ```
 
 ### Multi-Agent System
@@ -422,7 +409,7 @@ MIT License
 
 ## Acknowledgments
 
-- Built for [Kimi K2.5](https://kimi.moonshot.cn/), [Qwen](https://qwenlm.github.io/), and other local LLMs
+- Built for [Kimi K2.5](https://kimi.moonshot.cn/), [Qwen3-Coder](https://qwenlm.github.io/), and other local LLMs
 - Inspired by the [AiSocratic](https://aisocratic.org/) movement
 - UI philosophy: software should feel like a warm workshop, not a cold datacenter
 

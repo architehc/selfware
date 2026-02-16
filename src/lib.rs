@@ -4,9 +4,10 @@
 //! selfware philosophy: software you own, software that knows you, software
 //! that lasts.
 //!
-//! - **Tools**: File operations, git, cargo, search, containers, browser
+//! - **Tools**: 54 built-in tools for file, git, cargo, search, and more
 //! - **Safety**: Multi-layer validation, path protection, command filtering
-//! - **Persistence**: Journal entries (checkpoints) for long-running tasks
+//! - **Persistence**: Checkpoint system for long-running tasks
+//! - **Self-Healing**: Error classification, recovery strategies, exponential backoff
 //! - **Cognition**: PDVR cycle (Plan-Do-Verify-Reflect), working memory
 //! - **Garden View**: Visualize your codebase as a living garden
 //! - **Local-First**: Runs on your hardware, your rules

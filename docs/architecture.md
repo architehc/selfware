@@ -90,8 +90,28 @@ Incoming ToolCall
   └─ git_push      ─► force-push guard
 ```
 
+## Self-Healing Recovery (feature: `resilience`)
+
+```text
+Error occurs in agent loop
+  │
+  ├─ ErrorClass::classify()  ─► Network | Timeout | RateLimit | ParseError | ...
+  │
+  ├─ SelfHealingEngine::handle_error()
+  │    ├─ Select strategy (learned or class default)
+  │    ├─ Execute via RecoveryExecutor
+  │    │    ├─ Retry with exponential backoff (base * 2^attempt ±25%, cap 30s)
+  │    │    ├─ RestoreCheckpoint (revert to last known-good state)
+  │    │    ├─ ClearCache / ResetState
+  │    │    └─ Custom actions (compress_context, reduce_tool_set, switch_parsing_mode)
+  │    └─ Escalate if primary strategy fails
+  │
+  └─ Agent loop resumes or aborts (bounded by max_recovery_attempts)
+```
+
 ## Key Contributor Notes
 
 - `src/main.rs` should stay a thin CLI entrypoint that delegates to library modules.
-- `src/agent/mod.rs` is currently the largest critical path file; refactors should preserve loop behavior and safety semantics.
-- Prefer adding behavior through focused submodules (`agent/*`, `safety/*`) rather than growing central files.
+- `src/agent/mod.rs` is the largest critical path file; refactors should preserve loop behavior and safety semantics.
+- Prefer adding behavior through focused submodules (`agent/*`, `safety/*`, `self_healing/*`) rather than growing central files.
+- Feature-gated modules (`self_healing`, `tui`, `tokens`) must be guarded with `#[cfg(feature = "...")]`.
