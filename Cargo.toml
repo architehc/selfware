@@ -51,7 +51,7 @@ similar = "2.4"  # Diff algorithm
 
 # Vector Memory & RAG
 hnsw_rs = "0.3"  # Hierarchical Navigable Small World graphs (embedded vector search)
-bincode = "1.3"  # Fast binary serialization
+bincode = "3.0"  # Fast binary serialization
 
 # Workflows
 serde_yaml = "0.9"  # YAML workflow definitions
