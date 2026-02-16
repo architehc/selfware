@@ -49,6 +49,7 @@ pub struct Config {
     pub max_tokens: usize,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
+    /// API authentication key (can also be set via `SELFWARE_API_KEY` env var).
     pub api_key: Option<String>,
 
     #[serde(default)]
@@ -250,6 +251,7 @@ fn default_status_interval() -> usize {
     100
 }
 
+/// Safety guardrails: allowed/denied paths, protected branches, and confirmation rules.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SafetyConfig {
     #[serde(default = "default_allowed_paths")]
@@ -262,6 +264,7 @@ pub struct SafetyConfig {
     pub require_confirmation: Vec<String>,
 }
 
+/// Agent behavior settings: iteration limits, timeouts, token budgets, and calling mode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     #[serde(default = "default_max_iterations")]

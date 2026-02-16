@@ -21,7 +21,7 @@ use walkdir::WalkDir;
 
 use crate::token_count::estimate_content_tokens;
 use crate::vector_store::{
-    ChunkType, CodeChunker, CollectionScope, EmbeddingProvider, SearchFilter, SearchResult,
+    ChunkType, CodeChunker, CollectionScope, EmbeddingBackend, SearchFilter, SearchResult,
     VectorStore,
 };
 
@@ -362,7 +362,7 @@ impl RagEngine {
     /// Create new RAG engine
     pub fn new(
         root: impl Into<PathBuf>,
-        provider: Arc<dyn EmbeddingProvider>,
+        provider: Arc<EmbeddingBackend>,
         config: RagConfig,
     ) -> Self {
         let root = root.into();
@@ -1021,7 +1021,7 @@ mod tests {
     #[tokio::test]
     async fn test_rag_engine_creation() {
         let dir = tempdir().unwrap();
-        let provider = Arc::new(MockEmbeddingProvider::default());
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
         let config = RagConfig::default();
 
         let engine = RagEngine::new(dir.path(), provider, config);
@@ -1044,7 +1044,7 @@ mod tests {
         )
         .unwrap();
 
-        let provider = Arc::new(MockEmbeddingProvider::default());
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
         let config = RagConfig::rust();
 
         let mut engine = RagEngine::new(dir.path(), provider, config);
@@ -1071,7 +1071,7 @@ pub fn calculate_product(a: i32, b: i32) -> i32 {
         )
         .unwrap();
 
-        let provider = Arc::new(MockEmbeddingProvider::default());
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
         let config = RagConfig {
             min_score: 0.0, // Lower threshold for mock provider
             ..RagConfig::rust()
@@ -1093,7 +1093,7 @@ pub fn calculate_product(a: i32, b: i32) -> i32 {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
 
-        let provider = Arc::new(MockEmbeddingProvider::default());
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
         let config = RagConfig::rust();
 
         let mut engine = RagEngine::new(dir.path(), provider, config);
@@ -1108,7 +1108,7 @@ pub fn calculate_product(a: i32, b: i32) -> i32 {
 
     #[test]
     fn test_content_similarity() {
-        let provider = Arc::new(MockEmbeddingProvider::default());
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
         let config = RagConfig::default();
         let engine = RagEngine::new("/tmp", provider, config);
 
@@ -1216,7 +1216,7 @@ pub fn calculate_product(a: i32, b: i32) -> i32 {
         std::fs::write(dir.path().join("a.rs"), "fn a() {}").unwrap();
         std::fs::write(dir.path().join("b.rs"), "fn b() {}").unwrap();
 
-        let provider = Arc::new(MockEmbeddingProvider::default());
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
         let config = RagConfig::rust();
 
         let mut engine = RagEngine::new(dir.path(), provider, config);
@@ -1231,7 +1231,7 @@ pub fn calculate_product(a: i32, b: i32) -> i32 {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("main.rs"), "fn main() {}").unwrap();
 
-        let provider = Arc::new(MockEmbeddingProvider::default());
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
         let config = RagConfig::rust();
 
         let mut engine = RagEngine::new(dir.path(), provider, config);
@@ -1251,7 +1251,7 @@ pub fn calculate_product(a: i32, b: i32) -> i32 {
         std::fs::write(&file_path, "fn target_function() {}").unwrap();
         std::fs::write(dir.path().join("other.rs"), "fn other() {}").unwrap();
 
-        let provider = Arc::new(MockEmbeddingProvider::default());
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
         let config = RagConfig::rust();
 
         let mut engine = RagEngine::new(dir.path(), provider, config);
@@ -1522,7 +1522,7 @@ pub fn calculate_product(a: i32, b: i32) -> i32 {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("test.rs"), "fn test() {}").unwrap();
 
-        let provider = Arc::new(MockEmbeddingProvider::default());
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
         let config = RagConfig::rust();
 
         let mut engine = RagEngine::new(dir.path(), provider, config);

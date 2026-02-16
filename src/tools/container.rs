@@ -228,8 +228,8 @@ impl Tool for ContainerRun {
 
         let output = cmd.output().await.context("Failed to run container")?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
         // Container ID is in stdout when detached
         let container_id = stdout.trim().to_string();
@@ -302,8 +302,8 @@ impl Tool for ContainerStop {
 
         let output = cmd.output().await.context("Failed to stop container")?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
         Ok(json!({
             "success": output.status.success(),
@@ -385,8 +385,8 @@ impl Tool for ContainerList {
 
         let output = cmd.output().await.context("Failed to list containers")?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
         let containers: Vec<ContainerInfo> = stdout
             .lines()
@@ -497,8 +497,8 @@ impl Tool for ContainerLogs {
 
         let output = cmd.output().await.context("Failed to get container logs")?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
         // Container logs often go to stderr
         let logs = if stdout.is_empty() && !stderr.is_empty() {
@@ -621,8 +621,8 @@ impl Tool for ContainerExec {
 
         let output = cmd.output().await.context("Failed to exec in container")?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
         Ok(json!({
             "success": output.status.success(),
@@ -744,8 +744,8 @@ impl Tool for ContainerBuild {
         .context("Build timed out")?
         .context("Failed to build image")?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
         // Parse build output for image ID
         let image_id = parse_build_output(&stdout, &stderr);
@@ -833,8 +833,8 @@ impl Tool for ContainerImages {
 
         let output = cmd.output().await.context("Failed to list images")?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
         let images: Vec<ImageInfo> = stdout
             .lines()
@@ -921,8 +921,8 @@ impl Tool for ContainerPull {
         .context("Pull timed out")?
         .context("Failed to pull image")?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
         Ok(json!({
             "success": output.status.success(),
@@ -1007,8 +1007,8 @@ impl Tool for ContainerRemove {
 
         let output = cmd.output().await.context("Failed to remove container")?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
         Ok(json!({
             "success": output.status.success(),
@@ -1122,8 +1122,8 @@ impl Tool for ComposeUp {
             .context("Compose up timed out")?
             .context("Failed to run compose up")?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
         Ok(json!({
             "success": output.status.success(),
@@ -1216,8 +1216,8 @@ impl Tool for ComposeDown {
 
         let output = cmd.output().await.context("Failed to run compose down")?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
         Ok(json!({
             "success": output.status.success(),

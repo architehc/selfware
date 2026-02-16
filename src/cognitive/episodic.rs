@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::token_count::estimate_content_tokens;
-use crate::vector_store::{EmbeddingProvider, VectorIndex};
+use crate::vector_store::{EmbeddingBackend, VectorIndex};
 
 /// Episode type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -375,7 +375,7 @@ pub struct EpisodicMemory {
     /// Episode embeddings index
     index: VectorIndex,
     /// Embedding provider
-    provider: Arc<dyn EmbeddingProvider>,
+    provider: Arc<EmbeddingBackend>,
     /// Detected patterns
     patterns: Vec<Pattern>,
     /// Storage path
@@ -415,7 +415,7 @@ impl Default for EpisodicMemoryConfig {
 
 impl EpisodicMemory {
     /// Create new episodic memory
-    pub fn new(provider: Arc<dyn EmbeddingProvider>) -> Self {
+    pub fn new(provider: Arc<EmbeddingBackend>) -> Self {
         Self {
             episodes: HashMap::new(),
             sessions: HashMap::new(),
@@ -965,8 +965,8 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
-    fn mock_provider() -> Arc<dyn EmbeddingProvider> {
-        Arc::new(MockEmbeddingProvider::default())
+    fn mock_provider() -> Arc<EmbeddingBackend> {
+        Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()))
     }
 
     #[test]

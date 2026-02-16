@@ -33,6 +33,9 @@ use process::{PortCheck, ProcessList, ProcessLogs, ProcessRestart, ProcessStart,
 use search::{GlobFind, GrepSearch, SymbolSearch};
 use shell::ShellExec;
 
+/// A tool that can be executed by the agent. Each tool has a name, description,
+/// JSON schema for its arguments, and an async `execute` method. Tools are
+/// registered in a [`ToolRegistry`] and invoked by name during agent execution.
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
@@ -41,11 +44,14 @@ pub trait Tool: Send + Sync {
     async fn execute(&self, args: Value) -> Result<Value>;
 }
 
+/// Name-keyed registry of available tools. Created with all built-in tools
+/// pre-registered; additional tools can be added at runtime via [`register`](Self::register).
 pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
 }
 
 impl ToolRegistry {
+    /// Create a new registry pre-populated with all built-in tools.
     pub fn new() -> Self {
         let mut registry = Self {
             tools: HashMap::new(),
@@ -129,14 +135,17 @@ impl ToolRegistry {
         registry
     }
 
+    /// Register a tool, replacing any existing tool with the same name.
     pub fn register<T: Tool + 'static>(&mut self, tool: T) {
         self.tools.insert(tool.name().to_string(), Box::new(tool));
     }
 
+    /// Look up a tool by name, returning `None` if not found.
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools.get(name).map(|t| t.as_ref())
     }
 
+    /// Return references to all registered tools.
     pub fn list(&self) -> Vec<&dyn Tool> {
         self.tools.values().map(|t| t.as_ref()).collect()
     }
@@ -149,6 +158,7 @@ impl ToolRegistry {
         tool.execute(args).await
     }
 
+    /// Build API-compatible tool definitions for all registered tools.
     pub fn definitions(&self) -> Vec<crate::api::types::ToolDefinition> {
         self.tools
             .values()

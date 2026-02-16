@@ -98,8 +98,8 @@ impl Tool for NpmInstall {
 
         let output = cmd.output().await.context("Failed to run npm install")?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
         // Parse npm output for installed packages
         let installed = parse_npm_install_output(&stdout, &stderr);
@@ -196,8 +196,8 @@ impl Tool for NpmRun {
                 .context("npm run timed out")?
                 .context("Failed to run npm script")?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
         Ok(json!({
             "success": output.status.success(),
@@ -371,8 +371,8 @@ impl Tool for PipInstall {
 
         let output = cmd.output().await.context("Failed to run pip install")?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
         let installed = parse_pip_install_output(&stdout);
 
@@ -442,8 +442,8 @@ impl Tool for PipList {
 
         let output = cmd.output().await.context("Failed to run pip list")?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
         let packages: Vec<PipPackage> = serde_json::from_str(&stdout).unwrap_or_default();
 
@@ -495,8 +495,8 @@ impl Tool for PipFreeze {
 
         let output = cmd.output().await.context("Failed to run pip freeze")?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
         let packages: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
 
@@ -588,8 +588,8 @@ impl Tool for YarnInstall {
 
         let output = cmd.output().await.context("Failed to run yarn")?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
         Ok(json!({
             "success": output.status.success(),

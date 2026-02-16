@@ -193,8 +193,8 @@ async fn fetch_with_chrome(
     .context("Browser fetch timed out")?
     .context("Failed to run Chrome")?;
 
-    let html = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let html = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
     // Clean up temp file if it exists
     let _ = tokio::fs::remove_file(&output_file).await;
@@ -256,8 +256,8 @@ const {{ chromium }} = require('playwright');
     .context("Playwright fetch timed out")?
     .context("Failed to run Playwright")?;
 
-    let html = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let html = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     let text_content = extract_text_from_html(&html);
 
     Ok(json!({
@@ -292,8 +292,8 @@ async fn fetch_with_curl(url: &str, timeout_secs: u64, user_agent: Option<&str>)
 
     let output = cmd.output().await.context("Failed to run curl")?;
 
-    let html = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let html = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     let text_content = extract_text_from_html(&html);
 
     Ok(json!({
@@ -403,7 +403,7 @@ impl Tool for BrowserScreenshot {
                 .context("Screenshot timed out")?
                 .context("Failed to take screenshot")?;
 
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
                 // Check if file was created
                 let file_exists = tokio::fs::metadata(output_path).await.is_ok();
@@ -566,7 +566,7 @@ impl Tool for BrowserPdf {
                 .context("PDF generation timed out")?
                 .context("Failed to generate PDF")?;
 
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                 let file_exists = tokio::fs::metadata(output_path).await.is_ok();
                 let file_size = if file_exists {
                     tokio::fs::metadata(output_path).await.ok().map(|m| m.len())
@@ -683,8 +683,8 @@ const {{ chromium }} = require('playwright');
                 .context("Script execution timed out")?
                 .context("Failed to execute script")?;
 
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
                 // Try to parse result as JSON
                 let result: Value = serde_json::from_str(stdout.trim()).unwrap_or(json!(stdout.trim()));

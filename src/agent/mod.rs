@@ -316,11 +316,13 @@ To call a tool, use this EXACT XML structure:
     }
 
     /// Get current execution mode
+    #[inline]
     pub fn execution_mode(&self) -> crate::config::ExecutionMode {
         self.config.execution_mode
     }
 
     /// Set execution mode
+    #[inline]
     pub fn set_execution_mode(&mut self, mode: crate::config::ExecutionMode) {
         self.config.execution_mode = mode;
     }
@@ -375,6 +377,7 @@ To call a tool, use this EXACT XML structure:
     }
 
     /// Check if running in non-interactive mode (piped stdin)
+    #[inline]
     pub fn is_interactive(&self) -> bool {
         use std::io::IsTerminal;
         std::io::stdin().is_terminal()

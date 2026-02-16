@@ -8,8 +8,11 @@ use std::path::Path;
 use tracing::instrument;
 use walkdir::WalkDir;
 
+/// Searches file contents for regex patterns, returning matching lines with context.
 pub struct GrepSearch;
+/// Finds files by glob pattern (e.g. `**/*.rs`), returning paths with metadata.
 pub struct GlobFind;
+/// Finds Rust symbol definitions (functions, structs, enums, traits, etc.) by name.
 pub struct SymbolSearch;
 
 /// A single match result from grep search

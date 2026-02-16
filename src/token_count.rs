@@ -9,11 +9,13 @@ use tiktoken_rs::{cl100k_base, CoreBPE};
 static TOKENIZER: Lazy<Option<CoreBPE>> = Lazy::new(|| cl100k_base().ok());
 
 /// Estimate token count for content and add a fixed per-message overhead.
+#[inline]
 pub fn estimate_tokens_with_overhead(content: &str, message_overhead: usize) -> usize {
     estimate_content_tokens(content) + message_overhead
 }
 
 /// Estimate tokens for raw content.
+#[inline]
 pub fn estimate_content_tokens(content: &str) -> usize {
     TOKENIZER
         .as_ref()

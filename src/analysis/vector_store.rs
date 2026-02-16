@@ -461,7 +461,11 @@ impl VectorCollection {
     }
 }
 
-/// Trait for embedding generation
+/// Trait for embedding generation.
+///
+/// NOTE: Prefer using `EmbeddingBackend` enum dispatch instead of
+/// `Arc<dyn EmbeddingProvider>` for new code. The trait is retained
+/// as documentation of the interface contract.
 #[async_trait::async_trait]
 pub trait EmbeddingProvider: Send + Sync {
     /// Generate embedding for text
@@ -950,6 +954,43 @@ impl CodeChunker {
     }
 }
 
+/// Enum dispatch for embedding providers.
+///
+/// Prefer using this enum over `Arc<dyn EmbeddingProvider>` trait objects.
+/// It avoids dynamic dispatch overhead and is easier to reason about.
+pub enum EmbeddingBackend {
+    /// Mock provider for testing (deterministic hash-based embeddings)
+    Mock(MockEmbeddingProvider),
+    /// TF-IDF based embedding provider (no external dependencies)
+    TfIdf(TfIdfEmbeddingProvider),
+}
+
+impl EmbeddingBackend {
+    /// Generate embedding for text
+    pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        match self {
+            Self::Mock(p) => p.embed(text).await,
+            Self::TfIdf(p) => p.embed(text).await,
+        }
+    }
+
+    /// Generate embeddings for multiple texts
+    pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        match self {
+            Self::Mock(p) => p.embed_batch(texts).await,
+            Self::TfIdf(p) => p.embed_batch(texts).await,
+        }
+    }
+
+    /// Get embedding dimension
+    pub fn dimension(&self) -> usize {
+        match self {
+            Self::Mock(p) => p.dimension(),
+            Self::TfIdf(p) => p.dimension(),
+        }
+    }
+}
+
 /// Main vector store
 pub struct VectorStore {
     /// Collections by name
@@ -957,7 +998,7 @@ pub struct VectorStore {
     /// Vector indices by collection name
     indices: HashMap<String, VectorIndex>,
     /// Embedding provider
-    provider: Arc<dyn EmbeddingProvider>,
+    provider: Arc<EmbeddingBackend>,
     /// Storage path for persistence
     storage_path: Option<PathBuf>,
     /// Code chunker
@@ -966,7 +1007,7 @@ pub struct VectorStore {
 
 impl VectorStore {
     /// Create new vector store
-    pub fn new(provider: Arc<dyn EmbeddingProvider>) -> Self {
+    pub fn new(provider: Arc<EmbeddingBackend>) -> Self {
         Self {
             collections: HashMap::new(),
             indices: HashMap::new(),
@@ -1559,7 +1600,7 @@ impl Point {
 
     #[tokio::test]
     async fn test_vector_store_create_collection() {
-        let provider = Arc::new(MockEmbeddingProvider::default());
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
         let mut store = VectorStore::new(provider);
 
         store.collection("test", CollectionScope::Project);
@@ -1570,7 +1611,7 @@ impl Point {
 
     #[tokio::test]
     async fn test_vector_store_delete_collection() {
-        let provider = Arc::new(MockEmbeddingProvider::default());
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
         let mut store = VectorStore::new(provider);
 
         store.collection("test", CollectionScope::Project);
@@ -1582,7 +1623,7 @@ impl Point {
 
     #[tokio::test]
     async fn test_vector_store_index_file() {
-        let provider = Arc::new(MockEmbeddingProvider::default());
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
         let mut store = VectorStore::new(provider);
 
         let dir = tempdir().unwrap();
@@ -1600,7 +1641,7 @@ impl Point {
 
     #[tokio::test]
     async fn test_vector_store_search() {
-        let provider = Arc::new(MockEmbeddingProvider::default());
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
         let mut store = VectorStore::new(provider);
 
         let dir = tempdir().unwrap();
@@ -1632,7 +1673,7 @@ pub fn calculate_product(a: i32, b: i32) -> i32 {
 
     #[tokio::test]
     async fn test_vector_store_search_with_filter() {
-        let provider = Arc::new(MockEmbeddingProvider::default());
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
         let mut store = VectorStore::new(provider);
 
         let dir = tempdir().unwrap();
@@ -1657,7 +1698,7 @@ pub fn calculate_product(a: i32, b: i32) -> i32 {
 
     #[tokio::test]
     async fn test_vector_store_persistence() {
-        let provider = Arc::new(MockEmbeddingProvider::default());
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
         let dir = tempdir().unwrap();
         let storage_path = dir.path().join("vector_store");
 
@@ -1684,7 +1725,7 @@ pub fn calculate_product(a: i32, b: i32) -> i32 {
 
     #[tokio::test]
     async fn test_vector_store_stats() {
-        let provider = Arc::new(MockEmbeddingProvider::default());
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
         let mut store = VectorStore::new(provider);
 
         store.collection("project1", CollectionScope::Project);
@@ -1993,7 +2034,7 @@ pub fn calculate_product(a: i32, b: i32) -> i32 {
 
     #[test]
     fn test_vector_store_stats_empty() {
-        let provider = Arc::new(MockEmbeddingProvider::default());
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
         let store = VectorStore::new(provider);
 
         let stats = store.stats();

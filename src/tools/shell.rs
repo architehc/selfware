@@ -64,8 +64,8 @@ impl Tool for ShellExec {
         let (exit_code, stdout, stderr, timed_out) = match output {
             Ok(Ok(output)) => (
                 output.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&output.stdout).to_string(),
-                String::from_utf8_lossy(&output.stderr).to_string(),
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
                 false,
             ),
             Ok(Err(e)) => return Err(e.into()),

@@ -31,27 +31,32 @@ pub(crate) fn init(compact: bool, verbose: bool, show_tokens: bool) {
 }
 
 /// Check if compact mode is enabled
+#[inline]
 pub(crate) fn is_compact() -> bool {
     COMPACT_MODE.load(Ordering::SeqCst)
 }
 
 /// Check if verbose mode is enabled
+#[inline]
 pub(crate) fn is_verbose() -> bool {
     VERBOSE_MODE.load(Ordering::SeqCst)
 }
 
 /// Check if show_tokens is enabled
+#[inline]
 pub(crate) fn should_show_tokens() -> bool {
     SHOW_TOKENS.load(Ordering::SeqCst)
 }
 
 /// Record token usage
+#[inline]
 pub(crate) fn record_tokens(prompt: u64, completion: u64) {
     TOTAL_PROMPT_TOKENS.fetch_add(prompt, Ordering::SeqCst);
     TOTAL_COMPLETION_TOKENS.fetch_add(completion, Ordering::SeqCst);
 }
 
 /// Get total token usage
+#[inline]
 pub(crate) fn get_total_tokens() -> (u64, u64) {
     (
         TOTAL_PROMPT_TOKENS.load(Ordering::SeqCst),
@@ -60,6 +65,7 @@ pub(crate) fn get_total_tokens() -> (u64, u64) {
 }
 
 /// Reset token counters (for new sessions)
+#[inline]
 pub(crate) fn reset_tokens() {
     TOTAL_PROMPT_TOKENS.store(0, Ordering::SeqCst);
     TOTAL_COMPLETION_TOKENS.store(0, Ordering::SeqCst);

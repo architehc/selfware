@@ -443,7 +443,7 @@ impl Tool for CargoFmt {
 
         Ok(serde_json::json!({
             "success": output.status.success(),
-            "diff": String::from_utf8_lossy(&output.stderr).to_string(),
+            "diff": String::from_utf8_lossy(&output.stderr).into_owned(),
             "exit_code": output.status.code()
         }))
     }
