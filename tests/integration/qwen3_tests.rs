@@ -878,8 +878,8 @@ async fn qwen3_test_10_concurrent_agents() {
                 successes += 1;
                 total_response_time += elapsed;
                 let content = response.choices[0].message.content.trim();
-                let preview = if content.len() > 80 {
-                    format!("{}...", &content[..80])
+                let preview = if content.chars().count() > 80 {
+                    format!("{}...", content.chars().take(80).collect::<String>())
                 } else {
                     content.to_string()
                 };
