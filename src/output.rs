@@ -564,7 +564,7 @@ mod tests {
 
     #[test]
     fn test_token_tracking() {
-        let _lock = TOKEN_TEST_MUTEX.lock().unwrap();
+        let _lock = TOKEN_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         reset_tokens();
         record_tokens(100, 50);
         record_tokens(200, 100);
@@ -576,7 +576,7 @@ mod tests {
 
     #[test]
     fn test_reset_tokens() {
-        let _lock = TOKEN_TEST_MUTEX.lock().unwrap();
+        let _lock = TOKEN_TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
         reset_tokens();
         record_tokens(100, 50);
         reset_tokens();

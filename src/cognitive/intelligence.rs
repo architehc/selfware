@@ -1986,8 +1986,16 @@ fn main() {
     #[test]
     fn test_project_intelligence_accessors() {
         let intel = ProjectIntelligence::new(PathBuf::from("/tmp/test"));
-        assert!(intel.symbols().read().unwrap().is_empty());
-        assert!(intel.files().read().unwrap().is_empty());
+        assert!(intel
+            .symbols()
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty());
+        assert!(intel
+            .files()
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty());
     }
 
     #[test]
@@ -2059,7 +2067,10 @@ serde = "1.0"
         intel.refresh().unwrap();
 
         // Check dependencies were parsed
-        let deps = intel.dependencies().read().unwrap();
+        let deps = intel
+            .dependencies()
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         assert!(deps.find("serde").is_some());
 
         // The refresh succeeded without error, which is the main check
@@ -2071,7 +2082,7 @@ serde = "1.0"
         let intel = ProjectIntelligence::new(PathBuf::from("/tmp/test"));
 
         // Test manual file addition
-        let mut files = intel.files().write().unwrap();
+        let mut files = intel.files().write().unwrap_or_else(|e| e.into_inner());
         files.add(FileEntry {
             path: PathBuf::from("test.rs"),
             size: 100,
