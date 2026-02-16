@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use colored::*;
 use std::time::Instant;
-use tracing::{debug, info};
 #[cfg(feature = "resilience")]
 use tracing::warn;
+use tracing::{debug, info};
 
 use super::*;
 use crate::checkpoint::{capture_git_state, CheckpointManager, TaskCheckpoint, TaskStatus};

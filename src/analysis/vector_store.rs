@@ -1073,10 +1073,9 @@ impl VectorStore {
             self.collection(collection_name, CollectionScope::Project);
         }
 
-        let collection = self
-            .collections
-            .get_mut(collection_name)
-            .with_context(|| format!("collection '{}' not found after creation", collection_name))?;
+        let collection = self.collections.get_mut(collection_name).with_context(|| {
+            format!("collection '{}' not found after creation", collection_name)
+        })?;
         let index = self
             .indices
             .get_mut(collection_name)

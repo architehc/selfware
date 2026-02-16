@@ -26,7 +26,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Repository URLs in Cargo.toml and README.md now point to correct location
-- Removed no-op CLI flags (`--compact`, `--verbose`, `--show-tokens`)
 
 ### Security
 - Updated CI to include security audit job

@@ -76,13 +76,11 @@ execution-modes = []
 cache = []
 # Log analysis and diagnostics
 log-analysis = []
-# Speculative execution
-speculative = []
 # Token counting and management
 tokens = []
 
 # Convenience feature that enables all optional modules
-extras = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-analysis", "speculative", "tokens"]
+extras = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-analysis", "tokens"]
 
 [dev-dependencies]
 tokio-test = "0.4"

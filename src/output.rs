@@ -56,6 +56,7 @@ pub(crate) fn record_tokens(prompt: u64, completion: u64) {
 }
 
 /// Get total token usage
+#[allow(dead_code)]
 #[inline]
 pub(crate) fn get_total_tokens() -> (u64, u64) {
     (
@@ -65,6 +66,7 @@ pub(crate) fn get_total_tokens() -> (u64, u64) {
 }
 
 /// Reset token counters (for new sessions)
+#[allow(dead_code)]
 #[inline]
 pub(crate) fn reset_tokens() {
     TOTAL_PROMPT_TOKENS.store(0, Ordering::SeqCst);
@@ -90,6 +92,7 @@ pub(crate) fn print_token_usage(prompt: u64, completion: u64) {
 }
 
 /// Print session token summary (at end of session)
+#[allow(dead_code)]
 pub(crate) fn print_session_summary() {
     if should_show_tokens() {
         let (prompt, completion) = get_total_tokens();
@@ -205,6 +208,7 @@ pub(crate) fn task_completed() {
 }
 
 /// Print task completed with mascot (verbose mode)
+#[allow(dead_code)]
 pub(crate) fn task_completed_with_mascot() {
     if is_verbose() {
         println!(
@@ -217,6 +221,7 @@ pub(crate) fn task_completed_with_mascot() {
 }
 
 /// Print task failed with mascot (verbose mode)
+#[allow(dead_code)]
 pub(crate) fn task_failed_with_mascot(reason: &str) {
     if is_verbose() {
         println!(
@@ -229,6 +234,7 @@ pub(crate) fn task_failed_with_mascot(reason: &str) {
 }
 
 /// Print greeting mascot on startup (verbose mode only)
+#[allow(dead_code)]
 pub(crate) fn greeting_mascot() {
     if is_verbose() {
         println!("{}", render_mascot(MascotMood::Greeting));
@@ -236,6 +242,7 @@ pub(crate) fn greeting_mascot() {
 }
 
 /// Print thinking mascot during LLM calls (verbose mode only)
+#[allow(dead_code)]
 pub(crate) fn thinking_mascot() {
     if is_verbose() {
         println!("{}", render_inline_mascot(MascotMood::Thinking));
@@ -243,6 +250,7 @@ pub(crate) fn thinking_mascot() {
 }
 
 /// Print working mascot during tool execution (verbose mode only)
+#[allow(dead_code)]
 pub(crate) fn working_mascot() {
     if is_verbose() {
         print!("{} ", render_inline_mascot(MascotMood::Working));
@@ -280,6 +288,7 @@ pub(crate) fn debug_output(label: &str, content: &str) {
 }
 
 /// Print confirmation prompt preview
+#[allow(dead_code)]
 pub(crate) fn confirmation_preview(tool_name: &str, args: &str) {
     println!(
         "{} Tool: {} Args: {}",
@@ -377,6 +386,7 @@ impl TaskProgress {
     }
 
     /// Add a new phase dynamically
+    #[allow(dead_code)]
     pub(crate) fn add_phase(&mut self, name: &str) {
         self.phases.push(ProgressPhase {
             name: name.to_string(),

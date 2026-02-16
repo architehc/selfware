@@ -1235,6 +1235,12 @@ pub mod mock {
         }
     }
 
+    impl Default for MockLlmClient {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     #[async_trait]
     impl LlmClient for MockLlmClient {
         async fn chat(
@@ -1311,27 +1317,21 @@ pub mod mock {
             let mock = MockLlmClient::new();
             let result = mock.chat(vec![], None, ThinkingMode::Disabled).await;
             assert!(result.is_err());
-            assert!(
-                result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("no more responses")
-            );
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("no more responses"));
         }
 
         #[tokio::test]
         async fn test_mock_stream_returns_error() {
             let mock = MockLlmClient::new();
-            let result = mock
-                .chat_stream(vec![], None, ThinkingMode::Disabled)
-                .await;
+            let result = mock.chat_stream(vec![], None, ThinkingMode::Disabled).await;
             assert!(result.is_err());
-            assert!(
-                result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("Streaming not supported")
-            );
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("Streaming not supported"));
         }
     }
 }

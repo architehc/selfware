@@ -6,6 +6,8 @@
 //! - Explosions
 //! - Ambient effects
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use super::{colors, Animation};
 use ratatui::{
     buffer::Buffer,
@@ -315,13 +317,13 @@ pub struct EmitConfig<'a> {
 }
 
 // Simple pseudo-random number generator (deterministic for testing)
-static mut RANDOM_SEED: u32 = 12345;
+static RANDOM_SEED: AtomicU32 = AtomicU32::new(12345);
 
 fn pseudo_random() -> f32 {
-    unsafe {
-        RANDOM_SEED = RANDOM_SEED.wrapping_mul(1103515245).wrapping_add(12345);
-        ((RANDOM_SEED >> 16) & 0x7FFF) as f32 / 32768.0
-    }
+    let mut seed = RANDOM_SEED.load(Ordering::Relaxed);
+    seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+    RANDOM_SEED.store(seed, Ordering::Relaxed);
+    ((seed >> 16) & 0x7FFF) as f32 / 32768.0
 }
 
 fn pseudo_random_index(max: usize) -> usize {

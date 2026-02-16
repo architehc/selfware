@@ -495,7 +495,10 @@ impl Tool for SymbolSearch {
 }
 
 /// Build regex patterns for different Rust symbol types
-fn build_symbol_patterns(symbol_type: &str, _name_pattern: &str) -> Result<Vec<(Regex, &'static str)>> {
+fn build_symbol_patterns(
+    symbol_type: &str,
+    _name_pattern: &str,
+) -> Result<Vec<(Regex, &'static str)>> {
     let mut patterns = Vec::new();
 
     // Function pattern: pub/pub(crate)/async fn name

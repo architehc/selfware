@@ -957,7 +957,6 @@ To call a tool, use this EXACT XML structure:
         Ok(saved)
     }
 
-
     pub async fn run_task(&mut self, task: &str) -> Result<()> {
         println!("{}", "🦊 Selfware starting task...".bright_cyan());
         println!("Task: {}", task.bright_white());

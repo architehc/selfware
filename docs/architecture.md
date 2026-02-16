@@ -26,7 +26,7 @@ This document maps the main runtime flow and module boundaries for contributors.
 ┌───────────────────────────────────────────────────────────────────────┐
 │                      Safety + Verification Guardrails                 │
 │  src/safety (checker/path validator/scanner)                          │
-│  src/verification (cargo/test/lint verification gate)                 │
+│  src/testing/verification.rs (cargo/test/lint verification gate)      │
 └───────────────────────────────────────────────────────────────────────┘
 ```
 

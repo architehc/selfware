@@ -833,10 +833,11 @@ impl Swarm {
             }
             ConflictStrategy::ConfidenceWins => {
                 // Find vote with highest confidence
-                let best_vote = decision
-                    .votes
-                    .iter()
-                    .max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap());
+                let best_vote = decision.votes.iter().max_by(|a, b| {
+                    a.confidence
+                        .partial_cmp(&b.confidence)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
 
                 Ok(best_vote.map(|v| v.choice.clone()))
             }
