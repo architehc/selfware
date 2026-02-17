@@ -849,8 +849,8 @@ To call a tool, use this EXACT XML structure:
                 let stale_marker = if is_stale { format!("  {}⟳ modified{}", coral, reset) } else { String::new() };
                 let k_tokens = file_tokens as f64 / 1000.0;
                 println!(
-                    "    {}{}  {}{:>40}{}  {}({:.1}k tokens){}{}",
-                    worn, "→", sand, path_str, reset, worn, k_tokens, reset, stale_marker
+                    "    {}→  {}{:>40}{}  {}({:.1}k tokens){}{}",
+                    worn, sand, path_str, reset, worn, k_tokens, reset, stale_marker
                 );
             }
             let total_k = total_file_tokens as f64 / 1000.0;
