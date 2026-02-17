@@ -87,6 +87,15 @@ impl Default for InputConfig {
                 "/garden".into(),
                 "/journal".into(),
                 "/palette".into(),
+                "/vim".into(),
+                "/copy".into(),
+                "/restore".into(),
+                "/chat".into(),
+                "/chat save".into(),
+                "/chat resume".into(),
+                "/chat list".into(),
+                "/chat delete".into(),
+                "/theme".into(),
                 "exit".into(),
                 "quit".into(),
             ],
@@ -103,6 +112,7 @@ fn dirs_history_path() -> Option<PathBuf> {
 pub struct SelfwareEditor {
     editor: Reedline,
     prompt: SelfwarePrompt,
+    config: InputConfig,
 }
 
 impl SelfwareEditor {
@@ -155,6 +165,13 @@ impl SelfwareEditor {
         // Set up bracket validator
         let validator = Box::new(BracketValidator::new());
 
+        // Configure external editor for Ctrl+X
+        let editor_cmd = std::env::var("VISUAL")
+            .or_else(|_| std::env::var("EDITOR"))
+            .unwrap_or_else(|_| "vi".to_string());
+        let temp_file = std::env::temp_dir().join("selfware_edit_buffer.tmp");
+        let buffer_editor = std::process::Command::new(editor_cmd);
+
         let mut editor = Reedline::create()
             .with_history(history)
             .with_completer(completer)
@@ -164,14 +181,19 @@ impl SelfwareEditor {
             .with_highlighter(highlighter)
             .with_validator(validator)
             .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
-            .with_edit_mode(edit_mode);
+            .with_edit_mode(edit_mode)
+            .with_buffer_editor(buffer_editor, temp_file);
 
         // Add Ctrl+R for history search
         editor = editor.with_history_exclusion_prefix(Some(" ".into()));
 
         let prompt = SelfwarePrompt::new();
 
-        Ok(Self { editor, prompt })
+        Ok(Self {
+            editor,
+            prompt,
+            config,
+        })
     }
 
     /// Build keybindings for the given mode
@@ -195,11 +217,11 @@ impl SelfwareEditor {
             ]),
         );
 
-        // Shift+Tab to go backwards in menu
+        // Shift+Tab to toggle auto-edit mode (via host command)
         keybindings.add_binding(
             KeyModifiers::SHIFT,
             KeyCode::BackTab,
-            ReedlineEvent::MenuPrevious,
+            ReedlineEvent::ExecuteHostCommand("__toggle_auto_edit__".to_string()),
         );
 
         // Escape to close menu without selecting
@@ -215,6 +237,27 @@ impl SelfwareEditor {
             ]),
         );
 
+        // Ctrl+J to insert newline (multi-line input)
+        keybindings.add_binding(
+            KeyModifiers::CONTROL,
+            KeyCode::Char('j'),
+            ReedlineEvent::Edit(vec![EditCommand::InsertNewline]),
+        );
+
+        // Ctrl+Y to toggle YOLO mode (via host command)
+        keybindings.add_binding(
+            KeyModifiers::CONTROL,
+            KeyCode::Char('y'),
+            ReedlineEvent::ExecuteHostCommand("__toggle_yolo__".to_string()),
+        );
+
+        // Ctrl+X to open external editor
+        keybindings.add_binding(
+            KeyModifiers::CONTROL,
+            KeyCode::Char('x'),
+            ReedlineEvent::OpenEditor,
+        );
+
         // Ctrl+Space for command palette (we'll handle this in the app)
         keybindings.add_binding(
             KeyModifiers::CONTROL,
@@ -228,7 +271,14 @@ impl SelfwareEditor {
     /// Read a line from the user
     pub fn read_line(&mut self) -> Result<ReadlineResult> {
         match self.editor.read_line(&self.prompt) {
-            Ok(Signal::Success(line)) => Ok(ReadlineResult::Line(line)),
+            Ok(Signal::Success(line)) => {
+                // Detect sentinel values from ExecuteHostCommand keybindings
+                if line.starts_with("__") && line.ends_with("__") {
+                    Ok(ReadlineResult::HostCommand(line))
+                } else {
+                    Ok(ReadlineResult::Line(line))
+                }
+            }
             Ok(Signal::CtrlC) => Ok(ReadlineResult::Interrupt),
             Ok(Signal::CtrlD) => Ok(ReadlineResult::Eof),
             Err(e) => Err(e.into()),
@@ -246,6 +296,20 @@ impl SelfwareEditor {
         // For now, tools should be passed at construction time
         let _ = tools;
     }
+
+    /// Toggle between Emacs and Vi mode, returns the new mode
+    pub fn toggle_vim_mode(&mut self) -> Result<InputMode> {
+        let new_mode = match self.config.mode {
+            InputMode::Emacs => InputMode::Vi,
+            InputMode::Vi => InputMode::Emacs,
+        };
+        self.config.mode = new_mode;
+
+        // Rebuild the editor with new mode
+        let new_editor = SelfwareEditor::new(self.config.clone())?;
+        self.editor = new_editor.editor;
+        Ok(new_mode)
+    }
 }
 
 /// Result of reading a line
@@ -257,6 +321,8 @@ pub enum ReadlineResult {
     Interrupt,
     /// Ctrl+D was pressed (EOF)
     Eof,
+    /// Host command triggered by keybinding (e.g., "__toggle_yolo__")
+    HostCommand(String),
 }
 
 #[cfg(test)]
@@ -357,6 +423,7 @@ mod tests {
         let _line = ReadlineResult::Line("test".into());
         let _interrupt = ReadlineResult::Interrupt;
         let _eof = ReadlineResult::Eof;
+        let _host_cmd = ReadlineResult::HostCommand("__toggle_yolo__".into());
     }
 
     #[test]
@@ -365,5 +432,23 @@ mod tests {
         let debug_str = format!("{:?}", result);
         assert!(debug_str.contains("Line"));
         assert!(debug_str.contains("test"));
+    }
+
+    #[test]
+    fn test_readline_result_host_command_debug() {
+        let result = ReadlineResult::HostCommand("__toggle_yolo__".into());
+        let debug_str = format!("{:?}", result);
+        assert!(debug_str.contains("HostCommand"));
+        assert!(debug_str.contains("__toggle_yolo__"));
+    }
+
+    #[test]
+    fn test_input_config_new_commands() {
+        let config = InputConfig::default();
+        assert!(config.commands.contains(&"/vim".into()));
+        assert!(config.commands.contains(&"/copy".into()));
+        assert!(config.commands.contains(&"/restore".into()));
+        assert!(config.commands.contains(&"/chat".into()));
+        assert!(config.commands.contains(&"/theme".into()));
     }
 }

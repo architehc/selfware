@@ -7,6 +7,7 @@
 //! - Local-first storage
 //! - Edit history
 
+pub mod chat_store;
 pub mod checkpoint;
 pub mod edit_history;
 pub mod local_first;

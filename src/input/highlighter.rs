@@ -70,6 +70,11 @@ impl SelfwareHighlighter {
                     | "/garden"
                     | "/journal"
                     | "/palette"
+                    | "/vim"
+                    | "/copy"
+                    | "/restore"
+                    | "/chat"
+                    | "/theme"
             )
     }
 

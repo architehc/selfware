@@ -1,5 +1,6 @@
 use anyhow::Result;
 use colored::*;
+use std::time::Instant;
 
 use super::*;
 
@@ -53,19 +54,65 @@ impl Agent {
 
         let mut consecutive_errors = 0;
         const MAX_CONSECUTIVE_ERRORS: u32 = 3;
+        let mut last_ctrl_c: Option<Instant> = None;
 
         loop {
             let input = match editor.read_line() {
                 Ok(ReadlineResult::Line(line)) => {
                     consecutive_errors = 0;
+                    last_ctrl_c = None;
                     line
                 }
                 Ok(ReadlineResult::Interrupt) => {
                     consecutive_errors = 0;
-                    println!("\n{}", "Interrupted. Type 'exit' to leave.".bright_yellow());
+                    // Double-tap Ctrl+C to exit
+                    if let Some(last) = last_ctrl_c {
+                        if last.elapsed().as_millis() < 1500 {
+                            println!();
+                            break;
+                        }
+                    }
+                    last_ctrl_c = Some(Instant::now());
+                    println!(
+                        "\n{}",
+                        "Press Ctrl+C again to exit, or type 'exit'".bright_yellow()
+                    );
                     continue;
                 }
                 Ok(ReadlineResult::Eof) => break,
+                Ok(ReadlineResult::HostCommand(cmd)) => {
+                    last_ctrl_c = None;
+                    match cmd.as_str() {
+                        "__toggle_yolo__" => {
+                            use crate::config::ExecutionMode;
+                            let new_mode = match self.execution_mode() {
+                                ExecutionMode::Yolo => ExecutionMode::Normal,
+                                _ => ExecutionMode::Yolo,
+                            };
+                            self.set_execution_mode(new_mode);
+                            let label = match new_mode {
+                                ExecutionMode::Yolo => "YOLO".bright_red(),
+                                _ => "Normal".bright_green(),
+                            };
+                            println!("{} Mode: {}", "⚡".bright_yellow(), label);
+                        }
+                        "__toggle_auto_edit__" => {
+                            use crate::config::ExecutionMode;
+                            let new_mode = match self.execution_mode() {
+                                ExecutionMode::AutoEdit => ExecutionMode::Normal,
+                                _ => ExecutionMode::AutoEdit,
+                            };
+                            self.set_execution_mode(new_mode);
+                            let label = match new_mode {
+                                ExecutionMode::AutoEdit => "Auto-Edit".bright_cyan(),
+                                _ => "Normal".bright_green(),
+                            };
+                            println!("{} Mode: {}", "✏️".bright_cyan(), label);
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
                 Err(e) => {
                     consecutive_errors += 1;
                     if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
@@ -81,6 +128,33 @@ impl Agent {
 
             if input == "exit" || input == "quit" {
                 break;
+            }
+
+            // Shell escape: !command runs via sh -c
+            if input.starts_with('!') {
+                let cmd = input.strip_prefix('!').unwrap().trim();
+                if cmd.is_empty() {
+                    println!("{} Usage: !<command>", "ℹ".bright_yellow());
+                } else {
+                    let status = std::process::Command::new("sh")
+                        .args(["-c", cmd])
+                        .stdout(std::process::Stdio::inherit())
+                        .stderr(std::process::Stdio::inherit())
+                        .stdin(std::process::Stdio::inherit())
+                        .status();
+                    match status {
+                        Ok(s) if !s.success() => {
+                            println!(
+                                "{} exit code: {}",
+                                "⚠".bright_yellow(),
+                                s.code().unwrap_or(-1)
+                            );
+                        }
+                        Err(e) => println!("{} Shell error: {}", "✗".bright_red(), e),
+                        _ => {}
+                    }
+                }
+                continue;
             }
 
             if input == "/help" {
@@ -214,12 +288,88 @@ impl Agent {
                     "├──────────────────────────────────────────────────────┤".bright_cyan()
                 );
                 println!(
+                    "{}",
+                    "├──────────────────────────────────────────────────────┤".bright_cyan()
+                );
+                println!(
+                    "│  {} /vim               Toggle vim/emacs mode        │",
+                    "⌨ ".bright_white()
+                );
+                println!(
+                    "│  {} /copy              Copy last response           │",
+                    "📋".bright_white()
+                );
+                println!(
+                    "│  {} /restore           List/restore checkpoints     │",
+                    "⏪".bright_white()
+                );
+                println!(
+                    "│  {} /chat save <n>     Save chat session            │",
+                    "💾".bright_white()
+                );
+                println!(
+                    "│  {} /chat resume <n>   Resume saved chat            │",
+                    "▶ ".bright_white()
+                );
+                println!(
+                    "│  {} /chat list         List saved chats             │",
+                    "📋".bright_white()
+                );
+                println!(
+                    "│  {} /theme <name>      Switch color theme           │",
+                    "🎨".bright_white()
+                );
+                println!(
+                    "│  {} !<cmd>             Run shell command            │",
+                    "💲".bright_white()
+                );
+                println!(
+                    "{}",
+                    "├──────────────────────────────────────────────────────┤".bright_cyan()
+                );
+                println!(
                     "│  {} @file              Reference file in message    │",
                     "📎".bright_white()
                 );
                 println!(
                     "│  {} exit               Exit interactive mode        │",
                     "🚪".bright_white()
+                );
+                println!(
+                    "{}",
+                    "├──────────────────────────────────────────────────────┤".bright_cyan()
+                );
+                println!(
+                    "{}",
+                    "│             ⌨  KEYBOARD SHORTCUTS                   │".bright_cyan()
+                );
+                println!(
+                    "{}",
+                    "├──────────────────────────────────────────────────────┤".bright_cyan()
+                );
+                println!(
+                    "│  Ctrl+C ×2     Exit (double-tap)                    │"
+                );
+                println!(
+                    "│  Ctrl+J        Insert newline (multi-line)          │"
+                );
+                println!(
+                    "│  Ctrl+Y        Toggle YOLO mode                     │"
+                );
+                println!(
+                    "│  Shift+Tab     Toggle Auto-Edit mode                │"
+                );
+                println!(
+                    "│  Ctrl+X        Open external editor ($EDITOR)       │"
+                );
+                println!(
+                    "│  Ctrl+L        Clear screen                         │"
+                );
+                println!(
+                    "│  Ctrl+R        Reverse history search               │"
+                );
+                println!(
+                    "│  Tab           Autocomplete / cycle suggestions     │"
                 );
                 println!(
                     "{}",
@@ -599,6 +749,259 @@ impl Agent {
                 continue;
             }
 
+            // /vim - Toggle vim/emacs mode
+            if input == "/vim" {
+                match editor.toggle_vim_mode() {
+                    Ok(mode) => {
+                        let label = match mode {
+                            crate::input::InputMode::Vi => "Vi".bright_yellow(),
+                            crate::input::InputMode::Emacs => "Emacs".bright_green(),
+                        };
+                        println!("{} Input mode: {}", "⌨".bright_cyan(), label);
+                    }
+                    Err(e) => println!("{} Failed to toggle mode: {}", "✗".bright_red(), e),
+                }
+                continue;
+            }
+
+            // /copy - Copy last response to clipboard
+            if input == "/copy" {
+                if self.last_assistant_response.is_empty() {
+                    println!("{} No response to copy", "ℹ".bright_yellow());
+                } else {
+                    match Self::copy_text_to_clipboard(&self.last_assistant_response) {
+                        Ok(()) => {
+                            let len = self.last_assistant_response.len();
+                            println!(
+                                "{} Copied {} chars to clipboard",
+                                "📋".bright_green(),
+                                len
+                            );
+                        }
+                        Err(e) => println!("{} Copy failed: {}", "✗".bright_red(), e),
+                    }
+                }
+                continue;
+            }
+
+            // /restore - List/restore edit checkpoints
+            if input == "/restore" {
+                let timeline = self.edit_history.timeline();
+                if timeline.is_empty() {
+                    println!("{} No edit checkpoints available", "ℹ".bright_yellow());
+                } else {
+                    println!();
+                    println!("  {} Edit History", "⏪".bright_cyan());
+                    for (i, entry) in timeline.iter().enumerate() {
+                        let icon = if entry.is_current {
+                            "●".bright_green()
+                        } else {
+                            "○".bright_cyan()
+                        };
+                        println!(
+                            "  {} {} {} - {}",
+                            icon,
+                            format!("[{}]", i).bright_white(),
+                            entry.timestamp.format("%H:%M:%S").to_string().dimmed(),
+                            entry.action.description().bright_white()
+                        );
+                    }
+                    println!();
+                    println!(
+                        "  {} Use {} to restore a checkpoint",
+                        "💡".bright_yellow(),
+                        "/restore <n>".bright_cyan()
+                    );
+                    println!();
+                }
+                continue;
+            }
+
+            if input.starts_with("/restore ") {
+                let idx_str = input.strip_prefix("/restore ").unwrap().trim();
+                if let Ok(idx) = idx_str.parse::<usize>() {
+                    let timeline = self.edit_history.timeline();
+                    if idx < timeline.len() {
+                        let checkpoint_id = timeline[idx].id;
+                        if let Some(checkpoint) = self.edit_history.goto(checkpoint_id) {
+                            let mut restored = 0;
+                            let files: Vec<_> = checkpoint
+                                .files
+                                .iter()
+                                .map(|(p, s)| (p.clone(), s.content.clone()))
+                                .collect();
+                            for (path, content) in &files {
+                                if std::fs::write(path, content).is_ok() {
+                                    println!(
+                                        "  {} Restored {}",
+                                        "✓".bright_green(),
+                                        path.display().to_string().bright_white()
+                                    );
+                                    restored += 1;
+                                }
+                            }
+                            println!(
+                                "{} Restored checkpoint {} ({} file(s))",
+                                "⏪".bright_green(),
+                                idx,
+                                restored
+                            );
+                        } else {
+                            println!("{} Failed to navigate to checkpoint", "✗".bright_red());
+                        }
+                    } else {
+                        println!(
+                            "{} Invalid checkpoint index (max: {})",
+                            "✗".bright_red(),
+                            timeline.len().saturating_sub(1)
+                        );
+                    }
+                } else {
+                    println!("{} Usage: /restore <number>", "ℹ".bright_yellow());
+                }
+                continue;
+            }
+
+            // /chat commands
+            if input.starts_with("/chat save ") {
+                let name = input.strip_prefix("/chat save ").unwrap().trim();
+                if name.is_empty() {
+                    println!("{} Usage: /chat save <name>", "ℹ".bright_yellow());
+                } else {
+                    match self.chat_store.save(name, &self.messages, &self.config.model) {
+                        Ok(()) => println!("{} Chat '{}' saved", "💾".bright_green(), name),
+                        Err(e) => println!("{} Save failed: {}", "✗".bright_red(), e),
+                    }
+                }
+                continue;
+            }
+
+            if input.starts_with("/chat resume ") {
+                let name = input.strip_prefix("/chat resume ").unwrap().trim();
+                if name.is_empty() {
+                    println!("{} Usage: /chat resume <name>", "ℹ".bright_yellow());
+                } else {
+                    match self.chat_store.load(name) {
+                        Ok(chat) => {
+                            self.messages = chat.messages;
+                            println!(
+                                "{} Resumed chat '{}' ({} messages, model: {})",
+                                "▶".bright_green(),
+                                name,
+                                self.messages.len(),
+                                chat.model.bright_white()
+                            );
+                        }
+                        Err(e) => println!("{} Resume failed: {}", "✗".bright_red(), e),
+                    }
+                }
+                continue;
+            }
+
+            if input == "/chat list" {
+                match self.chat_store.list() {
+                    Ok(chats) => {
+                        if chats.is_empty() {
+                            println!("{} No saved chats", "ℹ".bright_yellow());
+                        } else {
+                            println!();
+                            println!("  {} Saved Chats", "💬".bright_cyan());
+                            for chat in &chats {
+                                println!(
+                                    "  {} {} ({} msgs, {}, {})",
+                                    "●".bright_cyan(),
+                                    chat.name.bright_white(),
+                                    chat.message_count,
+                                    chat.model.dimmed(),
+                                    chat.saved_at
+                                        .format("%Y-%m-%d %H:%M")
+                                        .to_string()
+                                        .dimmed()
+                                );
+                            }
+                            println!();
+                        }
+                    }
+                    Err(e) => println!("{} Error listing chats: {}", "✗".bright_red(), e),
+                }
+                continue;
+            }
+
+            if input.starts_with("/chat delete ") {
+                let name = input.strip_prefix("/chat delete ").unwrap().trim();
+                if name.is_empty() {
+                    println!("{} Usage: /chat delete <name>", "ℹ".bright_yellow());
+                } else {
+                    match self.chat_store.delete(name) {
+                        Ok(()) => println!("{} Chat '{}' deleted", "🗑️".bright_green(), name),
+                        Err(e) => println!("{} Delete failed: {}", "✗".bright_red(), e),
+                    }
+                }
+                continue;
+            }
+
+            if input == "/chat" {
+                println!();
+                println!("  {} Chat Commands", "💬".bright_cyan());
+                println!(
+                    "  {} /chat save <name>    Save current session",
+                    "→".bright_black()
+                );
+                println!(
+                    "  {} /chat resume <name>  Resume a saved chat",
+                    "→".bright_black()
+                );
+                println!(
+                    "  {} /chat list           List all saved chats",
+                    "→".bright_black()
+                );
+                println!(
+                    "  {} /chat delete <name>  Delete a saved chat",
+                    "→".bright_black()
+                );
+                println!();
+                continue;
+            }
+
+            // /theme - Switch color theme
+            if input == "/theme" {
+                let themes = crate::ui::theme::available_themes();
+                let current = crate::ui::theme::current_theme_id();
+                println!();
+                println!("  {} Available Themes", "🎨".bright_cyan());
+                for name in &themes {
+                    let id = crate::ui::theme::theme_from_name(name);
+                    let marker = if id == Some(current) {
+                        "●".bright_green()
+                    } else {
+                        "○".dimmed()
+                    };
+                    println!("  {} {}", marker, name.bright_white());
+                }
+                println!();
+                println!(
+                    "  {} Use {} to switch",
+                    "💡".bright_yellow(),
+                    "/theme <name>".bright_cyan()
+                );
+                println!();
+                continue;
+            }
+
+            if input.starts_with("/theme ") {
+                let name = input.strip_prefix("/theme ").unwrap().trim();
+                match crate::ui::theme::theme_from_name(name) {
+                    Some(id) => {
+                        crate::ui::theme::set_theme(id);
+                        println!("{} Theme set to: {}", "🎨".bright_green(), name.bright_white());
+                    }
+                    None => {
+                        println!("{} Unknown theme '{}'. Use /theme to see available themes.", "✗".bright_red(), name);
+                    }
+                }
+                continue;
+            }
+
             // Expand @file references in input (Qwen Code style)
             let (expanded_input, included_files) = self.expand_file_references(input);
             if !included_files.is_empty() {
@@ -655,6 +1058,59 @@ impl Agent {
         }
 
         Ok(())
+    }
+
+    /// Copy text to clipboard using system clipboard tools
+    fn copy_text_to_clipboard(text: &str) -> Result<()> {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        // Try xclip, xsel, wl-copy, pbcopy in order
+        let clipboard_cmd = if Command::new("which")
+            .arg("pbcopy")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            Some(("pbcopy", vec![]))
+        } else if Command::new("which")
+            .arg("xclip")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            Some(("xclip", vec!["-selection", "clipboard"]))
+        } else if Command::new("which")
+            .arg("xsel")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            Some(("xsel", vec!["--clipboard", "--input"]))
+        } else if Command::new("which")
+            .arg("wl-copy")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            Some(("wl-copy", vec![]))
+        } else {
+            None
+        };
+
+        if let Some((cmd, args)) = clipboard_cmd {
+            let mut child = Command::new(cmd)
+                .args(&args)
+                .stdin(Stdio::piped())
+                .spawn()?;
+            if let Some(stdin) = child.stdin.as_mut() {
+                stdin.write_all(text.as_bytes())?;
+            }
+            child.wait()?;
+            Ok(())
+        } else {
+            anyhow::bail!("No clipboard tool found (pbcopy, xclip, xsel, or wl-copy)")
+        }
     }
 
     /// Basic interactive mode (fallback when reedline unavailable)

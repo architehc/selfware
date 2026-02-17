@@ -2555,6 +2555,7 @@ dependencies = [
  "once_cell",
  "proptest",
  "pulldown-cmark",
+ "rand",
  "ratatui",
  "reedline",
  "regex",

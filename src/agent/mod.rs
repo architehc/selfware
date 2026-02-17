@@ -15,6 +15,7 @@ use crate::output;
 use crate::safety::SafetyChecker;
 #[cfg(feature = "resilience")]
 use crate::self_healing::{SelfHealingConfig, SelfHealingEngine};
+use crate::session::chat_store::ChatStore;
 use crate::session::edit_history::EditHistory;
 use crate::telemetry::{enter_agent_step, record_state_transition};
 use crate::tools::ToolRegistry;
@@ -87,6 +88,10 @@ pub struct Agent {
     checkpoint_persisted_once: bool,
     /// Edit history for undo support
     edit_history: EditHistory,
+    /// Last assistant response content (for /copy command)
+    last_assistant_response: String,
+    /// Chat session store for save/resume/list/delete
+    chat_store: ChatStore,
     /// Self-healing engine for automatic recovery attempts
     #[cfg(feature = "resilience")]
     self_healing: SelfHealingEngine,
@@ -205,6 +210,7 @@ To call a tool, use this EXACT XML structure:
         });
 
         let edit_history = EditHistory::new();
+        let chat_store = ChatStore::new().unwrap_or_else(|_| ChatStore::fallback());
 
         info!("Agent initialized with cognitive state, verification gate, and error analyzer");
 
@@ -227,6 +233,8 @@ To call a tool, use this EXACT XML structure:
             last_checkpoint_tool_calls: 0,
             checkpoint_persisted_once: false,
             edit_history,
+            last_assistant_response: String::new(),
+            chat_store,
             #[cfg(feature = "resilience")]
             self_healing,
         })
@@ -251,6 +259,12 @@ To call a tool, use this EXACT XML structure:
     ) -> Result<(String, Option<String>, Option<Vec<ToolCall>>)> {
         use std::io::{self, Write};
 
+        // Start loading spinner with a random phrase while waiting for first token
+        let mut spinner = Some(crate::ui::spinner::TerminalSpinner::start(
+            crate::ui::loading_phrases::random_phrase(),
+        ));
+        let mut phrase_rotation = tokio::time::Instant::now();
+
         let stream = self.client.chat_stream(messages, tools, thinking).await?;
 
         let mut rx = stream.into_channel().await;
@@ -262,8 +276,20 @@ To call a tool, use this EXACT XML structure:
         while let Some(chunk_result) = rx.recv().await {
             let chunk = chunk_result?;
 
+            // Rotate loading phrase every 3 seconds while spinner is active
+            if let Some(ref s) = spinner {
+                if phrase_rotation.elapsed() > tokio::time::Duration::from_secs(3) {
+                    s.set_message(crate::ui::loading_phrases::random_phrase());
+                    phrase_rotation = tokio::time::Instant::now();
+                }
+            }
+
             match chunk {
                 StreamChunk::Content(text) => {
+                    // Stop spinner on first content
+                    if let Some(s) = spinner.take() {
+                        drop(s);
+                    }
                     if in_reasoning {
                         // Finished reasoning, now showing content
                         in_reasoning = false;
@@ -276,6 +302,10 @@ To call a tool, use this EXACT XML structure:
                     content.push_str(&text);
                 }
                 StreamChunk::Reasoning(text) => {
+                    // Stop spinner on first reasoning
+                    if let Some(s) = spinner.take() {
+                        drop(s);
+                    }
                     if !output::is_compact() {
                         if !in_reasoning {
                             in_reasoning = true;
@@ -799,20 +829,47 @@ To call a tool, use this EXACT XML structure:
     // =========================================================================
 
     /// Expand @file references in input (e.g., "@src/main.rs" becomes file content)
+    /// Also supports @directory/ to include a directory tree (max depth 3)
     /// Returns the expanded input and the list of files that were included
     fn expand_file_references(&self, input: &str) -> (String, Vec<String>) {
         use regex::Regex;
         use std::fs;
 
-        let re = Regex::new(r"@([a-zA-Z0-9_./\-]+(?:\.[a-zA-Z0-9]+)?)").unwrap();
+        let re = Regex::new(r"@([a-zA-Z0-9_./\-]+(?:\.[a-zA-Z0-9]+)?/?)").unwrap();
         let mut expanded = input.to_string();
         let mut included_files = Vec::new();
 
         for caps in re.captures_iter(input) {
             let full_match = caps.get(0).unwrap().as_str();
             let file_path = caps.get(1).unwrap().as_str();
+            let path = std::path::Path::new(file_path);
 
-            if let Ok(content) = fs::read_to_string(file_path) {
+            if path.is_dir() {
+                // Directory reference: include tree listing + file contents (max depth 3)
+                let mut dir_content = format!("Directory tree for {}:\n```\n", file_path);
+                let mut file_count = 0;
+                for entry in walkdir::WalkDir::new(file_path)
+                    .max_depth(3)
+                    .into_iter()
+                    .filter_map(|e| e.ok())
+                {
+                    let entry_path = entry.path();
+                    let display = entry_path.display().to_string();
+                    if display.contains("/target/")
+                        || display.contains("/.git/")
+                        || display.contains("/node_modules/")
+                    {
+                        continue;
+                    }
+                    if entry.file_type().is_file() {
+                        dir_content.push_str(&format!("  {}\n", display));
+                        file_count += 1;
+                    }
+                }
+                dir_content.push_str("```\n");
+                expanded = expanded.replacen(full_match, &dir_content, 1);
+                included_files.push(format!("{}/ ({} files)", file_path.trim_end_matches('/'), file_count));
+            } else if let Ok(content) = fs::read_to_string(file_path) {
                 let file_block = format!(
                     "\n```{} ({})\n{}\n```\n",
                     file_path,

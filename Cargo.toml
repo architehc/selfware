@@ -49,6 +49,7 @@ nucleo = "0.5"  # Fast fuzzy matcher
 pulldown-cmark = "0.13"  # Markdown parsing (0.12+ has breaking API changes)
 similar = "2.4"  # Diff algorithm
 unicode-width = "0.2"  # Unicode character display width
+rand = "0.9"  # Random number generation
 
 # Vector Memory & RAG
 hnsw_rs = "0.3"  # Hierarchical Navigable Small World graphs (embedded vector search)

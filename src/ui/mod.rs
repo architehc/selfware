@@ -8,7 +8,9 @@ pub mod animations;
 pub mod banners;
 pub mod components;
 pub mod garden;
+pub mod loading_phrases;
 pub mod mascot;
+pub mod spinner;
 pub mod style;
 pub mod theme;
 

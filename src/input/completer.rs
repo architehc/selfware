@@ -212,6 +212,15 @@ impl SelfwareCompleter {
             "/garden" => "View digital garden".to_string(),
             "/journal" => "Browse journal entries".to_string(),
             "/palette" => "Open command palette".to_string(),
+            "/vim" => "Toggle vim/emacs mode".to_string(),
+            "/copy" => "Copy last response to clipboard".to_string(),
+            "/restore" => "List/restore edit checkpoints".to_string(),
+            "/chat" => "Chat session management".to_string(),
+            "/chat save" => "Save current chat session".to_string(),
+            "/chat resume" => "Resume a saved chat".to_string(),
+            "/chat list" => "List saved chats".to_string(),
+            "/chat delete" => "Delete a saved chat".to_string(),
+            "/theme" => "Switch color theme".to_string(),
             "exit" => "Exit interactive mode".to_string(),
             "quit" => "Exit interactive mode".to_string(),
             _ => "Command".to_string(),
@@ -227,6 +236,11 @@ impl SelfwareCompleter {
             || before_cursor.starts_with("/review ")
             || before_cursor.starts_with("/ctx load ")
             || before_cursor.starts_with("/context load ")
+            || before_cursor.starts_with("/chat save ")
+            || before_cursor.starts_with("/chat resume ")
+            || before_cursor.starts_with("/chat delete ")
+            || before_cursor.starts_with("/theme ")
+            || before_cursor.starts_with("/restore ")
         {
             let prefix = before_cursor.split_whitespace().last().unwrap_or("");
             return CompletionContext::Path(prefix.to_string());
@@ -237,9 +251,14 @@ impl SelfwareCompleter {
             return CompletionContext::Command(before_cursor.to_string());
         }
 
-        // Check if we're typing a tool name (after "use " or similar)
+        // Check if the last word starts with @ (file reference)
         let words: Vec<&str> = before_cursor.split_whitespace().collect();
         if let Some(last) = words.last() {
+            if last.starts_with('@') {
+                let path_prefix = &last[1..]; // strip the @
+                return CompletionContext::FileReference(path_prefix.to_string());
+            }
+
             // If the last word looks like a tool name prefix
             if last.chars().all(|c| c.is_alphanumeric() || c == '_') {
                 return CompletionContext::Tool(last.to_string());
@@ -253,6 +272,29 @@ impl SelfwareCompleter {
 
         CompletionContext::None
     }
+
+    /// Complete file references (@ prefix paths)
+    fn complete_file_refs_with_span(
+        &self,
+        prefix: &str,
+        span_start: usize,
+        span_end: usize,
+    ) -> Vec<Suggestion> {
+        // Reuse path completion but prepend @ to results
+        let path_suggestions = self.complete_paths_with_span(prefix, span_start, span_end);
+        path_suggestions
+            .into_iter()
+            .map(|mut s| {
+                s.value = format!("@{}", s.value);
+                s.description = Some(
+                    s.description
+                        .map(|d| format!("Include {}", d.to_lowercase()))
+                        .unwrap_or_else(|| "Include file".to_string()),
+                );
+                s
+            })
+            .collect()
+    }
 }
 
 /// What type of completion is being requested
@@ -260,6 +302,8 @@ enum CompletionContext {
     Command(String),
     Tool(String),
     Path(String),
+    /// @file reference completion
+    FileReference(String),
     None,
 }
 
@@ -284,6 +328,14 @@ impl Completer for SelfwareCompleter {
                     .map(|i| i + 1)
                     .unwrap_or(0);
                 self.complete_paths_with_span(&prefix, word_start, pos)
+            }
+            CompletionContext::FileReference(prefix) => {
+                // @ file reference: span starts at the @ character
+                let word_start = before_cursor
+                    .rfind(char::is_whitespace)
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+                self.complete_file_refs_with_span(&prefix, word_start, pos)
             }
             CompletionContext::None => {
                 // If empty or very short, show commands but with correct span

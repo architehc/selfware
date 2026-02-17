@@ -402,7 +402,7 @@ mod tests {
 
         let entry = MemoryEntry {
             key: "test".to_string(),
-            value: "This is a very long value that should be truncated".to_string(),
+            value: "This is a very long value that should be truncated!!!".to_string(),
             created_by: "agent1".to_string(),
             created_at: 0,
             modified_by: None,

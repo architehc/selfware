@@ -57,6 +57,7 @@ impl Agent {
 
         if tool_calls.is_empty() {
             output::final_answer(&content);
+            self.last_assistant_response = content;
             return Ok(true);
         }
 
