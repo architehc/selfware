@@ -249,6 +249,30 @@ To call a tool, use this EXACT XML structure:
         }
     }
 
+    /// Extract function name from a tool_call XML block for clean display
+    fn extract_tool_name(xml: &str) -> Option<String> {
+        // Match <function=name> or <function>name pattern
+        if let Some(start) = xml.find("<function=") {
+            let rest = &xml[start + "<function=".len()..];
+            let end = rest.find(['>', '<', '\n']).unwrap_or(rest.len());
+            let name = rest[..end].trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+        // Also try <function>name</function> pattern
+        if let Some(start) = xml.find("<function>") {
+            let rest = &xml[start + "<function>".len()..];
+            if let Some(end) = rest.find("</function>") {
+                let name = rest[..end].trim();
+                if !name.is_empty() {
+                    return Some(name.to_string());
+                }
+            }
+        }
+        None
+    }
+
     /// Chat with streaming, displaying output as it arrives
     /// Returns (content, reasoning, tool_calls) tuple
     async fn chat_streaming(
@@ -272,6 +296,8 @@ To call a tool, use this EXACT XML structure:
         let mut reasoning = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut in_reasoning = false;
+        let mut display_buf = String::new();
+        let mut in_tool_tag = false;
 
         while let Some(chunk_result) = rx.recv().await {
             let chunk = chunk_result?;
@@ -297,9 +323,55 @@ To call a tool, use this EXACT XML structure:
                             println!(); // End reasoning line
                         }
                     }
-                    print!("{}", text);
-                    io::stdout().flush().ok();
+                    // Always accumulate full content for parsing
                     content.push_str(&text);
+
+                    // Filter out <tool_call> XML blocks from display
+                    // Buffer content and only print text outside tool_call tags
+                    display_buf.push_str(&text);
+
+                    // Process display buffer: suppress tool_call blocks
+                    loop {
+                        if in_tool_tag {
+                            // We're inside a <tool_call> - look for closing tag
+                            if let Some(end_pos) = display_buf.find("</tool_call>") {
+                                let end = end_pos + "</tool_call>".len();
+                                // Extract the tool call text to show a clean summary
+                                let tool_xml = &display_buf[..end];
+                                if let Some(fname) = Self::extract_tool_name(tool_xml) {
+                                    print!("  {} {}...", "🔧".dimmed(), fname.bright_cyan());
+                                    io::stdout().flush().ok();
+                                }
+                                display_buf = display_buf[end..].to_string();
+                                in_tool_tag = false;
+                            } else {
+                                break; // Wait for more data
+                            }
+                        } else {
+                            // Look for start of <tool_call>
+                            if let Some(start_pos) = display_buf.find("<tool_call>") {
+                                // Print everything before the tag
+                                let before = &display_buf[..start_pos];
+                                if !before.is_empty() {
+                                    print!("{}", before);
+                                    io::stdout().flush().ok();
+                                }
+                                display_buf = display_buf[start_pos..].to_string();
+                                in_tool_tag = true;
+                            } else if display_buf.contains('<') && !display_buf.contains('>') {
+                                // Partial tag at end - buffer it
+                                break;
+                            } else {
+                                // No tags - print everything
+                                if !display_buf.is_empty() {
+                                    print!("{}", display_buf);
+                                    io::stdout().flush().ok();
+                                }
+                                display_buf.clear();
+                                break;
+                            }
+                        }
+                    }
                 }
                 StreamChunk::Reasoning(text) => {
                     // Stop spinner on first reasoning
@@ -329,6 +401,12 @@ To call a tool, use this EXACT XML structure:
                 }
                 StreamChunk::Done => break,
             }
+        }
+
+        // Flush any remaining display buffer (non-tool-call text)
+        if !display_buf.is_empty() && !in_tool_tag {
+            print!("{}", display_buf);
+            io::stdout().flush().ok();
         }
 
         // Ensure we end with a newline if we printed content
@@ -424,8 +502,18 @@ To call a tool, use this EXACT XML structure:
     // =========================================================================
 
     /// Get context usage percentage (0.0 - 100.0)
+    /// Get total tokens actually used (from API usage reports)
+    fn total_tokens_used(&self) -> usize {
+        let (prompt, completion) = output::get_total_tokens();
+        (prompt + completion) as usize
+    }
+
     fn context_usage_pct(&self) -> f64 {
-        let tokens = self.memory.total_tokens();
+        // Use actual API token usage, not local memory estimates
+        let api_tokens = self.total_tokens_used();
+        // Also include local memory estimate for messages not yet sent
+        let memory_tokens = self.memory.total_tokens();
+        let tokens = api_tokens.max(memory_tokens);
         let window = self.memory.context_window();
         if window == 0 {
             return 0.0;
@@ -440,7 +528,8 @@ To call a tool, use this EXACT XML structure:
         use colored::*;
 
         let pct = self.context_usage_pct();
-        let tokens = self.memory.total_tokens();
+        let (prompt_tokens, completion_tokens) = output::get_total_tokens();
+        let tokens = (prompt_tokens + completion_tokens) as usize;
         let window = self.memory.context_window();
         let (k_tokens, k_window) = (tokens as f64 / 1000.0, window as f64 / 1000.0);
 
@@ -460,10 +549,8 @@ To call a tool, use this EXACT XML structure:
             bar.bright_green()
         };
 
-        // Get cost
-        let (prompt_tok, completion_tok) = output::get_total_tokens();
-        let total_tok = prompt_tok + completion_tok;
-        let cost = total_tok as f64 * 0.000003; // rough estimate
+        // Get cost from actual API usage
+        let cost = tokens as f64 * 0.000003; // rough estimate
 
         // Model name
         let model_name = &self.config.model;
