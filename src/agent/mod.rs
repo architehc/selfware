@@ -868,7 +868,11 @@ To call a tool, use this EXACT XML structure:
                 }
                 dir_content.push_str("```\n");
                 expanded = expanded.replacen(full_match, &dir_content, 1);
-                included_files.push(format!("{}/ ({} files)", file_path.trim_end_matches('/'), file_count));
+                included_files.push(format!(
+                    "{}/ ({} files)",
+                    file_path.trim_end_matches('/'),
+                    file_count
+                ));
             } else if let Ok(content) = fs::read_to_string(file_path) {
                 let file_block = format!(
                     "\n```{} ({})\n{}\n```\n",

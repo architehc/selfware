@@ -136,7 +136,10 @@ pub fn render_shared_memory(frame: &mut Frame, area: Rect, entries: &[MemoryEntr
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(TuiPalette::border_style())
-        .title(Span::styled(" 🧠 Shared Memory ", TuiPalette::title_style()));
+        .title(Span::styled(
+            " 🧠 Shared Memory ",
+            TuiPalette::title_style(),
+        ));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -150,7 +153,7 @@ pub fn render_shared_memory(frame: &mut Frame, area: Rect, entries: &[MemoryEntr
     // Show stats
     let stats_text = format!("{} entries", entries.len());
     let stats_para = Paragraph::new(stats_text).style(TuiPalette::muted_style());
-    
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Min(1)])
@@ -252,7 +255,10 @@ pub fn render_decisions(frame: &mut Frame, area: Rect, decisions: &[DecisionView
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(TuiPalette::border_style())
-        .title(Span::styled(" ⚖️ Active Decisions ", TuiPalette::title_style()));
+        .title(Span::styled(
+            " ⚖️ Active Decisions ",
+            TuiPalette::title_style(),
+        ));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -335,10 +341,7 @@ pub fn render_swarm_events(frame: &mut Frame, area: Rect, events: &[SwarmEvent])
             };
 
             ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!("[{}] ", event.timestamp),
-                    TuiPalette::muted_style(),
-                ),
+                Span::styled(format!("[{}] ", event.timestamp), TuiPalette::muted_style()),
                 Span::styled(format!("{} ", event.event_type.icon()), style),
                 Span::styled(&event.message, style),
             ]))

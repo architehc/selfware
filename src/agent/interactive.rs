@@ -347,30 +347,14 @@ impl Agent {
                     "{}",
                     "├──────────────────────────────────────────────────────┤".bright_cyan()
                 );
-                println!(
-                    "│  Ctrl+C ×2     Exit (double-tap)                    │"
-                );
-                println!(
-                    "│  Ctrl+J        Insert newline (multi-line)          │"
-                );
-                println!(
-                    "│  Ctrl+Y        Toggle YOLO mode                     │"
-                );
-                println!(
-                    "│  Shift+Tab     Toggle Auto-Edit mode                │"
-                );
-                println!(
-                    "│  Ctrl+X        Open external editor ($EDITOR)       │"
-                );
-                println!(
-                    "│  Ctrl+L        Clear screen                         │"
-                );
-                println!(
-                    "│  Ctrl+R        Reverse history search               │"
-                );
-                println!(
-                    "│  Tab           Autocomplete / cycle suggestions     │"
-                );
+                println!("│  Ctrl+C ×2     Exit (double-tap)                    │");
+                println!("│  Ctrl+J        Insert newline (multi-line)          │");
+                println!("│  Ctrl+Y        Toggle YOLO mode                     │");
+                println!("│  Shift+Tab     Toggle Auto-Edit mode                │");
+                println!("│  Ctrl+X        Open external editor ($EDITOR)       │");
+                println!("│  Ctrl+L        Clear screen                         │");
+                println!("│  Ctrl+R        Reverse history search               │");
+                println!("│  Tab           Autocomplete / cycle suggestions     │");
                 println!(
                     "{}",
                     "╰──────────────────────────────────────────────────────╯".bright_cyan()
@@ -772,11 +756,7 @@ impl Agent {
                     match Self::copy_text_to_clipboard(&self.last_assistant_response) {
                         Ok(()) => {
                             let len = self.last_assistant_response.len();
-                            println!(
-                                "{} Copied {} chars to clipboard",
-                                "📋".bright_green(),
-                                len
-                            );
+                            println!("{} Copied {} chars to clipboard", "📋".bright_green(), len);
                         }
                         Err(e) => println!("{} Copy failed: {}", "✗".bright_red(), e),
                     }
@@ -868,7 +848,10 @@ impl Agent {
                 if name.is_empty() {
                     println!("{} Usage: /chat save <name>", "ℹ".bright_yellow());
                 } else {
-                    match self.chat_store.save(name, &self.messages, &self.config.model) {
+                    match self
+                        .chat_store
+                        .save(name, &self.messages, &self.config.model)
+                    {
                         Ok(()) => println!("{} Chat '{}' saved", "💾".bright_green(), name),
                         Err(e) => println!("{} Save failed: {}", "✗".bright_red(), e),
                     }
@@ -913,10 +896,7 @@ impl Agent {
                                     chat.name.bright_white(),
                                     chat.message_count,
                                     chat.model.dimmed(),
-                                    chat.saved_at
-                                        .format("%Y-%m-%d %H:%M")
-                                        .to_string()
-                                        .dimmed()
+                                    chat.saved_at.format("%Y-%m-%d %H:%M").to_string().dimmed()
                                 );
                             }
                             println!();
@@ -993,10 +973,18 @@ impl Agent {
                 match crate::ui::theme::theme_from_name(name) {
                     Some(id) => {
                         crate::ui::theme::set_theme(id);
-                        println!("{} Theme set to: {}", "🎨".bright_green(), name.bright_white());
+                        println!(
+                            "{} Theme set to: {}",
+                            "🎨".bright_green(),
+                            name.bright_white()
+                        );
                     }
                     None => {
-                        println!("{} Unknown theme '{}'. Use /theme to see available themes.", "✗".bright_red(), name);
+                        println!(
+                            "{} Unknown theme '{}'. Use /theme to see available themes.",
+                            "✗".bright_red(),
+                            name
+                        );
                     }
                 }
                 continue;

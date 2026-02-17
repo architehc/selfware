@@ -3,8 +3,8 @@
 //! Manages the shared state between the swarm system and the TUI.
 
 use crate::orchestration::swarm::{
-    Agent, AgentRole, AgentStatus, Decision, DecisionStatus, MemoryEntry, Swarm,
-    SwarmTask, TaskStatus,
+    Agent, AgentRole, AgentStatus, Decision, DecisionStatus, MemoryEntry, Swarm, SwarmTask,
+    TaskStatus,
 };
 use crate::ui::tui::animation::agent_avatar::{ActivityLevel, AgentRole as AvatarRole};
 use std::sync::{Arc, RwLock};
@@ -242,28 +242,33 @@ impl SwarmUiState {
                     .iter()
                     .map(|a| AgentUiState::from_agent(a))
                     .collect();
-                
+
                 let stats = swarm.stats();
-                
+
                 let memory = swarm.memory();
                 let entries = if let Ok(mem) = memory.read() {
-                    Some(mem.entries().iter().map(|e| MemoryEntryView::from_entry(e)).collect::<Vec<_>>())
+                    Some(
+                        mem.entries()
+                            .iter()
+                            .map(|e| MemoryEntryView::from_entry(e))
+                            .collect::<Vec<_>>(),
+                    )
                 } else {
                     None
                 };
-                
+
                 let decisions: Vec<_> = swarm
                     .list_decisions()
                     .iter()
                     .map(|d| DecisionView::from_decision(d))
                     .collect();
-                
+
                 let tasks: Vec<_> = swarm
                     .list_tasks()
                     .iter()
                     .map(|t| TaskView::from_task(t))
                     .collect();
-                
+
                 (agents, Some(stats), entries, decisions, tasks)
             } else {
                 (Vec::new(), None, None, Vec::new(), Vec::new())
@@ -274,20 +279,20 @@ impl SwarmUiState {
         self.agents = agents_data;
         self.decisions = decisions_data;
         self.tasks = tasks_data;
-        
+
         // Calculate positions for visualization
         self.calculate_agent_positions();
-        
+
         // Update memory entries
         if let Some(entries) = memory_entries_opt {
             self.memory_entries = entries;
         }
-        
+
         // Update stats
         if let Some(swarm_stats) = swarm_stats_opt {
             self.update_stats(&swarm_stats);
         }
-        
+
         self.stats.memory_entries = self.memory_entries.len();
     }
 
@@ -304,7 +309,7 @@ impl SwarmUiState {
     /// Update statistics from swarm stats
     fn update_stats(&mut self, swarm_stats: &crate::orchestration::swarm::SwarmStats) {
         use crate::orchestration::swarm::AgentStatus;
-        
+
         self.stats = SwarmStats {
             total_agents: swarm_stats.total_agents,
             active_agents: swarm_stats
@@ -439,7 +444,11 @@ mod tests {
         let swarm = Arc::new(RwLock::new(create_dev_swarm()));
         let mut state = SwarmUiState::new(swarm);
 
-        state.add_event(EventType::AgentStarted, "Test message", Some("agent1".to_string()));
+        state.add_event(
+            EventType::AgentStarted,
+            "Test message",
+            Some("agent1".to_string()),
+        );
 
         assert_eq!(state.events.len(), 1);
         assert_eq!(state.events[0].event_type, EventType::AgentStarted);

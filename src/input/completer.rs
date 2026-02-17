@@ -254,8 +254,7 @@ impl SelfwareCompleter {
         // Check if the last word starts with @ (file reference)
         let words: Vec<&str> = before_cursor.split_whitespace().collect();
         if let Some(last) = words.last() {
-            if last.starts_with('@') {
-                let path_prefix = &last[1..]; // strip the @
+            if let Some(path_prefix) = last.strip_prefix('@') {
                 return CompletionContext::FileReference(path_prefix.to_string());
             }
 

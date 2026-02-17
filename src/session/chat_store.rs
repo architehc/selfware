@@ -76,8 +76,8 @@ impl ChatStore {
     /// Load a saved chat by name
     pub fn load(&self, name: &str) -> Result<SavedChat> {
         let path = self.chat_path(name);
-        let json = std::fs::read_to_string(&path)
-            .with_context(|| format!("Chat '{}' not found", name))?;
+        let json =
+            std::fs::read_to_string(&path).with_context(|| format!("Chat '{}' not found", name))?;
         let chat: SavedChat = serde_json::from_str(&json)?;
         Ok(chat)
     }
@@ -122,7 +122,13 @@ impl ChatStore {
         // Sanitize name for filesystem
         let safe_name: String = name
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect();
         self.chats_dir.join(format!("{}.json", safe_name))
     }

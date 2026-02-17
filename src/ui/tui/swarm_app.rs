@@ -64,11 +64,8 @@ impl SwarmApp {
 
         // Initial sync
         app.swarm_state.sync();
-        app.swarm_state.add_event(
-            EventType::AgentStarted,
-            "Swarm UI initialized",
-            None,
-        );
+        app.swarm_state
+            .add_event(EventType::AgentStarted, "Swarm UI initialized", None);
 
         app
     }
@@ -76,7 +73,7 @@ impl SwarmApp {
     /// Create swarm app with custom configuration
     pub fn with_config(roles: Vec<AgentRole>) -> Self {
         let mut swarm = Swarm::new();
-        
+
         for (i, role) in roles.iter().enumerate() {
             let name = format!("{}-{}", role.name(), i + 1);
             swarm.add_agent(crate::orchestration::swarm::Agent::new(name, *role));
@@ -196,11 +193,8 @@ impl SwarmApp {
                 // Refresh
                 KeyCode::Char('r') => {
                     self.swarm_state.sync();
-                    self.swarm_state.add_event(
-                        EventType::AgentStarted,
-                        "Manual refresh",
-                        None,
-                    );
+                    self.swarm_state
+                        .add_event(EventType::AgentStarted, "Manual refresh", None);
                 }
 
                 // Layout presets
@@ -288,11 +282,8 @@ impl SwarmApp {
                 .with_priority(5);
             swarm.queue_task(task);
 
-            self.swarm_state.add_event(
-                EventType::TaskCreated,
-                "New task added to queue",
-                None,
-            );
+            self.swarm_state
+                .add_event(EventType::TaskCreated, "New task added to queue", None);
         }
     }
 
@@ -329,14 +320,8 @@ impl SwarmApp {
                     let agent_id = agent.id.clone();
                     let agent_name = agent.name.clone();
                     let question = decision.question.clone();
-                    
-                    let _ = swarm.vote(
-                        &decision_id,
-                        &agent_id,
-                        "Yes",
-                        0.8,
-                        "Good approach",
-                    );
+
+                    let _ = swarm.vote(&decision_id, &agent_id, "Yes", 0.8, "Good approach");
 
                     self.swarm_state.add_event(
                         EventType::VoteCast,
@@ -372,7 +357,11 @@ fn render_pause_indicator(frame: &mut Frame, area: Rect) {
     frame.render_widget(block, pause_area);
 
     let text_widget = Paragraph::new(text)
-        .style(Style::default().fg(TuiPalette::warning()).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(TuiPalette::warning())
+                .add_modifier(Modifier::BOLD),
+        )
         .alignment(Alignment::Center);
 
     let inner = Rect::new(pause_area.x + 1, pause_area.y + 1, pause_area.width - 2, 1);
