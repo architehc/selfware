@@ -106,6 +106,7 @@ pub const LOADING_PHRASES: &[&str] = &[
     "Hammering out the details...",
     "Sanding the rough edges...",
     "Applying the finishing touches...",
+    "Connecting the dots...",
 ];
 
 /// Get a random loading phrase
