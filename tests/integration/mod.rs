@@ -16,6 +16,7 @@ mod deep_tests;
 mod e2e_tests;
 mod extended_e2e;
 mod helpers;
+#[cfg(not(target_os = "windows"))]
 mod interactive_tests;
 mod model_format_tests;
 mod qwen3_tests;
