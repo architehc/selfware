@@ -372,7 +372,10 @@ impl RecoveryExecutor {
             } else {
                 0
             };
-            let actual_delay = base.saturating_sub(jitter_range).saturating_add(jitter_offset).min(30_000);
+            let actual_delay = base
+                .saturating_sub(jitter_range)
+                .saturating_add(jitter_offset)
+                .min(30_000);
 
             state.attempt_count += 1;
             state.last_delay_ms = actual_delay;

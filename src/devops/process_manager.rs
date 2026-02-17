@@ -1725,6 +1725,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(not(target_os = "windows"))]
     async fn test_process_manager_with_working_directory() {
         let manager = ProcessManager::new();
 

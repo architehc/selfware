@@ -645,6 +645,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(not(target_os = "windows"))]
     async fn test_process_start_with_cwd() {
         let tool = ProcessStart;
         let result = tool

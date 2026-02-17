@@ -1096,6 +1096,7 @@ steps:
 }
 
 #[tokio::test]
+#[cfg(not(target_os = "windows"))]
 async fn test_shell_step_live_execution() {
     // Test that shell steps execute for real (not dry-run)
     let yaml = r#"

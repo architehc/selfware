@@ -257,7 +257,8 @@ impl FilesystemPolicy {
 
         // Check denied paths first (blacklist takes precedence)
         for denied in &self.denied_paths {
-            if path.starts_with(denied) {
+            let denied_canonical = denied.canonicalize().unwrap_or_else(|_| denied.clone());
+            if path.starts_with(&denied_canonical) {
                 return Err(anyhow!("Path is in denied list: {}", path.display()));
             }
         }

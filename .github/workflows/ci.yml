@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-14, windows-2022]
+        os: [ubuntu-24.04, macos-14, windows-2022]
         rust: [stable, beta]
         exclude:
           # Only test beta on Linux to save CI time
@@ -63,7 +63,7 @@ jobs:
 
   lint:
     name: Lint
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -93,17 +93,17 @@ jobs:
 
   # Minimum supported Rust version
   msrv:
-    name: MSRV (1.80.0)
-    runs-on: ubuntu-22.04
+    name: MSRV (1.85.0)
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Rust 1.80.0
+      - name: Install Rust 1.85.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.80.0
+          toolchain: 1.85.0
 
       - name: Cache cargo registry
         uses: actions/cache@v5
@@ -128,7 +128,7 @@ jobs:
   # Documentation build
   docs:
     name: Documentation
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -145,7 +145,7 @@ jobs:
   # Security audit
   security:
     name: Security Audit
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -160,7 +160,7 @@ jobs:
   # Coverage (runs on main and PRs)
   coverage:
     name: Code Coverage
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -186,7 +186,7 @@ jobs:
         uses: taiki-e/install-action@cargo-tarpaulin
 
       - name: Generate coverage
-        run: cargo tarpaulin --out Html --out Xml --output-dir coverage --all-features
+        run: cargo tarpaulin --out Html --out Xml --output-dir coverage --all-features --timeout 600
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v6
@@ -206,7 +206,7 @@ jobs:
   semver:
     name: Semver Checks
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout

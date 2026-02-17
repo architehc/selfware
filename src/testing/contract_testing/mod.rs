@@ -19,10 +19,10 @@ fn current_timestamp() -> u64 {
         .as_secs()
 }
 
+pub mod api_compat;
+pub mod containers;
 pub mod contracts;
 pub mod stubs;
-pub mod containers;
-pub mod api_compat;
 
 // Re-export everything from contracts
 pub use contracts::{
@@ -31,17 +31,13 @@ pub use contracts::{
 };
 
 // Re-export everything from stubs
-pub use stubs::{
-    FaultType, MockServer, RequestLogEntry, StubMapping, StubRequest, StubResponse,
-};
+pub use stubs::{FaultType, MockServer, RequestLogEntry, StubMapping, StubRequest, StubResponse};
 
 // Re-export everything from containers
-pub use containers::{
-    ContainerOrchestrator, ContainerState, ContainerType, TestContainer,
-};
+pub use containers::{ContainerOrchestrator, ContainerState, ContainerType, TestContainer};
 
 // Re-export everything from api_compat
 pub use api_compat::{
-    ApiEndpoint, ApiParameter, ApiSchema, ApiSchemaProperty, ApiVersion,
-    CompatibilityChange, CompatibilityChangeType, CompatibilityChecker,
+    ApiEndpoint, ApiParameter, ApiSchema, ApiSchemaProperty, ApiVersion, CompatibilityChange,
+    CompatibilityChangeType, CompatibilityChecker,
 };

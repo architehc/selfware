@@ -1109,9 +1109,9 @@ impl SelfHealingEngine {
             .unwrap_or_else(|| error_class.default_strategy());
 
         // Execute recovery with pattern tracking for exponential backoff
-        let execution =
-            self.executor
-                .execute_for_pattern(&strategy, &self.state, &pattern_key);
+        let execution = self
+            .executor
+            .execute_for_pattern(&strategy, &self.state, &pattern_key);
 
         if execution.success {
             // Record successful outcome for learning
@@ -1880,7 +1880,9 @@ mod tests {
         assert!(ErrorClass::RateLimit.escalation_strategy().is_some());
 
         // Resource exhaustion escalates to full reset
-        assert!(ErrorClass::ResourceExhaustion.escalation_strategy().is_some());
+        assert!(ErrorClass::ResourceExhaustion
+            .escalation_strategy()
+            .is_some());
 
         // Parse errors escalate to context compression
         assert!(ErrorClass::ParseError.escalation_strategy().is_some());
@@ -1954,11 +1956,7 @@ mod tests {
             estimated_duration_ms: 0,
         };
 
-        executor.execute_for_pattern(
-            &strategy,
-            &StateManager::default(),
-            "reset_test",
-        );
+        executor.execute_for_pattern(&strategy, &StateManager::default(), "reset_test");
         assert_eq!(executor.retry_attempt_count("reset_test"), 1);
 
         // Reset clears the count
@@ -1966,11 +1964,7 @@ mod tests {
         assert_eq!(executor.retry_attempt_count("reset_test"), 0);
 
         // Can retry again from scratch
-        executor.execute_for_pattern(
-            &strategy,
-            &StateManager::default(),
-            "reset_test",
-        );
+        executor.execute_for_pattern(&strategy, &StateManager::default(), "reset_test");
         assert_eq!(executor.retry_attempt_count("reset_test"), 1);
     }
 
@@ -1990,7 +1984,10 @@ mod tests {
 
         let result = executor.execute(&strategy);
         assert!(!result.success);
-        assert!(result.error.unwrap().contains("max_attempts must be greater than 0"));
+        assert!(result
+            .error
+            .unwrap()
+            .contains("max_attempts must be greater than 0"));
     }
 
     // ================================================================

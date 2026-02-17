@@ -318,8 +318,7 @@ impl Tool for GlobFind {
                 format!("{}/{}", base_path, pattern_str)
             };
 
-            let glob_pattern =
-                glob::Pattern::new(&full_pattern).context("Invalid glob pattern")?;
+            let glob_pattern = glob::Pattern::new(&full_pattern).context("Invalid glob pattern")?;
 
             let mut files = Vec::new();
 

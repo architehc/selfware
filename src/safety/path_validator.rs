@@ -41,7 +41,7 @@ impl PathValidator {
         let canonical = resolved
             .canonicalize()
             .unwrap_or_else(|_| normalize_path(&resolved));
-        let canonical_str = canonical.to_string_lossy();
+        let canonical_str = strip_unc_prefix(&canonical.to_string_lossy());
 
         // Strict path traversal check
         if path.contains("..") {
@@ -105,11 +105,24 @@ impl PathValidator {
         canonical_str: &str,
         _original_path: &str,
     ) -> Result<bool> {
+        let working_dir_canonical = strip_unc_prefix(
+            &self
+                .working_dir
+                .canonicalize()
+                .unwrap_or_else(|_| self.working_dir.clone())
+                .to_string_lossy(),
+        );
+
         for pattern in &self.config.allowed_paths {
+            // For relative patterns, expand using the working directory
             let expanded_pattern = if pattern.starts_with("./") || pattern == "." {
-                let base = self.working_dir.to_string_lossy();
                 let suffix = pattern.strip_prefix("./").unwrap_or("");
-                format!("{}/{}", base, suffix)
+                if cfg!(target_os = "windows") {
+                    // On Windows, use backslash separator for glob matching
+                    format!("{}\\{}", working_dir_canonical, suffix)
+                } else {
+                    format!("{}/{}", working_dir_canonical, suffix)
+                }
             } else {
                 pattern.clone()
             };
@@ -120,11 +133,9 @@ impl PathValidator {
                 return Ok(true);
             }
 
-            if pattern == "./**" {
-                let working_dir_str = self.working_dir.to_string_lossy();
-                if canonical_str.starts_with(&*working_dir_str) {
-                    return Ok(true);
-                }
+            // Fallback: for "./**" pattern, do a simple prefix check
+            if pattern == "./**" && canonical_str.starts_with(&working_dir_canonical) {
+                return Ok(true);
             }
         }
         Ok(false)
@@ -185,6 +196,19 @@ impl PathValidator {
         }
 
         Ok(())
+    }
+}
+
+/// Strip the Windows `\\?\` extended-length path prefix.
+///
+/// On Windows, `canonicalize()` returns paths like `\\?\C:\Users\...`
+/// but `current_dir()` returns `C:\Users\...` without the prefix.
+/// This causes `starts_with` comparisons to fail.
+fn strip_unc_prefix(path: &str) -> String {
+    if cfg!(target_os = "windows") {
+        path.strip_prefix(r"\\?\").unwrap_or(path).to_string()
+    } else {
+        path.to_string()
     }
 }
 

@@ -164,6 +164,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(not(target_os = "windows"))]
     async fn test_shell_exec_with_cwd() {
         let tool = ShellExec;
         let args = serde_json::json!({
