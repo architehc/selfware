@@ -423,6 +423,105 @@ To call a tool, use this EXACT XML structure:
     // Context Management
     // =========================================================================
 
+    /// Get context usage percentage (0.0 - 100.0)
+    fn context_usage_pct(&self) -> f64 {
+        let tokens = self.memory.total_tokens();
+        let window = self.memory.context_window();
+        if window == 0 {
+            return 0.0;
+        }
+        (tokens as f64 / window as f64 * 100.0).min(100.0)
+    }
+
+    /// Print a Qwen Code-style status bar line before the prompt
+    ///
+    /// Layout: `  ? for shortcuts                            45.2% context used`
+    fn print_status_bar(&self) {
+        use colored::*;
+
+        let pct = self.context_usage_pct();
+        let tokens = self.memory.total_tokens();
+        let window = self.memory.context_window();
+        let (k_tokens, k_window) = (tokens as f64 / 1000.0, window as f64 / 1000.0);
+
+        // Build progress bar (10 chars wide)
+        let bar_width = 10;
+        let filled = ((pct / 100.0) * bar_width as f64) as usize;
+        let bar: String = (0..bar_width)
+            .map(|i| if i < filled { "█" } else { "░" })
+            .collect();
+
+        // Color the bar based on usage
+        let colored_bar = if pct > 90.0 {
+            bar.bright_red()
+        } else if pct > 70.0 {
+            bar.bright_yellow()
+        } else {
+            bar.bright_green()
+        };
+
+        // Get cost
+        let (prompt_tok, completion_tok) = output::get_total_tokens();
+        let total_tok = prompt_tok + completion_tok;
+        let cost = total_tok as f64 * 0.000003; // rough estimate
+
+        // Model name
+        let model_name = &self.config.model;
+        let short_model = if model_name.len() > 15 {
+            &model_name[..15]
+        } else {
+            model_name
+        };
+
+        // Mode indicator
+        let mode = match self.execution_mode() {
+            crate::config::ExecutionMode::Normal => "normal",
+            crate::config::ExecutionMode::AutoEdit => "auto-edit",
+            crate::config::ExecutionMode::Yolo => "YOLO",
+            crate::config::ExecutionMode::Daemon => "daemon",
+        };
+
+        // Terminal width for alignment
+        let term_width = crossterm::terminal::size()
+            .map(|(w, _)| w as usize)
+            .unwrap_or(80);
+
+        // Left side: mode + hint
+        let left = format!("[{}] ? for shortcuts", mode);
+        // Right side: bar + percentage + tokens + cost
+        let right = format!(
+            "{} {:.1}% ({:.1}k/{:.0}k) ${:.2} [{}]",
+            bar, pct, k_tokens, k_window, cost, short_model
+        );
+
+        // Pad middle with spaces
+        let padding = if left.len() + right.len() + 2 < term_width {
+            term_width - left.len() - right.len() - 2
+        } else {
+            1
+        };
+
+        // Print colored version
+        let mode_colored = match self.execution_mode() {
+            crate::config::ExecutionMode::Yolo => format!("[{}]", mode).bright_red(),
+            crate::config::ExecutionMode::AutoEdit => format!("[{}]", mode).bright_yellow(),
+            _ => format!("[{}]", mode).bright_cyan(),
+        };
+
+        println!(
+            " {} {}{}  {} {:.1}% ({:.1}k/{:.0}k) {} [{}]",
+            mode_colored,
+            "? for shortcuts".dimmed(),
+            " ".repeat(padding),
+            colored_bar,
+            pct,
+            k_tokens,
+            k_window,
+            format!("${:.2}", cost).dimmed(),
+            short_model.dimmed(),
+        );
+    }
+
     /// Show compact startup context line (Claude Code style)
     fn show_startup_context(&self) {
         let tokens = self.memory.total_tokens();

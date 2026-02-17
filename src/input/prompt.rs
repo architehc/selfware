@@ -12,6 +12,8 @@ pub struct SelfwarePrompt {
     model: String,
     /// Current step number
     step: usize,
+    /// Context usage percentage (0.0 - 100.0)
+    context_pct: f64,
     /// Left prompt style
     #[allow(dead_code)] // For future styled prompts
     left_style: Style,
@@ -26,6 +28,7 @@ impl SelfwarePrompt {
         Self {
             model: String::new(),
             step: 0,
+            context_pct: 0.0,
             left_style: Style::new().fg(Color::Rgb(212, 163, 115)), // Amber
             right_style: Style::new().fg(Color::Rgb(128, 128, 128)).dimmed(), // Stone
         }
@@ -36,6 +39,18 @@ impl SelfwarePrompt {
         Self {
             model: model.to_string(),
             step,
+            context_pct: 0.0,
+            left_style: Style::new().fg(Color::Rgb(212, 163, 115)),
+            right_style: Style::new().fg(Color::Rgb(128, 128, 128)).dimmed(),
+        }
+    }
+
+    /// Create a prompt with full context including token usage
+    pub fn with_full_context(model: &str, step: usize, context_pct: f64) -> Self {
+        Self {
+            model: model.to_string(),
+            step,
+            context_pct,
             left_style: Style::new().fg(Color::Rgb(212, 163, 115)),
             right_style: Style::new().fg(Color::Rgb(128, 128, 128)).dimmed(),
         }
@@ -75,13 +90,17 @@ impl Prompt for SelfwarePrompt {
 
     fn render_prompt_right(&self) -> Cow<str> {
         if !self.model.is_empty() {
-            // Show abbreviated model name
+            // Show abbreviated model name + context percentage (like Qwen Code)
             let short_model = if self.model.len() > 20 {
                 format!("{}...", &self.model[..17])
             } else {
                 self.model.clone()
             };
-            Cow::Owned(format!("[{}]", short_model))
+            if self.context_pct > 0.0 {
+                Cow::Owned(format!("[{}] {:.1}% used", short_model, self.context_pct))
+            } else {
+                Cow::Owned(format!("[{}]", short_model))
+            }
         } else {
             Cow::Borrowed("")
         }
@@ -284,5 +303,30 @@ mod tests {
         let indicator = prompt.render_prompt_history_search_indicator(search);
         assert!(indicator.contains("❌"));
         assert!(indicator.contains("notfound"));
+    }
+
+    #[test]
+    fn test_prompt_with_full_context() {
+        let prompt = SelfwarePrompt::with_full_context("test-model", 3, 45.2);
+        assert_eq!(prompt.model, "test-model");
+        assert_eq!(prompt.step, 3);
+        assert!((prompt.context_pct - 45.2).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_render_prompt_right_with_context_pct() {
+        let prompt = SelfwarePrompt::with_full_context("test-model", 1, 45.2);
+        let right = prompt.render_prompt_right();
+        assert!(right.contains("45.2% used"), "got: {}", right);
+        assert!(right.contains("test-model"));
+    }
+
+    #[test]
+    fn test_render_prompt_right_zero_context() {
+        let prompt = SelfwarePrompt::with_full_context("test-model", 1, 0.0);
+        let right = prompt.render_prompt_right();
+        // 0% should not show context usage
+        assert!(!right.contains("used"));
+        assert!(right.contains("test-model"));
     }
 }

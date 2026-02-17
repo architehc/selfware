@@ -45,6 +45,8 @@ impl Agent {
             mode_indicator.bright_yellow()
         );
         self.show_startup_context();
+        // Show context stats on startup (like /ctx)
+        self.show_context_stats();
         println!(
             "  Type {} for commands, {} for context, {} to quit",
             "/help".bright_cyan(),
@@ -57,6 +59,12 @@ impl Agent {
         let mut last_ctrl_c: Option<Instant> = None;
 
         loop {
+            // Print status bar and update prompt with context usage before each input
+            self.print_status_bar();
+            let ctx_pct = self.context_usage_pct();
+            let step = self.loop_control.current_step();
+            editor.set_prompt_full_context(&self.config.model, step, ctx_pct);
+
             let input = match editor.read_line() {
                 Ok(ReadlineResult::Line(line)) => {
                     consecutive_errors = 0;

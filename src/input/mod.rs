@@ -290,6 +290,11 @@ impl SelfwareEditor {
         self.prompt = SelfwarePrompt::with_context(model, step);
     }
 
+    /// Update the prompt with full context including token usage
+    pub fn set_prompt_full_context(&mut self, model: &str, step: usize, context_pct: f64) {
+        self.prompt = SelfwarePrompt::with_full_context(model, step, context_pct);
+    }
+
     /// Add tool names for completion
     pub fn add_tools(&mut self, tools: Vec<String>) {
         // Note: We'd need to rebuild the completer for dynamic updates
