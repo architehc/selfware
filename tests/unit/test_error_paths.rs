@@ -349,8 +349,7 @@ mod directory_tree_error_tests {
             }))
             .await;
         // Should return error or empty result
-        if result.is_ok() {
-            let value = result.unwrap();
+        if let Ok(value) = result {
             // If it returns OK, entries should be empty or error field set
             let entries = value.get("entries").and_then(|e| e.as_array());
             if let Some(arr) = entries {

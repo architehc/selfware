@@ -252,13 +252,16 @@ async fn test_longer_conversation() {
         )
         .await;
 
-        if result.is_err() {
-            // Timeout is acceptable for slow models
-            eprintln!("Conversation turn timed out, which is acceptable");
-            return;
-        }
+        let result = match result {
+            Err(_) => {
+                // Timeout is acceptable for slow models
+                eprintln!("Conversation turn timed out, which is acceptable");
+                return;
+            }
+            Ok(r) => r,
+        };
 
-        let response = result.unwrap().expect("Chat should succeed");
+        let response = result.expect("Chat should succeed");
         let content = response.choices[0].message.content.clone();
 
         // Add assistant response to context
