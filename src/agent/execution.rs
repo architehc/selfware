@@ -649,19 +649,20 @@ impl Agent {
 
         // Check if the planning response contains tool calls
         // For native function calling, check tool_calls field; otherwise parse from content
-        let (has_tool_calls, native_tool_calls) =
-            if self.config.agent.native_function_calling && assistant_msg.tool_calls.is_some() {
-                let tool_calls = assistant_msg.tool_calls.as_ref().unwrap();
-                info!(
-                    "Planning response has {} native tool calls",
-                    tool_calls.len()
-                );
-                (!tool_calls.is_empty(), assistant_msg.tool_calls.clone())
-            } else {
-                let parsed = !parse_tool_calls(content).tool_calls.is_empty();
-                debug!("Planning response has tool calls (parsed): {}", parsed);
-                (parsed, None)
-            };
+        let (has_tool_calls, native_tool_calls) = if let (true, Some(tool_calls)) = (
+            self.config.agent.native_function_calling,
+            assistant_msg.tool_calls.as_ref(),
+        ) {
+            info!(
+                "Planning response has {} native tool calls",
+                tool_calls.len()
+            );
+            (!tool_calls.is_empty(), assistant_msg.tool_calls.clone())
+        } else {
+            let parsed = !parse_tool_calls(content).tool_calls.is_empty();
+            debug!("Planning response has tool calls (parsed): {}", parsed);
+            (parsed, None)
+        };
 
         self.messages.push(Message {
             role: "assistant".to_string(),

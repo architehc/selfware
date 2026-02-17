@@ -755,8 +755,8 @@ impl GraphRenderer {
 
         // Edges
         for edge in &graph.edges {
-            let label = if self.include_edge_labels && edge.label.is_some() {
-                format!("|{}|", edge.label.as_ref().unwrap())
+            let label = if let (true, Some(lbl)) = (self.include_edge_labels, edge.label.as_ref()) {
+                format!("|{}|", lbl)
             } else {
                 String::new()
             };

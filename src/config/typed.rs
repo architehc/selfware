@@ -650,13 +650,10 @@ impl ConfigSchema {
                 }
 
                 // Check for deprecated
-                if field.deprecated.is_some() {
+                if let Some(ref reason) = field.deprecated {
                     errors.push(ValidationError {
                         field: name.clone(),
-                        message: format!(
-                            "field is deprecated: {}",
-                            field.deprecated.as_ref().unwrap()
-                        ),
+                        message: format!("field is deprecated: {}", reason),
                         severity: ErrorSeverity::Warning,
                     });
                 }
