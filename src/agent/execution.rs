@@ -128,6 +128,25 @@ impl Agent {
             let (success, result) = self
                 .execute_single_tool(&name, &args_str, &args, start_time)
                 .await?;
+
+            // Track file operations for context management
+            if success {
+                if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                    let path_str = path.to_string();
+                    match name.as_str() {
+                        "file_read" => {
+                            if !self.context_files.contains(&path_str) {
+                                self.context_files.push(path_str);
+                            }
+                        }
+                        "file_write" | "file_edit" | "file_create" => {
+                            self.stale_files.insert(path_str);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
             self.push_tool_result_message(use_native_fc, &call_id, success, &result);
         }
 
@@ -186,7 +205,7 @@ impl Agent {
             name.bright_cyan(),
             args_display.bright_white()
         );
-        print!("{}", "Execute? [y/N/s(kip all)]: ".bright_yellow());
+        print!("{}", "Execute? [y/N/s(bypass permissions)]: ".bright_yellow());
         io::stdout().flush().ok();
 
         let mut response = String::new();

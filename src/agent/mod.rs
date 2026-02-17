@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use colored::*;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
@@ -80,6 +81,8 @@ pub struct Agent {
     error_analyzer: ErrorAnalyzer,
     /// Files loaded into context for reload functionality
     context_files: Vec<String>,
+    /// Files modified since last loaded into context (need refresh)
+    stale_files: HashSet<String>,
     /// Last time a checkpoint was persisted to disk
     last_checkpoint_persisted_at: Instant,
     /// Tool call count at last persisted checkpoint
@@ -229,6 +232,7 @@ To call a tool, use this EXACT XML structure:
             verification_gate,
             error_analyzer,
             context_files: Vec::new(),
+            stale_files: HashSet::new(),
             last_checkpoint_persisted_at: Instant::now(),
             last_checkpoint_tool_calls: 0,
             checkpoint_persisted_once: false,
@@ -501,19 +505,27 @@ To call a tool, use this EXACT XML structure:
     // Context Management
     // =========================================================================
 
-    /// Get context usage percentage (0.0 - 100.0)
-    /// Get total tokens actually used (from API usage reports)
+    /// Estimate total tokens from accumulated messages (the actual context sent to API)
+    fn estimate_messages_tokens(&self) -> usize {
+        self.messages
+            .iter()
+            .map(|m| crate::token_count::estimate_tokens_with_overhead(&m.content, 4))
+            .sum()
+    }
+
+    /// Get the best estimate of total tokens used
     fn total_tokens_used(&self) -> usize {
-        let (prompt, completion) = output::get_total_tokens();
-        (prompt + completion) as usize
+        // Use the MAX of: API-reported usage, message estimates, memory estimates
+        // API usage may be 0 if the provider doesn't send usage chunks
+        let (api_prompt, api_completion) = output::get_total_tokens();
+        let api_tokens = (api_prompt + api_completion) as usize;
+        let msg_tokens = self.estimate_messages_tokens();
+        let mem_tokens = self.memory.total_tokens();
+        api_tokens.max(msg_tokens).max(mem_tokens)
     }
 
     fn context_usage_pct(&self) -> f64 {
-        // Use actual API token usage, not local memory estimates
-        let api_tokens = self.total_tokens_used();
-        // Also include local memory estimate for messages not yet sent
-        let memory_tokens = self.memory.total_tokens();
-        let tokens = api_tokens.max(memory_tokens);
+        let tokens = self.total_tokens_used();
         let window = self.memory.context_window();
         if window == 0 {
             return 0.0;
@@ -528,8 +540,7 @@ To call a tool, use this EXACT XML structure:
         use colored::*;
 
         let pct = self.context_usage_pct();
-        let (prompt_tokens, completion_tokens) = output::get_total_tokens();
-        let tokens = (prompt_tokens + completion_tokens) as usize;
+        let tokens = self.total_tokens_used();
         let window = self.memory.context_window();
         let (k_tokens, k_window) = (tokens as f64 / 1000.0, window as f64 / 1000.0);
 
@@ -611,7 +622,7 @@ To call a tool, use this EXACT XML structure:
 
     /// Show compact startup context line (Claude Code style)
     fn show_startup_context(&self) {
-        let tokens = self.memory.total_tokens();
+        let tokens = self.total_tokens_used();
         let window = self.memory.context_window();
         let used_pct = (tokens as f64 / window as f64 * 100.0).min(100.0);
         let tool_count = self.tools.list().len();
@@ -650,7 +661,7 @@ To call a tool, use this EXACT XML structure:
 
     /// Show context statistics with visual progress bar
     fn show_context_stats(&self) {
-        let tokens = self.memory.total_tokens();
+        let tokens = self.total_tokens_used();
         let window = self.memory.context_window();
         let used_pct = (tokens as f64 / window as f64 * 100.0).min(100.0);
         let messages = self.messages.len();
@@ -820,7 +831,84 @@ To call a tool, use this EXACT XML structure:
             "      {}⚓ /ctx clear    ◈ /ctx load    ≋ /ctx reload    ⊡ /ctx copy{}",
             worn, reset
         );
+
+        // Show tracked context files if any
+        if !self.context_files.is_empty() {
+            println!();
+            println!("  {}📄 Context Files:{}", patina_light, reset);
+            let mut total_file_tokens = 0usize;
+            for path_str in &self.context_files {
+                let file_tokens = self
+                    .messages
+                    .iter()
+                    .find(|m| m.role == "user" && m.content.contains(&format!("// FILE: {}", path_str)))
+                    .map(|m| crate::token_count::estimate_tokens_with_overhead(&m.content, 4))
+                    .unwrap_or(0);
+                total_file_tokens += file_tokens;
+                let is_stale = self.stale_files.contains(path_str);
+                let stale_marker = if is_stale { format!("  {}⟳ modified{}", coral, reset) } else { String::new() };
+                let k_tokens = file_tokens as f64 / 1000.0;
+                println!(
+                    "    {}{}  {}{:>40}{}  {}({:.1}k tokens){}{}",
+                    worn, "→", sand, path_str, reset, worn, k_tokens, reset, stale_marker
+                );
+            }
+            let total_k = total_file_tokens as f64 / 1000.0;
+            println!(
+                "  {}Total: {} files, {:.1}k tokens{}",
+                aged, self.context_files.len(), total_k, reset
+            );
+        }
+
         println!();
+    }
+
+    /// Refresh any stale files that are in context
+    /// Returns the number of files refreshed
+    fn refresh_stale_context_files(&mut self) -> usize {
+        if self.stale_files.is_empty() {
+            return 0;
+        }
+
+        // Find which stale files are in our context
+        let stale_in_context: Vec<String> = self
+            .context_files
+            .iter()
+            .filter(|f| self.stale_files.contains(f.as_str()))
+            .cloned()
+            .collect();
+
+        if stale_in_context.is_empty() {
+            self.stale_files.clear();
+            return 0;
+        }
+
+        let mut refreshed = 0;
+        for path_str in &stale_in_context {
+            let file_marker = format!("// FILE: {}", path_str);
+            if let Ok(content) = std::fs::read_to_string(path_str) {
+                let file_header = format!(
+                    "\n// ═══════════════════════════════════════════\n// FILE: {}\n// ═══════════════════════════════════════════\n",
+                    path_str
+                );
+                let new_content = format!("{}{}", file_header, content);
+
+                // Find and replace the existing message for this file
+                if let Some(msg) = self.messages.iter_mut().find(|m| {
+                    m.role == "user" && m.content.contains(&file_marker)
+                }) {
+                    msg.content = new_content;
+                    refreshed += 1;
+                }
+            }
+        }
+
+        // Clear the stale set for refreshed files
+        for path_str in &stale_in_context {
+            self.stale_files.remove(path_str);
+        }
+
+        refreshed
     }
 
     /// Clear all context (messages and memory)
@@ -836,6 +924,7 @@ To call a tool, use this EXACT XML structure:
         use walkdir::WalkDir;
 
         let mut loaded = 0;
+        let mut total_tokens = 0usize;
         let extensions: Vec<&str> = if pattern == "." || pattern == "*" {
             vec!["rs", "toml", "md", "ts", "tsx", "js", "jsx", "py", "go"]
         } else {
@@ -874,30 +963,47 @@ To call a tool, use this EXACT XML structure:
             if extensions.contains(&ext) {
                 if let Ok(content) = fs::read_to_string(path) {
                     let file_header = format!("\n// ═══════════════════════════════════════════\n// FILE: {}\n// ═══════════════════════════════════════════\n", path_str);
+                    let full_content = format!("{}{}", file_header, content);
+                    let file_tokens = crate::token_count::estimate_tokens_with_overhead(&full_content, 4);
+                    total_tokens += file_tokens;
 
                     // Add to context files tracking
-                    self.context_files.push(path_str.clone());
+                    if !self.context_files.contains(&path_str) {
+                        self.context_files.push(path_str.clone());
+                    }
 
                     // Add as user message with file content
-                    self.messages
-                        .push(Message::user(format!("{}{}", file_header, content)));
+                    self.messages.push(Message::user(full_content));
 
-                    let size: String = if content.len() > 1000 {
-                        format!("{}K", content.len() / 1000)
-                    } else {
-                        format!("{}", content.len())
-                    };
+                    let k_tokens = file_tokens as f64 / 1000.0;
                     println!(
-                        "  {} {} ({})",
+                        "  {} {} ({:.1}k tokens)",
                         "✓".bright_green(),
                         path_str.bright_white(),
-                        size.bright_black()
+                        k_tokens
                     );
                     loaded += 1;
                 }
             }
         }
 
+        let window = self.memory.context_window();
+        let pct = if window > 0 {
+            total_tokens as f64 / window as f64 * 100.0
+        } else {
+            0.0
+        };
+        let total_k = total_tokens as f64 / 1000.0;
+        let window_k = window as f64 / 1000.0;
+        println!();
+        println!(
+            "  {} Loaded {} files, ~{:.0}k tokens ({:.1}% of {:.0}k context)",
+            "📊".bright_cyan(),
+            loaded,
+            total_k,
+            pct,
+            window_k
+        );
         println!();
         Ok(loaded)
     }
@@ -915,9 +1021,11 @@ To call a tool, use this EXACT XML structure:
             return Ok(0);
         }
 
-        // Clear old file messages but keep system and conversation
-        self.messages
-            .retain(|m| m.role == "system" || m.role == "assistant");
+        // Remove only messages that contain file content (// FILE: headers)
+        // Keep all conversation messages intact
+        self.messages.retain(|m| {
+            !(m.role == "user" && m.content.contains("// FILE: "))
+        });
 
         let mut loaded = 0;
         for path_str in &files {
@@ -929,6 +1037,9 @@ To call a tool, use this EXACT XML structure:
                 loaded += 1;
             }
         }
+
+        // Clear stale tracking since we just refreshed everything
+        self.stale_files.clear();
 
         Ok(loaded)
     }

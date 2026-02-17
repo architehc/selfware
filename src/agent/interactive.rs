@@ -59,6 +59,17 @@ impl Agent {
         let mut last_ctrl_c: Option<Instant> = None;
 
         loop {
+            // Auto-refresh stale files before prompting
+            let refreshed = self.refresh_stale_context_files();
+            if refreshed > 0 {
+                println!(
+                    "  {} Refreshed {} modified file{} in context",
+                    "⟳".bright_cyan(),
+                    refreshed,
+                    if refreshed == 1 { "" } else { "s" }
+                );
+            }
+
             // Print status bar and update prompt with context usage before each input
             self.print_status_bar();
             let ctx_pct = self.context_usage_pct();
