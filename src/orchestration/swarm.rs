@@ -827,6 +827,26 @@ impl Swarm {
         Ok(decision.resolve(&trust_scores))
     }
 
+    /// List all decisions
+    pub fn list_decisions(&self) -> Vec<&Decision> {
+        self.decisions.values().collect()
+    }
+
+    /// Get a specific decision
+    pub fn get_decision(&self, id: &str) -> Option<&Decision> {
+        self.decisions.get(id)
+    }
+
+    /// List all tasks in the queue
+    pub fn list_tasks(&self) -> Vec<&SwarmTask> {
+        self.task_queue.iter().collect()
+    }
+
+    /// Get a specific task
+    pub fn get_task(&self, id: &str) -> Option<&SwarmTask> {
+        self.task_queue.iter().find(|t| t.id == id)
+    }
+
     /// Handle conflict
     pub fn resolve_conflict(&mut self, decision_id: &str) -> Result<Option<String>> {
         let decision = self

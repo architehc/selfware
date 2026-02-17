@@ -11,6 +11,9 @@ pub mod garden_view;
 mod layout;
 mod markdown;
 mod palette;
+mod swarm_app;
+mod swarm_state;
+mod swarm_widgets;
 mod widgets;
 
 pub use app::{App, AppState, ChatMessage, MessageRole, TaskProgress};
@@ -23,6 +26,17 @@ pub use layout::{LayoutEngine, LayoutNode, LayoutPreset, Pane, PaneId, PaneType,
 pub use markdown::MarkdownRenderer;
 pub use palette::CommandPalette;
 pub use widgets::{GardenSpinner, GrowthGauge, StatusIndicator, StatusType, ToolOutput};
+
+// Re-export swarm components
+pub use swarm_app::{SwarmApp, SwarmAppState};
+pub use swarm_state::{
+    AgentUiState, DecisionView, EventType, MemoryEntryView, SwarmEvent, SwarmStats, SwarmUiState,
+    TaskView,
+};
+pub use swarm_widgets::{
+    render_agent_swarm, render_decisions, render_shared_memory, render_swarm_events,
+    render_swarm_health, render_swarm_help, render_swarm_status_bar, render_task_queue,
+};
 
 // Re-export animation components for convenience
 pub use animation::{
@@ -1643,4 +1657,112 @@ mod tests {
             panic!("Wrong event type");
         }
     }
+}
+
+/// Run the TUI in swarm mode
+///
+/// This creates a full terminal UI for visualizing and interacting with
+/// the agent swarm system. Features include:
+/// - Real-time agent status visualization
+/// - Shared memory browser
+/// - Task queue monitoring
+/// - Decision/consensus tracking
+/// - Event logging
+///
+/// Keyboard shortcuts:
+/// - q / Ctrl+C: Quit
+/// - ?: Toggle help overlay
+/// - Space: Pause/resume
+/// - r: Refresh swarm state
+/// - t: Add sample task
+/// - c: Create sample decision
+/// - v: Cast sample vote
+/// - Alt+1-3: Layout presets
+/// - Tab: Cycle focus between panes
+/// - z: Toggle zoom
+pub fn run_tui_swarm() -> Result<()> {
+    let mut terminal = TuiTerminal::new()?;
+    let mut app = SwarmApp::new();
+    let mut last_tick = Instant::now();
+    let tick_rate = Duration::from_millis(100);
+
+    loop {
+        // Handle timing
+        let timeout = tick_rate
+            .checked_sub(last_tick.elapsed())
+            .unwrap_or_else(|| Duration::from_secs(0));
+
+        // Render
+        terminal.terminal().draw(|frame| {
+            app.render(frame);
+        })?;
+
+        // Handle events
+        if crossterm::event::poll(timeout)? {
+            if let Event::Key(key) = crossterm::event::read()? {
+                if !app.handle_event(Event::Key(key)) {
+                    break;
+                }
+            }
+        }
+
+        // Update on tick
+        if last_tick.elapsed() >= tick_rate {
+            app.on_tick();
+            last_tick = Instant::now();
+        }
+    }
+
+    terminal.restore()?;
+    Ok(())
+}
+
+/// Run the TUI swarm with a custom swarm configuration
+///
+/// Similar to `run_tui_swarm` but allows specifying custom agent roles.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use selfware::ui::tui::run_tui_swarm_with_roles;
+/// use selfware::orchestration::swarm::AgentRole;
+///
+/// let roles = vec![
+///     AgentRole::Architect,
+///     AgentRole::Coder,
+///     AgentRole::Tester,
+/// ];
+/// run_tui_swarm_with_roles(roles).unwrap();
+/// ```
+pub fn run_tui_swarm_with_roles(roles: Vec<crate::orchestration::swarm::AgentRole>) -> Result<()> {
+    let mut terminal = TuiTerminal::new()?;
+    let mut app = SwarmApp::with_config(roles);
+    let mut last_tick = Instant::now();
+    let tick_rate = Duration::from_millis(100);
+
+    loop {
+        let timeout = tick_rate
+            .checked_sub(last_tick.elapsed())
+            .unwrap_or_else(|| Duration::from_secs(0));
+
+        terminal.terminal().draw(|frame| {
+            app.render(frame);
+        })?;
+
+        if crossterm::event::poll(timeout)? {
+            if let Event::Key(key) = crossterm::event::read()? {
+                if !app.handle_event(Event::Key(key)) {
+                    break;
+                }
+            }
+        }
+
+        if last_tick.elapsed() >= tick_rate {
+            app.on_tick();
+            last_tick = Instant::now();
+        }
+    }
+
+    terminal.restore()?;
+    Ok(())
 }
