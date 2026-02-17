@@ -91,6 +91,68 @@ impl GhostTextHinter {
                 completion: " me the contents of".to_string(),
                 description: "Show pattern".to_string(),
             },
+            // New command hints
+            PatternHint {
+                prefix: "/diff".to_string(),
+                completion: "".to_string(),
+                description: "Git diff --stat".to_string(),
+            },
+            PatternHint {
+                prefix: "/git".to_string(),
+                completion: "".to_string(),
+                description: "Git status --short".to_string(),
+            },
+            PatternHint {
+                prefix: "/undo".to_string(),
+                completion: "".to_string(),
+                description: "Undo last file edit".to_string(),
+            },
+            PatternHint {
+                prefix: "/cost".to_string(),
+                completion: "".to_string(),
+                description: "Token usage & cost".to_string(),
+            },
+            PatternHint {
+                prefix: "/model".to_string(),
+                completion: "".to_string(),
+                description: "Model configuration".to_string(),
+            },
+            PatternHint {
+                prefix: "/config".to_string(),
+                completion: "".to_string(),
+                description: "Show current config".to_string(),
+            },
+            // Natural language hints
+            PatternHint {
+                prefix: "find".to_string(),
+                completion: " all files that".to_string(),
+                description: "Find pattern".to_string(),
+            },
+            PatternHint {
+                prefix: "write".to_string(),
+                completion: " a function that".to_string(),
+                description: "Write pattern".to_string(),
+            },
+            PatternHint {
+                prefix: "debug".to_string(),
+                completion: " the error in".to_string(),
+                description: "Debug pattern".to_string(),
+            },
+            PatternHint {
+                prefix: "test".to_string(),
+                completion: " the implementation of".to_string(),
+                description: "Test pattern".to_string(),
+            },
+            PatternHint {
+                prefix: "why".to_string(),
+                completion: " does this".to_string(),
+                description: "Why pattern".to_string(),
+            },
+            PatternHint {
+                prefix: "how".to_string(),
+                completion: " do I".to_string(),
+                description: "How pattern".to_string(),
+            },
         ]
     }
 

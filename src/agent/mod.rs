@@ -15,6 +15,7 @@ use crate::output;
 use crate::safety::SafetyChecker;
 #[cfg(feature = "resilience")]
 use crate::self_healing::{SelfHealingConfig, SelfHealingEngine};
+use crate::session::edit_history::EditHistory;
 use crate::telemetry::{enter_agent_step, record_state_transition};
 use crate::tools::ToolRegistry;
 use crate::verification::{VerificationConfig, VerificationGate};
@@ -84,6 +85,8 @@ pub struct Agent {
     last_checkpoint_tool_calls: usize,
     /// Whether at least one checkpoint has been persisted in this session
     checkpoint_persisted_once: bool,
+    /// Edit history for undo support
+    edit_history: EditHistory,
     /// Self-healing engine for automatic recovery attempts
     #[cfg(feature = "resilience")]
     self_healing: SelfHealingEngine,
@@ -201,6 +204,8 @@ To call a tool, use this EXACT XML structure:
             ..Default::default()
         });
 
+        let edit_history = EditHistory::new();
+
         info!("Agent initialized with cognitive state, verification gate, and error analyzer");
 
         Ok(Self {
@@ -221,6 +226,7 @@ To call a tool, use this EXACT XML structure:
             last_checkpoint_persisted_at: Instant::now(),
             last_checkpoint_tool_calls: 0,
             checkpoint_persisted_once: false,
+            edit_history,
             #[cfg(feature = "resilience")]
             self_healing,
         })
@@ -386,6 +392,45 @@ To call a tool, use this EXACT XML structure:
     // =========================================================================
     // Context Management
     // =========================================================================
+
+    /// Show compact startup context line (Claude Code style)
+    fn show_startup_context(&self) {
+        let tokens = self.memory.total_tokens();
+        let window = self.memory.context_window();
+        let used_pct = (tokens as f64 / window as f64 * 100.0).min(100.0);
+        let tool_count = self.tools.list().len();
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| ".".to_string());
+        let short_cwd = if cwd.len() > 40 {
+            format!("...{}", &cwd[cwd.len() - 37..])
+        } else {
+            cwd
+        };
+
+        let model_name = &self.config.model;
+        let short_model = if model_name.len() > 20 {
+            &model_name[..20]
+        } else {
+            model_name
+        };
+
+        let (k_tokens, k_window) = (tokens as f64 / 1000.0, window as f64 / 1000.0);
+
+        println!(
+            "  {} {}  {} {:.1}k/{:.0}k ({:.0}%)  {} {}  {} {}",
+            "Model:".dimmed(),
+            short_model.bright_cyan(),
+            "Context:".dimmed(),
+            k_tokens,
+            k_window,
+            used_pct,
+            "Tools:".dimmed(),
+            tool_count.to_string().bright_white(),
+            "Dir:".dimmed(),
+            short_cwd.bright_white(),
+        );
+    }
 
     /// Show context statistics with visual progress bar
     fn show_context_stats(&self) {

@@ -76,6 +76,14 @@ impl Default for InputConfig {
                 "/analyze".into(),
                 "/review".into(),
                 "/plan".into(),
+                "/diff".into(),
+                "/git".into(),
+                "/undo".into(),
+                "/cost".into(),
+                "/model".into(),
+                "/compact".into(),
+                "/verbose".into(),
+                "/config".into(),
                 "/garden".into(),
                 "/journal".into(),
                 "/palette".into(),
@@ -280,6 +288,14 @@ mod tests {
         assert!(config.commands.contains(&"/analyze".into()));
         assert!(config.commands.contains(&"/review".into()));
         assert!(config.commands.contains(&"/plan".into()));
+        assert!(config.commands.contains(&"/diff".into()));
+        assert!(config.commands.contains(&"/git".into()));
+        assert!(config.commands.contains(&"/undo".into()));
+        assert!(config.commands.contains(&"/cost".into()));
+        assert!(config.commands.contains(&"/model".into()));
+        assert!(config.commands.contains(&"/compact".into()));
+        assert!(config.commands.contains(&"/verbose".into()));
+        assert!(config.commands.contains(&"/config".into()));
         assert!(config.commands.contains(&"/garden".into()));
         assert!(config.commands.contains(&"/journal".into()));
         assert!(config.commands.contains(&"/palette".into()));

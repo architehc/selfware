@@ -98,7 +98,10 @@ impl Agent {
 
     async fn execute_tool_batch(&mut self, tool_calls: Vec<CollectedToolCall>) -> Result<()> {
         for (name, args_str, tool_call_id) in tool_calls {
-            output::tool_call(&name);
+            // Parse args early for semantic display
+            let args_preview: serde_json::Value =
+                serde_json::from_str(&args_str).unwrap_or_else(|_| serde_json::json!({}));
+            output::tool_activity_start(&name, &args_preview);
             let start_time = std::time::Instant::now();
             let (call_id, use_native_fc, fake_call) =
                 self.build_tool_call_context(&name, &args_str, tool_call_id);
@@ -255,10 +258,32 @@ impl Agent {
             return Ok((false, err));
         };
 
+        // Snapshot file before edit/write for undo support
+        if matches!(name, "file_edit" | "file_write" | "file_create") {
+            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                if let Ok(content) = std::fs::read_to_string(path) {
+                    use crate::session::edit_history::{EditAction, FileSnapshot};
+                    let snapshot = FileSnapshot::new(std::path::PathBuf::from(path), content);
+                    let action = EditAction::FileEdit {
+                        path: std::path::PathBuf::from(path),
+                        tool: name.to_string(),
+                    };
+                    self.edit_history.create_checkpoint(action);
+                    self.edit_history.add_file_to_current(snapshot);
+                }
+            }
+        }
+
         match tool.execute(args.clone()).await {
             Ok(result) => {
-                output::tool_success(name);
+                let elapsed = start_time.elapsed().as_millis() as u64;
                 let result_str = serde_json::to_string(&result)?;
+                let summary =
+                    output::semantic_summary(name, args, Some(&result_str), true, elapsed);
+                output::tool_result_summary(&summary, true);
+                if output::is_verbose() {
+                    output::tool_success(name);
+                }
                 self.log_tool_call(name, args_str, &result_str, true, start_time, true);
 
                 let verification_result = self.maybe_verify_edit(name, args).await;
@@ -270,7 +295,13 @@ impl Agent {
                 Ok((true, final_result))
             }
             Err(e) => {
-                output::tool_failure(name, &e.to_string());
+                let elapsed = start_time.elapsed().as_millis() as u64;
+                let summary =
+                    output::semantic_summary(name, args, Some(&e.to_string()), false, elapsed);
+                output::tool_result_summary(&summary, false);
+                if output::is_verbose() {
+                    output::tool_failure(name, &e.to_string());
+                }
                 self.log_tool_call(name, args_str, &e.to_string(), false, start_time, false);
                 self.cognitive_state
                     .episodic_memory

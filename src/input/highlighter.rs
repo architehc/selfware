@@ -48,12 +48,25 @@ impl SelfwareHighlighter {
                 word,
                 "/help"
                     | "/status"
+                    | "/stats"
+                    | "/mode"
+                    | "/ctx"
+                    | "/context"
+                    | "/compress"
                     | "/memory"
                     | "/clear"
                     | "/tools"
                     | "/analyze"
                     | "/review"
                     | "/plan"
+                    | "/diff"
+                    | "/git"
+                    | "/undo"
+                    | "/cost"
+                    | "/model"
+                    | "/compact"
+                    | "/verbose"
+                    | "/config"
                     | "/garden"
                     | "/journal"
                     | "/palette"
@@ -200,12 +213,25 @@ mod tests {
         let h = SelfwareHighlighter::new();
         assert!(h.is_command("/help"));
         assert!(h.is_command("/status"));
+        assert!(h.is_command("/stats"));
+        assert!(h.is_command("/mode"));
+        assert!(h.is_command("/ctx"));
+        assert!(h.is_command("/context"));
+        assert!(h.is_command("/compress"));
         assert!(h.is_command("/memory"));
         assert!(h.is_command("/clear"));
         assert!(h.is_command("/tools"));
         assert!(h.is_command("/analyze"));
         assert!(h.is_command("/review"));
         assert!(h.is_command("/plan"));
+        assert!(h.is_command("/diff"));
+        assert!(h.is_command("/git"));
+        assert!(h.is_command("/undo"));
+        assert!(h.is_command("/cost"));
+        assert!(h.is_command("/model"));
+        assert!(h.is_command("/compact"));
+        assert!(h.is_command("/verbose"));
+        assert!(h.is_command("/config"));
         assert!(h.is_command("/garden"));
         assert!(h.is_command("/journal"));
         assert!(h.is_command("/palette"));

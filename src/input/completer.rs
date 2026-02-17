@@ -186,16 +186,34 @@ impl SelfwareCompleter {
         match cmd {
             "/help" => "Show available commands".to_string(),
             "/status" => "Show agent status".to_string(),
+            "/stats" => "Detailed session statistics".to_string(),
+            "/mode" => "Cycle execution mode".to_string(),
+            "/ctx" => "Context window stats".to_string(),
+            "/ctx clear" => "Clear all context".to_string(),
+            "/ctx load" => "Load files into context".to_string(),
+            "/ctx reload" => "Reload loaded files".to_string(),
+            "/ctx copy" => "Copy sources to clipboard".to_string(),
+            "/compress" => "Compress context".to_string(),
+            "/context" => "Context window stats".to_string(),
             "/memory" => "Show memory statistics".to_string(),
             "/clear" => "Clear conversation history".to_string(),
             "/tools" => "List available tools".to_string(),
             "/analyze" => "Analyze codebase structure".to_string(),
             "/review" => "Review code in file".to_string(),
             "/plan" => "Create a plan for a task".to_string(),
+            "/diff" => "Git diff --stat".to_string(),
+            "/git" => "Git status --short".to_string(),
+            "/undo" => "Undo last file edit".to_string(),
+            "/cost" => "Token usage & cost estimate".to_string(),
+            "/model" => "Model configuration".to_string(),
+            "/compact" => "Toggle compact mode".to_string(),
+            "/verbose" => "Toggle verbose mode".to_string(),
+            "/config" => "Show current config".to_string(),
             "/garden" => "View digital garden".to_string(),
             "/journal" => "Browse journal entries".to_string(),
             "/palette" => "Open command palette".to_string(),
             "exit" => "Exit interactive mode".to_string(),
+            "quit" => "Exit interactive mode".to_string(),
             _ => "Command".to_string(),
         }
     }
@@ -205,7 +223,11 @@ impl SelfwareCompleter {
         let before_cursor = &line[..pos];
 
         // If we're after a command that takes a path argument (check first!)
-        if before_cursor.starts_with("/analyze ") || before_cursor.starts_with("/review ") {
+        if before_cursor.starts_with("/analyze ")
+            || before_cursor.starts_with("/review ")
+            || before_cursor.starts_with("/ctx load ")
+            || before_cursor.starts_with("/context load ")
+        {
             let prefix = before_cursor.split_whitespace().last().unwrap_or("");
             return CompletionContext::Path(prefix.to_string());
         }

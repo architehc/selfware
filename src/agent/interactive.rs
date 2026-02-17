@@ -40,10 +40,16 @@ impl Agent {
 
         println!(
             "{} {}",
-            "🦊 Selfware Workshop Interactive Mode".bright_cyan(),
+            "🦊 Selfware Interactive Mode".bright_cyan(),
             mode_indicator.bright_yellow()
         );
-        println!("Type 'exit' to quit, '/help' for commands, '/mode' to cycle modes");
+        self.show_startup_context();
+        println!(
+            "  Type {} for commands, {} for context, {} to quit",
+            "/help".bright_cyan(),
+            "/ctx".bright_cyan(),
+            "exit".bright_cyan(),
+        );
 
         let mut consecutive_errors = 0;
         const MAX_CONSECUTIVE_ERRORS: u32 = 3;
@@ -150,6 +156,42 @@ impl Agent {
                 println!(
                     "│  {} /tools             List available tools       │",
                     "🔧".bright_white()
+                );
+                println!(
+                    "{}",
+                    "├──────────────────────────────────────────────────────┤".bright_cyan()
+                );
+                println!(
+                    "│  {} /diff              Git diff --stat              │",
+                    "📊".bright_white()
+                );
+                println!(
+                    "│  {} /git               Git status --short           │",
+                    "📋".bright_white()
+                );
+                println!(
+                    "│  {} /undo              Undo last file edit          │",
+                    "↩ ".bright_white()
+                );
+                println!(
+                    "│  {} /cost              Token usage & cost           │",
+                    "💰".bright_white()
+                );
+                println!(
+                    "│  {} /model             Model configuration          │",
+                    "🤖".bright_white()
+                );
+                println!(
+                    "│  {} /compact           Toggle compact mode          │",
+                    "📦".bright_white()
+                );
+                println!(
+                    "│  {} /verbose           Toggle verbose mode          │",
+                    "📢".bright_white()
+                );
+                println!(
+                    "│  {} /config            Show current config          │",
+                    "⚙ ".bright_white()
                 );
                 println!(
                     "{}",
@@ -300,6 +342,218 @@ impl Agent {
                     }
                     Err(e) => println!("{} Error copying: {}", "❌".bright_red(), e),
                 }
+                continue;
+            }
+
+            // === New slash commands ===
+
+            if input == "/diff" {
+                match std::process::Command::new("git")
+                    .args(["diff", "--stat"])
+                    .output()
+                {
+                    Ok(out) => {
+                        let stdout = String::from_utf8_lossy(&out.stdout);
+                        if stdout.trim().is_empty() {
+                            println!("{} No changes", "✓".bright_green());
+                        } else {
+                            println!("{}", stdout);
+                        }
+                    }
+                    Err(e) => println!("{} git diff failed: {}", "✗".bright_red(), e),
+                }
+                continue;
+            }
+
+            if input == "/git" {
+                match std::process::Command::new("git")
+                    .args(["status", "--short", "--branch"])
+                    .output()
+                {
+                    Ok(out) => {
+                        let stdout = String::from_utf8_lossy(&out.stdout);
+                        println!("{}", stdout);
+                    }
+                    Err(e) => println!("{} git status failed: {}", "✗".bright_red(), e),
+                }
+                continue;
+            }
+
+            if input == "/undo" {
+                if let Some(checkpoint) = self.edit_history.undo() {
+                    let mut restored = 0;
+                    for (path, snapshot) in &checkpoint.files {
+                        if std::fs::write(path, &snapshot.content).is_ok() {
+                            println!(
+                                "  {} Restored {}",
+                                "✓".bright_green(),
+                                path.display().to_string().bright_white()
+                            );
+                            restored += 1;
+                        }
+                    }
+                    if restored == 0 {
+                        println!(
+                            "{} Undo: {} (no files to restore)",
+                            "↩".bright_yellow(),
+                            checkpoint.action.description()
+                        );
+                    } else {
+                        println!(
+                            "{} Undone: {} ({} file(s) restored)",
+                            "↩".bright_green(),
+                            checkpoint.action.description(),
+                            restored
+                        );
+                    }
+                } else {
+                    println!("{} Nothing to undo", "ℹ".bright_yellow());
+                }
+                continue;
+            }
+
+            if input == "/cost" {
+                let (prompt, completion) = output::get_total_tokens();
+                let total = prompt + completion;
+                println!();
+                println!("  {} Token Usage", "📊".bright_cyan());
+                println!("  Prompt:     {:>10}", prompt.to_string().bright_white());
+                println!(
+                    "  Completion: {:>10}",
+                    completion.to_string().bright_white()
+                );
+                println!("  Total:      {:>10}", total.to_string().bright_cyan());
+                let est_cost = (prompt as f64 * 3.0 + completion as f64 * 15.0) / 1_000_000.0;
+                if est_cost > 0.001 {
+                    println!(
+                        "  Est. cost:  {:>10}",
+                        format!("~${:.4}", est_cost).dimmed()
+                    );
+                }
+                println!();
+                continue;
+            }
+
+            if input == "/model" {
+                println!();
+                println!("  {} Model Configuration", "🤖".bright_cyan());
+                println!("  Model:       {}", self.config.model.bright_white());
+                println!("  Endpoint:    {}", self.config.endpoint.bright_white());
+                println!(
+                    "  Max tokens:  {}",
+                    self.config.max_tokens.to_string().bright_white()
+                );
+                println!(
+                    "  Temperature: {}",
+                    self.config.temperature.to_string().bright_white()
+                );
+                println!(
+                    "  Streaming:   {}",
+                    if self.config.agent.streaming {
+                        "yes".bright_green()
+                    } else {
+                        "no".bright_red()
+                    }
+                );
+                println!(
+                    "  Native FC:   {}",
+                    if self.config.agent.native_function_calling {
+                        "yes".bright_green()
+                    } else {
+                        "no".bright_red()
+                    }
+                );
+                println!();
+                continue;
+            }
+
+            if input == "/compact" {
+                let new_compact = !output::is_compact();
+                output::init(
+                    new_compact,
+                    output::is_verbose(),
+                    output::should_show_tokens(),
+                );
+                println!(
+                    "{} Compact mode: {}",
+                    "⚙".bright_cyan(),
+                    if new_compact {
+                        "ON".bright_green()
+                    } else {
+                        "OFF".bright_red()
+                    }
+                );
+                continue;
+            }
+
+            if input == "/verbose" {
+                let new_verbose = !output::is_verbose();
+                output::init(
+                    output::is_compact(),
+                    new_verbose,
+                    output::should_show_tokens(),
+                );
+                println!(
+                    "{} Verbose mode: {}",
+                    "⚙".bright_cyan(),
+                    if new_verbose {
+                        "ON".bright_green()
+                    } else {
+                        "OFF".bright_red()
+                    }
+                );
+                continue;
+            }
+
+            if input == "/config" {
+                println!();
+                println!("  {} Current Configuration", "⚙".bright_cyan());
+                let mode_str = match self.execution_mode() {
+                    crate::config::ExecutionMode::Normal => "Normal",
+                    crate::config::ExecutionMode::AutoEdit => "Auto-Edit",
+                    crate::config::ExecutionMode::Yolo => "YOLO",
+                    crate::config::ExecutionMode::Daemon => "Daemon",
+                };
+                println!("  Exec mode:   {}", mode_str.bright_yellow());
+                println!("  Model:       {}", self.config.model.bright_white());
+                println!(
+                    "  Max tokens:  {}",
+                    self.config.max_tokens.to_string().bright_white()
+                );
+                println!(
+                    "  Compact:     {}",
+                    if output::is_compact() { "yes" } else { "no" }
+                );
+                println!(
+                    "  Verbose:     {}",
+                    if output::is_verbose() { "yes" } else { "no" }
+                );
+                println!(
+                    "  Show tokens: {}",
+                    if output::should_show_tokens() {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                );
+                println!(
+                    "  Streaming:   {}",
+                    if self.config.agent.streaming {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                );
+                println!(
+                    "  Native FC:   {}",
+                    if self.config.agent.native_function_calling {
+                        "yes"
+                    } else {
+                        "no"
+                    }
+                );
+                println!("  Max iters:   {}", self.config.agent.max_iterations);
+                println!();
                 continue;
             }
 
