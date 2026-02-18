@@ -201,6 +201,8 @@ impl SelfwareCompleter {
             "/analyze" => "Analyze codebase structure".to_string(),
             "/review" => "Review code in file".to_string(),
             "/plan" => "Create a plan for a task".to_string(),
+            "/swarm" => "Run task with dev swarm orchestration".to_string(),
+            "/queue" => "Queue a message for sequential execution".to_string(),
             "/diff" => "Git diff --stat".to_string(),
             "/git" => "Git status --short".to_string(),
             "/undo" => "Undo last file edit".to_string(),
@@ -454,6 +456,14 @@ mod tests {
         assert_eq!(
             completer.command_description("/review"),
             "Review code in file"
+        );
+        assert_eq!(
+            completer.command_description("/swarm"),
+            "Run task with dev swarm orchestration"
+        );
+        assert_eq!(
+            completer.command_description("/queue"),
+            "Queue a message for sequential execution"
         );
         assert_eq!(completer.command_description("/unknown"), "Command");
     }

@@ -7,6 +7,7 @@
 //! - `show_mascot`: Display ASCII fox mascot during key moments
 
 use colored::*;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // Re-export mascot types for convenience
@@ -338,8 +339,14 @@ pub(crate) fn tool_activity_start(name: &str, args: &serde_json::Value) {
         tool_call(name);
         return;
     }
-    // Normal mode: show semantic activity indicator
-    let activity = match name {
+    let activity = tool_activity_message(name, args);
+    print!("  {} {}", "⠋".dimmed(), activity.dimmed());
+    std::io::stdout().flush().ok();
+}
+
+/// Generate the activity message for a running tool
+pub(crate) fn tool_activity_message(name: &str, args: &serde_json::Value) -> String {
+    match name {
         "file_read" => format!("Reading {}...", extract_path(args).unwrap_or("file")),
         "file_write" | "file_create" => {
             format!("Writing {}...", extract_path(args).unwrap_or("file"))
@@ -363,8 +370,7 @@ pub(crate) fn tool_activity_start(name: &str, args: &serde_json::Value) {
         "directory_tree" => format!("Listing {}...", extract_path(args).unwrap_or(".")),
         "glob_find" => format!("Finding {}...", extract_pattern(args).unwrap_or("files")),
         _ => format!("{}...", name),
-    };
-    println!("  {}", activity.dimmed());
+    }
 }
 
 /// Print tool result summary (shown after tool completes)
@@ -379,6 +385,8 @@ pub(crate) fn tool_result_summary(summary: &str, success: bool) {
         }
         return;
     }
+    print!("\r\x1b[2K");
+    std::io::stdout().flush().ok();
     // Normal mode: semantic one-liner
     if success {
         println!("  {} {}", "✓".bright_green(), summary);

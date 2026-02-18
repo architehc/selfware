@@ -99,16 +99,18 @@ impl Agent {
 
     async fn execute_tool_batch(&mut self, tool_calls: Vec<CollectedToolCall>) -> Result<()> {
         for (name, args_str, tool_call_id) in tool_calls {
-            // Parse args early for semantic display
-            let args_preview: serde_json::Value =
-                serde_json::from_str(&args_str).unwrap_or_else(|_| serde_json::json!({}));
-            output::tool_activity_start(&name, &args_preview);
+            if self.is_cancelled() {
+                break;
+            }
+
             let start_time = std::time::Instant::now();
             let (call_id, use_native_fc, fake_call) =
                 self.build_tool_call_context(&name, &args_str, tool_call_id);
 
             if let Err(e) = self.safety.check_tool_call(&fake_call) {
                 let error_msg = format!("Safety check failed: {}", e);
+                let spinner = crate::ui::spinner::TerminalSpinner::start(&error_msg);
+                spinner.stop_error(&error_msg);
                 output::safety_blocked(&error_msg);
                 self.push_tool_result_message(use_native_fc, &call_id, false, &error_msg);
                 self.log_tool_call(&name, &args_str, &error_msg, false, start_time, false);
@@ -125,9 +127,16 @@ impl Agent {
                     None => continue,
                 };
 
-            let (success, result) = self
+            let activity = output::tool_activity_message(&name, &args);
+            let spinner = crate::ui::spinner::TerminalSpinner::start(&activity);
+            let (success, result, summary) = self
                 .execute_single_tool(&name, &args_str, &args, start_time)
                 .await?;
+            if success {
+                spinner.stop_success(&summary);
+            } else {
+                spinner.stop_error(&summary);
+            }
 
             // Track file operations for context management
             if success {
@@ -205,7 +214,10 @@ impl Agent {
             name.bright_cyan(),
             args_display.bright_white()
         );
-        print!("{}", "Execute? [y/N/s(bypass permissions)]: ".bright_yellow());
+        print!(
+            "{}",
+            "Execute? [y/N/s(bypass permissions)]: ".bright_yellow()
+        );
         io::stdout().flush().ok();
 
         let mut response = String::new();
@@ -270,12 +282,11 @@ impl Agent {
         args_str: &str,
         args: &Value,
         start_time: std::time::Instant,
-    ) -> Result<(bool, String)> {
+    ) -> Result<(bool, String, String)> {
         let Some(tool) = self.tools.get(name) else {
             let err = format!("Unknown tool: {}", name);
-            println!("{} {}", "✗".bright_red(), err);
             self.log_tool_call(name, args_str, &err, false, start_time, false);
-            return Ok((false, err));
+            return Ok((false, err.clone(), err));
         };
 
         // Snapshot file before edit/write for undo support
@@ -300,10 +311,6 @@ impl Agent {
                 let result_str = serde_json::to_string(&result)?;
                 let summary =
                     output::semantic_summary(name, args, Some(&result_str), true, elapsed);
-                output::tool_result_summary(&summary, true);
-                if output::is_verbose() {
-                    output::tool_success(name);
-                }
                 self.log_tool_call(name, args_str, &result_str, true, start_time, true);
 
                 let verification_result = self.maybe_verify_edit(name, args).await;
@@ -312,21 +319,17 @@ impl Agent {
                     Some(ver_msg) => format!("{}{}", enhanced_result, ver_msg),
                     None => enhanced_result,
                 };
-                Ok((true, final_result))
+                Ok((true, final_result, summary))
             }
             Err(e) => {
                 let elapsed = start_time.elapsed().as_millis() as u64;
                 let summary =
                     output::semantic_summary(name, args, Some(&e.to_string()), false, elapsed);
-                output::tool_result_summary(&summary, false);
-                if output::is_verbose() {
-                    output::tool_failure(name, &e.to_string());
-                }
                 self.log_tool_call(name, args_str, &e.to_string(), false, start_time, false);
                 self.cognitive_state
                     .episodic_memory
                     .what_failed(name, &e.to_string());
-                Ok((false, e.to_string()))
+                Ok((false, e.to_string(), summary))
             }
         }
     }
@@ -339,6 +342,7 @@ impl Agent {
         let path = args.get("path").and_then(|v| v.as_str())?;
         info!("Running verification after file_edit on {}", path);
         self.cognitive_state.set_phase(CyclePhase::Verify);
+        let spinner = crate::ui::spinner::TerminalSpinner::start("Verifying...");
 
         match self
             .verification_gate
@@ -347,13 +351,17 @@ impl Agent {
         {
             Ok(report) => {
                 if report.overall_passed {
+                    spinner.stop_success("Verification passed");
                     self.cognitive_state.episodic_memory.what_worked(
                         "file_edit",
                         &format!("Edit to {} passed verification", path),
                     );
-                    output::verification_report(&format!("{}", report), true);
+                    if output::is_verbose() {
+                        output::verification_report(&format!("{}", report), true);
+                    }
                     None
                 } else {
+                    spinner.stop_error("Verification failed");
                     self.cognitive_state.episodic_memory.what_failed(
                         "file_edit",
                         &format!("Edit to {} failed verification", path),
@@ -366,6 +374,7 @@ impl Agent {
                 }
             }
             Err(e) => {
+                spinner.stop_error("Verification failed to run");
                 warn!("Verification failed to run: {}", e);
                 None
             }

@@ -1,0 +1,294 @@
+# Mega Project Test Configuration
+# 
+# This configuration defines the parameters for long-running test sessions
+# that validate Selfware's capabilities on large-scale software projects.
+
+[metadata]
+name = "Mega Project Test"
+version = "1.0.0"
+description = "Long-running validation of agentic software engineering"
+
+# Session configuration
+[session]
+# Unique identifier for this test session
+id = "auto"  # Use "auto" for timestamp-based ID, or specify manually
+
+# Test duration in hours (1-24)
+duration_hours = 6
+
+# Number of concurrent agents (2-16)
+agent_count = 6
+
+# Project type to build
+# Options: "task_queue", "database", "microservices"
+project_type = "task_queue"
+
+# Checkpointing strategy
+[checkpoint]
+# Enable automatic checkpointing
+enabled = true
+
+# Time between checkpoints (minutes)
+interval_minutes = 10
+
+# Also checkpoint every N tool calls
+tool_call_threshold = 100
+
+# Also checkpoint every N tokens consumed
+token_threshold = 500000
+
+# Automatically recover from failures
+auto_recovery = true
+
+# Maximum recovery attempts before pausing for manual intervention
+max_recovery_attempts = 5
+
+# Recovery backoff strategy: "fixed", "linear", "exponential"
+backoff_strategy = "exponential"
+
+# Initial backoff in seconds
+backoff_initial_seconds = 30
+
+# Maximum backoff in seconds
+backoff_max_seconds = 300
+
+# Agent configuration
+[agent]
+# Maximum iterations per task
+max_iterations = 10000
+
+# Timeout per step (seconds)
+step_timeout_secs = 600
+
+# Maximum concurrent agents (should match session.agent_count)
+concurrent_agents = 6
+
+# Agent roles for this test
+# If empty, uses default development swarm
+roles = ["Architect", "Coder", "Tester", "Reviewer", "Security", "DevOps"]
+
+# Trust score thresholds
+min_trust_score = 0.3
+max_trust_score = 1.0
+
+# Enable dynamic agent spawning
+dynamic_spawning = false
+max_total_agents = 8
+
+# Consensus configuration
+[consensus]
+# Required for decision making
+enabled = true
+
+# Minimum votes needed for consensus
+min_votes = 3
+
+# Timeout for voting (seconds)
+vote_timeout_secs = 300
+
+# Strategy: "unanimous", "majority", "weighted", "priority"
+strategy = "weighted"
+
+# Threshold for consensus (0.0-1.0)
+threshold = 0.6
+
+# Resource limits
+[limits]
+# Total token budget for entire session
+total_token_budget = 5000000
+
+# Per-agent hourly token limit
+tokens_per_agent_per_hour = 200000
+
+# Per-agent hourly tool call limit
+tool_calls_per_agent_per_hour = 500
+
+# Maximum memory context size per agent (tokens)
+max_context_size = 128000
+
+# Disk space limit (GB)
+disk_space_limit_gb = 2
+
+# Maximum test runtime (minutes)
+max_test_runtime_min = 30
+
+# Monitoring and observability
+[monitoring]
+# Enable metrics collection
+enabled = true
+
+# Health check interval (seconds)
+health_check_interval = 30
+
+# Metrics export interval (seconds)
+metrics_export_interval = 60
+
+# Dashboard update interval (seconds)
+dashboard_update_interval = 30
+
+# Log level: "trace", "debug", "info", "warn", "error"
+log_level = "info"
+
+# Enable detailed agent activity logging
+agent_activity_logging = true
+
+# Export metrics to file
+export_metrics = true
+metrics_format = "json"  # Options: "json", "prometheus"
+
+# Error handling
+[error_handling]
+# Maximum consecutive errors before pause
+max_consecutive_errors = 5
+
+# Classification strategy
+# "auto" = automatic severity detection
+# "manual" = use rules below
+classification = "auto"
+
+# Manual error classification rules (when classification = "manual")
+[[error_handling.rules]]
+pattern = "timeout"
+severity = "transient"
+action = "retry_immediate"
+
+[[error_handling.rules]]
+pattern = "rate.?limit"
+severity = "recoverable"
+action = "retry_with_backoff"
+
+[[error_handling.rules]]
+pattern = "parse.?error"
+severity = "recoverable"
+action = "retry_with_modification"
+
+[[error_handling.rules]]
+pattern = "disk.?full"
+severity = "critical"
+action = "pause_and_alert"
+
+[[error_handling.rules]]
+pattern = "permission.?denied"
+severity = "critical"
+action = "pause_and_alert"
+
+[[error_handling.rules]]
+pattern = "out.?of.?memory"
+severity = "critical"
+action = "compress_and_retry"
+
+# Project specifications
+# These define the target project characteristics for validation
+[project.target]
+# Target lines of code
+lines_of_code = 5000
+
+# Target test coverage (0.0-1.0)
+test_coverage = 0.80
+
+# Target documentation coverage
+documentation_coverage = 0.90
+
+# Maximum acceptable bug count
+max_bugs_critical = 0
+max_bugs_high = 2
+max_bugs_medium = 5
+
+# Performance targets
+[project.performance]
+# Target build time (seconds)
+build_time_secs = 60
+
+# Target test execution time (seconds)
+test_execution_time_secs = 120
+
+# Memory usage limit (MB)
+memory_usage_mb = 512
+
+# Binary size limit (MB)
+binary_size_mb = 50
+
+# Phases configuration
+[[phases]]
+name = "bootstrap"
+duration_minutes = 60
+objectives = [
+    "Initialize project structure",
+    "Design system architecture",
+    "Set up CI/CD pipeline",
+    "Create initial documentation"
+]
+success_criteria = [
+    "Project compiles successfully",
+    "All modules have defined interfaces",
+    "CI pipeline passes",
+    "Architecture document complete"
+]
+
+[[phases]]
+name = "development"
+duration_minutes = 120
+objectives = [
+    "Implement core functionality",
+    "Add comprehensive tests",
+    "Integrate components",
+    "Establish performance baseline"
+]
+success_criteria = [
+    "Core features functional",
+    "Test coverage >= 70%",
+    "Integration tests pass",
+    "No critical security issues"
+]
+
+[[phases]]
+name = "refinement"
+duration_minutes = 120
+objectives = [
+    "Bug fixes from testing",
+    "Performance optimization",
+    "Security hardening",
+    "Documentation completion"
+]
+success_criteria = [
+    "All critical/high bugs fixed",
+    "Performance targets met",
+    "Security scan clean",
+    "E2E tests pass"
+]
+
+[[phases]]
+name = "finalization"
+duration_minutes = 60
+objectives = [
+    "Final polish",
+    "Documentation completion",
+    "Release preparation",
+    "Final validation"
+]
+success_criteria = [
+    "Documentation 100% complete",
+    "All tests passing",
+    "Release artifacts ready",
+    "Final checkpoint validates"
+]
+
+# Notifications (optional)
+[notifications]
+# Enable notifications
+enabled = false
+
+# Webhook URL for notifications
+# webhook_url = "https://hooks.slack.com/services/..."
+
+# Notify on events: "checkpoint", "phase_complete", "error", "complete"
+events = ["phase_complete", "error", "complete"]
+
+# Email notifications (optional)
+# [notifications.email]
+# smtp_server = "smtp.example.com"
+# smtp_port = 587
+# username = "test@example.com"
+# password = "..."
+# from_address = "test@example.com"
+# to_addresses = ["admin@example.com"]
