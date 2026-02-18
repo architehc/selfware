@@ -1,0 +1,13 @@
+[workspace]
+members = [
+  "apps/mega-cli",
+  "crates/domain",
+  "crates/storage",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"

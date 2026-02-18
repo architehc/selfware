@@ -8,6 +8,11 @@ impl Agent {
     pub async fn interactive(&mut self) -> Result<()> {
         use crate::input::{InputConfig, ReadlineResult, SelfwareEditor};
 
+        let cancel = self.cancel_token();
+        let _ = ctrlc::set_handler(move || {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+
         // Get tool names for autocomplete
         let tool_names: Vec<String> = self
             .tools
@@ -80,10 +85,12 @@ impl Agent {
                 Ok(ReadlineResult::Line(line)) => {
                     consecutive_errors = 0;
                     last_ctrl_c = None;
+                    self.reset_cancellation();
                     line
                 }
                 Ok(ReadlineResult::Interrupt) => {
                     consecutive_errors = 0;
+                    self.reset_cancellation();
                     // Double-tap Ctrl+C to exit
                     if let Some(last) = last_ctrl_c {
                         if last.elapsed().as_millis() < 1500 {
@@ -303,6 +310,14 @@ impl Agent {
                     "📝".bright_white()
                 );
                 println!(
+                    "│  {} /swarm <task>      Run task with dev swarm      │",
+                    "🐝".bright_white()
+                );
+                println!(
+                    "│  {} /queue <msg>       Queue message for later      │",
+                    "📨".bright_white()
+                );
+                println!(
                     "{}",
                     "├──────────────────────────────────────────────────────┤".bright_cyan()
                 );
@@ -366,7 +381,8 @@ impl Agent {
                     "{}",
                     "├──────────────────────────────────────────────────────┤".bright_cyan()
                 );
-                println!("│  Ctrl+C ×2     Exit (double-tap)                    │");
+                println!("│  Ctrl+C        Interrupt running task               │");
+                println!("│  Ctrl+C ×2     Exit (double-tap at prompt)          │");
                 println!("│  Ctrl+J        Insert newline (multi-line)          │");
                 println!("│  Ctrl+Y        Toggle YOLO mode                     │");
                 println!("│  Shift+Tab     Toggle Auto-Edit mode                │");
@@ -726,7 +742,7 @@ impl Agent {
             if input.starts_with("/review ") {
                 let file_path = input.strip_prefix("/review ").unwrap().trim();
                 match self.review(file_path).await {
-                    Ok(_) => {}
+                    Ok(_) => self.after_task_run().await,
                     Err(e) => println!("{} Error reviewing file: {}", "❌".bright_red(), e),
                 }
                 continue;
@@ -735,7 +751,7 @@ impl Agent {
             if input.starts_with("/analyze ") {
                 let path = input.strip_prefix("/analyze ").unwrap().trim();
                 match self.analyze(path).await {
-                    Ok(_) => {}
+                    Ok(_) => self.after_task_run().await,
                     Err(e) => println!("{} Error analyzing: {}", "❌".bright_red(), e),
                 }
                 continue;
@@ -745,9 +761,54 @@ impl Agent {
                 let task = input.strip_prefix("/plan ").unwrap().trim();
                 let context = self.memory.summary(5);
                 let plan_prompt = Planner::create_plan(task, &context);
-                match self.run_task(&plan_prompt).await {
+                match self.run_task_with_queue(&plan_prompt).await {
                     Ok(_) => {}
                     Err(e) => println!("{} Error planning: {}", "❌".bright_red(), e),
+                }
+                continue;
+            }
+
+            if input == "/swarm" {
+                println!(
+                    "{} Usage: /swarm <task> (uses Architect/Coder/Tester/Reviewer orchestration)",
+                    "ℹ".bright_yellow()
+                );
+                continue;
+            }
+
+            if input.starts_with("/swarm ") {
+                let task = input.strip_prefix("/swarm ").unwrap().trim();
+                if task.is_empty() {
+                    println!("{} Usage: /swarm <task>", "ℹ".bright_yellow());
+                    continue;
+                }
+                match self.run_swarm_with_queue(task).await {
+                    Ok(_) => {}
+                    Err(e) => println!("{} Swarm error: {}", "❌".bright_red(), e),
+                }
+                continue;
+            }
+
+            if input == "/queue" {
+                println!(
+                    "{} Usage: /queue <message> ({} pending)",
+                    "📨".bright_cyan(),
+                    self.pending_messages.len()
+                );
+                continue;
+            }
+
+            if input.starts_with("/queue ") {
+                let msg = input.strip_prefix("/queue ").unwrap().trim();
+                if msg.is_empty() {
+                    println!("{} Usage: /queue <message>", "ℹ".bright_yellow());
+                } else {
+                    self.pending_messages.push_back(msg.to_string());
+                    println!(
+                        "{} Queued ({} pending)",
+                        "📨".bright_green(),
+                        self.pending_messages.len()
+                    );
                 }
                 continue;
             }
@@ -1058,13 +1119,59 @@ impl Agent {
                 println!();
             }
 
-            match self.run_task(&expanded_input).await {
+            match self.run_task_with_queue(&expanded_input).await {
                 Ok(_) => {}
                 Err(e) => println!("{} Error: {}", "❌".bright_red(), e),
             }
         }
 
         Ok(())
+    }
+
+    async fn run_task_with_queue(&mut self, task: &str) -> Result<()> {
+        let result = self.run_task(task).await;
+        self.after_task_run().await;
+        result
+    }
+
+    async fn run_swarm_with_queue(&mut self, task: &str) -> Result<()> {
+        let result = self.run_swarm_task(task).await;
+        self.after_task_run().await;
+        result
+    }
+
+    async fn after_task_run(&mut self) {
+        let interrupted = self.is_cancelled();
+        self.reset_cancellation();
+        if !interrupted {
+            self.drain_pending_messages().await;
+        }
+    }
+
+    async fn drain_pending_messages(&mut self) {
+        while let Some(queued) = self.pending_messages.pop_front() {
+            let queued = queued.trim().to_string();
+            if queued.is_empty() {
+                continue;
+            }
+
+            let preview = if queued.len() > 60 {
+                format!("{}...", &queued[..57])
+            } else {
+                queued.clone()
+            };
+            println!("{} Queued: {}", "📨".bright_cyan(), preview);
+
+            if let Err(e) = self.run_task(&queued).await {
+                println!("{} Error: {}", "❌".bright_red(), e);
+            }
+
+            let interrupted = self.is_cancelled();
+            self.reset_cancellation();
+            if interrupted {
+                break;
+            }
+        }
     }
 
     /// Copy text to clipboard using system clipboard tools
@@ -1170,6 +1277,8 @@ impl Agent {
                 println!("  /analyze <path> - Analyze codebase at path");
                 println!("  /review <file>  - Review code in file");
                 println!("  /plan <task>    - Create a plan for a task");
+                println!("  /swarm <task>   - Run task with dev swarm");
+                println!("  /queue <msg>    - Queue a message");
                 println!("  exit            - Exit interactive mode");
                 continue;
             }
@@ -1213,7 +1322,7 @@ impl Agent {
             if input.starts_with("/review ") {
                 let file_path = input.strip_prefix("/review ").unwrap().trim();
                 match self.review(file_path).await {
-                    Ok(_) => {}
+                    Ok(_) => self.after_task_run().await,
                     Err(e) => println!("{} Error reviewing file: {}", "❌".bright_red(), e),
                 }
                 continue;
@@ -1222,7 +1331,7 @@ impl Agent {
             if input.starts_with("/analyze ") {
                 let path = input.strip_prefix("/analyze ").unwrap().trim();
                 match self.analyze(path).await {
-                    Ok(_) => {}
+                    Ok(_) => self.after_task_run().await,
                     Err(e) => println!("{} Error analyzing: {}", "❌".bright_red(), e),
                 }
                 continue;
@@ -1232,14 +1341,56 @@ impl Agent {
                 let task = input.strip_prefix("/plan ").unwrap().trim();
                 let context = self.memory.summary(5);
                 let plan_prompt = Planner::create_plan(task, &context);
-                match self.run_task(&plan_prompt).await {
+                match self.run_task_with_queue(&plan_prompt).await {
                     Ok(_) => {}
                     Err(e) => println!("{} Error planning: {}", "❌".bright_red(), e),
                 }
                 continue;
             }
 
-            match self.run_task(input).await {
+            if input == "/swarm" {
+                println!("{} Usage: /swarm <task>", "ℹ".bright_yellow());
+                continue;
+            }
+
+            if input.starts_with("/swarm ") {
+                let task = input.strip_prefix("/swarm ").unwrap().trim();
+                if task.is_empty() {
+                    println!("{} Usage: /swarm <task>", "ℹ".bright_yellow());
+                } else {
+                    match self.run_swarm_with_queue(task).await {
+                        Ok(_) => {}
+                        Err(e) => println!("{} Swarm error: {}", "❌".bright_red(), e),
+                    }
+                }
+                continue;
+            }
+
+            if input == "/queue" {
+                println!(
+                    "{} Usage: /queue <message> ({} pending)",
+                    "📨".bright_cyan(),
+                    self.pending_messages.len()
+                );
+                continue;
+            }
+
+            if input.starts_with("/queue ") {
+                let msg = input.strip_prefix("/queue ").unwrap().trim();
+                if msg.is_empty() {
+                    println!("{} Usage: /queue <message>", "ℹ".bright_yellow());
+                } else {
+                    self.pending_messages.push_back(msg.to_string());
+                    println!(
+                        "{} Queued ({} pending)",
+                        "📨".bright_green(),
+                        self.pending_messages.len()
+                    );
+                }
+                continue;
+            }
+
+            match self.run_task_with_queue(input).await {
                 Ok(_) => {}
                 Err(e) => println!("{} Error: {}", "❌".bright_red(), e),
             }

@@ -7,6 +7,7 @@
 //! - `show_mascot`: Display ASCII fox mascot during key moments
 
 use colored::*;
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // Re-export mascot types for convenience
@@ -115,6 +116,7 @@ pub(crate) fn print_session_summary() {
 }
 
 /// Print tool call announcement (verbose fallback)
+#[allow(dead_code)]
 pub(crate) fn tool_call(name: &str) {
     if !is_compact() {
         println!(
@@ -126,6 +128,7 @@ pub(crate) fn tool_call(name: &str) {
 }
 
 /// Print tool success (verbose fallback)
+#[allow(dead_code)]
 pub(crate) fn tool_success(name: &str) {
     if !is_compact() {
         println!("{} Tool succeeded", "✓".bright_green());
@@ -135,6 +138,7 @@ pub(crate) fn tool_success(name: &str) {
 }
 
 /// Print tool failure (always shown, but format varies)
+#[allow(dead_code)]
 pub(crate) fn tool_failure(name: &str, error: &str) {
     if is_compact() {
         println!("{} {}: {}", "✗".red(), name, error);
@@ -329,6 +333,7 @@ fn format_number(n: u64) -> String {
 }
 
 /// Print tool activity start line (shown while tool is running)
+#[allow(dead_code)]
 pub(crate) fn tool_activity_start(name: &str, args: &serde_json::Value) {
     if is_compact() {
         return;
@@ -338,8 +343,14 @@ pub(crate) fn tool_activity_start(name: &str, args: &serde_json::Value) {
         tool_call(name);
         return;
     }
-    // Normal mode: show semantic activity indicator
-    let activity = match name {
+    let activity = tool_activity_message(name, args);
+    print!("  {} {}", "⠋".dimmed(), activity.dimmed());
+    std::io::stdout().flush().ok();
+}
+
+/// Generate the activity message for a running tool
+pub(crate) fn tool_activity_message(name: &str, args: &serde_json::Value) -> String {
+    match name {
         "file_read" => format!("Reading {}...", extract_path(args).unwrap_or("file")),
         "file_write" | "file_create" => {
             format!("Writing {}...", extract_path(args).unwrap_or("file"))
@@ -363,11 +374,11 @@ pub(crate) fn tool_activity_start(name: &str, args: &serde_json::Value) {
         "directory_tree" => format!("Listing {}...", extract_path(args).unwrap_or(".")),
         "glob_find" => format!("Finding {}...", extract_pattern(args).unwrap_or("files")),
         _ => format!("{}...", name),
-    };
-    println!("  {}", activity.dimmed());
+    }
 }
 
 /// Print tool result summary (shown after tool completes)
+#[allow(dead_code)]
 pub(crate) fn tool_result_summary(summary: &str, success: bool) {
     if is_verbose() {
         // Verbose mode falls through to tool_success/tool_failure in caller
@@ -379,6 +390,8 @@ pub(crate) fn tool_result_summary(summary: &str, success: bool) {
         }
         return;
     }
+    print!("\r\x1b[2K");
+    std::io::stdout().flush().ok();
     // Normal mode: semantic one-liner
     if success {
         println!("  {} {}", "✓".bright_green(), summary);

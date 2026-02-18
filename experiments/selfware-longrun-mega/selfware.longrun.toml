@@ -1,0 +1,37 @@
+endpoint = "http://localhost:8000/v1"
+model = "Qwen/Qwen3-Coder-Next-FP8"
+max_tokens = 65536
+temperature = 0.7
+
+[safety]
+allowed_paths = ["./**"]
+denied_paths = ["**/.env", "**/secrets/**", "**/*.pem"]
+protected_branches = ["main", "master"]
+require_confirmation = ["git_push", "shell_exec", "file_delete"]
+
+[agent]
+max_iterations = 220
+step_timeout_secs = 1800
+token_budget = 2000000
+native_function_calling = true
+streaming = true
+
+[continuous_work]
+enabled = true
+checkpoint_interval_tools = 8
+checkpoint_interval_secs = 180
+auto_recovery = true
+max_recovery_attempts = 5
+
+[retry]
+max_retries = 7
+base_delay_ms = 1000
+max_delay_ms = 90000
+
+[ui]
+theme = "minimal"
+animations = false
+compact_mode = true
+verbose_mode = false
+show_tokens = true
+animation_speed = 1.0

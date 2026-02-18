@@ -1,7 +1,11 @@
 use anyhow::{Context, Result};
 use colored::*;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
@@ -95,6 +99,10 @@ pub struct Agent {
     last_assistant_response: String,
     /// Chat session store for save/resume/list/delete
     chat_store: ChatStore,
+    /// Cancellation token set by Ctrl+C while a task is running
+    cancelled: Arc<AtomicBool>,
+    /// Messages queued for sequential execution
+    pending_messages: VecDeque<String>,
     /// Self-healing engine for automatic recovery attempts
     #[cfg(feature = "resilience")]
     self_healing: SelfHealingEngine,
@@ -239,6 +247,8 @@ To call a tool, use this EXACT XML structure:
             edit_history,
             last_assistant_response: String::new(),
             chat_store,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            pending_messages: VecDeque::new(),
             #[cfg(feature = "resilience")]
             self_healing,
         })
@@ -499,6 +509,21 @@ To call a tool, use this EXACT XML structure:
     pub fn is_interactive(&self) -> bool {
         use std::io::IsTerminal;
         std::io::stdin().is_terminal()
+    }
+
+    /// Shared cancellation token for Ctrl+C interrupt handling.
+    pub(crate) fn cancel_token(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancelled)
+    }
+
+    /// True when the current task should stop as soon as possible.
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed)
+    }
+
+    /// Clear cancellation state after handling an interrupt.
+    pub(crate) fn reset_cancellation(&self) {
+        self.cancelled.store(false, Ordering::Relaxed);
     }
 
     // =========================================================================
@@ -841,12 +866,18 @@ To call a tool, use this EXACT XML structure:
                 let file_tokens = self
                     .messages
                     .iter()
-                    .find(|m| m.role == "user" && m.content.contains(&format!("// FILE: {}", path_str)))
+                    .find(|m| {
+                        m.role == "user" && m.content.contains(&format!("// FILE: {}", path_str))
+                    })
                     .map(|m| crate::token_count::estimate_tokens_with_overhead(&m.content, 4))
                     .unwrap_or(0);
                 total_file_tokens += file_tokens;
                 let is_stale = self.stale_files.contains(path_str);
-                let stale_marker = if is_stale { format!("  {}⟳ modified{}", coral, reset) } else { String::new() };
+                let stale_marker = if is_stale {
+                    format!("  {}⟳ modified{}", coral, reset)
+                } else {
+                    String::new()
+                };
                 let k_tokens = file_tokens as f64 / 1000.0;
                 println!(
                     "    {}→  {}{:>40}{}  {}({:.1}k tokens){}{}",
@@ -856,7 +887,18 @@ To call a tool, use this EXACT XML structure:
             let total_k = total_file_tokens as f64 / 1000.0;
             println!(
                 "  {}Total: {} files, {:.1}k tokens{}",
-                aged, self.context_files.len(), total_k, reset
+                aged,
+                self.context_files.len(),
+                total_k,
+                reset
+            );
+        }
+
+        if used_pct > 80.0 {
+            println!(
+                "  {} Context {:.0}% full - consider /compress or /ctx clear",
+                "⚠".bright_yellow(),
+                used_pct
             );
         }
 
@@ -894,9 +936,11 @@ To call a tool, use this EXACT XML structure:
                 let new_content = format!("{}{}", file_header, content);
 
                 // Find and replace the existing message for this file
-                if let Some(msg) = self.messages.iter_mut().find(|m| {
-                    m.role == "user" && m.content.contains(&file_marker)
-                }) {
+                if let Some(msg) = self
+                    .messages
+                    .iter_mut()
+                    .find(|m| m.role == "user" && m.content.contains(&file_marker))
+                {
                     msg.content = new_content;
                     refreshed += 1;
                 }
@@ -964,7 +1008,8 @@ To call a tool, use this EXACT XML structure:
                 if let Ok(content) = fs::read_to_string(path) {
                     let file_header = format!("\n// ═══════════════════════════════════════════\n// FILE: {}\n// ═══════════════════════════════════════════\n", path_str);
                     let full_content = format!("{}{}", file_header, content);
-                    let file_tokens = crate::token_count::estimate_tokens_with_overhead(&full_content, 4);
+                    let file_tokens =
+                        crate::token_count::estimate_tokens_with_overhead(&full_content, 4);
                     total_tokens += file_tokens;
 
                     // Add to context files tracking
@@ -1023,9 +1068,8 @@ To call a tool, use this EXACT XML structure:
 
         // Remove only messages that contain file content (// FILE: headers)
         // Keep all conversation messages intact
-        self.messages.retain(|m| {
-            !(m.role == "user" && m.content.contains("// FILE: "))
-        });
+        self.messages
+            .retain(|m| !(m.role == "user" && m.content.contains("// FILE: ")));
 
         let mut loaded = 0;
         for path_str in &files {
@@ -1384,6 +1428,13 @@ To call a tool, use this EXACT XML structure:
         progress.start_phase();
 
         while let Some(state) = self.loop_control.next_state() {
+            if self.is_cancelled() {
+                println!("{}", "\n⚡ Interrupted".bright_yellow());
+                self.messages
+                    .push(Message::user("[Task interrupted by user]"));
+                return Ok(());
+            }
+
             match state {
                 AgentState::Planning => {
                     let _span = enter_agent_step("Planning", 0);
@@ -1603,6 +1654,36 @@ To call a tool, use this EXACT XML structure:
         }
 
         Ok(())
+    }
+
+    async fn run_swarm_task(&mut self, task: &str) -> Result<()> {
+        use crate::orchestration::swarm::create_dev_swarm;
+
+        let swarm = create_dev_swarm();
+        let mut agents = swarm.list_agents();
+        agents.sort_by_key(|a| std::cmp::Reverse(a.role.priority()));
+
+        println!(
+            "{} Swarm initialized: {} agents",
+            "🐝".bright_cyan(),
+            agents.len()
+        );
+        for agent in agents {
+            println!(
+                "  {} {} ({})",
+                "→".bright_black(),
+                agent.name.bright_white(),
+                agent.role.name().dimmed()
+            );
+        }
+
+        let prompt = format!(
+            "You are coordinating a dev team: Architect, Coder, Tester, Reviewer.\n\
+             Decompose and execute this task. Verify with cargo_check after changes.\n\
+             Task: {}",
+            task
+        );
+        self.run_task(&prompt).await
     }
 
     pub async fn analyze(&mut self, path: &str) -> Result<()> {

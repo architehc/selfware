@@ -1,0 +1,34 @@
+# PHASE 0 - Baseline
+Run `cargo test --workspace` and summarize current baseline risks in docs/baseline.md.
+Create docs/architecture.md with module boundaries, data flow, and open questions.
+Create docs/decision-log.md and record first architecture decision.
+
+# PHASE 1 - Core Design
+Implement a domain model for work items with validation and serde support.
+Implement a persistence layer for work items with save/load/update/delete operations.
+Add unit tests for persistence edge cases, including missing files and corrupt JSON.
+Create a CLI command to initialize a workspace config file with sane defaults.
+
+# PHASE 2 - Feature Expansion
+Implement task status transitions with explicit state machine rules and tests.
+Add filtering and search for tasks by status, label, and owner.
+Add import/export of tasks to JSON and CSV.
+Implement an audit log with timestamped actions and query APIs.
+Add integration tests for end-to-end task create/update/complete flows.
+
+# PHASE 3 - Quality and Scale
+Profile slow paths and optimize the top bottleneck using measurable before/after numbers.
+Add a benchmark target for the core filtering/search path.
+Improve CLI help text and examples for all public commands.
+Add markdown docs for failure handling and recovery workflow.
+
+# PHASE 4 - Recovery and Robustness
+Simulate a partial write crash and implement safe recovery behavior.
+Add retry logic for transient I/O failures with bounded backoff.
+Add property-based tests for state transitions and serialization roundtrips.
+Harden error messages so operators get clear cause and next action.
+
+# PHASE 5 - Final Validation
+Run full test suite and fix failing tests or flaky behavior.
+Run clippy and resolve warnings in changed modules.
+Generate a release checklist and a short postmortem in docs/release-readiness.md.

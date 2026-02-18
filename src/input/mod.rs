@@ -76,6 +76,8 @@ impl Default for InputConfig {
                 "/analyze".into(),
                 "/review".into(),
                 "/plan".into(),
+                "/swarm".into(),
+                "/queue".into(),
                 "/diff".into(),
                 "/git".into(),
                 "/undo".into(),
@@ -214,6 +216,16 @@ impl SelfwareEditor {
                 ReedlineEvent::Edit(vec![EditCommand::Complete]), // Try inline completion
                 ReedlineEvent::Menu("completion_menu".to_string()), // Open menu for visibility
                 ReedlineEvent::MenuNext,            // Then cycle entries
+            ]),
+        );
+
+        // Typing "/" opens slash command menu (Qwen-style)
+        keybindings.add_binding(
+            KeyModifiers::NONE,
+            KeyCode::Char('/'),
+            ReedlineEvent::Multiple(vec![
+                ReedlineEvent::Edit(vec![EditCommand::InsertChar('/')]),
+                ReedlineEvent::Menu("completion_menu".to_string()),
             ]),
         );
 
@@ -359,6 +371,8 @@ mod tests {
         assert!(config.commands.contains(&"/analyze".into()));
         assert!(config.commands.contains(&"/review".into()));
         assert!(config.commands.contains(&"/plan".into()));
+        assert!(config.commands.contains(&"/swarm".into()));
+        assert!(config.commands.contains(&"/queue".into()));
         assert!(config.commands.contains(&"/diff".into()));
         assert!(config.commands.contains(&"/git".into()));
         assert!(config.commands.contains(&"/undo".into()));
