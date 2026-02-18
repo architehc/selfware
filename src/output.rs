@@ -116,6 +116,7 @@ pub(crate) fn print_session_summary() {
 }
 
 /// Print tool call announcement (verbose fallback)
+#[allow(dead_code)]
 pub(crate) fn tool_call(name: &str) {
     if !is_compact() {
         println!(
@@ -127,6 +128,7 @@ pub(crate) fn tool_call(name: &str) {
 }
 
 /// Print tool success (verbose fallback)
+#[allow(dead_code)]
 pub(crate) fn tool_success(name: &str) {
     if !is_compact() {
         println!("{} Tool succeeded", "✓".bright_green());
@@ -136,6 +138,7 @@ pub(crate) fn tool_success(name: &str) {
 }
 
 /// Print tool failure (always shown, but format varies)
+#[allow(dead_code)]
 pub(crate) fn tool_failure(name: &str, error: &str) {
     if is_compact() {
         println!("{} {}: {}", "✗".red(), name, error);
@@ -330,6 +333,7 @@ fn format_number(n: u64) -> String {
 }
 
 /// Print tool activity start line (shown while tool is running)
+#[allow(dead_code)]
 pub(crate) fn tool_activity_start(name: &str, args: &serde_json::Value) {
     if is_compact() {
         return;
@@ -374,6 +378,7 @@ pub(crate) fn tool_activity_message(name: &str, args: &serde_json::Value) -> Str
 }
 
 /// Print tool result summary (shown after tool completes)
+#[allow(dead_code)]
 pub(crate) fn tool_result_summary(summary: &str, success: bool) {
     if is_verbose() {
         // Verbose mode falls through to tool_success/tool_failure in caller
