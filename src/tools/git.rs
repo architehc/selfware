@@ -356,6 +356,10 @@ impl Tool for GitPush {
                 .output()
                 .await
                 .context("Failed to get current branch")?;
+            if !output.status.success() {
+                let err = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("Failed to detect current branch: {}", err.trim());
+            }
             String::from_utf8_lossy(&output.stdout).trim().to_string()
         };
 

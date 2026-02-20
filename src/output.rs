@@ -183,8 +183,9 @@ pub(crate) fn semantic_summary(
     duration_ms: u64,
 ) -> String {
     let path = extract_path(args).unwrap_or("?");
-    let short_path = if path.len() > 50 {
-        &path[path.len() - 50..]
+    let short_path = if path.chars().count() > 50 {
+        let skip = path.chars().count() - 50;
+        &path[path.char_indices().nth(skip).map(|(i, _)| i).unwrap_or(0)..]
     } else {
         path
     };
@@ -225,7 +226,11 @@ pub(crate) fn semantic_summary(
         // === Shell ===
         "shell_exec" => {
             let cmd = extract_command(args).unwrap_or("?");
-            let short_cmd = if cmd.len() > 40 { &cmd[..40] } else { cmd };
+            let short_cmd = if cmd.chars().count() > 40 {
+                &cmd[..cmd.char_indices().nth(40).map(|(i, _)| i).unwrap_or(cmd.len())]
+            } else {
+                cmd
+            };
             let exit_code = result_json(result)
                 .and_then(|v| v.get("exit_code").and_then(|c| c.as_i64()));
             match exit_code {
@@ -240,8 +245,8 @@ pub(crate) fn semantic_summary(
                 let passed = result
                     .and_then(|r| {
                         r.find("passed").and_then(|idx| {
-                            let before = &r[..idx];
-                            before.rfind(char::is_whitespace).map(|i| &before[i + 1..])
+                            let before = r[..idx].trim_end();
+                            before.rsplit_once(char::is_whitespace).map(|(_, n)| n)
                         })
                     })
                     .unwrap_or("all");
