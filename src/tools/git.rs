@@ -8,9 +8,7 @@ use tracing::info;
 pub struct GitStatus;
 pub struct GitDiff;
 pub struct GitCommit;
-
-// Add this to the existing git.rs file:
-
+pub struct GitPush;
 pub struct GitCheckpoint;
 
 #[async_trait]
@@ -303,6 +301,81 @@ impl Tool for GitCommit {
         Ok(serde_json::json!({
             "success": success,
             "output": stdout.to_string()
+        }))
+    }
+}
+
+#[async_trait]
+impl Tool for GitPush {
+    fn name(&self) -> &str {
+        "git_push"
+    }
+
+    fn description(&self) -> &str {
+        "Push commits to a remote repository. Force push is blocked by the safety checker."
+    }
+
+    fn schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "remote": {
+                    "type": "string",
+                    "description": "Remote name (default: origin)",
+                    "default": "origin"
+                },
+                "branch": {
+                    "type": "string",
+                    "description": "Branch to push (default: current branch)"
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": "Force push (blocked by safety checker)",
+                    "default": false
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, args: Value) -> Result<Value> {
+        let remote = args
+            .get("remote")
+            .and_then(|v| v.as_str())
+            .unwrap_or("origin");
+        let force = args
+            .get("force")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // Determine branch
+        let branch = if let Some(b) = args.get("branch").and_then(|v| v.as_str()) {
+            b.to_string()
+        } else {
+            let output = tokio::process::Command::new("git")
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .output()
+                .await
+                .context("Failed to get current branch")?;
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.arg("push").arg(remote).arg(&branch);
+        if force {
+            cmd.arg("--force");
+        }
+
+        let output = cmd.output().await.context("Failed to execute git push")?;
+        let success = output.status.success();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        Ok(serde_json::json!({
+            "success": success,
+            "remote": remote,
+            "branch": branch,
+            "force": force,
+            "output": format!("{}{}", stdout, stderr)
         }))
     }
 }
@@ -633,5 +706,52 @@ mod tests {
         let required = schema["required"].as_array().unwrap();
         assert_eq!(required.len(), 1);
         assert!(required.contains(&serde_json::json!("message")));
+    }
+
+    // GitPush tests
+
+    #[test]
+    fn test_git_push_name() {
+        let tool = GitPush;
+        assert_eq!(tool.name(), "git_push");
+    }
+
+    #[test]
+    fn test_git_push_description() {
+        let tool = GitPush;
+        assert!(tool.description().contains("Push"));
+    }
+
+    #[test]
+    fn test_git_push_schema() {
+        let tool = GitPush;
+        let schema = tool.schema();
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"]["remote"].is_object());
+        assert!(schema["properties"]["branch"].is_object());
+        assert!(schema["properties"]["force"].is_object());
+    }
+
+    #[test]
+    fn test_git_push_schema_defaults() {
+        let tool = GitPush;
+        let schema = tool.schema();
+        assert_eq!(schema["properties"]["remote"]["default"], "origin");
+        assert_eq!(schema["properties"]["force"]["default"], false);
+    }
+
+    #[tokio::test]
+    async fn test_git_push_execute() {
+        let tool = GitPush;
+        // Push to nonexistent remote will fail, but shouldn't panic
+        let args = serde_json::json!({
+            "remote": "nonexistent_remote_test",
+            "branch": "test-branch"
+        });
+        let result = tool.execute(args).await;
+        // Should return Ok with success: false (remote doesn't exist)
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert_eq!(output["success"], false);
     }
 }

@@ -19,7 +19,10 @@ fn get_binary_path() -> String {
     env!("CARGO_BIN_EXE_selfware").to_string()
 }
 
-/// Helper to run selfware with input and capture output with timeout enforcement
+/// Helper to run selfware with input and capture output with timeout enforcement.
+///
+/// On timeout, kills the process but still drains stdout/stderr so that
+/// partially-flushed output is available to the calling test.
 fn run_interactive(input: &str, timeout_secs: u64) -> (String, String, i32) {
     let binary = get_binary_path();
     let mut child = Command::new(&binary)
@@ -62,8 +65,13 @@ fn run_interactive(input: &str, timeout_secs: u64) -> (String, String, i32) {
                 // Still running, check timeout
                 if start.elapsed() >= timeout {
                     child.kill().ok();
-                    child.wait().ok();
-                    return ("".to_string(), "timeout".to_string(), -1);
+                    // Drain stdout/stderr even after kill so partial output is available
+                    let output = child
+                        .wait_with_output()
+                        .expect("Failed to wait after kill");
+                    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                    return (stdout, format!("timeout: {}", stderr), -1);
                 }
                 std::thread::sleep(poll_interval);
             }
@@ -179,13 +187,15 @@ fn test_interactive_clear_command() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_interactive_tools_command() {
-    let (stdout, _stderr, _code) = run_interactive("/tools\nexit\n", 30);
+    let (stdout, stderr, _code) = run_interactive("/tools\nexit\n", 30);
+    let combined = format!("{}{}", stdout, stderr);
 
-    // Should list tools (file_read is a core tool)
+    // Should list tools (file_read is a core tool) — check both stdout and stderr
     assert!(
-        stdout.contains("file_read") || stdout.contains("directory_tree"),
-        "Should list tools. Got: {}",
-        stdout
+        combined.contains("file_read") || combined.contains("directory_tree"),
+        "Should list tools. Got stdout: {}, stderr: {}",
+        stdout,
+        stderr
     );
 }
 

@@ -1940,7 +1940,7 @@ mod tests {
         assert_eq!(summary.recent_logs.len(), 2);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn test_is_port_available_high_port() {
         // High ports should be more likely available
         let high_port = 59999;

@@ -48,6 +48,16 @@ impl AgentLoop {
     pub fn current_step(&self) -> usize {
         self.current_step
     }
+
+    /// Reset loop state for a new task, preserving max_iterations.
+    ///
+    /// Without this, queued tasks share the iteration counter from the previous
+    /// task and may hit the max-iterations limit prematurely.
+    pub fn reset_for_task(&mut self) {
+        self.state = AgentState::Planning;
+        self.current_step = 0;
+        self.iteration = 0;
+    }
 }
 
 #[cfg(test)]
@@ -154,5 +164,35 @@ mod tests {
             AgentState::Executing { step } => assert_eq!(*step, 1),
             _ => panic!("Expected Executing state after increment"),
         }
+    }
+
+    #[test]
+    fn test_reset_for_task() {
+        let mut loop_ctrl = AgentLoop::new(10);
+
+        // Simulate several iterations
+        loop_ctrl.next_state();
+        loop_ctrl.next_state();
+        loop_ctrl.next_state();
+        loop_ctrl.increment_step();
+        loop_ctrl.increment_step();
+
+        assert_eq!(loop_ctrl.iteration, 3);
+        assert_eq!(loop_ctrl.current_step(), 2);
+
+        // Reset for a new task
+        loop_ctrl.reset_for_task();
+        assert_eq!(loop_ctrl.iteration, 0);
+        assert_eq!(loop_ctrl.current_step(), 0);
+        assert!(matches!(loop_ctrl.state, AgentState::Planning));
+
+        // Should be able to iterate fully again
+        for _ in 0..10 {
+            let state = loop_ctrl.next_state();
+            assert!(!matches!(state, Some(AgentState::Failed { .. })));
+        }
+        // 11th should fail
+        let state = loop_ctrl.next_state();
+        assert!(matches!(state, Some(AgentState::Failed { .. })));
     }
 }

@@ -1155,8 +1155,8 @@ impl Agent {
                 continue;
             }
 
-            let preview = if queued.len() > 60 {
-                format!("{}...", &queued[..57])
+            let preview = if queued.chars().count() > 60 {
+                format!("{}...", queued.chars().take(57).collect::<String>())
             } else {
                 queued.clone()
             };

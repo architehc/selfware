@@ -480,7 +480,6 @@ impl DependencyAnalyzer {
             "symbol_search",
             "git_status",
             "git_diff",
-            "git_log",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -1273,7 +1272,6 @@ pub fn are_independent(tool1: &ParsedToolCall, tool2: &ParsedToolCall) -> bool {
         "symbol_search",
         "git_status",
         "git_diff",
-        "git_log",
     ];
 
     let tool1_read_only = read_only_tools.contains(&tool1.tool_name.as_str());

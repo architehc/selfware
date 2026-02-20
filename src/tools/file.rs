@@ -11,6 +11,7 @@ use std::path::Path;
 pub struct FileRead;
 pub struct FileWrite;
 pub struct FileEdit;
+pub struct FileDelete;
 pub struct DirectoryTree;
 
 #[async_trait]
@@ -181,6 +182,56 @@ impl Tool for FileEdit {
         Ok(serde_json::json!({
             "success": true,
             "matches_found": 1,
+            "path": args.path
+        }))
+    }
+}
+
+#[async_trait]
+impl Tool for FileDelete {
+    fn name(&self) -> &str {
+        "file_delete"
+    }
+
+    fn description(&self) -> &str {
+        "Delete a file. Use with caution — this is irreversible without version control."
+    }
+
+    fn schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Absolute or relative path to the file to delete"
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    async fn execute(&self, args: Value) -> Result<Value> {
+        #[derive(Deserialize)]
+        struct Args {
+            path: String,
+        }
+
+        let args: Args = serde_json::from_value(args)?;
+        validate_tool_path(&args.path)?;
+        let path = Path::new(&args.path);
+
+        if !path.exists() {
+            anyhow::bail!("File not found: {}", args.path);
+        }
+        if path.is_dir() {
+            anyhow::bail!("Path is a directory, not a file: {}", args.path);
+        }
+
+        fs::remove_file(path)
+            .with_context(|| format!("Failed to delete file: {}", args.path))?;
+
+        Ok(serde_json::json!({
+            "deleted": true,
             "path": args.path
         }))
     }
@@ -859,5 +910,91 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Path traversal detected"));
+    }
+
+    // FileDelete tests
+
+    #[test]
+    fn test_file_delete_name() {
+        let tool = FileDelete;
+        assert_eq!(tool.name(), "file_delete");
+    }
+
+    #[test]
+    fn test_file_delete_description() {
+        let tool = FileDelete;
+        assert!(tool.description().contains("Delete"));
+    }
+
+    #[test]
+    fn test_file_delete_schema() {
+        let tool = FileDelete;
+        let schema = tool.schema();
+        assert_eq!(schema["type"], "object");
+        assert!(schema["properties"]["path"].is_object());
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.contains(&serde_json::json!("path")));
+    }
+
+    #[tokio::test]
+    async fn test_file_delete_success() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("to_delete.txt");
+        fs::write(&file_path, "delete me").unwrap();
+        assert!(file_path.exists());
+
+        let tool = FileDelete;
+        let args = serde_json::json!({"path": file_path.to_str().unwrap()});
+
+        let result = tool.execute(args).await.unwrap();
+        assert_eq!(result["deleted"], true);
+        assert!(!file_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_file_delete_not_found() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("nonexistent.txt");
+
+        let tool = FileDelete;
+        let args = serde_json::json!({"path": file_path.to_str().unwrap()});
+
+        let result = tool.execute(args).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("File not found"));
+    }
+
+    #[tokio::test]
+    async fn test_file_delete_directory_rejected() {
+        let temp_dir = TempDir::new().unwrap();
+        let dir_path = temp_dir.path().join("subdir");
+        fs::create_dir(&dir_path).unwrap();
+
+        let tool = FileDelete;
+        let args = serde_json::json!({"path": dir_path.to_str().unwrap()});
+
+        let result = tool.execute(args).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("directory"));
+    }
+
+    #[tokio::test]
+    async fn test_file_delete_blocks_traversal() {
+        let tool = FileDelete;
+        let args = serde_json::json!({"path": "../escape.txt"});
+        let result = tool.execute(args).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Path traversal detected"));
+    }
+
+    #[tokio::test]
+    async fn test_file_delete_invalid_json_args() {
+        let tool = FileDelete;
+        let args = serde_json::json!({});
+        let result = tool.execute(args).await;
+        assert!(result.is_err());
     }
 }

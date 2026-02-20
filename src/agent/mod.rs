@@ -477,11 +477,9 @@ To call a tool, use this EXACT XML structure:
             "directory_tree",
             "glob_find",
             "grep_search",
+            "symbol_search",
             "git_status",
             "git_diff",
-            "git_log",
-            "ripgrep_search",
-            "web_search",
         ];
 
         if safe_tools.contains(&tool_name) {
@@ -494,7 +492,7 @@ To call a tool, use this EXACT XML structure:
                 // Auto-approve file operations, ask for destructive operations
                 !matches!(
                     tool_name,
-                    "file_write" | "file_edit" | "file_create" | "directory_tree" | "glob_find"
+                    "file_write" | "file_edit" | "directory_tree" | "glob_find"
                 )
             }
             ExecutionMode::Normal => {
@@ -1405,6 +1403,10 @@ To call a tool, use this EXACT XML structure:
     }
 
     pub async fn run_task(&mut self, task: &str) -> Result<()> {
+        // Reset loop state so queued tasks don't inherit the previous
+        // task's iteration counter and hit the max-iterations limit.
+        self.loop_control.reset_for_task();
+
         println!("{}", "🦊 Selfware starting task...".bright_cyan());
         println!("Task: {}", task.bright_white());
 
@@ -2315,9 +2317,9 @@ mod tests {
             "directory_tree",
             "glob_find",
             "grep_search",
+            "symbol_search",
             "git_status",
             "git_diff",
-            "git_log",
         ];
 
         for tool in &safe_tools {
@@ -2405,11 +2407,9 @@ mod tests {
             "directory_tree",
             "glob_find",
             "grep_search",
+            "symbol_search",
             "git_status",
             "git_diff",
-            "git_log",
-            "ripgrep_search",
-            "web_search",
         ];
 
         if safe_tools.contains(&tool_name) {
@@ -2420,7 +2420,7 @@ mod tests {
             ExecutionMode::Yolo | ExecutionMode::Daemon => false,
             ExecutionMode::AutoEdit => !matches!(
                 tool_name,
-                "file_write" | "file_edit" | "file_create" | "directory_tree" | "glob_find"
+                "file_write" | "file_edit" | "directory_tree" | "glob_find"
             ),
             ExecutionMode::Normal => !safe_tools.contains(&tool_name),
         }

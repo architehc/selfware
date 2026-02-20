@@ -148,7 +148,7 @@ impl Agent {
                                 self.context_files.push(path_str);
                             }
                         }
-                        "file_write" | "file_edit" | "file_create" => {
+                        "file_write" | "file_edit" | "file_create" | "file_delete" => {
                             self.stale_files.insert(path_str);
                         }
                         _ => {}
@@ -290,7 +290,7 @@ impl Agent {
         };
 
         // Snapshot file before edit/write for undo support
-        if matches!(name, "file_edit" | "file_write" | "file_create") {
+        if matches!(name, "file_edit" | "file_write" | "file_delete") {
             if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
                 if let Ok(content) = std::fs::read_to_string(path) {
                     use crate::session::edit_history::{EditAction, FileSnapshot};

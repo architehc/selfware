@@ -57,6 +57,7 @@ impl StreamingResponse {
         tokio::spawn(async move {
             let mut stream = self.response.bytes_stream();
             let mut buffer = String::new();
+            let mut accumulator = ToolCallAccumulator::new();
 
             while let Some(chunk_result) = stream.next().await {
                 match chunk_result {
@@ -68,7 +69,7 @@ impl StreamingResponse {
                             let event = buffer[..pos].to_string();
                             buffer = buffer[pos + 2..].to_string();
 
-                            if let Some(chunk) = parse_sse_event(&event) {
+                            for chunk in parse_sse_event(&event, &mut accumulator) {
                                 if tx.send(Ok(chunk)).await.is_err() {
                                     return; // Receiver dropped
                                 }
@@ -79,6 +80,23 @@ impl StreamingResponse {
                         let _ = tx.send(Err(anyhow::anyhow!("Stream error: {}", e))).await;
                         return;
                     }
+                }
+            }
+
+            // Flush trailing buffer (data without final \n\n)
+            let remaining = buffer.trim().to_string();
+            if !remaining.is_empty() {
+                for chunk in parse_sse_event(&remaining, &mut accumulator) {
+                    if tx.send(Ok(chunk)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+
+            // Flush any remaining accumulated tool calls
+            for call in accumulator.flush() {
+                if tx.send(Ok(StreamChunk::ToolCall(call))).await.is_err() {
+                    return;
                 }
             }
         });
@@ -161,52 +179,161 @@ pub enum StreamChunk {
     Done,
 }
 
-/// Parse a Server-Sent Events (SSE) event
+/// Accumulates incremental tool call deltas from SSE streaming into complete ToolCall objects.
+///
+/// The OpenAI streaming API sends tool calls as a series of deltas:
+/// 1. First delta: `index`, `id`, `type`, `function.name`, partial `function.arguments`
+/// 2. Subsequent deltas: same `index`, only `function.arguments` chunk
+///
+/// The accumulator buffers these per-index and emits a complete `ToolCall` when
+/// a new index appears or when `flush()` is called at stream end.
+#[derive(Default)]
+struct ToolCallAccumulator {
+    /// In-progress tool calls keyed by index
+    pending: std::collections::HashMap<usize, (String, String, String, String)>, // (id, type, name, args)
+}
+
+impl ToolCallAccumulator {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Process a tool call delta, returning a completed ToolCall if a prior index is displaced.
+    fn process_delta(&mut self, delta: &serde_json::Value) -> Option<types::ToolCall> {
+        let index = delta.get("index").and_then(|v| v.as_u64())? as usize;
+        let id = delta
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let call_type = delta
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let func = delta.get("function");
+        let name = func
+            .and_then(|f| f.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let args_chunk = func
+            .and_then(|f| f.get("arguments"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        if let Some(entry) = self.pending.get_mut(&index) {
+            // Continuation delta: append arguments
+            entry.3.push_str(&args_chunk);
+            // Also update id/type/name if they were provided (first delta for this index)
+            if !id.is_empty() {
+                entry.0 = id;
+            }
+            if !call_type.is_empty() {
+                entry.1 = call_type;
+            }
+            if !name.is_empty() {
+                entry.2 = name;
+            }
+            None
+        } else {
+            // New index — insert it
+            self.pending
+                .insert(index, (id, call_type, name, args_chunk));
+            None
+        }
+    }
+
+    /// Flush all pending tool calls, returning completed ToolCall objects.
+    fn flush(&mut self) -> Vec<types::ToolCall> {
+        let mut calls: Vec<_> = self.pending.drain().collect();
+        calls.sort_by_key(|(idx, _)| *idx);
+        calls
+            .into_iter()
+            .map(|(_, (id, call_type, name, args))| types::ToolCall {
+                id,
+                call_type,
+                function: types::ToolFunction {
+                    name,
+                    arguments: args,
+                },
+            })
+            .collect()
+    }
+}
+
+/// Parse a Server-Sent Events (SSE) event, returning zero or more StreamChunks.
+///
+/// A single SSE event can produce multiple chunks (e.g., content + tool call deltas
+/// arrive in the same JSON payload). The accumulator buffers incremental tool call
+/// deltas; call `accumulator.flush()` at stream end to emit any remaining calls.
 // Streaming infrastructure (used by chat_streaming)
-fn parse_sse_event(event: &str) -> Option<StreamChunk> {
+fn parse_sse_event(
+    event: &str,
+    accumulator: &mut ToolCallAccumulator,
+) -> Vec<StreamChunk> {
+    let mut chunks = Vec::new();
+
     for line in event.lines() {
         if let Some(data) = line.strip_prefix("data: ") {
             if data == "[DONE]" {
-                return Some(StreamChunk::Done);
+                // Flush any remaining tool calls before Done
+                for call in accumulator.flush() {
+                    chunks.push(StreamChunk::ToolCall(call));
+                }
+                chunks.push(StreamChunk::Done);
+                return chunks;
             }
 
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                // Extract content from choices[0].delta.content
-                if let Some(content) = json
+                let delta = json
                     .get("choices")
                     .and_then(|c| c.get(0))
-                    .and_then(|c| c.get("delta"))
+                    .and_then(|c| c.get("delta"));
+
+                // Extract content from choices[0].delta.content
+                if let Some(content) = delta
                     .and_then(|d| d.get("content"))
                     .and_then(|c| c.as_str())
                 {
                     if !content.is_empty() {
-                        return Some(StreamChunk::Content(content.to_string()));
+                        chunks.push(StreamChunk::Content(content.to_string()));
                     }
                 }
 
                 // Extract reasoning content
-                if let Some(reasoning) = json
-                    .get("choices")
-                    .and_then(|c| c.get(0))
-                    .and_then(|c| c.get("delta"))
+                if let Some(reasoning) = delta
                     .and_then(|d| d.get("reasoning_content"))
                     .and_then(|c| c.as_str())
                 {
                     if !reasoning.is_empty() {
-                        return Some(StreamChunk::Reasoning(reasoning.to_string()));
+                        chunks.push(StreamChunk::Reasoning(reasoning.to_string()));
+                    }
+                }
+
+                // Extract tool_calls deltas
+                if let Some(tool_calls) = delta
+                    .and_then(|d| d.get("tool_calls"))
+                    .and_then(|tc| tc.as_array())
+                {
+                    for tc_delta in tool_calls {
+                        if let Some(completed) = accumulator.process_delta(tc_delta) {
+                            chunks.push(StreamChunk::ToolCall(completed));
+                        }
                     }
                 }
 
                 // Extract usage if present
                 if let Some(usage) = json.get("usage") {
                     if let Ok(u) = serde_json::from_value::<Usage>(usage.clone()) {
-                        return Some(StreamChunk::Usage(u));
+                        chunks.push(StreamChunk::Usage(u));
                     }
                 }
             }
         }
     }
-    None
+    chunks
 }
 
 /// Retry configuration for API calls
@@ -600,62 +727,72 @@ mod tests {
 
     #[test]
     fn test_parse_sse_event_done() {
+        let mut acc = ToolCallAccumulator::new();
         let event = "data: [DONE]";
-        let result = parse_sse_event(event);
-        assert!(matches!(result, Some(StreamChunk::Done)));
+        let results = parse_sse_event(event, &mut acc);
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0], StreamChunk::Done));
     }
 
     #[test]
     fn test_parse_sse_event_content() {
+        let mut acc = ToolCallAccumulator::new();
         let event = r#"data: {"choices":[{"delta":{"content":"Hello"}}]}"#;
-        let result = parse_sse_event(event);
-        assert!(matches!(result, Some(StreamChunk::Content(_))));
-        if let Some(StreamChunk::Content(text)) = result {
-            assert_eq!(text, "Hello");
-        }
+        let results = parse_sse_event(event, &mut acc);
+        assert_eq!(results.len(), 1);
+        assert!(matches!(&results[0], StreamChunk::Content(t) if t == "Hello"));
     }
 
     #[test]
     fn test_parse_sse_event_reasoning() {
+        let mut acc = ToolCallAccumulator::new();
         let event = r#"data: {"choices":[{"delta":{"reasoning_content":"Thinking about it"}}]}"#;
-        let result = parse_sse_event(event);
-        assert!(matches!(result, Some(StreamChunk::Reasoning(_))));
+        let results = parse_sse_event(event, &mut acc);
+        assert_eq!(results.len(), 1);
+        assert!(matches!(&results[0], StreamChunk::Reasoning(_)));
     }
 
     #[test]
     fn test_parse_sse_event_usage() {
+        let mut acc = ToolCallAccumulator::new();
         let event =
             r#"data: {"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#;
-        let result = parse_sse_event(event);
-        assert!(matches!(result, Some(StreamChunk::Usage(_))));
+        let results = parse_sse_event(event, &mut acc);
+        assert_eq!(results.len(), 1);
+        assert!(matches!(&results[0], StreamChunk::Usage(_)));
     }
 
     #[test]
     fn test_parse_sse_event_empty_content() {
+        let mut acc = ToolCallAccumulator::new();
         let event = r#"data: {"choices":[{"delta":{"content":""}}]}"#;
-        let result = parse_sse_event(event);
-        assert!(result.is_none());
+        let results = parse_sse_event(event, &mut acc);
+        assert!(results.is_empty());
     }
 
     #[test]
     fn test_parse_sse_event_no_data_prefix() {
+        let mut acc = ToolCallAccumulator::new();
         let event = "not a data line";
-        let result = parse_sse_event(event);
-        assert!(result.is_none());
+        let results = parse_sse_event(event, &mut acc);
+        assert!(results.is_empty());
     }
 
     #[test]
     fn test_parse_sse_event_invalid_json() {
+        let mut acc = ToolCallAccumulator::new();
         let event = "data: {invalid json}";
-        let result = parse_sse_event(event);
-        assert!(result.is_none());
+        let results = parse_sse_event(event, &mut acc);
+        assert!(results.is_empty());
     }
 
     #[test]
     fn test_parse_sse_event_multiline() {
+        let mut acc = ToolCallAccumulator::new();
         let event = "event: message\ndata: [DONE]";
-        let result = parse_sse_event(event);
-        assert!(matches!(result, Some(StreamChunk::Done)));
+        let results = parse_sse_event(event, &mut acc);
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0], StreamChunk::Done));
     }
 
     #[test]
@@ -1057,23 +1194,76 @@ mod tests {
 
     #[test]
     fn test_parse_sse_event_with_tool_call() {
-        // Test parsing SSE event with tool call delta (streaming scenario)
-        let event = r#"data: {"choices":[{"delta":{"tool_calls":[{"id":"call_123","type":"function","function":{"name":"file_read","arguments":"{\"path\":\"/test\"}"}}]}}]}"#;
+        // Test parsing SSE event with complete tool call delta
+        let mut acc = ToolCallAccumulator::new();
+        let event = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_123","type":"function","function":{"name":"file_read","arguments":"{\"path\":\"/test\"}"}}]}}]}"#;
+        let results = parse_sse_event(event, &mut acc);
+        // Tool call is buffered in accumulator, not emitted yet
+        assert!(results.is_empty());
 
-        // The current implementation doesn't parse tool_calls in SSE events
-        // This test documents the current behavior
-        let result = parse_sse_event(event);
-        // Tool calls are not extracted in the current SSE parser
-        assert!(result.is_none());
+        // Flush to get the completed tool call
+        let calls = acc.flush();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_123");
+        assert_eq!(calls[0].function.name, "file_read");
+        assert!(calls[0].function.arguments.contains("/test"));
+    }
+
+    #[test]
+    fn test_parse_sse_event_incremental_tool_call() {
+        // Test incremental tool call argument assembly
+        let mut acc = ToolCallAccumulator::new();
+
+        // First chunk: id, name, partial args
+        let event1 = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_456","type":"function","function":{"name":"file_write","arguments":"{\"path\":"}}]}}]}"#;
+        let r1 = parse_sse_event(event1, &mut acc);
+        assert!(r1.is_empty());
+
+        // Second chunk: more args
+        let event2 = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"/tmp/test\","}}]}}]}"#;
+        let r2 = parse_sse_event(event2, &mut acc);
+        assert!(r2.is_empty());
+
+        // Third chunk: finish args
+        let event3 = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"content\":\"hello\"}"}}]}}]}"#;
+        let r3 = parse_sse_event(event3, &mut acc);
+        assert!(r3.is_empty());
+
+        // Flush to get the completed tool call with assembled arguments
+        let calls = acc.flush();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_456");
+        assert_eq!(calls[0].function.name, "file_write");
+        assert_eq!(
+            calls[0].function.arguments,
+            "{\"path\":\"/tmp/test\",\"content\":\"hello\"}"
+        );
+    }
+
+    #[test]
+    fn test_parse_sse_event_tool_calls_flushed_on_done() {
+        // Tool calls should be flushed before the Done marker
+        let mut acc = ToolCallAccumulator::new();
+
+        let event1 = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_789","type":"function","function":{"name":"git_status","arguments":"{}"}}]}}]}"#;
+        parse_sse_event(event1, &mut acc);
+
+        let done_event = "data: [DONE]";
+        let results = parse_sse_event(done_event, &mut acc);
+        // Should have the flushed tool call + Done
+        assert_eq!(results.len(), 2);
+        assert!(matches!(&results[0], StreamChunk::ToolCall(tc) if tc.id == "call_789"));
+        assert!(matches!(results[1], StreamChunk::Done));
     }
 
     #[test]
     fn test_parse_sse_event_finish_reason() {
         // Test SSE event with finish_reason but no content
+        let mut acc = ToolCallAccumulator::new();
         let event = r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#;
-        let result = parse_sse_event(event);
-        // Should return None since there's no content or reasoning
-        assert!(result.is_none());
+        let results = parse_sse_event(event, &mut acc);
+        // Should return empty since there's no content or reasoning
+        assert!(results.is_empty());
     }
 
     // ============================================
@@ -1127,6 +1317,7 @@ mod tests {
 
     #[test]
     fn test_multiple_sse_events_in_buffer() {
+        let mut acc = ToolCallAccumulator::new();
         // Simulate multiple SSE events in a buffer (as would happen during streaming)
         let buffer = "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n";
 
@@ -1134,27 +1325,25 @@ mod tests {
         assert_eq!(events.len(), 2);
 
         // First event
-        let result1 = parse_sse_event(events[0]);
-        assert!(matches!(result1, Some(StreamChunk::Content(_))));
-        if let Some(StreamChunk::Content(text)) = result1 {
-            assert_eq!(text, "Hello");
-        }
+        let results1 = parse_sse_event(events[0], &mut acc);
+        assert_eq!(results1.len(), 1);
+        assert!(matches!(&results1[0], StreamChunk::Content(t) if t == "Hello"));
 
         // Second event
-        let result2 = parse_sse_event(events[1]);
-        assert!(matches!(result2, Some(StreamChunk::Content(_))));
-        if let Some(StreamChunk::Content(text)) = result2 {
-            assert_eq!(text, " world");
-        }
+        let results2 = parse_sse_event(events[1], &mut acc);
+        assert_eq!(results2.len(), 1);
+        assert!(matches!(&results2[0], StreamChunk::Content(t) if t == " world"));
     }
 
     #[test]
     fn test_parse_sse_event_with_whitespace() {
+        let mut acc = ToolCallAccumulator::new();
         // Test SSE event with extra whitespace
         let event = "  data: [DONE]  ";
         // The parser strips "data: " prefix, should handle this
-        let result = parse_sse_event(event.trim());
-        assert!(matches!(result, Some(StreamChunk::Done)));
+        let results = parse_sse_event(event.trim(), &mut acc);
+        assert_eq!(results.len(), 1);
+        assert!(matches!(results[0], StreamChunk::Done));
     }
 
     #[test]

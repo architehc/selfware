@@ -189,17 +189,18 @@ pub(crate) fn semantic_summary(
         path
     };
 
+    // Helper closure to parse result JSON
+    let result_json = |r: Option<&str>| -> Option<serde_json::Value> {
+        r.and_then(|s| serde_json::from_str(s).ok())
+    };
+
     match tool_name {
+        // === File operations ===
         "file_read" => {
-            let lines = result
-                .and_then(|r| {
-                    // Try to count lines from the result
-                    serde_json::from_str::<serde_json::Value>(r)
-                        .ok()
-                        .and_then(|v| {
-                            v.get("content")
-                                .and_then(|c| c.as_str().map(|s| s.lines().count()))
-                        })
+            let lines = result_json(result)
+                .and_then(|v| {
+                    v.get("content")
+                        .and_then(|c| c.as_str().map(|s| s.lines().count()))
                 })
                 .unwrap_or(0);
             if lines > 0 {
@@ -209,12 +210,8 @@ pub(crate) fn semantic_summary(
             }
         }
         "file_write" | "file_create" => {
-            let bytes = result
-                .and_then(|r| {
-                    serde_json::from_str::<serde_json::Value>(r)
-                        .ok()
-                        .and_then(|v| v.get("bytes_written").and_then(|b| b.as_u64()))
-                })
+            let bytes = result_json(result)
+                .and_then(|v| v.get("bytes_written").and_then(|b| b.as_u64()))
                 .unwrap_or(0);
             if bytes > 0 {
                 format!("Wrote {} ({} bytes)", short_path, format_number(bytes))
@@ -223,24 +220,25 @@ pub(crate) fn semantic_summary(
             }
         }
         "file_edit" => format!("Edited {}", short_path),
+        "file_delete" => format!("Deleted {}", short_path),
+
+        // === Shell ===
         "shell_exec" => {
             let cmd = extract_command(args).unwrap_or("?");
             let short_cmd = if cmd.len() > 40 { &cmd[..40] } else { cmd };
-            let exit_code = result.and_then(|r| {
-                serde_json::from_str::<serde_json::Value>(r)
-                    .ok()
-                    .and_then(|v| v.get("exit_code").and_then(|c| c.as_i64()))
-            });
+            let exit_code = result_json(result)
+                .and_then(|v| v.get("exit_code").and_then(|c| c.as_i64()));
             match exit_code {
                 Some(code) => format!("Ran: {} (exit {})", short_cmd, code),
                 None => format!("Ran: {}", short_cmd),
             }
         }
+
+        // === Cargo / Build ===
         "cargo_test" => {
             if success {
                 let passed = result
                     .and_then(|r| {
-                        // Look for "X passed" in test output
                         r.find("passed").and_then(|idx| {
                             let before = &r[..idx];
                             before.rfind(char::is_whitespace).map(|i| &before[i + 1..])
@@ -259,6 +257,22 @@ pub(crate) fn semantic_summary(
                 "Cargo check failed".to_string()
             }
         }
+        "cargo_clippy" => {
+            if success {
+                "Clippy: clean".to_string()
+            } else {
+                "Clippy: warnings".to_string()
+            }
+        }
+        "cargo_fmt" => {
+            if success {
+                "Formatted code".to_string()
+            } else {
+                "Format check failed".to_string()
+            }
+        }
+
+        // === Search ===
         "grep_search" | "ripgrep_search" => {
             let pattern = extract_pattern(args).unwrap_or("?");
             let short_pattern = if pattern.len() > 30 {
@@ -266,12 +280,8 @@ pub(crate) fn semantic_summary(
             } else {
                 pattern
             };
-            let matches = result
-                .and_then(|r| {
-                    serde_json::from_str::<serde_json::Value>(r)
-                        .ok()
-                        .and_then(|v| v.get("matches").and_then(|m| m.as_array().map(|a| a.len())))
-                })
+            let matches = result_json(result)
+                .and_then(|v| v.get("matches").and_then(|m| m.as_array().map(|a| a.len())))
                 .unwrap_or(0);
             if matches > 0 {
                 format!("Searched '{}' ({} matches)", short_pattern, matches)
@@ -279,29 +289,39 @@ pub(crate) fn semantic_summary(
                 format!("Searched '{}'", short_pattern)
             }
         }
+        "symbol_search" => {
+            let pattern = extract_pattern(args).unwrap_or("?");
+            format!("Symbol search '{}'", pattern)
+        }
+        "glob_find" => {
+            let pattern = extract_pattern(args).unwrap_or("?");
+            format!("Glob '{}'", pattern)
+        }
+
+        // === Git ===
         "git_status" => {
-            let changed = result
-                .and_then(|r| {
-                    serde_json::from_str::<serde_json::Value>(r)
-                        .ok()
-                        .and_then(|v| v.get("files").and_then(|f| f.as_array().map(|a| a.len())))
-                })
+            let rj = result_json(result);
+            let staged = rj.as_ref()
+                .and_then(|v| v.get("staged").and_then(|a| a.as_array().map(|a| a.len())))
                 .unwrap_or(0);
-            if changed > 0 {
-                format!("Git status ({} changed)", changed)
+            let unstaged = rj.as_ref()
+                .and_then(|v| v.get("unstaged").and_then(|a| a.as_array().map(|a| a.len())))
+                .unwrap_or(0);
+            let untracked = rj.as_ref()
+                .and_then(|v| v.get("untracked").and_then(|a| a.as_array().map(|a| a.len())))
+                .unwrap_or(0);
+            let total = staged + unstaged + untracked;
+            if total > 0 {
+                format!("Git status ({} changed)", total)
             } else {
                 "Git status (clean)".to_string()
             }
         }
         "git_diff" => {
-            let lines = result
-                .and_then(|r| {
-                    serde_json::from_str::<serde_json::Value>(r)
-                        .ok()
-                        .and_then(|v| {
-                            v.get("diff")
-                                .and_then(|d| d.as_str().map(|s| s.lines().count()))
-                        })
+            let lines = result_json(result)
+                .and_then(|v| {
+                    v.get("diff")
+                        .and_then(|d| d.as_str().map(|s| s.lines().count()))
                 })
                 .unwrap_or(0);
             if lines > 0 {
@@ -310,13 +330,164 @@ pub(crate) fn semantic_summary(
                 "Git diff".to_string()
             }
         }
-        "directory_tree" => format!("Listed {}", short_path),
-        "glob_find" => {
-            let pattern = extract_pattern(args).unwrap_or("?");
-            format!("Glob '{}'", pattern)
-        }
         "git_log" => "Git log".to_string(),
         "git_commit" => "Git commit".to_string(),
+        "git_checkpoint" => {
+            let msg = args.get("message").and_then(|v| v.as_str()).unwrap_or("checkpoint");
+            format!("Checkpoint: {}", msg)
+        }
+        "git_push" => {
+            let remote = args.get("remote").and_then(|v| v.as_str()).unwrap_or("origin");
+            let branch = result_json(result)
+                .and_then(|v| v.get("branch").and_then(|b| b.as_str().map(|s| s.to_string())))
+                .unwrap_or_default();
+            if branch.is_empty() {
+                format!("Pushed to {}", remote)
+            } else {
+                format!("Pushed {} to {}", branch, remote)
+            }
+        }
+
+        // === Directory ===
+        "directory_tree" => format!("Listed {}", short_path),
+
+        // === HTTP ===
+        "http_request" => {
+            let method = args.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
+            let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("?");
+            let short_url = if url.len() > 40 { &url[..40] } else { url };
+            format!("HTTP {} {}", method, short_url)
+        }
+
+        // === Process management ===
+        "process_start" => {
+            let cmd = extract_command(args).unwrap_or("process");
+            format!("Started {}", cmd)
+        }
+        "process_stop" => {
+            let id = args.get("id").or_else(|| args.get("name")).and_then(|v| v.as_str()).unwrap_or("process");
+            format!("Stopped {}", id)
+        }
+        "process_list" => "Process list".to_string(),
+        "process_logs" => {
+            let id = args.get("id").or_else(|| args.get("name")).and_then(|v| v.as_str()).unwrap_or("process");
+            format!("Logs for {}", id)
+        }
+        "process_restart" => {
+            let id = args.get("id").or_else(|| args.get("name")).and_then(|v| v.as_str()).unwrap_or("process");
+            format!("Restarted {}", id)
+        }
+        "port_check" => {
+            let port = args.get("port").and_then(|v| v.as_u64()).unwrap_or(0);
+            format!("Port {} check", port)
+        }
+
+        // === Container operations ===
+        "container_run" => {
+            let image = args.get("image").and_then(|v| v.as_str()).unwrap_or("container");
+            format!("Container run {}", image)
+        }
+        "container_stop" => {
+            let id = args.get("container").or_else(|| args.get("id")).and_then(|v| v.as_str()).unwrap_or("container");
+            format!("Container stop {}", id)
+        }
+        "container_list" => "Container list".to_string(),
+        "container_logs" => {
+            let id = args.get("container").or_else(|| args.get("id")).and_then(|v| v.as_str()).unwrap_or("container");
+            format!("Container logs {}", id)
+        }
+        "container_exec" => {
+            let id = args.get("container").or_else(|| args.get("id")).and_then(|v| v.as_str()).unwrap_or("container");
+            format!("Container exec {}", id)
+        }
+        "container_build" => {
+            let tag = args.get("tag").and_then(|v| v.as_str()).unwrap_or("image");
+            format!("Container build {}", tag)
+        }
+        "container_images" => "Container images".to_string(),
+        "container_pull" => {
+            let image = args.get("image").and_then(|v| v.as_str()).unwrap_or("image");
+            format!("Container pull {}", image)
+        }
+        "container_remove" => {
+            let id = args.get("container").or_else(|| args.get("id")).and_then(|v| v.as_str()).unwrap_or("container");
+            format!("Container remove {}", id)
+        }
+        "compose_up" => "Compose up".to_string(),
+        "compose_down" => "Compose down".to_string(),
+
+        // === Package managers ===
+        "npm_install" => {
+            let pkg = args.get("package").and_then(|v| v.as_str());
+            match pkg {
+                Some(p) => format!("npm install {}", p),
+                None => "npm install".to_string(),
+            }
+        }
+        "npm_run" => {
+            let script = args.get("script").and_then(|v| v.as_str()).unwrap_or("script");
+            format!("npm run {}", script)
+        }
+        "npm_scripts" => "npm scripts".to_string(),
+        "pip_install" => {
+            let pkg = args.get("package").and_then(|v| v.as_str());
+            match pkg {
+                Some(p) => format!("pip install {}", p),
+                None => "pip install".to_string(),
+            }
+        }
+        "pip_list" => "pip list".to_string(),
+        "pip_freeze" => "pip freeze".to_string(),
+        "yarn_install" => {
+            let pkg = args.get("package").and_then(|v| v.as_str());
+            match pkg {
+                Some(p) => format!("yarn add {}", p),
+                None => "yarn install".to_string(),
+            }
+        }
+
+        // === Browser automation ===
+        "browser_fetch" => {
+            let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("?");
+            let short_url = if url.len() > 40 { &url[..40] } else { url };
+            format!("Fetch {}", short_url)
+        }
+        "browser_screenshot" => {
+            let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("page");
+            let short_url = if url.len() > 40 { &url[..40] } else { url };
+            format!("Screenshot {}", short_url)
+        }
+        "browser_pdf" => {
+            let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("page");
+            let short_url = if url.len() > 40 { &url[..40] } else { url };
+            format!("PDF {}", short_url)
+        }
+        "browser_eval" => "Browser eval".to_string(),
+        "browser_links" => {
+            let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("page");
+            let short_url = if url.len() > 40 { &url[..40] } else { url };
+            format!("Links from {}", short_url)
+        }
+
+        // === Knowledge graph ===
+        "knowledge_add" => {
+            let entity = args.get("name").or_else(|| args.get("entity")).and_then(|v| v.as_str()).unwrap_or("entity");
+            format!("Knowledge add '{}'", entity)
+        }
+        "knowledge_relate" => "Knowledge relate".to_string(),
+        "knowledge_query" => {
+            let query = extract_pattern(args).unwrap_or("?");
+            format!("Knowledge query '{}'", query)
+        }
+        "knowledge_stats" => "Knowledge stats".to_string(),
+        "knowledge_clear" => "Knowledge cleared".to_string(),
+        "knowledge_remove" => {
+            let entity = args.get("name").or_else(|| args.get("entity")).and_then(|v| v.as_str()).unwrap_or("entity");
+            format!("Knowledge remove '{}'", entity)
+        }
+        "knowledge_export" => "Knowledge export".to_string(),
+
+        // === Fallback ===
         _ => format!("{} ({}ms)", tool_name, duration_ms),
     }
 }
@@ -356,6 +527,7 @@ pub(crate) fn tool_activity_message(name: &str, args: &serde_json::Value) -> Str
             format!("Writing {}...", extract_path(args).unwrap_or("file"))
         }
         "file_edit" => format!("Editing {}...", extract_path(args).unwrap_or("file")),
+        "file_delete" => format!("Deleting {}...", extract_path(args).unwrap_or("file")),
         "shell_exec" => format!(
             "Running {}...",
             extract_command(args)
@@ -364,15 +536,34 @@ pub(crate) fn tool_activity_message(name: &str, args: &serde_json::Value) -> Str
         ),
         "cargo_test" => "Running tests...".to_string(),
         "cargo_check" => "Checking project...".to_string(),
+        "cargo_clippy" => "Running clippy...".to_string(),
+        "cargo_fmt" => "Formatting code...".to_string(),
         "grep_search" | "ripgrep_search" => {
             format!("Searching '{}'...", extract_pattern(args).unwrap_or("?"))
         }
+        "symbol_search" => format!("Searching symbols '{}'...", extract_pattern(args).unwrap_or("?")),
         "git_status" => "Checking git status...".to_string(),
         "git_diff" => "Getting diff...".to_string(),
         "git_log" => "Reading git log...".to_string(),
         "git_commit" => "Committing...".to_string(),
+        "git_push" => "Pushing...".to_string(),
+        "git_checkpoint" => "Creating checkpoint...".to_string(),
         "directory_tree" => format!("Listing {}...", extract_path(args).unwrap_or(".")),
         "glob_find" => format!("Finding {}...", extract_pattern(args).unwrap_or("files")),
+        "http_request" => "Making HTTP request...".to_string(),
+        "process_start" => "Starting process...".to_string(),
+        "process_stop" => "Stopping process...".to_string(),
+        "process_list" => "Listing processes...".to_string(),
+        "process_logs" => "Fetching logs...".to_string(),
+        "process_restart" => "Restarting process...".to_string(),
+        "container_run" | "container_build" => "Running container...".to_string(),
+        "container_stop" | "container_remove" => "Stopping container...".to_string(),
+        "npm_install" | "pip_install" | "yarn_install" => "Installing packages...".to_string(),
+        "npm_run" => "Running script...".to_string(),
+        "browser_fetch" => "Fetching page...".to_string(),
+        "browser_screenshot" => "Taking screenshot...".to_string(),
+        "knowledge_add" | "knowledge_relate" => "Updating knowledge...".to_string(),
+        "knowledge_query" => "Querying knowledge...".to_string(),
         _ => format!("{}...", name),
     }
 }
@@ -1016,5 +1207,136 @@ mod tests {
         assert_eq!(progress.phases.len(), 2);
         assert_eq!(progress.phases[1].name, "Phase 2");
         assert_eq!(progress.phases[1].status, PhaseStatus::Pending);
+    }
+
+    // New semantic summary tests
+
+    #[test]
+    fn test_semantic_summary_file_delete() {
+        let args = serde_json::json!({"path": "old_file.txt"});
+        let summary = semantic_summary("file_delete", &args, None, true, 10);
+        assert_eq!(summary, "Deleted old_file.txt");
+    }
+
+    #[test]
+    fn test_semantic_summary_cargo_clippy_clean() {
+        let args = serde_json::json!({});
+        let summary = semantic_summary("cargo_clippy", &args, None, true, 100);
+        assert_eq!(summary, "Clippy: clean");
+    }
+
+    #[test]
+    fn test_semantic_summary_cargo_clippy_warnings() {
+        let args = serde_json::json!({});
+        let summary = semantic_summary("cargo_clippy", &args, None, false, 100);
+        assert_eq!(summary, "Clippy: warnings");
+    }
+
+    #[test]
+    fn test_semantic_summary_cargo_fmt() {
+        let args = serde_json::json!({});
+        assert_eq!(
+            semantic_summary("cargo_fmt", &args, None, true, 50),
+            "Formatted code"
+        );
+        assert_eq!(
+            semantic_summary("cargo_fmt", &args, None, false, 50),
+            "Format check failed"
+        );
+    }
+
+    #[test]
+    fn test_semantic_summary_symbol_search() {
+        let args = serde_json::json!({"pattern": "MyStruct"});
+        let summary = semantic_summary("symbol_search", &args, None, true, 30);
+        assert_eq!(summary, "Symbol search 'MyStruct'");
+    }
+
+    #[test]
+    fn test_semantic_summary_http_request() {
+        let args = serde_json::json!({"method": "POST", "url": "https://api.example.com/data"});
+        let summary = semantic_summary("http_request", &args, None, true, 100);
+        assert!(summary.contains("HTTP POST"));
+        assert!(summary.contains("api.example.com"));
+    }
+
+    #[test]
+    fn test_semantic_summary_git_push() {
+        let args = serde_json::json!({"remote": "origin"});
+        let result_str = r#"{"success": true, "remote": "origin", "branch": "main"}"#;
+        let summary = semantic_summary("git_push", &args, Some(result_str), true, 50);
+        assert_eq!(summary, "Pushed main to origin");
+    }
+
+    #[test]
+    fn test_semantic_summary_git_checkpoint() {
+        let args = serde_json::json!({"message": "before refactor"});
+        let summary = semantic_summary("git_checkpoint", &args, None, true, 50);
+        assert_eq!(summary, "Checkpoint: before refactor");
+    }
+
+    #[test]
+    fn test_semantic_summary_process_start() {
+        let args = serde_json::json!({"command": "node server.js"});
+        let summary = semantic_summary("process_start", &args, None, true, 50);
+        assert_eq!(summary, "Started node server.js");
+    }
+
+    #[test]
+    fn test_semantic_summary_container_run() {
+        let args = serde_json::json!({"image": "nginx:latest"});
+        let summary = semantic_summary("container_run", &args, None, true, 50);
+        assert_eq!(summary, "Container run nginx:latest");
+    }
+
+    #[test]
+    fn test_semantic_summary_npm_install() {
+        let args = serde_json::json!({"package": "express"});
+        let summary = semantic_summary("npm_install", &args, None, true, 50);
+        assert_eq!(summary, "npm install express");
+    }
+
+    #[test]
+    fn test_semantic_summary_npm_install_all() {
+        let args = serde_json::json!({});
+        let summary = semantic_summary("npm_install", &args, None, true, 50);
+        assert_eq!(summary, "npm install");
+    }
+
+    #[test]
+    fn test_semantic_summary_browser_fetch() {
+        let args = serde_json::json!({"url": "https://example.com"});
+        let summary = semantic_summary("browser_fetch", &args, None, true, 50);
+        assert_eq!(summary, "Fetch https://example.com");
+    }
+
+    #[test]
+    fn test_semantic_summary_knowledge_add() {
+        let args = serde_json::json!({"name": "Rust"});
+        let summary = semantic_summary("knowledge_add", &args, None, true, 50);
+        assert_eq!(summary, "Knowledge add 'Rust'");
+    }
+
+    #[test]
+    fn test_semantic_summary_knowledge_query() {
+        let args = serde_json::json!({"query": "error handling"});
+        let summary = semantic_summary("knowledge_query", &args, None, true, 50);
+        assert_eq!(summary, "Knowledge query 'error handling'");
+    }
+
+    #[test]
+    fn test_semantic_summary_git_status_with_changes() {
+        let args = serde_json::json!({});
+        let result_str = r#"{"branch":"main","staged":["a.rs"],"unstaged":["b.rs"],"untracked":["c.rs"]}"#;
+        let summary = semantic_summary("git_status", &args, Some(result_str), true, 20);
+        assert_eq!(summary, "Git status (3 changed)");
+    }
+
+    #[test]
+    fn test_semantic_summary_git_status_clean() {
+        let args = serde_json::json!({});
+        let result_str = r#"{"branch":"main","staged":[],"unstaged":[],"untracked":[]}"#;
+        let summary = semantic_summary("git_status", &args, Some(result_str), true, 20);
+        assert_eq!(summary, "Git status (clean)");
     }
 }

@@ -21,8 +21,8 @@ use container::{
     ComposeDown, ComposeUp, ContainerBuild, ContainerExec, ContainerImages, ContainerList,
     ContainerLogs, ContainerPull, ContainerRemove, ContainerRun, ContainerStop,
 };
-use file::{DirectoryTree, FileEdit, FileRead, FileWrite};
-use git::{GitCheckpoint, GitCommit, GitDiff, GitStatus};
+use file::{DirectoryTree, FileDelete, FileEdit, FileRead, FileWrite};
+use git::{GitCheckpoint, GitCommit, GitDiff, GitPush, GitStatus};
 use http::HttpRequest;
 use knowledge::{
     KnowledgeAdd, KnowledgeClear, KnowledgeExport, KnowledgeQuery, KnowledgeRelate,
@@ -61,12 +61,14 @@ impl ToolRegistry {
         registry.register(FileRead);
         registry.register(FileWrite);
         registry.register(FileEdit);
+        registry.register(FileDelete);
         registry.register(DirectoryTree);
 
         // Git operations
         registry.register(GitStatus);
         registry.register(GitDiff);
         registry.register(GitCommit);
+        registry.register(GitPush);
         registry.register(GitCheckpoint);
 
         // Cargo/Build operations
@@ -257,6 +259,7 @@ mod tests {
         assert!(registry.get("git_status").is_some());
         assert!(registry.get("git_diff").is_some());
         assert!(registry.get("git_commit").is_some());
+        assert!(registry.get("git_push").is_some());
         assert!(registry.get("git_checkpoint").is_some());
     }
 
@@ -277,6 +280,7 @@ mod tests {
         assert!(registry.get("file_read").is_some());
         assert!(registry.get("file_write").is_some());
         assert!(registry.get("file_edit").is_some());
+        assert!(registry.get("file_delete").is_some());
         assert!(registry.get("directory_tree").is_some());
     }
 
