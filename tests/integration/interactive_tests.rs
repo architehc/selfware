@@ -66,9 +66,7 @@ fn run_interactive(input: &str, timeout_secs: u64) -> (String, String, i32) {
                 if start.elapsed() >= timeout {
                     child.kill().ok();
                     // Drain stdout/stderr even after kill so partial output is available
-                    let output = child
-                        .wait_with_output()
-                        .expect("Failed to wait after kill");
+                    let output = child.wait_with_output().expect("Failed to wait after kill");
                     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
                     return (stdout, format!("timeout: {}", stderr), -1);

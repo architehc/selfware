@@ -342,10 +342,7 @@ impl Tool for GitPush {
             .get("remote")
             .and_then(|v| v.as_str())
             .unwrap_or("origin");
-        let force = args
-            .get("force")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
 
         // Determine branch
         let branch = if let Some(b) = args.get("branch").and_then(|v| v.as_str()) {

@@ -227,12 +227,16 @@ pub(crate) fn semantic_summary(
         "shell_exec" => {
             let cmd = extract_command(args).unwrap_or("?");
             let short_cmd = if cmd.chars().count() > 40 {
-                &cmd[..cmd.char_indices().nth(40).map(|(i, _)| i).unwrap_or(cmd.len())]
+                &cmd[..cmd
+                    .char_indices()
+                    .nth(40)
+                    .map(|(i, _)| i)
+                    .unwrap_or(cmd.len())]
             } else {
                 cmd
             };
-            let exit_code = result_json(result)
-                .and_then(|v| v.get("exit_code").and_then(|c| c.as_i64()));
+            let exit_code =
+                result_json(result).and_then(|v| v.get("exit_code").and_then(|c| c.as_i64()));
             match exit_code {
                 Some(code) => format!("Ran: {} (exit {})", short_cmd, code),
                 None => format!("Ran: {}", short_cmd),
@@ -306,14 +310,23 @@ pub(crate) fn semantic_summary(
         // === Git ===
         "git_status" => {
             let rj = result_json(result);
-            let staged = rj.as_ref()
+            let staged = rj
+                .as_ref()
                 .and_then(|v| v.get("staged").and_then(|a| a.as_array().map(|a| a.len())))
                 .unwrap_or(0);
-            let unstaged = rj.as_ref()
-                .and_then(|v| v.get("unstaged").and_then(|a| a.as_array().map(|a| a.len())))
+            let unstaged = rj
+                .as_ref()
+                .and_then(|v| {
+                    v.get("unstaged")
+                        .and_then(|a| a.as_array().map(|a| a.len()))
+                })
                 .unwrap_or(0);
-            let untracked = rj.as_ref()
-                .and_then(|v| v.get("untracked").and_then(|a| a.as_array().map(|a| a.len())))
+            let untracked = rj
+                .as_ref()
+                .and_then(|v| {
+                    v.get("untracked")
+                        .and_then(|a| a.as_array().map(|a| a.len()))
+                })
                 .unwrap_or(0);
             let total = staged + unstaged + untracked;
             if total > 0 {
@@ -338,13 +351,22 @@ pub(crate) fn semantic_summary(
         "git_log" => "Git log".to_string(),
         "git_commit" => "Git commit".to_string(),
         "git_checkpoint" => {
-            let msg = args.get("message").and_then(|v| v.as_str()).unwrap_or("checkpoint");
+            let msg = args
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("checkpoint");
             format!("Checkpoint: {}", msg)
         }
         "git_push" => {
-            let remote = args.get("remote").and_then(|v| v.as_str()).unwrap_or("origin");
+            let remote = args
+                .get("remote")
+                .and_then(|v| v.as_str())
+                .unwrap_or("origin");
             let branch = result_json(result)
-                .and_then(|v| v.get("branch").and_then(|b| b.as_str().map(|s| s.to_string())))
+                .and_then(|v| {
+                    v.get("branch")
+                        .and_then(|b| b.as_str().map(|s| s.to_string()))
+                })
                 .unwrap_or_default();
             if branch.is_empty() {
                 format!("Pushed to {}", remote)
@@ -370,16 +392,28 @@ pub(crate) fn semantic_summary(
             format!("Started {}", cmd)
         }
         "process_stop" => {
-            let id = args.get("id").or_else(|| args.get("name")).and_then(|v| v.as_str()).unwrap_or("process");
+            let id = args
+                .get("id")
+                .or_else(|| args.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("process");
             format!("Stopped {}", id)
         }
         "process_list" => "Process list".to_string(),
         "process_logs" => {
-            let id = args.get("id").or_else(|| args.get("name")).and_then(|v| v.as_str()).unwrap_or("process");
+            let id = args
+                .get("id")
+                .or_else(|| args.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("process");
             format!("Logs for {}", id)
         }
         "process_restart" => {
-            let id = args.get("id").or_else(|| args.get("name")).and_then(|v| v.as_str()).unwrap_or("process");
+            let id = args
+                .get("id")
+                .or_else(|| args.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("process");
             format!("Restarted {}", id)
         }
         "port_check" => {
@@ -389,20 +423,35 @@ pub(crate) fn semantic_summary(
 
         // === Container operations ===
         "container_run" => {
-            let image = args.get("image").and_then(|v| v.as_str()).unwrap_or("container");
+            let image = args
+                .get("image")
+                .and_then(|v| v.as_str())
+                .unwrap_or("container");
             format!("Container run {}", image)
         }
         "container_stop" => {
-            let id = args.get("container").or_else(|| args.get("id")).and_then(|v| v.as_str()).unwrap_or("container");
+            let id = args
+                .get("container")
+                .or_else(|| args.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("container");
             format!("Container stop {}", id)
         }
         "container_list" => "Container list".to_string(),
         "container_logs" => {
-            let id = args.get("container").or_else(|| args.get("id")).and_then(|v| v.as_str()).unwrap_or("container");
+            let id = args
+                .get("container")
+                .or_else(|| args.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("container");
             format!("Container logs {}", id)
         }
         "container_exec" => {
-            let id = args.get("container").or_else(|| args.get("id")).and_then(|v| v.as_str()).unwrap_or("container");
+            let id = args
+                .get("container")
+                .or_else(|| args.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("container");
             format!("Container exec {}", id)
         }
         "container_build" => {
@@ -411,11 +460,18 @@ pub(crate) fn semantic_summary(
         }
         "container_images" => "Container images".to_string(),
         "container_pull" => {
-            let image = args.get("image").and_then(|v| v.as_str()).unwrap_or("image");
+            let image = args
+                .get("image")
+                .and_then(|v| v.as_str())
+                .unwrap_or("image");
             format!("Container pull {}", image)
         }
         "container_remove" => {
-            let id = args.get("container").or_else(|| args.get("id")).and_then(|v| v.as_str()).unwrap_or("container");
+            let id = args
+                .get("container")
+                .or_else(|| args.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("container");
             format!("Container remove {}", id)
         }
         "compose_up" => "Compose up".to_string(),
@@ -430,7 +486,10 @@ pub(crate) fn semantic_summary(
             }
         }
         "npm_run" => {
-            let script = args.get("script").and_then(|v| v.as_str()).unwrap_or("script");
+            let script = args
+                .get("script")
+                .and_then(|v| v.as_str())
+                .unwrap_or("script");
             format!("npm run {}", script)
         }
         "npm_scripts" => "npm scripts".to_string(),
@@ -476,7 +535,11 @@ pub(crate) fn semantic_summary(
 
         // === Knowledge graph ===
         "knowledge_add" => {
-            let entity = args.get("name").or_else(|| args.get("entity")).and_then(|v| v.as_str()).unwrap_or("entity");
+            let entity = args
+                .get("name")
+                .or_else(|| args.get("entity"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("entity");
             format!("Knowledge add '{}'", entity)
         }
         "knowledge_relate" => "Knowledge relate".to_string(),
@@ -487,7 +550,11 @@ pub(crate) fn semantic_summary(
         "knowledge_stats" => "Knowledge stats".to_string(),
         "knowledge_clear" => "Knowledge cleared".to_string(),
         "knowledge_remove" => {
-            let entity = args.get("name").or_else(|| args.get("entity")).and_then(|v| v.as_str()).unwrap_or("entity");
+            let entity = args
+                .get("name")
+                .or_else(|| args.get("entity"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("entity");
             format!("Knowledge remove '{}'", entity)
         }
         "knowledge_export" => "Knowledge export".to_string(),
@@ -546,7 +613,10 @@ pub(crate) fn tool_activity_message(name: &str, args: &serde_json::Value) -> Str
         "grep_search" | "ripgrep_search" => {
             format!("Searching '{}'...", extract_pattern(args).unwrap_or("?"))
         }
-        "symbol_search" => format!("Searching symbols '{}'...", extract_pattern(args).unwrap_or("?")),
+        "symbol_search" => format!(
+            "Searching symbols '{}'...",
+            extract_pattern(args).unwrap_or("?")
+        ),
         "git_status" => "Checking git status...".to_string(),
         "git_diff" => "Getting diff...".to_string(),
         "git_log" => "Reading git log...".to_string(),
@@ -1332,7 +1402,8 @@ mod tests {
     #[test]
     fn test_semantic_summary_git_status_with_changes() {
         let args = serde_json::json!({});
-        let result_str = r#"{"branch":"main","staged":["a.rs"],"unstaged":["b.rs"],"untracked":["c.rs"]}"#;
+        let result_str =
+            r#"{"branch":"main","staged":["a.rs"],"unstaged":["b.rs"],"untracked":["c.rs"]}"#;
         let summary = semantic_summary("git_status", &args, Some(result_str), true, 20);
         assert_eq!(summary, "Git status (3 changed)");
     }

@@ -1942,21 +1942,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_is_port_available_high_port() {
-        // High ports should be more likely available
-        let high_port = 59999;
-        let result = is_port_available(high_port).await;
-        // Verify that the check completes and returns expected availability
-        // High ports are typically available unless something is using them
-        // We verify the function runs without error - actual availability depends on system state
-        if result {
-            // Port is available - verify by attempting to bind
-            let listener = tokio::net::TcpListener::bind(("127.0.0.1", high_port)).await;
-            assert!(
-                listener.is_ok(),
-                "Port reported available but couldn't bind"
-            );
-        }
-        // If not available, that's also a valid response (port in use)
+        // Bind to port 0 to get an OS-assigned free port, then release it and
+        // verify is_port_available() agrees it's free.  This avoids hardcoded
+        // port collisions when many tests run in parallel.
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0u16))
+            .await
+            .expect("Should bind to ephemeral port");
+        let port = listener.local_addr().unwrap().port();
+        drop(listener); // release port
+
+        let result = is_port_available(port).await;
+        // Port was just released, so it should be available (barring a race)
+        assert!(
+            result,
+            "Recently released port {} should be available",
+            port
+        );
     }
 
     #[tokio::test(start_paused = true)]

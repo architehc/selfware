@@ -1252,10 +1252,7 @@ mod tests {
         );
         let result = checker.check_tool_call(&call);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("secrets detected"));
+        assert!(result.unwrap_err().to_string().contains("secrets detected"));
     }
 
     #[test]
@@ -1269,10 +1266,7 @@ mod tests {
         );
         let result = checker.check_tool_call(&call);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("secrets detected"));
+        assert!(result.unwrap_err().to_string().contains("secrets detected"));
     }
 
     #[test]

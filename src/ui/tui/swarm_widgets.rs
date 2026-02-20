@@ -454,7 +454,7 @@ pub fn render_swarm_help(frame: &mut Frame, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orchestration::swarm::{AgentRole, AgentStatus};
+    use crate::orchestration::swarm::AgentRole;
     use crate::ui::tui::animation::agent_avatar::ActivityLevel;
 
     #[test]

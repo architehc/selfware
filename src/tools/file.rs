@@ -227,8 +227,7 @@ impl Tool for FileDelete {
             anyhow::bail!("Path is a directory, not a file: {}", args.path);
         }
 
-        fs::remove_file(path)
-            .with_context(|| format!("Failed to delete file: {}", args.path))?;
+        fs::remove_file(path).with_context(|| format!("Failed to delete file: {}", args.path))?;
 
         Ok(serde_json::json!({
             "deleted": true,

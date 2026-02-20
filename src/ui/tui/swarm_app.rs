@@ -39,6 +39,12 @@ pub struct SwarmApp {
     pub input_buffer: String,
 }
 
+impl Default for SwarmApp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SwarmApp {
     /// Create new swarm app with default dev swarm
     pub fn new() -> Self {

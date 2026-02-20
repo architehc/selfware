@@ -1396,6 +1396,7 @@ fn render_pause_indicator(frame: &mut Frame, area: Rect) {
     frame.render_widget(text, Rect::new(x, y + 1, width, 1));
 }
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;

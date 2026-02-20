@@ -121,11 +121,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_loading_phrases_not_empty() {
-        assert!(!LOADING_PHRASES.is_empty());
-    }
-
-    #[test]
     fn test_loading_phrases_count() {
         assert!(LOADING_PHRASES.len() >= 100);
     }

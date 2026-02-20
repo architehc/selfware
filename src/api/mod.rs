@@ -269,10 +269,7 @@ impl ToolCallAccumulator {
 /// arrive in the same JSON payload). The accumulator buffers incremental tool call
 /// deltas; call `accumulator.flush()` at stream end to emit any remaining calls.
 // Streaming infrastructure (used by chat_streaming)
-fn parse_sse_event(
-    event: &str,
-    accumulator: &mut ToolCallAccumulator,
-) -> Vec<StreamChunk> {
+fn parse_sse_event(event: &str, accumulator: &mut ToolCallAccumulator) -> Vec<StreamChunk> {
     let mut chunks = Vec::new();
 
     for line in event.lines() {
