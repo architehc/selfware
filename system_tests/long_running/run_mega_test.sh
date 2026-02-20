@@ -333,9 +333,11 @@ cd "$PROJECT_ROOT"
 echo "running" > "$SESSION_DIR/status"
 
 # Execute the test
-if timeout "${DURATION_HOURS}h" ./target/release/selfware run "$PROJECT_PROMPT" \
-    --config "$SESSION_DIR/selfware.toml" \
-    --output-dir "$SESSION_DIR" 2>&1 | tee -a "$LOG_FILE"; then
+if timeout "${DURATION_HOURS}h" ./target/release/selfware \
+    -c "$SESSION_DIR/selfware.toml" \
+    -C "$SESSION_DIR" \
+    -y \
+    run "$PROJECT_PROMPT" 2>&1 | tee -a "$LOG_FILE"; then
     
     log_info "Test completed successfully"
     echo "completed" > "$SESSION_DIR/status"

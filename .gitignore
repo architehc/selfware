@@ -26,6 +26,9 @@ Thumbs.db
 # Test artifacts
 /tmp/
 *.tmp
+/test_runs/
+/system_tests/projecte2e/work/
+/system_tests/projecte2e/reports/
 
 # Local config overrides (keep examples)
 selfware-local.toml

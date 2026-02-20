@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -uo pipefail
+set -o pipefail
 
 # ════════════════════════════════════════════════════════════════════
 #  Selfware Full System Test Suite with 30-second Monitoring
@@ -247,12 +247,17 @@ set -e
 # Parse projecte2e results
 e2e_report_dir="${SCRIPT_DIR}/projecte2e/reports/latest"
 if [ -L "${e2e_report_dir}" ] && [ -f "${e2e_report_dir}/results.tsv" ]; then
-    e2e_passed=$(awk -F'|' 'NR>1 && $5==0 {n++} END{print n+0}' "${e2e_report_dir}/results.tsv")
+    # Count coding scenarios (have numeric post_status) and swarm separately
+    e2e_passed=$(awk -F'|' 'NR>1 && $5=="0" {n++} END{print n+0}' "${e2e_report_dir}/results.tsv")
+    e2e_coding_total=$(awk -F'|' 'NR>1 && $5!="n/a" {n++} END{print n+0}' "${e2e_report_dir}/results.tsv")
     e2e_total=$(awk -F'|' 'NR>1 {n++} END{print n+0}' "${e2e_report_dir}/results.tsv")
     e2e_score=$(awk -F'|' 'NR>1{sum+=$9;n++} END{if(n==0){print 0}else{printf "%.1f", sum/n}}' "${e2e_report_dir}/results.tsv")
-    TESTS_PASSED=$((TESTS_PASSED + ${e2e_passed}))
-    TESTS_FAILED=$((TESTS_FAILED + (${e2e_total} - ${e2e_passed})))
-    TESTS_TOTAL=$((TESTS_TOTAL + ${e2e_total}))
+    # For swarm, count as passed if score >= 70
+    swarm_passed=$(awk -F'|' 'NR>1 && $2=="swarm" && $9>=70 {n++} END{print n+0}' "${e2e_report_dir}/results.tsv")
+    total_passed=$((e2e_passed + swarm_passed))
+    TESTS_PASSED=$((TESTS_PASSED + total_passed))
+    TESTS_FAILED=$((TESTS_FAILED + (e2e_total - total_passed)))
+    TESTS_TOTAL=$((TESTS_TOTAL + e2e_total))
     echo "Phase 4 - Project E2E: ${e2e_passed}/${e2e_total} passed, avg score ${e2e_score}/100" > "${SESSION_DIR}/phases/04_summary.txt"
     # Copy the detailed report
     cp "${e2e_report_dir}/summary.md" "${SESSION_DIR}/phases/04_e2e_report.md" 2>/dev/null || true
