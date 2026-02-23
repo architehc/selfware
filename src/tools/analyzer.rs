@@ -1,20 +1,18 @@
 use crate::tools::cargo::{CompilerError, Severity};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Analyzer for compiler errors with fix suggestions
-#[allow(dead_code)]
 pub struct ErrorAnalyzer;
 
 /// A group of related errors
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorGroup {
     pub primary_error: CompilerError,
     pub related_errors: Vec<CompilerError>,
     pub likely_cause: String,
 }
 
-#[allow(dead_code)]
 impl ErrorAnalyzer {
     /// Suggest a fix for a compiler error based on its error code
     pub fn suggest_fix(error: &CompilerError) -> Option<String> {
@@ -159,7 +157,6 @@ impl ErrorAnalyzer {
 }
 
 /// Extract an identifier from an error message
-#[allow(dead_code)]
 fn extract_identifier(message: &str) -> Option<&str> {
     // Look for backtick-quoted identifiers like `foo`
     if let Some(start) = message.find('`') {
@@ -171,7 +168,6 @@ fn extract_identifier(message: &str) -> Option<&str> {
 }
 
 /// Get priority value for severity (lower = higher priority)
-#[allow(dead_code)]
 fn severity_priority(severity: &Severity) -> u8 {
     match severity {
         Severity::Error => 0,
@@ -182,7 +178,6 @@ fn severity_priority(severity: &Severity) -> u8 {
 }
 
 /// Get priority value for error codes (lower = higher priority)
-#[allow(dead_code)]
 fn error_code_priority(code: Option<&str>) -> u8 {
     match code {
         // Syntax/Parse errors - fix first
@@ -209,7 +204,6 @@ fn error_code_priority(code: Option<&str>) -> u8 {
 }
 
 /// Check if two errors are likely related
-#[allow(dead_code)]
 fn are_related(a: &CompilerError, b: &CompilerError) -> bool {
     // Same file, within 10 lines
     if a.file == b.file && (a.line as i32 - b.line as i32).abs() < 10 {
@@ -240,7 +234,6 @@ fn are_related(a: &CompilerError, b: &CompilerError) -> bool {
 }
 
 /// Determine the likely cause of a group of errors
-#[allow(dead_code)]
 fn determine_cause(primary: &CompilerError, related: &[CompilerError]) -> String {
     // If there are many related errors with the same code
     if related.len() > 2 && related.iter().all(|e| e.code == primary.code) {
@@ -271,7 +264,6 @@ fn determine_cause(primary: &CompilerError, related: &[CompilerError]) -> String
 }
 
 /// Categorize an error for summary purposes
-#[allow(dead_code)]
 fn categorize_error(error: &CompilerError) -> String {
     if let Some(code) = &error.code {
         if code.starts_with("clippy::") {

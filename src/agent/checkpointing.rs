@@ -36,16 +36,22 @@ impl Agent {
         agent.messages = checkpoint.messages.clone();
         agent.loop_control = AgentLoop::new(agent.config.agent.max_iterations);
 
-        // Restore step counter and iteration counter from checkpoint.
-        // We advance `next_state()` to consume iteration tokens for steps
-        // already completed, then set the execution state.
-        for _ in 0..checkpoint.current_step {
-            agent.loop_control.next_state(); // consumes one iteration
-            agent.loop_control.increment_step();
+        // Restore exact loop progress when available.
+        // Older checkpoints may not have an iteration value, so keep fallback logic.
+        if checkpoint.current_iteration > 0 {
+            agent
+                .loop_control
+                .restore_progress(checkpoint.current_step, checkpoint.current_iteration);
+        } else {
+            // Backward-compatible restore for legacy checkpoints.
+            for _ in 0..checkpoint.current_step {
+                agent.loop_control.next_state(); // consumes one iteration
+                agent.loop_control.increment_step();
+            }
+            agent.loop_control.set_state(AgentState::Executing {
+                step: checkpoint.current_step,
+            });
         }
-        agent.loop_control.set_state(AgentState::Executing {
-            step: checkpoint.current_step,
-        });
 
         let checkpoint_tool_calls = checkpoint.tool_calls.len();
         agent.current_checkpoint = Some(checkpoint);
@@ -71,6 +77,7 @@ impl Agent {
         };
 
         checkpoint.set_step(self.loop_control.current_step());
+        checkpoint.set_iteration(self.loop_control.current_iteration());
         checkpoint.set_messages(self.messages.clone());
         checkpoint.estimated_tokens = self.memory.total_tokens();
 

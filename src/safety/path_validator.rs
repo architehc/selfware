@@ -230,3 +230,184 @@ pub fn normalize_path(path: &Path) -> PathBuf {
 
     components.iter().collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_config(allowed: Vec<&str>, denied: Vec<&str>) -> SafetyConfig {
+        SafetyConfig {
+            allowed_paths: allowed.into_iter().map(|s| s.to_string()).collect(),
+            denied_paths: denied.into_iter().map(|s| s.to_string()).collect(),
+            protected_branches: vec![],
+            require_confirmation: vec![],
+        }
+    }
+
+    // ===== normalize_path tests =====
+
+    #[test]
+    fn test_normalize_simple_absolute() {
+        let path = normalize_path(Path::new("/foo/bar/baz"));
+        assert_eq!(path, PathBuf::from("/foo/bar/baz"));
+    }
+
+    #[test]
+    fn test_normalize_with_dot() {
+        let path = normalize_path(Path::new("/foo/./bar"));
+        assert_eq!(path, PathBuf::from("/foo/bar"));
+    }
+
+    #[test]
+    fn test_normalize_with_dotdot() {
+        let path = normalize_path(Path::new("/foo/bar/../baz"));
+        assert_eq!(path, PathBuf::from("/foo/baz"));
+    }
+
+    #[test]
+    fn test_normalize_multiple_dotdot() {
+        let path = normalize_path(Path::new("/foo/bar/baz/../../qux"));
+        assert_eq!(path, PathBuf::from("/foo/qux"));
+    }
+
+    #[test]
+    fn test_normalize_dotdot_at_root() {
+        // When all components are popped, the result is an empty path
+        let path = normalize_path(Path::new("/foo/../.."));
+        assert_eq!(path, PathBuf::from(""));
+    }
+
+    #[test]
+    fn test_normalize_relative() {
+        let path = normalize_path(Path::new("foo/./bar/../baz"));
+        assert_eq!(path, PathBuf::from("foo/baz"));
+    }
+
+    // ===== strip_unc_prefix tests =====
+
+    #[test]
+    fn test_strip_unc_prefix_normal_path() {
+        assert_eq!(strip_unc_prefix("/foo/bar"), "/foo/bar");
+    }
+
+    #[test]
+    fn test_strip_unc_prefix_empty() {
+        assert_eq!(strip_unc_prefix(""), "");
+    }
+
+    // ===== is_path_in_allowed_list tests =====
+
+    #[test]
+    fn test_allowed_list_empty() {
+        let config = make_config(vec![], vec![]);
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd);
+        // Empty allowed list => nothing matches
+        assert!(!validator
+            .is_path_in_allowed_list("/some/path", "/some/path")
+            .unwrap());
+    }
+
+    #[test]
+    fn test_allowed_list_absolute_glob() {
+        let config = make_config(vec!["/tmp/**"], vec![]);
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd);
+        assert!(validator
+            .is_path_in_allowed_list("/tmp/foo/bar", "/tmp/foo/bar")
+            .unwrap());
+        assert!(!validator
+            .is_path_in_allowed_list("/etc/passwd", "/etc/passwd")
+            .unwrap());
+    }
+
+    #[test]
+    fn test_allowed_list_relative_glob() {
+        let config = make_config(vec!["./**"], vec![]);
+        let cwd = std::env::current_dir().unwrap();
+        let cwd_str = cwd.to_string_lossy();
+        let validator = PathValidator::new(&config, cwd.clone());
+        let test_path = format!("{}/src/main.rs", cwd_str);
+        assert!(validator
+            .is_path_in_allowed_list(&test_path, "./src/main.rs")
+            .unwrap());
+    }
+
+    // ===== validate tests =====
+
+    #[test]
+    fn test_validate_denied_env_file() {
+        let config = make_config(vec![], vec!["**/.env"]);
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd);
+        let result = validator.validate(".env");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("denied pattern"));
+    }
+
+    #[test]
+    fn test_validate_denied_ssh() {
+        let config = make_config(vec![], vec!["**/.ssh/**"]);
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd);
+        let result = validator.validate("/home/user/.ssh/id_rsa");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_allowed_path() {
+        let config = make_config(vec![], vec![]);
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd.clone());
+        // A path within the working dir with no denied patterns should be OK
+        let result = validator.validate("src/main.rs");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_denied_secrets_dir() {
+        let config = make_config(vec![], vec!["**/secrets/**"]);
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd);
+        let result = validator.validate("config/secrets/api_key.txt");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_path_traversal_detected() {
+        let config = make_config(vec![], vec![]);
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd);
+        // Traversal that goes outside working dir
+        let result = validator.validate("../../../../etc/passwd");
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Path traversal") || err_msg.contains("denied"),
+            "Expected traversal or denied error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_validate_not_in_allowed_list() {
+        let config = make_config(vec!["/allowed/**"], vec![]);
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd);
+        let result = validator.validate("/not-allowed/file.txt");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not in allowed list"));
+    }
+
+    #[test]
+    fn test_validate_env_local_denied() {
+        let config = make_config(vec![], vec!["**/.env.local"]);
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd);
+        let result = validator.validate(".env.local");
+        assert!(result.is_err());
+    }
+}

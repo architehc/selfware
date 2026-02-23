@@ -78,6 +78,8 @@ pub struct TaskCheckpoint {
     pub updated_at: DateTime<Utc>,
     pub status: TaskStatus,
     pub current_step: usize,
+    #[serde(default)]
+    pub current_iteration: usize,
 
     // Context state
     pub messages: Vec<Message>,
@@ -116,6 +118,7 @@ impl TaskCheckpoint {
             updated_at: now,
             status: TaskStatus::InProgress,
             current_step: 0,
+            current_iteration: 0,
             messages: Vec::new(),
             memory_entries: Vec::new(),
             estimated_tokens: 0,
@@ -159,6 +162,12 @@ impl TaskCheckpoint {
     /// Update the step
     pub fn set_step(&mut self, step: usize) {
         self.current_step = step;
+        self.updated_at = Utc::now();
+    }
+
+    /// Update the loop iteration count
+    pub fn set_iteration(&mut self, iteration: usize) {
+        self.current_iteration = iteration;
         self.updated_at = Utc::now();
     }
 
@@ -403,6 +412,7 @@ mod tests {
         assert_eq!(checkpoint.task_description, "Test task");
         assert_eq!(checkpoint.status, TaskStatus::InProgress);
         assert_eq!(checkpoint.current_step, 0);
+        assert_eq!(checkpoint.current_iteration, 0);
     }
 
     #[test]
@@ -442,6 +452,13 @@ mod tests {
         let mut checkpoint = TaskCheckpoint::new("task_123".to_string(), "Test task".to_string());
         checkpoint.set_step(5);
         assert_eq!(checkpoint.current_step, 5);
+    }
+
+    #[test]
+    fn test_task_checkpoint_set_iteration() {
+        let mut checkpoint = TaskCheckpoint::new("task_123".to_string(), "Test task".to_string());
+        checkpoint.set_iteration(12);
+        assert_eq!(checkpoint.current_iteration, 12);
     }
 
     #[test]
@@ -525,6 +542,7 @@ mod tests {
     fn test_checkpoint_serialization_round_trip() {
         let mut checkpoint = TaskCheckpoint::new("task_123".to_string(), "Test task".to_string());
         checkpoint.set_step(5);
+        checkpoint.set_iteration(9);
         checkpoint.set_status(TaskStatus::Paused);
         checkpoint.messages.push(Message::user("Hello"));
         checkpoint.log_tool_call(ToolCallLog {
@@ -541,9 +559,32 @@ mod tests {
 
         assert_eq!(loaded.task_id, checkpoint.task_id);
         assert_eq!(loaded.current_step, 5);
+        assert_eq!(loaded.current_iteration, 9);
         assert_eq!(loaded.status, TaskStatus::Paused);
         assert_eq!(loaded.messages.len(), 1);
         assert_eq!(loaded.tool_calls.len(), 1);
+    }
+
+    #[test]
+    fn test_checkpoint_deserialize_without_iteration_defaults_zero() {
+        let json = r#"{
+            "task_id":"task_old",
+            "task_description":"legacy",
+            "created_at":"2026-01-01T00:00:00Z",
+            "updated_at":"2026-01-01T00:00:00Z",
+            "status":"in_progress",
+            "current_step":2,
+            "messages":[],
+            "memory_entries":[],
+            "estimated_tokens":0,
+            "tool_calls":[],
+            "errors":[],
+            "git_checkpoint":null
+        }"#;
+
+        let loaded: TaskCheckpoint = serde_json::from_str(json).unwrap();
+        assert_eq!(loaded.current_step, 2);
+        assert_eq!(loaded.current_iteration, 0);
     }
 
     #[test]

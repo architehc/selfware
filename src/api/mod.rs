@@ -50,7 +50,6 @@ impl StreamingResponse {
     }
 
     /// Process the stream and send chunks through a channel
-    #[allow(dead_code)] // Streaming API - used by chat_streaming
     pub async fn into_channel(self) -> mpsc::Receiver<Result<StreamChunk>> {
         let (tx, rx) = mpsc::channel(32);
 
@@ -172,7 +171,7 @@ impl StreamingResponse {
 
 /// A chunk from a streaming response
 #[derive(Debug, Clone)]
-// Streaming infrastructure (used by chat_streaming)
+/// A chunk received from an SSE streaming response.
 pub enum StreamChunk {
     /// Text content
     Content(String),
@@ -205,11 +204,12 @@ impl ToolCallAccumulator {
         Self::default()
     }
 
-    /// Process a tool call delta, returning a completed ToolCall if a prior index is displaced.
+    /// Process a tool call delta.
     ///
-    /// The OpenAI streaming API sends tool calls with incrementing indices (0, 1, 2, ...).
-    /// When a new index appears, the previous index is considered complete and is emitted.
-    /// The final tool call is emitted by `flush()` when the stream ends.
+    /// We intentionally avoid progressive emission based on index transitions because
+    /// some backends can interleave argument chunks across multiple indices.
+    /// Emission happens only when the stream signals completion (`finish_reason`) or
+    /// at stream end via `flush()`.
     fn process_delta(&mut self, delta: &serde_json::Value) -> Option<types::ToolCall> {
         let index = delta.get("index").and_then(|v| v.as_u64())? as usize;
         let id = delta
@@ -247,27 +247,11 @@ impl ToolCallAccumulator {
             if !name.is_empty() {
                 entry.2 = name;
             }
-            None
         } else {
-            // New index — emit the previous index if it exists (it's now complete)
-            let completed = if index > 0 {
-                self.pending
-                    .remove(&(index - 1))
-                    .map(|(id, ct, name, args)| types::ToolCall {
-                        id,
-                        call_type: ct,
-                        function: types::ToolFunction {
-                            name,
-                            arguments: args,
-                        },
-                    })
-            } else {
-                None
-            };
             self.pending
                 .insert(index, (id, call_type, name, args_chunk));
-            completed
         }
+        None
     }
 
     /// Flush all pending tool calls, returning completed ToolCall objects.
@@ -309,10 +293,8 @@ fn parse_sse_event(event: &str, accumulator: &mut ToolCallAccumulator) -> Vec<St
             }
 
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                let delta = json
-                    .get("choices")
-                    .and_then(|c| c.get(0))
-                    .and_then(|c| c.get("delta"));
+                let choice = json.get("choices").and_then(|c| c.get(0));
+                let delta = choice.and_then(|c| c.get("delta"));
 
                 // Extract content from choices[0].delta.content
                 if let Some(content) = delta
@@ -343,6 +325,17 @@ fn parse_sse_event(event: &str, accumulator: &mut ToolCallAccumulator) -> Vec<St
                         if let Some(completed) = accumulator.process_delta(tc_delta) {
                             chunks.push(StreamChunk::ToolCall(completed));
                         }
+                    }
+                }
+
+                // Flush buffered tool calls when backend marks completion for this turn.
+                if choice
+                    .and_then(|c| c.get("finish_reason"))
+                    .and_then(|f| f.as_str())
+                    .is_some()
+                {
+                    for call in accumulator.flush() {
+                        chunks.push(StreamChunk::ToolCall(call));
                     }
                 }
 
@@ -393,6 +386,10 @@ impl RetryConfig {
     }
 }
 
+/// HTTP client for OpenAI-compatible chat completion APIs.
+///
+/// Supports both synchronous and streaming requests, native tool calling,
+/// thinking/reasoning modes, and configurable retry logic.
 pub struct ApiClient {
     client: Client,
     config: crate::config::Config,
@@ -464,7 +461,6 @@ impl ApiClient {
 
     /// Stream a chat completion response
     /// Returns a receiver that yields chunks as they arrive
-    #[allow(dead_code)] // Streaming API endpoint
     pub async fn chat_stream(
         &self,
         messages: Vec<Message>,
@@ -1290,32 +1286,57 @@ mod tests {
 
     #[test]
     fn test_process_delta_progressive_emission() {
-        // When index 1 arrives, index 0 should be emitted progressively
+        // Interleaved chunks should not trigger premature emission.
+        // Calls are emitted only on flush in stable index order.
         let mut acc = ToolCallAccumulator::new();
 
-        // Index 0 — first tool call
+        // Index 0 — first tool call (partial args)
         let delta0 = serde_json::json!({
             "index": 0, "id": "call_a", "type": "function",
-            "function": {"name": "file_read", "arguments": "{\"path\":\"/a\"}"}
+            "function": {"name": "file_write", "arguments": "{\"path\":\"/a\","}
         });
         let result0 = acc.process_delta(&delta0);
-        assert!(result0.is_none()); // First index, nothing to emit yet
+        assert!(result0.is_none());
 
-        // Index 1 — second tool call; should emit index 0
+        // Index 1 starts before index 0 is fully complete.
         let delta1 = serde_json::json!({
             "index": 1, "id": "call_b", "type": "function",
             "function": {"name": "file_read", "arguments": "{\"path\":\"/b\"}"}
         });
         let result1 = acc.process_delta(&delta1);
-        assert!(result1.is_some());
-        let emitted = result1.unwrap();
-        assert_eq!(emitted.id, "call_a");
-        assert_eq!(emitted.function.name, "file_read");
+        assert!(result1.is_none());
 
-        // Flush should yield only index 1 (index 0 already emitted)
-        let remaining = acc.flush();
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].id, "call_b");
+        // Index 0 receives a late continuation chunk.
+        let delta0_late = serde_json::json!({
+            "index": 0,
+            "function": {"arguments": "\"content\":\"hello\"}"}
+        });
+        let result2 = acc.process_delta(&delta0_late);
+        assert!(result2.is_none());
+
+        let calls = acc.flush();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id, "call_a");
+        assert_eq!(calls[0].function.name, "file_write");
+        assert_eq!(
+            calls[0].function.arguments,
+            "{\"path\":\"/a\",\"content\":\"hello\"}"
+        );
+        assert_eq!(calls[1].id, "call_b");
+    }
+
+    #[test]
+    fn test_parse_sse_event_flushes_on_finish_reason() {
+        let mut acc = ToolCallAccumulator::new();
+
+        let event1 = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_finish","type":"function","function":{"name":"git_status","arguments":"{}"}}]}}]}"#;
+        let r1 = parse_sse_event(event1, &mut acc);
+        assert!(r1.is_empty());
+
+        let finish = r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
+        let r2 = parse_sse_event(finish, &mut acc);
+        assert_eq!(r2.len(), 1);
+        assert!(matches!(&r2[0], StreamChunk::ToolCall(tc) if tc.id == "call_finish"));
     }
 
     // ============================================

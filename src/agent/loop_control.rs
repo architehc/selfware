@@ -49,6 +49,17 @@ impl AgentLoop {
         self.current_step
     }
 
+    pub fn current_iteration(&self) -> usize {
+        self.iteration
+    }
+
+    /// Restore loop progress from persisted state.
+    pub fn restore_progress(&mut self, step: usize, iteration: usize) {
+        self.current_step = step;
+        self.iteration = iteration;
+        self.state = AgentState::Executing { step };
+    }
+
     /// Reset loop state for a new task, preserving max_iterations.
     ///
     /// Without this, queued tasks share the iteration counter from the previous
@@ -194,5 +205,15 @@ mod tests {
         // 11th should fail
         let state = loop_ctrl.next_state();
         assert!(matches!(state, Some(AgentState::Failed { .. })));
+    }
+
+    #[test]
+    fn test_restore_progress() {
+        let mut loop_ctrl = AgentLoop::new(10);
+        loop_ctrl.restore_progress(3, 7);
+
+        assert_eq!(loop_ctrl.current_step(), 3);
+        assert_eq!(loop_ctrl.current_iteration(), 7);
+        assert!(matches!(loop_ctrl.state, AgentState::Executing { step: 3 }));
     }
 }

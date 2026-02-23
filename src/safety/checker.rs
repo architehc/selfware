@@ -23,6 +23,10 @@ use regex::Regex;
 use std::path::Path;
 use std::path::PathBuf;
 
+/// Guards against dangerous tool calls by validating commands, paths, and content.
+///
+/// Blocks destructive shell commands, path traversal attacks, secret leakage,
+/// force pushes to protected branches, SSRF attempts, and unsafe container mounts.
 pub struct SafetyChecker {
     config: SafetyConfig,
     /// Working directory for resolving relative paths
@@ -1585,5 +1589,28 @@ mod tests {
             r#"{"image": "alpine", "volumes": ["/proc:/proc"]}"#,
         );
         assert!(checker.check_tool_call(&call).is_err());
+    }
+
+    #[test]
+    fn test_regex_patterns_initialize_without_panic() {
+        // Force lazy initialization of all static regex patterns.
+        // This catches malformed regexes at test time, not at runtime.
+        let patterns = &*DANGEROUS_COMMAND_PATTERNS;
+        assert!(!patterns.is_empty(), "dangerous command patterns should not be empty");
+
+        assert!(
+            BASE64_EXEC_PATTERN.is_match("echo dGVzdA== | base64 -d | sh"),
+            "base64 exec pattern should match piped decode-to-shell"
+        );
+
+        // Matches $VAR, ${VAR}, $'...' style substitutions
+        assert!(
+            SUSPICIOUS_SUBSTITUTION_PATTERN.is_match("echo $HOME"),
+            "suspicious substitution pattern should match $VARNAME"
+        );
+        assert!(
+            SUSPICIOUS_SUBSTITUTION_PATTERN.is_match("echo ${PATH}"),
+            "suspicious substitution pattern should match ${{...}}"
+        );
     }
 }

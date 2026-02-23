@@ -1,3 +1,4 @@
+use super::analyzer::ErrorAnalyzer;
 use super::Tool;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -276,7 +277,14 @@ impl Tool for CargoCheck {
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         // Parse JSON messages from stdout
-        let (errors, warnings) = parse_cargo_json_messages(&stdout);
+        let (mut errors, warnings) = parse_cargo_json_messages(&stdout);
+
+        // Enrich errors with fix suggestions from ErrorAnalyzer
+        for error in &mut errors {
+            if error.suggestion.is_none() {
+                error.suggestion = ErrorAnalyzer::suggest_fix(error);
+            }
+        }
 
         // Group by file
         let mut by_file: HashMap<String, Vec<CompilerError>> = HashMap::new();
@@ -301,7 +309,19 @@ impl Tool for CargoCheck {
             exit_code: output.status.code(),
         };
 
-        Ok(serde_json::to_value(result)?)
+        // Add error analysis summary to the output
+        let mut result_value = serde_json::to_value(&result)?;
+        if !result.errors.is_empty() {
+            let category_summary = ErrorAnalyzer::summarize_by_category(&result.errors);
+            let most_actionable =
+                ErrorAnalyzer::most_actionable(&result.errors).map(|e| e.message.clone());
+            result_value["analysis"] = serde_json::json!({
+                "most_actionable": most_actionable,
+                "by_category": category_summary,
+            });
+        }
+
+        Ok(result_value)
     }
 }
 

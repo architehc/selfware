@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 
+pub mod analyzer;
 pub mod browser;
 pub mod cargo;
 pub mod container;

@@ -658,7 +658,7 @@ impl ModelSelector {
                 .min_by(|a, b| {
                     a.input_cost_per_1k
                         .partial_cmp(&b.input_cost_per_1k)
-                        .unwrap()
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .map(|m| m.model_id.clone())
                 .unwrap_or_else(|| self.config.default_model.clone());

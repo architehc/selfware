@@ -317,6 +317,9 @@ fn validate_tool_path(path: &str) -> Result<()> {
     // validation as defense-in-depth for direct tool invocation paths.
     let mut config = SafetyConfig::default();
     config.allowed_paths.clear();
+    // Do not apply default deny globs here; policy checks happen in SafetyChecker
+    // with the user's runtime configuration.
+    config.denied_paths.clear();
     let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
     PathValidator::new(&config, working_dir).validate(path)
 }

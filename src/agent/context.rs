@@ -6,8 +6,6 @@ use anyhow::Result;
 use tracing::{debug, info, warn};
 
 pub struct ContextCompressor {
-    #[allow(dead_code)] // Used for absolute budget enforcement (planned feature)
-    token_budget: usize,
     compression_threshold: usize,
     min_messages_to_keep: usize,
 }
@@ -15,7 +13,6 @@ pub struct ContextCompressor {
 impl ContextCompressor {
     pub fn new(token_budget: usize) -> Self {
         Self {
-            token_budget,
             compression_threshold: (token_budget as f32 * 0.85) as usize,
             min_messages_to_keep: 6,
         }
@@ -152,7 +149,6 @@ mod tests {
     #[test]
     fn test_context_compressor_new() {
         let compressor = ContextCompressor::new(100000);
-        assert_eq!(compressor.token_budget, 100000);
         assert_eq!(compressor.compression_threshold, 85000);
         assert_eq!(compressor.min_messages_to_keep, 6);
     }

@@ -66,6 +66,11 @@ fn is_confirmation_error(e: &anyhow::Error) -> bool {
         .unwrap_or(false)
 }
 
+/// Core agent that orchestrates LLM reasoning with tool execution.
+///
+/// The agent maintains conversation state, manages tool calls through a safety
+/// checker, supports checkpointing for task resumption, and implements an
+/// observe-orient-decide-act cognitive loop.
 pub struct Agent {
     client: ApiClient,
     tools: ToolRegistry,
@@ -1486,6 +1491,9 @@ To call a tool, use this EXACT XML structure:
                         output::step_start(1, "Executing");
                         match self.execute_pending_tool_calls(&task_description).await {
                             Ok(completed) => {
+                                if self.is_cancelled() {
+                                    continue;
+                                }
                                 if completed {
                                     record_state_transition("Executing", "Completed");
                                     output::task_completed();
@@ -1544,6 +1552,9 @@ To call a tool, use this EXACT XML structure:
                     progress.update_progress(step_progress);
                     match self.execute_step_with_logging(&task_description).await {
                         Ok(completed) => {
+                            if self.is_cancelled() {
+                                continue;
+                            }
                             #[cfg(feature = "resilience")]
                             {
                                 recovery_attempts = 0;
@@ -1799,6 +1810,13 @@ To call a tool, use this EXACT XML structure:
         let mut recovery_attempts = 0u32;
 
         while let Some(state) = self.loop_control.next_state() {
+            if self.is_cancelled() {
+                println!("{}", "\n⚡ Interrupted".bright_yellow());
+                self.messages
+                    .push(Message::user("[Task interrupted by user]"));
+                return Ok(());
+            }
+
             match state {
                 AgentState::Planning => {
                     let _span = enter_agent_step("Planning", 0);
@@ -1807,6 +1825,9 @@ To call a tool, use this EXACT XML structure:
                     self.cognitive_state.set_phase(CyclePhase::Plan);
 
                     self.plan().await?;
+                    if self.is_cancelled() {
+                        continue;
+                    }
                     self.loop_control
                         .set_state(AgentState::Executing { step: 0 });
                     self.cognitive_state.set_phase(CyclePhase::Do);
@@ -1823,6 +1844,9 @@ To call a tool, use this EXACT XML structure:
                     );
                     match self.execute_step_with_logging(&task_description).await {
                         Ok(completed) => {
+                            if self.is_cancelled() {
+                                continue;
+                            }
                             #[cfg(feature = "resilience")]
                             {
                                 recovery_attempts = 0;

@@ -7,13 +7,7 @@
 //! - `show_mascot`: Display ASCII fox mascot during key moments
 
 use colored::*;
-use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
-// Re-export mascot types for convenience
-pub use crate::ui::mascot::{
-    render_inline_mascot, render_mascot, render_mascot_with_message, MascotMood,
-};
 
 /// Global output mode flags (set once at startup)
 static COMPACT_MODE: AtomicBool = AtomicBool::new(false);
@@ -89,61 +83,6 @@ pub(crate) fn print_token_usage(prompt: u64, completion: u64) {
                 total.to_string().bright_cyan()
             );
         }
-    }
-}
-
-/// Print session token summary (at end of session)
-#[allow(dead_code)]
-pub(crate) fn print_session_summary() {
-    if should_show_tokens() {
-        let (prompt, completion) = get_total_tokens();
-        let total = prompt + completion;
-        if total > 0 {
-            println!();
-            if is_compact() {
-                println!("{}", format!("[Session: {} tokens]", total).dimmed());
-            } else {
-                println!(
-                    "{} {} prompt + {} completion = {} total",
-                    "📊 Session tokens:".bright_blue(),
-                    prompt.to_string().cyan(),
-                    completion.to_string().cyan(),
-                    total.to_string().bright_cyan()
-                );
-            }
-        }
-    }
-}
-
-/// Print tool call announcement (verbose fallback)
-#[allow(dead_code)]
-pub(crate) fn tool_call(name: &str) {
-    if !is_compact() {
-        println!(
-            "{} Calling tool: {}",
-            "🔧".bright_blue(),
-            name.bright_cyan()
-        );
-    }
-}
-
-/// Print tool success (verbose fallback)
-#[allow(dead_code)]
-pub(crate) fn tool_success(name: &str) {
-    if !is_compact() {
-        println!("{} Tool succeeded", "✓".bright_green());
-    } else if is_verbose() {
-        println!("{} {}", "✓".green(), name);
-    }
-}
-
-/// Print tool failure (always shown, but format varies)
-#[allow(dead_code)]
-pub(crate) fn tool_failure(name: &str, error: &str) {
-    if is_compact() {
-        println!("{} {}: {}", "✗".red(), name, error);
-    } else {
-        println!("{} Tool failed: {}", "✗".bright_red(), error);
     }
 }
 
@@ -575,22 +514,6 @@ fn format_number(n: u64) -> String {
     }
 }
 
-/// Print tool activity start line (shown while tool is running)
-#[allow(dead_code)]
-pub(crate) fn tool_activity_start(name: &str, args: &serde_json::Value) {
-    if is_compact() {
-        return;
-    }
-    if is_verbose() {
-        // Verbose mode: use raw tool_call output
-        tool_call(name);
-        return;
-    }
-    let activity = tool_activity_message(name, args);
-    print!("  {} {}", "⠋".dimmed(), activity.dimmed());
-    std::io::stdout().flush().ok();
-}
-
 /// Generate the activity message for a running tool
 pub(crate) fn tool_activity_message(name: &str, args: &serde_json::Value) -> String {
     match name {
@@ -640,29 +563,6 @@ pub(crate) fn tool_activity_message(name: &str, args: &serde_json::Value) -> Str
         "knowledge_add" | "knowledge_relate" => "Updating knowledge...".to_string(),
         "knowledge_query" => "Querying knowledge...".to_string(),
         _ => format!("{}...", name),
-    }
-}
-
-/// Print tool result summary (shown after tool completes)
-#[allow(dead_code)]
-pub(crate) fn tool_result_summary(summary: &str, success: bool) {
-    if is_verbose() {
-        // Verbose mode falls through to tool_success/tool_failure in caller
-        return;
-    }
-    if is_compact() {
-        if !success {
-            println!("{} {}", "✗".red(), summary);
-        }
-        return;
-    }
-    print!("\r\x1b[2K");
-    std::io::stdout().flush().ok();
-    // Normal mode: semantic one-liner
-    if success {
-        println!("  {} {}", "✓".bright_green(), summary);
-    } else {
-        println!("  {} {}", "✗".bright_red(), summary);
     }
 }
 
@@ -730,56 +630,6 @@ pub(crate) fn task_completed() {
     }
 }
 
-/// Print task completed with mascot (verbose mode)
-#[allow(dead_code)]
-pub(crate) fn task_completed_with_mascot() {
-    if is_verbose() {
-        println!(
-            "{}",
-            render_mascot_with_message(MascotMood::Success, "Task completed successfully!")
-        );
-    } else if !is_compact() {
-        println!("{}", "✅ Task completed successfully!".bright_green());
-    }
-}
-
-/// Print task failed with mascot (verbose mode)
-#[allow(dead_code)]
-pub(crate) fn task_failed_with_mascot(reason: &str) {
-    if is_verbose() {
-        println!(
-            "{}",
-            render_mascot_with_message(MascotMood::Error, &format!("Task failed: {}", reason))
-        );
-    } else {
-        println!("{} {}", "❌ Task failed:".bright_red(), reason);
-    }
-}
-
-/// Print greeting mascot on startup (verbose mode only)
-#[allow(dead_code)]
-pub(crate) fn greeting_mascot() {
-    if is_verbose() {
-        println!("{}", render_mascot(MascotMood::Greeting));
-    }
-}
-
-/// Print thinking mascot during LLM calls (verbose mode only)
-#[allow(dead_code)]
-pub(crate) fn thinking_mascot() {
-    if is_verbose() {
-        println!("{}", render_inline_mascot(MascotMood::Thinking));
-    }
-}
-
-/// Print working mascot during tool execution (verbose mode only)
-#[allow(dead_code)]
-pub(crate) fn working_mascot() {
-    if is_verbose() {
-        print!("{} ", render_inline_mascot(MascotMood::Working));
-    }
-}
-
 /// Print verification report
 pub(crate) fn verification_report(report: &str, passed: bool) {
     if is_verbose() {
@@ -808,17 +658,6 @@ pub(crate) fn debug_output(label: &str, content: &str) {
         println!("{}", content);
         println!("{}", "=== END DEBUG ===".bright_magenta());
     }
-}
-
-/// Print confirmation prompt preview
-#[allow(dead_code)]
-pub(crate) fn confirmation_preview(tool_name: &str, args: &str) {
-    println!(
-        "{} Tool: {} Args: {}",
-        "⚠️".bright_yellow(),
-        tool_name.bright_cyan(),
-        args.bright_white()
-    );
 }
 
 // ============================================================================
@@ -906,16 +745,6 @@ impl TaskProgress {
             self.phases[self.current_phase].status = PhaseStatus::Failed;
             self.print_progress();
         }
-    }
-
-    /// Add a new phase dynamically
-    #[allow(dead_code)]
-    pub(crate) fn add_phase(&mut self, name: &str) {
-        self.phases.push(ProgressPhase {
-            name: name.to_string(),
-            status: PhaseStatus::Pending,
-            progress: 0.0,
-        });
     }
 
     /// Get overall progress (0.0 to 1.0)
@@ -1271,17 +1100,6 @@ mod tests {
 
         let args2 = serde_json::json!({"query": "search term"});
         assert_eq!(extract_pattern(&args2), Some("search term"));
-    }
-
-    #[test]
-    fn test_task_progress_add_phase() {
-        let mut progress = TaskProgress::new(&["Phase 1"]);
-        assert_eq!(progress.phases.len(), 1);
-
-        progress.add_phase("Phase 2");
-        assert_eq!(progress.phases.len(), 2);
-        assert_eq!(progress.phases[1].name, "Phase 2");
-        assert_eq!(progress.phases[1].status, PhaseStatus::Pending);
     }
 
     // New semantic summary tests
