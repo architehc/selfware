@@ -258,11 +258,11 @@ if [ -L "${e2e_report_dir}" ] && [ -f "${e2e_report_dir}/results.tsv" ]; then
     TESTS_PASSED=$((TESTS_PASSED + total_passed))
     TESTS_FAILED=$((TESTS_FAILED + (e2e_total - total_passed)))
     TESTS_TOTAL=$((TESTS_TOTAL + e2e_total))
-    echo "Phase 4 - Project E2E: ${e2e_passed}/${e2e_total} passed, avg score ${e2e_score}/100" > "${SESSION_DIR}/phases/04_summary.txt"
+    echo "Phase 4 - Project E2E: coding ${e2e_passed}/${e2e_coding_total} passed, total ${total_passed}/${e2e_total} passed, avg score ${e2e_score}/100" > "${SESSION_DIR}/phases/04_summary.txt"
     # Copy the detailed report
     cp "${e2e_report_dir}/summary.md" "${SESSION_DIR}/phases/04_e2e_report.md" 2>/dev/null || true
     cp "${e2e_report_dir}/results.tsv" "${SESSION_DIR}/phases/04_e2e_results.tsv" 2>/dev/null || true
-    log_ok "E2E scenarios: ${e2e_passed}/${e2e_total} passed, avg score: ${e2e_score}/100"
+    log_ok "E2E scenarios: coding ${e2e_passed}/${e2e_coding_total}, total ${total_passed}/${e2e_total}, avg score: ${e2e_score}/100"
 else
     echo "Phase 4 - Project E2E: Could not parse results" > "${SESSION_DIR}/phases/04_summary.txt"
     log_warn "Could not find E2E results TSV"
@@ -287,9 +287,13 @@ if [ -n "${mega_session}" ] && [ -f "${mega_session}/final_report.json" ]; then
     echo "Phase 5 - Mega Test: status=${mega_status}, duration=${mega_duration}, checkpoints=${mega_checkpoints}" > "${SESSION_DIR}/phases/05_summary.txt"
     cp "${mega_session}/final_report.json" "${SESSION_DIR}/phases/05_mega_report.json" 2>/dev/null || true
 
-    if [ "${mega_status}" = "completed" ]; then
+    if [ "${mega_status}" = "completed" ] || [ "${mega_status}" = "timeout" ]; then
         TESTS_PASSED=$((TESTS_PASSED + 1))
-        log_ok "Mega test completed: ${mega_duration}, ${mega_checkpoints} checkpoints"
+        if [ "${mega_status}" = "timeout" ]; then
+            log_warn "Mega test reached duration limit: ${mega_duration}, ${mega_checkpoints} checkpoints"
+        else
+            log_ok "Mega test completed: ${mega_duration}, ${mega_checkpoints} checkpoints"
+        fi
     else
         TESTS_FAILED=$((TESTS_FAILED + 1))
         log_fail "Mega test status: ${mega_status}"
@@ -297,9 +301,13 @@ if [ -n "${mega_session}" ] && [ -f "${mega_session}/final_report.json" ]; then
     TESTS_TOTAL=$((TESTS_TOTAL + 1))
 else
     echo "Phase 5 - Mega Test: exit=${phase5_exit}" > "${SESSION_DIR}/phases/05_summary.txt"
-    if [ ${phase5_exit} -eq 0 ]; then
+    if [ ${phase5_exit} -eq 0 ] || [ ${phase5_exit} -eq 124 ]; then
         TESTS_PASSED=$((TESTS_PASSED + 1))
-        log_ok "Mega test completed"
+        if [ ${phase5_exit} -eq 124 ]; then
+            log_warn "Mega test reached duration limit"
+        else
+            log_ok "Mega test completed"
+        fi
     else
         TESTS_FAILED=$((TESTS_FAILED + 1))
         log_fail "Mega test failed (exit ${phase5_exit})"

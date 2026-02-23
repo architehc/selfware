@@ -97,7 +97,10 @@ while true; do
     CONFIG=$(cat "$CONFIG_FILE" 2>/dev/null || echo "{}")
     
     SESSION_ID=$(echo "$CONFIG" | grep -o '"session_id": "[^"]*"' | cut -d'"' -f4 || echo "unknown")
-    PROJECT=$(echo "$CONFIG" | grep -o '"project_name": "[^"]*"' | cut -d'"' -f4 || echo "unknown")
+    PROJECT=$(echo "$CONFIG" | grep -o '"project_name": "[^"]*"' | cut -d'"' -f4 || true)
+    if [ -z "$PROJECT" ]; then
+        PROJECT=$(echo "$CONFIG" | grep -o '"project": "[^"]*"' | cut -d'"' -f4 || echo "unknown")
+    fi
     
     ELAPSED=$(echo "$METRICS" | grep -o '"elapsed_seconds": [0-9]*' | awk '{print $2}' || echo "0")
     PERCENT=$(echo "$METRICS" | grep -o '"percent_complete": [0-9]*' | awk '{print $2}' || echo "0")
@@ -108,9 +111,15 @@ while true; do
     COMMITS=$(echo "$METRICS" | grep -o '"git_commits": [0-9]*' | awk '{print $2}' || echo "0")
     BRANCH=$(echo "$METRICS" | grep -o '"git_branch": "[^"]*"' | cut -d'"' -f4 || echo "none")
     
+    DURATION_HOURS=$(echo "$CONFIG" | grep -o '"duration_hours": [0-9]*' | awk '{print $2}' || echo "2")
+    TOTAL_MIN=$((DURATION_HOURS * 60))
     ELAPSED_MIN=$((ELAPSED / 60))
     ELAPSED_H=$((ELAPSED_MIN / 60))
     ELAPSED_M=$((ELAPSED_MIN % 60))
+    REMAINING_MIN=$((TOTAL_MIN - ELAPSED_MIN))
+    if [ "$REMAINING_MIN" -lt 0 ]; then
+        REMAINING_MIN=0
+    fi
     
     # Header
     draw_frame
@@ -124,7 +133,7 @@ while true; do
     BAR=$(format_progress_bar $PERCENT)
     echo -e "${BLUE}║${WHITE} Progress:${NC} ${BAR} ${PERCENT}%$(printf '%*s' $((6-${#PERCENT})) '')${BLUE}║${NC}"
     echo -e "${BLUE}║${CYAN} Elapsed:${NC}  ${ELAPSED_H}h ${ELAPSED_M}m$(printf '%*s' $((62)) '')${BLUE}║${NC}"
-    echo -e "${BLUE}║${CYAN} Remaining:${NC} $((120 - ELAPSED_MIN))m$(printf '%*s' $((64)) '')${BLUE}║${NC}"
+    echo -e "${BLUE}║${CYAN} Remaining:${NC} ${REMAINING_MIN}m$(printf '%*s' $((64)) '')${BLUE}║${NC}"
     echo -e "${BLUE}╠$(printf '═%.0s' $(seq 1 78))╣${NC}"
     
     # System Metrics
@@ -141,7 +150,7 @@ while true; do
     echo -e "${BLUE}║${MAGENTA} Recent Activity:${NC}$(printf '%*s' $((62)) '')${BLUE}║${NC}"
     if [ -f "$LOG_FILE" ]; then
         tail -5 "$LOG_FILE" 2>/dev/null | while IFS= read -r line; do
-            local truncated="${line:0:74}"
+            truncated="${line:0:74}"
             printf "${BLUE}║${GRAY} %s$(printf '%*s' $((77-${#truncated})) '')${BLUE}║${NC}\n" "$truncated"
         done
     else

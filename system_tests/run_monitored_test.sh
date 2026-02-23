@@ -48,13 +48,34 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1" | tee -a "$MAIN_LOG"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1" | tee -a "$MAIN_LOG"; }
 log_phase() { echo -e "${MAGENTA}[PHASE]${NC} $1" | tee -a "$MAIN_LOG"; }
 
+# Map process exit code to persisted session status.
+status_from_exit() {
+    local code=$1
+    case "$code" in
+        0) echo "completed" ;;
+        124) echo "timeout" ;;
+        130|143) echo "interrupted" ;;
+        *) echo "failed" ;;
+    esac
+}
+
 # Cleanup
 cleanup() {
     local code=$?
+
+    # Prevent trap re-entry while finalizing report files.
+    trap - EXIT INT TERM
+
+    local current_status=""
+    if [ -f "$STATUS_FILE" ]; then
+        current_status="$(cat "$STATUS_FILE" 2>/dev/null || true)"
+    fi
+    if [ -z "$current_status" ] || [ "$current_status" = "running" ]; then
+        status_from_exit "$code" > "$STATUS_FILE"
+    fi
+
     log_warn "Cleaning up..."
-    echo "completed" > "$STATUS_FILE" 2>/dev/null || true
-    
-    # Generate report
+
     local end=$(date +%s)
     local start=$(stat -c %Y "$TEST_DIR/config.json" 2>/dev/null || echo "$end")
     local dur=$((end - start))
@@ -67,7 +88,7 @@ cleanup() {
   "status": "$(cat $STATUS_FILE 2>/dev/null || echo 'unknown')"
 }
 EOF
-    exit $code
+    exit "$code"
 }
 trap cleanup EXIT INT TERM
 
@@ -276,9 +297,11 @@ main() {
     log_phase "Executing: $SCENARIO"
     
     # Run with timeout
-    if timeout "${DURATION_MIN}m" "$SELFWARE_BIN" run "$TASK" \
+    if timeout "${DURATION_MIN}m" "$SELFWARE_BIN" \
         --config "$TEST_DIR/selfware.toml" \
-        --work-dir "$WORK_DIR" 2>&1 | tee -a "$MAIN_LOG"; then
+        --workdir "$WORK_DIR" \
+        --yolo \
+        run "$TASK" 2>&1 | tee -a "$MAIN_LOG"; then
         
         log_info "Selfware completed successfully"
         echo "completed" > "$STATUS_FILE"

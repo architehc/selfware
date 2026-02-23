@@ -67,18 +67,36 @@ log_phase() {
     echo -e "${MAGENTA}[PHASE]${NC} $1" | tee -a "$MAIN_LOG"
 }
 
+# Map process exit code to persisted session status.
+status_from_exit() {
+    local code=$1
+    case "$code" in
+        0) echo "completed" ;;
+        124) echo "timeout" ;;
+        130|143) echo "interrupted" ;;
+        *) echo "failed" ;;
+    esac
+}
+
 # Cleanup handler
 cleanup() {
     local exit_code=$?
+
+    # Prevent trap re-entry while we finalize artifacts.
+    trap - EXIT INT TERM
+
+    local current_status=""
+    if [ -f "$STATUS_FILE" ]; then
+        current_status="$(cat "$STATUS_FILE" 2>/dev/null || true)"
+    fi
+    if [ -z "$current_status" ] || [ "$current_status" = "running" ]; then
+        status_from_exit "$exit_code" > "$STATUS_FILE"
+    fi
+
     log_warn "Cleaning up... (exit code: $exit_code)"
-    
-    # Save final status
-    echo "completed" > "$STATUS_FILE"
-    
-    # Generate final report
     generate_final_report "$exit_code"
-    
-    exit $exit_code
+
+    exit "$exit_code"
 }
 
 trap cleanup EXIT INT TERM
@@ -449,16 +467,19 @@ main() {
     
     # Run selfware with timeout
     log_phase "Starting selfware execution..."
-    
-    if timeout "${DURATION_HOURS}h" "$SELFWARE_BIN" run "$TASK" \
+
+    local exit_code=0
+    if timeout "${DURATION_HOURS}h" "$SELFWARE_BIN" \
         --config "$TEST_DIR/selfware.toml" \
-        --work-dir "$TEST_DIR/work" 2>&1 | tee -a "$MAIN_LOG"; then
+        --workdir "$TEST_DIR/work" \
+        --yolo \
+        run "$TASK" 2>&1 | tee -a "$MAIN_LOG"; then
         
         log_info "Selfware completed successfully"
         echo "completed" > "$STATUS_FILE"
         exit_code=0
     else
-        local exit_code=$?
+        exit_code=$?
         if [ $exit_code -eq 124 ]; then
             log_warn "Test timed out after $DURATION_HOURS hours"
             echo "timeout" > "$STATUS_FILE"
@@ -474,7 +495,7 @@ main() {
         wait "$monitor_pid" 2>/dev/null || true
     fi
     
-    return $exit_code
+    return "$exit_code"
 }
 
 # Run main

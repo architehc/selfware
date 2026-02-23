@@ -343,9 +343,17 @@ if timeout "${DURATION_HOURS}h" ./target/release/selfware \
     echo "completed" > "$SESSION_DIR/status"
     EXIT_CODE=0
 else
-    log_error "Test failed or was interrupted"
-    echo "failed" > "$SESSION_DIR/status"
-    EXIT_CODE=1
+    EXIT_CODE=$?
+    if [ "$EXIT_CODE" -eq 124 ]; then
+        log_warn "Test reached configured duration (${DURATION_HOURS}h)"
+        echo "timeout" > "$SESSION_DIR/status"
+    elif [ "$EXIT_CODE" -eq 130 ] || [ "$EXIT_CODE" -eq 143 ]; then
+        log_warn "Test interrupted"
+        echo "interrupted" > "$SESSION_DIR/status"
+    else
+        log_error "Test failed (exit ${EXIT_CODE})"
+        echo "failed" > "$SESSION_DIR/status"
+    fi
 fi
 
 # Stop monitoring
@@ -400,6 +408,8 @@ echo ""
 
 if [ $EXIT_CODE -eq 0 ]; then
     log_info "✅ Mega test completed successfully"
+elif [ $EXIT_CODE -eq 124 ]; then
+    log_warn "⏱️ Mega test reached duration limit"
 else
     log_error "❌ Mega test failed or was interrupted"
 fi
