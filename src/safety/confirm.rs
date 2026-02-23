@@ -262,12 +262,13 @@ pub fn detect_destructive_git_operation(
     }
 }
 
-/// Truncate a string for display
+/// Truncate a string for display (UTF-8 safe)
 fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    if s.chars().count() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len])
+        let truncated: String = s.chars().take(max_len).collect();
+        format!("{}...", truncated)
     }
 }
 

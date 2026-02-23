@@ -467,7 +467,13 @@ To call a tool, use this EXACT XML structure:
         self.config.execution_mode
     }
 
-    /// Check if tool execution needs confirmation based on current mode and risk level
+    /// Check if tool execution needs confirmation based on current mode and risk level.
+    ///
+    /// The confirmation policy is layered:
+    /// 1. Read-only tools never need confirmation
+    /// 2. Yolo / Daemon mode never asks
+    /// 3. Tools in `safety.require_confirmation` config always ask (except Yolo/Daemon)
+    /// 4. Mode-specific rules (AutoEdit auto-approves file ops, Normal asks for everything)
     pub fn needs_confirmation(&self, tool_name: &str) -> bool {
         use crate::config::ExecutionMode;
 
@@ -486,8 +492,27 @@ To call a tool, use this EXACT XML structure:
             return false;
         }
 
+        // Yolo / Daemon never ask
+        if matches!(
+            self.config.execution_mode,
+            ExecutionMode::Yolo | ExecutionMode::Daemon
+        ) {
+            return false;
+        }
+
+        // Tools in safety.require_confirmation always need confirmation
+        if self
+            .config
+            .safety
+            .require_confirmation
+            .iter()
+            .any(|t| t == tool_name)
+        {
+            return true;
+        }
+
         match self.config.execution_mode {
-            ExecutionMode::Yolo | ExecutionMode::Daemon => false, // Never ask
+            ExecutionMode::Yolo | ExecutionMode::Daemon => false, // Already handled above
             ExecutionMode::AutoEdit => {
                 // Auto-approve file operations, ask for destructive operations
                 !matches!(
@@ -1420,7 +1445,6 @@ To call a tool, use this EXACT XML structure:
         self.memory.add_message(&msg);
         self.messages.push(msg);
 
-        let mut iteration = 0;
         #[cfg(feature = "resilience")]
         let mut recovery_attempts = 0u32;
         let task_description = task.to_string();
@@ -1645,14 +1669,8 @@ To call a tool, use this EXACT XML structure:
                 }
             }
 
-            iteration += 1;
-            if iteration > self.config.agent.max_iterations {
-                progress.fail_phase();
-                if let Err(e) = self.fail_checkpoint("Max iterations reached") {
-                    warn!("Failed to save failed checkpoint: {}", e);
-                }
-                anyhow::bail!("Max iterations reached");
-            }
+            // Iteration tracking is handled by loop_control.next_state()
+            // which increments and checks max_iterations each loop turn.
         }
 
         Ok(())
@@ -1777,7 +1795,6 @@ To call a tool, use this EXACT XML structure:
             .map(|c| c.task_description.clone())
             .unwrap_or_default();
 
-        let mut iteration = 0;
         #[cfg(feature = "resilience")]
         let mut recovery_attempts = 0u32;
 
@@ -1921,13 +1938,7 @@ To call a tool, use this EXACT XML structure:
                 }
             }
 
-            iteration += 1;
-            if iteration > self.config.agent.max_iterations {
-                if let Err(e) = self.fail_checkpoint("Max iterations reached") {
-                    warn!("Failed to save failed checkpoint: {}", e);
-                }
-                anyhow::bail!("Max iterations reached");
-            }
+            // Iteration tracking is handled by loop_control.next_state()
         }
 
         Ok(())
@@ -2414,6 +2425,23 @@ mod tests {
 
         if safe_tools.contains(&tool_name) {
             return false;
+        }
+
+        if matches!(
+            config.execution_mode,
+            ExecutionMode::Yolo | ExecutionMode::Daemon
+        ) {
+            return false;
+        }
+
+        // Check config's require_confirmation list
+        if config
+            .safety
+            .require_confirmation
+            .iter()
+            .any(|t| t == tool_name)
+        {
+            return true;
         }
 
         match config.execution_mode {

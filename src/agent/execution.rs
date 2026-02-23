@@ -148,7 +148,12 @@ impl Agent {
                                 self.context_files.push(path_str);
                             }
                         }
-                        "file_write" | "file_edit" | "file_create" | "file_delete" => {
+                        "file_delete" => {
+                            // Remove deleted files from context tracking entirely
+                            self.context_files.retain(|p| p != &path_str);
+                            self.stale_files.remove(&path_str);
+                        }
+                        "file_write" | "file_edit" => {
                             self.stale_files.insert(path_str);
                         }
                         _ => {}

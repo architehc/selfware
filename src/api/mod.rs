@@ -77,6 +77,13 @@ impl StreamingResponse {
                         }
                     }
                     Err(e) => {
+                        // Flush accumulated tool calls before reporting the error
+                        // so partial progress is not lost
+                        for call in accumulator.flush() {
+                            if tx.send(Ok(StreamChunk::ToolCall(call))).await.is_err() {
+                                return;
+                            }
+                        }
                         let _ = tx.send(Err(anyhow::anyhow!("Stream error: {}", e))).await;
                         return;
                     }
@@ -199,6 +206,10 @@ impl ToolCallAccumulator {
     }
 
     /// Process a tool call delta, returning a completed ToolCall if a prior index is displaced.
+    ///
+    /// The OpenAI streaming API sends tool calls with incrementing indices (0, 1, 2, ...).
+    /// When a new index appears, the previous index is considered complete and is emitted.
+    /// The final tool call is emitted by `flush()` when the stream ends.
     fn process_delta(&mut self, delta: &serde_json::Value) -> Option<types::ToolCall> {
         let index = delta.get("index").and_then(|v| v.as_u64())? as usize;
         let id = delta
@@ -238,10 +249,24 @@ impl ToolCallAccumulator {
             }
             None
         } else {
-            // New index — insert it
+            // New index — emit the previous index if it exists (it's now complete)
+            let completed = if index > 0 {
+                self.pending
+                    .remove(&(index - 1))
+                    .map(|(id, ct, name, args)| types::ToolCall {
+                        id,
+                        call_type: ct,
+                        function: types::ToolFunction {
+                            name,
+                            arguments: args,
+                        },
+                    })
+            } else {
+                None
+            };
             self.pending
                 .insert(index, (id, call_type, name, args_chunk));
-            None
+            completed
         }
     }
 
@@ -1261,6 +1286,36 @@ mod tests {
         let results = parse_sse_event(event, &mut acc);
         // Should return empty since there's no content or reasoning
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_process_delta_progressive_emission() {
+        // When index 1 arrives, index 0 should be emitted progressively
+        let mut acc = ToolCallAccumulator::new();
+
+        // Index 0 — first tool call
+        let delta0 = serde_json::json!({
+            "index": 0, "id": "call_a", "type": "function",
+            "function": {"name": "file_read", "arguments": "{\"path\":\"/a\"}"}
+        });
+        let result0 = acc.process_delta(&delta0);
+        assert!(result0.is_none()); // First index, nothing to emit yet
+
+        // Index 1 — second tool call; should emit index 0
+        let delta1 = serde_json::json!({
+            "index": 1, "id": "call_b", "type": "function",
+            "function": {"name": "file_read", "arguments": "{\"path\":\"/b\"}"}
+        });
+        let result1 = acc.process_delta(&delta1);
+        assert!(result1.is_some());
+        let emitted = result1.unwrap();
+        assert_eq!(emitted.id, "call_a");
+        assert_eq!(emitted.function.name, "file_read");
+
+        // Flush should yield only index 1 (index 0 already emitted)
+        let remaining = acc.flush();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "call_b");
     }
 
     // ============================================

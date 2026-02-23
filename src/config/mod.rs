@@ -256,7 +256,7 @@ fn default_status_interval() -> usize {
 pub struct SafetyConfig {
     #[serde(default = "default_allowed_paths")]
     pub allowed_paths: Vec<String>,
-    #[serde(default)]
+    #[serde(default = "default_denied_paths")]
     pub denied_paths: Vec<String>,
     #[serde(default = "default_protected_branches")]
     pub protected_branches: Vec<String>,
@@ -310,7 +310,7 @@ impl Default for SafetyConfig {
     fn default() -> Self {
         Self {
             allowed_paths: default_allowed_paths(),
-            denied_paths: vec![],
+            denied_paths: default_denied_paths(),
             protected_branches: default_protected_branches(),
             require_confirmation: default_require_confirmation(),
         }
@@ -352,6 +352,14 @@ fn default_token_budget() -> usize {
 }
 fn default_allowed_paths() -> Vec<String> {
     vec!["./**".to_string()]
+}
+fn default_denied_paths() -> Vec<String> {
+    vec![
+        "**/.env".to_string(),
+        "**/.env.local".to_string(),
+        "**/.ssh/**".to_string(),
+        "**/secrets/**".to_string(),
+    ]
 }
 fn default_protected_branches() -> Vec<String> {
     vec!["main".to_string(), "master".to_string()]
@@ -472,7 +480,7 @@ mod tests {
     fn test_safety_config_default() {
         let config = SafetyConfig::default();
         assert_eq!(config.allowed_paths, vec!["./**".to_string()]);
-        assert!(config.denied_paths.is_empty());
+        assert!(!config.denied_paths.is_empty());
         assert_eq!(
             config.protected_branches,
             vec!["main".to_string(), "master".to_string()]
