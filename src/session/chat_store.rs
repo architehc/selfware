@@ -61,6 +61,9 @@ impl ChatStore {
 
     /// Save a chat with the given name
     pub fn save(&self, name: &str, messages: &[Message], model: &str) -> Result<()> {
+        // Ensure directory exists (especially for fallback mode)
+        std::fs::create_dir_all(&self.chats_dir).context("Failed to create chats directory")?;
+
         let chat = SavedChat {
             name: name.to_string(),
             saved_at: Utc::now(),

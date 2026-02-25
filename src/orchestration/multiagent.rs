@@ -61,7 +61,7 @@ impl Default for MultiAgentConfig {
 
 impl MultiAgentConfig {
     pub fn with_concurrency(mut self, n: usize) -> Self {
-        self.max_concurrency = n.min(MAX_CONCURRENT_AGENTS);
+        self.max_concurrency = n.clamp(1, MAX_CONCURRENT_AGENTS);
         self
     }
 
@@ -149,7 +149,7 @@ impl MultiAgentChat {
         let client = ApiClient::new(api_config).context("Failed to create API client")?;
 
         let tools = ToolRegistry::default();
-        let concurrency = agent_config.max_concurrency.min(MAX_CONCURRENT_AGENTS);
+        let concurrency = agent_config.max_concurrency.clamp(1, MAX_CONCURRENT_AGENTS);
 
         Ok(Self {
             config: agent_config,

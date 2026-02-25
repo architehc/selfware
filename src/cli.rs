@@ -4,7 +4,8 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use tracing::warn;
+use std::sync::mpsc;
+use tracing::{info, warn};
 
 // Use library exports instead of redeclaring modules
 // This avoids duplicate compilation and maintains consistency
@@ -371,13 +372,43 @@ pub async fn run() -> Result<()> {
     }
 
     // Handle TUI dashboard mode
-    // Default to TUI when tui feature is enabled and no subcommand specified
-    // Use --no-tui to force classic CLI mode
     #[cfg(feature = "tui")]
     {
         let should_use_tui = cli.tui || (cli.command.is_none() && !cli.no_tui);
         if should_use_tui {
-            let _user_inputs = crate::ui::tui::run_tui_dashboard(&config.model)?;
+            let (event_tx, event_rx) = mpsc::channel();
+            let (user_input_tx, user_input_rx) = mpsc::channel();
+            
+            let mut agent = Agent::new(config.clone()).await?
+                .with_event_sender(event_tx);
+            
+            let shared_state = crate::ui::tui::SharedDashboardState::default();
+            let model = config.model.clone();
+            
+            // Run TUI in a separate thread
+            let tui_handle = std::thread::spawn(move || {
+                crate::ui::tui::run_tui_dashboard_with_events(
+                    &model,
+                    shared_state,
+                    event_rx,
+                    user_input_tx,
+                )
+            });
+
+            // Process user inputs from TUI
+            while let Ok(input) = user_input_rx.recv() {
+                if input == "exit" || input == "quit" {
+                    break;
+                }
+                
+                // Run the task - this will emit events to the TUI through event_tx
+                if let Err(e) = agent.run_task(&input).await {
+                    warn!("Agent failed to run task: {}", e);
+                }
+            }
+
+            // Cleanup
+            let _ = tui_handle.join();
             return Ok(());
         }
     }

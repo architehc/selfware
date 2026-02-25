@@ -1,4 +1,4 @@
-endpoint = "http://localhost:8000/v1"
+endpoint = "https://crazyshit.ngrok.io/v1"
 model = "Qwen/Qwen3-Coder-Next-FP8"
 max_tokens = 98304
 

@@ -107,6 +107,11 @@ name = "integration"
 path = "tests/integration/mod.rs"
 required-features = ["integration"]
 
+[[test]]
+name = "system_test"
+path = "tests/system_test.rs"
+required-features = ["integration"]
+
 # Examples
 [[example]]
 name = "basic_chat"

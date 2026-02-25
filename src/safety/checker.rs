@@ -56,7 +56,7 @@ impl SafetyChecker {
 
     pub fn check_tool_call(&self, call: &ToolCall) -> Result<()> {
         match call.function.name.as_str() {
-            "file_write" | "file_edit" | "file_read" | "file_delete" => {
+            "file_write" | "file_edit" | "file_read" | "file_delete" | "search" | "directory_tree" | "file_list" | "analyze" | "tech_debt_report" => {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
                 if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
                     self.check_path(path)?;
@@ -77,6 +77,10 @@ impl SafetyChecker {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
                 let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
                 self.check_shell_command(cmd)?;
+
+                if let Some(cwd) = args.get("cwd").and_then(|v| v.as_str()) {
+                    self.check_path(cwd)?;
+                }
             }
             "git_commit" | "git_checkpoint" => {
                 // Git operations are generally safe
@@ -132,6 +136,9 @@ impl SafetyChecker {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
                 if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
                     self.check_shell_command(cmd)?;
+                }
+                if let Some(cwd) = args.get("cwd").and_then(|v| v.as_str()) {
+                    self.check_path(cwd)?;
                 }
             }
             // HTTP/browser tools — block SSRF to cloud metadata endpoints
@@ -345,10 +352,10 @@ fn normalize_path(path: &Path) -> PathBuf {
 // Each tuple contains (regex pattern, human-readable description)
 static DANGEROUS_COMMAND_PATTERNS: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
     vec![
-        // rm -rf / variants (handles multiple slashes, spaces, flags)
+        // rm -rf / variants (handles multiple slashes, spaces, flags, and parent dir escape)
         (
-            Regex::new(r"rm\s+(-[a-z]+\s+)*(/+|\*|/\*)").expect("Invalid regex"),
-            "rm -rf / (delete root filesystem)",
+            Regex::new(r"rm\s+(-[a-z]+\s+)*(/+|\*|/\*|\.\.|\.\./\*)").expect("Invalid regex"),
+            "rm -rf / or .. (destructive deletion)",
         ),
         // mkfs - format filesystem
         (

@@ -495,10 +495,16 @@ impl ApiClient {
         let url = format!("{}/chat/completions", self.base_url);
         debug!("Starting streaming request to {}", url);
 
-        let response = self
+        let mut request = self
             .client
             .post(&url)
-            .header("Content-Type", "application/json")
+            .header("Content-Type", "application/json");
+
+        if let Some(ref key) = self.config.api_key {
+            request = request.header("Authorization", format!("Bearer {}", key));
+        }
+
+        let response = request
             .json(&body)
             .send()
             .await
@@ -535,10 +541,16 @@ impl ApiClient {
 
             debug!("Sending request to {} (attempt {})", url, attempt + 1);
 
-            let result = self
+            let mut request = self
                 .client
                 .post(&url)
-                .header("Content-Type", "application/json")
+                .header("Content-Type", "application/json");
+
+            if let Some(ref key) = self.config.api_key {
+                request = request.header("Authorization", format!("Bearer {}", key));
+            }
+
+            let result = request
                 .json(body)
                 .send()
                 .await;

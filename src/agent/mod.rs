@@ -9,6 +9,9 @@ use std::sync::{
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
+#[cfg(feature = "tui")]
+use crate::ui::tui::TuiEvent;
+
 use crate::analyzer::ErrorAnalyzer;
 use crate::api::types::{Message, ToolCall};
 use crate::api::{ApiClient, StreamChunk, ThinkingMode};
@@ -98,6 +101,9 @@ pub struct Agent {
     last_checkpoint_tool_calls: usize,
     /// Whether at least one checkpoint has been persisted in this session
     checkpoint_persisted_once: bool,
+    /// Optional sender for TUI events
+    #[cfg(feature = "tui")]
+    event_tx: Option<std::sync::mpsc::Sender<TuiEvent>>,
     /// Edit history for undo support
     edit_history: EditHistory,
     /// Last assistant response content (for /copy command)
@@ -249,6 +255,8 @@ To call a tool, use this EXACT XML structure:
             last_checkpoint_persisted_at: Instant::now(),
             last_checkpoint_tool_calls: 0,
             checkpoint_persisted_once: false,
+            #[cfg(feature = "tui")]
+            event_tx: None,
             edit_history,
             last_assistant_response: String::new(),
             chat_store,
@@ -257,6 +265,21 @@ To call a tool, use this EXACT XML structure:
             #[cfg(feature = "resilience")]
             self_healing,
         })
+    }
+
+    /// Set the TUI event sender for real-time updates
+    #[cfg(feature = "tui")]
+    pub fn with_event_sender(mut self, tx: std::sync::mpsc::Sender<TuiEvent>) -> Self {
+        self.event_tx = Some(tx);
+        self
+    }
+
+    /// Emit an event to the TUI if a sender is configured
+    #[cfg(feature = "tui")]
+    fn emit_tui_event(&self, event: TuiEvent) {
+        if let Some(ref tx) = self.event_tx {
+            let _ = tx.send(event);
+        }
     }
 
     /// Get tools for API calls - returns Some(tools) if native function calling is enabled
@@ -1437,6 +1460,9 @@ To call a tool, use this EXACT XML structure:
         // task's iteration counter and hit the max-iterations limit.
         self.loop_control.reset_for_task();
 
+        #[cfg(feature = "tui")]
+        self.emit_tui_event(TuiEvent::AgentStarted);
+
         println!("{}", "🦊 Selfware starting task...".bright_cyan());
         println!("Task: {}", task.bright_white());
 
@@ -1497,6 +1523,10 @@ To call a tool, use this EXACT XML structure:
                                 if completed {
                                     record_state_transition("Executing", "Completed");
                                     output::task_completed();
+
+                                    #[cfg(feature = "tui")]
+                                    self.emit_tui_event(TuiEvent::AgentCompleted { message: "Task completed successfully".to_string() });
+
                                     if let Err(e) = self.complete_checkpoint() {
                                         warn!("Failed to save completed checkpoint: {}", e);
                                     }

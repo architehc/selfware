@@ -121,10 +121,21 @@ impl Agent {
                 continue;
             }
 
+            #[cfg(feature = "tui")]
+            self.emit_tui_event(TuiEvent::ToolStarted { name: name.clone() });
+
             let args =
                 match self.parse_tool_args(&name, &args_str, &call_id, use_native_fc, start_time) {
                     Some(args) => args,
-                    None => continue,
+                    None => {
+                        #[cfg(feature = "tui")]
+                        self.emit_tui_event(TuiEvent::ToolCompleted { 
+                            name: name.clone(), 
+                            success: false, 
+                            duration_ms: start_time.elapsed().as_millis() as u64 
+                        });
+                        continue;
+                    },
                 };
 
             let activity = output::tool_activity_message(&name, &args);
@@ -132,6 +143,15 @@ impl Agent {
             let (success, result, summary) = self
                 .execute_single_tool(&name, &args_str, &args, start_time)
                 .await?;
+
+            let duration_ms = start_time.elapsed().as_millis() as u64;
+            #[cfg(feature = "tui")]
+            self.emit_tui_event(TuiEvent::ToolCompleted { 
+                name: name.clone(), 
+                success, 
+                duration_ms 
+            });
+
             if success {
                 spinner.stop_success(&summary);
             } else {

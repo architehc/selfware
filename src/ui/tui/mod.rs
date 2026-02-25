@@ -772,12 +772,12 @@ pub fn run_tui_dashboard_with_events(
     model: &str,
     shared_state: SharedDashboardState,
     event_rx: std::sync::mpsc::Receiver<TuiEvent>,
-) -> Result<Vec<String>> {
+    user_input_tx: std::sync::mpsc::Sender<String>,
+) -> Result<()> {
     let mut terminal = TuiTerminal::new()?;
     let mut app = App::new(model);
     let mut layout_engine = LayoutEngine::new();
     let mut garden_view = garden_view::GardenView::new();
-    let mut user_inputs = Vec::new();
     let mut show_help = false;
     let mut paused = false;
     let mut quit_armed_at: Option<Instant> = None;
@@ -1024,9 +1024,11 @@ pub fn run_tui_dashboard_with_events(
                                 with_dashboard_state(&shared_state, |state| {
                                     state.log(LogLevel::Info, &format!("Command: {}", input));
                                 });
+                                // Commands like /clear or /analyze could also be sent to the agent
+                                let _ = user_input_tx.send(input);
                             } else {
                                 app.add_user_message(&input);
-                                user_inputs.push(input.clone());
+                                let _ = user_input_tx.send(input.clone());
                                 with_dashboard_state(&shared_state, |state| {
                                     state.log(
                                         LogLevel::Info,
@@ -1061,7 +1063,7 @@ pub fn run_tui_dashboard_with_events(
     }
 
     terminal.restore()?;
-    Ok(user_inputs)
+    Ok(())
 }
 
 /// Create a channel pair for sending events to the TUI dashboard
