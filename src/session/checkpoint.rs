@@ -20,6 +20,13 @@ use std::path::PathBuf;
 use crate::api::types::Message;
 use crate::redact;
 
+/// Current version of the checkpoint format
+pub const CURRENT_CHECKPOINT_VERSION: u32 = 1;
+
+fn default_version() -> u32 {
+    0 // Legacy checkpoints have version 0
+}
+
 /// Status of a task checkpoint
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -72,6 +79,8 @@ pub struct GitCheckpointInfo {
 /// A complete checkpoint of task state
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskCheckpoint {
+    #[serde(default = "default_version")]
+    pub version: u32,
     pub task_id: String,
     pub task_description: String,
     pub created_at: DateTime<Utc>,
@@ -112,6 +121,7 @@ impl TaskCheckpoint {
     pub fn new(task_id: String, task_description: String) -> Self {
         let now = Utc::now();
         Self {
+            version: CURRENT_CHECKPOINT_VERSION,
             task_id,
             task_description,
             created_at: now,

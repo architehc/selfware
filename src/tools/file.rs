@@ -6,7 +6,9 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
+use tempfile::NamedTempFile;
 
 pub struct FileRead;
 pub struct FileWrite;
@@ -118,12 +120,7 @@ impl Tool for FileWrite {
             fs::copy(path, &backup_path)?;
         }
 
-        // Create parent directories
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        fs::write(path, &args.content)?;
+        write_atomic(path, &args.content)?;
 
         Ok(serde_json::json!({
             "success": true,
@@ -177,7 +174,7 @@ impl Tool for FileEdit {
         }
 
         let new_content = content.replace(&args.old_str, &args.new_str);
-        fs::write(&args.path, new_content)?;
+        write_atomic(path, &new_content)?;
 
         Ok(serde_json::json!({
             "success": true,
@@ -318,6 +315,21 @@ fn validate_tool_path(path: &str) -> Result<()> {
     let config = SafetyConfig::default();
     let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
     PathValidator::new(&config, working_dir).validate(path)
+}
+
+/// Write content to a file atomically using a temporary file and rename.
+fn write_atomic(path: &Path, content: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Invalid file path (no parent)"))?;
+    fs::create_dir_all(parent)?;
+
+    let mut temp = NamedTempFile::new_in(parent)?;
+    temp.write_all(content.as_bytes())?;
+    temp.persist(path)
+        .map_err(|e| anyhow::anyhow!("Failed to persist atomic write: {}", e))?;
+
+    Ok(())
 }
 
 #[cfg(test)]
