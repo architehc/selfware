@@ -35,39 +35,13 @@ mod execution;
 mod interactive;
 pub mod loop_control;
 pub mod planning;
+pub mod tui_events;
 
 use context::ContextCompressor;
 use loop_control::{AgentLoop, AgentState};
 use planning::Planner;
-
-/// Agent-specific errors that require special handling
-#[derive(Debug, Clone, PartialEq)]
-pub enum AgentError {
-    /// Tool requires confirmation but running in non-interactive mode
-    ConfirmationRequired { tool_name: String },
-}
-
-impl std::fmt::Display for AgentError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AgentError::ConfirmationRequired { tool_name } => write!(
-                f,
-                "Tool '{}' requires confirmation but running in non-interactive mode. \
-                Use --yolo to auto-approve tools, or run interactively.",
-                tool_name
-            ),
-        }
-    }
-}
-
-impl std::error::Error for AgentError {}
-
-/// Check if an anyhow error is a confirmation-required error (fatal in non-interactive mode)
-fn is_confirmation_error(e: &anyhow::Error) -> bool {
-    e.downcast_ref::<AgentError>()
-        .map(|ae| matches!(ae, AgentError::ConfirmationRequired { .. }))
-        .unwrap_or(false)
-}
+use tui_events::{EventEmitter, NoopEmitter};
+use crate::errors::is_confirmation_error;
 
 /// Core agent that orchestrates LLM reasoning with tool execution.
 ///
@@ -101,9 +75,8 @@ pub struct Agent {
     last_checkpoint_tool_calls: usize,
     /// Whether at least one checkpoint has been persisted in this session
     checkpoint_persisted_once: bool,
-    /// Optional sender for TUI events
-    #[cfg(feature = "tui")]
-    event_tx: Option<std::sync::mpsc::Sender<TuiEvent>>,
+    /// Event emitter for real-time updates (TUI or other)
+    events: Arc<dyn EventEmitter>,
     /// Edit history for undo support
     edit_history: EditHistory,
     /// Last assistant response content (for /copy command)
@@ -255,8 +228,7 @@ To call a tool, use this EXACT XML structure:
             last_checkpoint_persisted_at: Instant::now(),
             last_checkpoint_tool_calls: 0,
             checkpoint_persisted_once: false,
-            #[cfg(feature = "tui")]
-            event_tx: None,
+            events: Arc::new(NoopEmitter),
             edit_history,
             last_assistant_response: String::new(),
             chat_store,
@@ -269,17 +241,15 @@ To call a tool, use this EXACT XML structure:
 
     /// Set the TUI event sender for real-time updates
     #[cfg(feature = "tui")]
-    pub fn with_event_sender(mut self, tx: std::sync::mpsc::Sender<TuiEvent>) -> Self {
-        self.event_tx = Some(tx);
+    pub fn with_event_sender(mut self, tx: std::sync::mpsc::Sender<crate::ui::tui::TuiEvent>) -> Self {
+        self.events = Arc::new(tui_events::TuiEmitter::new(tx));
         self
     }
 
     /// Emit an event to the TUI if a sender is configured
     #[cfg(feature = "tui")]
-    fn emit_tui_event(&self, event: TuiEvent) {
-        if let Some(ref tx) = self.event_tx {
-            let _ = tx.send(event);
-        }
+    fn emit_tui_event(&self, event: crate::ui::tui::TuiEvent) {
+        self.events.emit(event);
     }
 
     /// Get tools for API calls - returns Some(tools) if native function calling is enabled
@@ -1224,16 +1194,19 @@ To call a tool, use this EXACT XML structure:
     /// Also supports @directory/ to include a directory tree (max depth 3)
     /// Returns the expanded input and the list of files that were included
     fn expand_file_references(&self, input: &str) -> (String, Vec<String>) {
-        use regex::Regex;
         use std::fs;
+        use std::sync::LazyLock;
 
-        let re = Regex::new(r"@([a-zA-Z0-9_./\-]+(?:\.[a-zA-Z0-9]+)?/?)").unwrap();
+        static FILE_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"@([a-zA-Z0-9_./\-]+(?:\.[a-zA-Z0-9]+)?/?)").expect("Invalid file reference regex")
+        });
+
         let mut expanded = input.to_string();
         let mut included_files = Vec::new();
 
-        for caps in re.captures_iter(input) {
-            let full_match = caps.get(0).unwrap().as_str();
-            let file_path = caps.get(1).unwrap().as_str();
+        for caps in FILE_REF_RE.captures_iter(input) {
+            let Some(full_match) = caps.get(0).map(|m| m.as_str()) else { continue; };
+            let Some(file_path) = caps.get(1).map(|m| m.as_str()) else { continue; };
             let path = std::path::Path::new(file_path);
 
             if path.is_dir() {

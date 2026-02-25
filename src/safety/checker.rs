@@ -17,8 +17,8 @@ use crate::safety::path_validator::normalize_path as normalize_path_impl;
 use crate::safety::path_validator::PathValidator;
 use crate::safety::scanner::{SecurityScanner, SecuritySeverity};
 use anyhow::Result;
-use once_cell::sync::Lazy;
 use regex::Regex;
+use std::sync::LazyLock;
 #[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
@@ -350,7 +350,7 @@ fn normalize_path(path: &Path) -> PathBuf {
 
 // Dangerous command patterns with regex for robust matching
 // Each tuple contains (regex pattern, human-readable description)
-static DANGEROUS_COMMAND_PATTERNS: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
+static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
     vec![
         // rm -rf / variants (handles multiple slashes, spaces, flags, and parent dir escape)
         (
@@ -427,14 +427,14 @@ static DANGEROUS_COMMAND_PATTERNS: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(
 });
 
 // Pattern to detect base64-encoded command execution
-static BASE64_EXEC_PATTERN: Lazy<Regex> = Lazy::new(|| {
+static BASE64_EXEC_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     // Match: echo <base64> | base64 -d | sh  (and variants)
     Regex::new(r#"base64\s+(-[a-z]+\s+)*(-d|--decode).*\|\s*(sh|bash|zsh|perl|python)"#)
         .expect("Invalid regex")
 });
 
 // Pattern to detect suspicious shell variable substitution
-static SUSPICIOUS_SUBSTITUTION_PATTERN: Lazy<Regex> = Lazy::new(|| {
+static SUSPICIOUS_SUBSTITUTION_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"\$['"][^'"]*['"]|\$\{[^}]+\}|\$[a-zA-Z_][a-zA-Z0-9_]*"#).expect("Invalid regex")
 });
 

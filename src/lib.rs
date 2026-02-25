@@ -29,6 +29,7 @@ pub mod agent;
 pub mod api;
 pub mod cli;
 pub mod config;
+pub mod errors;
 pub mod input;
 pub mod tools;
 pub mod ui;

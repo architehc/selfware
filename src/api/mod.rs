@@ -8,6 +8,7 @@ use tracing::{debug, warn};
 
 pub mod types;
 
+use crate::errors::{ApiError, SelfwareError};
 use types::*;
 
 /// Trait abstraction over the LLM API client, enabling test mocking.
@@ -513,7 +514,10 @@ impl ApiClient {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            anyhow::bail!("API error {}: {}", status, text);
+            return Err(ApiError::HttpStatus { 
+                status: status.as_u16(), 
+                message: text 
+            }.into());
         }
 
         Ok(StreamingResponse::new(response))
@@ -586,7 +590,10 @@ impl ApiClient {
                     {
                         let error_text = response.text().await.unwrap_or_default();
                         warn!("Retryable error ({}): {}", status, error_text);
-                        last_error = Some(anyhow::anyhow!("API error {}: {}", status, error_text));
+                        last_error = Some(ApiError::HttpStatus { 
+                            status: status.as_u16(), 
+                            message: error_text 
+                        }.into());
 
                         // Check for Retry-After header
                         if status == StatusCode::TOO_MANY_REQUESTS {
@@ -596,24 +603,31 @@ impl ApiClient {
                     }
 
                     // Non-retryable error
+                    let status_code = status.as_u16();
                     let error_text = response.text().await.unwrap_or_default();
-                    anyhow::bail!("API error {}: {}", status, error_text);
+                    return Err(ApiError::HttpStatus { 
+                        status: status_code, 
+                        message: error_text 
+                    }.into());
                 }
                 Err(e) => {
                     // Network errors are generally retryable
                     if e.is_timeout() || e.is_connect() {
                         warn!("Network error (retrying): {}", e);
-                        last_error = Some(e.into());
+                        last_error = Some(ApiError::Network(e.to_string()).into());
                         continue;
                     }
                     // Other errors (e.g., invalid URL) are not retryable
-                    return Err(e).context("Failed to send request");
+                    return Err(ApiError::Network(e.to_string()).into());
                 }
             }
         }
 
         // All retries exhausted
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Request failed after retries")))
+        Err(last_error.unwrap_or_else(|| {
+            ApiError::Network("Request failed after all retries".to_string()).into()
+        }))
+    }
     }
 }
 

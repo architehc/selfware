@@ -4,21 +4,18 @@
 //! Built on reedline for a professional IDE-like experience.
 
 mod completer;
-mod ghost_text;
 mod highlighter;
 mod prompt;
-mod validator;
 
 pub use completer::SelfwareCompleter;
-pub use ghost_text::GhostTextHinter;
 pub use highlighter::SelfwareHighlighter;
 pub use prompt::SelfwarePrompt;
-pub use validator::BracketValidator;
 
 use anyhow::Result;
 use reedline::{
-    default_emacs_keybindings, ColumnarMenu, EditCommand, Emacs, FileBackedHistory, KeyCode,
-    KeyModifiers, Keybindings, MenuBuilder, Reedline, ReedlineEvent, ReedlineMenu, Signal, Vi,
+    default_emacs_keybindings, ColumnarMenu, DefaultHinter, DefaultValidator, EditCommand, Emacs,
+    FileBackedHistory, KeyCode, KeyModifiers, Keybindings, MenuBuilder, Reedline, ReedlineEvent,
+    ReedlineMenu, Signal, Vi,
 };
 use std::path::PathBuf;
 
@@ -143,8 +140,8 @@ impl SelfwareEditor {
         // Set up highlighter
         let highlighter = Box::new(SelfwareHighlighter::new());
 
-        // Set up hinter with ghost text support
-        let hinter = Box::new(GhostTextHinter::new());
+        // Set up hinter
+        let hinter = Box::new(DefaultHinter::default());
 
         // Set up completion menu - IDE style that cycles with Tab
         let completion_menu = Box::new(
@@ -164,8 +161,8 @@ impl SelfwareEditor {
             InputMode::Vi => Box::new(Vi::default()),
         };
 
-        // Set up bracket validator
-        let validator = Box::new(BracketValidator::new());
+        // Set up validator
+        let validator = Box::new(DefaultValidator);
 
         // Configure external editor for Ctrl+X
         let editor_cmd = std::env::var("VISUAL")
