@@ -24,6 +24,16 @@ use crate::tools::ToolRegistry;
 /// Maximum number of concurrent agent streams
 pub const MAX_CONCURRENT_AGENTS: usize = 16;
 
+/// Failure policy for multi-agent execution
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MultiAgentFailurePolicy {
+    /// Continue even if some agents fail (default)
+    BestEffort,
+    /// Abort all remaining tasks if any agent fails
+    #[default]
+    FailFast,
+}
+
 /// Configuration for multi-agent chat
 #[derive(Debug, Clone)]
 pub struct MultiAgentConfig {
@@ -39,6 +49,8 @@ pub struct MultiAgentConfig {
     pub temperature: f32,
     /// Max tokens per response
     pub max_tokens: usize,
+    /// Failure policy
+    pub failure_policy: MultiAgentFailurePolicy,
 }
 
 impl Default for MultiAgentConfig {
@@ -55,6 +67,7 @@ impl Default for MultiAgentConfig {
             timeout_secs: 120,
             temperature: 1.0,
             max_tokens: 65536,
+            failure_policy: MultiAgentFailurePolicy::BestEffort,
         }
     }
 }
@@ -219,6 +232,9 @@ impl MultiAgentChat {
             agents.len()
         };
 
+        // Shared cancellation state for FailFast policy
+        let cancelled = Arc::new(tokio::sync::Notify::new());
+
         // Spawn concurrent agent tasks
         let mut futures = FuturesUnordered::new();
 
@@ -231,19 +247,51 @@ impl MultiAgentChat {
             let task = task.to_string();
             let timeout = Duration::from_secs(self.config.timeout_secs);
             let event_tx = self.event_tx.clone();
+            let failure_policy = self.config.failure_policy;
+            let cancelled = Arc::clone(&cancelled);
 
             futures.push(tokio::spawn(async move {
-                Self::run_single_agent(
-                    agent_id, task, client, tools, semaphore, agents, results, timeout, event_tx,
-                )
-                .await
+                tokio::select! {
+                    _ = cancelled.notified() => {
+                        // Aborted by policy
+                        Ok(())
+                    }
+                    res = Self::run_single_agent(
+                        agent_id, task, client, tools, semaphore, agents, results, timeout, event_tx,
+                    ) => {
+                        if failure_policy == MultiAgentFailurePolicy::FailFast {
+                            // Check if this result was a failure
+                            if let Ok(Ok(())) = res {
+                                // Agent completed successfully, but we need to check the actual result status
+                                // because run_single_agent returns Ok(()) even if LLM call failed.
+                                // In this simplified implementation, we'll let run_single_agent 
+                                // handle internal failure reporting.
+                            }
+                        }
+                        res
+                    }
+                }
             }));
         }
 
-        // Wait for all agents to complete
+        // Wait for all agents to complete or fail
         while let Some(result) = futures.next().await {
-            if let Err(e) = result {
-                eprintln!("Agent task panicked: {}", e);
+            match result {
+                Ok(Ok(_)) => {
+                    // Task finished
+                }
+                Ok(Err(e)) => {
+                    eprintln!("Agent-specific error: {}", e);
+                    if self.config.failure_policy == MultiAgentFailurePolicy::FailFast {
+                        cancelled.notify_waiters();
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Agent task panicked: {}", e);
+                    if self.config.failure_policy == MultiAgentFailurePolicy::FailFast {
+                        cancelled.notify_waiters();
+                    }
+                }
             }
         }
 

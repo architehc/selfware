@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use crate::api::types::Message;
+use crate::session::encryption::EncryptionManager;
 
 /// A saved chat session
 #[derive(Debug, Serialize, Deserialize)]
@@ -72,15 +73,34 @@ impl ChatStore {
         };
         let path = self.chat_path(name);
         let json = serde_json::to_string_pretty(&chat)?;
-        std::fs::write(&path, json).context("Failed to write chat file")?;
+        
+        if let Some(encryption) = EncryptionManager::get() {
+            let encrypted = encryption.encrypt(json.as_bytes())?;
+            std::fs::write(&path, encrypted).context("Failed to write encrypted chat file")?;
+        } else {
+            std::fs::write(&path, json).context("Failed to write chat file")?;
+        }
         Ok(())
     }
 
     /// Load a saved chat by name
     pub fn load(&self, name: &str) -> Result<SavedChat> {
         let path = self.chat_path(name);
-        let json =
-            std::fs::read_to_string(&path).with_context(|| format!("Chat '{}' not found", name))?;
+        let data =
+            std::fs::read(&path).with_context(|| format!("Chat '{}' not found", name))?;
+        
+        let json = if let Some(encryption) = EncryptionManager::get() {
+            match encryption.decrypt(&data) {
+                Ok(plaintext) => String::from_utf8(plaintext).context("Decrypted chat is not valid UTF-8")?,
+                Err(_) => {
+                    // Try as plain JSON (legacy or unencrypted)
+                    String::from_utf8(data).context("Chat file is not valid UTF-8")?
+                }
+            }
+        } else {
+            String::from_utf8(data).context("Chat file is not valid UTF-8")?
+        };
+
         let chat: SavedChat = serde_json::from_str(&json)?;
         Ok(chat)
     }
@@ -92,14 +112,25 @@ impl ChatStore {
             for entry in entries.filter_map(|e| e.ok()) {
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                    if let Ok(json) = std::fs::read_to_string(&path) {
-                        if let Ok(chat) = serde_json::from_str::<SavedChat>(&json) {
-                            summaries.push(ChatSummary {
-                                name: chat.name,
-                                saved_at: chat.saved_at,
-                                model: chat.model,
-                                message_count: chat.messages.len(),
-                            });
+                    if let Ok(data) = std::fs::read(&path) {
+                        let json_opt = if let Some(encryption) = EncryptionManager::get() {
+                            match encryption.decrypt(&data) {
+                                Ok(p) => String::from_utf8(p).ok(),
+                                Err(_) => String::from_utf8(data).ok(),
+                            }
+                        } else {
+                            String::from_utf8(data).ok()
+                        };
+
+                        if let Some(json) = json_opt {
+                            if let Ok(chat) = serde_json::from_str::<SavedChat>(&json) {
+                                summaries.push(ChatSummary {
+                                    name: chat.name,
+                                    saved_at: chat.saved_at,
+                                    model: chat.model,
+                                    message_count: chat.messages.len(),
+                                });
+                            }
                         }
                     }
                 }

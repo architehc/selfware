@@ -115,3 +115,20 @@ Error occurs in agent loop
 - `src/agent/mod.rs` is the largest critical path file; refactors should preserve loop behavior and safety semantics.
 - Prefer adding behavior through focused submodules (`agent/*`, `safety/*`, `self_healing/*`) rather than growing central files.
 - Feature-gated modules (`self_healing`, `tui`, `tokens`) must be guarded with `#[cfg(feature = "...")]`.
+
+## Design Rationale & FAQ
+
+### Why PDVR instead of ReAct?
+The Plan-Do-Verify-Reflect cycle is designed for high-stakes autonomous coding. Unlike ReAct (Reason+Act), which is a "tight" loop, PDVR adds an explicit **Verify** step that allows the system to catch its own mistakes (e.g., failed compilations) before proceeding, and a **Reflect** step to update its long-term mental model.
+
+### Dual Parsing: XML and Native Function Calling
+Selfware supports both native function calling (OpenAI/Qwen style) and XML-based tool tags. This ensures compatibility across a wide range of backends. The `tool_parser` acts as a unified translation layer, presenting a consistent interface to the `Agent` regardless of how the model emitted the action.
+
+### Feature-Flag Decomposition
+The system is highly modular to support various deployment targets:
+- `tui`: Desktop/CLI interactive use.
+- `resilience`: Long-running server-side "daemon" use where self-healing is critical.
+- `tokens`: Advanced token tracking for cost-sensitive environments.
+
+### Checkpoint Format
+Checkpoints use a JSON-based format that captures the full mental state, including episodic memory. This allows a task started on one machine to be resumed on another with its "lessons learned" intact. Atomic writes (write-then-rename) are enforced to prevent state corruption during crashes.

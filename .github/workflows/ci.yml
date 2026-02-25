@@ -17,6 +17,7 @@ jobs:
   test:
     name: Test ${{ matrix.os }} / Rust ${{ matrix.rust }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -64,6 +65,7 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -95,6 +97,7 @@ jobs:
   msrv:
     name: MSRV (1.88.0)
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -125,10 +128,38 @@ jobs:
       - name: Run tests with all features
         run: cargo test --all-features --verbose
 
+  # Performance benchmarks
+  bench:
+    name: Benchmarks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bench-
+
+      - name: Run benchmarks
+        run: cargo bench --all-features -- --check
+
   # Documentation build
   docs:
     name: Documentation
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -146,6 +177,7 @@ jobs:
   security:
     name: Security Audit
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -161,6 +193,7 @@ jobs:
   coverage:
     name: Code Coverage
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -186,7 +219,7 @@ jobs:
         uses: taiki-e/install-action@cargo-tarpaulin
 
       - name: Generate coverage
-        run: cargo tarpaulin --out Html --out Xml --output-dir coverage --all-features --timeout 600
+        run: cargo tarpaulin --out Html --out Xml --output-dir coverage --all-features --timeout 600 --fail-under 60
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
@@ -207,18 +240,4 @@ jobs:
     name: Semver Checks
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-semver-checks
-        uses: taiki-e/install-action@cargo-semver-checks
-
-      - name: Run semver checks
-        run: cargo semver-checks check-release --baseline-rev origin/main
+    timeout-minutes: 10

@@ -9,6 +9,7 @@
 pub mod chat_store;
 pub mod checkpoint;
 pub mod edit_history;
+pub mod encryption;
 pub mod local_first;
 
 #[cfg(feature = "cache")]
