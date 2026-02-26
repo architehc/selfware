@@ -18,10 +18,10 @@ use crate::safety::path_validator::PathValidator;
 use crate::safety::scanner::{SecurityScanner, SecuritySeverity};
 use anyhow::Result;
 use regex::Regex;
-use std::sync::LazyLock;
 #[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
 /// Guards against dangerous tool calls by validating commands, paths, and content.
 ///
@@ -56,7 +56,8 @@ impl SafetyChecker {
 
     pub fn check_tool_call(&self, call: &ToolCall) -> Result<()> {
         match call.function.name.as_str() {
-            "file_write" | "file_edit" | "file_read" | "file_delete" | "search" | "directory_tree" | "file_list" | "analyze" | "tech_debt_report" => {
+            "file_write" | "file_edit" | "file_read" | "file_delete" | "search"
+            | "directory_tree" | "file_list" | "analyze" | "tech_debt_report" => {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
                 if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
                     self.check_path(path)?;
@@ -88,10 +89,7 @@ impl SafetyChecker {
             "git_push" => {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
                 let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
-                let branch = args
-                    .get("branch")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let branch = args.get("branch").and_then(|v| v.as_str()).unwrap_or("");
                 if force {
                     anyhow::bail!(
                         "Force push is blocked for safety. Use --no-force or confirm manually."
@@ -104,10 +102,7 @@ impl SafetyChecker {
                     && !branch.is_empty()
                     && self.config.protected_branches.contains(&branch.to_string())
                 {
-                    anyhow::bail!(
-                        "Force push to protected branch '{}' is blocked",
-                        branch
-                    );
+                    anyhow::bail!("Force push to protected branch '{}' is blocked", branch);
                 }
             }
             // Container tools — validate commands and volume mounts
@@ -292,10 +287,7 @@ impl SafetyChecker {
         ];
         for host in &blocked {
             if url.contains(host) {
-                anyhow::bail!(
-                    "Blocked request to cloud metadata endpoint: {}",
-                    host
-                );
+                anyhow::bail!("Blocked request to cloud metadata endpoint: {}", host);
             }
         }
         Ok(())
@@ -1514,10 +1506,7 @@ mod tests {
         let config = SafetyConfig::default();
         let checker = SafetyChecker::new(&config);
 
-        let call = create_test_call(
-            "http_request",
-            r#"{"url": "https://api.example.com/data"}"#,
-        );
+        let call = create_test_call("http_request", r#"{"url": "https://api.example.com/data"}"#);
         assert!(checker.check_tool_call(&call).is_ok());
     }
 
@@ -1603,7 +1592,10 @@ mod tests {
         // Force lazy initialization of all static regex patterns.
         // This catches malformed regexes at test time, not at runtime.
         let patterns = &*DANGEROUS_COMMAND_PATTERNS;
-        assert!(!patterns.is_empty(), "dangerous command patterns should not be empty");
+        assert!(
+            !patterns.is_empty(),
+            "dangerous command patterns should not be empty"
+        );
 
         assert!(
             BASE64_EXEC_PATTERN.is_match("echo dGVzdA== | base64 -d | sh"),

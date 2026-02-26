@@ -468,10 +468,7 @@ impl Config {
             &self.endpoint[7..]
         };
         if after_scheme.is_empty() || after_scheme.starts_with('/') {
-            bail!(
-                "Config error: endpoint URL has no host: {}",
-                self.endpoint
-            );
+            bail!("Config error: endpoint URL has no host: {}", self.endpoint);
         }
 
         // --- Model name ---
@@ -1327,56 +1324,72 @@ mod tests {
 
     #[test]
     fn test_validate_empty_endpoint() {
-        let mut config = Config::default();
-        config.endpoint = "".to_string();
+        let config = Config {
+            endpoint: "".to_string(),
+            ..Config::default()
+        };
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("endpoint must not be empty"));
     }
 
     #[test]
     fn test_validate_invalid_endpoint_scheme() {
-        let mut config = Config::default();
-        config.endpoint = "ftp://example.com".to_string();
+        let config = Config {
+            endpoint: "ftp://example.com".to_string(),
+            ..Config::default()
+        };
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("http:// or https://"));
     }
 
     #[test]
     fn test_validate_endpoint_no_host() {
-        let mut config = Config::default();
-        config.endpoint = "http://".to_string();
+        let config = Config {
+            endpoint: "http://".to_string(),
+            ..Config::default()
+        };
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("no host"));
     }
 
     #[test]
     fn test_validate_empty_model() {
-        let mut config = Config::default();
-        config.model = "   ".to_string();
+        let config = Config {
+            model: "   ".to_string(),
+            ..Config::default()
+        };
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("model name must not be empty"));
     }
 
     #[test]
     fn test_validate_zero_max_tokens() {
-        let mut config = Config::default();
-        config.max_tokens = 0;
+        let config = Config {
+            max_tokens: 0,
+            ..Config::default()
+        };
         let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("max_tokens must be greater than 0"));
+        assert!(err
+            .to_string()
+            .contains("max_tokens must be greater than 0"));
     }
 
     #[test]
     fn test_validate_excessive_max_tokens() {
-        let mut config = Config::default();
-        config.max_tokens = 100_000_000;
+        let config = Config {
+            max_tokens: 100_000_000,
+            ..Config::default()
+        };
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("exceeds maximum allowed"));
     }
 
     #[test]
     fn test_validate_negative_temperature() {
-        let mut config = Config::default();
-        config.temperature = -0.5;
+        let config = Config {
+            temperature: -0.5,
+            ..Config::default()
+        };
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("temperature must be non-negative"));
     }
@@ -1417,9 +1430,7 @@ mod tests {
         config.retry.base_delay_ms = 5000;
         config.retry.max_delay_ms = 1000;
         let err = config.validate().unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("base_delay_ms"));
+        assert!(err.to_string().contains("base_delay_ms"));
     }
 
     #[test]
@@ -1427,15 +1438,15 @@ mod tests {
         let mut config = Config::default();
         config.ui.animation_speed = 0.0;
         let err = config.validate().unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("animation_speed must be positive"));
+        assert!(err.to_string().contains("animation_speed must be positive"));
     }
 
     #[test]
     fn test_validate_valid_https_endpoint() {
-        let mut config = Config::default();
-        config.endpoint = "https://api.example.com/v1".to_string();
+        let config = Config {
+            endpoint: "https://api.example.com/v1".to_string(),
+            ..Config::default()
+        };
         assert!(config.validate().is_ok());
     }
 }

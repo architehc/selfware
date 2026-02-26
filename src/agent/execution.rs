@@ -8,8 +8,8 @@ use super::*;
 use crate::api::ThinkingMode;
 use crate::checkpoint::ToolCallLog;
 use crate::cognitive::self_improvement::Outcome;
-use crate::errors::AgentError;
 use crate::cognitive::CyclePhase;
+use crate::errors::AgentError;
 use crate::tool_parser::parse_tool_calls;
 
 struct AssistantStepResponse {

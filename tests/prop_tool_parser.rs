@@ -1,5 +1,5 @@
-use selfware::tool_parser::{parse_tool_calls, ParseMethod};
 use proptest::prelude::*;
+use selfware::tool_parser::{parse_tool_calls, ParseMethod};
 
 proptest! {
     #[test]
@@ -14,10 +14,10 @@ proptest! {
         prefix in r"\PC*",
         suffix in r"\PC*"
     ) {
-        let content = format!("{}<tool><name>{}</name><arguments>{}</arguments></tool>{}", 
+        let content = format!("{}<tool><name>{}</name><arguments>{}</arguments></tool>{}",
             prefix, name, args, suffix);
         let result = parse_tool_calls(&content);
-        
+
         // If it parsed at least one tool, one must match our name
         if !result.tool_calls.is_empty() {
             assert!(result.tool_calls.iter().any(|tc| tc.tool_name == name));
@@ -35,7 +35,7 @@ proptest! {
 {}
 ```{}", prefix, json_str, suffix);
         let result = parse_tool_calls(&content);
-        
+
         if !result.tool_calls.is_empty() {
             assert!(result.tool_calls.iter().any(|tc| tc.tool_name == name));
             assert_eq!(result.tool_calls[0].parse_method, ParseMethod::Json);
@@ -49,10 +49,10 @@ proptest! {
         prefix in r"\PC*",
         suffix in r"\PC*"
     ) {
-        let content = format!("{}<tool><name={}</name><arguments>{}</arguments></tool>{}", 
+        let content = format!("{}<tool><name={}</name><arguments>{}</arguments></tool>{}",
             prefix, name, args, suffix);
         let result = parse_tool_calls(&content);
-        
+
         if !result.tool_calls.is_empty() {
             assert!(result.tool_calls.iter().any(|tc| tc.tool_name == name));
         }
@@ -66,10 +66,10 @@ proptest! {
         prefix in r"\PC*",
         suffix in r"\PC*"
     ) {
-        let content = format!("{}<function={}><parameter={}>{}</parameter></function>{}", 
+        let content = format!("{}<function={}><parameter={}>{}</parameter></function>{}",
             prefix, name, key, val, suffix);
         let result = parse_tool_calls(&content);
-        
+
         if !result.tool_calls.is_empty() {
             assert!(result.tool_calls.iter().any(|tc| tc.tool_name == name));
         }

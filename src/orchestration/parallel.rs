@@ -1649,4 +1649,3 @@ mod execution_stats_tests {
         assert_eq!(stats.parallel(), 0);
     }
 }
-

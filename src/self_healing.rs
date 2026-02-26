@@ -211,7 +211,11 @@ impl ErrorLearner {
 
     /// Detect error patterns
     fn detect_patterns(&self) {
-        let errors = self.errors.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let errors = self
+            .errors
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
 
         // Group by error type and context
         let mut groups: HashMap<String, Vec<&ErrorOccurrence>> = HashMap::new();
@@ -265,7 +269,10 @@ impl ErrorLearner {
 
     /// Find best recovery strategy for an error pattern
     fn find_best_recovery(&self, pattern_id: &str) -> Option<RecoveryStrategy> {
-        let history = self.recovery_history.read().unwrap_or_else(|e| e.into_inner());
+        let history = self
+            .recovery_history
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(results) = history.get(pattern_id) {
             // Find strategy with highest success rate
             let mut strategy_stats: HashMap<String, (u32, u32)> = HashMap::new(); // (success, total)
@@ -295,7 +302,10 @@ impl ErrorLearner {
 
     /// Record recovery result
     pub fn record_recovery(&self, pattern_id: &str, strategy: &str, success: bool) {
-        let mut history = self.recovery_history.write().unwrap_or_else(|e| e.into_inner());
+        let mut history = self
+            .recovery_history
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         let results = history.entry(pattern_id.to_string()).or_default();
         results.push(RecoveryResult {
             strategy: strategy.to_string(),
@@ -343,15 +353,28 @@ impl ErrorLearner {
             errors_recorded: self.stats.errors_recorded.load(Ordering::Relaxed),
             patterns_detected: self.stats.patterns_detected.load(Ordering::Relaxed),
             recoveries_suggested: self.stats.recoveries_suggested.load(Ordering::Relaxed),
-            active_patterns: self.patterns.read().unwrap_or_else(|e| e.into_inner()).len(),
+            active_patterns: self
+                .patterns
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
         }
     }
 
     /// Clear all data
     pub fn clear(&self) {
-        self.errors.write().unwrap_or_else(|e| e.into_inner()).clear();
-        self.patterns.write().unwrap_or_else(|e| e.into_inner()).clear();
-        self.recovery_history.write().unwrap_or_else(|e| e.into_inner()).clear();
+        self.errors
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.patterns
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.recovery_history
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 }
 
@@ -577,7 +600,10 @@ impl StateManager {
             }
         }
 
-        *self.last_checkpoint.write().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+        *self
+            .last_checkpoint
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
 
         id
     }
@@ -588,10 +614,12 @@ impl StateManager {
             return false;
         }
 
-        let last = self.last_checkpoint.read().unwrap_or_else(|e| e.into_inner());
+        let last = self
+            .last_checkpoint
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(instant) = *last {
-            return instant.elapsed()
-                >= Duration::from_secs(self.config.checkpoint_interval_secs);
+            return instant.elapsed() >= Duration::from_secs(self.config.checkpoint_interval_secs);
         }
         true
     }
@@ -614,7 +642,11 @@ impl StateManager {
 
     /// Get latest checkpoint
     pub fn latest(&self) -> Option<StateCheckpoint> {
-        self.checkpoints.read().unwrap_or_else(|e| e.into_inner()).back().cloned()
+        self.checkpoints
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .back()
+            .cloned()
     }
 
     /// Get all checkpoints
@@ -629,7 +661,10 @@ impl StateManager {
 
     /// Clear checkpoints
     pub fn clear(&self) {
-        self.checkpoints.write().unwrap_or_else(|e| e.into_inner()).clear();
+        self.checkpoints
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     /// Get summary
@@ -638,7 +673,11 @@ impl StateManager {
             checkpoints_created: self.stats.checkpoints_created.load(Ordering::Relaxed),
             restores_performed: self.stats.restores_performed.load(Ordering::Relaxed),
             total_bytes_saved: self.stats.total_bytes_saved.load(Ordering::Relaxed),
-            active_checkpoints: self.checkpoints.read().unwrap_or_else(|e| e.into_inner()).len(),
+            active_checkpoints: self
+                .checkpoints
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .len(),
         }
     }
 }
@@ -756,8 +795,13 @@ impl HealthPredictor {
 
     /// Update prediction for component
     fn update_prediction(&self, component: &str) {
-        let history = self.history.read().unwrap_or_else(|e| e.into_inner())
-            .get(component).cloned().unwrap_or_default();
+        let history = self
+            .history
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(component)
+            .cloned()
+            .unwrap_or_default();
 
         if history.len() < 5 {
             return;
@@ -812,14 +856,19 @@ impl HealthPredictor {
             recommended_action,
         };
 
-        self.predictions.write().unwrap_or_else(|e| e.into_inner())
+        self.predictions
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(component.to_string(), prediction);
     }
 
     /// Get prediction for component
     pub fn predict(&self, component: &str) -> Option<HealthPrediction> {
-        self.predictions.read().unwrap_or_else(|e| e.into_inner())
-            .get(component).cloned()
+        self.predictions
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(component)
+            .cloned()
     }
 
     /// Get all predictions
@@ -854,8 +903,14 @@ impl HealthPredictor {
 
     /// Clear all data
     pub fn clear(&self) {
-        self.history.write().unwrap_or_else(|e| e.into_inner()).clear();
-        self.predictions.write().unwrap_or_else(|e| e.into_inner()).clear();
+        self.history
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.predictions
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 }
 

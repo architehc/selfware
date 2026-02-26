@@ -615,16 +615,40 @@ mod tests {
         assert_eq!(theme_from_name("ocean"), Some(ThemeId::Ocean));
         assert_eq!(theme_from_name("minimal"), Some(ThemeId::Minimal));
         assert_eq!(theme_from_name("highcontrast"), Some(ThemeId::HighContrast));
-        assert_eq!(theme_from_name("high-contrast"), Some(ThemeId::HighContrast));
-        assert_eq!(theme_from_name("high_contrast"), Some(ThemeId::HighContrast));
+        assert_eq!(
+            theme_from_name("high-contrast"),
+            Some(ThemeId::HighContrast)
+        );
+        assert_eq!(
+            theme_from_name("high_contrast"),
+            Some(ThemeId::HighContrast)
+        );
         assert_eq!(theme_from_name("dracula"), Some(ThemeId::Dracula));
         assert_eq!(theme_from_name("monokai"), Some(ThemeId::Monokai));
-        assert_eq!(theme_from_name("solarized-dark"), Some(ThemeId::SolarizedDark));
-        assert_eq!(theme_from_name("solarizeddark"), Some(ThemeId::SolarizedDark));
-        assert_eq!(theme_from_name("solarized_dark"), Some(ThemeId::SolarizedDark));
-        assert_eq!(theme_from_name("solarized-light"), Some(ThemeId::SolarizedLight));
-        assert_eq!(theme_from_name("solarizedlight"), Some(ThemeId::SolarizedLight));
-        assert_eq!(theme_from_name("solarized_light"), Some(ThemeId::SolarizedLight));
+        assert_eq!(
+            theme_from_name("solarized-dark"),
+            Some(ThemeId::SolarizedDark)
+        );
+        assert_eq!(
+            theme_from_name("solarizeddark"),
+            Some(ThemeId::SolarizedDark)
+        );
+        assert_eq!(
+            theme_from_name("solarized_dark"),
+            Some(ThemeId::SolarizedDark)
+        );
+        assert_eq!(
+            theme_from_name("solarized-light"),
+            Some(ThemeId::SolarizedLight)
+        );
+        assert_eq!(
+            theme_from_name("solarizedlight"),
+            Some(ThemeId::SolarizedLight)
+        );
+        assert_eq!(
+            theme_from_name("solarized_light"),
+            Some(ThemeId::SolarizedLight)
+        );
         assert_eq!(theme_from_name("nord"), Some(ThemeId::Nord));
         assert_eq!(theme_from_name("gruvbox"), Some(ThemeId::Gruvbox));
         assert_eq!(theme_from_name("nonexistent"), None);

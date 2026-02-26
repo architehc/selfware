@@ -395,13 +395,14 @@ pub async fn run() -> Result<()> {
         if should_use_tui {
             let (event_tx, event_rx) = mpsc::channel();
             let (user_input_tx, user_input_rx) = mpsc::channel();
-            
-            let mut agent = Agent::new(config.clone()).await?
+
+            let mut agent = Agent::new(config.clone())
+                .await?
                 .with_event_sender(event_tx);
-            
+
             let shared_state = crate::ui::tui::SharedDashboardState::default();
             let model = config.model.clone();
-            
+
             // Run TUI in a separate thread
             let tui_handle = std::thread::spawn(move || {
                 crate::ui::tui::run_tui_dashboard_with_events(
@@ -840,10 +841,7 @@ async fn handle_command(
             );
 
             for (i, target) in targets.iter().take(10).enumerate() {
-                let file_info = target
-                    .file
-                    .as_deref()
-                    .unwrap_or("(no specific file)");
+                let file_info = target.file.as_deref().unwrap_or("(no specific file)");
                 println!(
                     "   {}. [{}] {} (priority: {:.2})",
                     i + 1,
@@ -859,10 +857,7 @@ async fn handle_command(
             }
 
             if dry_run {
-                println!(
-                    "\n   {} Dry-run mode: no changes applied.",
-                    Glyphs::LEAF
-                );
+                println!("\n   {} Dry-run mode: no changes applied.", Glyphs::LEAF);
                 return Ok(());
             }
 
@@ -872,10 +867,7 @@ async fn handle_command(
             for cycle in 0..cycles {
                 let targets = orchestrator.analyze_self();
                 let Some(target) = orchestrator.select_target(&targets) else {
-                    println!(
-                        "\n   {} No more improvement targets. Done!",
-                        Glyphs::BLOOM
-                    );
+                    println!("\n   {} No more improvement targets. Done!", Glyphs::BLOOM);
                     break;
                 };
 
@@ -890,17 +882,10 @@ async fn handle_command(
                 let prompt = orchestrator.build_improvement_prompt(target);
                 match agent.run_task(&prompt).await {
                     Ok(()) => {
-                        println!(
-                            "   {} Improvement applied successfully.",
-                            Glyphs::BLOOM
-                        );
+                        println!("   {} Improvement applied successfully.", Glyphs::BLOOM);
                     }
                     Err(e) => {
-                        println!(
-                            "   {} Improvement failed: {}",
-                            Glyphs::FROST,
-                            e
-                        );
+                        println!("   {} Improvement failed: {}", Glyphs::FROST, e);
                     }
                 }
             }

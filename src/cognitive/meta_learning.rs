@@ -185,9 +185,7 @@ impl MetaLearner {
         Ok(())
     }
 
-    fn load_scores(
-        path: &Path,
-    ) -> Result<HashMap<ImprovementCategory, StrategyScore>> {
+    fn load_scores(path: &Path) -> Result<HashMap<ImprovementCategory, StrategyScore>> {
         if !path.exists() {
             return Ok(HashMap::new());
         }
@@ -256,7 +254,9 @@ mod tests {
         };
 
         learner.update_weights(&record);
-        let score = learner.get_score(&ImprovementCategory::ErrorHandling).unwrap();
+        let score = learner
+            .get_score(&ImprovementCategory::ErrorHandling)
+            .unwrap();
         assert_eq!(score.attempts, 1);
         assert_eq!(score.successes, 1);
         assert!((score.avg_effectiveness - 0.8).abs() < 0.001);
@@ -332,7 +332,9 @@ mod tests {
         score.attempts = 10;
         score.successes = 8;
         score.avg_effectiveness = 0.6;
-        learner.scores.insert(ImprovementCategory::ErrorHandling, score);
+        learner
+            .scores
+            .insert(ImprovementCategory::ErrorHandling, score);
 
         let weighted = learner.weight_priority(&ImprovementCategory::ErrorHandling, 1.0);
         // weight = 0.5 * 0.8 + 0.5 * 0.6 = 0.7, so 1.0 * 0.7 = 0.7
@@ -362,7 +364,9 @@ mod tests {
             persist_path: std::env::temp_dir().join("selfware_test_meta_gs.json"),
         };
 
-        assert!(learner.get_score(&ImprovementCategory::ToolPipeline).is_none());
+        assert!(learner
+            .get_score(&ImprovementCategory::ToolPipeline)
+            .is_none());
     }
 
     #[test]
@@ -388,7 +392,9 @@ mod tests {
         };
 
         learner.update_weights(&record);
-        let score = learner.get_score(&ImprovementCategory::CodeQuality).unwrap();
+        let score = learner
+            .get_score(&ImprovementCategory::CodeQuality)
+            .unwrap();
         assert_eq!(score.attempts, 1);
         assert_eq!(score.successes, 0);
         assert!(score.in_cooldown(), "Should be in cooldown after failure");
@@ -421,17 +427,23 @@ mod tests {
 
         // First record: avg = 1.0
         learner.update_weights(&make_record(1.0));
-        let s = learner.get_score(&ImprovementCategory::ErrorHandling).unwrap();
+        let s = learner
+            .get_score(&ImprovementCategory::ErrorHandling)
+            .unwrap();
         assert!((s.avg_effectiveness - 1.0).abs() < 0.001);
 
         // Second record (0.0): avg = 0.3 * 0.0 + 0.7 * 1.0 = 0.7
         learner.update_weights(&make_record(0.0));
-        let s = learner.get_score(&ImprovementCategory::ErrorHandling).unwrap();
+        let s = learner
+            .get_score(&ImprovementCategory::ErrorHandling)
+            .unwrap();
         assert!((s.avg_effectiveness - 0.7).abs() < 0.001);
 
         // Third record (0.5): avg = 0.3 * 0.5 + 0.7 * 0.7 = 0.64
         learner.update_weights(&make_record(0.5));
-        let s = learner.get_score(&ImprovementCategory::ErrorHandling).unwrap();
+        let s = learner
+            .get_score(&ImprovementCategory::ErrorHandling)
+            .unwrap();
         assert!((s.avg_effectiveness - 0.64).abs() < 0.001);
 
         std::fs::remove_file(&learner.persist_path).ok();
@@ -451,7 +463,9 @@ mod tests {
         good.attempts = 10;
         good.successes = 9;
         good.avg_effectiveness = 0.8;
-        learner.scores.insert(ImprovementCategory::ErrorHandling, good);
+        learner
+            .scores
+            .insert(ImprovementCategory::ErrorHandling, good);
 
         // Add a poor-performing category in cooldown
         let mut bad = StrategyScore::new(ImprovementCategory::CodeQuality);
@@ -463,12 +477,25 @@ mod tests {
 
         let strategies = learner.analyze_strategies();
         // ErrorHandling should be ranked above CodeQuality (which is 0.0 due to cooldown)
-        let eh_pos = strategies.iter().position(|(c, _)| *c == ImprovementCategory::ErrorHandling).unwrap();
-        let cq_pos = strategies.iter().position(|(c, _)| *c == ImprovementCategory::CodeQuality).unwrap();
-        assert!(eh_pos < cq_pos, "ErrorHandling should rank above cooldown CodeQuality");
+        let eh_pos = strategies
+            .iter()
+            .position(|(c, _)| *c == ImprovementCategory::ErrorHandling)
+            .unwrap();
+        let cq_pos = strategies
+            .iter()
+            .position(|(c, _)| *c == ImprovementCategory::CodeQuality)
+            .unwrap();
+        assert!(
+            eh_pos < cq_pos,
+            "ErrorHandling should rank above cooldown CodeQuality"
+        );
 
         // CodeQuality weight should be 0.0
-        let cq_weight = strategies.iter().find(|(c, _)| *c == ImprovementCategory::CodeQuality).unwrap().1;
+        let cq_weight = strategies
+            .iter()
+            .find(|(c, _)| *c == ImprovementCategory::CodeQuality)
+            .unwrap()
+            .1;
         assert_eq!(cq_weight, 0.0);
     }
 

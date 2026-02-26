@@ -73,7 +73,7 @@ impl ChatStore {
         };
         let path = self.chat_path(name);
         let json = serde_json::to_string_pretty(&chat)?;
-        
+
         if let Some(encryption) = EncryptionManager::get() {
             let encrypted = encryption.encrypt(json.as_bytes())?;
             std::fs::write(&path, encrypted).context("Failed to write encrypted chat file")?;
@@ -86,12 +86,13 @@ impl ChatStore {
     /// Load a saved chat by name
     pub fn load(&self, name: &str) -> Result<SavedChat> {
         let path = self.chat_path(name);
-        let data =
-            std::fs::read(&path).with_context(|| format!("Chat '{}' not found", name))?;
-        
+        let data = std::fs::read(&path).with_context(|| format!("Chat '{}' not found", name))?;
+
         let json = if let Some(encryption) = EncryptionManager::get() {
             match encryption.decrypt(&data) {
-                Ok(plaintext) => String::from_utf8(plaintext).context("Decrypted chat is not valid UTF-8")?,
+                Ok(plaintext) => {
+                    String::from_utf8(plaintext).context("Decrypted chat is not valid UTF-8")?
+                }
                 Err(_) => {
                     // Try as plain JSON (legacy or unencrypted)
                     String::from_utf8(data).context("Chat file is not valid UTF-8")?

@@ -488,9 +488,7 @@ fn action_name(action: &RecoveryAction) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::self_healing::{
-        RecoveryAction, RecoveryStrategy, SelfHealingConfig, StateManager,
-    };
+    use crate::self_healing::{RecoveryAction, RecoveryStrategy, SelfHealingConfig, StateManager};
 
     fn test_config() -> SelfHealingConfig {
         SelfHealingConfig {
