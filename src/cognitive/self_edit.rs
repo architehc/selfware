@@ -189,6 +189,17 @@ impl SelfEditOrchestrator {
         }
     }
 
+    /// Create with a custom history path (for testing)
+    #[cfg(test)]
+    pub fn with_history_path(project_root: PathBuf, history_path: PathBuf) -> Self {
+        let history = Self::load_history(&history_path).unwrap_or_default();
+        Self {
+            history,
+            history_path,
+            project_root,
+        }
+    }
+
     /// Analyze the codebase for improvement targets
     pub fn analyze_self(&self) -> Vec<ImprovementTarget> {
         let mut targets = Vec::new();
@@ -615,10 +626,11 @@ mod tests {
     fn test_record_result_and_history() {
         let tmp = std::env::temp_dir().join("selfware_test_history");
         std::fs::create_dir_all(&tmp).ok();
-        let history_path = tmp.join("improvements").join("history.json");
+        let history_path = tmp.join("history.json");
         std::fs::remove_file(&history_path).ok();
 
-        let mut orchestrator = SelfEditOrchestrator::new(tmp.clone());
+        let mut orchestrator =
+            SelfEditOrchestrator::with_history_path(tmp.clone(), history_path.clone());
         assert!(orchestrator.history().is_empty());
 
         let record = ImprovementRecord {
@@ -638,8 +650,9 @@ mod tests {
         assert_eq!(orchestrator.history().len(), 1);
         assert_eq!(orchestrator.history()[0].target_id, "imp-1");
 
-        // Verify persistence — create new orchestrator from same dir
-        let orchestrator2 = SelfEditOrchestrator::new(tmp.clone());
+        // Verify persistence — create new orchestrator from same path
+        let orchestrator2 =
+            SelfEditOrchestrator::with_history_path(tmp.clone(), history_path);
         assert_eq!(orchestrator2.history().len(), 1);
         assert_eq!(orchestrator2.history()[0].description, "Added retry");
 
@@ -650,10 +663,11 @@ mod tests {
     fn test_recently_failed_categories_cooldown() {
         let tmp = std::env::temp_dir().join("selfware_test_cooldown");
         std::fs::create_dir_all(&tmp).ok();
-        let history_path = tmp.join("improvements").join("history.json");
+        let history_path = tmp.join("history.json");
         std::fs::remove_file(&history_path).ok();
 
-        let mut orchestrator = SelfEditOrchestrator::new(tmp.clone());
+        let mut orchestrator =
+            SelfEditOrchestrator::with_history_path(tmp.clone(), history_path);
 
         // Record a rolled-back attempt
         let record = ImprovementRecord {

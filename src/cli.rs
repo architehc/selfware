@@ -5,7 +5,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::sync::mpsc;
-use tracing::{info, warn};
+use tracing::warn;
 
 // Use library exports instead of redeclaring modules
 // This avoids duplicate compilation and maintains consistency
