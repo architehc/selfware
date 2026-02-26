@@ -927,11 +927,14 @@ mod tests {
     }
 
     #[test]
-    fn test_checkpoint_manager_load_nonexistent() {
+    fn test_checkpoint_manager_load_nonexistent_recovers_fresh() {
         let dir = tempdir().unwrap();
         let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
-        let result = manager.load("nonexistent_task");
-        assert!(result.is_err());
+        // With recovery, loading a nonexistent task creates a fresh checkpoint
+        let result = manager.load("nonexistent_task").unwrap();
+        assert_eq!(result.task_id, "nonexistent_task");
+        assert_eq!(result.task_description, "");
+        assert_eq!(result.status, TaskStatus::InProgress);
     }
 
     #[test]
@@ -1180,7 +1183,7 @@ mod tests {
     }
 
     #[test]
-    fn test_load_detects_corrupted_file() {
+    fn test_load_detects_corrupted_file_and_recovers() {
         let dir = tempdir().unwrap();
         let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
 
@@ -1196,8 +1199,33 @@ mod tests {
         envelope["payload"]["task_description"] = serde_json::Value::String("TAMPERED".to_string());
         std::fs::write(&path, serde_json::to_string_pretty(&envelope).unwrap()).unwrap();
 
-        // Load should fail with integrity error
-        let result = manager.load("corrupt_test");
+        // Load should detect corruption and recover with a fresh checkpoint
+        // (no backup exists, so recovery creates a new empty one)
+        let result = manager.load("corrupt_test").unwrap();
+        assert_eq!(result.task_id, "corrupt_test");
+        // The description is empty because recovery created a fresh checkpoint
+        assert_eq!(result.task_description, "");
+    }
+
+    #[test]
+    fn test_try_load_from_path_detects_integrity_error() {
+        let dir = tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        // Save a valid checkpoint
+        let checkpoint =
+            TaskCheckpoint::new("direct_test".to_string(), "Direct load test".to_string());
+        manager.save(&checkpoint).unwrap();
+
+        // Corrupt the file
+        let path = dir.path().join("direct_test.json");
+        let content = std::fs::read_to_string(&path).unwrap();
+        let mut envelope: serde_json::Value = serde_json::from_str(&content).unwrap();
+        envelope["payload"]["task_description"] = serde_json::Value::String("TAMPERED".to_string());
+        std::fs::write(&path, serde_json::to_string_pretty(&envelope).unwrap()).unwrap();
+
+        // try_load_from_path should fail with integrity error
+        let result = manager.try_load_from_path(&path);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
