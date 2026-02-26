@@ -405,6 +405,8 @@ pub fn build_garden_from_path(path: &str) -> Result<DigitalGarden> {
 
     let mut garden = DigitalGarden::new(&project_name);
 
+    let sep = std::path::MAIN_SEPARATOR_STR;
+
     for entry in WalkDir::new(path)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -412,10 +414,10 @@ pub fn build_garden_from_path(path: &str) -> Result<DigitalGarden> {
     {
         let path_str = entry.path().display().to_string();
 
-        if path_str.contains("/.")
-            || path_str.contains("/target/")
-            || path_str.contains("/node_modules/")
-            || path_str.contains("/__pycache__/")
+        if path_str.contains(&format!("{sep}."))
+            || path_str.contains(&format!("{sep}target{sep}"))
+            || path_str.contains(&format!("{sep}node_modules{sep}"))
+            || path_str.contains(&format!("{sep}__pycache__{sep}"))
         {
             continue;
         }
@@ -555,6 +557,8 @@ pub fn scan_directory(dir: &Path) -> DigitalGarden {
         "cs", "rb", "php", "swift", "kt", "scala", "sh", "bash", "zsh", "yaml", "yml", "json",
     ];
 
+    let sep = std::path::MAIN_SEPARATOR_STR;
+
     for entry in WalkDir::new(dir)
         .max_depth(8) // Limit depth to avoid scanning too deep
         .into_iter()
@@ -564,14 +568,14 @@ pub fn scan_directory(dir: &Path) -> DigitalGarden {
         let path = entry.path();
         let path_str = path.strip_prefix(dir).unwrap_or(path).display().to_string();
 
-        // Skip common non-code directories
-        if path_str.contains("/target/")
-            || path_str.contains("/node_modules/")
-            || path_str.contains("/.git/")
-            || path_str.contains("/__pycache__/")
-            || path_str.contains("/vendor/")
-            || path_str.contains("/dist/")
-            || path_str.contains("/build/")
+        // Skip common non-code directories (use platform path separator)
+        if path_str.contains(&format!("{sep}target{sep}"))
+            || path_str.contains(&format!("{sep}node_modules{sep}"))
+            || path_str.contains(&format!("{sep}.git{sep}"))
+            || path_str.contains(&format!("{sep}__pycache__{sep}"))
+            || path_str.contains(&format!("{sep}vendor{sep}"))
+            || path_str.contains(&format!("{sep}dist{sep}"))
+            || path_str.contains(&format!("{sep}build{sep}"))
         {
             continue;
         }

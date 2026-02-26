@@ -13,6 +13,9 @@ use crate::token_count::estimate_tokens_with_overhead;
 use anyhow::Result;
 use chrono::Utc;
 
+/// Maximum number of memory entries before eviction kicks in.
+const MAX_MEMORY_ENTRIES: usize = 10_000;
+
 pub struct AgentMemory {
     context_window: usize,
     entries: Vec<MemoryEntry>,
@@ -49,8 +52,15 @@ impl AgentMemory {
         })
     }
 
-    /// Add a message to memory
+    /// Add a message to memory.
+    ///
+    /// When the number of entries reaches `MAX_MEMORY_ENTRIES`, the oldest 25%
+    /// of entries are removed to make room.
     pub fn add_message(&mut self, msg: &Message) {
+        if self.entries.len() >= MAX_MEMORY_ENTRIES {
+            let remove_count = MAX_MEMORY_ENTRIES / 4;
+            self.entries.drain(..remove_count);
+        }
         self.entries.push(MemoryEntry::from_message(msg));
     }
 

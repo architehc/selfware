@@ -39,7 +39,7 @@ impl std::fmt::Display for ExecutionMode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default = "default_endpoint")]
     pub endpoint: String,
@@ -49,6 +49,11 @@ pub struct Config {
     pub max_tokens: usize,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
+    // SECURITY NOTE: `api_key` is stored as a plain `String`. The key material
+    // may linger in memory after the value is dropped because Rust's allocator
+    // does not guarantee zeroing. Ideally this should use a wrapper like
+    // `secrecy::SecretString` that zeroes on drop. The custom `Debug` impl
+    // below ensures the key is never printed in logs or debug output.
     /// API authentication key (can also be set via `SELFWARE_API_KEY` env var).
     pub api_key: Option<String>,
 
@@ -85,6 +90,30 @@ pub struct Config {
     /// Always show token usage after responses - CLI override
     #[serde(skip)]
     pub show_tokens: bool,
+}
+
+// Manual `Debug` implementation that redacts the `api_key` field to prevent
+// accidental exposure of credentials in logs, error messages, or debug output.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("endpoint", &self.endpoint)
+            .field("model", &self.model)
+            .field("max_tokens", &self.max_tokens)
+            .field("temperature", &self.temperature)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("safety", &self.safety)
+            .field("agent", &self.agent)
+            .field("yolo", &self.yolo)
+            .field("ui", &self.ui)
+            .field("continuous_work", &self.continuous_work)
+            .field("retry", &self.retry)
+            .field("execution_mode", &self.execution_mode)
+            .field("compact_mode", &self.compact_mode)
+            .field("verbose_mode", &self.verbose_mode)
+            .field("show_tokens", &self.show_tokens)
+            .finish()
+    }
 }
 
 /// UI configuration for themes, animations, and output
@@ -330,7 +359,7 @@ impl Default for AgentConfig {
 }
 
 fn default_endpoint() -> String {
-    "http://localhost:8000/v1".to_string()
+    "https://localhost:8000/v1".to_string()
 }
 fn default_model() -> String {
     "Qwen/Qwen3-Coder-Next-FP8".to_string()
@@ -376,11 +405,33 @@ fn default_require_confirmation() -> Vec<String> {
 }
 
 impl Config {
+    /// On Unix, check whether a config file has overly permissive permissions
+    /// (group- or world-readable). Since the config may contain API keys, we
+    /// warn the user to tighten permissions.
+    #[cfg(unix)]
+    fn check_config_file_permissions(path: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            let mode = metadata.permissions().mode();
+            if mode & 0o077 != 0 {
+                eprintln!(
+                    "WARNING: Config file '{}' is accessible by other users (mode {:o}). \
+                     This file may contain API keys. Consider running: chmod 600 {}",
+                    path,
+                    mode & 0o777,
+                    path
+                );
+            }
+        }
+    }
+
     pub fn load(path: Option<&str>) -> Result<Self> {
+        let mut loaded_from_path: Option<String> = None;
         let mut config = match path {
             Some(p) => {
                 let content = std::fs::read_to_string(p)
                     .with_context(|| format!("Failed to read config from {}", p))?;
+                loaded_from_path = Some(p.to_string());
                 toml::from_str(&content).context("Failed to parse config")?
             }
             None => {
@@ -399,6 +450,7 @@ impl Config {
                 let mut loaded = None;
                 for p in &default_paths {
                     if let Ok(content) = std::fs::read_to_string(p) {
+                        loaded_from_path = Some(p.to_string());
                         loaded = Some(toml::from_str(&content).context("Failed to parse config")?);
                         break;
                     }
@@ -409,6 +461,15 @@ impl Config {
                 })
             }
         };
+
+        // On Unix, warn if the config file is world-readable since it may
+        // contain API keys.
+        #[cfg(unix)]
+        if let Some(ref cfg_path) = loaded_from_path {
+            Self::check_config_file_permissions(cfg_path);
+        }
+        // Suppress unused-variable warning on non-Unix platforms
+        let _ = &loaded_from_path;
 
         // Override with environment variables
         if let Ok(endpoint) = std::env::var("SELFWARE_ENDPOINT") {
@@ -469,6 +530,14 @@ impl Config {
         };
         if after_scheme.is_empty() || after_scheme.starts_with('/') {
             bail!("Config error: endpoint URL has no host: {}", self.endpoint);
+        }
+        // Warn if the endpoint uses plain HTTP (unencrypted)
+        if self.endpoint.starts_with("http://") {
+            eprintln!(
+                "WARNING: endpoint '{}' uses plain HTTP. API keys and data will be \
+                 transmitted unencrypted. Consider using https:// instead.",
+                self.endpoint
+            );
         }
 
         // --- Model name ---
@@ -588,7 +657,7 @@ mod tests {
     #[test]
     fn test_config_default() {
         let config = Config::default();
-        assert_eq!(config.endpoint, "http://localhost:8000/v1");
+        assert_eq!(config.endpoint, "https://localhost:8000/v1");
         assert_eq!(config.model, "Qwen/Qwen3-Coder-Next-FP8");
         assert_eq!(config.max_tokens, 65536);
         assert!((config.temperature - 1.0).abs() < f32::EPSILON);
@@ -625,7 +694,7 @@ mod tests {
         // When no config file exists in the specific path, it should return an error
         // Or wait, if we want to test default config values, just use Config::default()
         let config = Config::default();
-        assert_eq!(config.endpoint, "http://localhost:8000/v1");
+        assert_eq!(config.endpoint, "https://localhost:8000/v1");
     }
 
     #[test]
@@ -850,6 +919,23 @@ mod tests {
     }
 
     #[test]
+    fn test_config_debug_redacts_api_key() {
+        let config = Config {
+            api_key: Some("sk-super-secret-key-12345".to_string()),
+            ..Config::default()
+        };
+        let debug_str = format!("{:?}", config);
+        assert!(
+            !debug_str.contains("sk-super-secret-key-12345"),
+            "API key must not appear in Debug output"
+        );
+        assert!(
+            debug_str.contains("[REDACTED]"),
+            "Debug output should show [REDACTED] for API key"
+        );
+    }
+
+    #[test]
     fn test_safety_config_debug() {
         let config = SafetyConfig::default();
         let debug_str = format!("{:?}", config);
@@ -960,7 +1046,7 @@ mod tests {
     fn test_empty_config_uses_all_defaults() {
         let toml_str = "";
         let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.endpoint, "http://localhost:8000/v1");
+        assert_eq!(config.endpoint, "https://localhost:8000/v1");
         assert_eq!(config.model, "Qwen/Qwen3-Coder-Next-FP8");
         assert_eq!(config.max_tokens, 65536);
         assert!(!config.yolo.enabled);
@@ -1120,7 +1206,7 @@ mod tests {
 
     #[test]
     fn test_default_helpers() {
-        assert_eq!(default_endpoint(), "http://localhost:8000/v1");
+        assert_eq!(default_endpoint(), "https://localhost:8000/v1");
         assert_eq!(default_model(), "Qwen/Qwen3-Coder-Next-FP8");
         assert_eq!(default_max_tokens(), 65536);
         assert!((default_temperature() - 1.0).abs() < f32::EPSILON);

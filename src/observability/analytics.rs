@@ -6,9 +6,21 @@
 //! - Code quality metrics
 //! - Productivity trends
 
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Anonymize a task description by hashing it.
+///
+/// Prevents sensitive task content (which may include file paths, secrets, or
+/// proprietary code snippets) from being stored in plaintext analytics records.
+/// The first 16 hex characters of the SHA-256 hash are used as the anonymized
+/// identifier, providing enough uniqueness for aggregation while being irreversible.
+fn anonymize_task(task: &str) -> String {
+    let hash = hex::encode(Sha256::digest(task.as_bytes()));
+    format!("task:{}", &hash[..16])
+}
 
 /// Time period for aggregation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -123,15 +135,18 @@ impl TimeSavingsTracker {
             .insert(category.to_string(), estimate_secs);
     }
 
-    /// Record time savings
+    /// Record time savings.
+    ///
+    /// Task description is anonymized (hashed) before storage.
     pub fn record(&mut self, task: &str, automated_secs: u64, category: &str) {
         let manual_secs = self
             .category_estimates
             .get(category)
             .copied()
             .unwrap_or(300);
+        let anon = anonymize_task(task);
         self.records.push(TimeSavingsRecord::new(
-            task,
+            &anon,
             manual_secs,
             automated_secs,
             category,
@@ -142,7 +157,9 @@ impl TimeSavingsTracker {
         }
     }
 
-    /// Record with explicit manual time
+    /// Record with explicit manual time.
+    ///
+    /// Task description is anonymized (hashed) before storage.
     pub fn record_explicit(
         &mut self,
         task: &str,
@@ -150,8 +167,9 @@ impl TimeSavingsTracker {
         automated_secs: u64,
         category: &str,
     ) {
+        let anon = anonymize_task(task);
         self.records.push(TimeSavingsRecord::new(
-            task,
+            &anon,
             manual_secs,
             automated_secs,
             category,
@@ -316,7 +334,9 @@ impl BugPreventionTracker {
         }
     }
 
-    /// Record a bug prevented
+    /// Record a bug prevented.
+    ///
+    /// The description is anonymized (hashed) before storage.
     pub fn record(
         &mut self,
         description: &str,
@@ -324,8 +344,9 @@ impl BugPreventionTracker {
         severity: BugSeverity,
         method: &str,
     ) {
+        let anon_desc = anonymize_task(description);
         self.records.push(BugPreventionRecord::new(
-            description,
+            &anon_desc,
             bug_type,
             severity,
             method,

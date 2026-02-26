@@ -1,6 +1,7 @@
 //! Runtime -- workflow executor that walks the AST and evaluates nodes.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 
 use super::ast::AstNode;
 use super::value::Value;
@@ -12,8 +13,8 @@ pub struct Runtime {
     pub globals: HashMap<String, Value>,
     /// Function definitions
     pub functions: HashMap<String, AstNode>,
-    /// Execution history
-    pub history: Vec<ExecutionEvent>,
+    /// Execution history (bounded, O(1) front removal)
+    pub history: VecDeque<ExecutionEvent>,
     /// Built-in command executor
     command_executor: Option<CommandExecutor>,
 }
@@ -23,7 +24,7 @@ impl std::fmt::Debug for Runtime {
         f.debug_struct("Runtime")
             .field("globals", &self.globals)
             .field("functions", &self.functions)
-            .field("history", &self.history)
+            .field("history_len", &self.history.len())
             .field("command_executor", &self.command_executor.is_some())
             .finish()
     }
@@ -42,6 +43,9 @@ pub struct ExecutionEvent {
     pub timestamp: u64,
 }
 
+/// Maximum number of execution events to retain.
+const MAX_RUNTIME_HISTORY: usize = 1000;
+
 impl Default for Runtime {
     fn default() -> Self {
         Self::new()
@@ -54,7 +58,7 @@ impl Runtime {
         Self {
             globals: HashMap::new(),
             functions: HashMap::new(),
-            history: Vec::new(),
+            history: VecDeque::new(),
             command_executor: None,
         }
     }
@@ -114,7 +118,10 @@ impl Runtime {
             }
 
             AstNode::Parallel { body } => {
-                // Execute all in "parallel" (sequential for now, but could be async)
+                // NOTE: True parallel execution requires an async runtime and
+                // splitting ownership of &mut self, which this synchronous
+                // evaluator cannot do. Steps are executed sequentially. For
+                // actual concurrent execution, use the async WorkflowExecutor.
                 let mut results = Vec::new();
                 for node in body {
                     results.push(self.eval(node)?);
@@ -418,7 +425,7 @@ impl Runtime {
 
     /// Log execution event
     fn log_event(&mut self, event_type: &str, name: &str) {
-        self.history.push(ExecutionEvent {
+        self.history.push_back(ExecutionEvent {
             event_type: event_type.to_string(),
             name: name.to_string(),
             result: None,
@@ -427,6 +434,9 @@ impl Runtime {
                 .unwrap_or_default()
                 .as_secs(),
         });
+        while self.history.len() > MAX_RUNTIME_HISTORY {
+            self.history.pop_front();
+        }
     }
 
     /// Get variable value

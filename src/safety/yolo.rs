@@ -295,6 +295,13 @@ impl YoloManager {
             duration_ms,
         };
 
+        // Acquire file lock so in-memory push and file write are atomic.
+        let _file_guard = if self.config.audit_log_path.is_some() {
+            Some(AUDIT_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner()))
+        } else {
+            None
+        };
+
         // Add to in-memory log
         if let Ok(mut log) = self.audit_log.write() {
             log.push(entry.clone());
@@ -488,7 +495,7 @@ fn summarize_args(args: &serde_json::Value) -> String {
         for (key, value) in obj {
             let summarized = match value {
                 serde_json::Value::String(s) if s.len() > 100 => {
-                    serde_json::Value::String(format!("{}... ({} chars)", &s[..100], s.len()))
+                    serde_json::Value::String(format!("{}... ({} chars)", s.chars().take(100).collect::<String>(), s.len()))
                 }
                 other => other.clone(),
             };
@@ -499,13 +506,20 @@ fn summarize_args(args: &serde_json::Value) -> String {
     serde_json::to_string(&summary).unwrap_or_else(|_| "{}".to_string())
 }
 
-/// Append an audit entry to file
+/// Append an audit entry to file.
+///
+/// Thread-safety: the caller serialises access through AUDIT_FILE_LOCK.
 fn append_to_audit_file(path: &PathBuf, entry: &AuditEntry) -> std::io::Result<()> {
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-
     let json = serde_json::to_string(entry).unwrap_or_default();
-    writeln!(file, "{}", json)
+    let line = format!("{}\n", json);
+
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(line.as_bytes())?;
+    file.flush()
 }
+
+/// Global mutex protecting audit file writes from concurrent threads.
+static AUDIT_FILE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {

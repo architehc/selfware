@@ -31,6 +31,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tracing::warn;
 
 /// Cache entry with value and expiration
 #[derive(Clone)]
@@ -93,7 +94,10 @@ impl ToolCache {
     /// Get a cached result if available and not expired
     pub fn get(&self, tool_name: &str, args: &Value) -> Option<Value> {
         let key = Self::cache_key(tool_name, args);
-        let entries = self.entries.read().ok()?;
+        let entries = self.entries.read().unwrap_or_else(|poisoned| {
+            warn!("ToolCache read lock poisoned, recovering");
+            poisoned.into_inner()
+        });
 
         if let Some(entry) = entries.get(&key) {
             if !entry.is_expired() {
@@ -135,12 +139,15 @@ impl ToolCache {
             file_mtime,
         };
 
-        if let Ok(mut entries) = self.entries.write() {
+        {
+            let mut entries = self.entries.write().unwrap_or_else(|poisoned| {
+                warn!("ToolCache write lock poisoned, recovering");
+                poisoned.into_inner()
+            });
             // Evict old entries if at capacity
             if entries.len() >= self.max_entries {
                 self.evict_expired(&mut entries);
             }
-
             entries.insert(key, entry);
         }
     }
@@ -168,9 +175,11 @@ impl ToolCache {
     /// Invalidate a specific cache entry
     pub fn invalidate(&self, tool_name: &str, args: &Value) {
         let key = Self::cache_key(tool_name, args);
-        if let Ok(mut entries) = self.entries.write() {
-            entries.remove(&key);
-        }
+        let mut entries = self.entries.write().unwrap_or_else(|poisoned| {
+            warn!("ToolCache write lock poisoned, recovering");
+            poisoned.into_inner()
+        });
+        entries.remove(&key);
     }
 
     /// Invalidate all entries for a specific tool
@@ -568,8 +577,14 @@ impl LlmCache {
             return None;
         }
 
-        let entries = self.entries.read().ok()?;
-        let embeddings = self.embeddings.read().ok()?;
+        let entries = self.entries.read().unwrap_or_else(|poisoned| {
+            warn!("LlmCache entries read lock poisoned, recovering");
+            poisoned.into_inner()
+        });
+        let embeddings = self.embeddings.read().unwrap_or_else(|poisoned| {
+            warn!("LlmCache embeddings read lock poisoned, recovering");
+            poisoned.into_inner()
+        });
 
         // Find best matching entry by semantic similarity
         let mut best_match: Option<(&str, f32)> = None;
@@ -689,15 +704,26 @@ impl LlmCache {
 
     /// Get current cache size
     pub fn size(&self) -> usize {
-        self.entries.read().map(|e| e.len()).unwrap_or(0)
+        self.entries.read().unwrap_or_else(|poisoned| {
+            warn!("LlmCache entries read lock poisoned, recovering");
+            poisoned.into_inner()
+        }).len()
     }
 
     /// Clear the entire cache
     pub fn clear(&self) {
-        if let Ok(mut entries) = self.entries.write() {
+        {
+            let mut entries = self.entries.write().unwrap_or_else(|p| {
+                warn!("LlmCache entries write lock poisoned, recovering");
+                p.into_inner()
+            });
             entries.clear();
         }
-        if let Ok(mut embeddings) = self.embeddings.write() {
+        {
+            let mut embeddings = self.embeddings.write().unwrap_or_else(|p| {
+                warn!("LlmCache embeddings write lock poisoned, recovering");
+                p.into_inner()
+            });
             embeddings.clear();
         }
         self.invalidator.clear();
@@ -750,14 +776,19 @@ impl SemanticMatcher {
 
     /// Add an embedding for future matching
     pub fn add(&self, id: &str, embedding: Vec<f32>) {
-        if let Ok(mut embeddings) = self.embeddings.write() {
-            embeddings.push((id.to_string(), embedding));
-        }
+        let mut embeddings = self.embeddings.write().unwrap_or_else(|p| {
+            warn!("SemanticMatcher write lock poisoned, recovering");
+            p.into_inner()
+        });
+        embeddings.push((id.to_string(), embedding));
     }
 
     /// Find the best matching entry ID
     pub fn find_match(&self, embedding: &[f32]) -> Option<(String, f32)> {
-        let embeddings = self.embeddings.read().ok()?;
+        let embeddings = self.embeddings.read().unwrap_or_else(|poisoned| {
+            warn!("SemanticMatcher read lock poisoned, recovering");
+            poisoned.into_inner()
+        });
 
         let mut best: Option<(String, f32)> = None;
         for (id, stored) in embeddings.iter() {
@@ -846,7 +877,11 @@ impl CostTracker {
         self.total_calls_avoided.fetch_add(1, Ordering::Relaxed);
 
         // Record in history
-        if let Ok(mut history) = self.history.write() {
+        {
+            let mut history = self.history.write().unwrap_or_else(|p| {
+                warn!("CostTracker write lock poisoned, recovering");
+                p.into_inner()
+            });
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -895,8 +930,13 @@ impl CostTracker {
     pub fn history(&self) -> Vec<CostRecord> {
         self.history
             .read()
-            .map(|h| h.iter().cloned().collect())
-            .unwrap_or_default()
+            .unwrap_or_else(|p| {
+                warn!("CostTracker read lock poisoned, recovering");
+                p.into_inner()
+            })
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// Get summary stats
@@ -914,7 +954,11 @@ impl CostTracker {
         self.total_savings.store(0, Ordering::Relaxed);
         self.hits_with_savings.store(0, Ordering::Relaxed);
         self.total_calls_avoided.store(0, Ordering::Relaxed);
-        if let Ok(mut history) = self.history.write() {
+        {
+            let mut history = self.history.write().unwrap_or_else(|p| {
+                warn!("CostTracker write lock poisoned, recovering");
+                p.into_inner()
+            });
             history.clear();
         }
     }
@@ -1001,7 +1045,11 @@ impl CacheAnalytics {
     fn maybe_record_history(&self) {
         let requests = self.requests.load(Ordering::Relaxed);
         if requests.is_multiple_of(10) {
-            if let Ok(mut history) = self.history.write() {
+            let mut history = self.history.write().unwrap_or_else(|p| {
+                warn!("CacheAnalytics write lock poisoned, recovering");
+                p.into_inner()
+            });
+            {
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
@@ -1055,8 +1103,13 @@ impl CacheAnalytics {
     pub fn history(&self) -> Vec<HitRateRecord> {
         self.history
             .read()
-            .map(|h| h.iter().cloned().collect())
-            .unwrap_or_default()
+            .unwrap_or_else(|p| {
+                warn!("CacheAnalytics read lock poisoned, recovering");
+                p.into_inner()
+            })
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// Get optimization suggestions based on analytics
@@ -1109,7 +1162,11 @@ impl CacheAnalytics {
         self.hits.store(0, Ordering::Relaxed);
         self.misses.store(0, Ordering::Relaxed);
         self.stores.store(0, Ordering::Relaxed);
-        if let Ok(mut history) = self.history.write() {
+        {
+            let mut history = self.history.write().unwrap_or_else(|p| {
+                warn!("CacheAnalytics write lock poisoned, recovering");
+                p.into_inner()
+            });
             history.clear();
         }
     }
@@ -1151,12 +1208,15 @@ pub enum OptimizationPriority {
 // Cache Invalidation
 // ============================================================================
 
+/// Maximum number of tracked file paths in the cache invalidator.
+const MAX_INVALIDATOR_PATHS: usize = 5_000;
+
 /// Context-aware cache invalidator
 pub struct CacheInvalidator {
     /// File path to cache entry IDs mapping
     path_to_entries: RwLock<HashMap<String, Vec<String>>>,
     /// Invalidated context hashes
-    invalidated_contexts: RwLock<Vec<u64>>,
+    invalidated_contexts: RwLock<VecDeque<u64>>,
     /// File modification times for staleness check
     file_mtimes: RwLock<HashMap<String, u64>>,
 }
@@ -1166,17 +1226,29 @@ impl CacheInvalidator {
     pub fn new() -> Self {
         Self {
             path_to_entries: RwLock::new(HashMap::new()),
-            invalidated_contexts: RwLock::new(Vec::new()),
+            invalidated_contexts: RwLock::new(VecDeque::new()),
             file_mtimes: RwLock::new(HashMap::new()),
         }
     }
 
-    /// Register a file path for a cache entry
+    /// Register a file path for a cache entry.
+    ///
+    /// When the number of tracked paths exceeds MAX_INVALIDATOR_PATHS,
+    /// arbitrary old entries are evicted to stay within the limit.
     pub fn register_path(&self, entry_id: &str, path: &str) {
         if let Ok(mut map) = self.path_to_entries.write() {
             map.entry(path.to_string())
                 .or_default()
                 .push(entry_id.to_string());
+
+            // Evict entries if over capacity
+            if map.len() > MAX_INVALIDATOR_PATHS {
+                let to_remove = map.len() - MAX_INVALIDATOR_PATHS;
+                let keys: Vec<String> = map.keys().take(to_remove).cloned().collect();
+                for key in keys {
+                    map.remove(&key);
+                }
+            }
         }
 
         // Store current mtime
@@ -1185,6 +1257,14 @@ impl CacheInvalidator {
                 if let Ok(duration) = mtime.duration_since(UNIX_EPOCH) {
                     if let Ok(mut mtimes) = self.file_mtimes.write() {
                         mtimes.insert(path.to_string(), duration.as_secs());
+
+                        if mtimes.len() > MAX_INVALIDATOR_PATHS {
+                            let to_remove = mtimes.len() - MAX_INVALIDATOR_PATHS;
+                            let keys: Vec<String> = mtimes.keys().take(to_remove).cloned().collect();
+                            for key in keys {
+                                mtimes.remove(&key);
+                            }
+                        }
                     }
                 }
             }
@@ -1214,10 +1294,10 @@ impl CacheInvalidator {
     pub fn mark_invalidated(&self, context_hash: u64) {
         if let Ok(mut contexts) = self.invalidated_contexts.write() {
             if !contexts.contains(&context_hash) {
-                contexts.push(context_hash);
+                contexts.push_back(context_hash);
                 // Keep only last 100 invalidated contexts
                 while contexts.len() > 100 {
-                    contexts.remove(0);
+                    contexts.pop_front();
                 }
             }
         }

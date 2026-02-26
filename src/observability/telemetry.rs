@@ -7,6 +7,8 @@
 //! - Success/failure recording
 //! - Configurable log levels via RUST_LOG
 
+use regex::Regex;
+use std::sync::OnceLock;
 use std::time::Instant;
 use tracing::{error, info, info_span, Span};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -29,6 +31,37 @@ pub fn sanitize_for_log(s: &str) -> String {
         }
     }
     out
+}
+
+/// Compiled regex patterns for secret redaction.
+static SECRET_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+
+fn secret_patterns() -> &'static Vec<Regex> {
+    SECRET_PATTERNS.get_or_init(|| {
+        vec![
+            // API keys: sk-..., key-..., token-... followed by alphanumeric chars
+            Regex::new(r"(?i)(sk-|key-|token-)[A-Za-z0-9_\-]{8,}")
+                .expect("invalid secret regex"),
+            // Bearer tokens in Authorization headers
+            Regex::new(r"(?i)Bearer\s+[A-Za-z0-9_\-\.]{8,}")
+                .expect("invalid bearer regex"),
+            // Passwords in connection strings: password=..., passwd=..., pwd=...
+            Regex::new(r"(?i)(password|passwd|pwd)\s*=\s*\S+")
+                .expect("invalid password regex"),
+        ]
+    })
+}
+
+/// Redact sensitive data patterns from a string before logging.
+///
+/// Matches API keys (`sk-`, `key-`, `token-` prefixed), Bearer tokens,
+/// and passwords in connection strings, replacing them with `[REDACTED]`.
+pub fn redact_secrets(input: &str) -> String {
+    let mut result = input.to_string();
+    for pattern in secret_patterns() {
+        result = pattern.replace_all(&result, "[REDACTED]").to_string();
+    }
+    result
 }
 
 /// Initialize global tracing subscriber with configurable output
@@ -95,7 +128,7 @@ where
     E: std::fmt::Display,
 {
     let start = Instant::now();
-    let safe_name = sanitize_for_log(tool_name);
+    let safe_name = redact_secrets(&sanitize_for_log(tool_name));
     let span = info_span!(
         "tool.execute",
         tool_name = safe_name.as_str(),
@@ -120,7 +153,7 @@ where
         }
         Err(e) => {
             let duration = start.elapsed().as_millis() as u64;
-            let safe_err = sanitize_for_log(&e.to_string());
+            let safe_err = redact_secrets(&sanitize_for_log(&e.to_string()));
             span.record("duration_ms", duration);
             span.record("success", false);
             span.record("error", safe_err.as_str());
@@ -138,7 +171,7 @@ pub fn record_success() {
 
 /// Helper to record failure in current span with error details
 pub fn record_failure(error: &str) {
-    let safe_err = sanitize_for_log(error);
+    let safe_err = redact_secrets(&sanitize_for_log(error));
     Span::current().record("success", false);
     Span::current().record("error", safe_err.as_str());
     error!(error = safe_err.as_str(), "Operation failed");
@@ -573,5 +606,44 @@ mod tests {
     #[test]
     fn test_sanitize_for_log_preserves_unicode() {
         assert_eq!(sanitize_for_log("hello 世界"), "hello 世界");
+    }
+
+    #[test]
+    fn test_redact_secrets_api_key() {
+        let input = "Using api key sk-abc12345defghijk";
+        let result = redact_secrets(input);
+        assert!(!result.contains("sk-abc12345defghijk"));
+        assert!(result.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_redact_secrets_bearer_token() {
+        let input = "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.test";
+        let result = redact_secrets(input);
+        assert!(!result.contains("eyJhbGciOiJIUzI1NiJ9"));
+        assert!(result.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_redact_secrets_password_in_connection() {
+        let input = "postgres://user:password=mysecret@localhost/db";
+        let result = redact_secrets(input);
+        assert!(!result.contains("mysecret"));
+        assert!(result.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_redact_secrets_preserves_normal_text() {
+        let input = "This is a normal log message with no secrets";
+        let result = redact_secrets(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_redact_secrets_token_prefix() {
+        let input = "token-abcdefghijklmnop is being used";
+        let result = redact_secrets(input);
+        assert!(!result.contains("token-abcdefghijklmnop"));
+        assert!(result.contains("[REDACTED]"));
     }
 }

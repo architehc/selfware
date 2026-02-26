@@ -235,9 +235,22 @@ impl SecretScanner {
                 r#"(?i)aws(.{0,20})?['"][0-9a-zA-Z/+]{40}['"]"#,
                 SecuritySeverity::Critical,
             ),
+            // GitHub classic tokens (ghp_, gho_, ghu_, ghs_, ghr_)
             SecretPattern::new(
                 "GitHub Token",
                 r"gh[pousr]_[A-Za-z0-9_]{36,}",
+                SecuritySeverity::Critical,
+            ),
+            // GitHub fine-grained personal access tokens
+            SecretPattern::new(
+                "GitHub Fine-Grained Token",
+                r"github_pat_[A-Za-z0-9_]{22,}",
+                SecuritySeverity::Critical,
+            ),
+            // GitLab personal/project/group access tokens
+            SecretPattern::new(
+                "GitLab Token",
+                r"glpat-[A-Za-z0-9_\-]{20,}",
                 SecuritySeverity::Critical,
             ),
             SecretPattern::new(
@@ -248,6 +261,18 @@ impl SecretScanner {
             SecretPattern::new(
                 "Private Key",
                 r"-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+                SecuritySeverity::Critical,
+            ),
+            // Google API keys (AIza...)
+            SecretPattern::new(
+                "Google API Key",
+                r"AIza[a-zA-Z0-9_\-]{35}",
+                SecuritySeverity::High,
+            ),
+            // Stripe secret keys
+            SecretPattern::new(
+                "Stripe Key",
+                r"(sk_live_|rk_live_|pk_live_)[a-zA-Z0-9]{24,}",
                 SecuritySeverity::Critical,
             ),
             SecretPattern::new(
@@ -270,10 +295,24 @@ impl SecretScanner {
                 r"(?i)(postgres|mysql|mongodb)://[^:]+:[^@]+@",
                 SecuritySeverity::High,
             ),
+            // Slack tokens: bot (xoxb-), user (xoxp-), app-level (xoxa-),
+            // legacy (xoxs-), refresh (xoxr-)
             SecretPattern::new(
                 "Slack Token",
-                r"xox[baprs]-[0-9A-Za-z]{10,}",
+                r"xox[bpsar]-[0-9A-Za-z\-]{10,}",
                 SecuritySeverity::High,
+            ),
+            // Partial JWT / base64-encoded token starting with eyJ
+            SecretPattern::new(
+                "JWT Partial",
+                r"eyJ[a-zA-Z0-9_/+\-]{30,}",
+                SecuritySeverity::Medium,
+            ),
+            // Generic high-entropy base64 strings
+            SecretPattern::new(
+                "Base64 Secret",
+                r#"(?i)(?:key|token|secret|password|credential|auth)\s*[:=]\s*['"]?[A-Za-z0-9+/=_\-]{40,}['"]?"#,
+                SecuritySeverity::Medium,
             ),
         ]
     }
@@ -331,7 +370,7 @@ impl SecretScanner {
         if secret.len() <= 8 {
             "*".repeat(secret.len())
         } else {
-            format!("{}...{}", &secret[..4], "*".repeat(secret.len() - 4))
+            format!("{}...{}", secret.chars().take(4).collect::<String>(), "*".repeat(secret.chars().count().saturating_sub(4)))
         }
     }
 

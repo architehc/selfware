@@ -213,13 +213,38 @@ async fn fetch_with_chrome(
     }))
 }
 
+/// Escape a string for safe embedding in a JavaScript single-quoted string literal.
+fn escape_js_string(s: &str) -> String {
+    let mut escaped = String::with_capacity(s.len() + 16);
+    for c in s.chars() {
+        match c {
+            '\\' => escaped.push_str("\\\\"),
+            '\'' => escaped.push_str("\\'"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\0' => escaped.push_str("\\0"),
+            '\u{2028}' => escaped.push_str("\\u2028"),
+            '\u{2029}' => escaped.push_str("\\u2029"),
+            '`' => escaped.push_str("\\`"),
+            '$' => escaped.push_str("\\$"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
 async fn fetch_with_playwright(
     url: &str,
     timeout_secs: u64,
     user_agent: Option<&str>,
     _args: &Value,
 ) -> Result<Value> {
-    // Create a simple playwright script
+    let safe_url = escape_js_string(url);
+    let ua_option = user_agent
+        .map(|ua| format!("userAgent: '{}'", escape_js_string(ua)))
+        .unwrap_or_default();
     let script = format!(
         r#"
 const {{ chromium }} = require('playwright');
@@ -235,10 +260,8 @@ const {{ chromium }} = require('playwright');
     await browser.close();
 }})();
 "#,
-        user_agent
-            .map(|ua| format!("userAgent: '{}'", ua))
-            .unwrap_or_default(),
-        url,
+        ua_option,
+        safe_url,
         timeout_secs * 1000
     );
 
@@ -425,7 +448,11 @@ impl Tool for BrowserScreenshot {
                 }))
             }
             BrowserType::Playwright => {
-                // Use playwright for screenshot
+                let safe_url = escape_js_string(url);
+                let safe_output_path = escape_js_string(output_path);
+                let full_page = args.get("full_page")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let script = format!(
                     r#"
 const {{ chromium }} = require('playwright');
@@ -440,12 +467,10 @@ const {{ chromium }} = require('playwright');
 "#,
                     width,
                     height,
-                    url,
+                    safe_url,
                     timeout_secs * 1000,
-                    output_path,
-                    args.get("full_page")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false)
+                    safe_output_path,
+                    full_page
                 );
 
                 let mut cmd = Command::new("node");
@@ -647,8 +672,12 @@ impl Tool for BrowserEval {
 
         match browser {
             BrowserType::Playwright => {
-                // Escape the script for embedding
-                let escaped_script = script.replace('\\', "\\\\").replace('`', "\\`").replace('$', "\\$");
+                // Pass user script as a JSON-encoded string and evaluate via
+                // new Function() to avoid interpolating untrusted code into the
+                // Node source template.
+                let safe_url = escape_js_string(url);
+                let script_json = serde_json::to_string(script)
+                    .context("Failed to JSON-encode script")?;
 
                 let node_script = format!(
                     r#"
@@ -657,16 +686,17 @@ const {{ chromium }} = require('playwright');
     const browser = await chromium.launch({{ headless: true }});
     const page = await browser.newPage();
     await page.goto('{}', {{ timeout: {} }});
-    const result = await page.evaluate(() => {{
-        {}
-    }});
+    const userScript = {};
+    const result = await page.evaluate((s) => {{
+        return new Function(s)();
+    }}, userScript);
     console.log(JSON.stringify(result));
     await browser.close();
 }})();
 "#,
-                    url,
+                    safe_url,
                     timeout_secs * 1000,
-                    escaped_script
+                    script_json
                 );
 
                 let mut cmd = Command::new("node");

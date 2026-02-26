@@ -811,6 +811,9 @@ impl AuditSummary {
     }
 }
 
+/// Confirmation token required when disabling the sandbox via `set_enabled`.
+pub const SANDBOX_DISABLE_TOKEN: &str = "CONFIRM_SANDBOX_DISABLE";
+
 /// Security sandbox combining all policies
 #[derive(Debug)]
 pub struct SecuritySandbox {
@@ -898,15 +901,45 @@ impl SecuritySandbox {
 
     /// Enable/disable the sandbox.
     ///
-    /// WARNING: Disabling the sandbox bypasses all safety checks. An audit
-    /// log entry is emitted so that disabling is never silent.
-    pub fn set_enabled(&mut self, enabled: bool) {
+    /// WARNING: Disabling the sandbox bypasses all safety checks.
+    ///
+    /// Callers must supply `confirmation: Some(SANDBOX_DISABLE_TOKEN)` when
+    /// disabling. Re-enabling does not require a token.
+    pub fn set_enabled(&mut self, enabled: bool, confirmation: Option<&str>) -> Result<()> {
         if self.enabled && !enabled {
+            match confirmation {
+                Some(token) if token == SANDBOX_DISABLE_TOKEN => {}
+                Some(_) => {
+                    self.audit.log_action(
+                        "sandbox_disable_rejected",
+                        "system",
+                        "invalid confirmation token",
+                        AuditResult::Denied,
+                        RiskLevel::Critical,
+                    );
+                    return Err(anyhow!(
+                        "Sandbox disable rejected: invalid confirmation token"
+                    ));
+                }
+                None => {
+                    self.audit.log_action(
+                        "sandbox_disable_rejected",
+                        "system",
+                        "no confirmation token provided",
+                        AuditResult::Denied,
+                        RiskLevel::Critical,
+                    );
+                    return Err(anyhow!(
+                        "Sandbox disable rejected: confirmation token required. \
+                         Pass confirmation: Some(SANDBOX_DISABLE_TOKEN) to confirm."
+                    ));
+                }
+            }
             tracing::warn!("Sandbox DISABLED — all safety checks will be bypassed");
             self.audit.log_action(
                 "sandbox_disable",
                 "system",
-                "sandbox disabled by caller",
+                "sandbox disabled by caller (confirmed)",
                 AuditResult::Allowed,
                 RiskLevel::Critical,
             );
@@ -921,6 +954,7 @@ impl SecuritySandbox {
             );
         }
         self.enabled = enabled;
+        Ok(())
     }
 
     /// Check file access
@@ -1384,9 +1418,26 @@ mod tests {
     #[test]
     fn test_security_sandbox_disabled() {
         let mut sandbox = SecuritySandbox::new();
-        sandbox.set_enabled(false);
+        sandbox
+            .set_enabled(false, Some(SANDBOX_DISABLE_TOKEN))
+            .expect("disabling with correct token should succeed");
 
         assert!(!sandbox.needs_confirmation(RiskLevel::Critical));
+    }
+
+    #[test]
+    fn test_security_sandbox_disable_requires_token() {
+        let mut sandbox = SecuritySandbox::new();
+        assert!(sandbox.set_enabled(false, None).is_err());
+        assert!(sandbox.enabled);
+        assert!(sandbox.set_enabled(false, Some("wrong")).is_err());
+        assert!(sandbox.enabled);
+        assert!(sandbox
+            .set_enabled(false, Some(SANDBOX_DISABLE_TOKEN))
+            .is_ok());
+        assert!(!sandbox.enabled);
+        assert!(sandbox.set_enabled(true, None).is_ok());
+        assert!(sandbox.enabled);
     }
 
     #[test]
@@ -1866,7 +1917,9 @@ mod tests {
     #[test]
     fn test_security_sandbox_disabled_network() {
         let mut sandbox = SecuritySandbox::new();
-        sandbox.set_enabled(false);
+        sandbox
+            .set_enabled(false, Some(SANDBOX_DISABLE_TOKEN))
+            .expect("disabling with correct token should succeed");
 
         // When disabled, even external hosts should be allowed
         let result = sandbox.check_network_access("malicious.com", 80, NetworkAccess::Connect);

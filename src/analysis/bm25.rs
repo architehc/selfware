@@ -283,6 +283,12 @@ impl BM25Index {
         let dl = doc.length as f32;
         let avgdl = self.avgdl;
 
+        // Guard against division by zero when document length or average
+        // document length is zero.
+        if dl <= 0.0 || avgdl <= 0.0 {
+            return 0.0;
+        }
+
         for token in query_tokens {
             if let Some(&idf) = self.idf.get(token) {
                 let tf = *doc.term_freqs.get(token).unwrap_or(&0) as f32;
@@ -290,6 +296,9 @@ impl BM25Index {
                     // BM25 scoring formula
                     let numerator = tf * (self.k1 + 1.0);
                     let denominator = tf + self.k1 * (1.0 - self.b + self.b * (dl / avgdl));
+                    if denominator <= 0.0 {
+                        continue;
+                    }
                     score += idf * (numerator / denominator);
                 }
             }

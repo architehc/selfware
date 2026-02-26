@@ -135,8 +135,28 @@ fn json_block_regex() -> &'static Regex {
     })
 }
 
+/// Maximum input size for the tool parser (10 MB).
+/// Inputs larger than this are truncated to prevent pathological regex performance.
+const MAX_TOOL_PARSER_INPUT_SIZE: usize = 10 * 1024 * 1024;
+
+/// Decode standard XML entities in a string.
+fn decode_xml_entities(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+}
+
 /// Parse content for tool calls using multiple strategies
 pub fn parse_tool_calls(content: &str) -> ParseResult {
+    // Enforce maximum input size to prevent pathological regex performance
+    let content = if content.len() > MAX_TOOL_PARSER_INPUT_SIZE {
+        &content[..MAX_TOOL_PARSER_INPUT_SIZE]
+    } else {
+        content
+    };
+
     let mut result = ParseResult {
         tool_calls: Vec::new(),
         text_content: content.to_string(),
@@ -354,10 +374,11 @@ fn parse_qwen3_parameters(params_str: &str) -> Result<serde_json::Value> {
 
     for cap in param_regex.captures_iter(params_str) {
         let key = cap[1].trim().to_string();
-        let value = cap[2].trim();
+        let raw_value = cap[2].trim();
+        let value = decode_xml_entities(raw_value);
 
         // Try to parse value as JSON (for booleans, numbers, arrays, objects)
-        let json_value = if let Ok(v) = serde_json::from_str::<serde_json::Value>(value) {
+        let json_value = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&value) {
             v
         } else {
             // Treat as string
@@ -395,7 +416,8 @@ fn parse_xml_arguments(args_str: &str) -> Result<serde_json::Value> {
 
     for cap in elem_regex.captures_iter(trimmed) {
         let open_tag = &cap[1];
-        let value = cap[2].trim();
+        let raw_value = cap[2].trim();
+        let value = decode_xml_entities(raw_value);
         let close_tag = &cap[3];
 
         // Only accept if tags match
@@ -403,7 +425,7 @@ fn parse_xml_arguments(args_str: &str) -> Result<serde_json::Value> {
             let key = open_tag.to_string();
 
             // Try to parse value as JSON (for booleans, numbers, etc.)
-            let json_value = if let Ok(v) = serde_json::from_str::<serde_json::Value>(value) {
+            let json_value = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&value) {
                 v
             } else {
                 serde_json::Value::String(value.to_string())

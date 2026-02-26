@@ -5,6 +5,33 @@ use git2::{Repository, StatusOptions};
 use serde_json::Value;
 use tracing::info;
 
+/// Validate a git tag name to prevent shell injection.
+///
+/// Only allows alphanumeric characters plus `-`, `.`, `_`, and `/`.
+/// Rejects spaces, shell metacharacters, control characters, and empty names.
+fn validate_tag_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("Tag name must not be empty");
+    }
+    if name.len() > 256 {
+        anyhow::bail!("Tag name too long (max 256 characters)");
+    }
+    for c in name.chars() {
+        if !(c.is_alphanumeric() || c == '-' || c == '.' || c == '_' || c == '/') {
+            anyhow::bail!(
+                "Invalid character '{}' in tag name '{}'. Only alphanumeric, '-', '.', '_', '/' are allowed.",
+                c,
+                name
+            );
+        }
+    }
+    // Reject names starting with '-' (could be interpreted as a flag)
+    if name.starts_with('-') {
+        anyhow::bail!("Tag name must not start with '-'");
+    }
+    Ok(())
+}
+
 pub struct GitStatus;
 pub struct GitDiff;
 pub struct GitCommit;
@@ -97,6 +124,7 @@ impl Tool for GitCheckpoint {
 
         // Create or move tag
         if let Some(tag_name) = tag {
+            validate_tag_name(tag_name)?;
             tokio::process::Command::new("git")
                 .args(["tag", "-f", tag_name, &hash])
                 .output()

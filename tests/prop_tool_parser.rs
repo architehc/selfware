@@ -2,6 +2,8 @@ use proptest::prelude::*;
 use selfware::tool_parser::{parse_tool_calls, ParseMethod};
 
 proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
     #[test]
     fn test_parse_tool_calls_never_panics(s in r"\PC*") {
         let _ = parse_tool_calls(&s);

@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::Duration;
 
 /// Returns the platform-appropriate shell and flag for command execution.
@@ -82,6 +83,44 @@ impl Tool for ShellExec {
         for pattern in dangerous_patterns {
             if lower_cmd.contains(pattern) {
                 anyhow::bail!("Blocked potentially dangerous shell pattern: {}", pattern);
+            }
+        }
+
+        // Validate cwd: must be an absolute path without path traversal components
+        if let Some(cwd) = &args.cwd {
+            let cwd_path = Path::new(cwd);
+            if !cwd_path.is_absolute() {
+                anyhow::bail!("cwd must be an absolute path, got: {}", cwd);
+            }
+            for component in cwd_path.components() {
+                if let std::path::Component::ParentDir = component {
+                    anyhow::bail!(
+                        "cwd must not contain path traversal (..): {}",
+                        cwd
+                    );
+                }
+            }
+        }
+
+        // Validate environment variable names and values
+        for (name, value) in &args.env {
+            if name.contains('=') {
+                anyhow::bail!(
+                    "Environment variable name must not contain '=': {}",
+                    name
+                );
+            }
+            if name.contains('\0') {
+                anyhow::bail!(
+                    "Environment variable name must not contain null bytes: {}",
+                    name
+                );
+            }
+            if value.contains('\0') {
+                anyhow::bail!(
+                    "Environment variable value must not contain null bytes (var: {})",
+                    name
+                );
             }
         }
 

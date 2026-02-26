@@ -15,7 +15,7 @@ fn shell_call(command: &str) -> ToolCall {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(ProptestConfig::with_cases(256))]
 
     #[test]
     fn prop_shell_checker_never_panics(command in ".*") {
