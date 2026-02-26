@@ -306,9 +306,9 @@ impl SafetyChecker {
             "2852039166",          // decimal integer
             "0251.0376.0251.0376", // dotted octal
             // 100.100.100.200 encoded forms
-            "0x646464c8", // hex integer
+            "0x646464c8",          // hex integer
             "0x64.0x64.0x64.0xc8", // dotted hex
-            "1684300232", // decimal integer
+            "1684300232",          // decimal integer
             "0144.0144.0144.0310", // dotted octal
         ];
         for encoded in &encoded_bypasses {
