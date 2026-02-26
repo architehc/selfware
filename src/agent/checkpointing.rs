@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
 use colored::*;
 use std::time::Instant;
-#[cfg(feature = "resilience")]
-use tracing::warn;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::*;
 use crate::checkpoint::{capture_git_state, CheckpointManager, TaskCheckpoint, TaskStatus};
+#[cfg(feature = "self-improvement")]
+use crate::cognitive::metrics::{MetricsStore, PerformanceSnapshot};
 #[cfg(feature = "resilience")]
 use crate::self_healing::ErrorOccurrence;
 
@@ -148,12 +148,43 @@ impl Agent {
 
     /// Mark current task as completed
     pub(super) fn complete_checkpoint(&mut self) -> Result<()> {
+        // Collect metrics before moving the borrow
+        #[cfg(feature = "self-improvement")]
+        if let Some(ref checkpoint) = self.current_checkpoint {
+            let errors_total = checkpoint.errors.len();
+            let errors_recovered = checkpoint.errors.iter().filter(|e| e.recovered).count();
+            let tool_calls = checkpoint.tool_calls.len();
+            let iterations = checkpoint.current_iteration;
+            let tokens = checkpoint.estimated_tokens;
+            let task_succeeded = true; // we're in complete_checkpoint
+
+            let snapshot = PerformanceSnapshot::from_checkpoint_data(
+                iterations,
+                tool_calls,
+                errors_total,
+                errors_recovered,
+                errors_total == 0, // first-try verification = no errors
+                tokens,
+                task_succeeded,
+            );
+
+            let metrics_store = MetricsStore::new();
+            if let Err(e) = metrics_store.record(&snapshot) {
+                warn!("Failed to record performance metrics: {}", e);
+            } else {
+                info!("Recorded performance snapshot ({} tool calls, {} errors)", tool_calls, errors_total);
+            }
+        }
+
         if let Some(ref mut checkpoint) = self.current_checkpoint {
             checkpoint.set_status(TaskStatus::Completed);
-            
-            // Generate final summary of what worked and failed
-            self.reflect_and_learn()?;
-            
+        }
+
+        // Generate final summary of what worked and failed
+        // (done outside the borrow of current_checkpoint to avoid double borrow)
+        self.reflect_and_learn()?;
+
+        if let Some(ref checkpoint) = self.current_checkpoint {
             if let Some(ref manager) = self.checkpoint_manager {
                 manager.save(checkpoint)?;
                 self.last_checkpoint_tool_calls = checkpoint.tool_calls.len();
@@ -172,30 +203,87 @@ impl Agent {
                 if error.recovered {
                     self.cognitive_state.episodic_memory.what_worked(
                         "error_recovery",
-                        &format!("Successfully recovered from error at step {}: {}", error.step, error.error)
+                        &format!(
+                            "Successfully recovered from error at step {}: {}",
+                            error.step, error.error
+                        ),
                     );
                 } else {
                     self.cognitive_state.episodic_memory.what_failed(
                         "task_execution",
-                        &format!("Failed to recover from error: {}", error.error)
+                        &format!("Failed to recover from error: {}", error.error),
                     );
                 }
             }
         }
 
+        let stats = self.self_improvement.get_stats();
+        if let Some(tool_stats) = stats.tool_stats {
+            if tool_stats.total_records > 0 {
+                self.cognitive_state.episodic_memory.what_worked(
+                    "self_improvement",
+                    &format!(
+                        "Tool learning tracked {} executions across {} tools ({} successful).",
+                        tool_stats.total_records,
+                        tool_stats.unique_tools,
+                        tool_stats.successful_records
+                    ),
+                );
+            }
+        }
+        if let Some(error_stats) = stats.error_stats {
+            if error_stats.total_errors > 0 {
+                self.cognitive_state.episodic_memory.what_failed(
+                    "self_improvement",
+                    &format!(
+                        "Observed {} errors with {} learned patterns ({} recovered).",
+                        error_stats.total_errors,
+                        error_stats.pattern_count,
+                        error_stats.recovered_count
+                    ),
+                );
+            }
+        }
+
+        let preferred_tools: Vec<String> = self
+            .self_improvement
+            .best_tools_for(self.learning_context())
+            .into_iter()
+            .filter(|(_, score)| *score >= 0.6)
+            .take(3)
+            .map(|(tool, score)| format!("{} ({:.0}% confidence)", tool, score * 100.0))
+            .collect();
+        if !preferred_tools.is_empty() {
+            self.cognitive_state.episodic_memory.what_worked(
+                "tool_selection",
+                &format!(
+                    "Preferred tools for similar tasks: {}",
+                    preferred_tools.join(", ")
+                ),
+            );
+        }
+
         // Save global episodic memory
-        let global_memory_path = dirs::data_local_dir()
+        let data_dir = dirs::data_local_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("selfware")
-            .join("global_episodic_memory.json");
-            
+            .join("selfware");
+        let global_memory_path = data_dir.join("global_episodic_memory.json");
+
         if let Some(parent) = global_memory_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        
+
         let content = serde_json::to_string_pretty(&self.cognitive_state.episodic_memory)?;
         std::fs::write(&global_memory_path, content)?;
         info!("Saved global episodic memory");
+
+        // Save self-improvement engine state
+        let engine_path = data_dir.join("improvement_engine.json");
+        if let Err(e) = self.self_improvement.save(&engine_path) {
+            warn!("Failed to save improvement engine state: {}", e);
+        } else {
+            info!("Saved self-improvement engine state");
+        }
 
         Ok(())
     }

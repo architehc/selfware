@@ -261,7 +261,7 @@ impl MultiAgentChat {
                     ) => {
                         if failure_policy == MultiAgentFailurePolicy::FailFast {
                             // Check if this result was a failure
-                            if let Ok(Ok(())) = res {
+                            if let Ok(()) = res {
                                 // Agent completed successfully, but we need to check the actual result status
                                 // because run_single_agent returns Ok(()) even if LLM call failed.
                                 // In this simplified implementation, we'll let run_single_agent 

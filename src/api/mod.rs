@@ -8,7 +8,7 @@ use tracing::{debug, warn};
 
 pub mod types;
 
-use crate::errors::{ApiError, SelfwareError};
+use crate::errors::ApiError;
 use types::*;
 
 /// Trait abstraction over the LLM API client, enabling test mocking.
@@ -627,7 +627,6 @@ impl ApiClient {
         Err(last_error.unwrap_or_else(|| {
             ApiError::Network("Request failed after all retries".to_string()).into()
         }))
-    }
     }
 }
 

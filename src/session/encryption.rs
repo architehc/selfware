@@ -2,8 +2,8 @@ use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
-use anyhow::{Context, Result};
-use rand::{RngCore, thread_rng};
+use anyhow::Result;
+use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::sync::OnceLock;
 
@@ -37,7 +37,7 @@ impl EncryptionManager {
         
         // Generate a random 12-byte nonce
         let mut nonce_bytes = [0u8; 12];
-        thread_rng().fill_bytes(&mut nonce_bytes);
+        rand::rng().fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         let ciphertext = cipher
@@ -72,18 +72,20 @@ impl EncryptionManager {
 
     /// Try to load password from OS keychain
     pub fn load_from_keychain() -> Result<Option<String>> {
-        let entry = keyring::Entry::new("selfware", &whoami::username())?;
+        let entry = keyring::Entry::new("selfware", &whoami::username().unwrap_or_else(|_| "selfware_user".to_string()))
+            .map_err(|e| anyhow::anyhow!("Keyring error: {}", e))?;
         match entry.get_password() {
             Ok(p) => Ok(Some(p)),
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(e.into()),
+            Err(e) => Err(anyhow::anyhow!("Keyring error: {}", e)),
         }
     }
 
     /// Save password to OS keychain
     pub fn save_to_keychain(password: &str) -> Result<()> {
-        let entry = keyring::Entry::new("selfware", &whoami::username())?;
-        entry.set_password(password)?;
+        let entry = keyring::Entry::new("selfware", &whoami::username().unwrap_or_else(|_| "selfware_user".to_string()))
+            .map_err(|e| anyhow::anyhow!("Keyring error: {}", e))?;
+        entry.set_password(password).map_err(|e| anyhow::anyhow!("Keyring error: {}", e))?;
         Ok(())
     }
 }
