@@ -6,7 +6,7 @@ async fn main() -> ExitCode {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("Error: {}", e);
-            
+
             if selfware::errors::is_confirmation_error(&e) {
                 return ExitCode::from(6); // Confirmation required
             }

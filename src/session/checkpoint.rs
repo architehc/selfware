@@ -13,7 +13,7 @@
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -49,7 +49,7 @@ impl CheckpointEnvelope {
         use hmac::{Hmac, Mac};
         let canonical =
             serde_json::to_string(&payload).context("Failed to serialize payload for hashing")?;
-            
+
         let mut mac = Hmac::<Sha256>::new_from_slice(&Self::get_hmac_key())
             .expect("HMAC can take key of any size");
         mac.update(canonical.as_bytes());
@@ -65,12 +65,12 @@ impl CheckpointEnvelope {
         use hmac::{Hmac, Mac};
         let canonical = serde_json::to_string(&self.payload)
             .context("Failed to serialize payload for verification")?;
-            
+
         let mut mac = Hmac::<Sha256>::new_from_slice(&Self::get_hmac_key())
             .expect("HMAC can take key of any size");
         mac.update(canonical.as_bytes());
         let expected = hex::encode(mac.finalize().into_bytes());
-        
+
         if expected != self.sha256 {
             bail!(
                 "Checkpoint integrity check failed: expected HMAC {}, got {}",

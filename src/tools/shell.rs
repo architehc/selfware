@@ -72,19 +72,19 @@ impl Tool for ShellExec {
         // Block dangerous patterns that are common in reverse shells and
         // data exfiltration payloads. This is defense-in-depth; the safety
         // checker provides the primary validation layer.
-                let lower_cmd = args.command.to_lowercase();
-                let dangerous_patterns: &[&str] = &[
-                    "/dev/tcp/",
-                    "/dev/udp/",
-                    "| bash -i",
-                    "| sh -i",
-                    "mkfifo /tmp",
-                ];
-                for pattern in dangerous_patterns {
-                    if lower_cmd.contains(pattern) {
-                        anyhow::bail!("Blocked potentially dangerous shell pattern: {}", pattern);
-                    }
-                }
+        let lower_cmd = args.command.to_lowercase();
+        let dangerous_patterns: &[&str] = &[
+            "/dev/tcp/",
+            "/dev/udp/",
+            "| bash -i",
+            "| sh -i",
+            "mkfifo /tmp",
+        ];
+        for pattern in dangerous_patterns {
+            if lower_cmd.contains(pattern) {
+                anyhow::bail!("Blocked potentially dangerous shell pattern: {}", pattern);
+            }
+        }
         // Validate cwd: must be an absolute path without path traversal components
         if let Some(cwd) = &args.cwd {
             let cwd_path = Path::new(cwd);

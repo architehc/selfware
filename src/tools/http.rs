@@ -98,12 +98,12 @@ impl Tool for HttpRequest {
 
         // Block requests to private/internal network addresses (SSRF protection)
         // and pin DNS resolution to prevent rebinding attacks.
-        let mut builder = Client::builder()
-            .timeout(Duration::from_secs(args.timeout_secs));
+        let mut builder = Client::builder().timeout(Duration::from_secs(args.timeout_secs));
 
         if let Some(host) = url.host_str() {
-            let allow_private = std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1";
-            
+            let allow_private =
+                std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1";
+
             // Resolve the hostname manually to check the actual IP and pin it
             if host.parse::<std::net::IpAddr>().is_err() {
                 use std::net::ToSocketAddrs;
@@ -112,7 +112,11 @@ impl Tool for HttpRequest {
                     if let Some(addr) = addrs.next() {
                         let ip_str = addr.ip().to_string();
                         if is_private_network_host(&ip_str) && !allow_private {
-                            anyhow::bail!("DNS rebinding blocked: {} resolves to private IP {}", host, ip_str);
+                            anyhow::bail!(
+                                "DNS rebinding blocked: {} resolves to private IP {}",
+                                host,
+                                ip_str
+                            );
                         }
                         // Pin the resolved IP so the HTTP client doesn't re-resolve it
                         builder = builder.resolve(host, addr);
@@ -125,9 +129,12 @@ impl Tool for HttpRequest {
                     host
                 );
             }
-            
+
             if is_private_network_host(host) && allow_private {
-                tracing::warn!("Allowing request to private network (SELFWARE_ALLOW_PRIVATE_NETWORK=1): {}", host);
+                tracing::warn!(
+                    "Allowing request to private network (SELFWARE_ALLOW_PRIVATE_NETWORK=1): {}",
+                    host
+                );
             }
         }
 

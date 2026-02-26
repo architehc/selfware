@@ -848,22 +848,23 @@ impl CodeChunker {
 
     /// Chunk Rust code by functions, structs, etc.
     pub fn chunk_rust(&self, content: &str, file_path: &Path) -> Vec<CodeChunk> {
-        static PATTERNS: once_cell::sync::Lazy<Vec<(regex::Regex, ChunkType)>> = once_cell::sync::Lazy::new(|| {
-            [
-                (r"^\s*(pub\s+)?(async\s+)?fn\s+", ChunkType::Function),
-                (r"^\s*(pub\s+)?struct\s+", ChunkType::Struct),
-                (r"^\s*(pub\s+)?enum\s+", ChunkType::Enum),
-                (r"^\s*(pub\s+)?trait\s+", ChunkType::Trait),
-                (r"^\s*impl\s+", ChunkType::Impl),
-                (r"^\s*(pub\s+)?mod\s+", ChunkType::Module),
-                (r"^\s*#\[test\]", ChunkType::Test),
-                (r"^\s*(pub\s+)?const\s+", ChunkType::Constant),
-                (r"^\s*use\s+", ChunkType::Import),
-            ]
-            .into_iter()
-            .filter_map(|(pat, ct)| regex::Regex::new(pat).ok().map(|re| (re, ct)))
-            .collect()
-        });
+        static PATTERNS: once_cell::sync::Lazy<Vec<(regex::Regex, ChunkType)>> =
+            once_cell::sync::Lazy::new(|| {
+                [
+                    (r"^\s*(pub\s+)?(async\s+)?fn\s+", ChunkType::Function),
+                    (r"^\s*(pub\s+)?struct\s+", ChunkType::Struct),
+                    (r"^\s*(pub\s+)?enum\s+", ChunkType::Enum),
+                    (r"^\s*(pub\s+)?trait\s+", ChunkType::Trait),
+                    (r"^\s*impl\s+", ChunkType::Impl),
+                    (r"^\s*(pub\s+)?mod\s+", ChunkType::Module),
+                    (r"^\s*#\[test\]", ChunkType::Test),
+                    (r"^\s*(pub\s+)?const\s+", ChunkType::Constant),
+                    (r"^\s*use\s+", ChunkType::Import),
+                ]
+                .into_iter()
+                .filter_map(|(pat, ct)| regex::Regex::new(pat).ok().map(|re| (re, ct)))
+                .collect()
+            });
 
         let mut chunks = Vec::new();
         let lines: Vec<&str> = content.lines().collect();

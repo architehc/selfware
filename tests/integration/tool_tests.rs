@@ -4,7 +4,7 @@
 //! and handle responses from the local model.
 
 use super::helpers::*;
-use selfware::tools::ToolRegistry;
+use selfware::tools::{Tool, ToolRegistry};
 use serde_json::json;
 use std::time::Duration;
 
@@ -199,19 +199,13 @@ async fn test_all_tools_have_valid_schemas() {
 #[tokio::test]
 #[cfg(feature = "integration")]
 async fn test_file_write_read_roundtrip() {
-    let registry = ToolRegistry::new();
-    let write_tool = registry
-        .get("file_write")
-        .expect("file_write tool should exist");
-    let read_tool = registry
-        .get("file_read")
-        .expect("file_read tool should exist");
+    let mut write_tool = selfware::tools::file::FileWrite::new();
+    let mut read_tool = selfware::tools::file::FileRead::new();
 
-    // Set test mode so the safety validator permits absolute paths
-    // (integration tests don't run under #[cfg(test)] context)
     let mut cfg = selfware::config::SafetyConfig::default();
     cfg.allowed_paths = vec!["/**".to_string()];
-    selfware::tools::file::init_safety_config(&cfg);
+    write_tool.safety_config = Some(cfg.clone());
+    read_tool.safety_config = Some(cfg);
 
     let test_content = "Integration test content: Hello, Selfware!";
     let test_path = std::env::temp_dir()
