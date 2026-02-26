@@ -1044,6 +1044,7 @@ pub fn create_security_swarm() -> Swarm {
 
 #[cfg(test)]
 mod tests {
+    use tracing::warn;
     use super::*;
 
     #[test]
@@ -1435,7 +1436,7 @@ mod tests {
         // Phase 1: Architect proposes design in shared memory
         {
             let memory = swarm.memory();
-            let mut mem = memory.write().unwrap_or_else(|e| e.into_inner());
+            let mut mem = memory.write().unwrap_or_else(|e| { warn!("Swarm shared memory write lock poisoned, recovering"); e.into_inner() });
 
             mem.write(
                 "feature:auth:design",
@@ -1506,7 +1507,7 @@ mod tests {
         // Store decision in shared memory
         {
             let memory = swarm.memory();
-            let mut mem = memory.write().unwrap_or_else(|e| e.into_inner());
+            let mut mem = memory.write().unwrap_or_else(|e| { warn!("Swarm shared memory write lock poisoned, recovering"); e.into_inner() });
             mem.write(
                 "decision:auth:approach",
                 auth_outcome.as_ref().unwrap(),
@@ -1548,7 +1549,7 @@ mod tests {
         // Phase 5: Store implementation results in shared memory
         {
             let memory = swarm.memory();
-            let mut mem = memory.write().unwrap_or_else(|e| e.into_inner());
+            let mut mem = memory.write().unwrap_or_else(|e| { warn!("Swarm shared memory write lock poisoned, recovering"); e.into_inner() });
 
             mem.write(
                 "impl:auth:token_service",
@@ -1610,7 +1611,7 @@ mod tests {
         // Phase 7: Verify shared memory state
         {
             let memory = swarm.memory();
-            let mem = memory.read().unwrap_or_else(|e| e.into_inner());
+            let mem = memory.read().unwrap_or_else(|e| { warn!("Swarm shared memory read lock poisoned, recovering"); e.into_inner() });
 
             // Check all entries exist
             assert!(mem.peek("feature:auth:design").is_some());
@@ -1760,7 +1761,7 @@ mod tests {
         // Writer stores state
         {
             let memory = swarm.memory();
-            let mut mem = memory.write().unwrap_or_else(|e| e.into_inner());
+            let mut mem = memory.write().unwrap_or_else(|e| { warn!("Swarm shared memory write lock poisoned, recovering"); e.into_inner() });
 
             mem.write("state:phase", "testing", &writer_id);
             mem.write("state:tests_passed", "42", &writer_id);
@@ -1770,7 +1771,7 @@ mod tests {
         // Reader accesses state
         {
             let memory = swarm.memory();
-            let mut mem = memory.write().unwrap_or_else(|e| e.into_inner());
+            let mut mem = memory.write().unwrap_or_else(|e| { warn!("Swarm shared memory write lock poisoned, recovering"); e.into_inner() });
 
             let phase = mem.read("state:phase", &reader_id);
             assert_eq!(phase, Some("testing".to_string()));
@@ -1782,7 +1783,7 @@ mod tests {
         // Verify access log shows both agents
         {
             let memory = swarm.memory();
-            let mem = memory.read().unwrap_or_else(|e| e.into_inner());
+            let mem = memory.read().unwrap_or_else(|e| { warn!("Swarm shared memory read lock poisoned, recovering"); e.into_inner() });
             let log = mem.access_log();
 
             let writer_actions: Vec<_> = log.iter().filter(|a| a.agent_id == writer_id).collect();

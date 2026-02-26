@@ -58,8 +58,36 @@ impl StreamingResponse {
             let mut stream = self.response.bytes_stream();
             let mut buffer = String::new();
             let mut accumulator = ToolCallAccumulator::new();
+            // Timeout: treat stream as dead if no data for 60 seconds
+            let chunk_timeout = Duration::from_secs(60);
 
-            while let Some(chunk_result) = stream.next().await {
+            loop {
+                let chunk_opt =
+                    match tokio::time::timeout(chunk_timeout, stream.next()).await {
+                        Ok(Some(result)) => Some(result),
+                        Ok(None) => None, // Stream ended
+                        Err(_elapsed) => {
+                            for call in accumulator.flush() {
+                                if tx
+                                    .send(Ok(StreamChunk::ToolCall(call)))
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            let _ = tx
+                                .send(Err(anyhow::anyhow!(
+                                    "Stream timeout: no data for {} seconds",
+                                    chunk_timeout.as_secs()
+                                )))
+                                .await;
+                            return;
+                        }
+                    };
+                let Some(chunk_result) = chunk_opt else {
+                    break;
+                };
                 match chunk_result {
                     Ok(bytes) => {
                         buffer.push_str(&String::from_utf8_lossy(&bytes));
@@ -84,7 +112,8 @@ impl StreamingResponse {
                                 return;
                             }
                         }
-                        let _ = tx.send(Err(anyhow::anyhow!("Stream error: {}", e))).await;
+                        let _ =
+                            tx.send(Err(anyhow::anyhow!("Stream error: {}", e))).await;
                         return;
                     }
                 }
@@ -539,9 +568,10 @@ impl ApiClient {
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 // Exponential backoff with jitter
                 delay_ms = (delay_ms * 2).min(self.retry_config.max_delay_ms);
-                // Add jitter (±10%)
-                let jitter = (delay_ms as f64 * 0.1 * (rand_jitter() - 0.5)) as u64;
-                delay_ms = delay_ms.saturating_add_signed(jitter as i64);
+                // Add jitter (+-10%) -- use signed arithmetic to avoid u64 overflow
+                let jitter = (delay_ms as f64 * 0.1 * (rand_jitter() - 0.5)) as i64;
+                delay_ms = (delay_ms as i64).saturating_add(jitter).max(1) as u64;
+                delay_ms = delay_ms.min(self.retry_config.max_delay_ms);
             }
 
             debug!("Sending request to {} (attempt {})", url, attempt + 1);
@@ -586,6 +616,15 @@ impl ApiClient {
                         .retryable_status_codes
                         .contains(&status.as_u16())
                     {
+                        // Parse Retry-After header before consuming the body.
+                        // Supports numeric seconds format; capped at 300s.
+                        let retry_after_secs = response
+                            .headers()
+                            .get("retry-after")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|s| s.trim().parse::<u64>().ok())
+                            .map(|s| s.min(300));
+
                         let error_text = response.text().await.unwrap_or_default();
                         warn!("Retryable error ({}): {}", status, error_text);
                         last_error = Some(
@@ -596,9 +635,12 @@ impl ApiClient {
                             .into(),
                         );
 
-                        // Check for Retry-After header
-                        if status == StatusCode::TOO_MANY_REQUESTS {
-                            // Could parse Retry-After header here if needed
+                        // Honour Retry-After as minimum wait for 429/503
+                        if let Some(retry_secs) = retry_after_secs {
+                            let retry_ms = retry_secs * 1000;
+                            if retry_ms > delay_ms {
+                                delay_ms = retry_ms;
+                            }
                         }
                         continue;
                     }

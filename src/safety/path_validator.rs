@@ -69,6 +69,46 @@ impl PathValidator {
             anyhow::bail!("Path contains null bytes");
         }
 
+
+        // Unicode normalization bypass prevention.
+        // Reject paths with characters that look like ASCII but are not.
+        let suspicious_unicode: &[(char, &str)] = &[
+            ('\u{FF0E}', "fullwidth full stop (.)"),
+            ('\u{FF0F}', "fullwidth solidus (/)"),
+            ('\u{FF3C}', "fullwidth reverse solidus (\\)"),
+            ('\u{2024}', "one dot leader (.)"),
+            ('\u{FE52}', "small full stop (.)"),
+            ('\u{2025}', "two dot leader (..)"),
+            ('\u{2026}', "horizontal ellipsis (...)"),
+            ('\u{29F8}', "big solidus (/)"),
+            ('\u{2044}', "fraction slash (/)"),
+            ('\u{2215}', "division slash (/)"),
+            ('\u{FE68}', "small reverse solidus (\\)"),
+        ];
+        for (ch, description) in suspicious_unicode {
+            if path.contains(*ch) {
+                anyhow::bail!(
+                    "Path contains suspicious Unicode character: {} (U+{:04X}) - possible homoglyph bypass attempt",
+                    description,
+                    *ch as u32
+                );
+            }
+        }
+
+        // Reject short path components mixing ASCII dots with non-ASCII chars.
+        for component in path.split('/') {
+            if component.is_empty() {
+                continue;
+            }
+            let has_non_ascii = component.chars().any(|c| !c.is_ascii());
+            let has_dots = component.contains('.');
+            if has_non_ascii && has_dots && component.len() <= 10 {
+                anyhow::bail!(
+                    "Path component '{}' contains suspicious mix of ASCII and non-ASCII characters",
+                    component
+                );
+            }
+        }
         let path_buf = Path::new(path);
         let resolved = if path_buf.is_absolute() {
             path_buf.to_path_buf()

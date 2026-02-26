@@ -25,6 +25,7 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
@@ -336,6 +337,9 @@ pub struct StepResult {
 /// Maximum recursion depth for nested step execution
 const MAX_RECURSION_DEPTH: usize = 10;
 
+/// Maximum number of workflow log entries before oldest entries are evicted.
+const MAX_WORKFLOW_LOG_ENTRIES: usize = 1000;
+
 /// Workflow execution context
 #[derive(Debug, Clone)]
 pub struct WorkflowContext {
@@ -352,7 +356,7 @@ pub struct WorkflowContext {
     /// Start time
     pub started_at: Option<Instant>,
     /// Log messages
-    pub logs: Vec<LogEntry>,
+    pub logs: VecDeque<LogEntry>,
     /// Current recursion depth for nested steps
     pub recursion_depth: usize,
     /// Step IDs currently being executed (for cycle detection)
@@ -382,7 +386,7 @@ impl WorkflowContext {
             current_step: 0,
             status: WorkflowStatus::Pending,
             started_at: None,
-            logs: Vec::new(),
+            logs: VecDeque::new(),
             recursion_depth: 0,
             executing_steps: Vec::new(),
             control_flow_managed_steps: std::collections::HashSet::new(),
@@ -580,9 +584,12 @@ impl WorkflowContext {
         !condition.is_empty() && condition != "0"
     }
 
-    /// Log a message
+    /// Log a message.
+    ///
+    /// When the number of log entries exceeds MAX_WORKFLOW_LOG_ENTRIES, the
+    /// oldest entries are removed to stay within the limit.
     pub fn log(&mut self, level: LogLevel, message: impl Into<String>, step_id: Option<String>) {
-        self.logs.push(LogEntry {
+        self.logs.push_back(LogEntry {
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -591,6 +598,9 @@ impl WorkflowContext {
             message: message.into(),
             step_id,
         });
+        while self.logs.len() > MAX_WORKFLOW_LOG_ENTRIES {
+            self.logs.pop_front();
+        }
     }
 
     /// Get elapsed time in milliseconds
@@ -1597,7 +1607,7 @@ pub struct WorkflowResult {
     /// Step results
     pub step_results: HashMap<String, StepResult>,
     /// Log entries
-    pub logs: Vec<LogEntry>,
+    pub logs: VecDeque<LogEntry>,
     /// Total duration in milliseconds
     pub duration_ms: u64,
 }

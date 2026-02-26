@@ -50,6 +50,7 @@ pub use animation::{
 
 use anyhow::Result;
 use crossterm::{
+    cursor::Show as ShowCursor,
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -211,7 +212,12 @@ impl TuiTerminal {
         std::panic::set_hook(Box::new(move |panic_info| {
             // Best-effort restore — ignore errors since we're already panicking
             let _ = disable_raw_mode();
-            let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+            let _ = execute!(
+                io::stdout(),
+                LeaveAlternateScreen,
+                DisableMouseCapture,
+                ShowCursor
+            );
             original_hook(panic_info);
         }));
 
@@ -371,10 +377,17 @@ pub fn run_tui(model: &str) -> Result<Vec<String>> {
     // Create markdown renderer for rich message display
     let md_renderer = MarkdownRenderer::new();
 
+    // Throttle redraws to ~30fps to avoid wasting CPU
+    let min_draw_interval = Duration::from_millis(33);
+    let mut last_draw = Instant::now() - min_draw_interval;
+    let mut needs_redraw = true;
+
     loop {
         // Update spinner animation
         spinner.tick();
 
+        // Only redraw if enough time has passed and something changed
+        if needs_redraw && last_draw.elapsed() >= min_draw_interval {
         // Render the app
         terminal.terminal().draw(|frame| {
             app.render(frame);
@@ -400,9 +413,13 @@ pub fn run_tui(model: &str) -> Result<Vec<String>> {
             // Markdown renderer would format assistant messages
             let _ = &md_renderer;
         })?;
+        last_draw = Instant::now();
+        needs_redraw = false;
+        } // end redraw throttle
 
         // Handle events
         if let Some(event) = read_event(100)? {
+            needs_redraw = true; // Any event triggers a redraw
             if is_quit(&event) {
                 break;
             }
@@ -454,12 +471,22 @@ where
     let mut terminal = TuiTerminal::new()?;
     let mut app = App::new(model);
 
+    // Throttle redraws to ~30fps to avoid wasting CPU
+    let min_draw_interval = Duration::from_millis(33);
+    let mut last_draw = Instant::now() - min_draw_interval;
+    let mut needs_redraw = true;
+
     loop {
+        if needs_redraw && last_draw.elapsed() >= min_draw_interval {
         terminal.terminal().draw(|frame| {
             app.render(frame);
         })?;
+        last_draw = Instant::now();
+        needs_redraw = false;
+        }
 
         if let Some(event) = read_event(100)? {
+            needs_redraw = true;
             if is_quit(&event) {
                 break;
             }
@@ -539,7 +566,14 @@ pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
     dashboard_state.log(LogLevel::Info, "Dashboard initialized");
     dashboard_state.log(LogLevel::Success, "Connected to model");
 
+    // Throttle redraws to ~30fps to avoid wasting CPU
+    let min_draw_interval = Duration::from_millis(33);
+    let mut last_draw = Instant::now() - min_draw_interval;
+    let mut needs_redraw = true;
+
     loop {
+        // Only redraw if enough time has passed and something changed
+        if needs_redraw && last_draw.elapsed() >= min_draw_interval {
         // Render the dashboard
         terminal.terminal().draw(|frame| {
             let area = frame.size();
@@ -602,9 +636,13 @@ pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
                 render_pause_indicator(frame, area);
             }
         })?;
+        last_draw = Instant::now();
+        needs_redraw = false;
+        } // end redraw throttle
 
         // Handle events
         if let Some(Event::Key(key)) = read_event(100)? {
+            needs_redraw = true;
             // Check if we're in input mode (chat focused with non-empty input or chatting state)
             let in_input_mode = app.state == AppState::Chatting && !show_help;
             let allow_q_quit = !in_input_mode || app.input.is_empty();
@@ -814,12 +852,18 @@ pub fn run_tui_dashboard_with_events(
         state.log(LogLevel::Success, "Connected to model");
     });
 
+    // Throttle redraws to ~30fps to avoid wasting CPU
+    let min_draw_interval = Duration::from_millis(33);
+    let mut last_draw = Instant::now() - min_draw_interval;
+    let mut needs_redraw = true;
+
     loop {
         // Process any pending events from the agent (non-blocking)
         loop {
             match event_rx.try_recv() {
                 Ok(event) => {
                     with_dashboard_state(&shared_state, |state| state.process_event(event));
+                    needs_redraw = true;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -827,11 +871,14 @@ pub fn run_tui_dashboard_with_events(
                     with_dashboard_state(&shared_state, |state| {
                         state.log(LogLevel::Warning, "Event channel disconnected");
                     });
+                    needs_redraw = true;
                     break;
                 }
             }
         }
 
+        // Only redraw if enough time has passed and something changed
+        if needs_redraw && last_draw.elapsed() >= min_draw_interval {
         // Get a copy of the dashboard state for rendering
         let dashboard_state = dashboard_state_snapshot(&shared_state);
 
@@ -891,9 +938,13 @@ pub fn run_tui_dashboard_with_events(
                 render_pause_indicator(frame, area);
             }
         })?;
+        last_draw = Instant::now();
+        needs_redraw = false;
+        } // end redraw throttle
 
         // Handle events (same logic as run_tui_dashboard)
         if let Some(Event::Key(key)) = read_event(100)? {
+            needs_redraw = true;
             let in_input_mode = app.state == AppState::Chatting && !show_help;
             let allow_q_quit = !in_input_mode || app.input.is_empty();
 

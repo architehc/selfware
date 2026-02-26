@@ -9,6 +9,8 @@ async fn test_agent_creation() {
 }
 
 #[tokio::test]
+#[ignore] // TODO: implement -- test body is empty, needs real compression pipeline logic
 async fn test_context_compression_integration() {
     // Tests the full compression pipeline
+    unimplemented!("test_context_compression_integration not yet implemented");
 }

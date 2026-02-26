@@ -37,15 +37,40 @@ fn get_patterns() -> &'static Vec<SecretPattern> {
                 name: "aws_secret_key",
                 regex: Regex::new(r#"(?i)(aws[_-]?secret[_-]?access[_-]?key)\s*[=:]\s*["']?([a-zA-Z0-9/+=]{40})["']?"#).unwrap(),
             },
-            // GitHub tokens
+            // GitHub classic tokens (ghp_)
             SecretPattern {
                 name: "github_token",
-                regex: Regex::new(r#"(ghp_[a-zA-Z0-9]{36}|github_pat_[a-zA-Z0-9_]{22,})"#).unwrap(),
+                regex: Regex::new(r#"(ghp_[a-zA-Z0-9]{36})"#).unwrap(),
+            },
+            // GitHub fine-grained personal access tokens (github_pat_)
+            SecretPattern {
+                name: "github_fine_grained_token",
+                regex: Regex::new(r#"(github_pat_[a-zA-Z0-9_]{22,})"#).unwrap(),
+            },
+            // GitLab tokens (glpat-)
+            SecretPattern {
+                name: "gitlab_token",
+                regex: Regex::new(r#"(glpat-[a-zA-Z0-9_\-]{20,})"#).unwrap(),
             },
             // OpenAI/Anthropic API keys
             SecretPattern {
                 name: "openai_key",
                 regex: Regex::new(r#"(sk-[a-zA-Z0-9]{32,})"#).unwrap(),
+            },
+            // Google API keys
+            SecretPattern {
+                name: "google_api_key",
+                regex: Regex::new(r#"(AIza[a-zA-Z0-9_\-]{35})"#).unwrap(),
+            },
+            // Stripe API keys (secret, restricted, and publishable)
+            SecretPattern {
+                name: "stripe_key",
+                regex: Regex::new(r#"(sk_live_[a-zA-Z0-9]{24,}|rk_live_[a-zA-Z0-9]{24,}|pk_live_[a-zA-Z0-9]{24,})"#).unwrap(),
+            },
+            // Slack tokens (xoxb-, xoxp-, xoxs-, xoxa-, xoxr-)
+            SecretPattern {
+                name: "slack_token",
+                regex: Regex::new(r#"(xox[bpsar]-[a-zA-Z0-9\-]+)"#).unwrap(),
             },
             // Generic secret/password patterns
             SecretPattern {
@@ -62,20 +87,25 @@ fn get_patterns() -> &'static Vec<SecretPattern> {
                 name: "db_connection",
                 regex: Regex::new(r#"(?i)(mongodb|postgres|mysql|redis)://[^\s"'<>]+"#).unwrap(),
             },
-            // JWT tokens (basic pattern)
+            // JWT tokens - full three-part tokens
             SecretPattern {
                 name: "jwt",
                 regex: Regex::new(r#"eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*"#).unwrap(),
             },
-            // Slack tokens
+            // JWT-like base64 tokens (eyJ prefix is base64 for {"): catch partial/header-only
             SecretPattern {
-                name: "slack_token",
-                regex: Regex::new(r#"xox[baprs]-[a-zA-Z0-9-]+"#).unwrap(),
+                name: "jwt_partial",
+                regex: Regex::new(r#"eyJ[a-zA-Z0-9_/+\-]{30,}"#).unwrap(),
             },
             // Generic tokens in env vars
             SecretPattern {
                 name: "env_token",
                 regex: Regex::new(r#"(?i)([A-Z_]*(?:TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL)[A-Z_]*)\s*[=:]\s*["']?([^\s"']{16,})["']?"#).unwrap(),
+            },
+            // Generic high-entropy base64-encoded strings that look like API keys
+            SecretPattern {
+                name: "base64_secret",
+                regex: Regex::new(r#"(?i)(?:key|token|secret|password|credential|auth)\s*[=:]\s*["']?([A-Za-z0-9+/=_\-]{40,})["']?"#).unwrap(),
             },
         ]
     })

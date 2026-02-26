@@ -219,7 +219,7 @@ fn test_workflow_result_helpers() {
         status: WorkflowStatus::Completed,
         outputs: HashMap::from([("out".to_string(), VarValue::String("value".into()))]),
         step_results: HashMap::new(),
-        logs: Vec::new(),
+        logs: VecDeque::new(),
         duration_ms: 1000,
     };
 
@@ -634,7 +634,7 @@ fn test_workflow_result_is_success() {
         status: WorkflowStatus::Completed,
         outputs: HashMap::new(),
         step_results: HashMap::new(),
-        logs: vec![],
+        logs: VecDeque::new(),
         duration_ms: 1000,
     };
 
@@ -648,7 +648,7 @@ fn test_workflow_result_is_not_success() {
         status: WorkflowStatus::Failed,
         outputs: HashMap::new(),
         step_results: HashMap::new(),
-        logs: vec![],
+        logs: VecDeque::new(),
         duration_ms: 1000,
     };
 
@@ -665,7 +665,7 @@ fn test_workflow_result_get_output() {
         status: WorkflowStatus::Completed,
         outputs,
         step_results: HashMap::new(),
-        logs: vec![],
+        logs: VecDeque::new(),
         duration_ms: 0,
     };
 
@@ -704,7 +704,7 @@ fn test_workflow_result_failed_steps() {
         status: WorkflowStatus::Failed,
         outputs: HashMap::new(),
         step_results,
-        logs: vec![],
+        logs: VecDeque::new(),
         duration_ms: 150,
     };
 

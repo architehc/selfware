@@ -26,6 +26,11 @@ pub fn init_safety_config(config: &SafetyConfig) {
     let _ = SAFETY_CONFIG.set(config.clone());
 }
 
+/// Maximum file size for reads (50 MB) to prevent OOM from accidentally reading huge files.
+const MAX_READ_SIZE: u64 = 50 * 1024 * 1024;
+/// Maximum file size for writes (10 MB) to prevent accidentally writing huge files.
+const MAX_WRITE_SIZE: usize = 10 * 1024 * 1024;
+
 pub struct FileRead;
 pub struct FileWrite;
 pub struct FileEdit;
@@ -72,6 +77,17 @@ impl Tool for FileRead {
         let args: Args = serde_json::from_value(args)?;
         validate_tool_path(&args.path)?;
         let path = Path::new(&args.path);
+
+        // Check file size before reading to prevent OOM on huge files
+        if let Ok(metadata) = fs::metadata(path) {
+            if metadata.len() > MAX_READ_SIZE {
+                anyhow::bail!(
+                    "File too large to read: {} bytes (limit: {} bytes)",
+                    metadata.len(),
+                    MAX_READ_SIZE
+                );
+            }
+        }
 
         let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read file: {}", args.path))?;
@@ -129,6 +145,15 @@ impl Tool for FileWrite {
         let args: Args = serde_json::from_value(args)?;
         validate_tool_path(&args.path)?;
         let path = Path::new(&args.path);
+
+        // Check write size limit to prevent accidentally writing huge files
+        if args.content.len() > MAX_WRITE_SIZE {
+            anyhow::bail!(
+                "Content too large to write: {} bytes (limit: {} bytes)",
+                args.content.len(),
+                MAX_WRITE_SIZE
+            );
+        }
 
         // Create backup if exists
         if args.backup && path.exists() {

@@ -73,6 +73,24 @@ fn derive_key(password: &str) -> [u8; 32] {
     key
 }
 
+/// Zero the encryption key when the manager is dropped.
+///
+/// This provides basic defense-in-depth against memory-scraping attacks.
+/// Note: for production use, a dedicated zeroize crate would be better as
+/// the compiler may optimize away simple fill operations, but we avoid
+/// adding new dependencies here.
+impl Drop for EncryptionManager {
+    fn drop(&mut self) {
+        // Use write_volatile to prevent the compiler from optimizing this away.
+        for byte in self.key.iter_mut() {
+            // SAFETY: we have a mutable reference to each byte in the array.
+            unsafe {
+                std::ptr::write_volatile(byte, 0u8);
+            }
+        }
+    }
+}
+
 static INSTANCE: OnceLock<EncryptionManager> = OnceLock::new();
 
 impl EncryptionManager {

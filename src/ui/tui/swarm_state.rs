@@ -8,6 +8,7 @@ use crate::orchestration::swarm::{
 };
 use crate::ui::tui::animation::agent_avatar::{ActivityLevel, AgentRole as AvatarRole};
 use std::sync::{Arc, RwLock};
+use tracing::warn;
 
 /// UI-friendly representation of an agent
 #[derive(Debug, Clone)]
@@ -236,40 +237,50 @@ impl SwarmUiState {
     pub fn sync(&mut self) {
         // First, collect all the data we need
         let (agents_data, swarm_stats_opt, memory_entries_opt, decisions_data, tasks_data) = {
-            if let Ok(swarm) = self.swarm.read() {
-                let agents: Vec<_> = swarm
-                    .list_agents()
+            let swarm = match self.swarm.read() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    warn!("Swarm RwLock was poisoned during read; recovering inner data");
+                    poisoned.into_inner()
+                }
+            };
+
+            let agents: Vec<_> = swarm
+                .list_agents()
+                .iter()
+                .map(|a| AgentUiState::from_agent(a))
+                .collect();
+
+            let stats = swarm.stats();
+
+            let memory = swarm.memory();
+            let mem = match memory.read() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    warn!("Shared memory RwLock was poisoned during read; recovering inner data");
+                    poisoned.into_inner()
+                }
+            };
+            let entries = Some(
+                mem.entries()
                     .iter()
-                    .map(|a| AgentUiState::from_agent(a))
-                    .collect();
+                    .map(|e| MemoryEntryView::from_entry(e))
+                    .collect::<Vec<_>>(),
+            );
 
-                let stats = swarm.stats();
+            let decisions: Vec<_> = swarm
+                .list_decisions()
+                .iter()
+                .map(|d| DecisionView::from_decision(d))
+                .collect();
 
-                let memory = swarm.memory();
-                let mem = memory.read().unwrap_or_else(|e| e.into_inner());
-                let entries = Some(
-                    mem.entries()
-                        .iter()
-                        .map(|e| MemoryEntryView::from_entry(e))
-                        .collect::<Vec<_>>(),
-                );
+            let tasks: Vec<_> = swarm
+                .list_tasks()
+                .iter()
+                .map(|t| TaskView::from_task(t))
+                .collect();
 
-                let decisions: Vec<_> = swarm
-                    .list_decisions()
-                    .iter()
-                    .map(|d| DecisionView::from_decision(d))
-                    .collect();
-
-                let tasks: Vec<_> = swarm
-                    .list_tasks()
-                    .iter()
-                    .map(|t| TaskView::from_task(t))
-                    .collect();
-
-                (agents, Some(stats), entries, decisions, tasks)
-            } else {
-                (Vec::new(), None, None, Vec::new(), Vec::new())
-            }
+            (agents, Some(stats), entries, decisions, tasks)
         };
 
         // Now update self with the collected data
@@ -280,12 +291,12 @@ impl SwarmUiState {
         // Calculate positions for visualization
         self.calculate_agent_positions();
 
-        // Update memory entries
+        // Update memory entries (always Some now that we recover from poisoned locks)
         if let Some(entries) = memory_entries_opt {
             self.memory_entries = entries;
         }
 
-        // Update stats
+        // Update stats (always Some now that we recover from poisoned locks)
         if let Some(swarm_stats) = swarm_stats_opt {
             self.update_stats(&swarm_stats);
         }

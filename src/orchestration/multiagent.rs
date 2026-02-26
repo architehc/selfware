@@ -265,12 +265,8 @@ impl MultiAgentChat {
                         agent_id, task, client, tools, semaphore, agents, results, timeout, event_tx,
                     ) => {
                         if failure_policy == MultiAgentFailurePolicy::FailFast {
-                            // Check if this result was a failure
-                            if let Ok(()) = res {
-                                // Agent completed successfully, but we need to check the actual result status
-                                // because run_single_agent returns Ok(()) even if LLM call failed.
-                                // In this simplified implementation, we'll let run_single_agent 
-                                // handle internal failure reporting.
+                            if res.is_err() {
+                                cancelled.notify_waiters();
                             }
                         }
                         res
@@ -460,13 +456,19 @@ impl MultiAgentChat {
             });
         }
 
+        let agent_failed = !agent_result.success;
+
         // Store result
         {
             let mut results = results.lock().await;
             results.push(agent_result);
         }
 
-        Ok(())
+        if agent_failed {
+            Err(anyhow::anyhow!("Agent {} failed", agent_id))
+        } else {
+            Ok(())
+        }
     }
 
     /// Run interactive multi-agent chat

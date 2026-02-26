@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
 import signal
+import shutil
 
 # Configure logging
 logging.basicConfig(
@@ -40,11 +41,11 @@ class TestConfig:
     agent_count: int
     checkpoint_interval_min: int = 10
     project_specs: Dict = None
-    
+
     def __post_init__(self):
         if self.project_specs is None:
             self.project_specs = self._default_specs()
-    
+
     def _default_specs(self) -> Dict:
         specs = {
             'task_queue': {
@@ -91,18 +92,18 @@ class SessionMetrics:
 
 class CheckpointManager:
     """Manages session checkpoints"""
-    
+
     def __init__(self, session_dir: Path):
         self.session_dir = session_dir
         self.checkpoint_dir = session_dir / "checkpoints"
         self.checkpoint_dir.mkdir(exist_ok=True)
         self.last_checkpoint = None
-        
+
     def create_checkpoint(self, phase: str, metrics: SessionMetrics) -> Path:
         """Create a new checkpoint"""
         timestamp = datetime.now().isoformat()
         checkpoint_id = f"checkpoint_{int(time.time())}"
-        
+
         checkpoint_data = {
             'id': checkpoint_id,
             'timestamp': timestamp,
@@ -110,15 +111,15 @@ class CheckpointManager:
             'metrics': asdict(metrics),
             'git_commit': self._get_git_commit(),
         }
-        
+
         checkpoint_path = self.checkpoint_dir / f"{checkpoint_id}.json"
         with open(checkpoint_path, 'w') as f:
             json.dump(checkpoint_data, f, indent=2)
-        
+
         self.last_checkpoint = checkpoint_path
         logger.info(f"Checkpoint created: {checkpoint_path}")
         return checkpoint_path
-    
+
     def _get_git_commit(self) -> Optional[str]:
         """Get current git commit hash"""
         try:
@@ -129,30 +130,56 @@ class CheckpointManager:
                 cwd=self.session_dir
             )
             return result.stdout.strip() if result.returncode == 0 else None
-        except:
+        except Exception:
             return None
-    
+
     def list_checkpoints(self) -> List[Path]:
         """List all checkpoints"""
         return sorted(self.checkpoint_dir.glob("checkpoint_*.json"))
-    
+
     def restore_checkpoint(self, checkpoint_path: Path) -> bool:
-        """Restore from a checkpoint"""
+        """Restore from a checkpoint file.
+
+        Reads and validates the checkpoint JSON, then attempts to resume
+        the session using the selfware CLI.
+        """
         logger.info(f"Restoring from checkpoint: {checkpoint_path}")
         try:
-            # Extract task_id from filename (e.g., "task_123.json")
-            task_id = checkpoint_path.stem
+            if not checkpoint_path.exists():
+                logger.error(f"Checkpoint file does not exist: {checkpoint_path}")
+                return False
+
+            # Read and validate checkpoint data
+            with open(checkpoint_path, 'r') as f:
+                checkpoint_data = json.load(f)
+
+            checkpoint_id = checkpoint_data.get('id')
+            phase = checkpoint_data.get('phase', 'unknown')
+            if not checkpoint_id:
+                logger.error(f"Checkpoint missing 'id' field: {checkpoint_path}")
+                return False
+
+            logger.info(f"Checkpoint id={checkpoint_id}, phase={phase}")
+
+            # Attempt to resume via selfware CLI
             result = subprocess.run(
-                ['selfware', 'resume', task_id],
+                ['selfware', 'resume', checkpoint_id],
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=60
             )
             if result.returncode == 0:
-                logger.info(f"Successfully resumed task {task_id}")
+                logger.info(f"Successfully resumed from checkpoint {checkpoint_id}")
                 return True
             else:
-                logger.error(f"Failed to resume task {task_id}: {result.stderr}")
+                logger.error(f"Failed to resume checkpoint {checkpoint_id}: {result.stderr}")
                 return False
+        except json.JSONDecodeError as e:
+            logger.error(f"Checkpoint file is not valid JSON: {e}")
+            return False
+        except subprocess.TimeoutExpired:
+            logger.error("Timed out trying to resume from checkpoint")
+            return False
         except Exception as e:
             logger.error(f"Error during checkpoint restore: {e}")
             return False
@@ -160,13 +187,13 @@ class CheckpointManager:
 
 class TestMonitor:
     """Monitors test execution and collects metrics"""
-    
+
     def __init__(self, session_dir: Path):
         self.session_dir = session_dir
         self.metrics_dir = session_dir / "metrics"
         self.metrics_dir.mkdir(exist_ok=True)
         self.metrics_history = []
-        
+
     def record_snapshot(self, metrics: SessionMetrics):
         """Record metrics snapshot"""
         timestamp = datetime.now().isoformat()
@@ -175,20 +202,20 @@ class TestMonitor:
             'metrics': asdict(metrics)
         }
         self.metrics_history.append(snapshot)
-        
+
         # Save to file
         snapshot_path = self.metrics_dir / f"metrics_{int(time.time())}.json"
         with open(snapshot_path, 'w') as f:
             json.dump(snapshot, f, indent=2)
-    
+
     def generate_report(self) -> Dict:
         """Generate final test report"""
         if not self.metrics_history:
             return {}
-        
+
         first = self.metrics_history[0]
         last = self.metrics_history[-1]
-        
+
         return {
             'duration_seconds': last['metrics']['elapsed_seconds'],
             'total_tokens': last['metrics']['total_tokens'],
@@ -202,109 +229,109 @@ class TestMonitor:
 
 class MegaTestRunner:
     """Main test runner orchestrator"""
-    
+
     def __init__(self, config: TestConfig):
         self.config = config
         self.session_dir = Path("test_runs") / config.session_id
         self.session_dir.mkdir(parents=True, exist_ok=True)
-        
+
         self.checkpoint_mgr = CheckpointManager(self.session_dir)
         self.monitor = TestMonitor(self.session_dir)
         self.metrics = SessionMetrics()
-        
+
         self.running = False
         self.current_phase = "bootstrap"
         self.phase_start_time = time.time()
-        
+
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
-    
+
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals"""
         logger.info(f"Received signal {signum}, initiating graceful shutdown...")
         self.running = False
-    
+
     def run(self) -> bool:
         """Run the complete test session"""
         logger.info(f"Starting mega test session: {self.config.session_id}")
         logger.info(f"Project: {self.config.project_specs['name']}")
         logger.info(f"Duration: {self.config.duration_hours} hours")
         logger.info(f"Agents: {self.config.agent_count}")
-        
+
         self.running = True
         start_time = time.time()
-        
+
         try:
             # Phase 1: Bootstrap
             if not self._run_phase("bootstrap", 60 * 60):  # 1 hour
                 return False
-            
+
             # Phase 2: Core Development
             if not self._run_phase("development", 2 * 60 * 60):  # 2 hours
                 return False
-            
+
             # Phase 3: Refinement
             if not self._run_phase("refinement", 2 * 60 * 60):  # 2 hours
                 return False
-            
+
             # Phase 4: Finalization
             if not self._run_phase("finalization", 60 * 60):  # 1 hour
                 return False
-            
+
             self.metrics.status = "completed"
             return True
-            
+
         except Exception as e:
             logger.exception("Test session failed")
             self.metrics.status = "failed"
             return False
         finally:
             self._finalize_session()
-    
+
     def _run_phase(self, phase: str, duration_seconds: int) -> bool:
         """Run a single phase of the test"""
         logger.info(f"Starting phase: {phase} ({duration_seconds // 60} minutes)")
         self.current_phase = phase
         self.phase_start_time = time.time()
-        
+
         phase_end = time.time() + duration_seconds
         last_checkpoint = time.time()
-        
+
         while self.running and time.time() < phase_end:
             # Update metrics
             self._update_metrics()
-            
+
             # Check if checkpoint needed
             checkpoint_interval = self.config.checkpoint_interval_min * 60
             if time.time() - last_checkpoint >= checkpoint_interval:
                 self._create_checkpoint()
                 last_checkpoint = time.time()
-            
+
             # Monitor health
             if not self._health_check():
                 logger.warning("Health check failed, attempting recovery...")
                 if not self._attempt_recovery():
                     logger.error("Recovery failed")
                     return False
-            
+
             # Record metrics snapshot
             self.monitor.record_snapshot(self.metrics)
-            
+
             # Sleep before next iteration
             time.sleep(30)  # Check every 30 seconds
-        
+
         logger.info(f"Phase {phase} complete")
         return True
-    
+
     def _update_metrics(self):
         """Update current metrics by reading the latest selfware checkpoint"""
         now = time.time()
         elapsed = now - self.phase_start_time
-        
+
         self.metrics.elapsed_seconds = int(elapsed)
         self.metrics.phase = self.current_phase
-        
+
         # Locate selfware checkpoints
         checkpoint_dir = Path.home() / ".selfware" / "checkpoints"
         if not checkpoint_dir.exists():
@@ -321,12 +348,12 @@ class MegaTestRunner:
                 data = json.load(f)
                 # Handle both envelope and legacy formats
                 payload = data.get("payload", data)
-                
+
                 self.metrics.total_tokens = payload.get("estimated_tokens", 0)
                 self.metrics.tasks_completed = payload.get("current_step", 0)
                 self.metrics.checkpoint_count = len(checkpoints)
                 self.metrics.errors_encountered = len(payload.get("errors", []))
-                
+
                 # If git info is available, update LoC estimate (simplified)
                 git_info = payload.get("git_checkpoint")
                 if git_info:
@@ -338,7 +365,7 @@ class MegaTestRunner:
         # Calculate token rate
         if elapsed > 0:
             self.metrics.tokens_per_minute = self.metrics.total_tokens / (elapsed / 60)
-    
+
     def _create_checkpoint(self):
         """Create a checkpoint"""
         checkpoint_path = self.checkpoint_mgr.create_checkpoint(
@@ -347,12 +374,43 @@ class MegaTestRunner:
         )
         self.metrics.checkpoint_count += 1
         logger.info(f"Checkpoint created: {checkpoint_path}")
-    
+
     def _health_check(self) -> bool:
-        """Perform health check by verifying recent checkpoint updates"""
+        """Perform health check: disk space, memory, checkpoint freshness, agent heartbeat"""
+        # 1. Check disk space using shutil.disk_usage
+        try:
+            usage = shutil.disk_usage(str(self.session_dir))
+            free_gb = usage.free / (1024 ** 3)
+            if free_gb < 1.0:
+                logger.warning(f"Health check: Low disk space -- {free_gb:.2f} GB free")
+                return False
+        except Exception as e:
+            logger.error(f"Health check: disk space check failed: {e}")
+
+        # 2. Check available memory
+        try:
+            mem_info = self._get_memory_info()
+            if mem_info is not None:
+                avail_mb = mem_info / (1024 * 1024)
+                if avail_mb < 256:
+                    logger.warning(f"Health check: Low memory -- {avail_mb:.0f} MB available")
+                    return False
+        except Exception as e:
+            logger.debug(f"Health check: memory check failed (non-fatal): {e}")
+
+        # 3. Check agent heartbeat -- look for a selfware process
+        try:
+            selfware_alive = self._check_agent_heartbeat()
+            if selfware_alive is False:
+                logger.warning("Health check: No selfware agent process found")
+                # Not fatal -- agent may not have started yet
+        except Exception as e:
+            logger.debug(f"Health check: heartbeat check failed (non-fatal): {e}")
+
+        # 4. Check checkpoint freshness
         checkpoint_dir = Path.home() / ".selfware" / "checkpoints"
         if not checkpoint_dir.exists():
-            return True # No checkpoints yet, still healthy
+            return True  # No checkpoints yet, still healthy
 
         checkpoints = sorted(checkpoint_dir.glob("*.json"), key=os.path.getmtime, reverse=True)
         if not checkpoints:
@@ -368,34 +426,103 @@ class MegaTestRunner:
         except Exception as e:
             logger.error(f"Health check failed to read mtime: {e}")
             return False
-            
+
         return True
-    
+
+    @staticmethod
+    def _get_memory_info() -> Optional[int]:
+        """Get available memory in bytes. Returns None if unavailable."""
+        # Try psutil first
+        try:
+            import psutil
+            return psutil.virtual_memory().available
+        except ImportError:
+            pass
+
+        # Fallback: read /proc/meminfo on Linux
+        meminfo_path = Path("/proc/meminfo")
+        if meminfo_path.exists():
+            try:
+                with open(meminfo_path) as f:
+                    for line in f:
+                        if line.startswith("MemAvailable:"):
+                            # Value is in kB
+                            parts = line.split()
+                            return int(parts[1]) * 1024
+            except Exception:
+                pass
+
+        # macOS fallback: use vm_stat
+        try:
+            result = subprocess.run(
+                ["vm_stat"], capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                free_pages = 0
+                for line in result.stdout.splitlines():
+                    if "Pages free" in line or "Pages inactive" in line:
+                        parts = line.split()
+                        # Last element is the count (with trailing period)
+                        free_pages += int(parts[-1].rstrip("."))
+                # vm_stat pages are 4096 bytes on macOS
+                return free_pages * 4096
+        except Exception:
+            pass
+
+        return None
+
+    @staticmethod
+    def _check_agent_heartbeat() -> Optional[bool]:
+        """Check if a selfware agent process is running. Returns None if check is unsupported."""
+        # Look for selfware processes via pgrep
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", "selfware"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                pids = result.stdout.strip().split('\n')
+                # Verify at least one PID is alive
+                for pid_str in pids:
+                    try:
+                        pid = int(pid_str.strip())
+                        os.kill(pid, 0)  # signal 0 checks existence
+                        return True
+                    except (ValueError, ProcessLookupError, PermissionError):
+                        continue
+                return False
+            return False
+        except FileNotFoundError:
+            # pgrep not available
+            return None
+        except Exception:
+            return None
+
     def _attempt_recovery(self) -> bool:
         """Attempt to recover from failure"""
         logger.info("Attempting recovery...")
-        
+
         # Try restoring from last checkpoint
         if self.checkpoint_mgr.last_checkpoint:
             return self.checkpoint_mgr.restore_checkpoint(
                 self.checkpoint_mgr.last_checkpoint
             )
-        
+
         return False
-    
+
     def _finalize_session(self):
         """Finalize test session and generate report"""
         logger.info("Finalizing session...")
-        
+
         # Create final checkpoint
         self._create_checkpoint()
-        
+
         # Generate report
         report = self.monitor.generate_report()
         report_path = self.session_dir / "final_report.json"
         with open(report_path, 'w') as f:
             json.dump(report, f, indent=2)
-        
+
         logger.info(f"Session complete. Report: {report_path}")
         logger.info(f"Status: {self.metrics.status}")
         logger.info(f"Checkpoints: {self.metrics.checkpoint_count}")
@@ -415,9 +542,9 @@ def main():
                        help='Checkpoint interval in minutes')
     parser.add_argument('--session-id', type=str, default=None,
                        help='Session ID (auto-generated if not provided)')
-    
+
     args = parser.parse_args()
-    
+
     # Create config
     config = TestConfig(
         session_id=args.session_id or str(uuid.uuid4())[:8],
@@ -426,11 +553,11 @@ def main():
         agent_count=args.agents,
         checkpoint_interval_min=args.checkpoint_interval
     )
-    
+
     # Run test
     runner = MegaTestRunner(config)
     success = runner.run()
-    
+
     sys.exit(0 if success else 1)
 
 

@@ -7,6 +7,20 @@ use serde_json::Value;
 use std::collections::HashMap;
 use tracing::instrument;
 
+/// Maximum output buffer size from a cargo command (16 MB).
+/// Prevents a runaway cargo process from consuming unlimited memory.
+const MAX_CARGO_OUTPUT_SIZE: usize = 16 * 1024 * 1024;
+
+/// Truncate a byte buffer to a safe maximum size, returning a lossy UTF-8 string.
+/// Truncation happens at a valid UTF-8 boundary to avoid partial characters.
+fn safe_truncate_output(bytes: &[u8], max_size: usize) -> String {
+    if bytes.len() <= max_size {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    let truncated = String::from_utf8_lossy(&bytes[..max_size]).into_owned();
+    format!("{}\n[OUTPUT TRUNCATED: {} bytes total, showing first {}]", truncated, bytes.len(), max_size)
+}
+
 pub struct CargoTest;
 pub struct CargoCheck;
 pub struct CargoClippy;
@@ -180,8 +194,8 @@ impl Tool for CargoTest {
         cmd.env("RUST_BACKTRACE", "1");
 
         let output = cmd.output().await.context("Failed to execute cargo test")?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = safe_truncate_output(&output.stdout, MAX_CARGO_OUTPUT_SIZE);
+        let stderr = safe_truncate_output(&output.stderr, MAX_CARGO_OUTPUT_SIZE);
 
         // Parse test results from output
         let (tests, failures) = parse_test_output(&stdout, &stderr);
@@ -273,8 +287,8 @@ impl Tool for CargoCheck {
             .output()
             .await
             .context("Failed to execute cargo check")?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = safe_truncate_output(&output.stdout, MAX_CARGO_OUTPUT_SIZE);
+        let stderr = safe_truncate_output(&output.stderr, MAX_CARGO_OUTPUT_SIZE);
 
         // Parse JSON messages from stdout
         let (mut errors, warnings) = parse_cargo_json_messages(&stdout);
@@ -384,8 +398,8 @@ impl Tool for CargoClippy {
             .output()
             .await
             .context("Failed to execute cargo clippy")?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = safe_truncate_output(&output.stdout, MAX_CARGO_OUTPUT_SIZE);
+        let stderr = safe_truncate_output(&output.stderr, MAX_CARGO_OUTPUT_SIZE);
 
         // Parse clippy lints from JSON output
         let lints = parse_clippy_json_messages(&stdout);

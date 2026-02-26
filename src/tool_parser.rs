@@ -135,8 +135,28 @@ fn json_block_regex() -> &'static Regex {
     })
 }
 
+/// Maximum input size for the tool parser (10 MB).
+/// Inputs larger than this are truncated to prevent pathological regex performance.
+const MAX_TOOL_PARSER_INPUT_SIZE: usize = 10 * 1024 * 1024;
+
+/// Decode standard XML entities in a string.
+fn decode_xml_entities(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+}
+
 /// Parse content for tool calls using multiple strategies
 pub fn parse_tool_calls(content: &str) -> ParseResult {
+    // Enforce maximum input size to prevent pathological regex performance
+    let content = if content.len() > MAX_TOOL_PARSER_INPUT_SIZE {
+        &content[..MAX_TOOL_PARSER_INPUT_SIZE]
+    } else {
+        content
+    };
+
     let mut result = ParseResult {
         tool_calls: Vec::new(),
         text_content: content.to_string(),

@@ -178,6 +178,53 @@ impl SafetyChecker {
         // Normalize the command: collapse whitespace, lowercase for pattern matching
         let normalized = normalize_shell_command(cmd);
 
+        // Detect environment variable injection: patterns like `VAR=value command`
+        // that could override PATH, LD_PRELOAD, etc. to bypass safety checks.
+        static ENV_VAR_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"^\s*[A-Za-z_][A-Za-z0-9_]*=\S+\s+\S").expect("Invalid regex")
+        });
+        static DANGEROUS_ENV_VARS: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"(?i)^\s*(PATH|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|PYTHONPATH|NODE_PATH|PERL5LIB|RUBYLIB|CLASSPATH|HOME|SHELL|USER|TERM|IFS)\s*=")
+                .expect("Invalid regex")
+        });
+        for part in split_shell_commands(&normalized) {
+            let part_trimmed = part.trim();
+            if DANGEROUS_ENV_VARS.is_match(part_trimmed) {
+                anyhow::bail!(
+                    "Dangerous command blocked: environment variable injection detected (overrides security-sensitive variable)"
+                );
+            }
+            if ENV_VAR_PREFIX.is_match(part_trimmed) {
+                let mut remaining = part_trimmed;
+                while let Some(after_eq) = remaining.split_once('=') {
+                    let after_value = after_eq
+                        .1
+                        .split_whitespace()
+                        .skip(1)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if after_value.is_empty() {
+                        break;
+                    }
+                    if ENV_VAR_PREFIX.is_match(&after_value) {
+                        remaining =
+                            &remaining[remaining.len() - after_value.len()..];
+                        continue;
+                    }
+                    for (pattern, description) in DANGEROUS_COMMAND_PATTERNS.iter() {
+                        if pattern.is_match(&after_value) {
+                            anyhow::bail!(
+                                "Dangerous command blocked: {} (hidden behind env var injection)",
+                                description
+                            );
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+
         // Check for dangerous patterns using regex
         for (pattern, description) in DANGEROUS_COMMAND_PATTERNS.iter() {
             if pattern.is_match(&normalized) {
@@ -553,6 +600,25 @@ fn normalize_shell_command(cmd: &str) -> String {
         result = result.replace("//", "/");
     }
     result = result.replace("\\n", "").replace("\\t", " ");
+
+    // Remove backslash escapes that could reassemble dangerous commands.
+    // e.g., r\m -rf / -> rm -rf /
+    let mut deslashed = String::with_capacity(result.len());
+    let result_bytes = result.as_bytes();
+    let mut j = 0;
+    while j < result_bytes.len() {
+        if result_bytes[j] == b'\\' && j + 1 < result_bytes.len() {
+            let next = result_bytes[j + 1];
+            if next.is_ascii_alphanumeric() || next == b'_' || next == b'-' || next == b'/' {
+                j += 1;
+                continue;
+            }
+        }
+        deslashed.push(result_bytes[j] as char);
+        j += 1;
+    }
+    result = deslashed;
+
     result = result.replace('`', "$(");
     result = result.replace("$(", " $( ");
     result = result.replace(')', " ) ");
