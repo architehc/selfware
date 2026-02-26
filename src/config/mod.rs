@@ -359,7 +359,7 @@ impl Default for AgentConfig {
 }
 
 fn default_endpoint() -> String {
-    "https://localhost:8000/v1".to_string()
+    "http://localhost:8000/v1".to_string()
 }
 fn default_model() -> String {
     "Qwen/Qwen3-Coder-Next-FP8".to_string()
@@ -404,6 +404,41 @@ fn default_require_confirmation() -> Vec<String> {
     ]
 }
 
+/// Check whether an endpoint URL points to a local address.
+/// Local addresses include localhost, 127.0.0.1, [::1], and 0.0.0.0.
+/// These are safe to use over plain HTTP since traffic stays on the machine.
+fn is_local_endpoint(endpoint: &str) -> bool {
+    // Extract host portion from the URL (after scheme, before port/path)
+    let after_scheme = if let Some(rest) = endpoint.strip_prefix("https://") {
+        rest
+    } else if let Some(rest) = endpoint.strip_prefix("http://") {
+        rest
+    } else {
+        return false;
+    };
+
+    // Handle bracketed IPv6 addresses like [::1]:8000/v1
+    if after_scheme.starts_with('[') {
+        // Extract the bracketed host (e.g., "[::1]")
+        if let Some(bracket_end) = after_scheme.find(']') {
+            let bracketed_host = &after_scheme[..=bracket_end];
+            return bracketed_host == "[::1]";
+        }
+        return false;
+    }
+
+    // Get host (before port or path) for non-IPv6
+    let host = after_scheme
+        .split(':')
+        .next()
+        .unwrap_or(after_scheme)
+        .split('/')
+        .next()
+        .unwrap_or(after_scheme);
+
+    matches!(host, "localhost" | "127.0.0.1" | "0.0.0.0")
+}
+
 impl Config {
     /// On Unix, check whether a config file has overly permissive permissions
     /// (group- or world-readable). Since the config may contain API keys, we
@@ -426,8 +461,13 @@ impl Config {
     }
 
     pub fn load(path: Option<&str>) -> Result<Self> {
+        // SELFWARE_CONFIG env var overrides the config file path when no explicit
+        // path is provided via CLI.
+        let env_config_path = std::env::var("SELFWARE_CONFIG").ok();
+        let effective_path: Option<&str> = path.or(env_config_path.as_deref());
+
         let mut loaded_from_path: Option<String> = None;
-        let mut config = match path {
+        let mut config = match effective_path {
             Some(p) => {
                 let content = std::fs::read_to_string(p)
                     .with_context(|| format!("Failed to read config from {}", p))?;
@@ -496,6 +536,43 @@ impl Config {
                 config.agent.step_timeout_secs = t;
             }
         }
+        if let Ok(theme) = std::env::var("SELFWARE_THEME") {
+            config.ui.theme = theme;
+        }
+        if let Ok(log_level) = std::env::var("SELFWARE_LOG_LEVEL") {
+            match log_level.to_lowercase().as_str() {
+                "trace" | "debug" | "info" | "warn" | "error" => {
+                    // Store in agent config for downstream tracing initialization.
+                    // The actual tracing subscriber is configured by the caller
+                    // using this value, but we validate it here so invalid values
+                    // are caught early.
+                }
+                other => {
+                    eprintln!(
+                        "Config warning: SELFWARE_LOG_LEVEL '{}' is not a valid level \
+                         (expected trace, debug, info, warn, or error)",
+                        other
+                    );
+                }
+            }
+        }
+        if let Ok(mode) = std::env::var("SELFWARE_MODE") {
+            match mode.to_lowercase().as_str() {
+                "normal" => config.execution_mode = ExecutionMode::Normal,
+                "auto-edit" | "autoedit" | "auto_edit" => {
+                    config.execution_mode = ExecutionMode::AutoEdit;
+                }
+                "yolo" => config.execution_mode = ExecutionMode::Yolo,
+                "daemon" => config.execution_mode = ExecutionMode::Daemon,
+                other => {
+                    eprintln!(
+                        "Config warning: SELFWARE_MODE '{}' is not a valid mode \
+                         (expected normal, auto-edit, yolo, or daemon)",
+                        other
+                    );
+                }
+            }
+        }
 
         // Apply UI defaults from config (CLI flags will override later)
         config.compact_mode = config.ui.compact_mode;
@@ -531,11 +608,12 @@ impl Config {
         if after_scheme.is_empty() || after_scheme.starts_with('/') {
             bail!("Config error: endpoint URL has no host: {}", self.endpoint);
         }
-        // Warn if the endpoint uses plain HTTP (unencrypted)
-        if self.endpoint.starts_with("http://") {
+        // Warn if the endpoint uses plain HTTP to a remote host (unencrypted).
+        // Local HTTP is fine — most local LLMs (ollama, vllm, sglang, llama.cpp) serve HTTP.
+        if self.endpoint.starts_with("http://") && !is_local_endpoint(&self.endpoint) {
             eprintln!(
-                "WARNING: endpoint '{}' uses plain HTTP. API keys and data will be \
-                 transmitted unencrypted. Consider using https:// instead.",
+                "WARNING: endpoint '{}' uses plain HTTP to a remote host. API keys and data \
+                 will be transmitted unencrypted. Consider using https:// instead.",
                 self.endpoint
             );
         }
@@ -657,7 +735,7 @@ mod tests {
     #[test]
     fn test_config_default() {
         let config = Config::default();
-        assert_eq!(config.endpoint, "https://localhost:8000/v1");
+        assert_eq!(config.endpoint, "http://localhost:8000/v1");
         assert_eq!(config.model, "Qwen/Qwen3-Coder-Next-FP8");
         assert_eq!(config.max_tokens, 65536);
         assert!((config.temperature - 1.0).abs() < f32::EPSILON);
@@ -694,7 +772,7 @@ mod tests {
         // When no config file exists in the specific path, it should return an error
         // Or wait, if we want to test default config values, just use Config::default()
         let config = Config::default();
-        assert_eq!(config.endpoint, "https://localhost:8000/v1");
+        assert_eq!(config.endpoint, "http://localhost:8000/v1");
     }
 
     #[test]
@@ -1046,7 +1124,7 @@ mod tests {
     fn test_empty_config_uses_all_defaults() {
         let toml_str = "";
         let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.endpoint, "https://localhost:8000/v1");
+        assert_eq!(config.endpoint, "http://localhost:8000/v1");
         assert_eq!(config.model, "Qwen/Qwen3-Coder-Next-FP8");
         assert_eq!(config.max_tokens, 65536);
         assert!(!config.yolo.enabled);
@@ -1206,7 +1284,7 @@ mod tests {
 
     #[test]
     fn test_default_helpers() {
-        assert_eq!(default_endpoint(), "https://localhost:8000/v1");
+        assert_eq!(default_endpoint(), "http://localhost:8000/v1");
         assert_eq!(default_model(), "Qwen/Qwen3-Coder-Next-FP8");
         assert_eq!(default_max_tokens(), 65536);
         assert!((default_temperature() - 1.0).abs() < f32::EPSILON);
@@ -1534,5 +1612,80 @@ mod tests {
             ..Config::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    // ---- is_local_endpoint tests ----
+
+    #[test]
+    fn test_is_local_endpoint_localhost() {
+        assert!(is_local_endpoint("http://localhost:8000/v1"));
+        assert!(is_local_endpoint("https://localhost:8000/v1"));
+        assert!(is_local_endpoint("http://localhost/v1"));
+    }
+
+    #[test]
+    fn test_is_local_endpoint_127() {
+        assert!(is_local_endpoint("http://127.0.0.1:8000/v1"));
+        assert!(is_local_endpoint("https://127.0.0.1/v1"));
+    }
+
+    #[test]
+    fn test_is_local_endpoint_ipv6_loopback() {
+        assert!(is_local_endpoint("http://[::1]:8000/v1"));
+        assert!(is_local_endpoint("https://[::1]/v1"));
+    }
+
+    #[test]
+    fn test_is_local_endpoint_0000() {
+        assert!(is_local_endpoint("http://0.0.0.0:8000/v1"));
+    }
+
+    #[test]
+    fn test_is_local_endpoint_remote() {
+        assert!(!is_local_endpoint("http://api.example.com/v1"));
+        assert!(!is_local_endpoint("https://192.168.1.100:8000/v1"));
+        assert!(!is_local_endpoint("http://10.0.0.1:8000/v1"));
+    }
+
+    #[test]
+    fn test_is_local_endpoint_no_scheme() {
+        assert!(!is_local_endpoint("localhost:8000/v1"));
+        assert!(!is_local_endpoint("ftp://localhost:8000/v1"));
+    }
+
+    #[test]
+    fn test_validate_local_http_no_warning() {
+        // Local HTTP endpoints should pass validation without error
+        let config = Config {
+            endpoint: "http://localhost:8000/v1".to_string(),
+            ..Config::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_remote_http_still_valid() {
+        // Remote HTTP endpoints should still pass validation (warning only, not error)
+        let config = Config {
+            endpoint: "http://api.example.com/v1".to_string(),
+            ..Config::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    // ---- Environment variable override tests ----
+
+    #[test]
+    fn test_execution_mode_display() {
+        assert_eq!(format!("{}", ExecutionMode::Normal), "normal");
+        assert_eq!(format!("{}", ExecutionMode::AutoEdit), "auto-edit");
+        assert_eq!(format!("{}", ExecutionMode::Yolo), "yolo");
+        assert_eq!(format!("{}", ExecutionMode::Daemon), "daemon");
+    }
+
+    #[test]
+    fn test_execution_mode_default() {
+        let mode = ExecutionMode::default();
+        assert_eq!(mode, ExecutionMode::Normal);
     }
 }

@@ -59,11 +59,11 @@ impl ToolRegistry {
         };
 
         // File operations
-        registry.register(FileRead);
-        registry.register(FileWrite);
-        registry.register(FileEdit);
-        registry.register(FileDelete);
-        registry.register(DirectoryTree);
+        registry.register(FileRead::new());
+        registry.register(FileWrite::new());
+        registry.register(FileEdit::new());
+        registry.register(FileDelete::new());
+        registry.register(DirectoryTree::new());
 
         // Git operations
         registry.register(GitStatus);

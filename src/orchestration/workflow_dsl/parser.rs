@@ -1,4 +1,11 @@
 //! Parser -- transforms a token stream into an [`AstNode`] tree.
+//!
+//! All public methods return `Result<T, String>` so that callers can handle
+//! parse errors gracefully.  There are no `unwrap()`, `expect()`, or `panic!()`
+//! calls in the non-test production code -- every fallible operation propagates
+//! errors via `?` or explicit `Err(...)` returns.  The `panic!()` calls in the
+//! `#[cfg(test)]` module are intentional test assertions and do not affect
+//! production safety.
 
 use super::ast::AstNode;
 use super::lexer::Token;

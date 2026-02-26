@@ -23,7 +23,7 @@
 //! ```
 
 // ============================================================================
-// Core modules
+// Core modules (public API)
 // ============================================================================
 pub mod agent;
 pub mod api;
@@ -31,18 +31,21 @@ pub mod cli;
 pub mod config;
 pub mod errors;
 pub mod input;
+pub mod safety;
 pub mod tools;
 pub mod ui;
 
 // ============================================================================
-// Reorganized modules
+// Domain modules
+//
+// TODO: Restrict to pub(crate) once test coupling is resolved.
+// Currently pub because integration tests and examples import them directly.
 // ============================================================================
 pub mod analysis;
 pub mod cognitive;
 pub mod devops;
 pub mod observability;
 pub mod orchestration;
-pub mod safety;
 pub mod session;
 pub mod testing;
 
@@ -76,7 +79,7 @@ pub use devops::process_manager;
 pub use testing::verification;
 
 // ============================================================================
-// Modules to be reorganized (kept for now)
+// Utility modules
 // ============================================================================
 pub mod memory;
 pub mod output;
@@ -90,7 +93,6 @@ pub mod tool_parser;
 // ============================================================================
 // Backward-compatible re-exports for UI submodules
 // ============================================================================
-// TUI and demo modules (moved to ui/)
 #[cfg(feature = "tui")]
 pub use ui::demo;
 #[cfg(feature = "tui")]

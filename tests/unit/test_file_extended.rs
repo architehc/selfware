@@ -29,7 +29,7 @@ async fn test_file_read_with_line_range() {
     let file_path = dir.path().join("test.txt");
     fs::write(&file_path, "line1\nline2\nline3\nline4\nline5").unwrap();
 
-    let tool = FileRead;
+    let tool = FileRead::new();
     let args = json!({
         "path": file_path.to_str().unwrap(),
         "line_range": [2, 4]
@@ -48,7 +48,7 @@ async fn test_file_read_empty_file() {
     let file_path = dir.path().join("empty.txt");
     fs::write(&file_path, "").unwrap();
 
-    let tool = FileRead;
+    let tool = FileRead::new();
     let args = json!({"path": file_path.to_str().unwrap()});
 
     let result = tool.execute(args).await.unwrap();
@@ -64,7 +64,7 @@ async fn test_file_write_success() {
     let dir = TempDir::new().unwrap();
     let file_path = dir.path().join("new_file.txt");
 
-    let tool = FileWrite;
+    let tool = FileWrite::new();
     let args = json!({
         "path": file_path.to_str().unwrap(),
         "content": "Hello, World!"
@@ -84,7 +84,7 @@ async fn test_file_write_creates_directories() {
     let dir = TempDir::new().unwrap();
     let file_path = dir.path().join("nested/deep/file.txt");
 
-    let tool = FileWrite;
+    let tool = FileWrite::new();
     let args = json!({
         "path": file_path.to_str().unwrap(),
         "content": "nested content"
@@ -102,7 +102,7 @@ async fn test_file_write_with_backup() {
     let file_path = dir.path().join("existing.txt");
     fs::write(&file_path, "original").unwrap();
 
-    let tool = FileWrite;
+    let tool = FileWrite::new();
     let args = json!({
         "path": file_path.to_str().unwrap(),
         "content": "new content",
@@ -125,7 +125,7 @@ async fn test_file_write_without_backup() {
     let file_path = dir.path().join("existing.txt");
     fs::write(&file_path, "original").unwrap();
 
-    let tool = FileWrite;
+    let tool = FileWrite::new();
     let args = json!({
         "path": file_path.to_str().unwrap(),
         "content": "new content",
@@ -145,7 +145,7 @@ async fn test_file_write_empty_content() {
     let dir = TempDir::new().unwrap();
     let file_path = dir.path().join("empty.txt");
 
-    let tool = FileWrite;
+    let tool = FileWrite::new();
     let args = json!({
         "path": file_path.to_str().unwrap(),
         "content": ""
@@ -162,7 +162,7 @@ async fn test_file_write_unicode_content() {
     let dir = TempDir::new().unwrap();
     let file_path = dir.path().join("unicode.txt");
 
-    let tool = FileWrite;
+    let tool = FileWrite::new();
     let content = "Hello 世界 🌍 émoji";
     let args = json!({
         "path": file_path.to_str().unwrap(),
@@ -185,7 +185,7 @@ async fn test_file_edit_success() {
     let file_path = dir.path().join("edit.txt");
     fs::write(&file_path, "Hello, World!").unwrap();
 
-    let tool = FileEdit;
+    let tool = FileEdit::new();
     let args = json!({
         "path": file_path.to_str().unwrap(),
         "old_str": "World",
@@ -207,7 +207,7 @@ async fn test_file_edit_not_found() {
     let file_path = dir.path().join("edit.txt");
     fs::write(&file_path, "Hello, World!").unwrap();
 
-    let tool = FileEdit;
+    let tool = FileEdit::new();
     let args = json!({
         "path": file_path.to_str().unwrap(),
         "old_str": "NotFound",
@@ -226,7 +226,7 @@ async fn test_file_edit_multiple_matches() {
     let file_path = dir.path().join("edit.txt");
     fs::write(&file_path, "foo bar foo").unwrap();
 
-    let tool = FileEdit;
+    let tool = FileEdit::new();
     let args = json!({
         "path": file_path.to_str().unwrap(),
         "old_str": "foo",
@@ -245,7 +245,7 @@ async fn test_file_edit_delete_text() {
     let file_path = dir.path().join("edit.txt");
     fs::write(&file_path, "Hello, World!").unwrap();
 
-    let tool = FileEdit;
+    let tool = FileEdit::new();
     let args = json!({
         "path": file_path.to_str().unwrap(),
         "old_str": ", World",
@@ -266,7 +266,7 @@ async fn test_file_edit_multiline() {
     let file_path = dir.path().join("edit.txt");
     fs::write(&file_path, "fn foo() {\n    println!(\"old\");\n}").unwrap();
 
-    let tool = FileEdit;
+    let tool = FileEdit::new();
     let args = json!({
         "path": file_path.to_str().unwrap(),
         "old_str": "fn foo() {\n    println!(\"old\");\n}",
@@ -286,7 +286,7 @@ async fn test_file_edit_nonexistent_file() {
     let dir = TempDir::new().unwrap();
     let file_path = dir.path().join("nonexistent.txt");
 
-    let tool = FileEdit;
+    let tool = FileEdit::new();
     let args = json!({
         "path": file_path.to_str().unwrap(),
         "old_str": "foo",
@@ -307,7 +307,7 @@ async fn test_directory_tree_success() {
     fs::create_dir(dir.path().join("subdir")).unwrap();
     fs::write(dir.path().join("subdir/file2.txt"), "content").unwrap();
 
-    let tool = DirectoryTree;
+    let tool = DirectoryTree::new();
     let args = json!({
         "path": dir.path().to_str().unwrap()
     });
@@ -324,7 +324,7 @@ async fn test_directory_tree_max_depth() {
     fs::create_dir_all(dir.path().join("a/b/c/d")).unwrap();
     fs::write(dir.path().join("a/b/c/d/deep.txt"), "content").unwrap();
 
-    let tool = DirectoryTree;
+    let tool = DirectoryTree::new();
     let args = json!({
         "path": dir.path().to_str().unwrap(),
         "max_depth": 2
@@ -348,7 +348,7 @@ async fn test_directory_tree_hidden_files() {
     fs::write(dir.path().join("visible.txt"), "content").unwrap();
     fs::write(dir.path().join(".hidden"), "content").unwrap();
 
-    let tool = DirectoryTree;
+    let tool = DirectoryTree::new();
 
     // Without hidden files
     let args = json!({
@@ -378,7 +378,7 @@ async fn test_directory_tree_hidden_files() {
 #[tokio::test]
 async fn test_directory_tree_nonexistent() {
     setup_test_mode();
-    let tool = DirectoryTree;
+    let tool = DirectoryTree::new();
     let args = json!({
         "path": "/nonexistent/path/here"
     });
@@ -396,7 +396,7 @@ async fn test_directory_tree_file_metadata() {
     let file_path = dir.path().join("file.txt");
     fs::write(&file_path, "hello").unwrap();
 
-    let tool = DirectoryTree;
+    let tool = DirectoryTree::new();
     let args = json!({
         "path": dir.path().to_str().unwrap()
     });
@@ -423,7 +423,7 @@ async fn test_directory_tree_file_metadata() {
 
 #[test]
 fn test_file_read_metadata() {
-    let tool = FileRead;
+    let tool = FileRead::new();
     assert_eq!(tool.name(), "file_read");
     assert!(!tool.description().is_empty());
     let schema = tool.schema();
@@ -432,21 +432,21 @@ fn test_file_read_metadata() {
 
 #[test]
 fn test_file_write_metadata() {
-    let tool = FileWrite;
+    let tool = FileWrite::new();
     assert_eq!(tool.name(), "file_write");
     assert!(!tool.description().is_empty());
 }
 
 #[test]
 fn test_file_edit_metadata() {
-    let tool = FileEdit;
+    let tool = FileEdit::new();
     assert_eq!(tool.name(), "file_edit");
     assert!(tool.description().contains("surgical"));
 }
 
 #[test]
 fn test_directory_tree_metadata() {
-    let tool = DirectoryTree;
+    let tool = DirectoryTree::new();
     assert_eq!(tool.name(), "directory_tree");
     assert!(!tool.description().is_empty());
 }

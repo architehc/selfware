@@ -15,14 +15,22 @@ use tempfile::NamedTempFile;
 /// `validate_tool_path` reads from this so that user-configured `allowed_paths`
 /// (and other safety settings) are respected, rather than always falling back to
 /// `SafetyConfig::default()`.
+///
+/// NOTE: This global exists for backward compatibility. Prefer using the
+/// per-instance `safety_config` field on tool structs for multi-agent scenarios
+/// where each agent may have a different safety configuration.
 static SAFETY_CONFIG: OnceLock<SafetyConfig> = OnceLock::new();
 
 /// Register the runtime-loaded safety configuration for tool path validation.
 ///
 /// This should be called once during agent initialization (before any file tools
 /// execute) so that `validate_tool_path` honours user settings.
+///
+/// For multi-agent scenarios where each agent needs a different safety config,
+/// use the per-instance `with_safety_config()` constructor on each tool struct
+/// instead of (or in addition to) this global initializer.
 pub fn init_safety_config(config: &SafetyConfig) {
-    // OnceLock::set returns Err if already set; that's fine – first writer wins.
+    // OnceLock::set returns Err if already set; that's fine -- first writer wins.
     let _ = SAFETY_CONFIG.set(config.clone());
 }
 
@@ -31,11 +39,118 @@ const MAX_READ_SIZE: u64 = 50 * 1024 * 1024;
 /// Maximum file size for writes (10 MB) to prevent accidentally writing huge files.
 const MAX_WRITE_SIZE: usize = 10 * 1024 * 1024;
 
-pub struct FileRead;
-pub struct FileWrite;
-pub struct FileEdit;
-pub struct FileDelete;
-pub struct DirectoryTree;
+/// Read file contents. Supports optional per-instance safety configuration
+/// for multi-agent scenarios via [`FileRead::with_safety_config`].
+#[derive(Default)]
+pub struct FileRead {
+    /// Per-instance safety config. When `Some`, overrides the global `SAFETY_CONFIG`.
+    /// When `None`, falls back to the global or default config (backward compatible).
+    pub safety_config: Option<SafetyConfig>,
+}
+
+/// Write or overwrite entire file. Supports optional per-instance safety configuration
+/// for multi-agent scenarios via [`FileWrite::with_safety_config`].
+#[derive(Default)]
+pub struct FileWrite {
+    /// Per-instance safety config. When `Some`, overrides the global `SAFETY_CONFIG`.
+    pub safety_config: Option<SafetyConfig>,
+}
+
+/// Apply surgical edit to file. Supports optional per-instance safety configuration
+/// for multi-agent scenarios via [`FileEdit::with_safety_config`].
+#[derive(Default)]
+pub struct FileEdit {
+    /// Per-instance safety config. When `Some`, overrides the global `SAFETY_CONFIG`.
+    pub safety_config: Option<SafetyConfig>,
+}
+
+/// Delete a file. Supports optional per-instance safety configuration
+/// for multi-agent scenarios via [`FileDelete::with_safety_config`].
+#[derive(Default)]
+pub struct FileDelete {
+    /// Per-instance safety config. When `Some`, overrides the global `SAFETY_CONFIG`.
+    pub safety_config: Option<SafetyConfig>,
+}
+
+/// List directory structure. Supports optional per-instance safety configuration
+/// for multi-agent scenarios via [`DirectoryTree::with_safety_config`].
+#[derive(Default)]
+pub struct DirectoryTree {
+    /// Per-instance safety config. When `Some`, overrides the global `SAFETY_CONFIG`.
+    pub safety_config: Option<SafetyConfig>,
+}
+
+// ---------------------------------------------------------------------------
+// Constructors for dependency-injected safety configuration.
+//
+// Each file tool can be created with either:
+// - `Tool::new()` / `Tool::default()` -- no per-instance config; uses the global or default
+// - `Tool::with_safety_config(config)` -- uses the given config, ignoring the global
+// ---------------------------------------------------------------------------
+
+
+impl FileRead {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
+
+impl FileWrite {
+    pub fn new() -> Self {
+        Self {
+            safety_config: None,
+        }
+    }
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
+
+impl FileEdit {
+    pub fn new() -> Self {
+        Self {
+            safety_config: None,
+        }
+    }
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
+
+impl FileDelete {
+    pub fn new() -> Self {
+        Self {
+            safety_config: None,
+        }
+    }
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
+
+impl DirectoryTree {
+    pub fn new() -> Self {
+        Self {
+            safety_config: None,
+        }
+    }
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for FileRead {
@@ -75,7 +190,7 @@ impl Tool for FileRead {
         }
 
         let args: Args = serde_json::from_value(args)?;
-        validate_tool_path(&args.path)?;
+        validate_tool_path(&args.path, self.safety_config.as_ref())?;
         let path = Path::new(&args.path);
 
         // Check file size before reading to prevent OOM on huge files
@@ -143,7 +258,7 @@ impl Tool for FileWrite {
         }
 
         let args: Args = serde_json::from_value(args)?;
-        validate_tool_path(&args.path)?;
+        validate_tool_path(&args.path, self.safety_config.as_ref())?;
         let path = Path::new(&args.path);
 
         // Check write size limit to prevent accidentally writing huge files
@@ -202,7 +317,7 @@ impl Tool for FileEdit {
         }
 
         let args: Args = serde_json::from_value(args)?;
-        validate_tool_path(&args.path)?;
+        validate_tool_path(&args.path, self.safety_config.as_ref())?;
         let content = fs::read_to_string(&args.path)?;
 
         // Check for exactly one match
@@ -232,7 +347,7 @@ impl Tool for FileDelete {
     }
 
     fn description(&self) -> &str {
-        "Delete a file. Use with caution — this is irreversible without version control."
+        "Delete a file. Use with caution -- this is irreversible without version control."
     }
 
     fn schema(&self) -> Value {
@@ -255,7 +370,7 @@ impl Tool for FileDelete {
         }
 
         let args: Args = serde_json::from_value(args)?;
-        validate_tool_path(&args.path)?;
+        validate_tool_path(&args.path, self.safety_config.as_ref())?;
         let path = Path::new(&args.path);
 
         if !path.exists() {
@@ -307,7 +422,7 @@ impl Tool for DirectoryTree {
         }
 
         let args: Args = serde_json::from_value(args)?;
-        validate_tool_path(&args.path)?;
+        validate_tool_path(&args.path, self.safety_config.as_ref())?;
 
         let mut entries = vec![];
         for entry in walkdir::WalkDir::new(&args.path)
@@ -350,7 +465,12 @@ fn default_three() -> usize {
     3
 }
 
-fn validate_tool_path(path: &str) -> Result<()> {
+/// Validate that a tool path is safe to access.
+///
+/// When `instance_config` is `Some`, it takes priority (dependency-injected config
+/// for multi-agent isolation). Otherwise falls back to the global `SAFETY_CONFIG`,
+/// and finally to `SafetyConfig::default()`.
+fn validate_tool_path(path: &str, instance_config: Option<&SafetyConfig>) -> Result<()> {
     if std::env::var("SELFWARE_TEST_MODE").is_ok() {
         return Ok(());
     }
@@ -361,14 +481,17 @@ fn validate_tool_path(path: &str) -> Result<()> {
             return Ok(());
         }
     }
-    // Use the runtime-loaded safety config when available; fall back to defaults
-    // only if init_safety_config was never called (e.g. standalone tool usage).
+    // Priority: per-instance config > global OnceLock > default
     let default_config;
-    let config = match SAFETY_CONFIG.get() {
-        Some(cfg) => cfg,
-        None => {
-            default_config = SafetyConfig::default();
-            &default_config
+    let config = if let Some(cfg) = instance_config {
+        cfg
+    } else {
+        match SAFETY_CONFIG.get() {
+            Some(cfg) => cfg,
+            None => {
+                default_config = SafetyConfig::default();
+                &default_config
+            }
         }
     };
     let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
@@ -397,19 +520,19 @@ mod tests {
 
     #[test]
     fn test_file_read_name() {
-        let tool = FileRead;
+        let tool = FileRead::new();
         assert_eq!(tool.name(), "file_read");
     }
 
     #[test]
     fn test_file_read_description() {
-        let tool = FileRead;
+        let tool = FileRead::new();
         assert!(tool.description().contains("Read"));
     }
 
     #[test]
     fn test_file_read_schema() {
-        let tool = FileRead;
+        let tool = FileRead::new();
         let schema = tool.schema();
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["path"].is_object());
@@ -421,7 +544,7 @@ mod tests {
         let file_path = temp_dir.path().join("test.txt");
         fs::write(&file_path, "line1\nline2\nline3").unwrap();
 
-        let tool = FileRead;
+        let tool = FileRead::new();
         let args = serde_json::json!({"path": file_path.to_str().unwrap()});
 
         let result = tool.execute(args).await.unwrap();
@@ -435,7 +558,7 @@ mod tests {
         let file_path = temp_dir.path().join("test.txt");
         fs::write(&file_path, "line1\nline2\nline3\nline4\nline5").unwrap();
 
-        let tool = FileRead;
+        let tool = FileRead::new();
         let args = serde_json::json!({
             "path": file_path.to_str().unwrap(),
             "line_range": [2, 4]
@@ -450,7 +573,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_read_not_found() {
-        let tool = FileRead;
+        let tool = FileRead::new();
         let args = serde_json::json!({"path": "/nonexistent/file.txt"});
 
         let result = tool.execute(args).await;
@@ -459,7 +582,7 @@ mod tests {
 
     #[test]
     fn test_file_write_name() {
-        let tool = FileWrite;
+        let tool = FileWrite::new();
         assert_eq!(tool.name(), "file_write");
     }
 
@@ -468,7 +591,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("output.txt");
 
-        let tool = FileWrite;
+        let tool = FileWrite::new();
         let args = serde_json::json!({
             "path": file_path.to_str().unwrap(),
             "content": "Hello, World!"
@@ -489,7 +612,7 @@ mod tests {
         let file_path = temp_dir.path().join("existing.txt");
         fs::write(&file_path, "original content").unwrap();
 
-        let tool = FileWrite;
+        let tool = FileWrite::new();
         let args = serde_json::json!({
             "path": file_path.to_str().unwrap(),
             "content": "new content",
@@ -514,7 +637,7 @@ mod tests {
             .join("nested")
             .join("file.txt");
 
-        let tool = FileWrite;
+        let tool = FileWrite::new();
         let args = serde_json::json!({
             "path": file_path.to_str().unwrap(),
             "content": "nested content"
@@ -527,7 +650,7 @@ mod tests {
 
     #[test]
     fn test_file_edit_name() {
-        let tool = FileEdit;
+        let tool = FileEdit::new();
         assert_eq!(tool.name(), "file_edit");
     }
 
@@ -537,7 +660,7 @@ mod tests {
         let file_path = temp_dir.path().join("edit.txt");
         fs::write(&file_path, "Hello, World!").unwrap();
 
-        let tool = FileEdit;
+        let tool = FileEdit::new();
         let args = serde_json::json!({
             "path": file_path.to_str().unwrap(),
             "old_str": "World",
@@ -557,7 +680,7 @@ mod tests {
         let file_path = temp_dir.path().join("edit.txt");
         fs::write(&file_path, "Hello, World!").unwrap();
 
-        let tool = FileEdit;
+        let tool = FileEdit::new();
         let args = serde_json::json!({
             "path": file_path.to_str().unwrap(),
             "old_str": "NotFound",
@@ -575,7 +698,7 @@ mod tests {
         let file_path = temp_dir.path().join("edit.txt");
         fs::write(&file_path, "Hello Hello Hello").unwrap();
 
-        let tool = FileEdit;
+        let tool = FileEdit::new();
         let args = serde_json::json!({
             "path": file_path.to_str().unwrap(),
             "old_str": "Hello",
@@ -589,7 +712,7 @@ mod tests {
 
     #[test]
     fn test_directory_tree_name() {
-        let tool = DirectoryTree;
+        let tool = DirectoryTree::new();
         assert_eq!(tool.name(), "directory_tree");
     }
 
@@ -600,7 +723,7 @@ mod tests {
         fs::write(temp_dir.path().join("file2.txt"), "").unwrap();
         fs::create_dir(temp_dir.path().join("subdir")).unwrap();
 
-        let tool = DirectoryTree;
+        let tool = DirectoryTree::new();
         let args = serde_json::json!({
             "path": temp_dir.path().to_str().unwrap()
         });
@@ -615,7 +738,7 @@ mod tests {
         fs::write(temp_dir.path().join("visible.txt"), "").unwrap();
         fs::write(temp_dir.path().join(".hidden"), "").unwrap();
 
-        let tool = DirectoryTree;
+        let tool = DirectoryTree::new();
         let args = serde_json::json!({
             "path": temp_dir.path().to_str().unwrap(),
             "include_hidden": false
@@ -636,7 +759,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         fs::write(temp_dir.path().join(".hidden"), "").unwrap();
 
-        let tool = DirectoryTree;
+        let tool = DirectoryTree::new();
         let args = serde_json::json!({
             "path": temp_dir.path().to_str().unwrap(),
             "include_hidden": true
@@ -670,7 +793,7 @@ mod tests {
         let file_path = temp_dir.path().join("empty.txt");
         fs::write(&file_path, "").unwrap();
 
-        let tool = FileRead;
+        let tool = FileRead::new();
         let args = serde_json::json!({"path": file_path.to_str().unwrap()});
 
         let result = tool.execute(args).await.unwrap();
@@ -684,14 +807,13 @@ mod tests {
         let file_path = temp_dir.path().join("test.txt");
         fs::write(&file_path, "line1\nline2\nline3").unwrap();
 
-        let tool = FileRead;
+        let tool = FileRead::new();
         let args = serde_json::json!({
             "path": file_path.to_str().unwrap(),
-            "line_range": [100, 200]  // Beyond file length
+            "line_range": [100, 200]
         });
 
         let result = tool.execute(args).await.unwrap();
-        // Should return empty content for out-of-bounds range
         assert_eq!(result["content"], "");
     }
 
@@ -701,7 +823,7 @@ mod tests {
         let file_path = temp_dir.path().join("single.txt");
         fs::write(&file_path, "only one line").unwrap();
 
-        let tool = FileRead;
+        let tool = FileRead::new();
         let args = serde_json::json!({"path": file_path.to_str().unwrap()});
 
         let result = tool.execute(args).await.unwrap();
@@ -715,7 +837,7 @@ mod tests {
         let file_path = temp_dir.path().join("unicode.txt");
         fs::write(&file_path, "日本語\n한국어\n中文").unwrap();
 
-        let tool = FileRead;
+        let tool = FileRead::new();
         let args = serde_json::json!({"path": file_path.to_str().unwrap()});
 
         let result = tool.execute(args).await.unwrap();
@@ -730,7 +852,7 @@ mod tests {
         let file_path = temp_dir.path().join("no_backup.txt");
         fs::write(&file_path, "original").unwrap();
 
-        let tool = FileWrite;
+        let tool = FileWrite::new();
         let args = serde_json::json!({
             "path": file_path.to_str().unwrap(),
             "content": "new content",
@@ -739,7 +861,6 @@ mod tests {
 
         tool.execute(args).await.unwrap();
 
-        // Backup should NOT exist
         let backup_path = temp_dir.path().join("no_backup.txt.bak");
         assert!(!backup_path.exists());
     }
@@ -749,18 +870,17 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("brand_new.txt");
 
-        let tool = FileWrite;
+        let tool = FileWrite::new();
         let args = serde_json::json!({
             "path": file_path.to_str().unwrap(),
             "content": "new file content",
-            "backup": true  // backup requested but file doesn't exist
+            "backup": true
         });
 
         let result = tool.execute(args).await.unwrap();
         assert_eq!(result["success"], true);
         assert!(file_path.exists());
 
-        // Backup should NOT exist since original didn't exist
         let backup_path = temp_dir.path().join("brand_new.txt.bak");
         assert!(!backup_path.exists());
     }
@@ -771,11 +891,11 @@ mod tests {
         let file_path = temp_dir.path().join("delete.txt");
         fs::write(&file_path, "Hello, World!").unwrap();
 
-        let tool = FileEdit;
+        let tool = FileEdit::new();
         let args = serde_json::json!({
             "path": file_path.to_str().unwrap(),
             "old_str": ", World",
-            "new_str": ""  // Empty = delete
+            "new_str": ""
         });
 
         let result = tool.execute(args).await.unwrap();
@@ -791,7 +911,7 @@ mod tests {
         let file_path = temp_dir.path().join("multiline.txt");
         fs::write(&file_path, "line1\nline2\nline3").unwrap();
 
-        let tool = FileEdit;
+        let tool = FileEdit::new();
         let args = serde_json::json!({
             "path": file_path.to_str().unwrap(),
             "old_str": "line1\nline2",
@@ -811,7 +931,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("nonexistent.txt");
 
-        let tool = FileEdit;
+        let tool = FileEdit::new();
         let args = serde_json::json!({
             "path": file_path.to_str().unwrap(),
             "old_str": "anything",
@@ -829,7 +949,7 @@ mod tests {
         fs::create_dir_all(&deep_path).unwrap();
         fs::write(deep_path.join("deep_file.txt"), "").unwrap();
 
-        let tool = DirectoryTree;
+        let tool = DirectoryTree::new();
         let args = serde_json::json!({
             "path": temp_dir.path().to_str().unwrap(),
             "max_depth": 2
@@ -838,7 +958,6 @@ mod tests {
         let result = tool.execute(args).await.unwrap();
         let entries = result["entries"].as_array().unwrap();
 
-        // Should not contain deep_file.txt (at depth 4)
         let has_deep = entries
             .iter()
             .any(|e| e["path"].as_str().unwrap().contains("deep_file"));
@@ -847,20 +966,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_directory_tree_nonexistent_path() {
-        let tool = DirectoryTree;
+        let tool = DirectoryTree::new();
         let args = serde_json::json!({
             "path": "/nonexistent/directory/path"
         });
 
         let result = tool.execute(args).await;
-        // Should handle gracefully - might return empty or error
         assert!(result.is_ok() || result.is_err());
     }
 
     #[tokio::test]
     async fn test_file_read_invalid_json_args() {
-        let tool = FileRead;
-        // Missing required "path" field
+        let tool = FileRead::new();
         let args = serde_json::json!({});
 
         let result = tool.execute(args).await;
@@ -869,8 +986,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_write_invalid_json_args() {
-        let tool = FileWrite;
-        // Missing required fields
+        let tool = FileWrite::new();
         let args = serde_json::json!({"path": "test.txt"});
 
         let result = tool.execute(args).await;
@@ -879,8 +995,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_edit_invalid_json_args() {
-        let tool = FileEdit;
-        // Missing required fields
+        let tool = FileEdit::new();
         let args = serde_json::json!({"path": "test.txt"});
 
         let result = tool.execute(args).await;
@@ -889,8 +1004,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_directory_tree_invalid_json_args() {
-        let tool = DirectoryTree;
-        // Missing required path
+        let tool = DirectoryTree::new();
         let args = serde_json::json!({});
 
         let result = tool.execute(args).await;
@@ -903,16 +1017,13 @@ mod tests {
         let file_path = temp_dir.path().join("test.txt");
         fs::write(&file_path, "line1\nline2\nline3").unwrap();
 
-        let tool = FileRead;
+        let tool = FileRead::new();
         let args = serde_json::json!({
             "path": file_path.to_str().unwrap(),
-            "line_range": [3, 1]  // Inverted range
+            "line_range": [3, 1]
         });
 
         let result = tool.execute(args).await.unwrap();
-        // With inverted range (3,1), skip(2).take(0) would be empty,
-        // but saturating_sub makes end.saturating_sub(start) = 0, so take(1) gives line3
-        // The actual behavior returns "line3"
         assert_eq!(result["content"], "line3");
     }
 
@@ -921,7 +1032,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("empty_write.txt");
 
-        let tool = FileWrite;
+        let tool = FileWrite::new();
         let args = serde_json::json!({
             "path": file_path.to_str().unwrap(),
             "content": ""
@@ -941,7 +1052,7 @@ mod tests {
         fs::create_dir(temp_dir.path().join("subdir")).unwrap();
         fs::write(temp_dir.path().join("subdir").join("nested.txt"), "").unwrap();
 
-        let tool = DirectoryTree;
+        let tool = DirectoryTree::new();
         let args = serde_json::json!({
             "path": temp_dir.path().to_str().unwrap()
         });
@@ -949,7 +1060,6 @@ mod tests {
         let result = tool.execute(args).await.unwrap();
         let entries = result["entries"].as_array().unwrap();
 
-        // Should have directory type
         let has_dir = entries.iter().any(|e| e["type"] == "directory");
         let has_file = entries.iter().any(|e| e["type"] == "file");
         assert!(has_dir);
@@ -958,7 +1068,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_read_blocks_traversal() {
-        let tool = FileRead;
+        let tool = FileRead::new();
         let args = serde_json::json!({"path": "../should_not_escape.txt"});
         let result = tool.execute(args).await;
         assert!(result.is_err());
@@ -970,7 +1080,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_directory_tree_blocks_traversal() {
-        let tool = DirectoryTree;
+        let tool = DirectoryTree::new();
         let args = serde_json::json!({"path": "../"});
         let result = tool.execute(args).await;
         assert!(result.is_err());
@@ -984,19 +1094,19 @@ mod tests {
 
     #[test]
     fn test_file_delete_name() {
-        let tool = FileDelete;
+        let tool = FileDelete::new();
         assert_eq!(tool.name(), "file_delete");
     }
 
     #[test]
     fn test_file_delete_description() {
-        let tool = FileDelete;
+        let tool = FileDelete::new();
         assert!(tool.description().contains("Delete"));
     }
 
     #[test]
     fn test_file_delete_schema() {
-        let tool = FileDelete;
+        let tool = FileDelete::new();
         let schema = tool.schema();
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["path"].is_object());
@@ -1011,7 +1121,7 @@ mod tests {
         fs::write(&file_path, "delete me").unwrap();
         assert!(file_path.exists());
 
-        let tool = FileDelete;
+        let tool = FileDelete::new();
         let args = serde_json::json!({"path": file_path.to_str().unwrap()});
 
         let result = tool.execute(args).await.unwrap();
@@ -1024,7 +1134,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("nonexistent.txt");
 
-        let tool = FileDelete;
+        let tool = FileDelete::new();
         let args = serde_json::json!({"path": file_path.to_str().unwrap()});
 
         let result = tool.execute(args).await;
@@ -1038,7 +1148,7 @@ mod tests {
         let dir_path = temp_dir.path().join("subdir");
         fs::create_dir(&dir_path).unwrap();
 
-        let tool = FileDelete;
+        let tool = FileDelete::new();
         let args = serde_json::json!({"path": dir_path.to_str().unwrap()});
 
         let result = tool.execute(args).await;
@@ -1048,7 +1158,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_delete_blocks_traversal() {
-        let tool = FileDelete;
+        let tool = FileDelete::new();
         let args = serde_json::json!({"path": "../escape.txt"});
         let result = tool.execute(args).await;
         assert!(result.is_err());
@@ -1060,7 +1170,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_delete_invalid_json_args() {
-        let tool = FileDelete;
+        let tool = FileDelete::new();
         let args = serde_json::json!({});
         let result = tool.execute(args).await;
         assert!(result.is_err());

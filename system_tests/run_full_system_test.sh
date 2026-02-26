@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -o pipefail
+set -euo pipefail
 
 # ════════════════════════════════════════════════════════════════════
 #  Selfware Full System Test Suite with 30-second Monitoring
@@ -24,6 +24,20 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 mkdir -p "${SESSION_DIR}/phases"
+
+# ── Prerequisite checks ─────────────────────────────────────────────
+if ! command -v cargo &>/dev/null; then
+    echo "ERROR: cargo is not installed or not in PATH" >&2
+    exit 1
+fi
+
+if ! command -v python3 &>/dev/null; then
+    echo "WARNING: python3 not found; monitor output may be degraded" >&2
+fi
+
+if ! command -v bc &>/dev/null; then
+    echo "WARNING: bc not found; pass-rate calculation will show 0" >&2
+fi
 
 # ── Logging ──────────────────────────────────────────────────────────
 log() { echo -e "${BLUE}[$(date +%H:%M:%S)]${NC} $1" | tee -a "${LOG_FILE}"; }

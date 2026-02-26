@@ -862,6 +862,34 @@ pub fn run_tui_dashboard_with_events(
         loop {
             match event_rx.try_recv() {
                 Ok(event) => {
+                    // Connect agent responses to the chat pane
+                    match &event {
+                        TuiEvent::AgentCompleted { message } => {
+                            app.add_assistant_message(message);
+                            app.clear_progress();
+                        }
+                        TuiEvent::AgentError { message } => {
+                            app.add_system_message(&format!("Error: {}", message));
+                            app.clear_progress();
+                        }
+                        TuiEvent::AgentStarted => {
+                            app.set_progress(TaskProgress {
+                                description: "Processing...".into(),
+                                current_step: 0,
+                                total_steps: None,
+                                current_action: "Thinking".into(),
+                                elapsed_secs: 0,
+                            });
+                        }
+                        TuiEvent::ToolStarted { name } => {
+                            app.add_tool_message(name, "started");
+                        }
+                        TuiEvent::ToolCompleted { name, success, duration_ms } => {
+                            let status = if *success { "completed" } else { "failed" };
+                            app.add_tool_message(name, &format!("{} ({}ms)", status, duration_ms));
+                        }
+                        _ => {}
+                    }
                     with_dashboard_state(&shared_state, |state| state.process_event(event));
                     needs_redraw = true;
                 }
@@ -1084,13 +1112,56 @@ pub fn run_tui_dashboard_with_events(
                     if !show_help {
                         if let Some(input) = app.on_enter() {
                             if input.starts_with('/') {
-                                app.add_user_message(&input);
-                                app.status = format!("Executed: {}", input);
-                                with_dashboard_state(&shared_state, |state| {
-                                    state.log(LogLevel::Info, &format!("Command: {}", input));
-                                });
-                                // Commands like /clear or /analyze could also be sent to the agent
-                                let _ = user_input_tx.send(input);
+                                // Handle slash commands locally
+                                let parts: Vec<&str> = input.splitn(2, ' ').collect();
+                                let cmd = parts[0];
+                                let _arg = parts.get(1).copied().unwrap_or("");
+                                match cmd {
+                                    "/clear" => {
+                                        app.clear_chat();
+                                        with_dashboard_state(&shared_state, |state| {
+                                            state.log(LogLevel::Info, "Chat cleared");
+                                        });
+                                    }
+                                    "/quit" | "/exit" => {
+                                        with_dashboard_state(&shared_state, |state| {
+                                            state.log(LogLevel::Info, "Quit requested via command");
+                                        });
+                                        let _ = user_input_tx.send("quit".to_string());
+                                        break;
+                                    }
+                                    "/help" => {
+                                        app.add_system_message(
+                                            "Available commands: /clear, /quit, /exit, /help, /mode <mode>\n\
+                                             Keyboard: q (quit), ? (help), Ctrl+D (dashboard), Ctrl+G (garden), Tab (cycle panes)"
+                                        );
+                                        with_dashboard_state(&shared_state, |state| {
+                                            state.log(LogLevel::Info, "Displayed help text");
+                                        });
+                                    }
+                                    "/mode" => {
+                                        if _arg.is_empty() {
+                                            app.add_system_message(
+                                                "Usage: /mode <normal|yolo|auto-edit|daemon>"
+                                            );
+                                        } else {
+                                            app.add_system_message(
+                                                &format!("Mode switching to '{}' is not yet supported from the TUI.", _arg)
+                                            );
+                                        }
+                                        with_dashboard_state(&shared_state, |state| {
+                                            state.log(LogLevel::Info, &format!("Mode command: {}", _arg));
+                                        });
+                                    }
+                                    _ => {
+                                        app.add_system_message(
+                                            &format!("Unknown command: {}", cmd)
+                                        );
+                                        with_dashboard_state(&shared_state, |state| {
+                                            state.log(LogLevel::Warning, &format!("Unknown command: {}", cmd));
+                                        });
+                                    }
+                                }
                             } else {
                                 app.add_user_message(&input);
                                 let _ = user_input_tx.send(input.clone());

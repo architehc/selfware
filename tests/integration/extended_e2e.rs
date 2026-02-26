@@ -221,9 +221,14 @@ impl Default for ExtendedTestHarness {
 // ============================================================================
 
 /// Extended coding session test (2 hours)
-/// Tests sustained operation with multiple file operations
+///
+/// NOTE: This is a **simulation test**. It does not exercise real LLM requests
+/// or actual coding operations. Instead, it simulates a long-running session by
+/// sleeping and incrementing metric counters. The purpose is to validate the
+/// test harness, checkpoint infrastructure, and reporting pipeline -- not to
+/// verify real agent behavior against a model backend.
 #[tokio::test]
-#[ignore] // Run explicitly with: cargo test extended_coding_session --ignored
+#[ignore = "Simulation-only; run explicitly with: cargo test extended_coding_session --ignored"]
 async fn extended_coding_session_2h() {
     if skip_slow_tests() {
         eprintln!("Skipping extended test (SELFWARE_SKIP_SLOW=1)");
@@ -295,9 +300,13 @@ async fn extended_coding_session_2h() {
 }
 
 /// Multi-agent collaboration test (1 hour)
-/// Tests 4 agents working concurrently
+///
+/// NOTE: This is a **simulation test**. It spawns 4 tokio tasks that sleep and
+/// record metrics rather than executing real multi-agent workflows. It validates
+/// the concurrent metric recording and harness reporting, not actual agent
+/// collaboration against a live model.
 #[tokio::test]
-#[ignore]
+#[ignore = "Simulation-only; run explicitly with: cargo test extended_multi_agent --ignored"]
 async fn extended_multi_agent_collaboration_1h() {
     if skip_slow_tests() {
         eprintln!("Skipping extended test (SELFWARE_SKIP_SLOW=1)");
@@ -372,9 +381,13 @@ async fn extended_multi_agent_collaboration_1h() {
 }
 
 /// Checkpoint/resume cycle test
-/// Tests state persistence across simulated restarts
+///
+/// Tests state persistence across simulated restarts. This test serializes a
+/// HashMap to a JSON file, reads it back, and verifies equality. It does not
+/// exercise the real Agent checkpointing code path -- only the serialization
+/// round-trip through serde_json.
 #[tokio::test]
-#[ignore]
+#[ignore = "Simulation-only; exercises serde round-trip, not real agent checkpointing"]
 async fn extended_checkpoint_resume_cycle() {
     if skip_slow_tests() {
         return;
@@ -418,8 +431,12 @@ async fn extended_checkpoint_resume_cycle() {
 }
 
 /// Stress test with 100 sequential requests
+///
+/// NOTE: This is a **simulation test**. Each "request" is a 10ms sleep with
+/// counter increments. No real LLM calls are made. Validates the metrics
+/// collection and throughput reporting infrastructure.
 #[tokio::test]
-#[ignore]
+#[ignore = "Simulation-only; run explicitly with: cargo test extended_stress --ignored"]
 async fn extended_stress_100_requests() {
     if skip_slow_tests() {
         return;
@@ -484,8 +501,12 @@ async fn extended_stress_100_requests() {
 }
 
 /// Long context conversation test (50+ turns)
+///
+/// NOTE: This is a **simulation test**. It simulates growing context by
+/// incrementing counters and sleeping proportionally to simulated context size.
+/// No real LLM conversations or context compression are exercised.
 #[tokio::test]
-#[ignore]
+#[ignore = "Simulation-only; run explicitly with: cargo test extended_long_context --ignored"]
 async fn extended_long_context_conversation() {
     if skip_slow_tests() {
         return;
@@ -542,8 +563,12 @@ async fn extended_long_context_conversation() {
 }
 
 /// Concurrent request test
+///
+/// NOTE: This is a **simulation test**. Workers sleep for varying durations
+/// and record metrics. Tests concurrent metric recording correctness, not
+/// real concurrent LLM request handling.
 #[tokio::test]
-#[ignore]
+#[ignore = "Simulation-only; run explicitly with: cargo test extended_concurrent --ignored"]
 async fn extended_concurrent_requests() {
     if skip_slow_tests() {
         return;
@@ -600,8 +625,12 @@ async fn extended_concurrent_requests() {
 }
 
 /// Memory usage tracking test
+///
+/// NOTE: This is a **simulation test**. It allocates Vec<u8> buffers in a loop
+/// and records snapshots. It does not measure actual selfware agent memory usage
+/// or interact with the agent runtime.
 #[tokio::test]
-#[ignore]
+#[ignore = "Simulation-only; run explicitly with: cargo test extended_memory --ignored"]
 async fn extended_memory_tracking() {
     if skip_slow_tests() {
         return;
@@ -646,8 +675,12 @@ async fn extended_memory_tracking() {
 }
 
 /// Error recovery test
+///
+/// NOTE: This is a **simulation test**. It simulates a 20% failure rate by
+/// flipping a boolean based on iteration index, then verifies that the metrics
+/// counters reflect the expected mix of successes and failures.
 #[tokio::test]
-#[ignore]
+#[ignore = "Simulation-only; run explicitly with: cargo test extended_error_recovery --ignored"]
 async fn extended_error_recovery() {
     if skip_slow_tests() {
         return;
@@ -688,8 +721,12 @@ async fn extended_error_recovery() {
 }
 
 /// Timeout handling test
+///
+/// NOTE: This is a **simulation test**. It uses tokio::time::timeout to
+/// artificially timeout every 5th request. Validates that the metrics pipeline
+/// correctly records timeout failures, not real LLM timeout behavior.
 #[tokio::test]
-#[ignore]
+#[ignore = "Simulation-only; run explicitly with: cargo test extended_timeout --ignored"]
 async fn extended_timeout_handling() {
     if skip_slow_tests() {
         return;
