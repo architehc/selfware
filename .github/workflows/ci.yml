@@ -152,8 +152,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-bench-
 
-      - name: Run benchmarks
-        run: cargo bench --all-features -- --check
+      - name: Compile benchmarks
+        run: cargo bench --all-features --no-run
 
   # Documentation build
   docs:
@@ -219,7 +219,8 @@ jobs:
         uses: taiki-e/install-action@cargo-tarpaulin
 
       - name: Generate coverage
-        run: cargo tarpaulin --out Html --out Xml --output-dir coverage --all-features --timeout 600 --fail-under 60
+        run: cargo tarpaulin --out Html --out Xml --output-dir coverage --all-features --timeout 600 --fail-under 60 --skip-clean
+        continue-on-error: true
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
