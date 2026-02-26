@@ -41,6 +41,7 @@ const MAX_WRITE_SIZE: usize = 10 * 1024 * 1024;
 
 /// Read file contents. Supports optional per-instance safety configuration
 /// for multi-agent scenarios via [`FileRead::with_safety_config`].
+#[derive(Default)]
 pub struct FileRead {
     /// Per-instance safety config. When `Some`, overrides the global `SAFETY_CONFIG`.
     /// When `None`, falls back to the global or default config (backward compatible).
@@ -49,6 +50,7 @@ pub struct FileRead {
 
 /// Write or overwrite entire file. Supports optional per-instance safety configuration
 /// for multi-agent scenarios via [`FileWrite::with_safety_config`].
+#[derive(Default)]
 pub struct FileWrite {
     /// Per-instance safety config. When `Some`, overrides the global `SAFETY_CONFIG`.
     pub safety_config: Option<SafetyConfig>,
@@ -56,6 +58,7 @@ pub struct FileWrite {
 
 /// Apply surgical edit to file. Supports optional per-instance safety configuration
 /// for multi-agent scenarios via [`FileEdit::with_safety_config`].
+#[derive(Default)]
 pub struct FileEdit {
     /// Per-instance safety config. When `Some`, overrides the global `SAFETY_CONFIG`.
     pub safety_config: Option<SafetyConfig>,
@@ -63,6 +66,7 @@ pub struct FileEdit {
 
 /// Delete a file. Supports optional per-instance safety configuration
 /// for multi-agent scenarios via [`FileDelete::with_safety_config`].
+#[derive(Default)]
 pub struct FileDelete {
     /// Per-instance safety config. When `Some`, overrides the global `SAFETY_CONFIG`.
     pub safety_config: Option<SafetyConfig>,
@@ -70,6 +74,7 @@ pub struct FileDelete {
 
 /// List directory structure. Supports optional per-instance safety configuration
 /// for multi-agent scenarios via [`DirectoryTree::with_safety_config`].
+#[derive(Default)]
 pub struct DirectoryTree {
     /// Per-instance safety config. When `Some`, overrides the global `SAFETY_CONFIG`.
     pub safety_config: Option<SafetyConfig>,
@@ -79,15 +84,14 @@ pub struct DirectoryTree {
 // Constructors for dependency-injected safety configuration.
 //
 // Each file tool can be created with either:
-// - `Tool::new()` -- no per-instance config; uses the global or default (backward compatible)
+// - `Tool::new()` / `Tool::default()` -- no per-instance config; uses the global or default
 // - `Tool::with_safety_config(config)` -- uses the given config, ignoring the global
 // ---------------------------------------------------------------------------
 
+
 impl FileRead {
     pub fn new() -> Self {
-        Self {
-            safety_config: None,
-        }
+        Self::default()
     }
     pub fn with_safety_config(config: SafetyConfig) -> Self {
         Self {

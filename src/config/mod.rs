@@ -409,10 +409,10 @@ fn default_require_confirmation() -> Vec<String> {
 /// These are safe to use over plain HTTP since traffic stays on the machine.
 fn is_local_endpoint(endpoint: &str) -> bool {
     // Extract host portion from the URL (after scheme, before port/path)
-    let after_scheme = if endpoint.starts_with("https://") {
-        &endpoint[8..]
-    } else if endpoint.starts_with("http://") {
-        &endpoint[7..]
+    let after_scheme = if let Some(rest) = endpoint.strip_prefix("https://") {
+        rest
+    } else if let Some(rest) = endpoint.strip_prefix("http://") {
+        rest
     } else {
         return false;
     };
