@@ -896,14 +896,43 @@ impl SecuritySandbox {
         self
     }
 
-    /// Enable/disable
+    /// Enable/disable the sandbox.
+    ///
+    /// WARNING: Disabling the sandbox bypasses all safety checks. An audit
+    /// log entry is emitted so that disabling is never silent.
     pub fn set_enabled(&mut self, enabled: bool) {
+        if self.enabled && !enabled {
+            tracing::warn!("Sandbox DISABLED — all safety checks will be bypassed");
+            self.audit.log_action(
+                "sandbox_disable",
+                "system",
+                "sandbox disabled by caller",
+                AuditResult::Allowed,
+                RiskLevel::Critical,
+            );
+        } else if !self.enabled && enabled {
+            tracing::info!("Sandbox re-enabled");
+            self.audit.log_action(
+                "sandbox_enable",
+                "system",
+                "sandbox re-enabled by caller",
+                AuditResult::Allowed,
+                RiskLevel::Low,
+            );
+        }
         self.enabled = enabled;
     }
 
     /// Check file access
     pub fn check_file_access(&mut self, path: &Path, access: FileAccess) -> Result<bool> {
         if !self.enabled {
+            self.audit.log_action(
+                &format!("file_{}", access),
+                "agent",
+                &path.display().to_string(),
+                AuditResult::Allowed,
+                RiskLevel::Medium,
+            );
             return Ok(true);
         }
 
@@ -949,6 +978,13 @@ impl SecuritySandbox {
         access: NetworkAccess,
     ) -> Result<bool> {
         if !self.enabled {
+            self.audit.log_action(
+                &format!("net_{}", access),
+                "agent",
+                &format!("{}:{}", host, port),
+                AuditResult::Allowed,
+                RiskLevel::Medium,
+            );
             return Ok(true);
         }
 
@@ -980,6 +1016,10 @@ impl SecuritySandbox {
     /// Check if operation needs confirmation
     pub fn needs_confirmation(&self, risk: RiskLevel) -> bool {
         if !self.enabled {
+            tracing::debug!(
+                "Sandbox disabled — skipping confirmation for {:?} risk operation",
+                risk
+            );
             return false;
         }
 

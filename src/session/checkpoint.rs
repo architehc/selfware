@@ -321,6 +321,16 @@ impl CheckpointManager {
                 .sync_all()
                 .with_context(|| format!("Failed to fsync checkpoint temp file {:?}", tmp_path))?;
         }
+        // Keep a backup of the previous checkpoint so it can be recovered
+        // if the new one turns out to be corrupt or the rename is interrupted.
+        if path.exists() {
+            let backup_path = path.with_extension("json.bak");
+            if let Err(e) = fs::rename(&path, &backup_path) {
+                tracing::warn!("Failed to create checkpoint backup: {}", e);
+                // Continue anyway — losing the backup is better than failing the save
+            }
+        }
+
         if let Err(err) = fs::rename(&tmp_path, &path) {
             let _ = fs::remove_file(&tmp_path);
             return Err(err).with_context(|| {

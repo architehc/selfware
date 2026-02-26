@@ -33,7 +33,16 @@ impl PathValidator {
             self.working_dir.join(path_buf)
         };
 
-        // Check for symlink attacks on existing paths
+        // Canonicalize FIRST to eliminate TOCTOU window — the security
+        // decision is always based on the resolved canonical path, not the
+        // original which could be swapped between check and use.
+        let canonical = resolved
+            .canonicalize()
+            .unwrap_or_else(|_| normalize_path(&resolved));
+        let canonical_str = strip_unc_prefix(&canonical.to_string_lossy());
+
+        // Defense-in-depth: check for symlink attacks on the original path
+        // AFTER canonicalization so the security boundary is the canonical path.
         if resolved.exists() {
             self.check_symlink_safety(&resolved)?;
         } else if let Some(parent) = resolved.parent() {
@@ -42,12 +51,6 @@ impl PathValidator {
                 self.check_symlink_safety(parent)?;
             }
         }
-
-        // Canonicalize the path (resolves symlinks for existing paths)
-        let canonical = resolved
-            .canonicalize()
-            .unwrap_or_else(|_| normalize_path(&resolved));
-        let canonical_str = strip_unc_prefix(&canonical.to_string_lossy());
 
         // Strict path traversal check
         if path.contains("..") {

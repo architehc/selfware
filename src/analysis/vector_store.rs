@@ -1052,10 +1052,24 @@ impl VectorStore {
         self.collections.keys().map(|s| s.as_str()).collect()
     }
 
-    /// Delete collection
+    /// Delete collection, including its on-disk files.
     pub fn delete_collection(&mut self, name: &str) -> Option<VectorCollection> {
         self.indices.remove(name);
-        self.collections.remove(name)
+        let removed = self.collections.remove(name);
+
+        // Clean up persisted files for this collection
+        if let Some(ref storage_path) = self.storage_path {
+            let json_path = storage_path.join(format!("{}.json", name));
+            let idx_path = storage_path.join(format!("{}.idx", name));
+            if json_path.exists() {
+                let _ = std::fs::remove_file(&json_path);
+            }
+            if idx_path.exists() {
+                let _ = std::fs::remove_file(&idx_path);
+            }
+        }
+
+        removed
     }
 
     /// Index a file into a collection
@@ -1156,7 +1170,11 @@ impl VectorStore {
         Ok(search_results)
     }
 
-    /// Save store to disk
+    /// Save store to disk.
+    ///
+    /// Uses atomic writes (temp file + rename) for each file to prevent
+    /// corruption if the process crashes mid-write. Both the `.json` and
+    /// `.idx` files for a collection are written atomically.
     pub fn save(&self) -> Result<()> {
         let storage_path = self
             .storage_path
@@ -1165,17 +1183,32 @@ impl VectorStore {
 
         std::fs::create_dir_all(storage_path)?;
 
-        // Save each collection
+        let pid = std::process::id();
+
+        // Save each collection with atomic writes
         for (name, collection) in &self.collections {
             let collection_path = storage_path.join(format!("{}.json", name));
             let json = serde_json::to_string_pretty(collection)?;
-            std::fs::write(&collection_path, json)?;
 
-            // Save embeddings separately (binary for efficiency)
+            // Atomic write for collection JSON
+            let tmp_json = collection_path.with_extension(format!("json.tmp.{}", pid));
+            std::fs::write(&tmp_json, &json)?;
+            if let Err(e) = std::fs::rename(&tmp_json, &collection_path) {
+                let _ = std::fs::remove_file(&tmp_json);
+                return Err(e).context("Failed to atomically save collection");
+            }
+
+            // Atomic write for embeddings index
             if let Some(index) = self.indices.get(name) {
                 let index_path = storage_path.join(format!("{}.idx", name));
                 let data = bincode::serialize(&(&index.embeddings, &index.chunk_ids))?;
-                std::fs::write(index_path, data)?;
+
+                let tmp_idx = index_path.with_extension(format!("idx.tmp.{}", pid));
+                std::fs::write(&tmp_idx, &data)?;
+                if let Err(e) = std::fs::rename(&tmp_idx, &index_path) {
+                    let _ = std::fs::remove_file(&tmp_idx);
+                    return Err(e).context("Failed to atomically save index");
+                }
             }
         }
 
@@ -1216,6 +1249,18 @@ impl VectorStore {
                     let data = std::fs::read(&index_path)?;
                     let (embeddings, chunk_ids): (Vec<Vec<f32>>, Vec<String>) =
                         bincode::deserialize(&data)?;
+
+                    // Validate parallel array invariant: embeddings and chunk_ids
+                    // must have the same length, otherwise the index is corrupt.
+                    if embeddings.len() != chunk_ids.len() {
+                        tracing::warn!(
+                            "Corrupt vector index for '{}': {} embeddings vs {} chunk_ids — skipping",
+                            name,
+                            embeddings.len(),
+                            chunk_ids.len()
+                        );
+                        continue;
+                    }
 
                     let mut index = VectorIndex::new(self.provider.dimension());
                     for (chunk_id, embedding) in chunk_ids.into_iter().zip(embeddings.into_iter()) {

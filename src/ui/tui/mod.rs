@@ -201,6 +201,20 @@ impl TuiTerminal {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+
+        // Install a panic hook that restores the terminal to normal state
+        // BEFORE printing the panic message. Without this, a panic leaves the
+        // terminal in raw mode with the alternate screen active, making the
+        // error invisible and the shell unusable. The Drop impl may not run
+        // reliably during a panic unwind.
+        let original_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |panic_info| {
+            // Best-effort restore — ignore errors since we're already panicking
+            let _ = disable_raw_mode();
+            let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+            original_hook(panic_info);
+        }));
+
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
 

@@ -20,6 +20,17 @@ impl Agent {
             .load(task_id)
             .with_context(|| format!("Failed to load checkpoint for task: {}", task_id))?;
 
+        // Validate checkpoint integrity before attempting restore.
+        // This prevents leaving the agent in a half-restored state if the
+        // checkpoint data is inconsistent.
+        if checkpoint.current_step > 0 && checkpoint.messages.is_empty() {
+            anyhow::bail!(
+                "Corrupt checkpoint: step {} but no messages (task: {})",
+                checkpoint.current_step,
+                task_id
+            );
+        }
+
         println!(
             "{} Resuming task: {}",
             "🔄".bright_cyan(),
@@ -30,30 +41,32 @@ impl Agent {
             checkpoint.current_step, checkpoint.status
         );
 
-        let mut agent = Self::new(config).await?;
-
-        // Restore state from checkpoint
-        agent.messages = checkpoint.messages.clone();
-        agent.loop_control = AgentLoop::new(agent.config.agent.max_iterations);
+        // Build all restored state in temporary variables first, then commit
+        // atomically to the agent. This prevents partial state if any step fails.
+        let restored_messages = checkpoint.messages.clone();
+        let mut restored_loop = AgentLoop::new(config.agent.max_iterations);
 
         // Restore exact loop progress when available.
         // Older checkpoints may not have an iteration value, so keep fallback logic.
         if checkpoint.current_iteration > 0 {
-            agent
-                .loop_control
-                .restore_progress(checkpoint.current_step, checkpoint.current_iteration);
+            restored_loop.restore_progress(checkpoint.current_step, checkpoint.current_iteration);
         } else {
             // Backward-compatible restore for legacy checkpoints.
             for _ in 0..checkpoint.current_step {
-                agent.loop_control.next_state(); // consumes one iteration
-                agent.loop_control.increment_step();
+                restored_loop.next_state(); // consumes one iteration
+                restored_loop.increment_step();
             }
-            agent.loop_control.set_state(AgentState::Executing {
+            restored_loop.set_state(AgentState::Executing {
                 step: checkpoint.current_step,
             });
         }
 
         let checkpoint_tool_calls = checkpoint.tool_calls.len();
+
+        // Create the agent and commit all restored state at once
+        let mut agent = Self::new(config).await?;
+        agent.messages = restored_messages;
+        agent.loop_control = restored_loop;
         agent.current_checkpoint = Some(checkpoint);
         agent.checkpoint_manager = Some(checkpoint_manager);
         agent.last_checkpoint_tool_calls = checkpoint_tool_calls;
