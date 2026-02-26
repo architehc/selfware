@@ -16,6 +16,11 @@ use chrono::Utc;
 /// Maximum number of memory entries before eviction kicks in.
 const MAX_MEMORY_ENTRIES: usize = 10_000;
 
+/// Maximum total estimated tokens across all memory entries.
+/// When exceeded, the oldest entries are evicted until under budget.
+/// This is complementary to the `MAX_MEMORY_ENTRIES` limit.
+const MAX_MEMORY_TOKENS: usize = 500_000;
+
 pub struct AgentMemory {
     context_window: usize,
     entries: Vec<MemoryEntry>,
@@ -54,14 +59,33 @@ impl AgentMemory {
 
     /// Add a message to memory.
     ///
-    /// When the number of entries reaches `MAX_MEMORY_ENTRIES`, the oldest 25%
-    /// of entries are removed to make room.
+    /// Two eviction strategies are applied in order:
+    /// 1. **Entry count limit** -- when the number of entries reaches
+    ///    `MAX_MEMORY_ENTRIES`, the oldest 25 % of entries are removed.
+    /// 2. **Token budget** -- when the total estimated tokens (including the
+    ///    new entry) would exceed `MAX_MEMORY_TOKENS`, the oldest entries are
+    ///    removed one at a time until the total is under budget.
     pub fn add_message(&mut self, msg: &Message) {
+        // Entry count eviction
         if self.entries.len() >= MAX_MEMORY_ENTRIES {
             let remove_count = MAX_MEMORY_ENTRIES / 4;
             self.entries.drain(..remove_count);
         }
-        self.entries.push(MemoryEntry::from_message(msg));
+
+        let new_entry = MemoryEntry::from_message(msg);
+
+        // Token budget eviction -- evict oldest entries while over budget.
+        let new_tokens = new_entry.token_estimate;
+        while self.total_estimated_tokens() + new_tokens > MAX_MEMORY_TOKENS && !self.entries.is_empty() {
+            self.entries.remove(0);
+        }
+
+        self.entries.push(new_entry);
+    }
+
+    /// Estimate total token usage across all memory entries.
+    pub fn total_estimated_tokens(&self) -> usize {
+        self.entries.iter().map(|e| e.token_estimate).sum()
     }
 
     /// Get total estimated tokens in memory
@@ -629,5 +653,76 @@ mod tests {
 
         // Same content should produce same token estimate
         assert_eq!(entry1.token_estimate, entry2.token_estimate);
+    }
+
+    // =========================================================================
+    // total_estimated_tokens and token budget eviction tests
+    // =========================================================================
+
+    #[test]
+    fn test_total_estimated_tokens_empty() {
+        let config = Config::default();
+        let memory = AgentMemory::new(&config).unwrap();
+        assert_eq!(memory.total_estimated_tokens(), 0);
+    }
+
+    #[test]
+    fn test_total_estimated_tokens_accumulates() {
+        let config = Config::default();
+        let mut memory = AgentMemory::new(&config).unwrap();
+
+        memory.add_message(&Message::user("Hello"));
+        let first = memory.total_estimated_tokens();
+        assert!(first > 0);
+
+        memory.add_message(&Message::user("World"));
+        let second = memory.total_estimated_tokens();
+        assert!(second > first);
+    }
+
+    #[test]
+    fn test_total_estimated_tokens_matches_total_tokens() {
+        let config = Config::default();
+        let mut memory = AgentMemory::new(&config).unwrap();
+
+        memory.add_message(&Message::user("Test message"));
+        memory.add_message(&Message::assistant("Response message"));
+
+        // total_estimated_tokens should equal total_tokens (same computation)
+        assert_eq!(memory.total_estimated_tokens(), memory.total_tokens());
+    }
+
+    #[test]
+    fn test_token_budget_eviction() {
+        let config = Config::default();
+        let mut memory = AgentMemory::new(&config).unwrap();
+
+        // Add many large messages to exceed the MAX_MEMORY_TOKENS budget.
+        // Each message is ~5000 chars which is roughly 1250-1666 tokens.
+        // MAX_MEMORY_TOKENS = 500_000, so ~300-400 of these should trigger eviction.
+        let big_content = "a".repeat(5000);
+        for _ in 0..500 {
+            memory.add_message(&Message::user(&big_content));
+        }
+
+        // After eviction, total tokens should be at or below MAX_MEMORY_TOKENS
+        assert!(
+            memory.total_estimated_tokens() <= MAX_MEMORY_TOKENS,
+            "total_estimated_tokens ({}) should be <= MAX_MEMORY_TOKENS ({})",
+            memory.total_estimated_tokens(),
+            MAX_MEMORY_TOKENS
+        );
+    }
+
+    #[test]
+    fn test_total_estimated_tokens_after_clear() {
+        let config = Config::default();
+        let mut memory = AgentMemory::new(&config).unwrap();
+
+        memory.add_message(&Message::user("Test"));
+        assert!(memory.total_estimated_tokens() > 0);
+
+        memory.clear();
+        assert_eq!(memory.total_estimated_tokens(), 0);
     }
 }

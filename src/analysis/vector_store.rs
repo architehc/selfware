@@ -17,10 +17,11 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::warn;
 
 /// Embedding dimension (common for small models)
 pub const EMBEDDING_DIM: usize = 384;
@@ -306,6 +307,17 @@ pub enum CollectionScope {
     Session,
     /// Global (shared across all projects)
     Global,
+}
+
+/// Health status of a vector index
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexHealth {
+    /// Index is consistent: no NaN/Inf, no duplicates, dimensions match
+    Healthy,
+    /// Index has minor issues (e.g., duplicate IDs) but is still usable
+    Degraded,
+    /// Index is corrupt (e.g., NaN/Inf values, dimension mismatches) and must be rebuilt
+    Corrupt,
 }
 
 /// Vector collection
@@ -714,6 +726,95 @@ impl VectorIndex {
         self.embeddings.clear();
         self.chunk_ids.clear();
     }
+
+    /// Verify index integrity, returning a list of issues found.
+    ///
+    /// Checks for:
+    /// - Mismatched embedding dimensions
+    /// - NaN or Inf values in vectors
+    /// - Duplicate chunk IDs
+    /// - Empty embedding vectors
+    pub fn verify_index_integrity(&self) -> Vec<String> {
+        let mut issues = Vec::new();
+
+        // Check for duplicate IDs
+        let mut seen_ids = HashSet::new();
+        for id in &self.chunk_ids {
+            if !seen_ids.insert(id.as_str()) {
+                issues.push(format!("Duplicate chunk ID: {}", id));
+            }
+        }
+
+        // Check each embedding
+        for (i, embedding) in self.embeddings.iter().enumerate() {
+            let id = self
+                .chunk_ids
+                .get(i)
+                .map(|s| s.as_str())
+                .unwrap_or("<missing>");
+
+            // Dimension mismatch
+            if embedding.len() != self.dimension {
+                issues.push(format!(
+                    "Dimension mismatch for '{}': expected {}, got {}",
+                    id,
+                    self.dimension,
+                    embedding.len()
+                ));
+            }
+
+            // Empty vector
+            if embedding.is_empty() {
+                issues.push(format!("Empty embedding vector for '{}'", id));
+                continue;
+            }
+
+            // NaN / Inf values
+            let has_nan = embedding.iter().any(|v| v.is_nan());
+            let has_inf = embedding.iter().any(|v| v.is_infinite());
+            if has_nan {
+                issues.push(format!("NaN values in embedding for '{}'", id));
+            }
+            if has_inf {
+                issues.push(format!("Inf values in embedding for '{}'", id));
+            }
+        }
+
+        // Parallel array length mismatch
+        if self.embeddings.len() != self.chunk_ids.len() {
+            issues.push(format!(
+                "Array length mismatch: {} embeddings vs {} chunk_ids",
+                self.embeddings.len(),
+                self.chunk_ids.len()
+            ));
+        }
+
+        issues
+    }
+
+    /// Check overall health of the index.
+    pub fn check_health(&self) -> IndexHealth {
+        let issues = self.verify_index_integrity();
+        if issues.is_empty() {
+            return IndexHealth::Healthy;
+        }
+
+        // NaN, Inf, dimension mismatch, or array length mismatch => Corrupt
+        let has_corrupt = issues.iter().any(|issue| {
+            issue.contains("NaN")
+                || issue.contains("Inf")
+                || issue.contains("Dimension mismatch")
+                || issue.contains("Array length mismatch")
+                || issue.contains("Empty embedding")
+        });
+
+        if has_corrupt {
+            IndexHealth::Corrupt
+        } else {
+            // Only duplicates or other minor issues
+            IndexHealth::Degraded
+        }
+    }
 }
 
 /// Code chunker for splitting code into meaningful pieces
@@ -1106,7 +1207,80 @@ impl VectorStore {
         Ok(chunk_count)
     }
 
-    /// Search across collection
+    /// Rebuild the index for a collection from its stored chunks.
+    ///
+    /// This discards the current index and reconstructs it by re-embedding
+    /// every chunk in the collection. Useful when `check_health()` reports
+    /// `IndexHealth::Corrupt`.
+    pub async fn rebuild_index(&mut self, collection_name: &str) -> Result<()> {
+        let collection = self
+            .collections
+            .get(collection_name)
+            .ok_or_else(|| anyhow!("Collection not found: {}", collection_name))?;
+
+        let texts: Vec<String> = collection.chunks().iter().map(|c| c.content.clone()).collect();
+        let ids: Vec<String> = collection.chunks().iter().map(|c| c.id.clone()).collect();
+
+        let embeddings = self.provider.embed_batch(&texts).await?;
+
+        let mut new_index = VectorIndex::new(self.provider.dimension());
+        for (id, embedding) in ids.into_iter().zip(embeddings.into_iter()) {
+            new_index.add(id, embedding)?;
+        }
+
+        self.indices.insert(collection_name.to_string(), new_index);
+        warn!(
+            "Rebuilt vector index for collection '{}' ({} vectors)",
+            collection_name,
+            texts.len()
+        );
+        Ok(())
+    }
+
+    /// Build `SearchResult` entries from raw `(chunk_id, score)` pairs.
+    fn build_search_results(
+        collection: &VectorCollection,
+        raw_results: Vec<(String, f32)>,
+        k: usize,
+        filter: Option<&SearchFilter>,
+    ) -> Vec<SearchResult> {
+        let mut search_results = Vec::new();
+        for (chunk_id, score) in raw_results {
+            if let Some(chunk) = collection.get_chunk(&chunk_id) {
+                if let Some(filter) = filter {
+                    if !filter.matches(chunk) {
+                        continue;
+                    }
+                    if let Some(min_score) = filter.min_score {
+                        if score < min_score {
+                            continue;
+                        }
+                    }
+                }
+
+                let weighted_score = score * chunk.metadata.chunk_type.weight();
+                search_results.push(SearchResult {
+                    chunk: chunk.clone(),
+                    score: weighted_score,
+                    distance: 1.0 - score,
+                });
+            }
+        }
+
+        search_results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        search_results.truncate(k);
+        search_results
+    }
+
+    /// Search across collection.
+    ///
+    /// If all raw similarity scores are NaN a warning is logged. Callers
+    /// that hold a mutable reference can use [`search_or_rebuild`] instead
+    /// to automatically rebuild the index and retry.
     pub async fn search(
         &self,
         collection_name: &str,
@@ -1124,50 +1298,78 @@ impl VectorStore {
             .get(collection_name)
             .ok_or_else(|| anyhow!("Index not found: {}", collection_name))?;
 
-        // Generate query embedding
         let query_embedding = self.provider.embed(query).await?;
+        let raw_results = index.search(&query_embedding, k * 2);
 
-        // Search index
-        let results = index.search(&query_embedding, k * 2); // Get more for filtering
-
-        // Build results with chunks
-        let mut search_results = Vec::new();
-        for (chunk_id, score) in results {
-            if let Some(chunk) = collection.get_chunk(&chunk_id) {
-                // Apply filter
-                if let Some(filter) = filter {
-                    if !filter.matches(chunk) {
-                        continue;
-                    }
-                    if let Some(min_score) = filter.min_score {
-                        if score < min_score {
-                            continue;
-                        }
-                    }
-                }
-
-                // Apply chunk type weight
-                let weighted_score = score * chunk.metadata.chunk_type.weight();
-
-                search_results.push(SearchResult {
-                    chunk: chunk.clone(),
-                    score: weighted_score,
-                    distance: 1.0 - score,
-                });
-            }
+        // Detect corruption: all scores are NaN
+        let all_nan =
+            !raw_results.is_empty() && raw_results.iter().all(|(_, score)| score.is_nan());
+        if all_nan {
+            warn!(
+                "All search scores are NaN for collection '{}' — index may be corrupt; \
+                 consider calling search_or_rebuild()",
+                collection_name
+            );
         }
 
-        // Sort by weighted score
-        search_results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        Ok(Self::build_search_results(
+            collection,
+            raw_results,
+            k,
+            filter,
+        ))
+    }
 
-        // Limit to k
-        search_results.truncate(k);
+    /// Search with automatic index rebuild on corruption.
+    ///
+    /// If the initial search produces only NaN scores the index is rebuilt
+    /// from the source chunks and the search is retried once.
+    pub async fn search_or_rebuild(
+        &mut self,
+        collection_name: &str,
+        query: &str,
+        k: usize,
+        filter: Option<&SearchFilter>,
+    ) -> Result<Vec<SearchResult>> {
+        let query_embedding = self.provider.embed(query).await?;
 
-        Ok(search_results)
+        let raw_results = {
+            let index = self
+                .indices
+                .get(collection_name)
+                .ok_or_else(|| anyhow!("Index not found: {}", collection_name))?;
+            index.search(&query_embedding, k * 2)
+        };
+
+        let all_nan =
+            !raw_results.is_empty() && raw_results.iter().all(|(_, score)| score.is_nan());
+
+        let raw_results = if all_nan {
+            warn!(
+                "All search scores are NaN for collection '{}' — rebuilding index",
+                collection_name
+            );
+            self.rebuild_index(collection_name).await?;
+            let index = self
+                .indices
+                .get(collection_name)
+                .ok_or_else(|| anyhow!("Index not found after rebuild: {}", collection_name))?;
+            index.search(&query_embedding, k * 2)
+        } else {
+            raw_results
+        };
+
+        let collection = self
+            .collections
+            .get(collection_name)
+            .ok_or_else(|| anyhow!("Collection not found: {}", collection_name))?;
+
+        Ok(Self::build_search_results(
+            collection,
+            raw_results,
+            k,
+            filter,
+        ))
     }
 
     /// Save store to disk.
@@ -2084,5 +2286,97 @@ pub fn calculate_product(a: i32, b: i32) -> i32 {
         let stats = store.stats();
         assert_eq!(stats.collection_count, 0);
         assert_eq!(stats.total_chunks, 0);
+    }
+
+    // =========================================================================
+    // Index integrity and health tests
+    // =========================================================================
+
+    #[test]
+    fn test_verify_index_integrity_healthy() {
+        let mut index = VectorIndex::new(3);
+        index.add("a".to_string(), vec![1.0, 0.0, 0.0]).unwrap();
+        index.add("b".to_string(), vec![0.0, 1.0, 0.0]).unwrap();
+
+        let issues = index.verify_index_integrity();
+        assert!(issues.is_empty(), "Expected no issues, got: {:?}", issues);
+    }
+
+    #[test]
+    fn test_verify_index_integrity_nan() {
+        let mut index = VectorIndex::new(3);
+        index.add("a".to_string(), vec![1.0, f32::NAN, 0.0]).unwrap();
+
+        let issues = index.verify_index_integrity();
+        assert!(!issues.is_empty());
+        assert!(issues.iter().any(|i| i.contains("NaN")));
+    }
+
+    #[test]
+    fn test_verify_index_integrity_inf() {
+        let mut index = VectorIndex::new(3);
+        index
+            .add("a".to_string(), vec![1.0, f32::INFINITY, 0.0])
+            .unwrap();
+
+        let issues = index.verify_index_integrity();
+        assert!(issues.iter().any(|i| i.contains("Inf")));
+    }
+
+    #[test]
+    fn test_verify_index_integrity_duplicate_ids() {
+        let mut index = VectorIndex::new(2);
+        index.add("dup".to_string(), vec![1.0, 0.0]).unwrap();
+        index.add("dup".to_string(), vec![0.0, 1.0]).unwrap();
+
+        let issues = index.verify_index_integrity();
+        assert!(issues.iter().any(|i| i.contains("Duplicate")));
+    }
+
+    #[test]
+    fn test_check_health_healthy() {
+        let mut index = VectorIndex::new(2);
+        index.add("a".to_string(), vec![1.0, 0.0]).unwrap();
+        assert_eq!(index.check_health(), IndexHealth::Healthy);
+    }
+
+    #[test]
+    fn test_check_health_corrupt_nan() {
+        let mut index = VectorIndex::new(2);
+        index.add("a".to_string(), vec![f32::NAN, 0.0]).unwrap();
+        assert_eq!(index.check_health(), IndexHealth::Corrupt);
+    }
+
+    #[test]
+    fn test_check_health_degraded_duplicates() {
+        let mut index = VectorIndex::new(2);
+        index.add("dup".to_string(), vec![1.0, 0.0]).unwrap();
+        index.add("dup".to_string(), vec![0.0, 1.0]).unwrap();
+        assert_eq!(index.check_health(), IndexHealth::Degraded);
+    }
+
+    #[test]
+    fn test_check_health_empty_index() {
+        let index = VectorIndex::new(4);
+        assert_eq!(index.check_health(), IndexHealth::Healthy);
+    }
+
+    #[tokio::test]
+    async fn test_rebuild_index() {
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut store = VectorStore::new(provider);
+
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.rs");
+        std::fs::write(&file_path, "pub fn test() {}").unwrap();
+
+        store.collection("project", CollectionScope::Project);
+        store.index_file("project", &file_path).await.unwrap();
+
+        // Rebuild should succeed
+        store.rebuild_index("project").await.unwrap();
+
+        let index = store.indices.get("project").unwrap();
+        assert_eq!(index.check_health(), IndexHealth::Healthy);
     }
 }

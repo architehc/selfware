@@ -95,6 +95,9 @@ pub struct Agent {
     cancelled: Arc<AtomicBool>,
     /// Messages queued for sequential execution
     pending_messages: VecDeque<String>,
+    /// Maximum total estimated tokens for the message history.
+    /// When exceeded, oldest non-system messages are removed.
+    max_context_tokens: usize,
     /// Self-healing engine for automatic recovery attempts
     #[cfg(feature = "resilience")]
     self_healing: SelfHealingEngine,
@@ -292,6 +295,7 @@ To call a tool, use this EXACT XML structure:
             chat_store,
             cancelled: Arc::new(AtomicBool::new(false)),
             pending_messages: VecDeque::new(),
+            max_context_tokens: 100_000,
             #[cfg(feature = "resilience")]
             self_healing,
         })
@@ -807,6 +811,28 @@ To call a tool, use this EXACT XML structure:
     // =========================================================================
     // Context Management
     // =========================================================================
+
+    /// Trim the message history so total estimated tokens stay within
+    /// `max_context_tokens`. Removes the oldest non-system messages first.
+    fn trim_message_history(&mut self) {
+        loop {
+            let total: usize = self
+                .messages
+                .iter()
+                .map(|m| crate::token_count::estimate_tokens_with_overhead(&m.content, 4))
+                .sum();
+            if total <= self.max_context_tokens {
+                break;
+            }
+            // Find the first non-system message and remove it.
+            if let Some(pos) = self.messages.iter().position(|m| m.role != "system") {
+                self.messages.remove(pos);
+            } else {
+                // Only system messages left -- nothing more to trim.
+                break;
+            }
+        }
+    }
 
     /// Estimate total tokens from accumulated messages (the actual context sent to API)
     fn estimate_messages_tokens(&self) -> usize {
@@ -1750,6 +1776,10 @@ To call a tool, use this EXACT XML structure:
         progress.start_phase();
 
         while let Some(state) = self.loop_control.next_state() {
+            // Trim message history before each iteration to stay within
+            // the token budget.
+            self.trim_message_history();
+
             if self.is_cancelled() {
                 println!("{}", "\n⚡ Interrupted".bright_yellow());
                 self.messages
@@ -2259,6 +2289,10 @@ To call a tool, use this EXACT XML structure:
         let mut recovery_attempts = 0u32;
 
         while let Some(state) = self.loop_control.next_state() {
+            // Trim message history before each iteration to stay within
+            // the token budget.
+            self.trim_message_history();
+
             if self.is_cancelled() {
                 println!("{}", "\n⚡ Interrupted".bright_yellow());
                 self.messages
@@ -3077,5 +3111,73 @@ mod tests {
         assert_eq!(Agent::outcome_quality(Outcome::Partial), 0.65);
         assert_eq!(Agent::outcome_quality(Outcome::Failure), 0.0);
         assert_eq!(Agent::outcome_quality(Outcome::Abandoned), 0.2);
+    }
+
+    // =========================================================================
+    // trim_message_history tests
+    // =========================================================================
+
+    /// Helper that mirrors `Agent::trim_message_history` logic so we can
+    /// verify the algorithm without constructing a full Agent instance.
+    fn trim_messages(messages: &mut Vec<Message>, max_tokens: usize) {
+        loop {
+            let total: usize = messages
+                .iter()
+                .map(|m| crate::token_count::estimate_tokens_with_overhead(&m.content, 4))
+                .sum();
+            if total <= max_tokens {
+                break;
+            }
+            if let Some(pos) = messages.iter().position(|m| m.role != "system") {
+                messages.remove(pos);
+            } else {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn test_trim_message_history_no_trim_needed() {
+        let mut msgs = vec![
+            Message::system("sys"),
+            Message::user("hi"),
+            Message::assistant("hello"),
+        ];
+        let before_len = msgs.len();
+        trim_messages(&mut msgs, 100_000);
+        assert_eq!(msgs.len(), before_len);
+    }
+
+    #[test]
+    fn test_trim_message_history_removes_oldest_non_system() {
+        let mut msgs = vec![
+            Message::system("system prompt"),
+            Message::user("first user message"),
+            Message::assistant("first reply"),
+            Message::user("second user message"),
+            Message::assistant("second reply"),
+        ];
+
+        // Use a very small budget to force trimming
+        trim_messages(&mut msgs, 50);
+
+        // System message must survive
+        assert_eq!(msgs[0].role, "system");
+        // At least some messages should have been removed
+        assert!(msgs.len() < 5);
+    }
+
+    #[test]
+    fn test_trim_message_history_preserves_system_only() {
+        let mut msgs = vec![
+            Message::system("system prompt"),
+            Message::user("big message ".repeat(5000)),
+        ];
+
+        // Very tiny budget: should remove the user message but keep system
+        trim_messages(&mut msgs, 30);
+
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, "system");
     }
 }
