@@ -4,6 +4,7 @@
 
 mod test_agent;
 mod test_api;
+mod test_cognitive;
 mod test_config;
 mod test_context;
 mod test_error_paths;
