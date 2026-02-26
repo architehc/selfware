@@ -209,7 +209,9 @@ async fn test_file_write_read_roundtrip() {
 
     // Set test mode so the safety validator permits absolute paths
     // (integration tests don't run under #[cfg(test)] context)
-    std::env::set_var("SELFWARE_TEST_MODE", "1");
+    let mut cfg = selfware::config::SafetyConfig::default();
+    cfg.allowed_paths = vec!["/**".to_string()];
+    selfware::tools::file::init_safety_config(&cfg);
 
     let test_content = "Integration test content: Hello, Selfware!";
     let test_path = std::env::temp_dir()
