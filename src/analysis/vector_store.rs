@@ -848,24 +848,25 @@ impl CodeChunker {
 
     /// Chunk Rust code by functions, structs, etc.
     pub fn chunk_rust(&self, content: &str, file_path: &Path) -> Vec<CodeChunk> {
+        static PATTERNS: once_cell::sync::Lazy<Vec<(regex::Regex, ChunkType)>> = once_cell::sync::Lazy::new(|| {
+            [
+                (r"^\s*(pub\s+)?(async\s+)?fn\s+", ChunkType::Function),
+                (r"^\s*(pub\s+)?struct\s+", ChunkType::Struct),
+                (r"^\s*(pub\s+)?enum\s+", ChunkType::Enum),
+                (r"^\s*(pub\s+)?trait\s+", ChunkType::Trait),
+                (r"^\s*impl\s+", ChunkType::Impl),
+                (r"^\s*(pub\s+)?mod\s+", ChunkType::Module),
+                (r"^\s*#\[test\]", ChunkType::Test),
+                (r"^\s*(pub\s+)?const\s+", ChunkType::Constant),
+                (r"^\s*use\s+", ChunkType::Import),
+            ]
+            .into_iter()
+            .filter_map(|(pat, ct)| regex::Regex::new(pat).ok().map(|re| (re, ct)))
+            .collect()
+        });
+
         let mut chunks = Vec::new();
         let lines: Vec<&str> = content.lines().collect();
-
-        // Patterns for Rust constructs
-        let patterns: Vec<(regex::Regex, ChunkType)> = [
-            (r"^\s*(pub\s+)?(async\s+)?fn\s+", ChunkType::Function),
-            (r"^\s*(pub\s+)?struct\s+", ChunkType::Struct),
-            (r"^\s*(pub\s+)?enum\s+", ChunkType::Enum),
-            (r"^\s*(pub\s+)?trait\s+", ChunkType::Trait),
-            (r"^\s*impl\s+", ChunkType::Impl),
-            (r"^\s*(pub\s+)?mod\s+", ChunkType::Module),
-            (r"^\s*#\[test\]", ChunkType::Test),
-            (r"^\s*(pub\s+)?const\s+", ChunkType::Constant),
-            (r"^\s*use\s+", ChunkType::Import),
-        ]
-        .into_iter()
-        .filter_map(|(pat, ct)| regex::Regex::new(pat).ok().map(|re| (re, ct)))
-        .collect();
 
         let mut current_start = 0;
         let mut current_type = ChunkType::CodeBlock;
@@ -874,7 +875,7 @@ impl CodeChunker {
 
         for (line_num, line) in lines.iter().enumerate() {
             // Check for pattern starts
-            for (pattern, chunk_type) in &patterns {
+            for (pattern, chunk_type) in PATTERNS.iter() {
                 if pattern.is_match(line) && !in_block {
                     // Save previous chunk if exists
                     if line_num > current_start {

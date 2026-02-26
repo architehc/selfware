@@ -309,6 +309,7 @@ impl Tool for GitCommit {
                         .arg("-C")
                         .arg(repo_path)
                         .arg("add")
+                        .arg("--")
                         .arg(f)
                         .output()
                         .await?;
@@ -392,10 +393,11 @@ impl Tool for GitPush {
         };
 
         let mut cmd = tokio::process::Command::new("git");
-        cmd.arg("push").arg(remote).arg(&branch);
+        cmd.arg("push");
         if force {
             cmd.arg("--force");
         }
+        cmd.arg("--").arg(remote).arg(&branch);
 
         let output = cmd.output().await.context("Failed to execute git push")?;
         let success = output.status.success();

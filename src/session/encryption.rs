@@ -57,37 +57,24 @@ fn load_or_create_salt() -> Result<Vec<u8>> {
 /// with a per-installation random salt.
 fn derive_key(password: &str) -> [u8; 32] {
     let salt = load_or_create_salt().unwrap_or_else(|_| {
-        // Last-resort fallback: derive from machine-specific data.
-        let mut fallback = Vec::new();
-        fallback.extend_from_slice(b"selfware-fallback-");
-        if let Ok(name) = whoami::username() {
-            fallback.extend_from_slice(name.as_bytes());
-        }
-        if let Ok(host) = whoami::hostname() {
-            fallback.extend_from_slice(host.as_bytes());
-        }
-        fallback
+        tracing::warn!("Failed to persist salt. Using an ephemeral random salt for this session.");
+        let mut fallback = [0u8; 32];
+        rand::rng().fill_bytes(&mut fallback);
+        fallback.to_vec()
     });
     let mut key = [0u8; 32];
     pbkdf2::pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt, KDF_ITERATIONS, &mut key);
     key
 }
 
+use zeroize::Zeroize;
+
 /// Zero the encryption key when the manager is dropped.
 ///
 /// This provides basic defense-in-depth against memory-scraping attacks.
-/// Note: for production use, a dedicated zeroize crate would be better as
-/// the compiler may optimize away simple fill operations, but we avoid
-/// adding new dependencies here.
 impl Drop for EncryptionManager {
     fn drop(&mut self) {
-        // Use write_volatile to prevent the compiler from optimizing this away.
-        for byte in self.key.iter_mut() {
-            // SAFETY: we have a mutable reference to each byte in the array.
-            unsafe {
-                std::ptr::write_volatile(byte, 0u8);
-            }
-        }
+        self.key.zeroize();
     }
 }
 

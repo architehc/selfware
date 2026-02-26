@@ -470,11 +470,11 @@ fn default_three() -> usize {
 /// for multi-agent isolation). Otherwise falls back to the global `SAFETY_CONFIG`,
 /// and finally to `SafetyConfig::default()`.
 fn validate_tool_path(path: &str, instance_config: Option<&SafetyConfig>) -> Result<()> {
-    if std::env::var("SELFWARE_TEST_MODE").is_ok() {
-        return Ok(());
-    }
     #[cfg(test)]
     {
+        if std::env::var("SELFWARE_TEST_MODE").is_ok() {
+            return Ok(());
+        }
         let p = std::path::Path::new(path);
         if p.is_absolute() {
             return Ok(());

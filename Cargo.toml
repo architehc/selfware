@@ -65,6 +65,7 @@ keyring = "3.2"
 
 # Workflows
 serde_yaml = "0.9"  # YAML workflow definitions
+zeroize = "1.8.2"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30", features = ["signal"] }

@@ -96,29 +96,42 @@ impl Tool for HttpRequest {
             anyhow::bail!("Only HTTP and HTTPS URLs are allowed");
         }
 
-        // Block requests to private/internal network addresses (SSRF protection).
-        // Set SELFWARE_ALLOW_PRIVATE_NETWORK=1 to override for local development.
+        // Block requests to private/internal network addresses (SSRF protection)
+        // and pin DNS resolution to prevent rebinding attacks.
+        let mut builder = Client::builder()
+            .timeout(Duration::from_secs(args.timeout_secs));
+
         if let Some(host) = url.host_str() {
-            if is_private_network_host(host) {
-                let allow_private =
-                    std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1";
-                if !allow_private {
-                    anyhow::bail!(
-                        "Blocked request to private/internal network address: {}. \
-                         Set SELFWARE_ALLOW_PRIVATE_NETWORK=1 to allow.",
-                        host
-                    );
+            let allow_private = std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1";
+            
+            // Resolve the hostname manually to check the actual IP and pin it
+            if host.parse::<std::net::IpAddr>().is_err() {
+                use std::net::ToSocketAddrs;
+                let port = url.port_or_known_default().unwrap_or(80);
+                if let Ok(mut addrs) = (host, port).to_socket_addrs() {
+                    if let Some(addr) = addrs.next() {
+                        let ip_str = addr.ip().to_string();
+                        if is_private_network_host(&ip_str) && !allow_private {
+                            anyhow::bail!("DNS rebinding blocked: {} resolves to private IP {}", host, ip_str);
+                        }
+                        // Pin the resolved IP so the HTTP client doesn't re-resolve it
+                        builder = builder.resolve(host, addr);
+                    }
                 }
-                tracing::warn!(
-                    "Allowing request to private network (SELFWARE_ALLOW_PRIVATE_NETWORK=1): {}",
+            } else if is_private_network_host(host) && !allow_private {
+                anyhow::bail!(
+                    "Blocked request to private/internal network address: {}. \
+                     Set SELFWARE_ALLOW_PRIVATE_NETWORK=1 to allow.",
                     host
                 );
             }
+            
+            if is_private_network_host(host) && allow_private {
+                tracing::warn!("Allowing request to private network (SELFWARE_ALLOW_PRIVATE_NETWORK=1): {}", host);
+            }
         }
 
-        // Build client
-        let client = Client::builder()
-            .timeout(Duration::from_secs(args.timeout_secs))
+        let client = builder
             .redirect(if args.follow_redirects {
                 reqwest::redirect::Policy::custom(|attempt| {
                     if attempt.previous().len() > 10 {

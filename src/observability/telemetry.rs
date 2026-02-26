@@ -77,18 +77,28 @@ pub fn log_entry_count() -> usize {
 /// Callers that maintain their own log buffers should drain old entries when this
 /// returns `true`.
 pub fn rotate_if_needed() -> bool {
-    let count = LOG_ENTRY_COUNT.load(Ordering::Relaxed);
-    if count >= MAX_LOG_ENTRIES {
-        // Reset to half to represent keeping the newer half of entries.
-        LOG_ENTRY_COUNT.store(count / 2, Ordering::Relaxed);
-        info!(
-            "Telemetry log rotation triggered: {} entries exceeded limit, reset to {}",
-            count,
-            count / 2
-        );
-        true
-    } else {
-        false
+    let mut count = LOG_ENTRY_COUNT.load(Ordering::Relaxed);
+    loop {
+        if count >= MAX_LOG_ENTRIES {
+            match LOG_ENTRY_COUNT.compare_exchange_weak(
+                count,
+                count / 2,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    info!(
+                        "Telemetry log rotation triggered: {} entries exceeded limit, reset to {}",
+                        count,
+                        count / 2
+                    );
+                    return true;
+                }
+                Err(actual) => count = actual,
+            }
+        } else {
+            return false;
+        }
     }
 }
 

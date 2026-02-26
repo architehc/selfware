@@ -35,25 +35,45 @@ struct CheckpointEnvelope {
 }
 
 impl CheckpointEnvelope {
-    /// Create a new envelope by computing the SHA-256 hash of the payload.
+    fn get_hmac_key() -> Vec<u8> {
+        // Fallback for getting a unique machine key to tie the checkpoint to this system.
+        let mut key = b"selfware-checkpoint-hmac-key".to_vec();
+        if let Ok(name) = whoami::username() {
+            key.extend_from_slice(name.as_bytes());
+        }
+        key
+    }
+
+    /// Create a new envelope by computing the HMAC-SHA-256 hash of the payload.
     fn wrap(payload: serde_json::Value) -> Result<Self> {
+        use hmac::{Hmac, Mac};
         let canonical =
             serde_json::to_string(&payload).context("Failed to serialize payload for hashing")?;
-        let hash = hex::encode(Sha256::digest(canonical.as_bytes()));
+            
+        let mut mac = Hmac::<Sha256>::new_from_slice(&Self::get_hmac_key())
+            .expect("HMAC can take key of any size");
+        mac.update(canonical.as_bytes());
+        let hash = hex::encode(mac.finalize().into_bytes());
         Ok(Self {
             sha256: hash,
             payload,
         })
     }
 
-    /// Verify the integrity of the envelope by recomputing the hash.
+    /// Verify the integrity of the envelope by recomputing the HMAC.
     fn verify(&self) -> Result<()> {
+        use hmac::{Hmac, Mac};
         let canonical = serde_json::to_string(&self.payload)
             .context("Failed to serialize payload for verification")?;
-        let expected = hex::encode(Sha256::digest(canonical.as_bytes()));
+            
+        let mut mac = Hmac::<Sha256>::new_from_slice(&Self::get_hmac_key())
+            .expect("HMAC can take key of any size");
+        mac.update(canonical.as_bytes());
+        let expected = hex::encode(mac.finalize().into_bytes());
+        
         if expected != self.sha256 {
             bail!(
-                "Checkpoint integrity check failed: expected SHA-256 {}, got {}",
+                "Checkpoint integrity check failed: expected HMAC {}, got {}",
                 expected,
                 self.sha256
             );

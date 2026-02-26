@@ -2762,6 +2762,7 @@ dependencies = [
  "uuid",
  "walkdir",
  "whoami",
+ "zeroize",
 ]
 
 [[package]]
