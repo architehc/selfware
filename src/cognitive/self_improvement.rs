@@ -6,12 +6,15 @@
 //! - Error pattern avoidance through learning
 //! - Usage pattern analysis
 
+use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Outcome of a task or action
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Outcome {
     /// Task completed successfully
     Success,
@@ -41,7 +44,7 @@ impl Outcome {
 }
 
 /// Record of a prompt's effectiveness
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptRecord {
     /// Original prompt text
     pub prompt: String,
@@ -92,7 +95,7 @@ impl PromptRecord {
 }
 
 /// Prompt pattern for optimization
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptPattern {
     /// Pattern identifier
     pub id: String,
@@ -154,7 +157,7 @@ pub struct PromptOptimizer {
 }
 
 /// Stats for prompts by task type
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TaskPromptStats {
     pub total_attempts: usize,
     pub successful: usize,
@@ -296,6 +299,25 @@ impl PromptOptimizer {
     }
 }
 
+impl PromptOptimizer {
+    fn to_snapshot(&self) -> PromptOptimizerSnapshot {
+        PromptOptimizerSnapshot {
+            records: self.records.clone(),
+            patterns: self.patterns.clone(),
+            task_stats: self.task_stats.clone(),
+        }
+    }
+
+    fn from_snapshot(snapshot: PromptOptimizerSnapshot) -> Self {
+        Self {
+            records: snapshot.records,
+            patterns: snapshot.patterns,
+            task_stats: snapshot.task_stats,
+            max_records: 10000,
+        }
+    }
+}
+
 impl Default for PromptOptimizer {
     fn default() -> Self {
         Self::new()
@@ -303,7 +325,7 @@ impl Default for PromptOptimizer {
 }
 
 /// Prompt improvement suggestion
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptSuggestion {
     pub suggestion_type: SuggestionType,
     pub description: String,
@@ -311,13 +333,21 @@ pub struct PromptSuggestion {
 }
 
 /// Type of prompt suggestion
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SuggestionType {
     AddContext,
     ClarifyIntent,
     UsePattern,
     SimplifyPrompt,
     AddExamples,
+}
+
+/// Serializable snapshot of PromptOptimizer state
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PromptOptimizerSnapshot {
+    records: Vec<PromptRecord>,
+    patterns: HashMap<String, PromptPattern>,
+    task_stats: HashMap<String, TaskPromptStats>,
 }
 
 /// Stats for prompt optimizer
@@ -331,7 +361,7 @@ pub struct PromptOptimizerStats {
 }
 
 /// Record of a tool usage
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolUsageRecord {
     /// Tool name
     pub tool: String,
@@ -374,7 +404,7 @@ impl ToolUsageRecord {
 }
 
 /// Stats for a tool
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ToolStats {
     pub usage_count: usize,
     pub success_count: usize,
@@ -544,6 +574,33 @@ impl ToolSelectionLearner {
     }
 }
 
+/// Serializable snapshot of ToolSelectionLearner state
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ToolLearnerSnapshot {
+    records: Vec<ToolUsageRecord>,
+    tool_stats: HashMap<String, ToolStats>,
+    context_tools: HashMap<String, Vec<(String, f32)>>,
+}
+
+impl ToolSelectionLearner {
+    fn to_snapshot(&self) -> ToolLearnerSnapshot {
+        ToolLearnerSnapshot {
+            records: self.records.clone(),
+            tool_stats: self.tool_stats.clone(),
+            context_tools: self.context_tools.clone(),
+        }
+    }
+
+    fn from_snapshot(snapshot: ToolLearnerSnapshot) -> Self {
+        Self {
+            records: snapshot.records,
+            tool_stats: snapshot.tool_stats,
+            context_tools: snapshot.context_tools,
+            max_records: 10000,
+        }
+    }
+}
+
 impl Default for ToolSelectionLearner {
     fn default() -> Self {
         Self::new()
@@ -560,7 +617,7 @@ pub struct ToolLearnerStats {
 }
 
 /// Record of an error occurrence
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorRecord {
     /// Error message
     pub message: String,
@@ -602,7 +659,7 @@ impl ErrorRecord {
 }
 
 /// Pattern of errors to avoid
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorPattern {
     /// Pattern identifier
     pub id: String,
@@ -796,6 +853,33 @@ impl ErrorPatternLearner {
     }
 }
 
+/// Serializable snapshot of ErrorPatternLearner state
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ErrorLearnerSnapshot {
+    records: Vec<ErrorRecord>,
+    patterns: HashMap<String, ErrorPattern>,
+    type_counts: HashMap<String, usize>,
+}
+
+impl ErrorPatternLearner {
+    fn to_snapshot(&self) -> ErrorLearnerSnapshot {
+        ErrorLearnerSnapshot {
+            records: self.records.clone(),
+            patterns: self.patterns.clone(),
+            type_counts: self.type_counts.clone(),
+        }
+    }
+
+    fn from_snapshot(snapshot: ErrorLearnerSnapshot) -> Self {
+        Self {
+            records: snapshot.records,
+            patterns: snapshot.patterns,
+            type_counts: snapshot.type_counts,
+            max_records: 5000,
+        }
+    }
+}
+
 impl Default for ErrorPatternLearner {
     fn default() -> Self {
         Self::new()
@@ -803,7 +887,7 @@ impl Default for ErrorPatternLearner {
 }
 
 /// Warning about potential error
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorWarning {
     pub pattern_id: String,
     pub error_type: String,
@@ -822,7 +906,7 @@ pub struct ErrorLearnerStats {
 }
 
 /// Usage session record
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageSession {
     /// Session ID
     pub id: String,
@@ -903,7 +987,7 @@ pub struct UsageAnalyzer {
 }
 
 /// Daily usage statistics
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DailyStats {
     pub sessions: usize,
     pub tasks_attempted: usize,
@@ -1036,6 +1120,35 @@ impl UsageAnalyzer {
             total_errors,
             avg_satisfaction,
             unique_tools: self.tool_frequency.len(),
+        }
+    }
+}
+
+/// Serializable snapshot of UsageAnalyzer state
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UsageAnalyzerSnapshot {
+    sessions: Vec<UsageSession>,
+    current_session: Option<UsageSession>,
+    daily_stats: HashMap<String, DailyStats>,
+    tool_frequency: HashMap<String, usize>,
+}
+
+impl UsageAnalyzer {
+    fn to_snapshot(&self) -> UsageAnalyzerSnapshot {
+        UsageAnalyzerSnapshot {
+            sessions: self.sessions.clone(),
+            current_session: self.current_session.clone(),
+            daily_stats: self.daily_stats.clone(),
+            tool_frequency: self.tool_frequency.clone(),
+        }
+    }
+
+    fn from_snapshot(snapshot: UsageAnalyzerSnapshot) -> Self {
+        Self {
+            sessions: snapshot.sessions,
+            current_session: snapshot.current_session,
+            daily_stats: snapshot.daily_stats,
+            tool_frequency: snapshot.tool_frequency,
         }
     }
 }
@@ -1224,6 +1337,75 @@ impl SelfImprovementEngine {
             usage_stats,
             learning_enabled: self.learning_enabled,
         }
+    }
+}
+
+/// Serializable snapshot of the entire engine state
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EngineSnapshot {
+    prompt_optimizer: PromptOptimizerSnapshot,
+    tool_learner: ToolLearnerSnapshot,
+    error_learner: ErrorLearnerSnapshot,
+    usage_analyzer: UsageAnalyzerSnapshot,
+    learning_enabled: bool,
+}
+
+impl SelfImprovementEngine {
+    /// Save engine state to a JSON file
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let snapshot = EngineSnapshot {
+            prompt_optimizer: self
+                .prompt_optimizer
+                .read()
+                .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?
+                .to_snapshot(),
+            tool_learner: self
+                .tool_learner
+                .read()
+                .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?
+                .to_snapshot(),
+            error_learner: self
+                .error_learner
+                .read()
+                .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?
+                .to_snapshot(),
+            usage_analyzer: self
+                .usage_analyzer
+                .read()
+                .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?
+                .to_snapshot(),
+            learning_enabled: self.learning_enabled,
+        };
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let content = serde_json::to_string_pretty(&snapshot)?;
+        std::fs::write(path, content)?;
+        Ok(())
+    }
+
+    /// Load engine state from a JSON file
+    pub fn load(path: &Path) -> Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let snapshot: EngineSnapshot = serde_json::from_str(&content)?;
+
+        Ok(Self {
+            prompt_optimizer: RwLock::new(PromptOptimizer::from_snapshot(
+                snapshot.prompt_optimizer,
+            )),
+            tool_learner: RwLock::new(ToolSelectionLearner::from_snapshot(
+                snapshot.tool_learner,
+            )),
+            error_learner: RwLock::new(ErrorPatternLearner::from_snapshot(
+                snapshot.error_learner,
+            )),
+            usage_analyzer: RwLock::new(UsageAnalyzer::from_snapshot(
+                snapshot.usage_analyzer,
+            )),
+            learning_enabled: snapshot.learning_enabled,
+        })
     }
 }
 
@@ -1593,5 +1775,294 @@ mod tests {
         let stats = engine.get_stats();
         // Stats should still be accessible but empty
         assert!(stats.prompt_stats.unwrap().total_records == 0);
+    }
+
+    #[test]
+    fn test_self_improvement_engine_save_load_roundtrip() {
+        let engine = SelfImprovementEngine::new();
+        engine.record_prompt("test prompt", "code", Outcome::Success, 0.9);
+        engine.record_tool("file_read", "reading config", Outcome::Success, 100, None);
+        engine.record_error("file not found", "io_error", "loading", "file_read", None);
+        engine.start_session("s1");
+        engine.record_task(true);
+
+        let tmp = std::env::temp_dir().join("selfware_test_engine.json");
+        engine.save(&tmp).unwrap();
+
+        let loaded = SelfImprovementEngine::load(&tmp).unwrap();
+        let stats = loaded.get_stats();
+        assert_eq!(stats.prompt_stats.unwrap().total_records, 1);
+        assert_eq!(stats.tool_stats.unwrap().total_records, 1);
+        assert_eq!(stats.error_stats.unwrap().total_errors, 1);
+
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn test_save_load_preserves_tool_stats() {
+        let engine = SelfImprovementEngine::new();
+        for _ in 0..5 {
+            engine.record_tool("file_read", "reading", Outcome::Success, 50, None);
+        }
+        for _ in 0..3 {
+            engine.record_tool("file_write", "writing", Outcome::Failure, 100, Some("permission denied".to_string()));
+        }
+
+        let tmp = std::env::temp_dir().join("selfware_test_engine_tools.json");
+        engine.save(&tmp).unwrap();
+        let loaded = SelfImprovementEngine::load(&tmp).unwrap();
+
+        let best = loaded.best_tools_for("reading");
+        assert!(!best.is_empty());
+        // file_read should rank higher than file_write
+        let file_read_score = best.iter().find(|(t, _)| t == "file_read").map(|(_, s)| *s);
+        assert!(file_read_score.is_some());
+
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn test_save_load_preserves_error_patterns() {
+        let engine = SelfImprovementEngine::new();
+        engine.record_error("timeout waiting", "timeout", "api_call", "shell_exec", None);
+        engine.record_error("timeout waiting", "timeout", "api_call", "shell_exec", Some("retry".to_string()));
+
+        let tmp = std::env::temp_dir().join("selfware_test_engine_errors.json");
+        engine.save(&tmp).unwrap();
+        let loaded = SelfImprovementEngine::load(&tmp).unwrap();
+
+        let warnings = loaded.check_for_errors("shell_exec", "api_call");
+        assert!(!warnings.is_empty());
+
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn test_save_load_preserves_usage_sessions() {
+        let engine = SelfImprovementEngine::new();
+        engine.start_session("s1");
+        engine.record_task(true);
+        engine.record_task(false);
+        engine.end_session(Some(0.7));
+
+        let tmp = std::env::temp_dir().join("selfware_test_engine_sessions.json");
+        engine.save(&tmp).unwrap();
+        let loaded = SelfImprovementEngine::load(&tmp).unwrap();
+
+        let stats = loaded.get_stats();
+        let usage = stats.usage_stats.unwrap();
+        assert_eq!(usage.total_sessions, 1);
+        assert_eq!(usage.total_tasks, 2);
+        assert_eq!(usage.completed_tasks, 1);
+
+        std::fs::remove_file(&tmp).ok();
+    }
+
+    #[test]
+    fn test_load_nonexistent_file_errors() {
+        let result = SelfImprovementEngine::load(std::path::Path::new("/tmp/selfware_nonexistent_engine_12345.json"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_save_creates_parent_dirs() {
+        let tmp = std::env::temp_dir().join("selfware_test_nested/deep/dir/engine.json");
+        // Clean up first
+        std::fs::remove_dir_all(std::env::temp_dir().join("selfware_test_nested")).ok();
+
+        let engine = SelfImprovementEngine::new();
+        engine.save(&tmp).unwrap();
+        assert!(tmp.exists());
+
+        std::fs::remove_dir_all(std::env::temp_dir().join("selfware_test_nested")).ok();
+    }
+
+    #[test]
+    fn test_outcome_serialization_roundtrip() {
+        for outcome in [Outcome::Success, Outcome::Partial, Outcome::Failure, Outcome::Abandoned] {
+            let json = serde_json::to_string(&outcome).unwrap();
+            let deserialized: Outcome = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized, outcome);
+        }
+    }
+
+    #[test]
+    fn test_prompt_record_serialization_roundtrip() {
+        let record = PromptRecord::new("test prompt".to_string(), "code".to_string(), Outcome::Success)
+            .with_quality(0.85)
+            .with_tokens(1500)
+            .with_response_time(2000);
+        let json = serde_json::to_string(&record).unwrap();
+        let deserialized: PromptRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.prompt, "test prompt");
+        assert_eq!(deserialized.quality_score, 0.85);
+        assert_eq!(deserialized.tokens_used, 1500);
+        assert_eq!(deserialized.response_time_ms, 2000);
+    }
+
+    #[test]
+    fn test_tool_usage_record_serialization_roundtrip() {
+        let record = ToolUsageRecord::new("cargo_check".to_string(), "building".to_string(), Outcome::Failure)
+            .with_execution_time(5000)
+            .with_error("compilation error".to_string());
+        let json = serde_json::to_string(&record).unwrap();
+        let deserialized: ToolUsageRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.tool, "cargo_check");
+        assert_eq!(deserialized.outcome, Outcome::Failure);
+        assert_eq!(deserialized.execution_time_ms, 5000);
+        assert_eq!(deserialized.error, Some("compilation error".to_string()));
+    }
+
+    #[test]
+    fn test_error_record_serialization_roundtrip() {
+        let record = ErrorRecord::new(
+            "file not found".to_string(),
+            "io_error".to_string(),
+            "loading config".to_string(),
+            "file_read".to_string(),
+        ).with_recovery("use default".to_string());
+        let json = serde_json::to_string(&record).unwrap();
+        let deserialized: ErrorRecord = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.recovered);
+        assert_eq!(deserialized.recovery_action, Some("use default".to_string()));
+    }
+
+    #[test]
+    fn test_usage_session_zero_tasks_completion_rate() {
+        let session = UsageSession::new("s1");
+        assert_eq!(session.completion_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_usage_session_serialization_roundtrip() {
+        let mut session = UsageSession::new("s1");
+        session.tasks_attempted = 5;
+        session.tasks_completed = 3;
+        session.tools_used = vec!["file_read".to_string(), "shell_exec".to_string()];
+        session.end();
+
+        let json = serde_json::to_string(&session).unwrap();
+        let deserialized: UsageSession = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.id, "s1");
+        assert!(deserialized.end_time.is_some());
+        assert_eq!(deserialized.tools_used.len(), 2);
+    }
+
+    #[test]
+    fn test_tool_stats_serialization_roundtrip() {
+        let stats = ToolStats {
+            usage_count: 10,
+            success_count: 8,
+            failure_count: 2,
+            avg_execution_time_ms: 150.0,
+            effective_contexts: vec!["reading files".to_string()],
+            common_errors: HashMap::from([("permission denied".to_string(), 2)]),
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let deserialized: ToolStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.usage_count, 10);
+        assert_eq!(deserialized.success_rate(), 0.8);
+        assert_eq!(deserialized.common_errors.len(), 1);
+    }
+
+    #[test]
+    fn test_error_warning_serialization_roundtrip() {
+        let warning = ErrorWarning {
+            pattern_id: "p1".to_string(),
+            error_type: "timeout".to_string(),
+            likelihood: 0.8,
+            prevention: vec!["set longer timeout".to_string()],
+            recovery: vec!["retry".to_string()],
+        };
+        let json = serde_json::to_string(&warning).unwrap();
+        let deserialized: ErrorWarning = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.pattern_id, "p1");
+        assert_eq!(deserialized.likelihood, 0.8);
+    }
+
+    #[test]
+    fn test_error_pattern_serialization_roundtrip() {
+        let mut pattern = ErrorPattern::new("p1", "io_error");
+        let record = ErrorRecord::new(
+            "not found".to_string(),
+            "io_error".to_string(),
+            "context".to_string(),
+            "action".to_string(),
+        );
+        pattern.update(&record);
+        pattern.add_prevention("check existence first".to_string());
+
+        let json = serde_json::to_string(&pattern).unwrap();
+        let deserialized: ErrorPattern = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.count, 1);
+        assert_eq!(deserialized.prevention.len(), 1);
+    }
+
+    #[test]
+    fn test_suggest_improvements_short_prompt() {
+        let engine = SelfImprovementEngine::new();
+        let suggestions = engine.suggest_prompt_improvements("x", "code");
+        assert!(!suggestions.is_empty());
+        assert!(suggestions.iter().any(|s| s.suggestion_type == SuggestionType::AddContext));
+    }
+
+    #[test]
+    fn test_tool_selection_learner_common_errors() {
+        let mut learner = ToolSelectionLearner::new();
+        learner.record(
+            ToolUsageRecord::new("shell_exec".to_string(), "running".to_string(), Outcome::Failure)
+                .with_error("permission denied".to_string()),
+        );
+        learner.record(
+            ToolUsageRecord::new("shell_exec".to_string(), "running".to_string(), Outcome::Failure)
+                .with_error("permission denied".to_string()),
+        );
+        let errors = learner.common_errors_for("shell_exec");
+        assert!(!errors.is_empty());
+        assert!(errors[0].1 >= 2);
+    }
+
+    #[test]
+    fn test_tool_selection_learner_no_stats() {
+        let learner = ToolSelectionLearner::new();
+        assert!(learner.get_tool_stats("nonexistent").is_none());
+        assert!(learner.common_errors_for("nonexistent").is_empty());
+    }
+
+    #[test]
+    fn test_usage_analyzer_multiple_sessions() {
+        let mut analyzer = UsageAnalyzer::new();
+
+        analyzer.start_session("s1");
+        analyzer.record_task_attempt(true);
+        analyzer.record_tool_usage("file_read");
+        analyzer.end_session(Some(0.8));
+
+        analyzer.start_session("s2");
+        analyzer.record_task_attempt(false);
+        analyzer.record_error();
+        analyzer.end_session(Some(0.5));
+
+        let stats = analyzer.get_stats();
+        assert_eq!(stats.total_sessions, 2);
+        assert_eq!(stats.total_tasks, 2);
+        assert_eq!(stats.completed_tasks, 1);
+        assert_eq!(stats.total_errors, 1);
+    }
+
+    #[test]
+    fn test_prompt_optimizer_best_patterns() {
+        let mut optimizer = PromptOptimizer::new();
+        let mut pattern = PromptPattern::new("p1", "Step by step: {action}");
+        pattern.effective_for = vec!["code".to_string()];
+        // Need 5+ usages to be considered
+        for _ in 0..6 {
+            pattern.update(Outcome::Success, 0.9);
+        }
+        optimizer.register_pattern(pattern);
+
+        let best = optimizer.best_patterns_for("code");
+        assert_eq!(best.len(), 1);
+        assert_eq!(best[0].id, "p1");
     }
 }

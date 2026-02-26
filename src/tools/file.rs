@@ -174,7 +174,7 @@ impl Tool for FileEdit {
         }
 
         let new_content = content.replace(&args.old_str, &args.new_str);
-        write_atomic(path, &new_content)?;
+        write_atomic(Path::new(&args.path), &new_content)?;
 
         Ok(serde_json::json!({
             "success": true,

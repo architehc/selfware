@@ -7,6 +7,8 @@ use tracing::{debug, info, warn};
 use super::*;
 use crate::api::ThinkingMode;
 use crate::checkpoint::ToolCallLog;
+use crate::cognitive::self_improvement::Outcome;
+use crate::errors::AgentError;
 use crate::cognitive::CyclePhase;
 use crate::tool_parser::parse_tool_calls;
 
@@ -104,6 +106,21 @@ impl Agent {
             }
 
             let start_time = std::time::Instant::now();
+            if let Some(warning) = self
+                .self_improvement
+                .check_for_errors(&name, self.learning_context())
+                .into_iter()
+                .next()
+                .filter(|w| w.likelihood >= 0.7)
+            {
+                warn!(
+                    "Self-improvement warning before {}: potential {} pattern ({}%)",
+                    name,
+                    warning.error_type,
+                    (warning.likelihood * 100.0) as u32
+                );
+            }
+
             let (call_id, use_native_fc, fake_call) =
                 self.build_tool_call_context(&name, &args_str, tool_call_id);
 
@@ -114,6 +131,21 @@ impl Agent {
                 output::safety_blocked(&error_msg);
                 self.push_tool_result_message(use_native_fc, &call_id, false, &error_msg);
                 self.log_tool_call(&name, &args_str, &error_msg, false, start_time, false);
+                let duration_ms = start_time.elapsed().as_millis() as u64;
+                self.self_improvement.record_tool(
+                    &name,
+                    self.learning_context(),
+                    Outcome::Failure,
+                    duration_ms,
+                    Some(error_msg.clone()),
+                );
+                self.self_improvement.record_error(
+                    &error_msg,
+                    "safety",
+                    self.learning_context(),
+                    &name,
+                    None,
+                );
                 continue;
             }
 
@@ -129,13 +161,13 @@ impl Agent {
                     Some(args) => args,
                     None => {
                         #[cfg(feature = "tui")]
-                        self.emit_tui_event(TuiEvent::ToolCompleted { 
-                            name: name.clone(), 
-                            success: false, 
-                            duration_ms: start_time.elapsed().as_millis() as u64 
+                        self.emit_tui_event(TuiEvent::ToolCompleted {
+                            name: name.clone(),
+                            success: false,
+                            duration_ms: start_time.elapsed().as_millis() as u64,
                         });
                         continue;
-                    },
+                    }
                 };
 
             let activity = output::tool_activity_message(&name, &args);
@@ -146,16 +178,39 @@ impl Agent {
 
             let duration_ms = start_time.elapsed().as_millis() as u64;
             #[cfg(feature = "tui")]
-            self.emit_tui_event(TuiEvent::ToolCompleted { 
-                name: name.clone(), 
-                success, 
-                duration_ms 
+            self.emit_tui_event(TuiEvent::ToolCompleted {
+                name: name.clone(),
+                success,
+                duration_ms,
             });
 
             if success {
                 spinner.stop_success(&summary);
             } else {
                 spinner.stop_error(&summary);
+            }
+
+            let tool_outcome = if success {
+                Outcome::Success
+            } else {
+                Outcome::Failure
+            };
+            let tool_error = (!success).then(|| result.clone());
+            self.self_improvement.record_tool(
+                &name,
+                self.learning_context(),
+                tool_outcome,
+                duration_ms,
+                tool_error.clone(),
+            );
+            if let Some(error_text) = tool_error {
+                self.self_improvement.record_error(
+                    &error_text,
+                    Self::classify_error_type(&error_text),
+                    self.learning_context(),
+                    &name,
+                    None,
+                );
             }
 
             // Track file operations for context management
@@ -296,6 +351,21 @@ impl Agent {
                 println!("{} {}", "✗".bright_red(), err);
                 self.push_tool_result_message(use_native_fc, call_id, false, &err);
                 self.log_tool_call(name, args_str, &err, false, start_time, false);
+                let duration_ms = start_time.elapsed().as_millis() as u64;
+                self.self_improvement.record_tool(
+                    name,
+                    self.learning_context(),
+                    Outcome::Failure,
+                    duration_ms,
+                    Some(err.clone()),
+                );
+                self.self_improvement.record_error(
+                    &err,
+                    "parsing",
+                    self.learning_context(),
+                    name,
+                    None,
+                );
                 None
             }
         }
@@ -338,6 +408,15 @@ impl Agent {
                     output::semantic_summary(name, args, Some(&result_str), true, elapsed);
                 self.log_tool_call(name, args_str, &result_str, true, start_time, true);
 
+                // Record successful tool usage for learning
+                self.self_improvement.record_tool(
+                    name,
+                    self.learning_context(),
+                    Outcome::Success,
+                    elapsed,
+                    None,
+                );
+
                 let verification_result = self.maybe_verify_edit(name, args).await;
                 let enhanced_result = self.maybe_enhance_tool_result(name, &result_str);
                 let final_result = match verification_result {
@@ -354,6 +433,16 @@ impl Agent {
                 self.cognitive_state
                     .episodic_memory
                     .what_failed(name, &e.to_string());
+
+                // Record failed tool usage for learning
+                self.self_improvement.record_tool(
+                    name,
+                    self.learning_context(),
+                    Outcome::Failure,
+                    elapsed,
+                    Some(e.to_string()),
+                );
+
                 Ok((false, e.to_string(), summary))
             }
         }
@@ -504,13 +593,14 @@ impl Agent {
             }
         }
 
+        let mut request_messages = self.messages.clone();
+        if let Some(learning_hint) = self.build_learning_hint(self.learning_context()) {
+            request_messages.push(Message::system(learning_hint));
+        }
+
         let (content, reasoning) = if self.config.agent.streaming {
             let (content, reasoning, stream_tool_calls) = self
-                .chat_streaming(
-                    self.messages.clone(),
-                    self.api_tools(),
-                    ThinkingMode::Enabled,
-                )
+                .chat_streaming(request_messages, self.api_tools(), ThinkingMode::Enabled)
                 .await?;
 
             if self.config.agent.native_function_calling && stream_tool_calls.is_some() {
@@ -525,11 +615,7 @@ impl Agent {
         } else {
             let response = self
                 .client
-                .chat(
-                    self.messages.clone(),
-                    self.api_tools(),
-                    ThinkingMode::Enabled,
-                )
+                .chat(request_messages, self.api_tools(), ThinkingMode::Enabled)
                 .await?;
 
             let choice = response
@@ -690,13 +776,13 @@ impl Agent {
     pub(super) async fn plan(&mut self) -> Result<bool> {
         // Tools are embedded in system prompt - see WORKAROUND comment in Agent::new()
         debug!("Sending planning request to model...");
+        let mut request_messages = self.messages.clone();
+        if let Some(learning_hint) = self.build_learning_hint(self.learning_context()) {
+            request_messages.push(Message::system(learning_hint));
+        }
         let response = self
             .client
-            .chat(
-                self.messages.clone(),
-                self.api_tools(),
-                ThinkingMode::Enabled,
-            )
+            .chat(request_messages, self.api_tools(), ThinkingMode::Enabled)
             .await?;
 
         let choice = response

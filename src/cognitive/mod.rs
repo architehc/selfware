@@ -12,7 +12,13 @@ pub mod intelligence;
 pub mod knowledge_graph;
 pub mod learning;
 pub mod load;
+#[cfg(feature = "self-improvement")]
+pub mod meta_learning;
+#[cfg(feature = "self-improvement")]
+pub mod metrics;
 pub mod rag;
+#[cfg(feature = "self-improvement")]
+pub mod self_edit;
 pub mod self_improvement;
 pub mod state;
 

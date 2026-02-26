@@ -213,6 +213,22 @@ enum Commands {
         output_format: OutputFormat,
     },
 
+    /// Self-improve: analyze and edit the selfware codebase
+    #[cfg(feature = "self-improvement")]
+    Improve {
+        /// Analyze and propose improvements without making changes
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Keep improving until no targets or max cycles reached
+        #[arg(long)]
+        continuous: bool,
+
+        /// Maximum improvement cycles (default 5)
+        #[arg(long, default_value_t = 5)]
+        max_cycles: usize,
+    },
+
     /// Execute a workflow from a YAML file
     #[command(alias = "w")]
     Workflow {
@@ -776,6 +792,108 @@ async fn handle_command(
                         "\n   {} This is your software. It runs on your terms.\n",
                         Glyphs::KEY
                     );
+                }
+            }
+        }
+
+        #[cfg(feature = "self-improvement")]
+        Commands::Improve {
+            dry_run,
+            continuous,
+            max_cycles,
+        } => {
+            use crate::cognitive::self_edit::SelfEditOrchestrator;
+
+            if !quiet {
+                println!("{}", render_header(ctx));
+                println!(
+                    "\n{} {}\n",
+                    Glyphs::GEAR,
+                    "Self-Improvement Analysis".workshop_title()
+                );
+            }
+
+            let project_root = std::env::current_dir()?;
+            let orchestrator = SelfEditOrchestrator::new(project_root);
+            let targets = orchestrator.analyze_self();
+
+            if targets.is_empty() {
+                println!(
+                    "   {} No improvement targets found. The codebase looks good!",
+                    Glyphs::BLOOM
+                );
+                return Ok(());
+            }
+
+            println!(
+                "   {} Found {} improvement targets:\n",
+                Glyphs::MAGNIFIER,
+                targets.len().to_string().emphasis()
+            );
+
+            for (i, target) in targets.iter().take(10).enumerate() {
+                let file_info = target
+                    .file
+                    .as_deref()
+                    .unwrap_or("(no specific file)");
+                println!(
+                    "   {}. [{}] {} (priority: {:.2})",
+                    i + 1,
+                    target.category,
+                    target.description,
+                    target.priority
+                );
+                println!(
+                    "      File: {} | Source: {:?}",
+                    file_info.path_local(),
+                    target.source
+                );
+            }
+
+            if dry_run {
+                println!(
+                    "\n   {} Dry-run mode: no changes applied.",
+                    Glyphs::LEAF
+                );
+                return Ok(());
+            }
+
+            let cycles = if continuous { max_cycles } else { 1 };
+            let mut agent = Agent::new(config).await?;
+
+            for cycle in 0..cycles {
+                let targets = orchestrator.analyze_self();
+                let Some(target) = orchestrator.select_target(&targets) else {
+                    println!(
+                        "\n   {} No more improvement targets. Done!",
+                        Glyphs::BLOOM
+                    );
+                    break;
+                };
+
+                println!(
+                    "\n   {} Cycle {}/{}: applying '{}'",
+                    Glyphs::GEAR,
+                    cycle + 1,
+                    cycles,
+                    target.description
+                );
+
+                let prompt = orchestrator.build_improvement_prompt(target);
+                match agent.run_task(&prompt).await {
+                    Ok(()) => {
+                        println!(
+                            "   {} Improvement applied successfully.",
+                            Glyphs::BLOOM
+                        );
+                    }
+                    Err(e) => {
+                        println!(
+                            "   {} Improvement failed: {}",
+                            Glyphs::FROST,
+                            e
+                        );
+                    }
                 }
             }
         }

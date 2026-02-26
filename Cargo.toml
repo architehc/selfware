@@ -84,9 +84,11 @@ cache = []
 log-analysis = []
 # Token counting and management
 tokens = []
+# Recursive self-improvement loop
+self-improvement = []
 
 # Convenience feature that enables all optional modules
-extras = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-analysis", "tokens"]
+extras = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-analysis", "tokens", "self-improvement"]
 
 [dev-dependencies]
 tokio-test = "0.4"

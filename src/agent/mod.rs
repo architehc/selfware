@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use colored::*;
+use regex::Regex;
 use serde_json::Value;
 use std::collections::{HashSet, VecDeque};
 use std::sync::{
@@ -16,6 +17,7 @@ use crate::analyzer::ErrorAnalyzer;
 use crate::api::types::{Message, ToolCall};
 use crate::api::{ApiClient, StreamChunk, ThinkingMode};
 use crate::checkpoint::{CheckpointManager, TaskCheckpoint};
+use crate::cognitive::self_improvement::{Outcome, SelfImprovementEngine};
 use crate::cognitive::{CognitiveState, CyclePhase};
 use crate::config::Config;
 use crate::memory::AgentMemory;
@@ -37,11 +39,11 @@ pub mod loop_control;
 pub mod planning;
 pub mod tui_events;
 
+use crate::errors::is_confirmation_error;
 use context::ContextCompressor;
 use loop_control::{AgentLoop, AgentState};
 use planning::Planner;
 use tui_events::{EventEmitter, NoopEmitter};
-use crate::errors::is_confirmation_error;
 
 /// Core agent that orchestrates LLM reasoning with tool execution.
 ///
@@ -61,6 +63,10 @@ pub struct Agent {
     pub current_checkpoint: Option<TaskCheckpoint>,
     /// Cognitive state for PDVR cycle and working memory
     cognitive_state: CognitiveState,
+    /// Runtime learner that adapts prompt/tool/error strategy from outcomes
+    self_improvement: SelfImprovementEngine,
+    /// Current task description used as learning context for tool/error feedback
+    current_task_context: String,
     /// Verification gate for automatic code validation
     verification_gate: VerificationGate,
     /// Error analyzer for intelligent error suggestions
@@ -107,13 +113,36 @@ impl Agent {
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("selfware")
             .join("global_episodic_memory.json");
-            
+
         if let Ok(content) = std::fs::read_to_string(&global_memory_path) {
-            if let Ok(loaded_memory) = serde_json::from_str::<crate::cognitive::EpisodicMemory>(&content) {
+            if let Ok(loaded_memory) =
+                serde_json::from_str::<crate::cognitive::EpisodicMemory>(&content)
+            {
                 cognitive_state.episodic_memory = loaded_memory;
                 info!("Loaded global episodic memory for recursive self-improvement");
             }
         }
+
+        // Load persisted self-improvement engine state if available
+        let improvement_engine_path = dirs::data_local_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("selfware")
+            .join("improvement_engine.json");
+
+        let self_improvement = if improvement_engine_path.exists() {
+            match SelfImprovementEngine::load(&improvement_engine_path) {
+                Ok(engine) => {
+                    info!("Loaded persisted self-improvement engine state");
+                    engine
+                }
+                Err(e) => {
+                    warn!("Failed to load improvement engine state: {}, starting fresh", e);
+                    SelfImprovementEngine::new()
+                }
+            }
+        } else {
+            SelfImprovementEngine::new()
+        };
 
         // Choose between native function calling or XML-based tool parsing
         let mut system_prompt = if config.agent.native_function_calling {
@@ -241,6 +270,8 @@ To call a tool, use this EXACT XML structure:
             checkpoint_manager,
             current_checkpoint: None,
             cognitive_state,
+            self_improvement,
+            current_task_context: String::new(),
             verification_gate,
             error_analyzer,
             context_files: Vec::new(),
@@ -259,9 +290,204 @@ To call a tool, use this EXACT XML structure:
         })
     }
 
+    fn infer_task_type(task: &str) -> &'static str {
+        let task_lower = task.to_lowercase();
+        if task_lower.contains("review") {
+            "code_review"
+        } else if task_lower.contains("test") {
+            "testing"
+        } else if task_lower.contains("refactor") {
+            "refactor"
+        } else if task_lower.contains("fix") || task_lower.contains("bug") {
+            "bug_fix"
+        } else if task_lower.contains("document") || task_lower.contains("readme") {
+            "documentation"
+        } else {
+            "general"
+        }
+    }
+
+    fn classify_error_type(error: &str) -> &'static str {
+        let lower = error.to_lowercase();
+        if lower.contains("timeout") || lower.contains("timed out") {
+            "timeout"
+        } else if lower.contains("permission") || lower.contains("denied") {
+            "permission"
+        } else if lower.contains("safety") || lower.contains("blocked") {
+            "safety"
+        } else if lower.contains("json") || lower.contains("parse") || lower.contains("invalid") {
+            "parsing"
+        } else if lower.contains("network") || lower.contains("connection") {
+            "network"
+        } else {
+            "execution"
+        }
+    }
+
+    fn outcome_quality(outcome: Outcome) -> f32 {
+        match outcome {
+            Outcome::Success => 1.0,
+            Outcome::Partial => 0.65,
+            Outcome::Failure => 0.0,
+            Outcome::Abandoned => 0.2,
+        }
+    }
+
+    fn learning_context(&self) -> &str {
+        if self.current_task_context.is_empty() {
+            "general"
+        } else {
+            &self.current_task_context
+        }
+    }
+
+    fn start_learning_session(&mut self, session_id: &str, task_context: &str) {
+        self.current_task_context = task_context.to_string();
+        self.self_improvement.start_session(session_id);
+    }
+
+    fn record_task_outcome(&mut self, task_prompt: &str, outcome: Outcome, error: Option<&str>) {
+        let task_type = Self::infer_task_type(task_prompt);
+        self.self_improvement.record_prompt(
+            task_prompt,
+            task_type,
+            outcome,
+            Self::outcome_quality(outcome),
+        );
+        self.self_improvement.record_task(outcome.is_positive());
+
+        if let Some(err) = error {
+            self.self_improvement.record_error(
+                err,
+                Self::classify_error_type(err),
+                self.learning_context(),
+                "task_execution",
+                None,
+            );
+        }
+
+        self.self_improvement.end_session(None);
+    }
+
+    fn build_learning_hint(&self, task_prompt: &str) -> Option<String> {
+        if task_prompt.trim().is_empty() {
+            return None;
+        }
+
+        let mut hints: Vec<String> = Vec::new();
+
+        let preferred_tools: Vec<String> = self
+            .self_improvement
+            .best_tools_for(task_prompt)
+            .into_iter()
+            .filter(|(_, score)| *score >= 0.6)
+            .take(3)
+            .map(|(tool, score)| format!("{} ({:.0}% confidence)", tool, score * 100.0))
+            .collect();
+        if !preferred_tools.is_empty() {
+            hints.push(format!(
+                "Prefer previously effective tools: {}.",
+                preferred_tools.join(", ")
+            ));
+        }
+
+        let warnings = self
+            .self_improvement
+            .check_for_errors("task_execution", task_prompt);
+        if let Some(warning) = warnings.into_iter().next().filter(|w| w.likelihood >= 0.6) {
+            hints.push(format!(
+                "Avoid recurring {} pattern (likelihood {:.0}%).",
+                warning.error_type,
+                warning.likelihood * 100.0
+            ));
+            if !warning.prevention.is_empty() {
+                hints.push(format!(
+                    "Prevention guidance: {}.",
+                    warning
+                        .prevention
+                        .into_iter()
+                        .take(2)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ));
+            }
+        }
+
+        if hints.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "Self-improvement guidance from prior outcomes:\n- {}",
+                hints.join("\n- ")
+            ))
+        }
+    }
+
+    /// Reflect on a completed step: record lessons, update learner, inject hints
+    fn reflect_on_step(&mut self, step: usize) {
+        self.cognitive_state.set_phase(CyclePhase::Reflect);
+
+        // 1. Check for verification failures in the last step and record lessons
+        if let Some(ref checkpoint) = self.current_checkpoint {
+            let step_errors: Vec<_> = checkpoint
+                .errors
+                .iter()
+                .filter(|e| e.step == step)
+                .collect();
+            for error in &step_errors {
+                if error.recovered {
+                    self.cognitive_state.episodic_memory.what_worked(
+                        "error_recovery",
+                        &format!("Step {}: recovered from: {}", step, error.error),
+                    );
+                    // Record recovery strategy in improvement engine
+                    self.self_improvement.record_error(
+                        &error.error,
+                        "step_error",
+                        self.learning_context(),
+                        &format!("step_{}", step),
+                        Some("automatic_recovery".to_string()),
+                    );
+                } else {
+                    self.cognitive_state.episodic_memory.what_failed(
+                        "step_execution",
+                        &format!("Step {}: unrecovered error: {}", step, error.error),
+                    );
+                }
+            }
+        }
+
+        // 2. Query tool learner for recommendations and inject hint into working memory
+        let context = self.current_task_context.clone();
+        let best_tools = self.self_improvement.best_tools_for(&context);
+        if let Some((tool, score)) = best_tools.first() {
+            if *score >= 0.7 {
+                let hint = format!(
+                    "Based on learning: tool '{}' has {:.0}% effectiveness for this context",
+                    tool,
+                    score * 100.0
+                );
+                self.cognitive_state
+                    .working_memory
+                    .add_fact(&hint);
+            }
+        }
+
+        // 3. Mark the plan step complete with notes
+        let notes = format!("Step {} completed", step);
+        self.cognitive_state
+            .working_memory
+            .complete_step(step, Some(notes));
+
+        self.cognitive_state.set_phase(CyclePhase::Do);
+    }
+
     /// Set the TUI event sender for real-time updates
     #[cfg(feature = "tui")]
-    pub fn with_event_sender(mut self, tx: std::sync::mpsc::Sender<crate::ui::tui::TuiEvent>) -> Self {
+    pub fn with_event_sender(
+        mut self,
+        tx: std::sync::mpsc::Sender<crate::ui::tui::TuiEvent>,
+    ) -> Self {
         self.events = Arc::new(tui_events::TuiEmitter::new(tx));
         self
     }
@@ -1218,15 +1444,20 @@ To call a tool, use this EXACT XML structure:
         use std::sync::LazyLock;
 
         static FILE_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"@([a-zA-Z0-9_./\-]+(?:\.[a-zA-Z0-9]+)?/?)").expect("Invalid file reference regex")
+            Regex::new(r"@([a-zA-Z0-9_./\-]+(?:\.[a-zA-Z0-9]+)?/?)")
+                .expect("Invalid file reference regex")
         });
 
         let mut expanded = input.to_string();
         let mut included_files = Vec::new();
 
         for caps in FILE_REF_RE.captures_iter(input) {
-            let Some(full_match) = caps.get(0).map(|m| m.as_str()) else { continue; };
-            let Some(file_path) = caps.get(1).map(|m| m.as_str()) else { continue; };
+            let Some(full_match) = caps.get(0).map(|m| m.as_str()) else {
+                continue;
+            };
+            let Some(file_path) = caps.get(1).map(|m| m.as_str()) else {
+                continue;
+            };
             let path = std::path::Path::new(file_path);
 
             if path.is_dir() {
@@ -1452,6 +1683,7 @@ To call a tool, use this EXACT XML structure:
         // Reset loop state so queued tasks don't inherit the previous
         // task's iteration counter and hit the max-iterations limit.
         self.loop_control.reset_for_task();
+        let task_description = task.to_string();
 
         #[cfg(feature = "tui")]
         self.emit_tui_event(TuiEvent::AgentStarted);
@@ -1464,6 +1696,12 @@ To call a tool, use this EXACT XML structure:
             let task_id = uuid::Uuid::new_v4().to_string();
             self.current_checkpoint = Some(TaskCheckpoint::new(task_id, task.to_string()));
         }
+        let learning_session_id = self
+            .current_checkpoint
+            .as_ref()
+            .map(|c| c.task_id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        self.start_learning_session(&learning_session_id, &task_description);
 
         let msg = Message::user(task);
         self.memory.add_message(&msg);
@@ -1471,7 +1709,6 @@ To call a tool, use this EXACT XML structure:
 
         #[cfg(feature = "resilience")]
         let mut recovery_attempts = 0u32;
-        let task_description = task.to_string();
 
         // Initialize multi-phase progress tracker
         let mut progress = output::TaskProgress::new(&["Planning", "Executing"]);
@@ -1482,6 +1719,11 @@ To call a tool, use this EXACT XML structure:
                 println!("{}", "\n⚡ Interrupted".bright_yellow());
                 self.messages
                     .push(Message::user("[Task interrupted by user]"));
+                self.record_task_outcome(
+                    &task_description,
+                    Outcome::Abandoned,
+                    Some("Task interrupted by user"),
+                );
                 return Ok(());
             }
 
@@ -1495,7 +1737,17 @@ To call a tool, use this EXACT XML structure:
                     self.cognitive_state.set_phase(CyclePhase::Plan);
 
                     // Plan returns true if the response contains tool calls
-                    let has_tool_calls = self.plan().await?;
+                    let has_tool_calls = match self.plan().await {
+                        Ok(has_tool_calls) => has_tool_calls,
+                        Err(e) => {
+                            self.record_task_outcome(
+                                &task_description,
+                                Outcome::Failure,
+                                Some(&e.to_string()),
+                            );
+                            return Err(e);
+                        }
+                    };
 
                     // Transition to Do phase
                     record_state_transition("Planning", "Executing");
@@ -1516,9 +1768,16 @@ To call a tool, use this EXACT XML structure:
                                 if completed {
                                     record_state_transition("Executing", "Completed");
                                     output::task_completed();
+                                    self.record_task_outcome(
+                                        &task_description,
+                                        Outcome::Success,
+                                        None,
+                                    );
 
                                     #[cfg(feature = "tui")]
-                                    self.emit_tui_event(TuiEvent::AgentCompleted { message: "Task completed successfully".to_string() });
+                                    self.emit_tui_event(TuiEvent::AgentCompleted {
+                                        message: "Task completed successfully".to_string(),
+                                    });
 
                                     if let Err(e) = self.complete_checkpoint() {
                                         warn!("Failed to save completed checkpoint: {}", e);
@@ -1530,9 +1789,7 @@ To call a tool, use this EXACT XML structure:
                                     recovery_attempts = 0;
                                 }
                                 self.loop_control.increment_step();
-                                self.cognitive_state.set_phase(CyclePhase::Reflect);
-                                self.cognitive_state.working_memory.complete_step(1, None);
-                                self.cognitive_state.set_phase(CyclePhase::Do);
+                                self.reflect_on_step(1);
                             }
                             Err(e) => {
                                 warn!("Initial execution failed: {}", e);
@@ -1587,19 +1844,14 @@ To call a tool, use this EXACT XML structure:
                                 record_state_transition("Executing", "Completed");
                                 progress.complete_phase();
                                 output::task_completed();
+                                self.record_task_outcome(&task_description, Outcome::Success, None);
                                 if let Err(e) = self.complete_checkpoint() {
                                     warn!("Failed to save completed checkpoint: {}", e);
                                 }
                                 return Ok(());
                             }
                             self.loop_control.increment_step();
-
-                            // Reflect phase - update cognitive state
-                            self.cognitive_state.set_phase(CyclePhase::Reflect);
-                            self.cognitive_state
-                                .working_memory
-                                .complete_step(step + 1, None);
-                            self.cognitive_state.set_phase(CyclePhase::Do);
+                            self.reflect_on_step(step + 1);
 
                             // Save checkpoint after each step
                             if let Err(e) = self.save_checkpoint(&task_description) {
@@ -1687,6 +1939,7 @@ To call a tool, use this EXACT XML structure:
                     record_state_transition("Executing", "Completed");
                     progress.complete_phase();
                     output::task_completed();
+                    self.record_task_outcome(&task_description, Outcome::Success, None);
                     if let Err(e) = self.complete_checkpoint() {
                         warn!("Failed to save completed checkpoint: {}", e);
                     }
@@ -1696,6 +1949,7 @@ To call a tool, use this EXACT XML structure:
                     record_state_transition("Executing", "Failed");
                     progress.fail_phase();
                     println!("{} {}", "❌ Task failed:".bright_red(), reason);
+                    self.record_task_outcome(&task_description, Outcome::Failure, Some(&reason));
                     if let Err(e) = self.fail_checkpoint(&reason) {
                         warn!("Failed to save failed checkpoint: {}", e);
                     }
@@ -1707,6 +1961,11 @@ To call a tool, use this EXACT XML structure:
             // which increments and checks max_iterations each loop turn.
         }
 
+        self.record_task_outcome(
+            &task_description,
+            Outcome::Partial,
+            Some("Execution stopped before completion"),
+        );
         Ok(())
     }
 
@@ -1828,6 +2087,12 @@ To call a tool, use this EXACT XML structure:
             .as_ref()
             .map(|c| c.task_description.clone())
             .unwrap_or_default();
+        let learning_session_id = self
+            .current_checkpoint
+            .as_ref()
+            .map(|c| c.task_id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        self.start_learning_session(&learning_session_id, &task_description);
 
         #[cfg(feature = "resilience")]
         let mut recovery_attempts = 0u32;
@@ -1837,6 +2102,11 @@ To call a tool, use this EXACT XML structure:
                 println!("{}", "\n⚡ Interrupted".bright_yellow());
                 self.messages
                     .push(Message::user("[Task interrupted by user]"));
+                self.record_task_outcome(
+                    &task_description,
+                    Outcome::Abandoned,
+                    Some("Task interrupted by user"),
+                );
                 return Ok(());
             }
 
@@ -1847,7 +2117,14 @@ To call a tool, use this EXACT XML structure:
                     println!("{}", "📋 Planning...".bright_yellow());
                     self.cognitive_state.set_phase(CyclePhase::Plan);
 
-                    self.plan().await?;
+                    if let Err(e) = self.plan().await {
+                        self.record_task_outcome(
+                            &task_description,
+                            Outcome::Failure,
+                            Some(&e.to_string()),
+                        );
+                        return Err(e);
+                    }
                     if self.is_cancelled() {
                         continue;
                     }
@@ -1878,6 +2155,7 @@ To call a tool, use this EXACT XML structure:
                             if completed {
                                 record_state_transition("Executing", "Completed");
                                 output::task_completed();
+                                self.record_task_outcome(&task_description, Outcome::Success, None);
                                 if let Err(e) = self.complete_checkpoint() {
                                     warn!("Failed to save completed checkpoint: {}", e);
                                 }
@@ -1886,11 +2164,7 @@ To call a tool, use this EXACT XML structure:
                             self.loop_control.increment_step();
 
                             // Reflect and continue
-                            self.cognitive_state.set_phase(CyclePhase::Reflect);
-                            self.cognitive_state
-                                .working_memory
-                                .complete_step(step + 1, None);
-                            self.cognitive_state.set_phase(CyclePhase::Do);
+                            self.reflect_on_step(step + 1);
 
                             if let Err(e) = self.save_checkpoint(&task_description) {
                                 warn!("Failed to save checkpoint: {}", e);
@@ -1970,6 +2244,7 @@ To call a tool, use this EXACT XML structure:
                 AgentState::Completed => {
                     record_state_transition("Executing", "Completed");
                     output::task_completed();
+                    self.record_task_outcome(&task_description, Outcome::Success, None);
                     if let Err(e) = self.complete_checkpoint() {
                         warn!("Failed to save completed checkpoint: {}", e);
                     }
@@ -1978,6 +2253,7 @@ To call a tool, use this EXACT XML structure:
                 AgentState::Failed { reason } => {
                     record_state_transition("Executing", "Failed");
                     println!("{} {}", "❌ Task failed:".bright_red(), reason);
+                    self.record_task_outcome(&task_description, Outcome::Failure, Some(&reason));
                     if let Err(e) = self.fail_checkpoint(&reason) {
                         warn!("Failed to save failed checkpoint: {}", e);
                     }
@@ -1988,6 +2264,11 @@ To call a tool, use this EXACT XML structure:
             // Iteration tracking is handled by loop_control.next_state()
         }
 
+        self.record_task_outcome(
+            &task_description,
+            Outcome::Partial,
+            Some("Execution stopped before completion"),
+        );
         Ok(())
     }
 }
@@ -1997,6 +2278,7 @@ mod tests {
     use super::*;
     use crate::api::types::{ToolCall, ToolFunction};
     use crate::config::{Config, ExecutionMode};
+    use crate::errors::AgentError;
     use crate::tool_parser::parse_tool_calls;
     use loop_control::{AgentLoop, AgentState};
 
@@ -2596,5 +2878,36 @@ mod tests {
 
         assert!(debug_str.contains("ErrorRecovery"));
         assert!(debug_str.contains("test error"));
+    }
+
+    #[test]
+    fn test_infer_task_type() {
+        assert_eq!(
+            Agent::infer_task_type("Please review this PR"),
+            "code_review"
+        );
+        assert_eq!(Agent::infer_task_type("Fix this bug"), "bug_fix");
+        assert_eq!(Agent::infer_task_type("Write tests for module"), "testing");
+    }
+
+    #[test]
+    fn test_classify_error_type() {
+        assert_eq!(Agent::classify_error_type("request timed out"), "timeout");
+        assert_eq!(
+            Agent::classify_error_type("permission denied"),
+            "permission"
+        );
+        assert_eq!(
+            Agent::classify_error_type("Invalid JSON in response"),
+            "parsing"
+        );
+    }
+
+    #[test]
+    fn test_outcome_quality_mapping() {
+        assert_eq!(Agent::outcome_quality(Outcome::Success), 1.0);
+        assert_eq!(Agent::outcome_quality(Outcome::Partial), 0.65);
+        assert_eq!(Agent::outcome_quality(Outcome::Failure), 0.0);
+        assert_eq!(Agent::outcome_quality(Outcome::Abandoned), 0.2);
     }
 }
