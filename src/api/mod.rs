@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::StreamExt;
-use reqwest::{Client, StatusCode};
+use reqwest::Client;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};

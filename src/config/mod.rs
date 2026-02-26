@@ -920,8 +920,10 @@ mod tests {
 
     #[test]
     fn test_config_debug_redacts_api_key() {
-        let mut config = Config::default();
-        config.api_key = Some("sk-super-secret-key-12345".to_string());
+        let config = Config {
+            api_key: Some("sk-super-secret-key-12345".to_string()),
+            ..Config::default()
+        };
         let debug_str = format!("{:?}", config);
         assert!(
             !debug_str.contains("sk-super-secret-key-12345"),

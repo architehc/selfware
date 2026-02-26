@@ -94,7 +94,7 @@ fn validate_port_mapping(mapping: &str) -> bool {
             return false;
         }
     }
-    if mapping.contains(SHELL_METACHARACTERS.as_ref() as &[char]) {
+    if mapping.contains(SHELL_METACHARACTERS) {
         return false;
     }
     let parts: Vec<&str> = port_part.split(':').collect();
@@ -121,7 +121,7 @@ fn is_valid_port(s: &str) -> bool {
 }
 
 fn validate_volume_spec(spec: &str) -> bool {
-    if spec.contains(SHELL_METACHARACTERS.as_ref() as &[char]) {
+    if spec.contains(SHELL_METACHARACTERS) {
         return false;
     }
     let parts: Vec<&str> = spec.splitn(3, ':').collect();

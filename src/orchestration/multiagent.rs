@@ -264,10 +264,8 @@ impl MultiAgentChat {
                     res = Self::run_single_agent(
                         agent_id, task, client, tools, semaphore, agents, results, timeout, event_tx,
                     ) => {
-                        if failure_policy == MultiAgentFailurePolicy::FailFast {
-                            if res.is_err() {
-                                cancelled.notify_waiters();
-                            }
+                        if failure_policy == MultiAgentFailurePolicy::FailFast && res.is_err() {
+                            cancelled.notify_waiters();
                         }
                         res
                     }

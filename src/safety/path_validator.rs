@@ -100,7 +100,7 @@ impl PathValidator {
             if component.is_empty() {
                 continue;
             }
-            let has_non_ascii = component.chars().any(|c| !c.is_ascii());
+            let has_non_ascii = !component.is_ascii();
             let has_dots = component.contains('.');
             if has_non_ascii && has_dots && component.len() <= 10 {
                 anyhow::bail!(
