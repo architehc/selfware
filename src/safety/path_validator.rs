@@ -116,38 +116,38 @@ impl PathValidator {
         };
 
         // Use O_NOFOLLOW atomic open to eliminate TOCTOU symlink races.
-        // For existing files, open with O_NOFOLLOW and resolve from the fd.
-        let canonical = if resolved.exists() {
-            match open_nofollow_and_resolve(&resolved) {
-                Ok(real_path) => real_path,
-                Err(e) if e.raw_os_error() == Some(ELOOP) => {
-                    // O_NOFOLLOW returns ELOOP for symlinks
-                    self.check_symlink_safety(&resolved)?;
-                    resolved
-                        .canonicalize()
-                        .unwrap_or_else(|_| normalize_path(&resolved))
-                }
-                Err(_) => resolved
+        // Try to open with O_NOFOLLOW and resolve from the fd directly.
+        let canonical = match open_nofollow_and_resolve(&resolved) {
+            Ok(real_path) => real_path,
+            Err(e) if e.raw_os_error() == Some(ELOOP) => {
+                // O_NOFOLLOW returns ELOOP for symlinks
+                self.check_symlink_safety(&resolved)?;
+                resolved
                     .canonicalize()
-                    .unwrap_or_else(|_| normalize_path(&resolved)),
+                    .unwrap_or_else(|_| normalize_path(&resolved))
             }
-        } else if let Some(parent) = resolved.parent() {
-            if parent.exists() {
-                match open_nofollow_and_resolve(parent) {
-                    Ok(real_parent) => real_parent.join(resolved.file_name().unwrap_or_default()),
-                    Err(e) if e.raw_os_error() == Some(ELOOP) => {
-                        self.check_symlink_safety(parent)?;
-                        resolved
-                            .canonicalize()
-                            .unwrap_or_else(|_| normalize_path(&resolved))
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // If it doesn't exist, check parent atomically
+                if let Some(parent) = resolved.parent() {
+                    match open_nofollow_and_resolve(parent) {
+                        Ok(real_parent) => {
+                            real_parent.join(resolved.file_name().unwrap_or_default())
+                        }
+                        Err(e) if e.raw_os_error() == Some(ELOOP) => {
+                            self.check_symlink_safety(parent)?;
+                            resolved
+                                .canonicalize()
+                                .unwrap_or_else(|_| normalize_path(&resolved))
+                        }
+                        Err(_) => normalize_path(&resolved),
                     }
-                    Err(_) => normalize_path(&resolved),
+                } else {
+                    normalize_path(&resolved)
                 }
-            } else {
-                normalize_path(&resolved)
             }
-        } else {
-            normalize_path(&resolved)
+            Err(_) => resolved
+                .canonicalize()
+                .unwrap_or_else(|_| normalize_path(&resolved)),
         };
         let canonical_str = strip_unc_prefix(&canonical.to_string_lossy());
 

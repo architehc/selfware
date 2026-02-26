@@ -104,6 +104,11 @@ impl Tool for ProcessStart {
             .context("Missing required parameter: command")?
             .to_string();
 
+        const FORBIDDEN_CHARS: &[char] = &[';', '&', '|', '`', '$', '(', ')', '<', '>'];
+        if command.chars().any(|c| FORBIDDEN_CHARS.contains(&c)) {
+            anyhow::bail!("Blocked forbidden metacharacter in process command.");
+        }
+
         let args_list: Vec<String> = args
             .get("args")
             .and_then(|v| v.as_array())

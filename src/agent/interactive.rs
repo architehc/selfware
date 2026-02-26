@@ -71,7 +71,7 @@ impl Agent {
 
         loop {
             // Auto-refresh stale files before prompting
-            let refreshed = self.refresh_stale_context_files();
+            let refreshed = self.refresh_stale_context_files().await;
             if refreshed > 0 {
                 println!(
                     "  {} Refreshed {} modified file{} in context",
@@ -169,12 +169,13 @@ impl Agent {
                     println!("{} Usage: !<command>", "ℹ".bright_yellow());
                 } else {
                     let (shell, flag) = crate::tools::shell::default_shell();
-                    let status = std::process::Command::new(shell)
+                    let status = tokio::process::Command::new(shell)
                         .args([flag, cmd])
                         .stdout(std::process::Stdio::inherit())
                         .stderr(std::process::Stdio::inherit())
                         .stdin(std::process::Stdio::inherit())
-                        .status();
+                        .status()
+                        .await;
                     match status {
                         Ok(s) if !s.success() => {
                             println!(
@@ -512,7 +513,7 @@ impl Agent {
             }
 
             if input == "/context copy" || input == "/ctx copy" {
-                match self.copy_sources_to_clipboard() {
+                match self.copy_sources_to_clipboard().await {
                     Ok(size) => {
                         println!("{} Copied {} chars to clipboard", "📋".bright_green(), size)
                     }

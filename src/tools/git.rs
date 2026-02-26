@@ -302,6 +302,9 @@ impl Tool for GitCommit {
         } else {
             for file in files {
                 if let Some(f) = file.as_str() {
+                    if f.contains("..") || f.starts_with('/') {
+                        anyhow::bail!("Invalid file path for git commit: {}", f);
+                    }
                     tokio::process::Command::new("git")
                         .arg("-C")
                         .arg(repo_path)

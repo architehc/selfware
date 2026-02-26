@@ -862,20 +862,33 @@ impl EpisodicMemory {
 
         std::fs::create_dir_all(path)?;
 
+        fn atomic_write(path: &std::path::Path, json: &str) -> Result<()> {
+            let tmp_path = path.with_extension(format!("tmp.{}", std::process::id()));
+            std::fs::write(&tmp_path, json)?;
+            std::fs::rename(&tmp_path, path)?;
+            Ok(())
+        }
+
         // Save episodes
         let episodes_path = path.join("episodes.json");
-        let episodes_json = serde_json::to_string_pretty(&self.episodes)?;
-        std::fs::write(episodes_path, episodes_json)?;
+        atomic_write(
+            &episodes_path,
+            &serde_json::to_string_pretty(&self.episodes)?,
+        )?;
 
         // Save sessions
         let sessions_path = path.join("sessions.json");
-        let sessions_json = serde_json::to_string_pretty(&self.sessions)?;
-        std::fs::write(sessions_path, sessions_json)?;
+        atomic_write(
+            &sessions_path,
+            &serde_json::to_string_pretty(&self.sessions)?,
+        )?;
 
         // Save patterns
         let patterns_path = path.join("patterns.json");
-        let patterns_json = serde_json::to_string_pretty(&self.patterns)?;
-        std::fs::write(patterns_path, patterns_json)?;
+        atomic_write(
+            &patterns_path,
+            &serde_json::to_string_pretty(&self.patterns)?,
+        )?;
 
         Ok(())
     }

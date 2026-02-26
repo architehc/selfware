@@ -1,2 +1,2 @@
 [safety]
-allowed_paths = ["/**"]
+allowed_paths = ["./**"]

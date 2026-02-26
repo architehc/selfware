@@ -1216,7 +1216,7 @@ To call a tool, use this EXACT XML structure:
 
     /// Refresh any stale files that are in context
     /// Returns the number of files refreshed
-    fn refresh_stale_context_files(&mut self) -> usize {
+    async fn refresh_stale_context_files(&mut self) -> usize {
         if self.stale_files.is_empty() {
             return 0;
         }
@@ -1237,7 +1237,7 @@ To call a tool, use this EXACT XML structure:
         let mut refreshed = 0;
         for path_str in &stale_in_context {
             let file_marker = format!("// FILE: {}", path_str);
-            if let Ok(content) = std::fs::read_to_string(path_str) {
+            if let Ok(content) = tokio::fs::read_to_string(path_str).await {
                 let file_header = format!(
                     "\n// ═══════════════════════════════════════════\n// FILE: {}\n// ═══════════════════════════════════════════\n",
                     path_str
@@ -1273,7 +1273,6 @@ To call a tool, use this EXACT XML structure:
 
     /// Load files matching pattern into context
     async fn load_files_to_context(&mut self, pattern: &str) -> Result<usize> {
-        use std::fs;
         use walkdir::WalkDir;
 
         let mut loaded = 0;
@@ -1314,7 +1313,7 @@ To call a tool, use this EXACT XML structure:
 
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if extensions.contains(&ext) {
-                if let Ok(content) = fs::read_to_string(path) {
+                if let Ok(content) = tokio::fs::read_to_string(path).await {
                     let file_header = format!("\n// ═══════════════════════════════════════════\n// FILE: {}\n// ═══════════════════════════════════════════\n", path_str);
                     let full_content = format!("{}{}", file_header, content);
                     let file_tokens =
@@ -1398,9 +1397,8 @@ To call a tool, use this EXACT XML structure:
     }
 
     /// Copy all source files to clipboard
-    fn copy_sources_to_clipboard(&self) -> Result<usize> {
-        use std::fs;
-        use std::process::{Command, Stdio};
+    async fn copy_sources_to_clipboard(&self) -> Result<usize> {
+        use std::process::Stdio;
         use walkdir::WalkDir;
 
         let mut output = String::new();
@@ -1420,7 +1418,7 @@ To call a tool, use this EXACT XML structure:
 
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
             if extensions.contains(&ext) {
-                if let Ok(content) = fs::read_to_string(path) {
+                if let Ok(content) = tokio::fs::read_to_string(path).await {
                     output.push_str(&format!("\n// ═══════════════════════════════════════════\n// FILE: {}\n// ═══════════════════════════════════════════\n{}\n", path_str, content));
                 }
             }
@@ -1429,23 +1427,26 @@ To call a tool, use this EXACT XML structure:
         let size = output.len();
 
         // Try xclip first, then xsel, then wl-copy (Wayland)
-        let clipboard_cmd = if Command::new("which")
+        let clipboard_cmd = if tokio::process::Command::new("which")
             .arg("xclip")
             .output()
+            .await
             .map(|o| o.status.success())
             .unwrap_or(false)
         {
             Some(("xclip", vec!["-selection", "clipboard"]))
-        } else if Command::new("which")
+        } else if tokio::process::Command::new("which")
             .arg("xsel")
             .output()
+            .await
             .map(|o| o.status.success())
             .unwrap_or(false)
         {
             Some(("xsel", vec!["--clipboard", "--input"]))
-        } else if Command::new("which")
+        } else if tokio::process::Command::new("which")
             .arg("wl-copy")
             .output()
+            .await
             .map(|o| o.status.success())
             .unwrap_or(false)
         {
@@ -1455,16 +1456,16 @@ To call a tool, use this EXACT XML structure:
         };
 
         if let Some((cmd, args)) = clipboard_cmd {
-            let mut child = Command::new(cmd)
+            let mut child = tokio::process::Command::new(cmd)
                 .args(&args)
                 .stdin(Stdio::piped())
                 .spawn()?;
 
             if let Some(stdin) = child.stdin.as_mut() {
-                use std::io::Write;
-                stdin.write_all(output.as_bytes())?;
+                use tokio::io::AsyncWriteExt;
+                stdin.write_all(output.as_bytes()).await?;
             }
-            child.wait()?;
+            child.wait().await?;
         } else {
             return Err(anyhow::anyhow!(
                 "No clipboard tool found (xclip, xsel, or wl-copy)"

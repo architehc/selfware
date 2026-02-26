@@ -685,6 +685,13 @@ impl Tool for ContainerExec {
             return Err(anyhow::anyhow!("command cannot be empty"));
         }
 
+        const FORBIDDEN_CHARS: &[char] = &[';', '&', '|', '`', '$', '(', ')', '<', '>'];
+        for arg in &command {
+            if arg.chars().any(|c| FORBIDDEN_CHARS.contains(&c)) {
+                anyhow::bail!("Blocked forbidden metacharacter in container command argument.");
+            }
+        }
+
         let runtime = get_runtime(args.get("runtime").and_then(|v| v.as_str())).await?;
 
         let mut cmd = Command::new(runtime.command());

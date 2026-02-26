@@ -756,6 +756,12 @@ impl Tool for KnowledgeExport {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("output_path is required"))?;
 
+        if output_path.contains("..") || output_path.starts_with('/') {
+            anyhow::bail!(
+                "Invalid output_path: must be a relative path without traversal components"
+            );
+        }
+
         let graph = KNOWLEDGE_GRAPH.read().await;
 
         let export_data = json!({
