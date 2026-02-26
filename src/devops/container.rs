@@ -14,6 +14,39 @@
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Validate a container image name to prevent shell injection.
+///
+/// Allowed format: `[registry/]name[:tag]` where each component consists
+/// of alphanumeric characters plus `-`, `.`, `_`, and `/`.
+/// Rejects shell metacharacters, spaces, control characters, and empty names.
+///
+/// # Errors
+///
+/// Returns `Err` if the image name is empty, too long, or contains
+/// characters outside the allowed set.
+pub fn validate_image_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Image name must not be empty".to_string());
+    }
+    if name.len() > 512 {
+        return Err("Image name too long (max 512 characters)".to_string());
+    }
+    // Reject names starting with '-' (could be interpreted as a flag)
+    if name.starts_with('-') {
+        return Err("Image name must not start with '-'".to_string());
+    }
+    for c in name.chars() {
+        if !(c.is_alphanumeric() || c == '-' || c == '.' || c == '_' || c == '/' || c == ':') {
+            return Err(format!(
+                "Invalid character '{}' in image name '{}'. \
+                 Only alphanumeric, '-', '.', '_', '/', ':' are allowed.",
+                c, name
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Container runtime type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeType {
@@ -697,7 +730,13 @@ impl ContainerManager {
     }
 
     /// Simulate running a container
+    ///
+    /// Validates the image name before execution to reject shell metacharacters.
     pub fn run(&mut self, container: Container) -> CommandResult {
+        if let Err(msg) = validate_image_name(&container.image) {
+            return CommandResult::error(1, &msg);
+        }
+
         let cmd = self.build_run_command(&container);
         self.history.push(cmd.join(" "));
 
@@ -778,7 +817,15 @@ impl ContainerManager {
     }
 
     /// Simulate building an image
+    ///
+    /// Validates the image tag (if provided) before execution.
     pub fn build(&mut self, context: BuildContext) -> CommandResult {
+        if let Some(ref tag) = context.tag {
+            if let Err(msg) = validate_image_name(tag) {
+                return CommandResult::error(1, &msg);
+            }
+        }
+
         let cmd = self.build_build_command(&context);
         self.history.push(cmd.join(" "));
 
@@ -803,7 +850,13 @@ impl ContainerManager {
     }
 
     /// Simulate pulling an image
+    ///
+    /// Validates the image reference before execution to reject shell metacharacters.
     pub fn pull(&mut self, reference: &str) -> CommandResult {
+        if let Err(msg) = validate_image_name(reference) {
+            return CommandResult::error(1, &msg);
+        }
+
         self.history
             .push(format!("{} pull {}", self.runtime_command, reference));
 
@@ -828,7 +881,13 @@ impl ContainerManager {
     }
 
     /// Simulate pushing an image
+    ///
+    /// Validates the image reference before execution to reject shell metacharacters.
     pub fn push(&self, reference: &str) -> CommandResult {
+        if let Err(msg) = validate_image_name(reference) {
+            return CommandResult::error(1, &msg);
+        }
+
         let _cmd = format!("{} push {}", self.runtime_command, reference);
 
         if self.images.contains_key(reference) {
@@ -1122,9 +1181,11 @@ impl ComposeFile {
                     compose
                         .services
                         .insert(name.to_string(), ComposeService::new(name));
-                } else if indent == 4 && current_service.is_some() {
+                } else if indent == 4 {
                     // Service property
-                    let service_name = current_service.as_ref().unwrap();
+                    let Some(service_name) = current_service.as_ref() else {
+                        continue;
+                    };
                     if let Some(service) = compose.services.get_mut(service_name) {
                         if let Some((key, value)) = trimmed.split_once(':') {
                             let value = value.trim().trim_matches('"');
@@ -1780,5 +1841,77 @@ services:
         assert_eq!(service.depends_on.len(), 2);
         assert!(service.build.is_some());
         assert!(service.image.is_some());
+    }
+
+    // Image name validation tests
+
+    #[test]
+    fn test_validate_image_name_valid() {
+        assert!(validate_image_name("nginx").is_ok());
+        assert!(validate_image_name("nginx:latest").is_ok());
+        assert!(validate_image_name("registry.io/image:tag").is_ok());
+        assert!(validate_image_name("my-app_v2.1").is_ok());
+        assert!(validate_image_name("docker.io/library/alpine:3.18").is_ok());
+    }
+
+    #[test]
+    fn test_validate_image_name_empty() {
+        assert!(validate_image_name("").is_err());
+    }
+
+    #[test]
+    fn test_validate_image_name_shell_metacharacters() {
+        assert!(validate_image_name("nginx; rm -rf /").is_err());
+        assert!(validate_image_name("image$(whoami)").is_err());
+        assert!(validate_image_name("image`id`").is_err());
+        assert!(validate_image_name("image|cat /etc/passwd").is_err());
+        assert!(validate_image_name("image&background").is_err());
+        assert!(validate_image_name("image>output").is_err());
+        assert!(validate_image_name("image<input").is_err());
+    }
+
+    #[test]
+    fn test_validate_image_name_leading_dash() {
+        assert!(validate_image_name("-bad-image").is_err());
+    }
+
+    #[test]
+    fn test_validate_image_name_too_long() {
+        let long_name = "a".repeat(513);
+        assert!(validate_image_name(&long_name).is_err());
+    }
+
+    #[test]
+    fn test_run_rejects_bad_image_name() {
+        let mut mgr = ContainerManager::default();
+        let container = Container::new("test", "image; rm -rf /");
+        let result = mgr.run(container);
+        assert!(!result.success());
+        assert!(result.stderr.contains("Invalid character"));
+    }
+
+    #[test]
+    fn test_pull_rejects_bad_image_name() {
+        let mut mgr = ContainerManager::default();
+        let result = mgr.pull("image$(whoami)");
+        assert!(!result.success());
+        assert!(result.stderr.contains("Invalid character"));
+    }
+
+    #[test]
+    fn test_build_rejects_bad_tag() {
+        let mut mgr = ContainerManager::default();
+        let ctx = BuildContext::new(".").with_tag("image; malicious");
+        let result = mgr.build(ctx);
+        assert!(!result.success());
+        assert!(result.stderr.contains("Invalid character"));
+    }
+
+    #[test]
+    fn test_push_rejects_bad_image_name() {
+        let mgr = ContainerManager::default();
+        let result = mgr.push("image|cat");
+        assert!(!result.success());
+        assert!(result.stderr.contains("Invalid character"));
     }
 }
