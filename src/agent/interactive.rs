@@ -162,8 +162,9 @@ impl Agent {
                 if cmd.is_empty() {
                     println!("{} Usage: !<command>", "ℹ".bright_yellow());
                 } else {
-                    let status = std::process::Command::new("sh")
-                        .args(["-c", cmd])
+                    let (shell, flag) = crate::tools::shell::default_shell();
+                    let status = std::process::Command::new(shell)
+                        .args([flag, cmd])
                         .stdout(std::process::Stdio::inherit())
                         .stderr(std::process::Stdio::inherit())
                         .stdin(std::process::Stdio::inherit())

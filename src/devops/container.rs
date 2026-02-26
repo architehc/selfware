@@ -607,9 +607,16 @@ impl ContainerManager {
         // Add image
         args.push(container.image.clone());
 
-        // Add command if specified
+        // Add command if specified — use shell-aware splitting to respect quotes
         if let Some(ref cmd) = container.command {
-            args.extend(cmd.split_whitespace().map(String::from));
+            match shlex::split(cmd) {
+                Some(parts) => args.extend(parts),
+                None => {
+                    // Unbalanced quotes — fall back to whitespace split with a warning
+                    tracing::warn!("Container command has unbalanced quotes, falling back to whitespace split: {}", cmd);
+                    args.extend(cmd.split_whitespace().map(String::from));
+                }
+            }
         }
 
         args

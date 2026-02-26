@@ -28,6 +28,9 @@ use tracing::{debug, info, warn};
 /// Maximum number of log lines to keep per process
 const MAX_LOG_LINES: usize = 500;
 
+/// Maximum length of a single log line in bytes (10 KB)
+const MAX_LOG_LINE_LEN: usize = 10_240;
+
 /// Default health check timeout in seconds
 const HEALTH_CHECK_TIMEOUT_SECS: u64 = 60;
 
@@ -131,6 +134,13 @@ impl ManagedProcess {
         if self.log_buffer.len() >= MAX_LOG_LINES {
             self.log_buffer.pop_front();
         }
+        let content = if content.len() > MAX_LOG_LINE_LEN {
+            let mut truncated = content[..MAX_LOG_LINE_LEN].to_string();
+            truncated.push_str("...[truncated]");
+            truncated
+        } else {
+            content
+        };
         self.log_buffer.push_back(LogLine {
             timestamp: Utc::now(),
             stream,
@@ -231,7 +241,7 @@ impl ProcessManager {
 
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
-        cmd.kill_on_drop(false); // We manage lifecycle ourselves
+        cmd.kill_on_drop(true); // Ensure child is killed if handle is dropped to prevent zombies
 
         info!(
             "Starting process '{}': {} {:?}",
@@ -522,7 +532,7 @@ async fn spawn_child_process(
 
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    cmd.kill_on_drop(false);
+    cmd.kill_on_drop(true); // Ensure child is killed if handle is dropped to prevent zombies
 
     let child = cmd.spawn().with_context(|| {
         format!(
@@ -744,14 +754,22 @@ async fn monitor_process(
     }
 }
 
-/// Check if a port is available
+/// Check if a port is available.
+///
+/// NOTE: This has a TOCTOU race -- the port may be taken between the check and
+/// actual use. Prefer `bind_available_port` when you need to guarantee the port
+/// stays reserved.
 pub async fn is_port_available(port: u16) -> bool {
     tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .is_ok()
 }
 
-/// Find an available port in a range
+/// Find an available port in a range.
+///
+/// NOTE: This has a TOCTOU race -- the port may be taken between the check and
+/// actual use. Prefer `bind_available_port` when you need to guarantee the port
+/// stays reserved.
 pub async fn find_available_port(start: u16, end: u16) -> Option<u16> {
     for port in start..=end {
         if is_port_available(port).await {
@@ -759,6 +777,21 @@ pub async fn find_available_port(start: u16, end: u16) -> Option<u16> {
         }
     }
     None
+}
+
+/// Bind to an available port and return the listener with the assigned port.
+///
+/// Uses port 0 to let the OS assign a free port, eliminating the TOCTOU race
+/// condition present in `is_port_available`/`find_available_port`. The caller
+/// should hold the returned `TcpListener` until the child process has bound to
+/// the port (or pass the port via env/arg and drop the listener right before
+/// the child binds).
+pub async fn bind_available_port() -> Option<(tokio::net::TcpListener, u16)> {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0u16))
+        .await
+        .ok()?;
+    let port = listener.local_addr().ok()?.port();
+    Some((listener, port))
 }
 
 /// Check what's listening on a port (Unix only)

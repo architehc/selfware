@@ -11,6 +11,26 @@ use std::time::Instant;
 use tracing::{error, info, info_span, Span};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
+/// Sanitize a string for safe log output by escaping control characters.
+/// Prevents log injection where attackers embed newlines to forge log entries.
+pub fn sanitize_for_log(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x0b' => out.push_str("\\v"),
+            '\x0c' => out.push_str("\\f"),
+            '\x1b' => out.push_str("\\e"),
+            '\x00' => out.push_str("\\0"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Initialize global tracing subscriber with configurable output
 /// By default, only enables tracing if RUST_LOG is explicitly set
 pub fn init_tracing() {
@@ -75,9 +95,10 @@ where
     E: std::fmt::Display,
 {
     let start = Instant::now();
+    let safe_name = sanitize_for_log(tool_name);
     let span = info_span!(
         "tool.execute",
-        tool_name = tool_name,
+        tool_name = safe_name.as_str(),
         duration_ms = tracing::field::Empty,
         success = tracing::field::Empty,
         error = tracing::field::Empty,
@@ -99,10 +120,11 @@ where
         }
         Err(e) => {
             let duration = start.elapsed().as_millis() as u64;
+            let safe_err = sanitize_for_log(&e.to_string());
             span.record("duration_ms", duration);
             span.record("success", false);
-            span.record("error", e.to_string());
-            error!(duration_ms = duration, error = %e, "Tool execution failed");
+            span.record("error", safe_err.as_str());
+            error!(duration_ms = duration, error = safe_err.as_str(), "Tool execution failed");
             Err(e)
         }
     }
@@ -116,20 +138,24 @@ pub fn record_success() {
 
 /// Helper to record failure in current span with error details
 pub fn record_failure(error: &str) {
+    let safe_err = sanitize_for_log(error);
     Span::current().record("success", false);
-    Span::current().record("error", error);
-    error!(error = %error, "Operation failed");
+    Span::current().record("error", safe_err.as_str());
+    error!(error = safe_err.as_str(), "Operation failed");
 }
 
 /// Span guard for agent loop steps
 pub fn enter_agent_step(state: &str, step: usize) -> tracing::span::Span {
-    let span = info_span!("agent.step", state = state, step = step,);
+    let safe_state = sanitize_for_log(state);
+    let span = info_span!("agent.step", state = safe_state.as_str(), step = step,);
     span
 }
 
 /// Record agent state transition
 pub fn record_state_transition(from: &str, to: &str) {
-    info!(from = from, to = to, "Agent state transition");
+    let safe_from = sanitize_for_log(from);
+    let safe_to = sanitize_for_log(to);
+    info!(from = safe_from.as_str(), to = safe_to.as_str(), "Agent state transition");
 }
 
 /// Initialize tracing for tests with a simple subscriber
@@ -524,5 +550,28 @@ mod tests {
         for handle in handles {
             handle.join().unwrap();
         }
+    }
+
+    #[test]
+    fn test_sanitize_for_log_basic() {
+        assert_eq!(sanitize_for_log("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_sanitize_for_log_newlines() {
+        assert_eq!(
+            sanitize_for_log("line1\nline2\r\nline3"),
+            "line1\\nline2\\r\\nline3"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_for_log_control_chars() {
+        assert_eq!(sanitize_for_log("a\x00b\x1bc"), "a\\0b\\ec");
+    }
+
+    #[test]
+    fn test_sanitize_for_log_preserves_unicode() {
+        assert_eq!(sanitize_for_log("hello 世界"), "hello 世界");
     }
 }

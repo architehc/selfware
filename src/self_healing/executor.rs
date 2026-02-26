@@ -352,6 +352,8 @@ impl RecoveryExecutor {
 
             if state.attempt_count >= max_attempts {
                 let elapsed = now.saturating_sub(state.first_attempt_at);
+                // Clean up exhausted entry to prevent unbounded map growth
+                states.remove(&key);
                 return Err(format!(
                     "Max retry attempts ({}) exhausted for pattern '{}' over {}s",
                     max_attempts, key, elapsed

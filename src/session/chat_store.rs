@@ -109,15 +109,12 @@ impl ChatStore {
         let data = std::fs::read(&path).with_context(|| format!("Chat '{}' not found", name))?;
 
         let json = if let Some(encryption) = EncryptionManager::get() {
-            match encryption.decrypt(&data) {
-                Ok(plaintext) => {
-                    String::from_utf8(plaintext).context("Decrypted chat is not valid UTF-8")?
-                }
-                Err(_) => {
-                    // Try as plain JSON (legacy or unencrypted)
-                    String::from_utf8(data).context("Chat file is not valid UTF-8")?
-                }
-            }
+            // Fail closed: if encryption is enabled and decryption fails, do NOT
+            // silently fall back to reading the data as plain text.
+            let plaintext = encryption.decrypt(&data).context(
+                "Decryption failed for chat file. The file may be corrupt or tampered with.",
+            )?;
+            String::from_utf8(plaintext).context("Decrypted chat is not valid UTF-8")?
         } else {
             String::from_utf8(data).context("Chat file is not valid UTF-8")?
         };
@@ -135,9 +132,16 @@ impl ChatStore {
                 if path.extension().and_then(|e| e.to_str()) == Some("json") {
                     if let Ok(data) = std::fs::read(&path) {
                         let json_opt = if let Some(encryption) = EncryptionManager::get() {
+                            // Fail closed: skip files that fail decryption.
                             match encryption.decrypt(&data) {
                                 Ok(p) => String::from_utf8(p).ok(),
-                                Err(_) => String::from_utf8(data).ok(),
+                                Err(_) => {
+                                    tracing::warn!(
+                                        "Skipping chat file {:?}: decryption failed (corrupt or tampered)",
+                                        path
+                                    );
+                                    None
+                                }
                             }
                         } else {
                             String::from_utf8(data).ok()

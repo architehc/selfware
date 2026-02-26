@@ -71,23 +71,41 @@ pub async fn check_model_health(config: &Config) -> Result<bool> {
     }
 }
 
-/// Skip test if model is not available
+/// Skip test if model is not available.
+///
+/// Prints a clearly visible SKIPPED message so that CI output does not
+/// silently report a pass when the backend was never exercised.
 #[macro_export]
 macro_rules! skip_if_no_model {
     ($config:expr) => {
         if !check_model_health($config).await.unwrap_or(false) {
-            eprintln!("Skipping test: model endpoint not available");
+            let test_path = module_path!();
+            println!(
+                "test {} ... SKIPPED (model endpoint not available at {})",
+                test_path,
+                $config.endpoint
+            );
+            eprintln!(
+                "SKIPPED: {} - model endpoint not available at {}",
+                test_path,
+                $config.endpoint
+            );
             return;
         }
     };
 }
 
-/// Skip test if SELFWARE_SKIP_SLOW is set
+/// Skip test if SELFWARE_SKIP_SLOW is set.
+///
+/// Prints a clearly visible SKIPPED message so that CI output does not
+/// silently report a pass when slow tests were disabled.
 #[macro_export]
 macro_rules! skip_if_slow {
     () => {
         if skip_slow_tests() {
-            eprintln!("Skipping slow test (SELFWARE_SKIP_SLOW=1)");
+            let test_path = module_path!();
+            println!("test {} ... SKIPPED (SELFWARE_SKIP_SLOW=1)", test_path);
+            eprintln!("SKIPPED: {} - slow tests disabled (SELFWARE_SKIP_SLOW=1)", test_path);
             return;
         }
     };
