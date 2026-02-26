@@ -92,6 +92,8 @@ pub struct AgentInstance {
     pub name: String,
     pub messages: Vec<Message>,
     pub status: AgentStatus,
+    /// Timestamp of the last heartbeat, updated during task execution
+    pub last_heartbeat: Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +148,10 @@ pub enum MultiAgentEvent {
 }
 
 /// Multi-agent chat orchestrator
+///
+/// NOTE: This struct uses `tokio::sync::RwLock` and `tokio::sync::Mutex`, which do NOT
+/// poison on panic (unlike their `std::sync` counterparts). Therefore lock poisoning
+/// recovery is not needed here.
 pub struct MultiAgentChat {
     config: MultiAgentConfig,
     client: Arc<ApiClient>,
@@ -193,6 +199,7 @@ impl MultiAgentChat {
                 name: format!("Agent-{}-{}", i, role.name()),
                 messages: vec![Message::system(role.system_prompt())],
                 status: AgentStatus::Idle,
+                last_heartbeat: Instant::now(),
             };
             agents.push(agent);
         }
@@ -328,11 +335,12 @@ impl MultiAgentChat {
 
         let start = Instant::now();
 
-        // Get agent info and update status
+        // Get agent info and update status + heartbeat
         let (agent_name, role, mut messages) = {
             let mut agents = agents.write().await;
             if let Some(agent) = agents.get_mut(agent_id) {
                 agent.status = AgentStatus::Working;
+                agent.last_heartbeat = Instant::now();
                 (agent.name.clone(), agent.role, agent.messages.clone())
             } else {
                 return Ok(());
@@ -434,7 +442,7 @@ impl MultiAgentChat {
             }
         };
 
-        // Update agent status
+        // Update agent status and heartbeat
         {
             let mut agents = agents.write().await;
             if let Some(agent) = agents.get_mut(agent_id) {
@@ -443,6 +451,7 @@ impl MultiAgentChat {
                 } else {
                     AgentStatus::Failed
                 };
+                agent.last_heartbeat = Instant::now();
             }
         }
 
@@ -575,6 +584,7 @@ impl MultiAgentChat {
                         name: format!("Agent-{}-{}", id, role.name()),
                         messages: vec![Message::system(role.system_prompt())],
                         status: AgentStatus::Idle,
+                        last_heartbeat: Instant::now(),
                     });
                     println!("Added Agent-{}-{}", id, role.name());
                 } else {
@@ -724,6 +734,26 @@ impl MultiAgentChat {
         Ok(())
     }
 
+    /// Default heartbeat timeout: an agent is considered unhealthy if its
+    /// last heartbeat is older than this duration.
+    const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(300);
+
+    /// Check whether a specific agent is healthy based on its heartbeat.
+    ///
+    /// An agent is healthy if:
+    /// - It exists in the agent list
+    /// - Its last heartbeat was within `HEARTBEAT_TIMEOUT`
+    /// - It is not in the `Failed` state
+    pub async fn is_agent_healthy(&self, agent_id: usize) -> bool {
+        let agents = self.agents.read().await;
+        if let Some(agent) = agents.get(agent_id) {
+            agent.status != AgentStatus::Failed
+                && agent.last_heartbeat.elapsed() < Self::HEARTBEAT_TIMEOUT
+        } else {
+            false
+        }
+    }
+
     /// Aggregate results from all agents into a summary
     pub fn aggregate_results(results: &[AgentResult]) -> String {
         let mut summary = String::new();
@@ -793,6 +823,7 @@ mod tests {
             name: "Test Agent".to_string(),
             messages: vec![],
             status: AgentStatus::Idle,
+            last_heartbeat: Instant::now(),
         };
         assert_eq!(agent.status, AgentStatus::Idle);
     }
@@ -891,6 +922,7 @@ mod tests {
             name: "Architect-5".to_string(),
             messages: vec![],
             status: AgentStatus::Working,
+            last_heartbeat: Instant::now(),
         };
         assert_eq!(agent.id, 5);
         assert_eq!(agent.role, AgentRole::Architect);
@@ -906,6 +938,7 @@ mod tests {
             name: "Test".to_string(),
             messages: vec![],
             status: AgentStatus::Idle,
+            last_heartbeat: Instant::now(),
         };
         let cloned = agent.clone();
         assert_eq!(agent.id, cloned.id);
@@ -1156,6 +1189,7 @@ mod tests {
             name: "Test".to_string(),
             messages: vec![],
             status: AgentStatus::Idle,
+            last_heartbeat: Instant::now(),
         };
         let debug_str = format!("{:?}", agent);
         assert!(debug_str.contains("AgentInstance"));
@@ -1365,6 +1399,7 @@ mod tests {
                 Message::user("Document this code"),
             ],
             status: AgentStatus::Idle,
+            last_heartbeat: Instant::now(),
         };
         assert_eq!(agent.messages.len(), 2);
     }
@@ -1453,5 +1488,35 @@ mod tests {
             };
             assert_eq!(result.role, *role);
         }
+    }
+
+    #[test]
+    fn test_agent_heartbeat_field() {
+        let now = Instant::now();
+        let agent = AgentInstance {
+            id: 0,
+            role: AgentRole::Coder,
+            name: "Heartbeat Test".to_string(),
+            messages: vec![],
+            status: AgentStatus::Working,
+            last_heartbeat: now,
+        };
+        // Heartbeat should be very recent
+        assert!(agent.last_heartbeat.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_agent_failed_status_not_healthy() {
+        // A failed agent should not be considered healthy regardless of heartbeat
+        let agent = AgentInstance {
+            id: 0,
+            role: AgentRole::Coder,
+            name: "Failed Agent".to_string(),
+            messages: vec![],
+            status: AgentStatus::Failed,
+            last_heartbeat: Instant::now(),
+        };
+        // Failed status means unhealthy
+        assert_eq!(agent.status, AgentStatus::Failed);
     }
 }

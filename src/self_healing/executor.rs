@@ -397,10 +397,14 @@ impl RecoveryExecutor {
 
         // Actual sleep — this is the real recovery delay.
         //
-        // SAFETY (async context): The entire execute chain is synchronous, so
-        // we cannot use `tokio::time::sleep().await` without a large-scale
-        // async refactor.  `block_in_place` tells tokio to temporarily move
+        // SAFETY (async context): The entire execute chain (execute / execute_with_state /
+        // execute_for_pattern / execute_internal / execute_action / execute_retry) is
+        // synchronous, so we cannot use `tokio::time::sleep().await` without converting
+        // the full call-tree to async.  `block_in_place` tells tokio to temporarily move
         // this worker's tasks to another thread, preventing executor starvation.
+        //
+        // TODO: If the execute chain is made async in the future, replace this with
+        // `tokio::time::sleep(Duration::from_millis(capped_delay)).await`.
         //
         // The delay is capped at 30s (line above) and bounded by max_attempts,
         // so total blocking time per recovery is predictable and limited.
