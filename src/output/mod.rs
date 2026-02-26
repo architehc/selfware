@@ -1233,4 +1233,202 @@ mod tests {
         let summary = semantic_summary("git_status", &args, Some(result_str), true, 20);
         assert_eq!(summary, "Git status (clean)");
     }
+
+    #[test]
+    fn test_tool_activity_message_file_ops() {
+        let args = serde_json::json!({"path": "src/main.rs"});
+        assert!(tool_activity_message("file_read", &args).contains("Reading"));
+        assert!(tool_activity_message("file_write", &args).contains("Writing"));
+        assert!(tool_activity_message("file_edit", &args).contains("Editing"));
+        assert!(tool_activity_message("file_delete", &args).contains("Deleting"));
+        assert!(tool_activity_message("file_create", &args).contains("Writing"));
+    }
+
+    #[test]
+    fn test_tool_activity_message_shell() {
+        let args = serde_json::json!({"command": "echo hello"});
+        assert!(tool_activity_message("shell_exec", &args).contains("Running"));
+    }
+
+    #[test]
+    fn test_tool_activity_message_cargo() {
+        let args = serde_json::json!({});
+        assert!(tool_activity_message("cargo_test", &args).contains("tests"));
+        assert!(tool_activity_message("cargo_check", &args).contains("Checking"));
+        assert!(tool_activity_message("cargo_clippy", &args).contains("clippy"));
+        assert!(tool_activity_message("cargo_fmt", &args).contains("Formatting"));
+    }
+
+    #[test]
+    fn test_tool_activity_message_search() {
+        let args = serde_json::json!({"pattern": "fn main"});
+        assert!(tool_activity_message("grep_search", &args).contains("Searching"));
+        assert!(tool_activity_message("ripgrep_search", &args).contains("Searching"));
+        assert!(tool_activity_message("symbol_search", &args).contains("Searching"));
+    }
+
+    #[test]
+    fn test_tool_activity_message_git() {
+        let args = serde_json::json!({});
+        assert!(tool_activity_message("git_status", &args).contains("git status"));
+        assert!(tool_activity_message("git_diff", &args).contains("diff"));
+        assert!(tool_activity_message("git_log", &args).contains("git log"));
+        assert!(tool_activity_message("git_commit", &args).contains("Committing"));
+        assert!(tool_activity_message("git_push", &args).contains("Pushing"));
+        assert!(tool_activity_message("git_checkpoint", &args).contains("checkpoint"));
+    }
+
+    #[test]
+    fn test_tool_activity_message_directory() {
+        let args = serde_json::json!({"path": "src"});
+        assert!(tool_activity_message("directory_tree", &args).contains("Listing"));
+        let glob_args = serde_json::json!({"pattern": "*.rs"});
+        assert!(tool_activity_message("glob_find", &glob_args).contains("Finding"));
+    }
+
+    #[test]
+    fn test_tool_activity_message_http_process() {
+        let args = serde_json::json!({});
+        assert!(tool_activity_message("http_request", &args).contains("HTTP"));
+        assert!(tool_activity_message("process_start", &args).contains("Starting"));
+        assert!(tool_activity_message("process_stop", &args).contains("Stopping"));
+        assert!(tool_activity_message("process_list", &args).contains("Listing"));
+        assert!(tool_activity_message("process_logs", &args).contains("logs"));
+        assert!(tool_activity_message("process_restart", &args).contains("Restarting"));
+    }
+
+    #[test]
+    fn test_tool_activity_message_container() {
+        let args = serde_json::json!({});
+        assert!(tool_activity_message("container_run", &args).contains("container"));
+        assert!(tool_activity_message("container_stop", &args).contains("container"));
+    }
+
+    #[test]
+    fn test_tool_activity_message_package() {
+        let args = serde_json::json!({});
+        assert!(tool_activity_message("npm_install", &args).contains("Installing"));
+        assert!(tool_activity_message("pip_install", &args).contains("Installing"));
+        assert!(tool_activity_message("yarn_install", &args).contains("Installing"));
+        assert!(tool_activity_message("npm_run", &args).contains("Running"));
+    }
+
+    #[test]
+    fn test_tool_activity_message_browser() {
+        let args = serde_json::json!({});
+        assert!(tool_activity_message("browser_fetch", &args).contains("Fetching"));
+        assert!(tool_activity_message("browser_screenshot", &args).contains("screenshot"));
+    }
+
+    #[test]
+    fn test_tool_activity_message_knowledge() {
+        let args = serde_json::json!({});
+        assert!(tool_activity_message("knowledge_add", &args).contains("knowledge"));
+        assert!(tool_activity_message("knowledge_query", &args).contains("knowledge"));
+    }
+
+    #[test]
+    fn test_tool_activity_message_fallback() {
+        let args = serde_json::json!({});
+        let msg = tool_activity_message("unknown_tool", &args);
+        assert!(msg.contains("unknown_tool"));
+    }
+
+    #[test]
+    fn test_verification_report_verbose() {
+        // Just exercise the function without panicking
+        init(false, true, false); // verbose mode
+        verification_report("All tests pass", true);
+        verification_report("Test failed: X", false);
+    }
+
+    #[test]
+    fn test_verification_report_compact() {
+        init(true, false, false); // compact mode
+        verification_report("All pass", true);
+        verification_report("Failure report", false);
+    }
+
+    #[test]
+    fn test_verification_report_normal() {
+        init(false, false, false); // normal mode
+        verification_report("Passed", true);
+        verification_report("Failed report text", false);
+    }
+
+    #[test]
+    fn test_task_progress_estimated_remaining_none_early() {
+        let progress = TaskProgress::new(&["Phase 1"]);
+        // No progress => no ETA
+        assert!(progress.estimated_remaining().is_none());
+    }
+
+    #[test]
+    fn test_task_progress_format_eta_minutes() {
+        let mut progress = TaskProgress::new(&["A", "B", "C", "D"]);
+        // Manually complete 1 of 4 phases so progress=25%
+        progress.start_phase();
+        progress.complete_phase();
+        // If enough time passes, format_eta should produce a result
+        // Since we can't easily fake time, just exercise the function
+        let _ = progress.format_eta();
+    }
+
+    #[test]
+    fn test_phase_status_equality() {
+        assert_eq!(PhaseStatus::Pending, PhaseStatus::Pending);
+        assert_ne!(PhaseStatus::Pending, PhaseStatus::Active);
+    }
+
+    #[test]
+    fn test_semantic_summary_various() {
+        let args = serde_json::json!({"path": "test.rs"});
+        let s = semantic_summary("file_edit", &args, None, true, 10);
+        assert!(s.contains("Edited"));
+
+        let s = semantic_summary("file_delete", &args, None, true, 10);
+        assert!(s.contains("Deleted"));
+
+        let s = semantic_summary("directory_tree", &args, None, true, 10);
+        assert!(s.contains("Listed"));
+    }
+
+    #[test]
+    fn test_semantic_summary_cargo() {
+        let args = serde_json::json!({});
+        assert!(semantic_summary("cargo_check", &args, None, true, 10).contains("passed"));
+        assert!(semantic_summary("cargo_check", &args, None, false, 10).contains("failed"));
+        assert!(semantic_summary("cargo_clippy", &args, None, true, 10).contains("clean"));
+        assert!(semantic_summary("cargo_clippy", &args, None, false, 10).contains("warnings"));
+        assert!(semantic_summary("cargo_fmt", &args, None, true, 10).contains("Formatted"));
+        assert!(semantic_summary("cargo_fmt", &args, None, false, 10).contains("failed"));
+    }
+
+    #[test]
+    fn test_semantic_summary_git() {
+        let args = serde_json::json!({});
+        assert_eq!(semantic_summary("git_log", &args, None, true, 10), "Git log");
+        assert_eq!(semantic_summary("git_commit", &args, None, true, 10), "Git commit");
+    }
+
+    #[test]
+    fn test_semantic_summary_fallback() {
+        let args = serde_json::json!({});
+        let s = semantic_summary("some_custom_tool", &args, None, true, 42);
+        assert!(s.contains("some_custom_tool"));
+        assert!(s.contains("42ms"));
+    }
+
+    #[test]
+    fn test_extract_helpers() {
+        let args = serde_json::json!({"path": "a.rs", "command": "echo", "pattern": "fn"});
+        assert_eq!(extract_path(&args), Some("a.rs"));
+        assert_eq!(extract_command(&args), Some("echo"));
+        assert_eq!(extract_pattern(&args), Some("fn"));
+
+        let empty = serde_json::json!({});
+        assert_eq!(extract_path(&empty), None);
+        assert_eq!(extract_command(&empty), None);
+        assert_eq!(extract_pattern(&empty), None);
+    }
 }

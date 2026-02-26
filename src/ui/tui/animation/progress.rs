@@ -216,4 +216,53 @@ mod tests {
         assert!(bar.progress() > 0.0);
         assert!(bar.progress() < 1.0);
     }
+
+    #[test]
+    fn test_set_progress_clamping() {
+        let mut bar = AnimatedProgressBar::new(0.5);
+        bar.set_progress(1.5);
+        assert!((bar.progress() - 0.5).abs() < 0.1); // Still near old since smooth transition
+        // After enough updates, should converge to 1.0
+        for _ in 0..100 {
+            bar.update(0.1);
+        }
+        assert!((bar.progress() - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_set_progress_negative_clamped() {
+        let mut bar = AnimatedProgressBar::new(0.5);
+        bar.set_progress(-1.0);
+        // Target is clamped to 0.0
+        for _ in 0..100 {
+            bar.update(0.1);
+        }
+        assert!((bar.progress() - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_show_percentage_builder() {
+        let bar = AnimatedProgressBar::new(0.5).show_percentage(false);
+        assert!(!bar.show_percentage);
+    }
+
+    #[test]
+    fn test_animated_builder() {
+        let bar = AnimatedProgressBar::new(0.5).animated(false);
+        assert!(!bar.animated);
+    }
+
+    #[test]
+    fn test_is_complete() {
+        let bar = AnimatedProgressBar::new(1.0);
+        assert!(!bar.is_complete()); // Progress bars never complete
+    }
+
+    #[test]
+    fn test_animation_trait_update() {
+        let mut bar = AnimatedProgressBar::new(0.0);
+        bar.set_progress(1.0);
+        Animation::update(&mut bar, 0.1);
+        assert!(bar.progress() > 0.0);
+    }
 }

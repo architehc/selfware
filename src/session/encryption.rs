@@ -88,4 +88,76 @@ impl EncryptionManager {
         entry.set_password(password).map_err(|e| anyhow::anyhow!("Keyring error: {}", e))?;
         Ok(())
     }
+
+    /// Create an EncryptionManager directly (test only, bypasses OnceLock)
+    #[cfg(test)]
+    pub fn new_for_test(password: &str) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(password.as_bytes());
+        let key: [u8; 32] = hasher.finalize().into();
+        EncryptionManager { key }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_manager() -> EncryptionManager {
+        EncryptionManager::new_for_test("test-password-123")
+    }
+
+    #[test]
+    fn encrypt_decrypt_roundtrip() {
+        let mgr = test_manager();
+        let plaintext = b"hello world";
+        let encrypted = mgr.encrypt(plaintext).unwrap();
+        let decrypted = mgr.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn encrypt_decrypt_empty() {
+        let mgr = test_manager();
+        let plaintext = b"";
+        let encrypted = mgr.encrypt(plaintext).unwrap();
+        let decrypted = mgr.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn encrypt_decrypt_large() {
+        let mgr = test_manager();
+        let plaintext = vec![0xABu8; 10_000];
+        let encrypted = mgr.encrypt(&plaintext).unwrap();
+        let decrypted = mgr.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn decrypt_too_short() {
+        let mgr = test_manager();
+        let short = vec![0u8; 8];
+        let result = mgr.decrypt(&short);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("too short"));
+    }
+
+    #[test]
+    fn decrypt_wrong_key() {
+        let mgr_a = EncryptionManager::new_for_test("key-a");
+        let mgr_b = EncryptionManager::new_for_test("key-b");
+        let encrypted = mgr_a.encrypt(b"secret data").unwrap();
+        let result = mgr_b.decrypt(&encrypted);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn encrypt_different_nonces() {
+        let mgr = test_manager();
+        let plaintext = b"same data";
+        let enc1 = mgr.encrypt(plaintext).unwrap();
+        let enc2 = mgr.encrypt(plaintext).unwrap();
+        assert_ne!(enc1, enc2, "Same plaintext should produce different ciphertext due to random nonce");
+    }
 }

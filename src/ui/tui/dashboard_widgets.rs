@@ -623,4 +623,126 @@ mod tests {
         // Just ensure it doesn't panic
         let _ = tool.elapsed();
     }
+
+    #[test]
+    fn test_process_event_agent_started() {
+        let mut state = DashboardState::default();
+        state.process_event(TuiEvent::AgentStarted);
+        assert_eq!(state.status_message, "Agent working...");
+        assert_eq!(state.logs.len(), 1);
+    }
+
+    #[test]
+    fn test_process_event_agent_completed() {
+        let mut state = DashboardState::default();
+        state.process_event(TuiEvent::AgentCompleted {
+            message: "done".to_string(),
+        });
+        assert_eq!(state.status_message, "Ready");
+        assert_eq!(state.logs.len(), 1);
+        assert!(state.logs[0].message.contains("done"));
+    }
+
+    #[test]
+    fn test_process_event_agent_error() {
+        let mut state = DashboardState::default();
+        state.process_event(TuiEvent::AgentError {
+            message: "something went wrong".to_string(),
+        });
+        assert!(state.status_message.contains("Error"));
+        assert_eq!(state.logs.len(), 1);
+        assert_eq!(state.logs[0].level, LogLevel::Error);
+    }
+
+    #[test]
+    fn test_process_event_tool_started() {
+        let mut state = DashboardState::default();
+        state.process_event(TuiEvent::ToolStarted {
+            name: "file_read".to_string(),
+        });
+        assert_eq!(state.active_tools.len(), 1);
+        assert_eq!(state.active_tools[0].name, "file_read");
+        assert!(state.status_message.contains("file_read"));
+    }
+
+    #[test]
+    fn test_process_event_tool_completed_success() {
+        let mut state = DashboardState::default();
+        state.process_event(TuiEvent::ToolStarted {
+            name: "file_read".to_string(),
+        });
+        state.process_event(TuiEvent::ToolCompleted {
+            name: "file_read".to_string(),
+            success: true,
+            duration_ms: 100,
+        });
+        assert!(state.active_tools.is_empty());
+        assert!(state.logs.last().unwrap().level == LogLevel::Success);
+    }
+
+    #[test]
+    fn test_process_event_tool_completed_failure() {
+        let mut state = DashboardState::default();
+        state.process_event(TuiEvent::ToolStarted {
+            name: "shell_exec".to_string(),
+        });
+        state.process_event(TuiEvent::ToolCompleted {
+            name: "shell_exec".to_string(),
+            success: false,
+            duration_ms: 200,
+        });
+        assert!(state.active_tools.is_empty());
+        assert!(state.logs.last().unwrap().level == LogLevel::Warning);
+    }
+
+    #[test]
+    fn test_process_event_token_usage() {
+        let mut state = DashboardState::default();
+        state.process_event(TuiEvent::TokenUsage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+        });
+        assert_eq!(state.tokens_used, 50);
+        assert_eq!(state.logs.len(), 1);
+    }
+
+    #[test]
+    fn test_process_event_status_update() {
+        let mut state = DashboardState::default();
+        state.process_event(TuiEvent::StatusUpdate {
+            message: "Processing files".to_string(),
+        });
+        assert_eq!(state.status_message, "Processing files");
+        assert_eq!(state.logs.len(), 1);
+    }
+
+    #[test]
+    fn test_process_event_garden_health_update() {
+        let mut state = DashboardState::default();
+        state.process_event(TuiEvent::GardenHealthUpdate { health: 0.75 });
+        assert!((state.garden_health - 0.75).abs() < 0.001);
+
+        // Test clamping
+        state.process_event(TuiEvent::GardenHealthUpdate { health: 1.5 });
+        assert!((state.garden_health - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_process_event_log() {
+        let mut state = DashboardState::default();
+        state.process_event(TuiEvent::Log {
+            level: LogLevel::Warning,
+            message: "low memory".to_string(),
+        });
+        assert_eq!(state.logs.len(), 1);
+        assert_eq!(state.logs[0].level, LogLevel::Warning);
+        assert_eq!(state.logs[0].message, "low memory");
+    }
+
+    #[test]
+    fn test_truncate_for_display() {
+        assert_eq!(truncate_for_display("hello", 3), "hel");
+        assert_eq!(truncate_for_display("hi", 10), "hi");
+        assert_eq!(truncate_for_display("", 5), "");
+    }
 }

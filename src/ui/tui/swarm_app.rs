@@ -418,4 +418,93 @@ mod tests {
         assert_eq!(SwarmAppState::Paused, SwarmAppState::Paused);
         assert_ne!(SwarmAppState::Running, SwarmAppState::Paused);
     }
+
+    #[test]
+    fn test_handle_event_quit_q() {
+        let mut app = SwarmApp::new();
+        let event = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('q'),
+            KeyModifiers::NONE,
+        ));
+        let should_continue = app.handle_event(event);
+        assert!(!should_continue);
+    }
+
+    #[test]
+    fn test_handle_event_quit_ctrl_c() {
+        let mut app = SwarmApp::new();
+        let event = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        ));
+        let should_continue = app.handle_event(event);
+        assert!(!should_continue);
+    }
+
+    #[test]
+    fn test_handle_event_help_toggle() {
+        let mut app = SwarmApp::new();
+        assert!(!app.show_help);
+
+        let event = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('?'),
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(event);
+        assert!(app.show_help);
+
+        // Esc while in help
+        let esc_event = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(esc_event);
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn test_handle_event_space_pause() {
+        let mut app = SwarmApp::new();
+        assert_eq!(app.state, SwarmAppState::Running);
+
+        let event = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char(' '),
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(event);
+        assert_eq!(app.state, SwarmAppState::Paused);
+    }
+
+    #[test]
+    fn test_handle_event_tab_focus() {
+        let mut app = SwarmApp::new();
+        let tab = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Tab,
+            KeyModifiers::NONE,
+        ));
+        // Just make sure it doesn't panic
+        app.handle_event(tab);
+    }
+
+    #[test]
+    fn test_handle_event_backtab() {
+        let mut app = SwarmApp::new();
+        let backtab = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::BackTab,
+            KeyModifiers::SHIFT,
+        ));
+        app.handle_event(backtab);
+    }
+
+    #[test]
+    fn test_is_running() {
+        let app = SwarmApp::new();
+        assert!(app.is_running());
+    }
+
+    #[test]
+    fn test_default_impl() {
+        let app = SwarmApp::default();
+        assert_eq!(app.state, SwarmAppState::Running);
+    }
 }

@@ -85,4 +85,102 @@ mod tests {
         assert_eq!(Value::Boolean(true).as_string(), "true");
         assert_eq!(Value::String("test".to_string()).as_string(), "test");
     }
+
+    #[test]
+    fn test_value_as_bool_float() {
+        assert!(Value::Float(1.0).as_bool());
+        assert!(!Value::Float(0.0).as_bool());
+        assert!(Value::Float(-1.5).as_bool());
+    }
+
+    #[test]
+    fn test_value_as_bool_array() {
+        assert!(Value::Array(vec![Value::Integer(1)]).as_bool());
+        assert!(!Value::Array(vec![]).as_bool());
+    }
+
+    #[test]
+    fn test_value_as_bool_object() {
+        let mut map = HashMap::new();
+        map.insert("key".to_string(), Value::Integer(1));
+        assert!(Value::Object(map).as_bool());
+        assert!(!Value::Object(HashMap::new()).as_bool());
+    }
+
+    #[test]
+    fn test_value_as_bool_function() {
+        assert!(Value::Function {
+            params: vec![],
+            body: vec![],
+        }
+        .as_bool());
+    }
+
+    #[test]
+    fn test_value_as_bool_step_result() {
+        assert!(Value::StepResult {
+            name: "test".to_string(),
+            success: true,
+            output: "ok".to_string(),
+            error: None,
+        }
+        .as_bool());
+
+        assert!(!Value::StepResult {
+            name: "test".to_string(),
+            success: false,
+            output: "".to_string(),
+            error: Some("err".to_string()),
+        }
+        .as_bool());
+    }
+
+    #[test]
+    fn test_value_as_string_float() {
+        let s = Value::Float(3.14).as_string();
+        assert!(s.contains("3.14"));
+    }
+
+    #[test]
+    fn test_value_as_string_null() {
+        assert_eq!(Value::Null.as_string(), "null");
+    }
+
+    #[test]
+    fn test_value_as_string_array() {
+        let arr = Value::Array(vec![Value::Integer(1), Value::Integer(2)]);
+        let s = arr.as_string();
+        assert!(s.starts_with('['));
+        assert!(s.ends_with(']'));
+        assert!(s.contains("1"));
+        assert!(s.contains("2"));
+    }
+
+    #[test]
+    fn test_value_as_string_object() {
+        assert_eq!(Value::Object(HashMap::new()).as_string(), "[object]");
+    }
+
+    #[test]
+    fn test_value_as_string_function() {
+        assert_eq!(
+            Value::Function {
+                params: vec![],
+                body: vec![],
+            }
+            .as_string(),
+            "[function]"
+        );
+    }
+
+    #[test]
+    fn test_value_as_string_step_result() {
+        let sr = Value::StepResult {
+            name: "build".to_string(),
+            success: true,
+            output: "compiled".to_string(),
+            error: None,
+        };
+        assert_eq!(sr.as_string(), "compiled");
+    }
 }

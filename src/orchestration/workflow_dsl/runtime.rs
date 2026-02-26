@@ -623,4 +623,113 @@ mod tests {
         let result = run(source);
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn test_runtime_get_set() {
+        let mut rt = Runtime::new();
+        assert!(rt.get("x").is_none());
+        rt.set("x", Value::Integer(42));
+        assert!(matches!(rt.get("x"), Some(Value::Integer(42))));
+    }
+
+    #[test]
+    fn test_runtime_divide_by_zero() {
+        let result = run("10 / 0");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("zero") || err.contains("invalid"));
+    }
+
+    #[test]
+    fn test_runtime_subtract_strings() {
+        let result = run("\"a\" - \"b\"");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("subtract") || err.contains("non-numeric"));
+    }
+
+    #[test]
+    fn test_runtime_negate_string() {
+        let result = run("-\"hello\"");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("negate") || err.contains("non-numeric"));
+    }
+
+    #[test]
+    fn test_runtime_multiply_strings() {
+        let result = run("\"a\" * \"b\"");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("multiply") || err.contains("non-numeric"));
+    }
+
+    #[test]
+    fn test_runtime_float_arithmetic() {
+        let result = run("3.14 + 2.86").unwrap();
+        if let Value::Float(f) = result {
+            assert!((f - 6.0).abs() < 0.001);
+        } else {
+            panic!("Expected float");
+        }
+    }
+
+    #[test]
+    fn test_runtime_string_concatenation() {
+        let result = run("\"hello\" + \" world\"").unwrap();
+        if let Value::String(s) = result {
+            assert_eq!(s, "hello world");
+        } else {
+            panic!("Expected string");
+        }
+    }
+
+    #[test]
+    fn test_runtime_unknown_function() {
+        let result = run("nonexistent_func()");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unknown function"));
+    }
+
+    #[test]
+    fn test_runtime_for_non_array() {
+        let result = run("for x in 42 { x }");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("iterable"));
+    }
+
+    #[test]
+    fn test_runtime_len_error() {
+        let result = run("len(42)");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("string or array"));
+    }
+
+    #[test]
+    fn test_runtime_range_two_args() {
+        let result = run("range(2, 5)").unwrap();
+        if let Value::Array(arr) = result {
+            assert_eq!(arr.len(), 3);
+        } else {
+            panic!("Expected array");
+        }
+    }
+
+    #[test]
+    fn test_runtime_comparison_lte_gte() {
+        let result = run("5 <= 5").unwrap();
+        assert!(matches!(result, Value::Boolean(true)));
+
+        let result = run("5 >= 6").unwrap();
+        assert!(matches!(result, Value::Boolean(false)));
+
+        let result = run("3 != 4").unwrap();
+        assert!(matches!(result, Value::Boolean(true)));
+    }
+
+    #[test]
+    fn test_runtime_if_no_else() {
+        let result = run("if false { 1 }").unwrap();
+        assert!(matches!(result, Value::Null));
+    }
 }

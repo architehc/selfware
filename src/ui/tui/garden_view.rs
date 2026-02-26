@@ -822,4 +822,106 @@ mod tests {
         let bar = view.render_health_bar(0.0, 10);
         assert_eq!(bar.chars().filter(|&c| c == '░').count(), 10);
     }
+
+    #[test]
+    fn test_garden_item_name_bed() {
+        let item = GardenItem::Bed {
+            name: "src".to_string(),
+            path: "src".to_string(),
+            plant_count: 5,
+            health: 0.9,
+            expanded: false,
+        };
+        assert_eq!(item.name(), "src");
+    }
+
+    #[test]
+    fn test_garden_item_name_plant() {
+        let item = GardenItem::Plant {
+            plant: GardenPlant {
+                path: "src/main.rs".to_string(),
+                name: "main.rs".to_string(),
+                extension: "rs".to_string(),
+                lines: 100,
+                age_days: 30,
+                last_tended_days: 1,
+                growth_stage: GrowthStage::Established,
+                plant_type: PlantType::Flower,
+            },
+            bed_path: "src".to_string(),
+        };
+        assert_eq!(item.name(), "main.rs");
+    }
+
+    #[test]
+    fn test_set_focused() {
+        let mut view = GardenView::new();
+        assert!(!view.focused);
+        view.set_focused(true);
+        assert!(view.focused);
+        view.set_focused(false);
+        assert!(!view.focused);
+    }
+
+    #[test]
+    fn test_navigation_on_empty_list() {
+        let mut view = GardenView::new();
+        // Should not panic
+        view.select_next();
+        view.select_prev();
+        view.toggle_expand();
+        assert_eq!(view.selected, 0);
+    }
+
+    #[test]
+    fn test_select_prev_wrap_around() {
+        let mut view = GardenView::new();
+        let garden = create_test_garden();
+        view.set_garden(garden);
+        view.toggle_expand(); // Expand to get 3 items
+
+        assert_eq!(view.selected, 0);
+        view.select_prev(); // Should wrap to last item
+        assert_eq!(view.selected, view.items.len() - 1);
+    }
+
+    #[test]
+    fn test_mark_changed_dedup() {
+        let mut view = GardenView::new();
+        view.mark_changed("src/main.rs");
+        view.mark_changed("src/main.rs"); // Duplicate
+        view.mark_changed("src/main.rs"); // Duplicate
+        assert_eq!(view.recent_changes.len(), 1);
+    }
+
+    #[test]
+    fn test_mark_changed_max_20() {
+        let mut view = GardenView::new();
+        for i in 0..25 {
+            view.mark_changed(&format!("file_{}.rs", i));
+        }
+        assert_eq!(view.recent_changes.len(), 20);
+        // First 5 should have been removed
+        assert!(!view.recent_changes.contains(&"file_0.rs".to_string()));
+        assert!(view.recent_changes.contains(&"file_24.rs".to_string()));
+    }
+
+    #[test]
+    fn test_garden_view_default() {
+        let view = GardenView::default();
+        assert!(view.garden.is_none());
+        assert!(view.items.is_empty());
+    }
+
+    #[test]
+    fn test_growth_char_all_frames() {
+        let mut view = GardenView::new();
+        let chars: Vec<&str> = (0..4)
+            .map(|i| {
+                view.animation_frame = i;
+                view.growth_char()
+            })
+            .collect();
+        assert_eq!(chars, vec!["🌱", "🌿", "🍃", "✨"]);
+    }
 }

@@ -160,4 +160,56 @@ mod tests {
         spinner.set_message("updated");
         assert_eq!(*rx.borrow(), "updated");
     }
+
+    #[test]
+    fn test_spinner_stop_success_no_panic() {
+        // Create a spinner in compact mode (no background task)
+        let spinner = TerminalSpinner {
+            stop_signal: Arc::new(AtomicBool::new(true)),
+            message_tx: watch::channel("test".to_string()).0,
+            handle: None,
+            start_time: Instant::now(),
+        };
+        spinner.stop_success("Done!");
+    }
+
+    #[test]
+    fn test_spinner_stop_error_no_panic() {
+        let spinner = TerminalSpinner {
+            stop_signal: Arc::new(AtomicBool::new(true)),
+            message_tx: watch::channel("test".to_string()).0,
+            handle: None,
+            start_time: Instant::now(),
+        };
+        spinner.stop_error("Failed!");
+    }
+
+    #[test]
+    fn test_spinner_drop_no_panic() {
+        {
+            let _spinner = TerminalSpinner {
+                stop_signal: Arc::new(AtomicBool::new(true)),
+                message_tx: watch::channel("test".to_string()).0,
+                handle: None,
+                start_time: Instant::now(),
+            };
+            // Spinner will be dropped here
+        }
+        // If we reach here without panic, the test passes
+    }
+
+    #[test]
+    fn test_spinner_drop_sets_stop_signal() {
+        let stop_signal = Arc::new(AtomicBool::new(false));
+        let stop_clone = stop_signal.clone();
+        {
+            let _spinner = TerminalSpinner {
+                stop_signal: stop_clone,
+                message_tx: watch::channel("test".to_string()).0,
+                handle: None,
+                start_time: Instant::now(),
+            };
+        }
+        assert!(stop_signal.load(Ordering::Relaxed));
+    }
 }
