@@ -7,6 +7,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::time::Duration;
 
 pub struct HttpRequest;
@@ -95,16 +96,23 @@ impl Tool for HttpRequest {
             anyhow::bail!("Only HTTP and HTTPS URLs are allowed");
         }
 
-        // Block internal/private network requests for security
+        // Block requests to private/internal network addresses (SSRF protection).
+        // Set SELFWARE_ALLOW_PRIVATE_NETWORK=1 to override for local development.
         if let Some(host) = url.host_str() {
-            if host == "localhost"
-                || host == "127.0.0.1"
-                || host.starts_with("192.168.")
-                || host.starts_with("10.")
-                || host.starts_with("172.16.")
-            {
-                // Allow localhost for development, but warn
-                tracing::warn!("Request to internal network: {}", host);
+            if is_private_network_host(host) {
+                let allow_private =
+                    std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1";
+                if !allow_private {
+                    anyhow::bail!(
+                        "Blocked request to private/internal network address: {}. \
+                         Set SELFWARE_ALLOW_PRIVATE_NETWORK=1 to allow.",
+                        host
+                    );
+                }
+                tracing::warn!(
+                    "Allowing request to private network (SELFWARE_ALLOW_PRIVATE_NETWORK=1): {}",
+                    host
+                );
             }
         }
 
@@ -198,6 +206,28 @@ impl Tool for HttpRequest {
             "truncated": truncated
         }))
     }
+}
+
+/// Check whether a hostname or IP belongs to a private/internal network range.
+fn is_private_network_host(host: &str) -> bool {
+    if host == "localhost" || host.ends_with(".localhost") {
+        return true;
+    }
+    let bare_host = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = bare_host.parse::<IpAddr>() {
+        return match ip {
+            IpAddr::V4(v4) => {
+                v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+            }
+            IpAddr::V6(v6) => {
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10
+                    || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7
+            }
+        };
+    }
+    false
 }
 
 #[cfg(test)]

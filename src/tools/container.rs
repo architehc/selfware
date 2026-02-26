@@ -247,28 +247,53 @@ impl Tool for ContainerRun {
             cmd.arg("--rm");
         }
 
-        // Port mappings
+        // Port mappings -- validate to prevent argument injection
         if let Some(ports) = args.get("ports").and_then(|v| v.as_array()) {
             for port in ports {
                 if let Some(p) = port.as_str() {
+                    if !validate_port_mapping(p) {
+                        anyhow::bail!(
+                            "Invalid port mapping '{}'. Expected: HOST_PORT:CONTAINER_PORT[/tcp|udp]",
+                            p
+                        );
+                    }
                     cmd.args(["-p", p]);
                 }
             }
         }
 
-        // Volume mounts
+        // Volume mounts -- validate to prevent argument injection
         if let Some(volumes) = args.get("volumes").and_then(|v| v.as_array()) {
             for vol in volumes {
                 if let Some(v) = vol.as_str() {
+                    if !validate_volume_spec(v) {
+                        anyhow::bail!(
+                            "Invalid volume spec '{}'. Expected: HOST_PATH:CONTAINER_PATH[:ro|rw]",
+                            v
+                        );
+                    }
                     cmd.args(["-v", v]);
                 }
             }
         }
 
-        // Environment variables
+        // Environment variables -- validate names and values
         if let Some(env) = args.get("env").and_then(|v| v.as_object()) {
             for (key, val) in env {
                 if let Some(v) = val.as_str() {
+                    if !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') || key.is_empty()
+                    {
+                        anyhow::bail!(
+                            "Invalid env var name '{}'. Only alphanumeric and underscores allowed.",
+                            key
+                        );
+                    }
+                    if v.contains('\0') {
+                        anyhow::bail!(
+                            "Env var value for '{}' must not contain null bytes",
+                            key
+                        );
+                    }
                     cmd.args(["-e", &format!("{}={}", key, v)]);
                 }
             }
