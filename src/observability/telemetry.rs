@@ -81,7 +81,11 @@ pub fn rotate_if_needed() -> bool {
     if count >= MAX_LOG_ENTRIES {
         // Reset to half to represent keeping the newer half of entries.
         LOG_ENTRY_COUNT.store(count / 2, Ordering::Relaxed);
-        info!("Telemetry log rotation triggered: {} entries exceeded limit, reset to {}", count, count / 2);
+        info!(
+            "Telemetry log rotation triggered: {} entries exceeded limit, reset to {}",
+            count,
+            count / 2
+        );
         true
     } else {
         false
@@ -115,14 +119,11 @@ fn secret_patterns() -> &'static Vec<Regex> {
     SECRET_PATTERNS.get_or_init(|| {
         vec![
             // API keys: sk-..., key-..., token-... followed by alphanumeric chars
-            Regex::new(r"(?i)(sk-|key-|token-)[A-Za-z0-9_\-]{8,}")
-                .expect("invalid secret regex"),
+            Regex::new(r"(?i)(sk-|key-|token-)[A-Za-z0-9_\-]{8,}").expect("invalid secret regex"),
             // Bearer tokens in Authorization headers
-            Regex::new(r"(?i)Bearer\s+[A-Za-z0-9_\-\.]{8,}")
-                .expect("invalid bearer regex"),
+            Regex::new(r"(?i)Bearer\s+[A-Za-z0-9_\-\.]{8,}").expect("invalid bearer regex"),
             // Passwords in connection strings: password=..., passwd=..., pwd=...
-            Regex::new(r"(?i)(password|passwd|pwd)\s*=\s*\S+")
-                .expect("invalid password regex"),
+            Regex::new(r"(?i)(password|passwd|pwd)\s*=\s*\S+").expect("invalid password regex"),
         ]
     })
 }
@@ -232,7 +233,11 @@ where
             span.record("duration_ms", duration);
             span.record("success", false);
             span.record("error", safe_err.as_str());
-            error!(duration_ms = duration, error = safe_err.as_str(), "Tool execution failed");
+            error!(
+                duration_ms = duration,
+                error = safe_err.as_str(),
+                "Tool execution failed"
+            );
             Err(e)
         }
     }
@@ -267,7 +272,11 @@ pub fn record_state_transition(from: &str, to: &str) {
     let safe_from = sanitize_for_log(from);
     let safe_to = sanitize_for_log(to);
     if should_sample() {
-        info!(from = safe_from.as_str(), to = safe_to.as_str(), "Agent state transition");
+        info!(
+            from = safe_from.as_str(),
+            to = safe_to.as_str(),
+            "Agent state transition"
+        );
     }
     increment_log_count();
 }

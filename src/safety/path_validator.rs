@@ -69,7 +69,6 @@ impl PathValidator {
             anyhow::bail!("Path contains null bytes");
         }
 
-
         // Unicode normalization bypass prevention.
         // Reject paths with characters that look like ASCII but are not.
         let suspicious_unicode: &[(char, &str)] = &[
@@ -124,9 +123,13 @@ impl PathValidator {
                 Err(e) if e.raw_os_error() == Some(ELOOP) => {
                     // O_NOFOLLOW returns ELOOP for symlinks
                     self.check_symlink_safety(&resolved)?;
-                    resolved.canonicalize().unwrap_or_else(|_| normalize_path(&resolved))
+                    resolved
+                        .canonicalize()
+                        .unwrap_or_else(|_| normalize_path(&resolved))
                 }
-                Err(_) => resolved.canonicalize().unwrap_or_else(|_| normalize_path(&resolved)),
+                Err(_) => resolved
+                    .canonicalize()
+                    .unwrap_or_else(|_| normalize_path(&resolved)),
             }
         } else if let Some(parent) = resolved.parent() {
             if parent.exists() {
@@ -134,7 +137,9 @@ impl PathValidator {
                     Ok(real_parent) => real_parent.join(resolved.file_name().unwrap_or_default()),
                     Err(e) if e.raw_os_error() == Some(ELOOP) => {
                         self.check_symlink_safety(parent)?;
-                        resolved.canonicalize().unwrap_or_else(|_| normalize_path(&resolved))
+                        resolved
+                            .canonicalize()
+                            .unwrap_or_else(|_| normalize_path(&resolved))
                     }
                     Err(_) => normalize_path(&resolved),
                 }

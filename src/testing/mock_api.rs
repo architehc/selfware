@@ -147,9 +147,7 @@ pub struct MockLlmServerBuilder {
 impl MockLlmServerBuilder {
     /// Queue a plain text response. Responses are served in FIFO order.
     pub fn with_response(mut self, text: impl Into<String>) -> Self {
-        self.config
-            .responses
-            .push(MockResponse::Text(text.into()));
+        self.config.responses.push(MockResponse::Text(text.into()));
         self
     }
 
@@ -635,11 +633,7 @@ mod tests {
         ];
         let json_str = format_tool_calls(&calls);
         let parsed: Result<serde_json::Value, _> = serde_json::from_str(&json_str);
-        assert!(
-            parsed.is_ok(),
-            "tool calls JSON is invalid: {}",
-            json_str
-        );
+        assert!(parsed.is_ok(), "tool calls JSON is invalid: {}", json_str);
         let arr = parsed.unwrap();
         assert_eq!(arr.as_array().unwrap().len(), 2);
     }

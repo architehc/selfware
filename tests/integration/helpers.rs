@@ -23,7 +23,9 @@ pub fn test_config() -> Config {
         model,
         max_tokens: 4096, // Keep small for faster responses
         temperature: 0.7,
-        api_key: env::var("SELFWARE_API_KEY").ok().map(selfware::config::RedactedString::new),
+        api_key: env::var("SELFWARE_API_KEY")
+            .ok()
+            .map(selfware::config::RedactedString::new),
         safety: SafetyConfig {
             allowed_paths: vec!["/tmp/**".to_string(), "./**".to_string()],
             denied_paths: vec![],
@@ -78,17 +80,24 @@ pub async fn check_model_health(config: &Config) -> Result<bool> {
 #[macro_export]
 macro_rules! skip_if_no_model {
     ($config:expr) => {
-        if !check_model_health($config).await.unwrap_or(false) {
+        if !$crate::helpers::check_model_health($config)
+            .await
+            .unwrap_or(false)
+        {
+            if std::env::var("CI").is_ok() || std::env::var("REQUIRE_MODEL").is_ok() {
+                panic!(
+                    "Model endpoint not available at {} - REQUIRED in CI",
+                    $config.endpoint
+                );
+            }
             let test_path = module_path!();
             println!(
                 "test {} ... SKIPPED (model endpoint not available at {})",
-                test_path,
-                $config.endpoint
+                test_path, $config.endpoint
             );
             eprintln!(
                 "SKIPPED: {} - model endpoint not available at {}",
-                test_path,
-                $config.endpoint
+                test_path, $config.endpoint
             );
             return;
         }
@@ -105,7 +114,10 @@ macro_rules! skip_if_slow {
         if skip_slow_tests() {
             let test_path = module_path!();
             println!("test {} ... SKIPPED (SELFWARE_SKIP_SLOW=1)", test_path);
-            eprintln!("SKIPPED: {} - slow tests disabled (SELFWARE_SKIP_SLOW=1)", test_path);
+            eprintln!(
+                "SKIPPED: {} - slow tests disabled (SELFWARE_SKIP_SLOW=1)",
+                test_path
+            );
             return;
         }
     };

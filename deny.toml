@@ -42,6 +42,8 @@ allow = [
     "Zlib",
     "MPL-2.0",
     "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "OpenSSL",
     "CC0-1.0",
     "Unlicense",
 ]
@@ -55,8 +57,6 @@ exceptions = []
 multiple-versions = "warn"
 # Lint level for when a crate is detected as a build-time dependency
 wildcards = "allow"
-# Allow dependencies with git sources
-allow-build-scripts = ["*"]
 
 # Specific crate denials
 deny = []
@@ -66,6 +66,8 @@ skip = []
 
 # Skip entire dependency trees
 skip-tree = []
+
+
 
 [sources]
 # Allowed registries

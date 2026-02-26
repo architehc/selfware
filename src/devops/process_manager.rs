@@ -135,7 +135,7 @@ impl ManagedProcess {
             self.log_buffer.pop_front();
         }
         let content = if content.len() > MAX_LOG_LINE_LEN {
-            let mut truncated = content[..MAX_LOG_LINE_LEN].to_string();
+            let mut truncated: String = content.chars().take(MAX_LOG_LINE_LEN).collect();
             truncated.push_str("...[truncated]");
             truncated
         } else {

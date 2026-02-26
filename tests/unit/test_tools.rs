@@ -123,10 +123,7 @@ async fn test_file_edit_empty_old_string_returns_error() {
     let result = tool.execute(args).await;
     // An empty old_str causes multiple matches (every position), so the
     // "expected exactly 1" guard should fire.
-    assert!(
-        result.is_err(),
-        "Expected Err for empty old_str, got Ok"
-    );
+    assert!(result.is_err(), "Expected Err for empty old_str, got Ok");
 }
 
 /// Verify that DirectoryTree returns an error (or an empty listing) when

@@ -92,7 +92,8 @@ impl Prompt for SelfwarePrompt {
         if !self.model.is_empty() {
             // Show abbreviated model name + context percentage (like Qwen Code)
             let short_model = if self.model.len() > 20 {
-                format!("{}...", &self.model[..17])
+                let safe_truncate: String = self.model.chars().take(17).collect();
+                format!("{}...", safe_truncate)
             } else {
                 self.model.clone()
             };

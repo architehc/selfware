@@ -15,7 +15,10 @@ use selfware::config::Config;
 async fn test_agent_creation() {
     let config = Config::default();
     let agent = Agent::new(config).await;
-    assert!(agent.is_ok(), "Agent::new with default config should succeed");
+    assert!(
+        agent.is_ok(),
+        "Agent::new with default config should succeed"
+    );
 }
 
 #[tokio::test]

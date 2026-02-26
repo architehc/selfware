@@ -684,7 +684,9 @@ impl KnowledgeGraph {
         }
 
         let target = MAX_GRAPH_ENTITIES * 9 / 10; // Evict down to 90% capacity
-        let mut entries: Vec<_> = self.access_times.iter()
+        let mut entries: Vec<_> = self
+            .access_times
+            .iter()
             .map(|(id, &ts)| (id.clone(), ts))
             .collect();
         entries.sort_by_key(|(_, ts)| *ts);
@@ -724,12 +726,14 @@ impl KnowledgeGraph {
         }
 
         // Remove relations involving this entity
-        let rel_ids_from: Vec<String> = self.source_relations
+        let rel_ids_from: Vec<String> = self
+            .source_relations
             .remove(id)
             .unwrap_or_default()
             .into_iter()
             .collect();
-        let rel_ids_to: Vec<String> = self.target_relations
+        let rel_ids_to: Vec<String> = self
+            .target_relations
             .remove(id)
             .unwrap_or_default()
             .into_iter()

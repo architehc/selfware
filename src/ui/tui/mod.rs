@@ -453,33 +453,34 @@ pub fn run_tui(model: &str) -> Result<Vec<String>> {
 
         // Only redraw if enough time has passed and something changed
         if needs_redraw && last_draw.elapsed() >= min_draw_interval {
-        // Render the app
-        terminal.terminal().draw(|frame| {
-            app.render(frame);
+            // Render the app
+            terminal.terminal().draw(|frame| {
+                app.render(frame);
 
-            // Render additional widgets based on state
-            if app.state == AppState::RunningTask {
-                if let Some(ref progress) = app.task_progress {
-                    let gauge = GrowthGauge::new(
-                        progress.current_step as f64 / progress.total_steps.unwrap_or(10) as f64,
-                        "Task",
-                    );
-                    // Gauge would be rendered in the progress area
-                    let _ = gauge; // Use the gauge
+                // Render additional widgets based on state
+                if app.state == AppState::RunningTask {
+                    if let Some(ref progress) = app.task_progress {
+                        let gauge = GrowthGauge::new(
+                            progress.current_step as f64
+                                / progress.total_steps.unwrap_or(10) as f64,
+                            "Task",
+                        );
+                        // Gauge would be rendered in the progress area
+                        let _ = gauge; // Use the gauge
+                    }
                 }
-            }
 
-            // Layout engine manages pane positions
-            let _panes = layout_engine.calculate_layout(frame.size());
+                // Layout engine manages pane positions
+                let _panes = layout_engine.calculate_layout(frame.size());
 
-            // Status indicator would show connection state
-            let _ = &status_indicator;
+                // Status indicator would show connection state
+                let _ = &status_indicator;
 
-            // Markdown renderer would format assistant messages
-            let _ = &md_renderer;
-        })?;
-        last_draw = Instant::now();
-        needs_redraw = false;
+                // Markdown renderer would format assistant messages
+                let _ = &md_renderer;
+            })?;
+            last_draw = Instant::now();
+            needs_redraw = false;
         } // end redraw throttle
 
         // Handle events
@@ -543,11 +544,11 @@ where
 
     loop {
         if needs_redraw && last_draw.elapsed() >= min_draw_interval {
-        terminal.terminal().draw(|frame| {
-            app.render(frame);
-        })?;
-        last_draw = Instant::now();
-        needs_redraw = false;
+            terminal.terminal().draw(|frame| {
+                app.render(frame);
+            })?;
+            last_draw = Instant::now();
+            needs_redraw = false;
         }
 
         if let Some(event) = read_event(100)? {
@@ -639,70 +640,75 @@ pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
     loop {
         // Only redraw if enough time has passed and something changed
         if needs_redraw && last_draw.elapsed() >= min_draw_interval {
-        // Render the dashboard
-        terminal.terminal().draw(|frame| {
-            let area = frame.size();
+            // Render the dashboard
+            terminal.terminal().draw(|frame| {
+                let area = frame.size();
 
-            // Calculate pane layouts
-            let pane_layouts = layout_engine.calculate_layout(area);
+                // Calculate pane layouts
+                let pane_layouts = layout_engine.calculate_layout(area);
 
-            // Render each pane based on its type
-            for (pane_id, pane_area) in &pane_layouts {
-                if let Some(pane) = layout_engine.get_pane(*pane_id) {
-                    match pane.pane_type {
-                        PaneType::StatusBar => {
-                            render_status_bar(frame, *pane_area, &dashboard_state);
-                        }
-                        PaneType::Chat => {
-                            // Render chat in this pane
-                            render_chat_pane(frame, *pane_area, &app, pane.focused);
-                        }
-                        PaneType::GardenHealth => {
-                            render_garden_health(frame, *pane_area, &dashboard_state);
-                        }
-                        PaneType::ActiveTools => {
-                            render_active_tools(frame, *pane_area, &dashboard_state);
-                        }
-                        PaneType::Logs => {
-                            render_logs(frame, *pane_area, &dashboard_state);
-                        }
-                        PaneType::GardenView => {
-                            render_garden_view(frame, *pane_area, &mut garden_view, pane.focused);
-                        }
-                        PaneType::Editor => {
-                            render_editor_pane(frame, *pane_area, pane);
-                        }
-                        PaneType::Terminal => {
-                            render_terminal_pane(frame, *pane_area, pane, &dashboard_state);
-                        }
-                        PaneType::Explorer => {
-                            render_explorer_pane(frame, *pane_area, pane);
-                        }
-                        PaneType::Diff => {
-                            render_diff_pane(frame, *pane_area, pane, &dashboard_state);
-                        }
-                        PaneType::Debug => {
-                            render_debug_pane(frame, *pane_area, pane, &dashboard_state);
-                        }
-                        PaneType::Help => {
-                            render_help_pane(frame, *pane_area, pane);
+                // Render each pane based on its type
+                for (pane_id, pane_area) in &pane_layouts {
+                    if let Some(pane) = layout_engine.get_pane(*pane_id) {
+                        match pane.pane_type {
+                            PaneType::StatusBar => {
+                                render_status_bar(frame, *pane_area, &dashboard_state);
+                            }
+                            PaneType::Chat => {
+                                // Render chat in this pane
+                                render_chat_pane(frame, *pane_area, &app, pane.focused);
+                            }
+                            PaneType::GardenHealth => {
+                                render_garden_health(frame, *pane_area, &dashboard_state);
+                            }
+                            PaneType::ActiveTools => {
+                                render_active_tools(frame, *pane_area, &dashboard_state);
+                            }
+                            PaneType::Logs => {
+                                render_logs(frame, *pane_area, &dashboard_state);
+                            }
+                            PaneType::GardenView => {
+                                render_garden_view(
+                                    frame,
+                                    *pane_area,
+                                    &mut garden_view,
+                                    pane.focused,
+                                );
+                            }
+                            PaneType::Editor => {
+                                render_editor_pane(frame, *pane_area, pane);
+                            }
+                            PaneType::Terminal => {
+                                render_terminal_pane(frame, *pane_area, pane, &dashboard_state);
+                            }
+                            PaneType::Explorer => {
+                                render_explorer_pane(frame, *pane_area, pane);
+                            }
+                            PaneType::Diff => {
+                                render_diff_pane(frame, *pane_area, pane, &dashboard_state);
+                            }
+                            PaneType::Debug => {
+                                render_debug_pane(frame, *pane_area, pane, &dashboard_state);
+                            }
+                            PaneType::Help => {
+                                render_help_pane(frame, *pane_area, pane);
+                            }
                         }
                     }
                 }
-            }
 
-            // Render help overlay if active
-            if show_help {
-                render_help_overlay(frame, area);
-            }
+                // Render help overlay if active
+                if show_help {
+                    render_help_overlay(frame, area);
+                }
 
-            // Render pause indicator if paused
-            if paused {
-                render_pause_indicator(frame, area);
-            }
-        })?;
-        last_draw = Instant::now();
-        needs_redraw = false;
+                // Render pause indicator if paused
+                if paused {
+                    render_pause_indicator(frame, area);
+                }
+            })?;
+            last_draw = Instant::now();
+            needs_redraw = false;
         } // end redraw throttle
 
         // Handle events
@@ -949,7 +955,11 @@ pub fn run_tui_dashboard_with_events(
                         TuiEvent::ToolStarted { name } => {
                             app.add_tool_message(name, "started");
                         }
-                        TuiEvent::ToolCompleted { name, success, duration_ms } => {
+                        TuiEvent::ToolCompleted {
+                            name,
+                            success,
+                            duration_ms,
+                        } => {
                             let status = if *success { "completed" } else { "failed" };
                             app.add_tool_message(name, &format!("{} ({}ms)", status, duration_ms));
                         }
@@ -972,67 +982,72 @@ pub fn run_tui_dashboard_with_events(
 
         // Only redraw if enough time has passed and something changed
         if needs_redraw && last_draw.elapsed() >= min_draw_interval {
-        // Get a copy of the dashboard state for rendering
-        let dashboard_state = dashboard_state_snapshot(&shared_state);
+            // Get a copy of the dashboard state for rendering
+            let dashboard_state = dashboard_state_snapshot(&shared_state);
 
-        // Render the dashboard
-        terminal.terminal().draw(|frame| {
-            let area = frame.size();
-            let pane_layouts = layout_engine.calculate_layout(area);
+            // Render the dashboard
+            terminal.terminal().draw(|frame| {
+                let area = frame.size();
+                let pane_layouts = layout_engine.calculate_layout(area);
 
-            for (pane_id, pane_area) in &pane_layouts {
-                if let Some(pane) = layout_engine.get_pane(*pane_id) {
-                    match pane.pane_type {
-                        PaneType::StatusBar => {
-                            render_status_bar(frame, *pane_area, &dashboard_state);
-                        }
-                        PaneType::Chat => {
-                            render_chat_pane(frame, *pane_area, &app, pane.focused);
-                        }
-                        PaneType::GardenHealth => {
-                            render_garden_health(frame, *pane_area, &dashboard_state);
-                        }
-                        PaneType::ActiveTools => {
-                            render_active_tools(frame, *pane_area, &dashboard_state);
-                        }
-                        PaneType::Logs => {
-                            render_logs(frame, *pane_area, &dashboard_state);
-                        }
-                        PaneType::GardenView => {
-                            render_garden_view(frame, *pane_area, &mut garden_view, pane.focused);
-                        }
-                        PaneType::Editor => {
-                            render_editor_pane(frame, *pane_area, pane);
-                        }
-                        PaneType::Terminal => {
-                            render_terminal_pane(frame, *pane_area, pane, &dashboard_state);
-                        }
-                        PaneType::Explorer => {
-                            render_explorer_pane(frame, *pane_area, pane);
-                        }
-                        PaneType::Diff => {
-                            render_diff_pane(frame, *pane_area, pane, &dashboard_state);
-                        }
-                        PaneType::Debug => {
-                            render_debug_pane(frame, *pane_area, pane, &dashboard_state);
-                        }
-                        PaneType::Help => {
-                            render_help_pane(frame, *pane_area, pane);
+                for (pane_id, pane_area) in &pane_layouts {
+                    if let Some(pane) = layout_engine.get_pane(*pane_id) {
+                        match pane.pane_type {
+                            PaneType::StatusBar => {
+                                render_status_bar(frame, *pane_area, &dashboard_state);
+                            }
+                            PaneType::Chat => {
+                                render_chat_pane(frame, *pane_area, &app, pane.focused);
+                            }
+                            PaneType::GardenHealth => {
+                                render_garden_health(frame, *pane_area, &dashboard_state);
+                            }
+                            PaneType::ActiveTools => {
+                                render_active_tools(frame, *pane_area, &dashboard_state);
+                            }
+                            PaneType::Logs => {
+                                render_logs(frame, *pane_area, &dashboard_state);
+                            }
+                            PaneType::GardenView => {
+                                render_garden_view(
+                                    frame,
+                                    *pane_area,
+                                    &mut garden_view,
+                                    pane.focused,
+                                );
+                            }
+                            PaneType::Editor => {
+                                render_editor_pane(frame, *pane_area, pane);
+                            }
+                            PaneType::Terminal => {
+                                render_terminal_pane(frame, *pane_area, pane, &dashboard_state);
+                            }
+                            PaneType::Explorer => {
+                                render_explorer_pane(frame, *pane_area, pane);
+                            }
+                            PaneType::Diff => {
+                                render_diff_pane(frame, *pane_area, pane, &dashboard_state);
+                            }
+                            PaneType::Debug => {
+                                render_debug_pane(frame, *pane_area, pane, &dashboard_state);
+                            }
+                            PaneType::Help => {
+                                render_help_pane(frame, *pane_area, pane);
+                            }
                         }
                     }
                 }
-            }
 
-            if show_help {
-                render_help_overlay(frame, area);
-            }
+                if show_help {
+                    render_help_overlay(frame, area);
+                }
 
-            if paused {
-                render_pause_indicator(frame, area);
-            }
-        })?;
-        last_draw = Instant::now();
-        needs_redraw = false;
+                if paused {
+                    render_pause_indicator(frame, area);
+                }
+            })?;
+            last_draw = Instant::now();
+            needs_redraw = false;
         } // end redraw throttle
 
         // Handle events (same logic as run_tui_dashboard)
@@ -1207,7 +1222,7 @@ pub fn run_tui_dashboard_with_events(
                                     "/mode" => {
                                         if _arg.is_empty() {
                                             app.add_system_message(
-                                                "Usage: /mode <normal|yolo|auto-edit|daemon>"
+                                                "Usage: /mode <normal|yolo|auto-edit|daemon>",
                                             );
                                         } else {
                                             app.add_system_message(
@@ -1215,15 +1230,22 @@ pub fn run_tui_dashboard_with_events(
                                             );
                                         }
                                         with_dashboard_state(&shared_state, |state| {
-                                            state.log(LogLevel::Info, &format!("Mode command: {}", _arg));
+                                            state.log(
+                                                LogLevel::Info,
+                                                &format!("Mode command: {}", _arg),
+                                            );
                                         });
                                     }
                                     _ => {
-                                        app.add_system_message(
-                                            &format!("Unknown command: {}", cmd)
-                                        );
+                                        app.add_system_message(&format!(
+                                            "Unknown command: {}",
+                                            cmd
+                                        ));
                                         with_dashboard_state(&shared_state, |state| {
-                                            state.log(LogLevel::Warning, &format!("Unknown command: {}", cmd));
+                                            state.log(
+                                                LogLevel::Warning,
+                                                &format!("Unknown command: {}", cmd),
+                                            );
                                         });
                                     }
                                 }

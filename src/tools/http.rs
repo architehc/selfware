@@ -120,7 +120,22 @@ impl Tool for HttpRequest {
         let client = Client::builder()
             .timeout(Duration::from_secs(args.timeout_secs))
             .redirect(if args.follow_redirects {
-                reqwest::redirect::Policy::limited(10)
+                reqwest::redirect::Policy::custom(|attempt| {
+                    if attempt.previous().len() > 10 {
+                        return attempt.error("Too many redirects");
+                    }
+                    if let Some(host) = attempt.url().host_str() {
+                        let allow_private = std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK")
+                            .unwrap_or_default()
+                            == "1";
+                        if !allow_private && is_private_network_host(host) {
+                            return attempt.error(
+                                "Blocked request to private/internal network address on redirect",
+                            );
+                        }
+                    }
+                    attempt.follow()
+                })
             } else {
                 reqwest::redirect::Policy::none()
             })
@@ -180,9 +195,10 @@ impl Tool for HttpRequest {
         // Truncate body if too large
         let truncated = body.len() > 50000;
         let body = if truncated {
+            let safe_truncate: String = body.chars().take(50000).collect();
             format!(
                 "{}...[truncated, {} bytes total]",
-                &body[..50000],
+                safe_truncate,
                 body.len()
             )
         } else {

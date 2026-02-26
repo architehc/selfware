@@ -6,6 +6,12 @@ use super::*;
 
 impl Agent {
     pub async fn interactive(&mut self) -> Result<()> {
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() {
+            eprintln!("Terminal input unavailable, falling back to basic mode...");
+            return self.interactive_basic().await;
+        }
+
         use crate::input::{InputConfig, ReadlineResult, SelfwareEditor};
 
         let cancel = self.cancel_token();

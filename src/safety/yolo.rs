@@ -495,7 +495,11 @@ fn summarize_args(args: &serde_json::Value) -> String {
         for (key, value) in obj {
             let summarized = match value {
                 serde_json::Value::String(s) if s.len() > 100 => {
-                    serde_json::Value::String(format!("{}... ({} chars)", s.chars().take(100).collect::<String>(), s.len()))
+                    serde_json::Value::String(format!(
+                        "{}... ({} chars)",
+                        s.chars().take(100).collect::<String>(),
+                        s.len()
+                    ))
                 }
                 other => other.clone(),
             };

@@ -88,7 +88,6 @@ pub struct DirectoryTree {
 // - `Tool::with_safety_config(config)` -- uses the given config, ignoring the global
 // ---------------------------------------------------------------------------
 
-
 impl FileRead {
     pub fn new() -> Self {
         Self::default()

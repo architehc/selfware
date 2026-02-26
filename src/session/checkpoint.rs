@@ -377,11 +377,12 @@ impl CheckpointManager {
                     path,
                     primary_err
                 );
-                self.recover_from_corruption(task_id)
-                    .with_context(|| format!(
+                self.recover_from_corruption(task_id).with_context(|| {
+                    format!(
                         "Recovery also failed for task '{}'. Original error: {}",
                         task_id, primary_err
-                    ))
+                    )
+                })
             }
         }
     }
@@ -439,11 +440,7 @@ impl CheckpointManager {
                     return Ok(checkpoint);
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "Backup checkpoint {:?} is also corrupt: {}",
-                        backup_path,
-                        e
-                    );
+                    tracing::warn!("Backup checkpoint {:?} is also corrupt: {}", backup_path, e);
                 }
             }
         }
@@ -1361,8 +1358,10 @@ mod tests {
         let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
 
         // Save a valid checkpoint
-        let checkpoint =
-            TaskCheckpoint::new("resave_test".to_string(), "Resave after recovery".to_string());
+        let checkpoint = TaskCheckpoint::new(
+            "resave_test".to_string(),
+            "Resave after recovery".to_string(),
+        );
         manager.save(&checkpoint).unwrap();
 
         // Create backup, then corrupt primary
@@ -1401,8 +1400,7 @@ mod tests {
         // Tamper with primary envelope payload (valid JSON but bad hash)
         let content = std::fs::read_to_string(&primary).unwrap();
         let mut envelope: serde_json::Value = serde_json::from_str(&content).unwrap();
-        envelope["payload"]["task_description"] =
-            serde_json::Value::String("TAMPERED".to_string());
+        envelope["payload"]["task_description"] = serde_json::Value::String("TAMPERED".to_string());
         std::fs::write(&primary, serde_json::to_string_pretty(&envelope).unwrap()).unwrap();
 
         // Load should detect integrity failure and recover from backup
@@ -1417,8 +1415,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
 
-        let checkpoint =
-            TaskCheckpoint::new("retry_ok".to_string(), "Retry success".to_string());
+        let checkpoint = TaskCheckpoint::new("retry_ok".to_string(), "Retry success".to_string());
         manager.save_with_retry(&checkpoint).unwrap();
 
         let loaded = manager.load("retry_ok").unwrap();

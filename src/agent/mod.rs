@@ -959,7 +959,12 @@ To call a tool, use this EXACT XML structure:
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| ".".to_string());
         let short_cwd = if cwd.chars().count() > 40 {
-            format!("...{}", cwd.chars().skip(cwd.chars().count() - 37).collect::<String>())
+            format!(
+                "...{}",
+                cwd.chars()
+                    .skip(cwd.chars().count() - 37)
+                    .collect::<String>()
+            )
         } else {
             cwd
         };
@@ -1580,11 +1585,7 @@ To call a tool, use this EXACT XML structure:
             .filter_map(|m| m.tool_calls.as_ref())
             .map(|calls| calls.len())
             .sum();
-        let tool_result_msgs = self
-            .messages
-            .iter()
-            .filter(|m| m.role == "tool")
-            .count();
+        let tool_result_msgs = self.messages.iter().filter(|m| m.role == "tool").count();
         // Use the maximum of (XML + native) or tool-result count to avoid
         // under-counting when only one signal is available.
         let tool_calls = (xml_tool_calls + native_tool_calls).max(tool_result_msgs);
@@ -2089,10 +2090,26 @@ To call a tool, use this EXACT XML structure:
         // Build role-specific sub-tasks and queue them in the swarm in
         // priority order: Architect -> Coder -> Tester -> Reviewer.
         let phases: Vec<(AgentRole, &str, u8)> = vec![
-            (AgentRole::Architect, "Design the architecture and plan the implementation", 10),
-            (AgentRole::Coder, "Implement the changes based on the architecture plan", 8),
-            (AgentRole::Tester, "Write and run tests to verify the implementation", 6),
-            (AgentRole::Reviewer, "Review the code changes for quality and correctness", 4),
+            (
+                AgentRole::Architect,
+                "Design the architecture and plan the implementation",
+                10,
+            ),
+            (
+                AgentRole::Coder,
+                "Implement the changes based on the architecture plan",
+                8,
+            ),
+            (
+                AgentRole::Tester,
+                "Write and run tests to verify the implementation",
+                6,
+            ),
+            (
+                AgentRole::Reviewer,
+                "Review the code changes for quality and correctness",
+                4,
+            ),
         ];
 
         for (role, phase_desc, priority) in &phases {

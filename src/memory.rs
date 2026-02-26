@@ -76,7 +76,9 @@ impl AgentMemory {
 
         // Token budget eviction -- evict oldest entries while over budget.
         let new_tokens = new_entry.token_estimate;
-        while self.total_estimated_tokens() + new_tokens > MAX_MEMORY_TOKENS && !self.entries.is_empty() {
+        while self.total_estimated_tokens() + new_tokens > MAX_MEMORY_TOKENS
+            && !self.entries.is_empty()
+        {
             self.entries.remove(0);
         }
 
@@ -129,12 +131,8 @@ impl AgentMemory {
         recent
             .iter()
             .map(|e| {
-                format!(
-                    "[{}] {}: {}...",
-                    e.timestamp,
-                    e.role,
-                    &e.content[..e.content.len().min(50)]
-                )
+                let preview: String = e.content.chars().take(50).collect();
+                format!("[{}] {}: {}...", e.timestamp, e.role, preview)
             })
             .collect::<Vec<_>>()
             .join("\n")

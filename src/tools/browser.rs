@@ -450,7 +450,8 @@ impl Tool for BrowserScreenshot {
             BrowserType::Playwright => {
                 let safe_url = escape_js_string(url);
                 let safe_output_path = escape_js_string(output_path);
-                let full_page = args.get("full_page")
+                let full_page = args
+                    .get("full_page")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 let script = format!(

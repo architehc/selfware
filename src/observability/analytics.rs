@@ -377,10 +377,7 @@ impl BugPreventionTracker {
     ) {
         let anon_desc = anonymize_task(description);
         self.records.push(BugPreventionRecord::new(
-            &anon_desc,
-            bug_type,
-            severity,
-            method,
+            &anon_desc, bug_type, severity, method,
         ));
 
         if self.records.len() > self.max_records {
@@ -1148,6 +1145,10 @@ pub struct RoiEstimate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use once_cell::sync::Lazy;
+    use std::sync::Mutex;
+
+    static ANALYTICS_TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     #[test]
     fn test_time_period_seconds() {
@@ -1807,6 +1808,7 @@ mod tests {
 
     #[test]
     fn test_analytics_enabled_default() {
+        let _guard = ANALYTICS_TEST_MUTEX.lock().unwrap();
         // Default should be true (unless env var overrides)
         // Reset to known state
         set_analytics_enabled(true);
@@ -1815,6 +1817,7 @@ mod tests {
 
     #[test]
     fn test_analytics_disable_enable() {
+        let _guard = ANALYTICS_TEST_MUTEX.lock().unwrap();
         let original = analytics_enabled();
 
         set_analytics_enabled(false);
@@ -1829,6 +1832,7 @@ mod tests {
 
     #[test]
     fn test_analytics_disabled_noop() {
+        let _guard = ANALYTICS_TEST_MUTEX.lock().unwrap();
         let original = analytics_enabled();
         set_analytics_enabled(false);
 
@@ -1852,6 +1856,7 @@ mod tests {
 
     #[test]
     fn test_clear_analytics_data() {
+        let _guard = ANALYTICS_TEST_MUTEX.lock().unwrap();
         let original = analytics_enabled();
         set_analytics_enabled(true);
 
@@ -1877,6 +1882,7 @@ mod tests {
 
     #[test]
     fn test_dashboard_is_enabled() {
+        let _guard = ANALYTICS_TEST_MUTEX.lock().unwrap();
         let original = analytics_enabled();
         set_analytics_enabled(true);
         let dashboard = AnalyticsDashboard::new();

@@ -1218,7 +1218,11 @@ impl VectorStore {
             .get(collection_name)
             .ok_or_else(|| anyhow!("Collection not found: {}", collection_name))?;
 
-        let texts: Vec<String> = collection.chunks().iter().map(|c| c.content.clone()).collect();
+        let texts: Vec<String> = collection
+            .chunks()
+            .iter()
+            .map(|c| c.content.clone())
+            .collect();
         let ids: Vec<String> = collection.chunks().iter().map(|c| c.id.clone()).collect();
 
         let embeddings = self.provider.embed_batch(&texts).await?;
@@ -2305,7 +2309,9 @@ pub fn calculate_product(a: i32, b: i32) -> i32 {
     #[test]
     fn test_verify_index_integrity_nan() {
         let mut index = VectorIndex::new(3);
-        index.add("a".to_string(), vec![1.0, f32::NAN, 0.0]).unwrap();
+        index
+            .add("a".to_string(), vec![1.0, f32::NAN, 0.0])
+            .unwrap();
 
         let issues = index.verify_index_integrity();
         assert!(!issues.is_empty());

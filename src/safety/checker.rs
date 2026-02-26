@@ -207,8 +207,7 @@ impl SafetyChecker {
                         break;
                     }
                     if ENV_VAR_PREFIX.is_match(&after_value) {
-                        remaining =
-                            &remaining[remaining.len() - after_value.len()..];
+                        remaining = &remaining[remaining.len() - after_value.len()..];
                         continue;
                     }
                     for (pattern, description) in DANGEROUS_COMMAND_PATTERNS.iter() {
@@ -223,7 +222,6 @@ impl SafetyChecker {
                 }
             }
         }
-
 
         // Check for dangerous patterns using regex
         for (pattern, description) in DANGEROUS_COMMAND_PATTERNS.iter() {

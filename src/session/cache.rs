@@ -704,10 +704,13 @@ impl LlmCache {
 
     /// Get current cache size
     pub fn size(&self) -> usize {
-        self.entries.read().unwrap_or_else(|poisoned| {
-            warn!("LlmCache entries read lock poisoned, recovering");
-            poisoned.into_inner()
-        }).len()
+        self.entries
+            .read()
+            .unwrap_or_else(|poisoned| {
+                warn!("LlmCache entries read lock poisoned, recovering");
+                poisoned.into_inner()
+            })
+            .len()
     }
 
     /// Clear the entire cache
@@ -1260,7 +1263,8 @@ impl CacheInvalidator {
 
                         if mtimes.len() > MAX_INVALIDATOR_PATHS {
                             let to_remove = mtimes.len() - MAX_INVALIDATOR_PATHS;
-                            let keys: Vec<String> = mtimes.keys().take(to_remove).cloned().collect();
+                            let keys: Vec<String> =
+                                mtimes.keys().take(to_remove).cloned().collect();
                             for key in keys {
                                 mtimes.remove(&key);
                             }

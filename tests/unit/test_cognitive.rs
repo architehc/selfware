@@ -12,9 +12,7 @@
 // self_improvement module smoke tests
 // ---------------------------------------------------------------------------
 
-use selfware::cognitive::self_improvement::{
-    Outcome, PromptRecord, SelfImprovementEngine,
-};
+use selfware::cognitive::self_improvement::{Outcome, PromptRecord, SelfImprovementEngine};
 
 /// Verify that the SelfImprovementEngine can be created, record a mixed
 /// workload of prompts, tools, and errors, then return coherent stats
@@ -141,7 +139,7 @@ fn test_self_improvement_engine_tool_ranking() {
 // ---------------------------------------------------------------------------
 
 use selfware::cognitive::knowledge_graph::{
-    Entity, EntityType, KnowledgeGraph, RelationType, Relation,
+    Entity, EntityType, KnowledgeGraph, Relation, RelationType,
 };
 
 /// Verify that a KnowledgeGraph can be created, populated with entities and
@@ -266,7 +264,10 @@ fn test_prompt_record_builder_chain() {
     .with_tokens(500)
     .with_response_time(1200);
 
-    assert_eq!(record.quality_score, 1.0, "quality should be clamped to 1.0");
+    assert_eq!(
+        record.quality_score, 1.0,
+        "quality should be clamped to 1.0"
+    );
     assert_eq!(record.tokens_used, 500);
     assert_eq!(record.response_time_ms, 1200);
     assert!(record.timestamp > 0);

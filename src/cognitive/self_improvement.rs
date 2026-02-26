@@ -201,7 +201,9 @@ impl PromptOptimizer {
 
         // Trim task_stats if it grows too large
         if self.task_stats.len() > MAX_ENTRIES / 10 {
-            let mut entries: Vec<_> = self.task_stats.iter()
+            let mut entries: Vec<_> = self
+                .task_stats
+                .iter()
                 .map(|(k, v)| (k.clone(), v.total_attempts))
                 .collect();
             entries.sort_by_key(|(_, count)| *count);
@@ -794,7 +796,9 @@ impl ErrorPatternLearner {
 
         // Trim patterns if they grow too large
         if self.patterns.len() > MAX_ENTRIES / 10 {
-            let mut entries: Vec<_> = self.patterns.iter()
+            let mut entries: Vec<_> = self
+                .patterns
+                .iter()
                 .map(|(k, v)| (k.clone(), v.count))
                 .collect();
             entries.sort_by_key(|(_, count)| *count);

@@ -18,7 +18,12 @@ fn safe_truncate_output(bytes: &[u8], max_size: usize) -> String {
         return String::from_utf8_lossy(bytes).into_owned();
     }
     let truncated = String::from_utf8_lossy(&bytes[..max_size]).into_owned();
-    format!("{}\n[OUTPUT TRUNCATED: {} bytes total, showing first {}]", truncated, bytes.len(), max_size)
+    format!(
+        "{}\n[OUTPUT TRUNCATED: {} bytes total, showing first {}]",
+        truncated,
+        bytes.len(),
+        max_size
+    )
 }
 
 pub struct CargoTest;

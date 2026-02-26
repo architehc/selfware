@@ -62,29 +62,24 @@ impl StreamingResponse {
             let chunk_timeout = Duration::from_secs(60);
 
             loop {
-                let chunk_opt =
-                    match tokio::time::timeout(chunk_timeout, stream.next()).await {
-                        Ok(Some(result)) => Some(result),
-                        Ok(None) => None, // Stream ended
-                        Err(_elapsed) => {
-                            for call in accumulator.flush() {
-                                if tx
-                                    .send(Ok(StreamChunk::ToolCall(call)))
-                                    .await
-                                    .is_err()
-                                {
-                                    return;
-                                }
+                let chunk_opt = match tokio::time::timeout(chunk_timeout, stream.next()).await {
+                    Ok(Some(result)) => Some(result),
+                    Ok(None) => None, // Stream ended
+                    Err(_elapsed) => {
+                        for call in accumulator.flush() {
+                            if tx.send(Ok(StreamChunk::ToolCall(call))).await.is_err() {
+                                return;
                             }
-                            let _ = tx
-                                .send(Err(anyhow::anyhow!(
-                                    "Stream timeout: no data for {} seconds",
-                                    chunk_timeout.as_secs()
-                                )))
-                                .await;
-                            return;
                         }
-                    };
+                        let _ = tx
+                            .send(Err(anyhow::anyhow!(
+                                "Stream timeout: no data for {} seconds",
+                                chunk_timeout.as_secs()
+                            )))
+                            .await;
+                        return;
+                    }
+                };
                 let Some(chunk_result) = chunk_opt else {
                     break;
                 };
@@ -112,8 +107,7 @@ impl StreamingResponse {
                                 return;
                             }
                         }
-                        let _ =
-                            tx.send(Err(anyhow::anyhow!("Stream error: {}", e))).await;
+                        let _ = tx.send(Err(anyhow::anyhow!("Stream error: {}", e))).await;
                         return;
                     }
                 }

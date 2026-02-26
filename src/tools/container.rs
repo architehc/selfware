@@ -103,9 +103,9 @@ fn validate_port_mapping(mapping: &str) -> bool {
         3 => {
             let ip = parts[0];
             !ip.is_empty()
-                && ip
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == ':' || c == '[' || c == ']')
+                && ip.chars().all(|c| {
+                    c.is_ascii_alphanumeric() || c == '.' || c == ':' || c == '[' || c == ']'
+                })
                 && is_valid_port(parts[1])
                 && is_valid_port(parts[2])
         }
@@ -289,10 +289,7 @@ impl Tool for ContainerRun {
                         );
                     }
                     if v.contains('\0') {
-                        anyhow::bail!(
-                            "Env var value for '{}' must not contain null bytes",
-                            key
-                        );
+                        anyhow::bail!("Env var value for '{}' must not contain null bytes", key);
                     }
                     cmd.args(["-e", &format!("{}={}", key, v)]);
                 }

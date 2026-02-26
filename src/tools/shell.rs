@@ -94,10 +94,7 @@ impl Tool for ShellExec {
             }
             for component in cwd_path.components() {
                 if let std::path::Component::ParentDir = component {
-                    anyhow::bail!(
-                        "cwd must not contain path traversal (..): {}",
-                        cwd
-                    );
+                    anyhow::bail!("cwd must not contain path traversal (..): {}", cwd);
                 }
             }
         }
@@ -105,10 +102,7 @@ impl Tool for ShellExec {
         // Validate environment variable names and values
         for (name, value) in &args.env {
             if name.contains('=') {
-                anyhow::bail!(
-                    "Environment variable name must not contain '=': {}",
-                    name
-                );
+                anyhow::bail!("Environment variable name must not contain '=': {}", name);
             }
             if name.contains('\0') {
                 anyhow::bail!(
@@ -126,6 +120,7 @@ impl Tool for ShellExec {
 
         let (shell, flag) = default_shell();
         let mut cmd = tokio::process::Command::new(shell);
+        cmd.kill_on_drop(true);
         cmd.arg(flag).arg(&args.command);
 
         if let Some(cwd) = &args.cwd {

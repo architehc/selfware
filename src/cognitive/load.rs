@@ -839,7 +839,8 @@ impl CognitiveLoadReducer {
         for (i, item) in items.iter().take(max_points).enumerate() {
             // Truncate long items
             let truncated = if item.len() > 80 {
-                format!("{}...", &item[..77])
+                let safe_truncate: String = item.chars().take(77).collect();
+                format!("{}...", safe_truncate)
             } else {
                 item.clone()
             };
