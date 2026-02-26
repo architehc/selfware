@@ -2,6 +2,7 @@
 //!
 //! Software you own. Software that knows you. Software that lasts.
 
+#[cfg(feature = "tui")]
 use std::sync::mpsc;
 
 use anyhow::Result;

@@ -104,7 +104,7 @@ fn test_model_tool_calls_are_parsed() {
 /// This test analyzes a single file to be faster and more deterministic
 /// Note: Ignored by default due to variable backend latency (run with --include-ignored)
 #[test]
-#[ignore]
+#[ignore = "Backend-dependent; requires live LLM endpoint. Run with --include-ignored"]
 #[cfg(feature = "integration")]
 fn test_analyze_tool_calls_work() {
     // Analyze a single small file instead of entire src/ directory
@@ -166,7 +166,7 @@ fn test_model_format_compatibility() {
 /// Test interactive mode commands result in proper tool execution
 /// This test is slower and may be flaky with slow models - marked as ignored by default
 #[test]
-#[ignore] // Run with: cargo test --features integration -- --ignored
+#[ignore = "Backend-dependent; slow/flaky with local models. Run with --include-ignored"]
 #[cfg(feature = "integration")]
 fn test_interactive_analyze_parses_tools() {
     use std::io::Write;

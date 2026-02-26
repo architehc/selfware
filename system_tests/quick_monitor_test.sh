@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Quick 5-minute test to verify monitoring works before 2-hour run
 

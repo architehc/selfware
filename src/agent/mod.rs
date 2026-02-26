@@ -661,6 +661,12 @@ To call a tool, use this EXACT XML structure:
                     );
                     output::record_tokens(u.prompt_tokens as u64, u.completion_tokens as u64);
                     output::print_token_usage(u.prompt_tokens as u64, u.completion_tokens as u64);
+
+                    #[cfg(feature = "tui")]
+                    self.emit_tui_event(TuiEvent::TokenUsage {
+                        prompt_tokens: u.prompt_tokens as u64,
+                        completion_tokens: u.completion_tokens as u64,
+                    });
                 }
                 StreamChunk::Done => break,
             }
@@ -1532,11 +1538,30 @@ To call a tool, use this EXACT XML structure:
             .iter()
             .filter(|m| m.role == "assistant")
             .count();
-        let tool_calls = self
+        // Count tool calls from both XML-based and native function calling.
+        // XML-based: assistant messages containing <tool> tags.
+        // Native FC: assistant messages with non-empty tool_calls field.
+        // Also count tool-result messages (role "tool") as a fallback indicator.
+        let xml_tool_calls = self
             .messages
             .iter()
             .filter(|m| m.role == "assistant" && m.content.contains("<tool>"))
             .count();
+        let native_tool_calls: usize = self
+            .messages
+            .iter()
+            .filter(|m| m.role == "assistant")
+            .filter_map(|m| m.tool_calls.as_ref())
+            .map(|calls| calls.len())
+            .sum();
+        let tool_result_msgs = self
+            .messages
+            .iter()
+            .filter(|m| m.role == "tool")
+            .count();
+        // Use the maximum of (XML + native) or tool-result count to avoid
+        // under-counting when only one signal is available.
+        let tool_calls = (xml_tool_calls + native_tool_calls).max(tool_result_msgs);
 
         // Colors - respect --no-color and NO_COLOR env
         let colors_enabled = colored::control::SHOULD_COLORIZE.should_colorize();
@@ -1693,6 +1718,11 @@ To call a tool, use this EXACT XML structure:
         #[cfg(feature = "tui")]
         self.emit_tui_event(TuiEvent::AgentStarted);
 
+        #[cfg(feature = "tui")]
+        self.emit_tui_event(TuiEvent::StatusUpdate {
+            message: "Starting task...".to_string(),
+        });
+
         println!("{}", "🦊 Selfware starting task...".bright_cyan());
         println!("Task: {}", task.bright_white());
 
@@ -1738,6 +1768,11 @@ To call a tool, use this EXACT XML structure:
                     record_state_transition("Start", "Planning");
                     output::phase_transition("Start", "Planning");
 
+                    #[cfg(feature = "tui")]
+                    self.emit_tui_event(TuiEvent::StatusUpdate {
+                        message: "Planning...".to_string(),
+                    });
+
                     // Set cognitive state to Plan phase
                     self.cognitive_state.set_phase(CyclePhase::Plan);
 
@@ -1745,6 +1780,11 @@ To call a tool, use this EXACT XML structure:
                     let has_tool_calls = match self.plan().await {
                         Ok(has_tool_calls) => has_tool_calls,
                         Err(e) => {
+                            #[cfg(feature = "tui")]
+                            self.emit_tui_event(TuiEvent::AgentError {
+                                message: format!("Planning failed: {}", e),
+                            });
+
                             self.record_task_outcome(
                                 &task_description,
                                 Outcome::Failure,
@@ -1757,6 +1797,11 @@ To call a tool, use this EXACT XML structure:
                     // Transition to Do phase
                     record_state_transition("Planning", "Executing");
                     output::phase_transition("Planning", "Executing");
+
+                    #[cfg(feature = "tui")]
+                    self.emit_tui_event(TuiEvent::StatusUpdate {
+                        message: "Executing...".to_string(),
+                    });
                     progress.complete_phase(); // Complete planning phase
                     self.cognitive_state.set_phase(CyclePhase::Do);
                     self.loop_control
@@ -1866,6 +1911,11 @@ To call a tool, use this EXACT XML structure:
                         Err(e) => {
                             warn!("Step failed: {}", e);
 
+                            #[cfg(feature = "tui")]
+                            self.emit_tui_event(TuiEvent::AgentError {
+                                message: format!("Step {} failed: {}", step + 1, e),
+                            });
+
                             // Check for confirmation error - these are fatal in non-interactive mode
                             if is_confirmation_error(&e) {
                                 record_state_transition("Executing", "Failed");
@@ -1900,6 +1950,11 @@ To call a tool, use this EXACT XML structure:
                 }
                 AgentState::ErrorRecovery { error } => {
                     let _span = enter_agent_step("ErrorRecovery", self.loop_control.current_step());
+
+                    #[cfg(feature = "tui")]
+                    self.emit_tui_event(TuiEvent::StatusUpdate {
+                        message: "Recovering from error...".to_string(),
+                    });
 
                     println!("{} {}", "⚠️ Recovering from error:".bright_red(), error);
 
@@ -1953,6 +2008,12 @@ To call a tool, use this EXACT XML structure:
                 AgentState::Failed { reason } => {
                     record_state_transition("Executing", "Failed");
                     progress.fail_phase();
+
+                    #[cfg(feature = "tui")]
+                    self.emit_tui_event(TuiEvent::AgentError {
+                        message: format!("Task failed: {}", reason),
+                    });
+
                     println!("{} {}", "❌ Task failed:".bright_red(), reason);
                     self.record_task_outcome(&task_description, Outcome::Failure, Some(&reason));
                     if let Err(e) = self.fail_checkpoint(&reason) {
@@ -1975,9 +2036,9 @@ To call a tool, use this EXACT XML structure:
     }
 
     async fn run_swarm_task(&mut self, task: &str) -> Result<()> {
-        use crate::orchestration::swarm::create_dev_swarm;
+        use crate::orchestration::swarm::{create_dev_swarm, AgentRole, SwarmTask};
 
-        let swarm = create_dev_swarm();
+        let mut swarm = create_dev_swarm();
         let mut agents = swarm.list_agents();
         agents.sort_by_key(|a| std::cmp::Reverse(a.role.priority()));
 
@@ -1986,7 +2047,7 @@ To call a tool, use this EXACT XML structure:
             "🐝".bright_cyan(),
             agents.len()
         );
-        for agent in agents {
+        for agent in &agents {
             println!(
                 "  {} {} ({})",
                 "→".bright_black(),
@@ -1995,13 +2056,108 @@ To call a tool, use this EXACT XML structure:
             );
         }
 
-        let prompt = format!(
-            "You are coordinating a dev team: Architect, Coder, Tester, Reviewer.\n\
-             Decompose and execute this task. Verify with cargo_check after changes.\n\
-             Task: {}",
-            task
+        // Build role-specific sub-tasks and queue them in the swarm in
+        // priority order: Architect -> Coder -> Tester -> Reviewer.
+        let phases: Vec<(AgentRole, &str, u8)> = vec![
+            (AgentRole::Architect, "Design the architecture and plan the implementation", 10),
+            (AgentRole::Coder, "Implement the changes based on the architecture plan", 8),
+            (AgentRole::Tester, "Write and run tests to verify the implementation", 6),
+            (AgentRole::Reviewer, "Review the code changes for quality and correctness", 4),
+        ];
+
+        for (role, phase_desc, priority) in &phases {
+            let sub_task = SwarmTask::new(format!("{}: {}", phase_desc, task))
+                .with_role(*role)
+                .with_priority(*priority);
+            swarm.queue_task(sub_task);
+        }
+
+        println!(
+            "{} Queued {} phases for orchestrated execution",
+            "🐝".bright_cyan(),
+            phases.len()
         );
-        self.run_task(&prompt).await
+
+        // Process tasks from the swarm queue in priority order.
+        // Each phase uses the specialist agent's system prompt to guide
+        // the LLM, then records the result back into the swarm.
+        let mut phase_num = 0usize;
+        while let Some(sub_task) = swarm.next_task() {
+            phase_num += 1;
+            let task_id = sub_task.id.clone();
+            let assigned = swarm.assign_task(&task_id);
+
+            // Determine the lead agent for this sub-task
+            let lead_agent_prompt = if let Some(agent_id) = assigned.first() {
+                swarm
+                    .get_agent(agent_id)
+                    .map(|a| a.system_prompt().to_string())
+                    .unwrap_or_default()
+            } else {
+                // No idle agent matched; fall back to role-based prompt
+                sub_task
+                    .required_roles
+                    .first()
+                    .map(|r| r.system_prompt().to_string())
+                    .unwrap_or_default()
+            };
+
+            let role_name = sub_task
+                .required_roles
+                .first()
+                .map(|r| r.name())
+                .unwrap_or("General");
+
+            println!(
+                "\n{} Phase {}/{}: {} ({})",
+                "🐝".bright_cyan(),
+                phase_num,
+                phases.len(),
+                sub_task.description.bright_white(),
+                role_name.bright_yellow()
+            );
+
+            // Build a role-specific prompt that includes specialist guidance
+            let role_prompt = format!(
+                "{}\n\n\
+                 You are acting as the {} in a development swarm.\n\
+                 Previous phases have already contributed to the conversation context.\n\
+                 Focus specifically on your role's responsibilities.\n\
+                 After completing your work, verify with cargo_check if you made code changes.\n\n\
+                 Task: {}",
+                lead_agent_prompt, role_name, sub_task.description
+            );
+
+            let result = self.run_task(&role_prompt).await;
+
+            // Record completion back in the swarm
+            let (success, result_msg) = match &result {
+                Ok(()) => (true, "Phase completed successfully".to_string()),
+                Err(e) => (false, e.to_string()),
+            };
+
+            for agent_id in &assigned {
+                swarm.complete_task(&task_id, agent_id, &result_msg);
+            }
+
+            if !success {
+                warn!(
+                    "Swarm phase '{}' failed: {}; continuing with remaining phases",
+                    role_name, result_msg
+                );
+            }
+        }
+
+        // Print swarm statistics
+        let stats = swarm.stats();
+        println!(
+            "\n{} Swarm complete: {} agents, avg trust {:.0}%",
+            "🐝".bright_green(),
+            stats.total_agents,
+            stats.average_trust * 100.0
+        );
+
+        Ok(())
     }
 
     pub async fn analyze(&mut self, path: &str) -> Result<()> {

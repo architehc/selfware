@@ -1,11 +1,21 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 # Show final test summary
 
-TEST_DIR=$(ls -td /home/thread/kimi-workspace/kimi-agent-claude/test_runs/test-* | head -1)
+TEST_DIR=$(ls -td "$PROJECT_ROOT/test_runs/test-"* 2>/dev/null | head -1 || true)
 
-echo "╔══════════════════════════════════════════════════════════════════════════════╗"
-echo "║                         🤖 Test Summary                                       ║"
-echo "╚══════════════════════════════════════════════════════════════════════════════╝"
+if [ -z "$TEST_DIR" ] || [ ! -d "$TEST_DIR" ]; then
+    echo "No test run directories found under $PROJECT_ROOT/test_runs/"
+    exit 1
+fi
+
+echo "=========================================================================="
+echo "                         Test Summary                                      "
+echo "=========================================================================="
 echo ""
 echo "Session: $(basename "$TEST_DIR")"
 echo ""
@@ -22,9 +32,9 @@ if [ -f "$TEST_DIR/metrics/metrics.jsonl" ]; then
     END_E=$(echo "$LAST" | grep -o '"e":[0-9]*' | cut -d':' -f2)
     START_P=$(echo "$FIRST" | grep -o '"p":[0-9]*' | cut -d':' -f2)
     END_P=$(echo "$LAST" | grep -o '"p":[0-9]*' | cut -d':' -f2)
-    
+
     echo "  Duration: $((END_E - START_E)) seconds ($(( (END_E - START_E) / 60 )) minutes)"
-    echo "  Progress: $START_P% → $END_P%"
+    echo "  Progress: $START_P% -> $END_P%"
 fi
 
 echo ""
@@ -38,15 +48,15 @@ if [ -d "$TEST_DIR/work" ]; then
     echo "  Rust files: $(find "$TEST_DIR/work" -name "*.rs" 2>/dev/null | wc -l)"
     echo "  Config files: $(find "$TEST_DIR/work" -name "*.toml" 2>/dev/null | wc -l)"
     echo "  Documentation: $(find "$TEST_DIR/work" -name "*.md" 2>/dev/null | wc -l)"
-    
+
     # Check for specific files
     echo ""
     echo "=== Key Deliverables ==="
-    [ -f "$TEST_DIR/work/redqueue/Dockerfile" ] && echo "  ✅ Dockerfile"
-    [ -d "$TEST_DIR/work/redqueue/.github" ] && echo "  ✅ CI/CD workflows"
-    [ -f "$TEST_DIR/work/redqueue/Cargo.lock" ] && echo "  ✅ Dependencies resolved (Cargo.lock)"
-    [ -d "$TEST_DIR/work/redqueue/target" ] && echo "  ✅ Compiled artifacts ($(du -sh "$TEST_DIR/work/redqueue/target" 2>/dev/null | cut -f1))"
-    [ -d "$TEST_DIR/work/redqueue/tests" ] && echo "  ✅ Test suite"
+    [ -f "$TEST_DIR/work/redqueue/Dockerfile" ] && echo "  [OK] Dockerfile"
+    [ -d "$TEST_DIR/work/redqueue/.github" ] && echo "  [OK] CI/CD workflows"
+    [ -f "$TEST_DIR/work/redqueue/Cargo.lock" ] && echo "  [OK] Dependencies resolved (Cargo.lock)"
+    [ -d "$TEST_DIR/work/redqueue/target" ] && echo "  [OK] Compiled artifacts ($(du -sh "$TEST_DIR/work/redqueue/target" 2>/dev/null | cut -f1))"
+    [ -d "$TEST_DIR/work/redqueue/tests" ] && echo "  [OK] Test suite"
 fi
 
 echo ""

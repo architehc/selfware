@@ -948,6 +948,16 @@ impl Agent {
                     match self.chat_store.load(name) {
                         Ok(chat) => {
                             self.messages = chat.messages;
+
+                            // Restore memory system from recovered messages so that
+                            // memory stats, token counts, and context are consistent.
+                            self.memory.clear();
+                            for msg in &self.messages {
+                                if msg.role != "system" {
+                                    self.memory.add_message(msg);
+                                }
+                            }
+
                             println!(
                                 "{} Resumed chat '{}' ({} messages, model: {})",
                                 "▶".bright_green(),

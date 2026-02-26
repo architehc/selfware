@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Flexible Monitored System Test for Selfware
 # Usage: ./run_monitored_test.sh [duration_minutes] [project] [scenario]
@@ -40,6 +40,12 @@ PID_FILE="$TEST_DIR/.pid"
 
 # Initialize
 mkdir -p "$LOG_DIR" "$METRICS_DIR" "$CHECKPOINT_DIR" "$WORK_DIR"
+
+# Prerequisite checks
+if ! command -v cargo &>/dev/null; then
+    echo "ERROR: cargo is not installed or not in PATH" >&2
+    exit 1
+fi
 
 # Logging
 log() { echo -e "${BLUE}[$(date '+%H:%M:%S')]${NC} $1" | tee -a "$MAIN_LOG"; }

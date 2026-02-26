@@ -3,7 +3,7 @@ use serde_json::json;
 
 #[tokio::test]
 async fn test_file_read_success() {
-    let tool = FileRead;
+    let tool = FileRead::new();
     let args = json!({"path": "Cargo.toml"});
 
     let result = tool.execute(args).await.unwrap();
@@ -13,7 +13,7 @@ async fn test_file_read_success() {
 
 #[tokio::test]
 async fn test_file_read_not_found() {
-    let tool = FileRead;
+    let tool = FileRead::new();
     let args = json!({"path": "/nonexistent/file.txt"});
 
     let result = tool.execute(args).await;

@@ -373,6 +373,17 @@ impl SafetyChecker {
         }
 
         // DNS rebinding protection: resolve hostname and check resulting IPs.
+        //
+        // SECURITY TODO: DNS rebinding TOCTOU -- This check resolves DNS at
+        // validation time, but the subsequent HTTP request (via reqwest) will
+        // re-resolve DNS independently.  An attacker-controlled DNS server
+        // could return a safe IP here and then switch to 169.254.169.254 (or
+        // another internal address) for the actual request, bypassing this
+        // check entirely.
+        //
+        // Fix: Use a custom `reqwest::dns::Resolve` implementation that pins
+        // the resolved IP from validation, so the HTTP client reuses the
+        // already-validated address instead of performing a second lookup.
         if let Ok(parsed) = url::Url::parse(url) {
             if let Some(host) = parsed.host_str() {
                 if host.parse::<std::net::IpAddr>().is_err() {

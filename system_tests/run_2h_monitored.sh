@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # 2-Hour Monitored System Test for Selfware
 # Monitors progress every 30 seconds
@@ -137,6 +137,15 @@ EOF
 # Check prerequisites
 log "Checking prerequisites..."
 
+if ! command -v cargo &>/dev/null; then
+    log_error "cargo is not installed or not in PATH"
+    exit 1
+fi
+
+if ! command -v timeout &>/dev/null && ! command -v gtimeout &>/dev/null; then
+    log_warn "'timeout' command not found; long-running test may not be bounded"
+fi
+
 if [ ! -f "$PROJECT_ROOT/Cargo.toml" ]; then
     log_error "Cannot find project root at $PROJECT_ROOT"
     exit 1
@@ -159,14 +168,14 @@ fi
 SELFWARE_BIN="$PROJECT_ROOT/target/release/selfware"
 
 # Create test configuration
-cat > "$TEST_DIR/selfware.toml" << 'EOF'
+cat > "$TEST_DIR/selfware.toml" << EOF
 endpoint = "http://localhost:8888/v1"
 model = "Qwen/Qwen3-Coder-Next-FP8"
 max_tokens = 98304
 temperature = 1.0
 
 [safety]
-allowed_paths = ["./**", "/home/thread/**"]
+allowed_paths = ["./**", "${PROJECT_ROOT}/**"]
 denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**"]
 protected_branches = ["main", "master"]
 

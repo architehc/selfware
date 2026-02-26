@@ -33,7 +33,7 @@ mod file_read_error_tests {
     #[tokio::test]
     async fn test_file_read_missing_path_arg() {
         setup_test_mode();
-        let tool = FileRead;
+        let tool = FileRead::new();
         let result = tool.execute(serde_json::json!({})).await;
         assert!(result.is_err());
     }
@@ -41,7 +41,7 @@ mod file_read_error_tests {
     #[tokio::test]
     async fn test_file_read_invalid_json() {
         setup_test_mode();
-        let tool = FileRead;
+        let tool = FileRead::new();
         let result = tool.execute(serde_json::json!("not an object")).await;
         assert!(result.is_err());
     }
@@ -49,7 +49,7 @@ mod file_read_error_tests {
     #[tokio::test]
     async fn test_file_read_nonexistent_file() {
         setup_test_mode();
-        let tool = FileRead;
+        let tool = FileRead::new();
         let result = tool
             .execute(serde_json::json!({
                 "path": "/nonexistent/path/to/file.txt"
@@ -64,7 +64,7 @@ mod file_read_error_tests {
     async fn test_file_read_directory_instead_of_file() {
         setup_test_mode();
         let dir = tempdir().unwrap();
-        let tool = FileRead;
+        let tool = FileRead::new();
         let result = tool
             .execute(serde_json::json!({
                 "path": dir.path().to_str().unwrap()
@@ -80,7 +80,7 @@ mod file_read_error_tests {
         let file_path = dir.path().join("test.txt");
         fs::write(&file_path, "line1\nline2\nline3").unwrap();
 
-        let tool = FileRead;
+        let tool = FileRead::new();
         // Line range with start > end should still work (returns empty)
         let result = tool
             .execute(serde_json::json!({
@@ -98,7 +98,7 @@ mod file_read_error_tests {
         let file_path = dir.path().join("test.txt");
         fs::write(&file_path, "line1\nline2").unwrap();
 
-        let tool = FileRead;
+        let tool = FileRead::new();
         let result = tool
             .execute(serde_json::json!({
                 "path": file_path.to_str().unwrap(),
@@ -117,7 +117,7 @@ mod file_read_error_tests {
         let file_path = dir.path().join("empty.txt");
         fs::write(&file_path, "").unwrap();
 
-        let tool = FileRead;
+        let tool = FileRead::new();
         let result = tool
             .execute(serde_json::json!({
                 "path": file_path.to_str().unwrap()
@@ -140,7 +140,7 @@ mod file_write_error_tests {
     #[tokio::test]
     async fn test_file_write_missing_path() {
         setup_test_mode();
-        let tool = FileWrite;
+        let tool = FileWrite::new();
         let result = tool
             .execute(serde_json::json!({
                 "content": "test"
@@ -152,7 +152,7 @@ mod file_write_error_tests {
     #[tokio::test]
     async fn test_file_write_missing_content() {
         setup_test_mode();
-        let tool = FileWrite;
+        let tool = FileWrite::new();
         let result = tool
             .execute(serde_json::json!({
                 "path": "/tmp/test.txt"
@@ -164,7 +164,7 @@ mod file_write_error_tests {
     #[tokio::test]
     async fn test_file_write_invalid_json() {
         setup_test_mode();
-        let tool = FileWrite;
+        let tool = FileWrite::new();
         let result = tool.execute(serde_json::json!(null)).await;
         assert!(result.is_err());
     }
@@ -175,7 +175,7 @@ mod file_write_error_tests {
         let dir = tempdir().unwrap();
         let nested_path = dir.path().join("a/b/c/test.txt");
 
-        let tool = FileWrite;
+        let tool = FileWrite::new();
         let result = tool
             .execute(serde_json::json!({
                 "path": nested_path.to_str().unwrap(),
@@ -193,7 +193,7 @@ mod file_write_error_tests {
         let file_path = dir.path().join("original.txt");
         fs::write(&file_path, "original content").unwrap();
 
-        let tool = FileWrite;
+        let tool = FileWrite::new();
         let result = tool
             .execute(serde_json::json!({
                 "path": file_path.to_str().unwrap(),
@@ -219,7 +219,7 @@ mod file_write_error_tests {
         let file_path = dir.path().join("no_backup.txt");
         fs::write(&file_path, "original").unwrap();
 
-        let tool = FileWrite;
+        let tool = FileWrite::new();
         let result = tool
             .execute(serde_json::json!({
                 "path": file_path.to_str().unwrap(),
@@ -245,7 +245,7 @@ mod file_edit_error_tests {
     #[tokio::test]
     async fn test_file_edit_file_not_found() {
         setup_test_mode();
-        let tool = FileEdit;
+        let tool = FileEdit::new();
         let result = tool
             .execute(serde_json::json!({
                 "path": "/nonexistent/file.txt",
@@ -263,7 +263,7 @@ mod file_edit_error_tests {
         let file_path = dir.path().join("test.txt");
         fs::write(&file_path, "hello world").unwrap();
 
-        let tool = FileEdit;
+        let tool = FileEdit::new();
         let result = tool
             .execute(serde_json::json!({
                 "path": file_path.to_str().unwrap(),
@@ -282,7 +282,7 @@ mod file_edit_error_tests {
         let file_path = dir.path().join("test.txt");
         fs::write(&file_path, "foo bar foo baz foo").unwrap();
 
-        let tool = FileEdit;
+        let tool = FileEdit::new();
         let result = tool
             .execute(serde_json::json!({
                 "path": file_path.to_str().unwrap(),
@@ -298,7 +298,7 @@ mod file_edit_error_tests {
     #[tokio::test]
     async fn test_file_edit_missing_args() {
         setup_test_mode();
-        let tool = FileEdit;
+        let tool = FileEdit::new();
 
         // Missing old_str
         let result = tool
@@ -326,7 +326,7 @@ mod file_edit_error_tests {
         let file_path = dir.path().join("test.txt");
         fs::write(&file_path, "hello world").unwrap();
 
-        let tool = FileEdit;
+        let tool = FileEdit::new();
         let result = tool
             .execute(serde_json::json!({
                 "path": file_path.to_str().unwrap(),
@@ -345,7 +345,7 @@ mod file_edit_error_tests {
         let file_path = dir.path().join("test.txt");
         fs::write(&file_path, "line1\nline2\nline3").unwrap();
 
-        let tool = FileEdit;
+        let tool = FileEdit::new();
         let result = tool
             .execute(serde_json::json!({
                 "path": file_path.to_str().unwrap(),
@@ -371,7 +371,7 @@ mod directory_tree_error_tests {
     #[tokio::test]
     async fn test_directory_tree_nonexistent() {
         setup_test_mode();
-        let tool = DirectoryTree;
+        let tool = DirectoryTree::new();
         let result = tool
             .execute(serde_json::json!({
                 "path": "/nonexistent/directory"
@@ -394,7 +394,7 @@ mod directory_tree_error_tests {
         let file_path = dir.path().join("file.txt");
         fs::write(&file_path, "content").unwrap();
 
-        let tool = DirectoryTree;
+        let tool = DirectoryTree::new();
         let result = tool
             .execute(serde_json::json!({
                 "path": file_path.to_str().unwrap()
@@ -411,7 +411,7 @@ mod directory_tree_error_tests {
         fs::create_dir_all(dir.path().join("a/b/c")).unwrap();
         fs::write(dir.path().join("a/b/c/deep.txt"), "").unwrap();
 
-        let tool = DirectoryTree;
+        let tool = DirectoryTree::new();
         let result = tool
             .execute(serde_json::json!({
                 "path": dir.path().to_str().unwrap(),
@@ -428,7 +428,7 @@ mod directory_tree_error_tests {
         fs::write(dir.path().join(".hidden"), "").unwrap();
         fs::write(dir.path().join("visible"), "").unwrap();
 
-        let tool = DirectoryTree;
+        let tool = DirectoryTree::new();
 
         // Without include_hidden
         let result = tool

@@ -132,6 +132,15 @@ impl App {
         });
     }
 
+    /// Add a system message
+    pub fn add_system_message(&mut self, content: &str) {
+        self.messages.push(ChatMessage {
+            role: MessageRole::System,
+            content: content.into(),
+            timestamp: chrono::Local::now().format("%H:%M").to_string(),
+        });
+    }
+
     /// Add a tool output message
     pub fn add_tool_message(&mut self, tool_name: &str, output: &str) {
         self.messages.push(ChatMessage {
@@ -139,6 +148,17 @@ impl App {
             content: format!("[{}] {}", tool_name, output),
             timestamp: chrono::Local::now().format("%H:%M").to_string(),
         });
+    }
+
+    /// Clear chat history (keeping a fresh system message)
+    pub fn clear_chat(&mut self) {
+        self.messages.clear();
+        self.messages.push(ChatMessage {
+            role: MessageRole::System,
+            content: "Chat cleared.".into(),
+            timestamp: chrono::Local::now().format("%H:%M").to_string(),
+        });
+        self.scroll = 0;
     }
 
     /// Set task progress
