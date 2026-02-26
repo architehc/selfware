@@ -16,6 +16,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+// TODO: Consider migrating to tokio::sync::RwLock if ProjectIntelligence methods become async.
+// Currently all methods are synchronous, so std::sync::RwLock is correct and avoids
+// requiring .await at every lock acquisition. Migration would require making refresh(),
+// search(), index_files(), and all accessor call-sites async (~50+ changes).
+
 /// Main intelligence hub coordinating all analysis
 #[derive(Debug)]
 pub struct ProjectIntelligence {

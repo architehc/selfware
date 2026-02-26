@@ -384,12 +384,11 @@ impl Agent {
             return Ok((false, err.clone(), err));
         };
 
-        // Snapshot file before edit/write for undo support
-        // TODO: consider spawn_blocking for large files — std::fs::read_to_string
-        // blocks the async runtime thread, but for typical source files this is fine.
+        // Snapshot file before edit/write for undo support.
+        // Use tokio::fs to avoid blocking the async runtime thread.
         if matches!(name, "file_edit" | "file_write" | "file_delete") {
             if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                if let Ok(content) = std::fs::read_to_string(path) {
+                if let Ok(content) = tokio::fs::read_to_string(path).await {
                     use crate::session::edit_history::{EditAction, FileSnapshot};
                     let snapshot = FileSnapshot::new(std::path::PathBuf::from(path), content);
                     let action = EditAction::FileEdit {

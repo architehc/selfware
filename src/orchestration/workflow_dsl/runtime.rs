@@ -118,10 +118,13 @@ impl Runtime {
             }
 
             AstNode::Parallel { body } => {
-                // NOTE: True parallel execution requires an async runtime and
-                // splitting ownership of &mut self, which this synchronous
-                // evaluator cannot do. Steps are executed sequentially. For
-                // actual concurrent execution, use the async WorkflowExecutor.
+                // TODO: Execute steps concurrently with tokio::join! or
+                // futures::future::join_all. This requires:
+                //   1. Making eval() async (and the entire Runtime API async)
+                //   2. Splitting &mut self ownership (e.g. Arc<Mutex<Runtime>>)
+                //      so multiple futures can access runtime state concurrently
+                // Until then, steps run sequentially. For actual concurrent
+                // execution, use the async WorkflowExecutor.
                 let mut results = Vec::new();
                 for node in body {
                     results.push(self.eval(node)?);

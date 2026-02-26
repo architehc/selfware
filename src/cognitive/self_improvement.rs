@@ -13,6 +13,11 @@ use std::path::Path;
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// TODO: Consider migrating to tokio::sync::RwLock if SelfImprovementEngine methods become async.
+// Currently all public methods (record_prompt, record_tool, record_error, check_for_errors,
+// optimize_prompt, save, load, etc.) are synchronous, so std::sync::RwLock is correct.
+// Migration would require making every method async and updating all call-sites in agent/execution.rs.
+
 /// Global limit for record vectors to prevent unbounded memory growth in long-running sessions.
 const MAX_ENTRIES: usize = 10_000;
 
