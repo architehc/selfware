@@ -6,6 +6,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::PathBuf;
 
 use crate::api::types::Message;
@@ -74,12 +75,31 @@ impl ChatStore {
         let path = self.chat_path(name);
         let json = serde_json::to_string_pretty(&chat)?;
 
-        if let Some(encryption) = EncryptionManager::get() {
-            let encrypted = encryption.encrypt(json.as_bytes())?;
-            std::fs::write(&path, encrypted).context("Failed to write encrypted chat file")?;
+        let data = if let Some(encryption) = EncryptionManager::get() {
+            encryption.encrypt(json.as_bytes())?
         } else {
-            std::fs::write(&path, json).context("Failed to write chat file")?;
+            json.into_bytes()
+        };
+
+        // Atomic write: write to temp file then rename, preventing corruption
+        // if the process crashes mid-write or another instance writes concurrently.
+        let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp_path)
+                .context("Failed to create chat temp file")?;
+            f.write_all(&data)
+                .context("Failed to write chat temp file")?;
+            f.sync_all().context("Failed to sync chat temp file")?;
         }
+        if let Err(err) = std::fs::rename(&tmp_path, &path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(err).context("Failed to atomically replace chat file");
+        }
+
         Ok(())
     }
 

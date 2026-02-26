@@ -278,18 +278,53 @@ impl SafetyChecker {
     }
 
     /// Block requests to cloud metadata endpoints (SSRF prevention).
+    ///
+    /// Checks both plain-text hostnames and common IP encoding bypass
+    /// techniques (hex, octal, decimal integer forms).
     fn check_url_ssrf(&self, url: &str) -> Result<()> {
-        let blocked = [
+        let lower = url.to_lowercase();
+
+        // Plain-text hostname/IP checks
+        let blocked_hosts = [
             "169.254.169.254",
             "metadata.google.internal",
             "[fd00:ec2::254]",
             "100.100.100.200", // Alibaba Cloud metadata
         ];
-        for host in &blocked {
-            if url.contains(host) {
+        for host in &blocked_hosts {
+            if lower.contains(host) {
                 anyhow::bail!("Blocked request to cloud metadata endpoint: {}", host);
             }
         }
+
+        // Encoded IP bypass checks — attackers use hex, octal, or decimal
+        // integer representations of metadata IPs to evade string matching.
+        let encoded_bypasses = [
+            // 169.254.169.254 encoded forms
+            "0xa9fea9fe",          // hex integer
+            "0xa9.0xfe.0xa9.0xfe", // dotted hex
+            "2852039166",          // decimal integer
+            "0251.0376.0251.0376", // dotted octal
+            // 100.100.100.200 encoded forms
+            "0x646464c8", // hex integer
+            "0x64.0x64.0x64.0xc8", // dotted hex
+            "1684300232", // decimal integer
+            "0144.0144.0144.0310", // dotted octal
+        ];
+        for encoded in &encoded_bypasses {
+            if lower.contains(encoded) {
+                anyhow::bail!(
+                    "Blocked request to encoded cloud metadata endpoint (bypass attempt)"
+                );
+            }
+        }
+
+        // Block link-local range entirely (169.254.0.0/16)
+        // Common in cloud metadata services
+        if lower.contains("169.254.") {
+            anyhow::bail!("Blocked request to link-local address range (169.254.x.x)");
+        }
+
         Ok(())
     }
 

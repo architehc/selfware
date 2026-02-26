@@ -394,13 +394,18 @@ impl RecoveryExecutor {
             .fetch_add(actual_delay_ms, Ordering::Relaxed);
 
         // Actual sleep — this is the real recovery delay.
-        // Use block_in_place so tokio can schedule other tasks on this thread
-        // while we wait. The entire execute_retry call chain is synchronous,
-        // so we cannot use tokio::time::sleep().await directly without a
-        // large-scale async refactor.
+        //
+        // SAFETY (async context): The entire execute chain is synchronous, so
+        // we cannot use `tokio::time::sleep().await` without a large-scale
+        // async refactor.  `block_in_place` tells tokio to temporarily move
+        // this worker's tasks to another thread, preventing executor starvation.
+        //
+        // The delay is capped at 30s (line above) and bounded by max_attempts,
+        // so total blocking time per recovery is predictable and limited.
         if actual_delay_ms > 0 {
+            let capped_delay = actual_delay_ms.min(30_000);
             tokio::task::block_in_place(|| {
-                std::thread::sleep(Duration::from_millis(actual_delay_ms));
+                std::thread::sleep(Duration::from_millis(capped_delay));
             });
         }
 

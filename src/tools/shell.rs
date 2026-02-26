@@ -48,6 +48,32 @@ impl Tool for ShellExec {
 
         let args: Args = serde_json::from_value(args)?;
 
+        // Command length limit to prevent abuse
+        const MAX_COMMAND_LENGTH: usize = 10_000;
+        if args.command.len() > MAX_COMMAND_LENGTH {
+            anyhow::bail!(
+                "Command exceeds maximum length of {} characters",
+                MAX_COMMAND_LENGTH
+            );
+        }
+
+        // Block dangerous patterns that are common in reverse shells and
+        // data exfiltration payloads. This is defense-in-depth; the safety
+        // checker provides the primary validation layer.
+        let lower_cmd = args.command.to_lowercase();
+        let dangerous_patterns: &[&str] = &[
+            "/dev/tcp/",
+            "/dev/udp/",
+            "| bash -i",
+            "| sh -i",
+            "mkfifo /tmp",
+        ];
+        for pattern in dangerous_patterns {
+            if lower_cmd.contains(pattern) {
+                anyhow::bail!("Blocked potentially dangerous shell pattern: {}", pattern);
+            }
+        }
+
         let mut cmd = tokio::process::Command::new("sh");
         cmd.arg("-c").arg(&args.command);
 

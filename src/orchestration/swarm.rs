@@ -630,7 +630,12 @@ pub enum ConflictStrategy {
 pub struct Swarm {
     /// Agents in the swarm
     agents: HashMap<String, Agent>,
-    /// Shared memory
+    /// Shared memory.
+    ///
+    /// Uses `std::sync::RwLock` intentionally: all lock acquisitions are brief
+    /// (HashMap read/write) and never held across `.await` points, so async
+    /// executor starvation is not a concern. Callers use the
+    /// `unwrap_or_else(|e| e.into_inner())` pattern to recover from poisoning.
     memory: Arc<RwLock<SharedMemory>>,
     /// Active decisions
     decisions: HashMap<String, Decision>,
