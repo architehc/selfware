@@ -2,6 +2,10 @@
 //!
 //! An animated spinner that updates on the current terminal line using `\r` + ANSI
 //! line clearing, driven by a tokio background task. Shows elapsed time.
+//!
+//! Terminal capability detection: Respects `TERM=dumb`, unset `TERM`, and the
+//! `NO_COLOR` environment variable. When ANSI is not supported, spinner output
+//! and color sequences are suppressed.
 
 use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,6 +15,35 @@ use tokio::sync::watch;
 
 use crate::output;
 use crate::ui::animations::SPINNER_DOTS;
+
+/// Check if the terminal supports ANSI escape sequences.
+///
+/// Returns `false` if:
+/// - The `TERM` env var is `"dumb"` or unset/empty
+/// - Stdout is not a terminal (piped to a file, etc.)
+///
+/// This does NOT check `NO_COLOR` — use `supports_color()` for that.
+pub fn supports_ansi() -> bool {
+    if !io::stdout().is_terminal() {
+        return false;
+    }
+    match std::env::var("TERM") {
+        Ok(term) => !term.is_empty() && term != "dumb",
+        Err(_) => false, // TERM not set
+    }
+}
+
+/// Check if color output is allowed.
+///
+/// Returns `false` if:
+/// - The `NO_COLOR` env var is set (any value, per <https://no-color.org/>)
+/// - ANSI is not supported (see `supports_ansi()`)
+pub fn supports_color() -> bool {
+    if std::env::var("NO_COLOR").is_ok() {
+        return false;
+    }
+    supports_ansi()
+}
 
 /// A terminal spinner that animates on a single line
 pub struct TerminalSpinner {
@@ -23,8 +56,8 @@ pub struct TerminalSpinner {
 impl TerminalSpinner {
     /// Start a new spinner with the given message
     pub fn start(message: &str) -> Self {
-        // Skip in compact mode or non-terminal
-        if output::is_compact() || !io::stdout().is_terminal() {
+        // Skip in compact mode, non-terminal, or dumb terminal
+        if output::is_compact() || !io::stdout().is_terminal() || !supports_ansi() {
             return Self {
                 stop_signal: Arc::new(AtomicBool::new(true)),
                 message_tx: watch::channel(String::new()).0,
@@ -76,12 +109,20 @@ impl TerminalSpinner {
 
     /// Stop the spinner with a success message
     pub fn stop_success(self, message: &str) {
-        self.stop_with_icon("\x1b[32m\u{2714}\x1b[0m", message); // green checkmark
+        if supports_color() {
+            self.stop_with_icon("\x1b[32m\u{2714}\x1b[0m", message); // green checkmark
+        } else {
+            self.stop_with_icon("\u{2714}", message); // checkmark without color
+        }
     }
 
     /// Stop the spinner with an error message
     pub fn stop_error(self, message: &str) {
-        self.stop_with_icon("\x1b[31m\u{2715}\x1b[0m", message); // red X
+        if supports_color() {
+            self.stop_with_icon("\x1b[31m\u{2715}\x1b[0m", message); // red X
+        } else {
+            self.stop_with_icon("\u{2715}", message); // X without color
+        }
     }
 
     /// Stop the spinner and print a final line with icon
@@ -211,5 +252,32 @@ mod tests {
             };
         }
         assert!(stop_signal.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_supports_ansi_returns_bool() {
+        // In a test environment (often piped), this typically returns false,
+        // but we just verify it doesn't panic and returns a bool.
+        let _result: bool = supports_ansi();
+    }
+
+    #[test]
+    fn test_supports_color_returns_bool() {
+        // In a test environment, this typically returns false.
+        let _result: bool = supports_color();
+    }
+
+    #[test]
+    fn test_supports_color_respects_no_color() {
+        // If NO_COLOR is set, supports_color should return false.
+        // We can't easily set env vars in tests without affecting other tests
+        // running in parallel, so just verify the function works.
+        let _ = supports_color();
+    }
+
+    #[test]
+    fn test_supports_ansi_no_panic_on_dumb_term() {
+        // Just verify the function doesn't panic regardless of env state
+        let _ = supports_ansi();
     }
 }

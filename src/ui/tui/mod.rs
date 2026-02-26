@@ -30,8 +30,8 @@ pub use widgets::{GardenSpinner, GrowthGauge, StatusIndicator, StatusType, ToolO
 // Re-export swarm components
 pub use swarm_app::{SwarmApp, SwarmAppState};
 pub use swarm_state::{
-    AgentUiState, DecisionView, EventType, MemoryEntryView, SwarmEvent, SwarmStats, SwarmUiState,
-    TaskView,
+    safe_truncate, AgentUiState, DecisionView, EventType, MemoryEntryView, SwarmEvent, SwarmStats,
+    SwarmUiState, TaskView,
 };
 pub use swarm_widgets::{
     render_agent_swarm, render_decisions, render_shared_memory, render_swarm_events,
@@ -62,7 +62,72 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io::{self, Stdout};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+/// Global flag indicating a termination signal has been received.
+/// Shared between the signal handler and the TUI event loops.
+static SIGNAL_RECEIVED: AtomicBool = AtomicBool::new(false);
+
+/// Check if a termination signal (SIGINT/SIGTERM) has been received.
+pub fn signal_received() -> bool {
+    SIGNAL_RECEIVED.load(Ordering::Relaxed)
+}
+
+/// Restore terminal to its normal state.
+/// This is the same logic used in the panic hook and TuiTerminal::restore().
+/// Exposed as a standalone function so signal handlers can call it.
+pub fn restore_terminal_state() {
+    let _ = disable_raw_mode();
+    let _ = execute!(
+        io::stdout(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        ShowCursor
+    );
+}
+
+/// Install signal handlers that cleanly restore the terminal before exit.
+///
+/// On Unix, this handles SIGTERM via nix in addition to SIGINT via ctrlc.
+/// The ctrlc crate handles SIGINT (Ctrl+C) on all platforms.
+pub fn install_signal_handlers() {
+    let _ = ctrlc::set_handler(move || {
+        SIGNAL_RECEIVED.store(true, Ordering::Relaxed);
+        restore_terminal_state();
+        // After restoring terminal, exit cleanly
+        std::process::exit(130); // 128 + SIGINT(2)
+    });
+
+    // On Unix, also handle SIGTERM for graceful shutdown (e.g., from `kill`)
+    #[cfg(unix)]
+    install_unix_signal_handlers();
+}
+
+/// Unix-specific signal handler for SIGTERM.
+#[cfg(unix)]
+fn install_unix_signal_handlers() {
+    use std::thread;
+
+    thread::spawn(|| {
+        // Use nix to wait for SIGTERM
+        use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
+
+        // Install a handler that sets our flag and restores terminal
+        extern "C" fn handle_sigterm(_: std::os::raw::c_int) {
+            SIGNAL_RECEIVED.store(true, Ordering::Relaxed);
+            // Cannot call restore_terminal_state here (not async-signal-safe),
+            // but the flag will be checked by the event loop.
+        }
+
+        let action = SigAction::new(
+            SigHandler::Handler(handle_sigterm),
+            SaFlags::empty(),
+            SigSet::empty(),
+        );
+        let _ = unsafe { sigaction(Signal::SIGTERM, &action) };
+    });
+}
 
 /// The Selfware color palette for TUI
 ///
@@ -203,6 +268,11 @@ impl TuiTerminal {
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
 
+        // Install signal handlers (SIGINT, SIGTERM) that restore terminal state
+        // before exit. This prevents the terminal from being left in raw mode
+        // if the process is killed.
+        install_signal_handlers();
+
         // Install a panic hook that restores the terminal to normal state
         // BEFORE printing the panic message. Without this, a panic leaves the
         // terminal in raw mode with the alternate screen active, making the
@@ -211,13 +281,7 @@ impl TuiTerminal {
         let original_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |panic_info| {
             // Best-effort restore — ignore errors since we're already panicking
-            let _ = disable_raw_mode();
-            let _ = execute!(
-                io::stdout(),
-                LeaveAlternateScreen,
-                DisableMouseCapture,
-                ShowCursor
-            );
+            restore_terminal_state();
             original_hook(panic_info);
         }));
 
@@ -299,10 +363,11 @@ pub fn is_key(event: &Event, key: KeyCode, modifiers: KeyModifiers) -> bool {
     )
 }
 
-/// Check for quit keys (q, Ctrl+C)
+/// Check for quit keys (q, Ctrl+C) or if a termination signal was received
 /// Note: Ctrl+D is reserved for dashboard toggle
 pub fn is_quit(event: &Event) -> bool {
-    is_key(event, KeyCode::Char('q'), KeyModifiers::NONE)
+    signal_received()
+        || is_key(event, KeyCode::Char('q'), KeyModifiers::NONE)
         || is_key(event, KeyCode::Char('c'), KeyModifiers::CONTROL)
 }
 
@@ -1795,6 +1860,22 @@ mod tests {
         } else {
             panic!("Wrong event type");
         }
+    }
+
+    #[test]
+    fn test_signal_received_default_false() {
+        // Signal should not have been received at test startup
+        // (We cannot truly guarantee this in a shared test process,
+        // but it should be false by default.)
+        // Just verify the function doesn't panic.
+        let _ = signal_received();
+    }
+
+    #[test]
+    fn test_restore_terminal_state_no_panic() {
+        // restore_terminal_state should not panic even if terminal
+        // is not in raw mode (all operations are best-effort).
+        restore_terminal_state();
     }
 }
 

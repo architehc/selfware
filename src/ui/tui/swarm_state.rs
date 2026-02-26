@@ -10,6 +10,24 @@ use crate::ui::tui::animation::agent_avatar::{ActivityLevel, AgentRole as Avatar
 use std::sync::{Arc, RwLock};
 use tracing::warn;
 
+/// Safely truncate a string to at most `max_bytes` bytes, ensuring the result
+/// ends on a valid UTF-8 character boundary.
+///
+/// If `max_bytes >= s.len()`, the entire string is returned. Otherwise, the
+/// returned slice is the longest prefix of `s` that is at most `max_bytes`
+/// bytes and ends on a char boundary.
+pub fn safe_truncate(s: &str, max_bytes: usize) -> &str {
+    if max_bytes >= s.len() {
+        return s;
+    }
+    // Find the largest index <= max_bytes that is a char boundary
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// UI-friendly representation of an agent
 #[derive(Debug, Clone)]
 pub struct AgentUiState {
@@ -382,6 +400,58 @@ impl SwarmUiState {
 mod tests {
     use super::*;
     use crate::orchestration::swarm::{create_dev_swarm, Agent, AgentRole};
+
+    #[test]
+    fn test_safe_truncate_ascii() {
+        assert_eq!(safe_truncate("hello world", 5), "hello");
+        assert_eq!(safe_truncate("hello", 10), "hello");
+        assert_eq!(safe_truncate("hello", 5), "hello");
+        assert_eq!(safe_truncate("", 5), "");
+        assert_eq!(safe_truncate("hello", 0), "");
+    }
+
+    #[test]
+    fn test_safe_truncate_multibyte() {
+        // "hello" in Japanese: each char is 3 bytes in UTF-8
+        let s = "\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}"; // こんにちは
+        assert_eq!(s.len(), 15); // 5 chars * 3 bytes each
+
+        // Truncate at 6 bytes: should get first 2 chars (6 bytes exactly)
+        assert_eq!(safe_truncate(s, 6), "\u{3053}\u{3093}");
+
+        // Truncate at 7 bytes: would split a 3-byte char, should round down to 6
+        assert_eq!(safe_truncate(s, 7), "\u{3053}\u{3093}");
+
+        // Truncate at 8 bytes: still in the middle of 3rd char, round down to 6
+        assert_eq!(safe_truncate(s, 8), "\u{3053}\u{3093}");
+
+        // Truncate at 9 bytes: exactly 3 chars
+        assert_eq!(safe_truncate(s, 9), "\u{3053}\u{3093}\u{306b}");
+    }
+
+    #[test]
+    fn test_safe_truncate_emoji() {
+        // Emoji can be 4 bytes
+        let s = "\u{1F600}\u{1F601}\u{1F602}"; // 3 emoji, 4 bytes each = 12 bytes
+        assert_eq!(s.len(), 12);
+
+        assert_eq!(safe_truncate(s, 4), "\u{1F600}");
+        assert_eq!(safe_truncate(s, 5), "\u{1F600}"); // 5 is mid-char, rounds to 4
+        assert_eq!(safe_truncate(s, 8), "\u{1F600}\u{1F601}");
+        assert_eq!(safe_truncate(s, 12), s);
+        assert_eq!(safe_truncate(s, 100), s);
+    }
+
+    #[test]
+    fn test_safe_truncate_mixed() {
+        let s = "ab\u{00e9}cd"; // a, b, e-acute (2 bytes), c, d = 6 bytes
+        assert_eq!(s.len(), 6);
+
+        assert_eq!(safe_truncate(s, 2), "ab");
+        assert_eq!(safe_truncate(s, 3), "ab"); // 3 is mid-char of e-acute, rounds to 2
+        assert_eq!(safe_truncate(s, 4), "ab\u{00e9}");
+        assert_eq!(safe_truncate(s, 5), "ab\u{00e9}c");
+    }
 
     #[test]
     fn test_agent_ui_state_from_agent() {
