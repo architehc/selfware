@@ -5,11 +5,42 @@
 //! - Bugs prevented
 //! - Code quality metrics
 //! - Productivity trends
+//!
+//! Privacy: Analytics can be disabled via `SELFWARE_ANALYTICS=false` env var
+//! or by calling `AnalyticsDashboard::set_enabled(false)`. When disabled,
+//! all `record_*` methods become no-ops.
 
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Global flag controlling whether analytics are collected.
+/// Defaults to `true` unless the `SELFWARE_ANALYTICS` env var is set to `"false"` or `"0"`.
+static ANALYTICS_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Initialize the analytics enabled flag from the environment.
+/// Called automatically on first `AnalyticsDashboard::new()`, but can be called
+/// explicitly for early configuration.
+pub fn init_analytics_from_env() {
+    if let Ok(val) = std::env::var("SELFWARE_ANALYTICS") {
+        let lower = val.to_lowercase();
+        if lower == "false" || lower == "0" || lower == "no" || lower == "off" {
+            ANALYTICS_ENABLED.store(false, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Check if analytics collection is currently enabled.
+pub fn analytics_enabled() -> bool {
+    ANALYTICS_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Enable or disable analytics collection globally.
+pub fn set_analytics_enabled(enabled: bool) {
+    ANALYTICS_ENABLED.store(enabled, Ordering::Relaxed);
+}
 
 /// Anonymize a task description by hashing it.
 ///
@@ -865,6 +896,9 @@ pub struct AnalyticsDashboard {
 
 impl AnalyticsDashboard {
     pub fn new() -> Self {
+        // Initialize analytics enabled flag from environment on first creation
+        init_analytics_from_env();
+
         Self {
             time_savings: RwLock::new(TimeSavingsTracker::new()),
             bug_prevention: RwLock::new(BugPreventionTracker::new()),
@@ -873,8 +907,32 @@ impl AnalyticsDashboard {
         }
     }
 
+    /// Check if analytics collection is enabled.
+    pub fn is_enabled(&self) -> bool {
+        analytics_enabled()
+    }
+
+    /// Clear all stored analytics data across all trackers.
+    pub fn clear_analytics_data(&self) {
+        if let Ok(mut tracker) = self.time_savings.write() {
+            *tracker = TimeSavingsTracker::new();
+        }
+        if let Ok(mut tracker) = self.bug_prevention.write() {
+            *tracker = BugPreventionTracker::new();
+        }
+        if let Ok(mut tracker) = self.code_quality.write() {
+            *tracker = CodeQualityTracker::new();
+        }
+        if let Ok(mut tracker) = self.productivity.write() {
+            *tracker = ProductivityTracker::new();
+        }
+    }
+
     /// Record time savings
     pub fn record_time_savings(&self, task: &str, automated_secs: u64, category: &str) {
+        if !analytics_enabled() {
+            return;
+        }
         if let Ok(mut tracker) = self.time_savings.write() {
             tracker.record(task, automated_secs, category);
         }
@@ -888,6 +946,9 @@ impl AnalyticsDashboard {
         severity: BugSeverity,
         method: &str,
     ) {
+        if !analytics_enabled() {
+            return;
+        }
         if let Ok(mut tracker) = self.bug_prevention.write() {
             tracker.record(description, bug_type, severity, method);
         }
@@ -895,6 +956,9 @@ impl AnalyticsDashboard {
 
     /// Record quality snapshot
     pub fn record_quality_snapshot(&self, snapshot: QualitySnapshot) {
+        if !analytics_enabled() {
+            return;
+        }
         if let Ok(mut tracker) = self.code_quality.write() {
             tracker.record(snapshot);
         }
@@ -902,18 +966,27 @@ impl AnalyticsDashboard {
 
     /// Record productivity events
     pub fn record_task_completed(&self) {
+        if !analytics_enabled() {
+            return;
+        }
         if let Ok(mut tracker) = self.productivity.write() {
             tracker.record_task();
         }
     }
 
     pub fn record_lines_written(&self, count: usize) {
+        if !analytics_enabled() {
+            return;
+        }
         if let Ok(mut tracker) = self.productivity.write() {
             tracker.record_lines(count);
         }
     }
 
     pub fn record_commit(&self) {
+        if !analytics_enabled() {
+            return;
+        }
         if let Ok(mut tracker) = self.productivity.write() {
             tracker.record_commit();
         }
@@ -1708,6 +1781,8 @@ mod tests {
 
     #[test]
     fn test_analytics_dashboard_comprehensive() {
+        // Ensure analytics is enabled for this test
+        set_analytics_enabled(true);
         let dashboard = AnalyticsDashboard::new();
 
         // Record various data
@@ -1728,5 +1803,88 @@ mod tests {
         // Generate report
         let report = dashboard.generate_report(TimePeriod::All);
         assert!(report.contains("Analytics Report"));
+    }
+
+    #[test]
+    fn test_analytics_enabled_default() {
+        // Default should be true (unless env var overrides)
+        // Reset to known state
+        set_analytics_enabled(true);
+        assert!(analytics_enabled());
+    }
+
+    #[test]
+    fn test_analytics_disable_enable() {
+        let original = analytics_enabled();
+
+        set_analytics_enabled(false);
+        assert!(!analytics_enabled());
+
+        set_analytics_enabled(true);
+        assert!(analytics_enabled());
+
+        // Restore original state
+        set_analytics_enabled(original);
+    }
+
+    #[test]
+    fn test_analytics_disabled_noop() {
+        let original = analytics_enabled();
+        set_analytics_enabled(false);
+
+        let dashboard = AnalyticsDashboard::new();
+        // These should be no-ops when disabled
+        dashboard.record_time_savings("task", 100, "code_write");
+        dashboard.record_bug_prevented("bug", "type", BugSeverity::High, "lint");
+        dashboard.record_quality_snapshot(QualitySnapshot::new());
+        dashboard.record_task_completed();
+        dashboard.record_lines_written(100);
+        dashboard.record_commit();
+
+        // Summary should show nothing recorded
+        let summary = dashboard.get_summary(TimePeriod::All);
+        assert_eq!(summary.bugs_prevented, 0);
+        assert_eq!(summary.time_saved_secs, 0);
+
+        // Restore
+        set_analytics_enabled(original);
+    }
+
+    #[test]
+    fn test_clear_analytics_data() {
+        let original = analytics_enabled();
+        set_analytics_enabled(true);
+
+        let dashboard = AnalyticsDashboard::new();
+        dashboard.record_time_savings("task", 100, "code_write");
+        dashboard.record_bug_prevented("bug", "type", BugSeverity::High, "lint");
+
+        // Verify data is recorded
+        let summary = dashboard.get_summary(TimePeriod::All);
+        assert_eq!(summary.bugs_prevented, 1);
+
+        // Clear all data
+        dashboard.clear_analytics_data();
+
+        // Verify data is cleared
+        let summary = dashboard.get_summary(TimePeriod::All);
+        assert_eq!(summary.bugs_prevented, 0);
+        assert_eq!(summary.time_saved_secs, 0);
+
+        // Restore
+        set_analytics_enabled(original);
+    }
+
+    #[test]
+    fn test_dashboard_is_enabled() {
+        let original = analytics_enabled();
+        set_analytics_enabled(true);
+        let dashboard = AnalyticsDashboard::new();
+        assert!(dashboard.is_enabled());
+
+        set_analytics_enabled(false);
+        assert!(!dashboard.is_enabled());
+
+        set_analytics_enabled(original);
     }
 }

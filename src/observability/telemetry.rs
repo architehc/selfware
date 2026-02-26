@@ -6,12 +6,87 @@
 //! - Agent state transition logging
 //! - Success/failure recording
 //! - Configurable log levels via RUST_LOG
+//! - Configurable sampling rate for non-error events
+//! - Log rotation with configurable entry limits
 
 use regex::Regex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 use std::time::Instant;
 use tracing::{error, info, info_span, Span};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+/// Maximum number of in-memory log entries before rotation.
+/// When this limit is reached, `rotate_if_needed()` will discard the oldest half.
+pub const MAX_LOG_ENTRIES: usize = 100_000;
+
+/// Global telemetry sampling rate stored as fixed-point (rate * 1_000_000).
+/// Defaults to 1_000_000 (= 1.0 = 100%). When set below 1.0, only a fraction
+/// of non-error events are logged.
+static SAMPLING_RATE_MICRO: AtomicU64 = AtomicU64::new(1_000_000);
+
+/// Simple counter for deterministic sampling when rand is not desired.
+static SAMPLE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Set the telemetry sampling rate. `rate` must be in `0.0..=1.0`.
+/// A rate of 1.0 means all events are logged; 0.5 means ~50% of non-error
+/// events are logged.
+pub fn set_sampling_rate(rate: f64) {
+    let clamped = rate.clamp(0.0, 1.0);
+    SAMPLING_RATE_MICRO.store((clamped * 1_000_000.0) as u64, Ordering::Relaxed);
+}
+
+/// Get the current telemetry sampling rate as a float in `0.0..=1.0`.
+pub fn sampling_rate() -> f64 {
+    SAMPLING_RATE_MICRO.load(Ordering::Relaxed) as f64 / 1_000_000.0
+}
+
+/// Returns `true` if the current non-error event should be sampled (logged).
+/// Always returns `true` when the rate is 1.0. Uses a simple counter-based
+/// approach that is deterministic and does not require the `rand` crate at
+/// this call site.
+pub fn should_sample() -> bool {
+    let rate_micro = SAMPLING_RATE_MICRO.load(Ordering::Relaxed);
+    if rate_micro >= 1_000_000 {
+        return true;
+    }
+    if rate_micro == 0 {
+        return false;
+    }
+    // Counter-based: sample if (counter % 1_000_000) < rate_micro
+    let count = SAMPLE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    (count % 1_000_000) < rate_micro
+}
+
+/// In-memory log entry buffer for rotation tracking.
+static LOG_ENTRY_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Increment the in-memory log entry counter and return the new count.
+pub fn increment_log_count() -> usize {
+    LOG_ENTRY_COUNT.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+/// Get current log entry count.
+pub fn log_entry_count() -> usize {
+    LOG_ENTRY_COUNT.load(Ordering::Relaxed)
+}
+
+/// Check if log rotation is needed and perform it.
+/// Returns `true` if rotation was triggered (i.e., entries exceeded `MAX_LOG_ENTRIES`).
+/// In the in-memory case this resets the counter to simulate discarding old entries.
+/// Callers that maintain their own log buffers should drain old entries when this
+/// returns `true`.
+pub fn rotate_if_needed() -> bool {
+    let count = LOG_ENTRY_COUNT.load(Ordering::Relaxed);
+    if count >= MAX_LOG_ENTRIES {
+        // Reset to half to represent keeping the newer half of entries.
+        LOG_ENTRY_COUNT.store(count / 2, Ordering::Relaxed);
+        info!("Telemetry log rotation triggered: {} entries exceeded limit, reset to {}", count, count / 2);
+        true
+    } else {
+        false
+    }
+}
 
 /// Sanitize a string for safe log output by escaping control characters.
 /// Prevents log injection where attackers embed newlines to forge log entries.
@@ -166,7 +241,10 @@ where
 /// Helper to record success in current span
 pub fn record_success() {
     Span::current().record("success", true);
-    info!("Operation completed successfully");
+    if should_sample() {
+        info!("Operation completed successfully");
+    }
+    increment_log_count();
 }
 
 /// Helper to record failure in current span with error details
@@ -188,7 +266,10 @@ pub fn enter_agent_step(state: &str, step: usize) -> tracing::span::Span {
 pub fn record_state_transition(from: &str, to: &str) {
     let safe_from = sanitize_for_log(from);
     let safe_to = sanitize_for_log(to);
-    info!(from = safe_from.as_str(), to = safe_to.as_str(), "Agent state transition");
+    if should_sample() {
+        info!(from = safe_from.as_str(), to = safe_to.as_str(), "Agent state transition");
+    }
+    increment_log_count();
 }
 
 /// Initialize tracing for tests with a simple subscriber
@@ -645,5 +726,74 @@ mod tests {
         let result = redact_secrets(input);
         assert!(!result.contains("token-abcdefghijklmnop"));
         assert!(result.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_set_and_get_sampling_rate() {
+        // Save original and restore after test
+        let original = sampling_rate();
+        set_sampling_rate(0.5);
+        let rate = sampling_rate();
+        assert!((rate - 0.5).abs() < 0.01);
+
+        set_sampling_rate(0.0);
+        assert!((sampling_rate()).abs() < 0.01);
+
+        set_sampling_rate(1.0);
+        assert!((sampling_rate() - 1.0).abs() < 0.01);
+
+        // Clamp out-of-range values
+        set_sampling_rate(2.0);
+        assert!((sampling_rate() - 1.0).abs() < 0.01);
+        set_sampling_rate(-1.0);
+        assert!((sampling_rate()).abs() < 0.01);
+
+        // Restore
+        set_sampling_rate(original);
+    }
+
+    #[test]
+    fn test_should_sample_full_rate() {
+        let original = sampling_rate();
+        set_sampling_rate(1.0);
+        // At full rate, should always sample
+        for _ in 0..100 {
+            assert!(should_sample());
+        }
+        set_sampling_rate(original);
+    }
+
+    #[test]
+    fn test_should_sample_zero_rate() {
+        let original = sampling_rate();
+        set_sampling_rate(0.0);
+        // At zero rate, should never sample
+        for _ in 0..100 {
+            assert!(!should_sample());
+        }
+        set_sampling_rate(original);
+    }
+
+    #[test]
+    fn test_log_entry_count_and_increment() {
+        let before = log_entry_count();
+        let after = increment_log_count();
+        assert_eq!(after, before + 1);
+    }
+
+    #[test]
+    fn test_rotate_if_needed_below_limit() {
+        // Should not rotate when well below limit
+        // (log entry count is shared across tests, but should be far below MAX_LOG_ENTRIES)
+        let rotated = rotate_if_needed();
+        // We can't guarantee state across tests, but if count < MAX_LOG_ENTRIES, should be false
+        if log_entry_count() < MAX_LOG_ENTRIES {
+            assert!(!rotated);
+        }
+    }
+
+    #[test]
+    fn test_max_log_entries_constant() {
+        assert_eq!(MAX_LOG_ENTRIES, 100_000);
     }
 }

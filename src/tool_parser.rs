@@ -6,7 +6,7 @@
 //! 3. JSON code blocks with tool schema
 //! 4. Markdown code blocks with tool invocations
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
@@ -44,6 +44,9 @@ pub struct ParseResult {
     pub parse_errors: Vec<String>,
 }
 
+// All regex patterns are compiled once and cached via OnceLock to avoid
+// recompilation on each call to parse_tool_calls(). This is critical for
+// performance since the parser may be called on every LLM response.
 static XML_TOOL_REGEX: OnceLock<Regex> = OnceLock::new();
 static JSON_BLOCK_REGEX: OnceLock<Regex> = OnceLock::new();
 
@@ -54,6 +57,10 @@ static XML_TOOL_FUNCTION_TAG_REGEX: OnceLock<Regex> = OnceLock::new();
 static QWEN3_TOOL_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static QWEN3_PARAMETER_REGEX: OnceLock<Regex> = OnceLock::new();
 static BARE_FUNCTION_REGEX: OnceLock<Regex> = OnceLock::new();
+
+/// Cached regex for XML element parsing: `<tag>content</tag>`
+/// Previously this was compiled on every call to `parse_xml_arguments`.
+static XML_ELEMENT_REGEX: OnceLock<Regex> = OnceLock::new();
 
 fn xml_tool_regex() -> &'static Regex {
     XML_TOOL_REGEX.get_or_init(|| {
@@ -129,6 +136,15 @@ fn bare_function_regex() -> &'static Regex {
     })
 }
 
+/// Cached regex for parsing XML elements: `<tag>content</tag>`
+/// Used by `parse_xml_arguments` to extract key-value pairs from XML-style arguments.
+fn xml_element_regex() -> &'static Regex {
+    XML_ELEMENT_REGEX.get_or_init(|| {
+        Regex::new(r"<([a-zA-Z_][a-zA-Z0-9_]*)>([^<]*)</([a-zA-Z_][a-zA-Z0-9_]*)>")
+            .expect("Invalid XML element regex")
+    })
+}
+
 fn json_block_regex() -> &'static Regex {
     JSON_BLOCK_REGEX.get_or_init(|| {
         Regex::new(r"(?s)```(?:json)?\s*(\{[^`]*\})\s*```").expect("Invalid JSON block regex")
@@ -150,9 +166,15 @@ fn decode_xml_entities(s: &str) -> String {
 
 /// Parse content for tool calls using multiple strategies
 pub fn parse_tool_calls(content: &str) -> ParseResult {
-    // Enforce maximum input size to prevent pathological regex performance
+    // Enforce maximum input size to prevent pathological regex performance.
+    // Use char-boundary-safe truncation to avoid panics on multi-byte UTF-8.
     let content = if content.len() > MAX_TOOL_PARSER_INPUT_SIZE {
-        &content[..MAX_TOOL_PARSER_INPUT_SIZE]
+        // Find the largest index <= MAX_TOOL_PARSER_INPUT_SIZE that is a char boundary
+        let mut end = MAX_TOOL_PARSER_INPUT_SIZE;
+        while end > 0 && !content.is_char_boundary(end) {
+            end -= 1;
+        }
+        &content[..end]
     } else {
         content
     };
@@ -409,10 +431,8 @@ fn parse_xml_arguments(args_str: &str) -> Result<serde_json::Value> {
     let mut args = serde_json::Map::new();
 
     // XML element parser: <key>value</key>
-    // Note: We use a simpler pattern without backreference since Rust regex doesn't support \1
-    // Instead, we find all <tag>content</tag> patterns
-    let elem_regex = Regex::new(r"<([a-zA-Z_][a-zA-Z0-9_]*)>([^<]*)</([a-zA-Z_][a-zA-Z0-9_]*)>")
-        .context("Failed to compile element regex")?;
+    // Uses a cached (OnceLock) compiled regex to avoid recompilation on each call.
+    let elem_regex = xml_element_regex();
 
     for cap in elem_regex.captures_iter(trimmed) {
         let open_tag = &cap[1];
