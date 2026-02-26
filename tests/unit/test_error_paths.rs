@@ -19,7 +19,9 @@ static INIT: Once = Once::new();
 
 fn setup_test_mode() {
     INIT.call_once(|| {
-        std::env::set_var("SELFWARE_TEST_MODE", "1");
+        let mut cfg = selfware::config::SafetyConfig::default();
+        cfg.allowed_paths = vec!["/**".to_string()];
+        selfware::tools::file::init_safety_config(&cfg);
     });
 }
 
