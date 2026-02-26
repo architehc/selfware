@@ -6,8 +6,10 @@ use tempfile::tempdir;
 
 #[tokio::test]
 async fn test_e2e_file_tools() {
-    let mut cfg = selfware::config::SafetyConfig::default();
-    cfg.allowed_paths = vec!["/**".to_string()];
+    let cfg = selfware::config::SafetyConfig {
+        allowed_paths: vec!["/**".to_string()],
+        ..Default::default()
+    };
     selfware::tools::file::init_safety_config(&cfg);
     let dir = tempdir().unwrap();
     let test_file = dir.path().join("test.rs");

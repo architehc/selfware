@@ -401,8 +401,15 @@ impl Agent {
             }
         }
 
-        match tool.execute(args.clone()).await {
-            Ok(result) => {
+        let timeout_secs = self.config.agent.step_timeout_secs.max(1);
+        let execution = tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            tool.execute(args.clone()),
+        )
+        .await;
+
+        match execution {
+            Ok(Ok(result)) => {
                 let elapsed = start_time.elapsed().as_millis() as u64;
                 let result_str = serde_json::to_string(&result)?;
                 let summary =
@@ -426,7 +433,7 @@ impl Agent {
                 };
                 Ok((true, final_result, summary))
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let elapsed = start_time.elapsed().as_millis() as u64;
                 let summary =
                     output::semantic_summary(name, args, Some(&e.to_string()), false, elapsed);
@@ -445,6 +452,21 @@ impl Agent {
                 );
 
                 Ok((false, e.to_string(), summary))
+            }
+            Err(_) => {
+                let elapsed = start_time.elapsed().as_millis() as u64;
+                let err = format!("Tool '{}' timed out after {}s", name, timeout_secs);
+                let summary = output::semantic_summary(name, args, Some(&err), false, elapsed);
+                self.log_tool_call(name, args_str, &err, false, start_time, false);
+                self.cognitive_state.episodic_memory.what_failed(name, &err);
+                self.self_improvement.record_tool(
+                    name,
+                    self.learning_context(),
+                    Outcome::Failure,
+                    elapsed,
+                    Some(err.clone()),
+                );
+                Ok((false, err, summary))
             }
         }
     }

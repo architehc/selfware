@@ -35,19 +35,24 @@ pub trait LlmClient: Send + Sync {
 // Streaming infrastructure (used by chat_streaming)
 pub struct StreamingResponse {
     response: reqwest::Response,
+    chunk_timeout: Duration,
 }
 
 impl std::fmt::Debug for StreamingResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StreamingResponse")
             .field("status", &self.response.status())
+            .field("chunk_timeout_secs", &self.chunk_timeout.as_secs())
             .finish()
     }
 }
 
 impl StreamingResponse {
-    fn new(response: reqwest::Response) -> Self {
-        Self { response }
+    fn new(response: reqwest::Response, chunk_timeout: Duration) -> Self {
+        Self {
+            response,
+            chunk_timeout,
+        }
     }
 
     /// Process the stream and send chunks through a channel
@@ -58,8 +63,7 @@ impl StreamingResponse {
             let mut stream = self.response.bytes_stream();
             let mut buffer = String::new();
             let mut accumulator = ToolCallAccumulator::new();
-            // Timeout: treat stream as dead if no data for 60 seconds
-            let chunk_timeout = Duration::from_secs(60);
+            let chunk_timeout = self.chunk_timeout;
 
             loop {
                 let chunk_opt = match tokio::time::timeout(chunk_timeout, stream.next()).await {
@@ -68,15 +72,22 @@ impl StreamingResponse {
                     Err(_elapsed) => {
                         for call in accumulator.flush() {
                             if tx.send(Ok(StreamChunk::ToolCall(call))).await.is_err() {
+                                warn!(
+                                    "Streaming receiver dropped while sending buffered tool call after timeout"
+                                );
                                 return;
                             }
                         }
-                        let _ = tx
+                        if tx
                             .send(Err(anyhow::anyhow!(
                                 "Stream timeout: no data for {} seconds",
                                 chunk_timeout.as_secs()
                             )))
-                            .await;
+                            .await
+                            .is_err()
+                        {
+                            warn!("Streaming receiver dropped while sending timeout error");
+                        }
                         return;
                     }
                 };
@@ -94,6 +105,9 @@ impl StreamingResponse {
 
                             for chunk in parse_sse_event(&event, &mut accumulator) {
                                 if tx.send(Ok(chunk)).await.is_err() {
+                                    warn!(
+                                        "Streaming receiver dropped while forwarding parsed stream chunk"
+                                    );
                                     return; // Receiver dropped
                                 }
                             }
@@ -104,10 +118,15 @@ impl StreamingResponse {
                         // so partial progress is not lost
                         for call in accumulator.flush() {
                             if tx.send(Ok(StreamChunk::ToolCall(call))).await.is_err() {
+                                warn!(
+                                    "Streaming receiver dropped while sending buffered tool call after stream error"
+                                );
                                 return;
                             }
                         }
-                        let _ = tx.send(Err(anyhow::anyhow!("Stream error: {}", e))).await;
+                        if tx.send(Err(anyhow::anyhow!("Stream error: {}", e))).await.is_err() {
+                            warn!("Streaming receiver dropped while sending stream error");
+                        }
                         return;
                     }
                 }
@@ -118,6 +137,7 @@ impl StreamingResponse {
             if !remaining.is_empty() {
                 for chunk in parse_sse_event(&remaining, &mut accumulator) {
                     if tx.send(Ok(chunk)).await.is_err() {
+                        warn!("Streaming receiver dropped while sending trailing buffered chunk");
                         return;
                     }
                 }
@@ -126,6 +146,7 @@ impl StreamingResponse {
             // Flush any remaining accumulated tool calls
             for call in accumulator.flush() {
                 if tx.send(Ok(StreamChunk::ToolCall(call))).await.is_err() {
+                    warn!("Streaming receiver dropped while flushing final tool calls");
                     return;
                 }
             }
@@ -544,7 +565,12 @@ impl ApiClient {
             .into());
         }
 
-        Ok(StreamingResponse::new(response))
+        // Use configurable per-step timeout for stream inactivity instead of a fixed constant.
+        let stream_chunk_timeout_secs = self.config.agent.step_timeout_secs.max(30);
+        Ok(StreamingResponse::new(
+            response,
+            Duration::from_secs(stream_chunk_timeout_secs),
+        ))
     }
 
     /// Send request with exponential backoff retry logic

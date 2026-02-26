@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use tracing::warn;
 
 use super::ast::AstNode;
 use super::value::Value;
@@ -17,6 +18,8 @@ pub struct Runtime {
     pub history: VecDeque<ExecutionEvent>,
     /// Built-in command executor
     command_executor: Option<CommandExecutor>,
+    /// Whether we've already warned that `parallel` is sequential in this runtime.
+    parallel_fallback_warned: bool,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -26,6 +29,7 @@ impl std::fmt::Debug for Runtime {
             .field("functions", &self.functions)
             .field("history_len", &self.history.len())
             .field("command_executor", &self.command_executor.is_some())
+            .field("parallel_fallback_warned", &self.parallel_fallback_warned)
             .finish()
     }
 }
@@ -60,6 +64,7 @@ impl Runtime {
             functions: HashMap::new(),
             history: VecDeque::new(),
             command_executor: None,
+            parallel_fallback_warned: false,
         }
     }
 
@@ -125,6 +130,13 @@ impl Runtime {
                 //      so multiple futures can access runtime state concurrently
                 // Until then, steps run sequentially. For actual concurrent
                 // execution, use the async WorkflowExecutor.
+                if !self.parallel_fallback_warned {
+                    warn!(
+                        "Workflow DSL `parallel` blocks execute sequentially in Runtime; use WorkflowExecutor for true parallelism"
+                    );
+                    self.parallel_fallback_warned = true;
+                }
+                self.log_event("parallel_sequential_fallback", "parallel");
                 let mut results = Vec::new();
                 for node in body {
                     results.push(self.eval(node)?);
@@ -591,6 +603,22 @@ mod tests {
         } else {
             panic!("Expected array");
         }
+    }
+
+    #[test]
+    fn test_runtime_parallel_logs_sequential_fallback_event() {
+        let tokens = Lexer::new("parallel { let a = 1; let b = 2 }").tokenize();
+        let mut parser = Parser::new(tokens);
+        let ast = parser.parse().unwrap();
+        let mut runtime = Runtime::new();
+        let _ = runtime.execute(&ast).unwrap();
+
+        assert!(
+            runtime
+                .history
+                .iter()
+                .any(|e| e.event_type == "parallel_sequential_fallback")
+        );
     }
 
     #[test]

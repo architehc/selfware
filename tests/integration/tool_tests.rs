@@ -202,8 +202,10 @@ async fn test_file_write_read_roundtrip() {
     let mut write_tool = selfware::tools::file::FileWrite::new();
     let mut read_tool = selfware::tools::file::FileRead::new();
 
-    let mut cfg = selfware::config::SafetyConfig::default();
-    cfg.allowed_paths = vec!["/**".to_string()];
+    let cfg = selfware::config::SafetyConfig {
+        allowed_paths: vec!["/**".to_string()],
+        ..Default::default()
+    };
     write_tool.safety_config = Some(cfg.clone());
     read_tool.safety_config = Some(cfg);
 

@@ -164,7 +164,10 @@ impl Agent {
 
             // Shell escape: !command runs via sh -c
             if input.starts_with('!') {
-                let cmd = input.strip_prefix('!').unwrap().trim();
+                let Some(cmd) = input.strip_prefix('!').map(str::trim) else {
+                    println!("{} Usage: !<command>", "ℹ".bright_yellow());
+                    continue;
+                };
                 if cmd.is_empty() {
                     println!("{} Usage: !<command>", "ℹ".bright_yellow());
                 } else {
@@ -484,11 +487,14 @@ impl Agent {
             }
 
             if input.starts_with("/context load ") || input.starts_with("/ctx load ") {
-                let pattern = input
+                let Some(pattern) = input
                     .strip_prefix("/context load ")
                     .or_else(|| input.strip_prefix("/ctx load "))
-                    .unwrap()
-                    .trim();
+                    .map(str::trim)
+                else {
+                    println!("{} Usage: /context load <glob>", "ℹ".bright_yellow());
+                    continue;
+                };
                 match self.load_files_to_context(pattern).await {
                     Ok(count) => println!(
                         "{} Loaded {} files into context",
@@ -748,7 +754,10 @@ impl Agent {
             }
 
             if input.starts_with("/review ") {
-                let file_path = input.strip_prefix("/review ").unwrap().trim();
+                let Some(file_path) = input.strip_prefix("/review ").map(str::trim) else {
+                    println!("{} Usage: /review <file>", "ℹ".bright_yellow());
+                    continue;
+                };
                 match self.review(file_path).await {
                     Ok(_) => self.after_task_run().await,
                     Err(e) => println!("{} Error reviewing file: {}", "❌".bright_red(), e),
@@ -757,7 +766,10 @@ impl Agent {
             }
 
             if input.starts_with("/analyze ") {
-                let path = input.strip_prefix("/analyze ").unwrap().trim();
+                let Some(path) = input.strip_prefix("/analyze ").map(str::trim) else {
+                    println!("{} Usage: /analyze <path>", "ℹ".bright_yellow());
+                    continue;
+                };
                 match self.analyze(path).await {
                     Ok(_) => self.after_task_run().await,
                     Err(e) => println!("{} Error analyzing: {}", "❌".bright_red(), e),
@@ -766,7 +778,10 @@ impl Agent {
             }
 
             if input.starts_with("/plan ") {
-                let task = input.strip_prefix("/plan ").unwrap().trim();
+                let Some(task) = input.strip_prefix("/plan ").map(str::trim) else {
+                    println!("{} Usage: /plan <task>", "ℹ".bright_yellow());
+                    continue;
+                };
                 let context = self.memory.summary(5);
                 let plan_prompt = Planner::create_plan(task, &context);
                 match self.run_task_with_queue(&plan_prompt).await {
@@ -785,7 +800,10 @@ impl Agent {
             }
 
             if input.starts_with("/swarm ") {
-                let task = input.strip_prefix("/swarm ").unwrap().trim();
+                let Some(task) = input.strip_prefix("/swarm ").map(str::trim) else {
+                    println!("{} Usage: /swarm <task>", "ℹ".bright_yellow());
+                    continue;
+                };
                 if task.is_empty() {
                     println!("{} Usage: /swarm <task>", "ℹ".bright_yellow());
                     continue;
@@ -807,11 +825,14 @@ impl Agent {
             }
 
             if input.starts_with("/queue ") {
-                let msg = input.strip_prefix("/queue ").unwrap().trim();
+                let Some(msg) = input.strip_prefix("/queue ").map(str::trim) else {
+                    println!("{} Usage: /queue <message>", "ℹ".bright_yellow());
+                    continue;
+                };
                 if msg.is_empty() {
                     println!("{} Usage: /queue <message>", "ℹ".bright_yellow());
                 } else {
-                    self.pending_messages.push_back(msg.to_string());
+                    self.enqueue_pending_message(msg);
                     println!(
                         "{} Queued ({} pending)",
                         "📨".bright_green(),
@@ -886,7 +907,10 @@ impl Agent {
             }
 
             if input.starts_with("/restore ") {
-                let idx_str = input.strip_prefix("/restore ").unwrap().trim();
+                let Some(idx_str) = input.strip_prefix("/restore ").map(str::trim) else {
+                    println!("{} Usage: /restore <number>", "ℹ".bright_yellow());
+                    continue;
+                };
                 if let Ok(idx) = idx_str.parse::<usize>() {
                     let timeline = self.edit_history.timeline();
                     if idx < timeline.len() {
@@ -932,7 +956,10 @@ impl Agent {
 
             // /chat commands
             if input.starts_with("/chat save ") {
-                let name = input.strip_prefix("/chat save ").unwrap().trim();
+                let Some(name) = input.strip_prefix("/chat save ").map(str::trim) else {
+                    println!("{} Usage: /chat save <name>", "ℹ".bright_yellow());
+                    continue;
+                };
                 if name.is_empty() {
                     println!("{} Usage: /chat save <name>", "ℹ".bright_yellow());
                 } else {
@@ -948,7 +975,10 @@ impl Agent {
             }
 
             if input.starts_with("/chat resume ") {
-                let name = input.strip_prefix("/chat resume ").unwrap().trim();
+                let Some(name) = input.strip_prefix("/chat resume ").map(str::trim) else {
+                    println!("{} Usage: /chat resume <name>", "ℹ".bright_yellow());
+                    continue;
+                };
                 if name.is_empty() {
                     println!("{} Usage: /chat resume <name>", "ℹ".bright_yellow());
                 } else {
@@ -1006,7 +1036,10 @@ impl Agent {
             }
 
             if input.starts_with("/chat delete ") {
-                let name = input.strip_prefix("/chat delete ").unwrap().trim();
+                let Some(name) = input.strip_prefix("/chat delete ").map(str::trim) else {
+                    println!("{} Usage: /chat delete <name>", "ℹ".bright_yellow());
+                    continue;
+                };
                 if name.is_empty() {
                     println!("{} Usage: /chat delete <name>", "ℹ".bright_yellow());
                 } else {
@@ -1067,7 +1100,10 @@ impl Agent {
             }
 
             if input.starts_with("/theme ") {
-                let name = input.strip_prefix("/theme ").unwrap().trim();
+                let Some(name) = input.strip_prefix("/theme ").map(str::trim) else {
+                    println!("{} Usage: /theme <name>", "ℹ".bright_yellow());
+                    continue;
+                };
                 match crate::ui::theme::theme_from_name(name) {
                     Some(id) => {
                         crate::ui::theme::set_theme(id);
@@ -1190,6 +1226,18 @@ impl Agent {
                 break;
             }
         }
+    }
+
+    fn enqueue_pending_message(&mut self, msg: &str) {
+        if self.pending_messages.len() >= MAX_PENDING_MESSAGES {
+            let _ = self.pending_messages.pop_front();
+            println!(
+                "{} Queue full ({}). Dropped oldest queued message.",
+                "⚠".bright_yellow(),
+                MAX_PENDING_MESSAGES
+            );
+        }
+        self.pending_messages.push_back(msg.to_string());
     }
 
     /// Copy text to clipboard using system clipboard tools
@@ -1338,7 +1386,10 @@ impl Agent {
             }
 
             if input.starts_with("/review ") {
-                let file_path = input.strip_prefix("/review ").unwrap().trim();
+                let Some(file_path) = input.strip_prefix("/review ").map(str::trim) else {
+                    println!("{} Usage: /review <file>", "ℹ".bright_yellow());
+                    continue;
+                };
                 match self.review(file_path).await {
                     Ok(_) => self.after_task_run().await,
                     Err(e) => println!("{} Error reviewing file: {}", "❌".bright_red(), e),
@@ -1347,7 +1398,10 @@ impl Agent {
             }
 
             if input.starts_with("/analyze ") {
-                let path = input.strip_prefix("/analyze ").unwrap().trim();
+                let Some(path) = input.strip_prefix("/analyze ").map(str::trim) else {
+                    println!("{} Usage: /analyze <path>", "ℹ".bright_yellow());
+                    continue;
+                };
                 match self.analyze(path).await {
                     Ok(_) => self.after_task_run().await,
                     Err(e) => println!("{} Error analyzing: {}", "❌".bright_red(), e),
@@ -1356,7 +1410,10 @@ impl Agent {
             }
 
             if input.starts_with("/plan ") {
-                let task = input.strip_prefix("/plan ").unwrap().trim();
+                let Some(task) = input.strip_prefix("/plan ").map(str::trim) else {
+                    println!("{} Usage: /plan <task>", "ℹ".bright_yellow());
+                    continue;
+                };
                 let context = self.memory.summary(5);
                 let plan_prompt = Planner::create_plan(task, &context);
                 match self.run_task_with_queue(&plan_prompt).await {
@@ -1372,7 +1429,10 @@ impl Agent {
             }
 
             if input.starts_with("/swarm ") {
-                let task = input.strip_prefix("/swarm ").unwrap().trim();
+                let Some(task) = input.strip_prefix("/swarm ").map(str::trim) else {
+                    println!("{} Usage: /swarm <task>", "ℹ".bright_yellow());
+                    continue;
+                };
                 if task.is_empty() {
                     println!("{} Usage: /swarm <task>", "ℹ".bright_yellow());
                 } else {
@@ -1394,11 +1454,14 @@ impl Agent {
             }
 
             if input.starts_with("/queue ") {
-                let msg = input.strip_prefix("/queue ").unwrap().trim();
+                let Some(msg) = input.strip_prefix("/queue ").map(str::trim) else {
+                    println!("{} Usage: /queue <message>", "ℹ".bright_yellow());
+                    continue;
+                };
                 if msg.is_empty() {
                     println!("{} Usage: /queue <message>", "ℹ".bright_yellow());
                 } else {
-                    self.pending_messages.push_back(msg.to_string());
+                    self.enqueue_pending_message(msg);
                     println!(
                         "{} Queued ({} pending)",
                         "📨".bright_green(),

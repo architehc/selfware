@@ -547,22 +547,25 @@ impl MultiAgentChat {
             }
 
             if input.starts_with("/parallel ") {
-                if let Ok(n) = input
-                    .strip_prefix("/parallel ")
-                    .unwrap()
-                    .trim()
-                    .parse::<usize>()
-                {
-                    let n = n.clamp(1, MAX_CONCURRENT_AGENTS);
-                    self.config.max_concurrency = n;
-                    self.semaphore = Arc::new(Semaphore::new(n));
-                    println!("Max concurrency set to {}", n);
+                if let Some(value) = input.strip_prefix("/parallel ").map(str::trim) {
+                    if let Ok(n) = value.parse::<usize>() {
+                        let n = n.clamp(1, MAX_CONCURRENT_AGENTS);
+                        self.config.max_concurrency = n;
+                        self.semaphore = Arc::new(Semaphore::new(n));
+                        println!("Max concurrency set to {}", n);
+                    }
+                } else {
+                    println!("Usage: /parallel <1-{}>", MAX_CONCURRENT_AGENTS);
                 }
                 continue;
             }
 
             if input.starts_with("/add ") {
-                let role_str = input.strip_prefix("/add ").unwrap().trim().to_lowercase();
+                let Some(role_str) = input.strip_prefix("/add ").map(str::trim) else {
+                    println!("Usage: /add <role>");
+                    continue;
+                };
+                let role_str = role_str.to_lowercase();
                 let role = match role_str.as_str() {
                     "architect" => Some(AgentRole::Architect),
                     "coder" => Some(AgentRole::Coder),
@@ -594,23 +597,22 @@ impl MultiAgentChat {
             }
 
             if input.starts_with("/remove ") {
-                if let Ok(id) = input
-                    .strip_prefix("/remove ")
-                    .unwrap()
-                    .trim()
-                    .parse::<usize>()
-                {
-                    let mut agents = self.agents.write().await;
-                    if id < agents.len() {
-                        let removed = agents.remove(id);
-                        // Re-index remaining agents
-                        for (i, agent) in agents.iter_mut().enumerate() {
-                            agent.id = i;
+                if let Some(value) = input.strip_prefix("/remove ").map(str::trim) {
+                    if let Ok(id) = value.parse::<usize>() {
+                        let mut agents = self.agents.write().await;
+                        if id < agents.len() {
+                            let removed = agents.remove(id);
+                            // Re-index remaining agents
+                            for (i, agent) in agents.iter_mut().enumerate() {
+                                agent.id = i;
+                            }
+                            println!("Removed {}", removed.name);
+                        } else {
+                            println!("Invalid agent ID");
                         }
-                        println!("Removed {}", removed.name);
-                    } else {
-                        println!("Invalid agent ID");
                     }
+                } else {
+                    println!("Usage: /remove <id>");
                 }
                 continue;
             }

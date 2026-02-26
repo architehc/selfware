@@ -248,6 +248,19 @@ impl SafetyChecker {
 
         // Check for shell variable substitution that might hide dangerous commands
         if SUSPICIOUS_SUBSTITUTION_PATTERN.is_match(&normalized) {
+            // Block indirect execution where the command itself is sourced from
+            // a variable/function expansion (e.g., `${FUNC}`).
+            let trimmed = normalized.trim_start();
+            if trimmed.starts_with("${")
+                || trimmed.starts_with("$(")
+                || trimmed.starts_with('$')
+                || trimmed.starts_with('`')
+            {
+                anyhow::bail!(
+                    "Dangerous command blocked: indirect command execution via variable substitution"
+                );
+            }
+
             // Allow safe variable usage but block suspicious patterns
             if normalized.contains("rm") || normalized.contains("dd") || normalized.contains("mkfs")
             {
@@ -1768,6 +1781,26 @@ mod tests {
             r#"{"image": "alpine", "volumes": ["/proc:/proc"]}"#,
         );
         assert!(checker.check_tool_call(&call).is_err());
+    }
+
+    #[test]
+    fn test_security_blocks_variable_substitution_command_head() {
+        let config = SafetyConfig::default();
+        let checker = SafetyChecker::new(&config);
+
+        // If command resolution is deferred entirely to shell expansion, block it.
+        let call = create_test_call("shell_exec", r#"{"command": "${FUNC}"}"#);
+        assert!(checker.check_tool_call(&call).is_err());
+    }
+
+    #[test]
+    fn test_security_allows_variable_reference_in_arguments() {
+        let config = SafetyConfig::default();
+        let checker = SafetyChecker::new(&config);
+
+        // Safe variable interpolation in command arguments should remain allowed.
+        let call = create_test_call("shell_exec", r#"{"command": "echo $HOME"}"#);
+        assert!(checker.check_tool_call(&call).is_ok());
     }
 
     #[test]
