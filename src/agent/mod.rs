@@ -101,8 +101,22 @@ impl Agent {
         let loop_control = AgentLoop::new(config.agent.max_iterations);
         let compressor = ContextCompressor::new(config.max_tokens);
 
+        // Initialize cognitive state and load global episodic memory if available
+        let mut cognitive_state = CognitiveState::new();
+        let global_memory_path = dirs::data_local_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("selfware")
+            .join("global_episodic_memory.json");
+            
+        if let Ok(content) = std::fs::read_to_string(&global_memory_path) {
+            if let Ok(loaded_memory) = serde_json::from_str::<crate::cognitive::EpisodicMemory>(&content) {
+                cognitive_state.episodic_memory = loaded_memory;
+                info!("Loaded global episodic memory for recursive self-improvement");
+            }
+        }
+
         // Choose between native function calling or XML-based tool parsing
-        let system_prompt = if config.agent.native_function_calling {
+        let mut system_prompt = if config.agent.native_function_calling {
             // Native function calling: simple prompt, tools passed via API
             info!("Using native function calling mode");
             r#"You are Selfware, an expert software engineering AI assistant.
@@ -181,13 +195,19 @@ To call a tool, use this EXACT XML structure:
             )
         };
 
+        // Inject past lessons to avoid repeating mistakes
+        let recent_lessons = cognitive_state.episodic_memory.recent_lessons(10);
+        if !recent_lessons.is_empty() {
+            system_prompt.push_str("\n\n## Global Lessons Learned\nDo not repeat past mistakes. Consider these lessons:\n");
+            for lesson in recent_lessons {
+                system_prompt.push_str(&format!("- {}\n", lesson));
+            }
+        }
+
         let messages = vec![Message::system(system_prompt)];
 
         // Initialize checkpoint manager if configured
         let checkpoint_manager = CheckpointManager::default_path().ok();
-
-        // Initialize cognitive state
-        let cognitive_state = CognitiveState::new();
 
         // Initialize verification gate with project root
         let project_root = std::env::current_dir().unwrap_or_else(|_| ".".into());

@@ -150,6 +150,10 @@ impl Agent {
     pub(super) fn complete_checkpoint(&mut self) -> Result<()> {
         if let Some(ref mut checkpoint) = self.current_checkpoint {
             checkpoint.set_status(TaskStatus::Completed);
+            
+            // Generate final summary of what worked and failed
+            self.reflect_and_learn()?;
+            
             if let Some(ref manager) = self.checkpoint_manager {
                 manager.save(checkpoint)?;
                 self.last_checkpoint_tool_calls = checkpoint.tool_calls.len();
@@ -157,6 +161,42 @@ impl Agent {
                 self.checkpoint_persisted_once = true;
             }
         }
+        Ok(())
+    }
+
+    /// Reflect on the task outcome and save global lessons
+    pub(super) fn reflect_and_learn(&mut self) -> Result<()> {
+        // Extract basic lessons based on error history
+        if let Some(checkpoint) = &self.current_checkpoint {
+            for error in &checkpoint.errors {
+                if error.recovered {
+                    self.cognitive_state.episodic_memory.what_worked(
+                        "error_recovery",
+                        &format!("Successfully recovered from error at step {}: {}", error.step, error.error)
+                    );
+                } else {
+                    self.cognitive_state.episodic_memory.what_failed(
+                        "task_execution",
+                        &format!("Failed to recover from error: {}", error.error)
+                    );
+                }
+            }
+        }
+
+        // Save global episodic memory
+        let global_memory_path = dirs::data_local_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("selfware")
+            .join("global_episodic_memory.json");
+            
+        if let Some(parent) = global_memory_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        
+        let content = serde_json::to_string_pretty(&self.cognitive_state.episodic_memory)?;
+        std::fs::write(&global_memory_path, content)?;
+        info!("Saved global episodic memory");
+
         Ok(())
     }
 
