@@ -65,6 +65,9 @@ async fn main() -> Result<()> {
         // Generation parameters
         temperature: 0.7,
         max_tokens: 4096,
+        
+        // Failure policy
+        failure_policy: selfware::multiagent::MultiAgentFailurePolicy::BestEffort,
     };
 
     println!("Multi-Agent Configuration:");
@@ -81,7 +84,7 @@ async fn main() -> Result<()> {
     println!();
 
     // Create event channel for progress tracking
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<MultiAgentEvent>();
+    let (event_tx, mut event_rx) = mpsc::channel::<MultiAgentEvent>(1000);
 
     // Create the multi-agent chat system
     let multi_agent = MultiAgentChat::new(&config, agent_config)?.with_events(event_tx);

@@ -10,15 +10,57 @@
 //!
 //! Checkpoints are stored as JSON files and can be resumed with `Agent::resume()`.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
 use crate::api::types::Message;
 use crate::redact;
+
+/// Envelope that wraps a checkpoint with an integrity checksum.
+///
+/// The `sha256` field holds the hex-encoded SHA-256 hash of `payload` (the
+/// compact-JSON serialized checkpoint data).  On load, the hash is recomputed
+/// and compared to detect corruption or tampering.
+#[derive(Debug, Serialize, Deserialize)]
+struct CheckpointEnvelope {
+    /// SHA-256 hex digest of the `payload` string
+    sha256: String,
+    /// The checkpoint data serialized as a JSON value
+    payload: serde_json::Value,
+}
+
+impl CheckpointEnvelope {
+    /// Create a new envelope by computing the SHA-256 hash of the payload.
+    fn wrap(payload: serde_json::Value) -> Result<Self> {
+        let canonical =
+            serde_json::to_string(&payload).context("Failed to serialize payload for hashing")?;
+        let hash = hex::encode(Sha256::digest(canonical.as_bytes()));
+        Ok(Self {
+            sha256: hash,
+            payload,
+        })
+    }
+
+    /// Verify the integrity of the envelope by recomputing the hash.
+    fn verify(&self) -> Result<()> {
+        let canonical = serde_json::to_string(&self.payload)
+            .context("Failed to serialize payload for verification")?;
+        let expected = hex::encode(Sha256::digest(canonical.as_bytes()));
+        if expected != self.sha256 {
+            bail!(
+                "Checkpoint integrity check failed: expected SHA-256 {}, got {}",
+                expected,
+                self.sha256
+            );
+        }
+        Ok(())
+    }
+}
 
 /// Current version of the checkpoint format
 pub const CURRENT_CHECKPOINT_VERSION: u32 = 1;
@@ -226,7 +268,17 @@ impl CheckpointManager {
         self.checkpoints_dir.join(format!("{}.json", task_id))
     }
 
-    /// Save a checkpoint to disk (with secrets redacted)
+    /// Save a checkpoint to disk (with secrets redacted and integrity hash).
+    ///
+    /// Security: The checkpoint data is run through `redact::redact_json()`
+    /// before writing, which scrubs API keys, passwords, bearer tokens, and
+    /// other sensitive patterns from all serialized string values.  The
+    /// `TaskCheckpoint` struct intentionally does not include config-level
+    /// secrets such as `api_key` -- those live only in `Config`.
+    ///
+    /// Integrity: A SHA-256 checksum is computed over the JSON payload and
+    /// stored in a wrapper envelope so that `load()` can verify the file has
+    /// not been corrupted or tampered with.
     pub fn save(&self, checkpoint: &TaskCheckpoint) -> Result<()> {
         let path = self.checkpoint_path(&checkpoint.task_id);
 
@@ -237,7 +289,11 @@ impl CheckpointManager {
         // Redact any secrets in the checkpoint data
         redact::redact_json(&mut json_value);
 
-        let json = serde_json::to_string_pretty(&json_value)
+        // Wrap in an integrity envelope with SHA-256 checksum
+        let envelope = CheckpointEnvelope::wrap(json_value)
+            .context("Failed to create checkpoint envelope")?;
+
+        let json = serde_json::to_string_pretty(&envelope)
             .context("Failed to format checkpoint JSON")?;
 
         // Atomic write: write to a temp file in the same directory, then rename.
@@ -291,11 +347,28 @@ impl CheckpointManager {
         Ok(())
     }
 
-    /// Load a checkpoint from disk
+    /// Load a checkpoint from disk, verifying integrity.
+    ///
+    /// Supports both the new envelope format (with SHA-256 checksum) and the
+    /// legacy bare-checkpoint format for backward compatibility.
     pub fn load(&self, task_id: &str) -> Result<TaskCheckpoint> {
         let path = self.checkpoint_path(task_id);
         let json = fs::read_to_string(&path)
             .with_context(|| format!("Failed to read checkpoint from {:?}", path))?;
+
+        // Try to parse as an envelope first (new format with integrity check)
+        if let Ok(envelope) = serde_json::from_str::<CheckpointEnvelope>(&json) {
+            // Verify integrity before deserializing the payload
+            envelope
+                .verify()
+                .with_context(|| format!("Checkpoint integrity check failed for {:?}", path))?;
+
+            let checkpoint: TaskCheckpoint = serde_json::from_value(envelope.payload)
+                .context("Failed to deserialize checkpoint from envelope payload")?;
+            return Ok(checkpoint);
+        }
+
+        // Fall back to legacy format (bare checkpoint without envelope)
         let checkpoint: TaskCheckpoint =
             serde_json::from_str(&json).context("Failed to deserialize checkpoint")?;
         Ok(checkpoint)
@@ -315,7 +388,17 @@ impl CheckpointManager {
 
             if path.extension().and_then(|s| s.to_str()) == Some("json") {
                 if let Ok(json) = fs::read_to_string(&path) {
-                    if let Ok(checkpoint) = serde_json::from_str::<TaskCheckpoint>(&json) {
+                    // Try envelope format first, then legacy bare format
+                    let checkpoint_opt =
+                        serde_json::from_str::<CheckpointEnvelope>(&json)
+                            .ok()
+                            .and_then(|env| {
+                                env.verify().ok()?;
+                                serde_json::from_value::<TaskCheckpoint>(env.payload).ok()
+                            })
+                            .or_else(|| serde_json::from_str::<TaskCheckpoint>(&json).ok());
+
+                    if let Some(checkpoint) = checkpoint_opt {
                         summaries.push(checkpoint.to_summary());
                     }
                 }
@@ -930,5 +1013,140 @@ mod tests {
         let loaded: ErrorLog = serde_json::from_str(&json).unwrap();
         assert_eq!(loaded.step, 10);
         assert!(loaded.recovered);
+    }
+
+    // ---- Checkpoint integrity tests ----
+
+    #[test]
+    fn test_checkpoint_envelope_round_trip() {
+        let payload = serde_json::json!({"task_id": "test", "data": "hello"});
+        let envelope = CheckpointEnvelope::wrap(payload.clone()).unwrap();
+        assert!(!envelope.sha256.is_empty());
+        assert_eq!(envelope.payload, payload);
+        assert!(envelope.verify().is_ok());
+    }
+
+    #[test]
+    fn test_checkpoint_envelope_detects_tampering() {
+        let payload = serde_json::json!({"task_id": "test", "data": "hello"});
+        let mut envelope = CheckpointEnvelope::wrap(payload).unwrap();
+        // Tamper with the payload
+        envelope.payload = serde_json::json!({"task_id": "test", "data": "TAMPERED"});
+        assert!(envelope.verify().is_err());
+    }
+
+    #[test]
+    fn test_checkpoint_envelope_detects_bad_hash() {
+        let payload = serde_json::json!({"task_id": "test"});
+        let mut envelope = CheckpointEnvelope::wrap(payload).unwrap();
+        // Corrupt the hash
+        envelope.sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+            .to_string();
+        assert!(envelope.verify().is_err());
+    }
+
+    #[test]
+    fn test_save_load_with_integrity() {
+        let dir = tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        let checkpoint =
+            TaskCheckpoint::new("integrity_test".to_string(), "Integrity test".to_string());
+        manager.save(&checkpoint).unwrap();
+
+        // Load should succeed and verify integrity
+        let loaded = manager.load("integrity_test").unwrap();
+        assert_eq!(loaded.task_id, "integrity_test");
+        assert_eq!(loaded.task_description, "Integrity test");
+    }
+
+    #[test]
+    fn test_load_detects_corrupted_file() {
+        let dir = tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        // Save a valid checkpoint
+        let checkpoint =
+            TaskCheckpoint::new("corrupt_test".to_string(), "Corruption test".to_string());
+        manager.save(&checkpoint).unwrap();
+
+        // Corrupt the file by modifying the payload while keeping envelope structure
+        let path = dir.path().join("corrupt_test.json");
+        let content = std::fs::read_to_string(&path).unwrap();
+        let mut envelope: serde_json::Value = serde_json::from_str(&content).unwrap();
+        envelope["payload"]["task_description"] =
+            serde_json::Value::String("TAMPERED".to_string());
+        std::fs::write(&path, serde_json::to_string_pretty(&envelope).unwrap()).unwrap();
+
+        // Load should fail with integrity error
+        let result = manager.load("corrupt_test");
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("integrity"),
+            "Expected integrity error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_load_legacy_format_backward_compatible() {
+        let dir = tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        // Write a legacy-format checkpoint (bare JSON without envelope)
+        let checkpoint =
+            TaskCheckpoint::new("legacy_test".to_string(), "Legacy format".to_string());
+        let bare_json = serde_json::to_string_pretty(&checkpoint).unwrap();
+        let path = dir.path().join("legacy_test.json");
+        std::fs::write(&path, bare_json).unwrap();
+
+        // Load should succeed via legacy fallback
+        let loaded = manager.load("legacy_test").unwrap();
+        assert_eq!(loaded.task_id, "legacy_test");
+        assert_eq!(loaded.task_description, "Legacy format");
+    }
+
+    #[test]
+    fn test_save_redacts_secrets_in_messages() {
+        let dir = tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        let mut checkpoint =
+            TaskCheckpoint::new("redact_test".to_string(), "Secret redaction".to_string());
+        checkpoint.messages.push(Message::user(
+            "Use api_key=sk-secretkey12345678901234567890 to connect",
+        ));
+        manager.save(&checkpoint).unwrap();
+
+        // Read the raw file and verify secrets are redacted
+        let path = dir.path().join("redact_test.json");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !raw.contains("sk-secretkey12345678901234567890"),
+            "API key should have been redacted in checkpoint file"
+        );
+        assert!(raw.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_list_tasks_handles_envelope_format() {
+        let dir = tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        // Save with new envelope format
+        let cp1 = TaskCheckpoint::new("env_task".to_string(), "Envelope task".to_string());
+        manager.save(&cp1).unwrap();
+
+        // Also write a legacy bare-format file
+        let cp2 = TaskCheckpoint::new("bare_task".to_string(), "Bare task".to_string());
+        let bare_json = serde_json::to_string_pretty(&cp2).unwrap();
+        std::fs::write(dir.path().join("bare_task.json"), bare_json).unwrap();
+
+        let tasks = manager.list_tasks().unwrap();
+        assert_eq!(tasks.len(), 2);
+        let ids: Vec<&str> = tasks.iter().map(|t| t.task_id.as_str()).collect();
+        assert!(ids.contains(&"env_task"));
+        assert!(ids.contains(&"bare_task"));
     }
 }

@@ -4,7 +4,7 @@ use aes_gcm::{
 };
 use anyhow::Result;
 use rand::RngCore;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use std::sync::OnceLock;
 
 /// Manager for at-rest encryption of sensitive data.
@@ -12,15 +12,32 @@ pub struct EncryptionManager {
     key: [u8; 32],
 }
 
+/// Application-specific salt for PBKDF2 key derivation.
+const KDF_SALT: &[u8] = b"selfware-encryption-v1";
+
+/// Number of PBKDF2 iterations. 100,000 is the OWASP minimum recommendation
+/// for PBKDF2-HMAC-SHA256 as of 2023.
+const KDF_ITERATIONS: u32 = 100_000;
+
+/// Derive a 256-bit encryption key from a password using PBKDF2-HMAC-SHA256.
+///
+/// BREAKING CHANGE: This replaces the previous plain SHA-256 derivation.
+/// Existing encrypted session data created before this change will NOT be
+/// decryptable with keys derived by this function. A migration or
+/// re-encryption step is required for any pre-existing data.
+fn derive_key(password: &str) -> [u8; 32] {
+    let mut key = [0u8; 32];
+    pbkdf2::pbkdf2_hmac::<Sha256>(password.as_bytes(), KDF_SALT, KDF_ITERATIONS, &mut key);
+    key
+}
+
 static INSTANCE: OnceLock<EncryptionManager> = OnceLock::new();
 
 impl EncryptionManager {
     /// Initialize the global encryption manager with a password
     pub fn init(password: &str) -> Result<()> {
-        let mut hasher = Sha256::new();
-        hasher.update(password.as_bytes());
-        let key: [u8; 32] = hasher.finalize().into();
-        
+        let key = derive_key(password);
+
         let manager = EncryptionManager { key };
         INSTANCE.set(manager).map_err(|_| anyhow::anyhow!("Encryption already initialized"))?;
         Ok(())
@@ -92,9 +109,7 @@ impl EncryptionManager {
     /// Create an EncryptionManager directly (test only, bypasses OnceLock)
     #[cfg(test)]
     pub fn new_for_test(password: &str) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(password.as_bytes());
-        let key: [u8; 32] = hasher.finalize().into();
+        let key = derive_key(password);
         EncryptionManager { key }
     }
 }

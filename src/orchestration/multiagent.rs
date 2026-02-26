@@ -153,7 +153,7 @@ pub struct MultiAgentChat {
     semaphore: Arc<Semaphore>,
     agents: Arc<RwLock<Vec<AgentInstance>>>,
     results: Arc<Mutex<Vec<AgentResult>>>,
-    event_tx: Option<mpsc::UnboundedSender<MultiAgentEvent>>,
+    event_tx: Option<mpsc::Sender<MultiAgentEvent>>,
 }
 
 impl MultiAgentChat {
@@ -176,7 +176,7 @@ impl MultiAgentChat {
     }
 
     /// Set event sender for streaming events
-    pub fn with_events(mut self, tx: mpsc::UnboundedSender<MultiAgentEvent>) -> Self {
+    pub fn with_events(mut self, tx: mpsc::Sender<MultiAgentEvent>) -> Self {
         self.event_tx = Some(tx);
         self
     }
@@ -200,10 +200,15 @@ impl MultiAgentChat {
         Ok(())
     }
 
-    /// Send an event if event channel is configured
+    /// Send an event if event channel is configured.
+    /// Uses `try_send` so this remains non-async; events are dropped if the
+    /// bounded channel is full (back-pressure safety).
     fn emit(&self, event: MultiAgentEvent) {
         if let Some(ref tx) = self.event_tx {
-            let _ = tx.send(event);
+            if let Err(mpsc::error::TrySendError::Full(_)) = tx.try_send(event) {
+                tracing::warn!("MultiAgent event channel full, dropping event");
+            }
+            // Closed channel errors are silently ignored (receiver gone).
         }
     }
 
@@ -322,7 +327,7 @@ impl MultiAgentChat {
         agents: Arc<RwLock<Vec<AgentInstance>>>,
         results: Arc<Mutex<Vec<AgentResult>>>,
         timeout: Duration,
-        event_tx: Option<mpsc::UnboundedSender<MultiAgentEvent>>,
+        event_tx: Option<mpsc::Sender<MultiAgentEvent>>,
     ) -> Result<()> {
         // Acquire semaphore permit
         let _permit = semaphore.acquire().await?;
@@ -342,7 +347,7 @@ impl MultiAgentChat {
 
         // Emit start event
         if let Some(ref tx) = event_tx {
-            let _ = tx.send(MultiAgentEvent::AgentStarted {
+            let _ = tx.try_send(MultiAgentEvent::AgentStarted {
                 agent_id,
                 name: agent_name.clone(),
                 task: task.clone(),
@@ -378,7 +383,7 @@ impl MultiAgentChat {
                 // Emit tool call events
                 for tool in &tool_calls {
                     if let Some(ref tx) = event_tx {
-                        let _ = tx.send(MultiAgentEvent::AgentToolCall {
+                        let _ = tx.try_send(MultiAgentEvent::AgentToolCall {
                             agent_id,
                             tool: tool.clone(),
                         });
@@ -398,7 +403,7 @@ impl MultiAgentChat {
             }
             Ok(Err(e)) => {
                 if let Some(ref tx) = event_tx {
-                    let _ = tx.send(MultiAgentEvent::AgentFailed {
+                    let _ = tx.try_send(MultiAgentEvent::AgentFailed {
                         agent_id,
                         error: e.to_string(),
                     });
@@ -417,7 +422,7 @@ impl MultiAgentChat {
             Err(_) => {
                 let error = "Request timed out".to_string();
                 if let Some(ref tx) = event_tx {
-                    let _ = tx.send(MultiAgentEvent::AgentFailed {
+                    let _ = tx.try_send(MultiAgentEvent::AgentFailed {
                         agent_id,
                         error: error.clone(),
                     });
@@ -449,7 +454,7 @@ impl MultiAgentChat {
 
         // Emit completion event
         if let Some(ref tx) = event_tx {
-            let _ = tx.send(MultiAgentEvent::AgentCompleted {
+            let _ = tx.try_send(MultiAgentEvent::AgentCompleted {
                 agent_id,
                 result: agent_result.clone(),
             });
@@ -618,7 +623,7 @@ impl MultiAgentChat {
             let start = Instant::now();
 
             // Create event channel for this run
-            let (tx, mut rx) = mpsc::unbounded_channel::<MultiAgentEvent>();
+            let (tx, mut rx) = mpsc::channel::<MultiAgentEvent>(1000);
             self.event_tx = Some(tx);
 
             // Spawn event handler

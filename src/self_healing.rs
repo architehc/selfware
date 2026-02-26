@@ -189,8 +189,9 @@ impl ErrorLearner {
             .unwrap_or_default()
             .as_secs();
 
-        // Add to recent errors
-        if let Ok(mut errors) = self.errors.write() {
+        // Add to recent errors (recover from poisoned lock)
+        {
+            let mut errors = self.errors.write().unwrap_or_else(|e| e.into_inner());
             errors.push_back(error.clone());
 
             // Remove old errors outside window
@@ -210,10 +211,7 @@ impl ErrorLearner {
 
     /// Detect error patterns
     fn detect_patterns(&self) {
-        let errors = match self.errors.read() {
-            Ok(e) => e.clone(),
-            Err(_) => return,
-        };
+        let errors = self.errors.read().unwrap_or_else(|e| e.into_inner()).clone();
 
         // Group by error type and context
         let mut groups: HashMap<String, Vec<&ErrorOccurrence>> = HashMap::new();
@@ -222,8 +220,9 @@ impl ErrorLearner {
             groups.entry(key).or_default().push(error);
         }
 
-        // Create patterns from groups that exceed threshold
-        if let Ok(mut patterns) = self.patterns.write() {
+        // Create patterns from groups that exceed threshold (recover from poisoned lock)
+        {
+            let mut patterns = self.patterns.write().unwrap_or_else(|e| e.into_inner());
             for (key, group) in groups {
                 if group.len() >= self.config.pattern_threshold as usize {
                     let first = group.first().unwrap();
@@ -266,52 +265,50 @@ impl ErrorLearner {
 
     /// Find best recovery strategy for an error pattern
     fn find_best_recovery(&self, pattern_id: &str) -> Option<RecoveryStrategy> {
-        if let Ok(history) = self.recovery_history.read() {
-            if let Some(results) = history.get(pattern_id) {
-                // Find strategy with highest success rate
-                let mut strategy_stats: HashMap<String, (u32, u32)> = HashMap::new(); // (success, total)
+        let history = self.recovery_history.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(results) = history.get(pattern_id) {
+            // Find strategy with highest success rate
+            let mut strategy_stats: HashMap<String, (u32, u32)> = HashMap::new(); // (success, total)
 
-                for result in results {
-                    let entry = strategy_stats.entry(result.strategy.clone()).or_default();
-                    entry.1 += 1;
-                    if result.success {
-                        entry.0 += 1;
-                    }
+            for result in results {
+                let entry = strategy_stats.entry(result.strategy.clone()).or_default();
+                entry.1 += 1;
+                if result.success {
+                    entry.0 += 1;
                 }
-
-                return strategy_stats
-                    .into_iter()
-                    .filter(|(_, (s, t))| *t >= 2 && *s as f32 / *t as f32 >= 0.5)
-                    .max_by(|a, b| {
-                        let rate_a = a.1 .0 as f32 / a.1 .1 as f32;
-                        let rate_b = b.1 .0 as f32 / b.1 .1 as f32;
-                        rate_a
-                            .partial_cmp(&rate_b)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .map(|(strategy, _)| RecoveryStrategy::from_name(&strategy));
             }
+
+            return strategy_stats
+                .into_iter()
+                .filter(|(_, (s, t))| *t >= 2 && *s as f32 / *t as f32 >= 0.5)
+                .max_by(|a, b| {
+                    let rate_a = a.1 .0 as f32 / a.1 .1 as f32;
+                    let rate_b = b.1 .0 as f32 / b.1 .1 as f32;
+                    rate_a
+                        .partial_cmp(&rate_b)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(strategy, _)| RecoveryStrategy::from_name(&strategy));
         }
         None
     }
 
     /// Record recovery result
     pub fn record_recovery(&self, pattern_id: &str, strategy: &str, success: bool) {
-        if let Ok(mut history) = self.recovery_history.write() {
-            let results = history.entry(pattern_id.to_string()).or_default();
-            results.push(RecoveryResult {
-                strategy: strategy.to_string(),
-                success,
-                timestamp: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-            });
+        let mut history = self.recovery_history.write().unwrap_or_else(|e| e.into_inner());
+        let results = history.entry(pattern_id.to_string()).or_default();
+        results.push(RecoveryResult {
+            strategy: strategy.to_string(),
+            success,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        });
 
-            // Keep only recent results
-            while results.len() > 100 {
-                results.remove(0);
-            }
+        // Keep only recent results
+        while results.len() > 100 {
+            results.remove(0);
         }
     }
 
@@ -319,8 +316,10 @@ impl ErrorLearner {
     pub fn patterns(&self) -> Vec<ErrorPattern> {
         self.patterns
             .read()
-            .map(|p| p.values().cloned().collect())
-            .unwrap_or_default()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect()
     }
 
     /// Get recommended recovery for error
@@ -332,7 +331,7 @@ impl ErrorLearner {
 
         self.patterns
             .read()
-            .ok()?
+            .unwrap_or_else(|e| e.into_inner())
             .get(&key)?
             .recommended_recovery
             .clone()
@@ -344,21 +343,15 @@ impl ErrorLearner {
             errors_recorded: self.stats.errors_recorded.load(Ordering::Relaxed),
             patterns_detected: self.stats.patterns_detected.load(Ordering::Relaxed),
             recoveries_suggested: self.stats.recoveries_suggested.load(Ordering::Relaxed),
-            active_patterns: self.patterns.read().map(|p| p.len()).unwrap_or(0),
+            active_patterns: self.patterns.read().unwrap_or_else(|e| e.into_inner()).len(),
         }
     }
 
     /// Clear all data
     pub fn clear(&self) {
-        if let Ok(mut errors) = self.errors.write() {
-            errors.clear();
-        }
-        if let Ok(mut patterns) = self.patterns.write() {
-            patterns.clear();
-        }
-        if let Ok(mut history) = self.recovery_history.write() {
-            history.clear();
-        }
+        self.errors.write().unwrap_or_else(|e| e.into_inner()).clear();
+        self.patterns.write().unwrap_or_else(|e| e.into_inner()).clear();
+        self.recovery_history.write().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
 
@@ -574,7 +567,8 @@ impl StateManager {
             .total_bytes_saved
             .fetch_add(checkpoint.size_bytes as u64, Ordering::Relaxed);
 
-        if let Ok(mut checkpoints) = self.checkpoints.write() {
+        {
+            let mut checkpoints = self.checkpoints.write().unwrap_or_else(|e| e.into_inner());
             checkpoints.push_back(checkpoint);
 
             // Limit checkpoints
@@ -583,9 +577,7 @@ impl StateManager {
             }
         }
 
-        if let Ok(mut last) = self.last_checkpoint.write() {
-            *last = Some(Instant::now());
-        }
+        *self.last_checkpoint.write().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
 
         id
     }
@@ -596,11 +588,10 @@ impl StateManager {
             return false;
         }
 
-        if let Ok(last) = self.last_checkpoint.read() {
-            if let Some(instant) = *last {
-                return instant.elapsed()
-                    >= Duration::from_secs(self.config.checkpoint_interval_secs);
-            }
+        let last = self.last_checkpoint.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(instant) = *last {
+            return instant.elapsed()
+                >= Duration::from_secs(self.config.checkpoint_interval_secs);
         }
         true
     }
@@ -611,7 +602,7 @@ impl StateManager {
             .restores_performed
             .fetch_add(1, Ordering::Relaxed);
 
-        let checkpoints = self.checkpoints.read().ok()?;
+        let checkpoints = self.checkpoints.read().unwrap_or_else(|e| e.into_inner());
 
         if let Some(id) = checkpoint_id {
             checkpoints.iter().find(|c| c.id == id).cloned()
@@ -623,22 +614,22 @@ impl StateManager {
 
     /// Get latest checkpoint
     pub fn latest(&self) -> Option<StateCheckpoint> {
-        self.checkpoints.read().ok()?.back().cloned()
+        self.checkpoints.read().unwrap_or_else(|e| e.into_inner()).back().cloned()
     }
 
     /// Get all checkpoints
     pub fn all(&self) -> Vec<StateCheckpoint> {
         self.checkpoints
             .read()
-            .map(|c| c.iter().cloned().collect())
-            .unwrap_or_default()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect()
     }
 
     /// Clear checkpoints
     pub fn clear(&self) {
-        if let Ok(mut checkpoints) = self.checkpoints.write() {
-            checkpoints.clear();
-        }
+        self.checkpoints.write().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     /// Get summary
@@ -647,7 +638,7 @@ impl StateManager {
             checkpoints_created: self.stats.checkpoints_created.load(Ordering::Relaxed),
             restores_performed: self.stats.restores_performed.load(Ordering::Relaxed),
             total_bytes_saved: self.stats.total_bytes_saved.load(Ordering::Relaxed),
-            active_checkpoints: self.checkpoints.read().map(|c| c.len()).unwrap_or(0),
+            active_checkpoints: self.checkpoints.read().unwrap_or_else(|e| e.into_inner()).len(),
         }
     }
 }
@@ -743,7 +734,8 @@ impl HealthPredictor {
             .unwrap_or_default()
             .as_secs();
 
-        if let Ok(mut history) = self.history.write() {
+        {
+            let mut history = self.history.write().unwrap_or_else(|e| e.into_inner());
             let points = history.entry(component.to_string()).or_default();
             points.push(HealthDataPoint {
                 timestamp: now,
@@ -764,10 +756,8 @@ impl HealthPredictor {
 
     /// Update prediction for component
     fn update_prediction(&self, component: &str) {
-        let history = match self.history.read() {
-            Ok(h) => h.get(component).cloned().unwrap_or_default(),
-            Err(_) => return,
-        };
+        let history = self.history.read().unwrap_or_else(|e| e.into_inner())
+            .get(component).cloned().unwrap_or_default();
 
         if history.len() < 5 {
             return;
@@ -822,22 +812,24 @@ impl HealthPredictor {
             recommended_action,
         };
 
-        if let Ok(mut predictions) = self.predictions.write() {
-            predictions.insert(component.to_string(), prediction);
-        }
+        self.predictions.write().unwrap_or_else(|e| e.into_inner())
+            .insert(component.to_string(), prediction);
     }
 
     /// Get prediction for component
     pub fn predict(&self, component: &str) -> Option<HealthPrediction> {
-        self.predictions.read().ok()?.get(component).cloned()
+        self.predictions.read().unwrap_or_else(|e| e.into_inner())
+            .get(component).cloned()
     }
 
     /// Get all predictions
     pub fn all_predictions(&self) -> Vec<HealthPrediction> {
         self.predictions
             .read()
-            .map(|p| p.values().cloned().collect())
-            .unwrap_or_default()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect()
     }
 
     /// Record prediction outcome
@@ -862,12 +854,8 @@ impl HealthPredictor {
 
     /// Clear all data
     pub fn clear(&self) {
-        if let Ok(mut history) = self.history.write() {
-            history.clear();
-        }
-        if let Ok(mut predictions) = self.predictions.write() {
-            predictions.clear();
-        }
+        self.history.write().unwrap_or_else(|e| e.into_inner()).clear();
+        self.predictions.write().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
 

@@ -23,6 +23,7 @@ use crate::config::Config;
 use crate::memory::AgentMemory;
 use crate::output;
 use crate::safety::SafetyChecker;
+use crate::tools::file::init_safety_config;
 #[cfg(feature = "resilience")]
 use crate::self_healing::{SelfHealingConfig, SelfHealingEngine};
 use crate::session::chat_store::ChatStore;
@@ -82,6 +83,7 @@ pub struct Agent {
     /// Whether at least one checkpoint has been persisted in this session
     checkpoint_persisted_once: bool,
     /// Event emitter for real-time updates (TUI or other)
+    #[allow(dead_code)]
     events: Arc<dyn EventEmitter>,
     /// Edit history for undo support
     edit_history: EditHistory,
@@ -104,6 +106,8 @@ impl Agent {
         let tools = ToolRegistry::new();
         let memory = AgentMemory::new(&config)?;
         let safety = SafetyChecker::new(&config.safety);
+        // Publish the user-loaded safety config so file tools honour allowed_paths etc.
+        init_safety_config(&config.safety);
         let loop_control = AgentLoop::new(config.agent.max_iterations);
         let compressor = ContextCompressor::new(config.max_tokens);
 
@@ -2547,12 +2551,19 @@ mod tests {
 
     #[test]
     fn test_confirmation_error_detection() {
-        let error = AgentError::ConfirmationRequired {
+        // Case 1: Wrapped in SelfwareError::Agent
+        let error = crate::errors::SelfwareError::Agent(AgentError::ConfirmationRequired {
             tool_name: "shell_exec".to_string(),
-        };
+        });
         let anyhow_error: anyhow::Error = error.into();
-
         assert!(is_confirmation_error(&anyhow_error));
+
+        // Case 2: AgentError returned directly into anyhow (as in execution.rs non-interactive path)
+        let direct_error: anyhow::Error = AgentError::ConfirmationRequired {
+            tool_name: "shell_exec".to_string(),
+        }
+        .into();
+        assert!(is_confirmation_error(&direct_error));
     }
 
     #[test]

@@ -471,6 +471,7 @@ fn test_error_analyzer_summary() {
 
 #[tokio::test]
 async fn test_multi_step_file_workflow() {
+    std::env::set_var("SELFWARE_TEST_MODE", "1");
     let dir = tempdir().unwrap();
     let registry = ToolRegistry::new();
 
@@ -601,6 +602,7 @@ fn main() {
 
 #[tokio::test]
 async fn test_complete_coding_scenario() {
+    std::env::set_var("SELFWARE_TEST_MODE", "1");
     let dir = tempdir().unwrap();
     let src_dir = dir.path().join("src");
     fs::create_dir_all(&src_dir).unwrap();
@@ -732,6 +734,7 @@ pub fn subtract(a: i32, b: i32) -> i32 {
 
 #[tokio::test]
 async fn test_tool_execution_timing() {
+    std::env::set_var("SELFWARE_TEST_MODE", "1");
     let dir = tempdir().unwrap();
     let registry = ToolRegistry::new();
 

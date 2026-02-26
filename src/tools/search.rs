@@ -1,12 +1,45 @@
 use super::Tool;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
 use tracing::instrument;
 use walkdir::WalkDir;
+
+/// Maximum number of compiled regex patterns to cache.
+const REGEX_CACHE_MAX: usize = 64;
+
+/// Global cache of compiled regex patterns, keyed by their source string.
+/// When the cache exceeds [`REGEX_CACHE_MAX`] entries, it is cleared entirely
+/// (simple but bounded eviction strategy).
+static REGEX_CACHE: Lazy<Mutex<HashMap<String, Regex>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Return a cached `Regex` for `pattern`, compiling and caching it on first use.
+fn cached_regex(pattern: &str) -> Result<Regex> {
+    let mut cache = REGEX_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    if let Some(re) = cache.get(pattern) {
+        return Ok(re.clone());
+    }
+
+    let re = Regex::new(pattern).context("Invalid regex pattern")?;
+
+    // Evict all entries when the cache is full to stay bounded.
+    if cache.len() >= REGEX_CACHE_MAX {
+        cache.clear();
+    }
+
+    cache.insert(pattern.to_owned(), re.clone());
+    Ok(re)
+}
 
 /// Searches file contents for regex patterns, returning matching lines with context.
 pub struct GrepSearch;
@@ -131,13 +164,13 @@ impl Tool for GrepSearch {
             let include_pattern = args.get("include").and_then(|v| v.as_str());
             let exclude_pattern = args.get("exclude").and_then(|v| v.as_str());
 
-            // Build regex
-            let regex = if case_insensitive {
-                Regex::new(&format!("(?i){}", pattern_str))
+            // Build regex (uses a bounded cache to avoid recompilation)
+            let full_pattern = if case_insensitive {
+                format!("(?i){}", pattern_str)
             } else {
-                Regex::new(pattern_str)
-            }
-            .context("Invalid regex pattern")?;
+                pattern_str.to_string()
+            };
+            let regex = cached_regex(&full_pattern)?;
 
             // Build include/exclude globs
             let include_glob = include_pattern
@@ -506,63 +539,56 @@ impl Tool for SymbolSearch {
     }
 }
 
-/// Build regex patterns for different Rust symbol types
+/// Pre-compiled symbol regexes (compiled once, reused forever).
+struct SymbolRegexes {
+    fn_pattern: Regex,
+    struct_pattern: Regex,
+    enum_pattern: Regex,
+    trait_pattern: Regex,
+    impl_pattern: Regex,
+    const_pattern: Regex,
+    type_pattern: Regex,
+    mod_pattern: Regex,
+}
+
+static SYMBOL_REGEXES: Lazy<SymbolRegexes> = Lazy::new(|| SymbolRegexes {
+    fn_pattern: Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)").unwrap(),
+    struct_pattern: Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?struct\s+(\w+)").unwrap(),
+    enum_pattern: Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?enum\s+(\w+)").unwrap(),
+    trait_pattern: Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?trait\s+(\w+)").unwrap(),
+    impl_pattern: Regex::new(r"impl(?:<[^>]*>)?\s+(?:(\w+)|(?:\w+\s+for\s+(\w+)))").unwrap(),
+    const_pattern: Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?const\s+(\w+)").unwrap(),
+    type_pattern: Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?type\s+(\w+)").unwrap(),
+    mod_pattern: Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+(\w+)").unwrap(),
+});
+
+/// Build regex patterns for different Rust symbol types.
+/// The underlying regexes are compiled once via `Lazy` statics.
 fn build_symbol_patterns(
     symbol_type: &str,
     _name_pattern: &str,
-) -> Result<Vec<(Regex, &'static str)>> {
+) -> Result<Vec<(&'static Regex, &'static str)>> {
+    let sr = &*SYMBOL_REGEXES;
     let mut patterns = Vec::new();
 
-    // Function pattern: pub/pub(crate)/async fn name
-    let fn_pattern = Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)")
-        .context("Failed to compile function symbol regex")?;
-
-    // Struct pattern: pub struct Name
-    let struct_pattern = Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?struct\s+(\w+)")
-        .context("Failed to compile struct symbol regex")?;
-
-    // Enum pattern: pub enum Name
-    let enum_pattern = Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?enum\s+(\w+)")
-        .context("Failed to compile enum symbol regex")?;
-
-    // Trait pattern: pub trait Name
-    let trait_pattern = Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?trait\s+(\w+)")
-        .context("Failed to compile trait symbol regex")?;
-
-    // Impl pattern: impl Name or impl<T> Name
-    let impl_pattern = Regex::new(r"impl(?:<[^>]*>)?\s+(?:(\w+)|(?:\w+\s+for\s+(\w+)))")
-        .context("Failed to compile impl symbol regex")?;
-
-    // Const pattern: const NAME
-    let const_pattern = Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?const\s+(\w+)")
-        .context("Failed to compile const symbol regex")?;
-
-    // Type alias pattern: type Name
-    let type_pattern = Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?type\s+(\w+)")
-        .context("Failed to compile type symbol regex")?;
-
-    // Module pattern: mod name
-    let mod_pattern = Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+(\w+)")
-        .context("Failed to compile mod symbol regex")?;
-
     match symbol_type {
-        "function" => patterns.push((fn_pattern, "function")),
-        "struct" => patterns.push((struct_pattern, "struct")),
-        "enum" => patterns.push((enum_pattern, "enum")),
-        "trait" => patterns.push((trait_pattern, "trait")),
-        "impl" => patterns.push((impl_pattern, "impl")),
-        "const" => patterns.push((const_pattern, "const")),
-        "type" => patterns.push((type_pattern, "type")),
-        "mod" => patterns.push((mod_pattern, "mod")),
+        "function" => patterns.push((&sr.fn_pattern, "function")),
+        "struct" => patterns.push((&sr.struct_pattern, "struct")),
+        "enum" => patterns.push((&sr.enum_pattern, "enum")),
+        "trait" => patterns.push((&sr.trait_pattern, "trait")),
+        "impl" => patterns.push((&sr.impl_pattern, "impl")),
+        "const" => patterns.push((&sr.const_pattern, "const")),
+        "type" => patterns.push((&sr.type_pattern, "type")),
+        "mod" => patterns.push((&sr.mod_pattern, "mod")),
         _ => {
-            patterns.push((fn_pattern, "function"));
-            patterns.push((struct_pattern, "struct"));
-            patterns.push((enum_pattern, "enum"));
-            patterns.push((trait_pattern, "trait"));
-            patterns.push((impl_pattern, "impl"));
-            patterns.push((const_pattern, "const"));
-            patterns.push((type_pattern, "type"));
-            patterns.push((mod_pattern, "mod"));
+            patterns.push((&sr.fn_pattern, "function"));
+            patterns.push((&sr.struct_pattern, "struct"));
+            patterns.push((&sr.enum_pattern, "enum"));
+            patterns.push((&sr.trait_pattern, "trait"));
+            patterns.push((&sr.impl_pattern, "impl"));
+            patterns.push((&sr.const_pattern, "const"));
+            patterns.push((&sr.type_pattern, "type"));
+            patterns.push((&sr.mod_pattern, "mod"));
         }
     }
 

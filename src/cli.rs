@@ -2,9 +2,10 @@
 //!
 //! Software you own. Software that knows you. Software that lasts.
 
+use std::sync::mpsc;
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use std::sync::mpsc;
 use tracing::warn;
 
 // Use library exports instead of redeclaring modules
@@ -411,20 +412,27 @@ pub async fn run() -> Result<()> {
                 )
             });
 
-            // Process user inputs from TUI
-            while let Ok(input) = user_input_rx.recv() {
-                if input == "exit" || input == "quit" {
-                    break;
-                }
-                
-                // Run the task - this will emit events to the TUI through event_tx
-                if let Err(e) = agent.run_task(&input).await {
-                    warn!("Agent failed to run task: {}", e);
+            // Process user inputs from TUI.
+            // The recv() is blocking (std::sync::mpsc), so we use block_in_place
+            // to let tokio move other tasks off this thread while we wait.
+            loop {
+                let input = tokio::task::block_in_place(|| user_input_rx.recv());
+
+                match input {
+                    Ok(input) if input != "exit" && input != "quit" => {
+                        // Run the task — this will emit events to the TUI through event_tx
+                        if let Err(e) = agent.run_task(&input).await {
+                            warn!("Agent failed to run task: {}", e);
+                        }
+                    }
+                    _ => break,
                 }
             }
 
-            // Cleanup
-            let _ = tui_handle.join();
+            // Cleanup: join the TUI thread without blocking the async runtime
+            tokio::task::block_in_place(|| {
+                let _ = tui_handle.join();
+            });
             return Ok(());
         }
     }

@@ -5,6 +5,11 @@ use crate::token_count::estimate_tokens_with_overhead;
 use anyhow::Result;
 use tracing::{debug, info, warn};
 
+/// Hard upper limit on message count. If the message list exceeds this,
+/// `should_compress` returns true regardless of token estimate, so the
+/// conversation is always bounded.
+const MAX_MESSAGE_COUNT: usize = 512;
+
 pub struct ContextCompressor {
     compression_threshold: usize,
     min_messages_to_keep: usize,
@@ -19,6 +24,16 @@ impl ContextCompressor {
     }
 
     pub fn should_compress(&self, messages: &[Message]) -> bool {
+        // Hard cap on message count to prevent unbounded Vec growth.
+        if messages.len() > MAX_MESSAGE_COUNT {
+            warn!(
+                "Message count {} exceeds hard limit {}, forcing compression",
+                messages.len(),
+                MAX_MESSAGE_COUNT
+            );
+            return true;
+        }
+
         let estimated = self.estimate_tokens(messages);
         debug!(
             "Estimated tokens: {}/{}",

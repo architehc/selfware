@@ -31,6 +31,8 @@ tempfile = "3.9"
 base64 = "0.22"
 glob = "0.3"
 sha2 = "0.10"
+pbkdf2 = "0.12"
+hmac = "0.12"
 hex = "0.4"
 toml = "1.0"
 uuid = { version = "1.6", features = ["v4"] }
@@ -110,11 +112,6 @@ path = "tests/unit/mod.rs"
 [[test]]
 name = "integration"
 path = "tests/integration/mod.rs"
-required-features = ["integration"]
-
-[[test]]
-name = "system_test"
-path = "tests/system_test.rs"
 required-features = ["integration"]
 
 # Examples

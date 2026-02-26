@@ -953,14 +953,18 @@ impl Swarm {
         if let Some(task) = self.task_queue.iter_mut().find(|t| t.id == task_id) {
             task.results.insert(agent_id.to_string(), result.into());
 
-            // Check if all agents have submitted results
-            if task.results.len() >= task.assigned_agents.len() {
+            // Check if all agents have submitted results — done atomically
+            // within the same mutable borrow to avoid inconsistent state
+            let all_done = task.results.len() >= task.assigned_agents.len();
+            if all_done {
                 task.status = TaskStatus::Completed;
             }
-        }
 
-        if let Some(agent) = self.agents.get_mut(agent_id) {
-            agent.complete_task(true);
+            // Update agent status only when task was found, keeping both
+            // operations together so they succeed or fail as a unit
+            if let Some(agent) = self.agents.get_mut(agent_id) {
+                agent.complete_task(true);
+            }
         }
     }
 

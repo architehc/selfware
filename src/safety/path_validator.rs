@@ -20,6 +20,12 @@ impl PathValidator {
 
     /// Canonicalize and check a file path for safety.
     pub fn validate(&self, path: &str) -> Result<()> {
+        // Reject null bytes early — they can truncate paths at the OS/C-library
+        // boundary, allowing an attacker to bypass later validation checks.
+        if path.contains('\0') {
+            anyhow::bail!("Path contains null bytes");
+        }
+
         let path_buf = Path::new(path);
         let resolved = if path_buf.is_absolute() {
             path_buf.to_path_buf()
@@ -409,5 +415,31 @@ mod tests {
         let validator = PathValidator::new(&config, cwd);
         let result = validator.validate(".env.local");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_null_byte_rejected() {
+        let config = make_config(vec![], vec![]);
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd);
+        let result = validator.validate("safe_path\0/etc/passwd");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("null bytes"));
+    }
+
+    #[test]
+    fn test_validate_null_byte_at_end_rejected() {
+        let config = make_config(vec![], vec![]);
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd);
+        let result = validator.validate("some/file.txt\0");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("null bytes"));
     }
 }

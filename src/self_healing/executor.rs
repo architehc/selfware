@@ -393,9 +393,15 @@ impl RecoveryExecutor {
             .total_backoff_ms
             .fetch_add(actual_delay_ms, Ordering::Relaxed);
 
-        // Actual sleep — this is the real recovery delay
+        // Actual sleep — this is the real recovery delay.
+        // Use block_in_place so tokio can schedule other tasks on this thread
+        // while we wait. The entire execute_retry call chain is synchronous,
+        // so we cannot use tokio::time::sleep().await directly without a
+        // large-scale async refactor.
         if actual_delay_ms > 0 {
-            std::thread::sleep(Duration::from_millis(actual_delay_ms));
+            tokio::task::block_in_place(|| {
+                std::thread::sleep(Duration::from_millis(actual_delay_ms));
+            });
         }
 
         debug!(

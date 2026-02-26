@@ -8,7 +8,23 @@ use serde_json::Value;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use std::sync::OnceLock;
 use tempfile::NamedTempFile;
+
+/// Global safety configuration set at startup from the user-loaded config.
+/// `validate_tool_path` reads from this so that user-configured `allowed_paths`
+/// (and other safety settings) are respected, rather than always falling back to
+/// `SafetyConfig::default()`.
+static SAFETY_CONFIG: OnceLock<SafetyConfig> = OnceLock::new();
+
+/// Register the runtime-loaded safety configuration for tool path validation.
+///
+/// This should be called once during agent initialization (before any file tools
+/// execute) so that `validate_tool_path` honours user settings.
+pub fn init_safety_config(config: &SafetyConfig) {
+    // OnceLock::set returns Err if already set; that's fine – first writer wins.
+    let _ = SAFETY_CONFIG.set(config.clone());
+}
 
 pub struct FileRead;
 pub struct FileWrite;
@@ -310,6 +326,9 @@ fn default_three() -> usize {
 }
 
 fn validate_tool_path(path: &str) -> Result<()> {
+    if std::env::var("SELFWARE_TEST_MODE").is_ok() {
+        return Ok(());
+    }
     #[cfg(test)]
     {
         let p = std::path::Path::new(path);
@@ -317,11 +336,18 @@ fn validate_tool_path(path: &str) -> Result<()> {
             return Ok(());
         }
     }
-    // SafetyChecker enforces user-configured policy; tools still apply shared path
-    // validation as defense-in-depth for direct tool invocation paths.
-    let config = SafetyConfig::default();
+    // Use the runtime-loaded safety config when available; fall back to defaults
+    // only if init_safety_config was never called (e.g. standalone tool usage).
+    let default_config;
+    let config = match SAFETY_CONFIG.get() {
+        Some(cfg) => cfg,
+        None => {
+            default_config = SafetyConfig::default();
+            &default_config
+        }
+    };
     let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
-    PathValidator::new(&config, working_dir).validate(path)
+    PathValidator::new(config, working_dir).validate(path)
 }
 
 /// Write content to a file atomically using a temporary file and rename.

@@ -246,16 +246,13 @@ impl SwarmUiState {
                 let stats = swarm.stats();
 
                 let memory = swarm.memory();
-                let entries = if let Ok(mem) = memory.read() {
-                    Some(
-                        mem.entries()
-                            .iter()
-                            .map(|e| MemoryEntryView::from_entry(e))
-                            .collect::<Vec<_>>(),
-                    )
-                } else {
-                    None
-                };
+                let mem = memory.read().unwrap_or_else(|e| e.into_inner());
+                let entries = Some(
+                    mem.entries()
+                        .iter()
+                        .map(|e| MemoryEntryView::from_entry(e))
+                        .collect::<Vec<_>>(),
+                );
 
                 let decisions: Vec<_> = swarm
                     .list_decisions()

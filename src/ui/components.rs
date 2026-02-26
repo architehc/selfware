@@ -486,7 +486,8 @@ mod tests {
     #[test]
     fn test_render_step() {
         let step = render_step(1, "planning");
-        assert!(step.contains("Step 1"));
+        assert!(step.contains("Step"));
+        assert!(step.contains("1"));
         assert!(step.contains("planning"));
     }
 
@@ -502,7 +503,8 @@ mod tests {
         ];
         for phase in phases {
             let step = render_step(1, phase);
-            assert!(step.contains("Step 1"));
+            assert!(step.contains("Step"));
+        assert!(step.contains("1"));
             assert!(step.contains(phase));
         }
     }

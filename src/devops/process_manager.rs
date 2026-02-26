@@ -581,139 +581,166 @@ async fn monitor_process(
     max_restarts: u32,
 ) {
     loop {
-        let exit_status = {
-            let mut child_guard = child_handle.write().await;
-            if let Some(ref mut child) = *child_guard {
-                child.wait().await.ok()
-            } else {
-                None
-            }
-        };
-
-        if let Some(status) = exit_status {
-            let exit_code = status.code();
-            warn!("Process '{}' exited with code: {:?}", id, exit_code);
-
-            let mut procs = processes.write().await;
-            if let Some(proc) = procs.get_mut(&id) {
-                let should_restart = auto_restart
-                    && (max_restarts == 0 || proc.restart_count < max_restarts)
-                    && !matches!(proc.status, ProcessStatus::Stopped);
-
-                if should_restart {
-                    proc.restart_count += 1;
-                    let restart_attempt = proc.restart_count;
-                    proc.status = ProcessStatus::Restarting {
-                        attempt: restart_attempt,
-                    };
-                    info!(
-                        "Auto-restarting process '{}' (attempt {})",
-                        id, restart_attempt
-                    );
-
-                    // Clone config for restart
-                    let config = proc.config.clone();
-                    let health_pattern = config
-                        .health_check_pattern
-                        .as_ref()
-                        .and_then(|p| Regex::new(p).ok());
-
-                    // Backoff delay
-                    let delay = std::cmp::min(restart_attempt * 2, 30);
-                    drop(procs);
-                    tokio::time::sleep(tokio::time::Duration::from_secs(delay as u64)).await;
-
-                    // Actually restart the process
-                    match spawn_child_process(&config).await {
-                        Ok((pid, new_child_handle)) => {
-                            // Update process state
-                            {
-                                let mut procs = processes.write().await;
-                                if let Some(proc) = procs.get_mut(&id) {
-                                    proc.pid = pid;
-                                    proc.started_at = Some(Utc::now());
-                                    proc.status = ProcessStatus::Starting;
-                                    proc.health_matched = false;
-                                    proc.child_handle = Some(new_child_handle.clone());
-                                }
-                            }
-
-                            // Setup output collection for the new process
-                            {
-                                let mut child_guard = new_child_handle.write().await;
-                                if let Some(ref mut child) = *child_guard {
-                                    if let Some(stdout) = child.stdout.take() {
-                                        let procs = processes.clone();
-                                        let proc_id = id.clone();
-                                        let hp = health_pattern.clone();
-                                        tokio::spawn(async move {
-                                            collect_output(
-                                                procs,
-                                                proc_id,
-                                                stdout,
-                                                LogStream::Stdout,
-                                                hp,
-                                            )
-                                            .await;
-                                        });
-                                    }
-                                    if let Some(stderr) = child.stderr.take() {
-                                        let procs = processes.clone();
-                                        let proc_id = id.clone();
-                                        tokio::spawn(async move {
-                                            collect_output(
-                                                procs,
-                                                proc_id,
-                                                stderr,
-                                                LogStream::Stderr,
-                                                None,
-                                            )
-                                            .await;
-                                        });
-                                    }
-                                }
-                            }
-
-                            // Update child_handle for continued monitoring
-                            // Move the child from new_child_handle to the original child_handle
-                            let new_child = new_child_handle.write().await.take();
-                            *child_handle.write().await = new_child;
-
-                            // Mark as running after brief startup
-                            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                            let mut procs = processes.write().await;
-                            if let Some(proc) = procs.get_mut(&id) {
-                                if matches!(proc.status, ProcessStatus::Starting)
-                                    && health_pattern.is_none()
-                                {
-                                    proc.status = ProcessStatus::Running;
-                                    proc.health_matched = true;
-                                }
-                            }
-
-                            info!(
-                                "Process '{}' restarted successfully (attempt {})",
-                                id, restart_attempt
-                            );
-                            // Continue monitoring loop
-                            continue;
-                        }
-                        Err(e) => {
-                            warn!("Failed to restart process '{}': {}", id, e);
-                            let mut procs = processes.write().await;
-                            if let Some(proc) = procs.get_mut(&id) {
-                                proc.status = ProcessStatus::Crashed { exit_code };
-                            }
-                        }
-                    }
+        // Poll for process exit using try_wait() with short lock holds.
+        // This avoids holding the child_handle write lock during a blocking
+        // wait, which would prevent stop() from acquiring the lock to kill
+        // the child process.
+        let exit_status = loop {
+            let try_result = {
+                let mut child_guard = child_handle.write().await;
+                if let Some(ref mut child) = *child_guard {
+                    child.try_wait().ok().flatten()
                 } else {
-                    proc.status = ProcessStatus::Crashed { exit_code };
+                    // Child was taken/killed by stop(), treat as stopped
+                    break None;
+                }
+            };
+            // Lock is dropped here
+
+            if let Some(status) = try_result {
+                break Some(status);
+            }
+
+            // Check if process was marked as stopped by stop()
+            {
+                let procs = processes.read().await;
+                if let Some(proc) = procs.get(&id) {
+                    if matches!(proc.status, ProcessStatus::Stopped) {
+                        break None;
+                    }
                 }
             }
-            break;
-        }
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            // Sleep briefly before polling again
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        };
+
+        let Some(status) = exit_status else {
+            // Child handle was empty or process was stopped externally.
+            // Exit the monitor loop.
+            break;
+        };
+
+        let exit_code = status.code();
+        warn!("Process '{}' exited with code: {:?}", id, exit_code);
+
+        let mut procs = processes.write().await;
+        if let Some(proc) = procs.get_mut(&id) {
+            let should_restart = auto_restart
+                && (max_restarts == 0 || proc.restart_count < max_restarts)
+                && !matches!(proc.status, ProcessStatus::Stopped);
+
+            if should_restart {
+                proc.restart_count += 1;
+                let restart_attempt = proc.restart_count;
+                proc.status = ProcessStatus::Restarting {
+                    attempt: restart_attempt,
+                };
+                info!(
+                    "Auto-restarting process '{}' (attempt {})",
+                    id, restart_attempt
+                );
+
+                // Clone config for restart
+                let config = proc.config.clone();
+                let health_pattern = config
+                    .health_check_pattern
+                    .as_ref()
+                    .and_then(|p| Regex::new(p).ok());
+
+                // Backoff delay
+                let delay = std::cmp::min(restart_attempt * 2, 30);
+                drop(procs);
+                tokio::time::sleep(tokio::time::Duration::from_secs(delay as u64)).await;
+
+                // Actually restart the process
+                match spawn_child_process(&config).await {
+                    Ok((pid, new_child_handle)) => {
+                        // Update process state
+                        {
+                            let mut procs = processes.write().await;
+                            if let Some(proc) = procs.get_mut(&id) {
+                                proc.pid = pid;
+                                proc.started_at = Some(Utc::now());
+                                proc.status = ProcessStatus::Starting;
+                                proc.health_matched = false;
+                                proc.child_handle = Some(new_child_handle.clone());
+                            }
+                        }
+
+                        // Setup output collection for the new process
+                        {
+                            let mut child_guard = new_child_handle.write().await;
+                            if let Some(ref mut child) = *child_guard {
+                                if let Some(stdout) = child.stdout.take() {
+                                    let procs = processes.clone();
+                                    let proc_id = id.clone();
+                                    let hp = health_pattern.clone();
+                                    tokio::spawn(async move {
+                                        collect_output(
+                                            procs,
+                                            proc_id,
+                                            stdout,
+                                            LogStream::Stdout,
+                                            hp,
+                                        )
+                                        .await;
+                                    });
+                                }
+                                if let Some(stderr) = child.stderr.take() {
+                                    let procs = processes.clone();
+                                    let proc_id = id.clone();
+                                    tokio::spawn(async move {
+                                        collect_output(
+                                            procs,
+                                            proc_id,
+                                            stderr,
+                                            LogStream::Stderr,
+                                            None,
+                                        )
+                                        .await;
+                                    });
+                                }
+                            }
+                        }
+
+                        // Update child_handle for continued monitoring
+                        // Move the child from new_child_handle to the original child_handle
+                        let new_child = new_child_handle.write().await.take();
+                        *child_handle.write().await = new_child;
+
+                        // Mark as running after brief startup
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                        let mut procs = processes.write().await;
+                        if let Some(proc) = procs.get_mut(&id) {
+                            if matches!(proc.status, ProcessStatus::Starting)
+                                && health_pattern.is_none()
+                            {
+                                proc.status = ProcessStatus::Running;
+                                proc.health_matched = true;
+                            }
+                        }
+
+                        info!(
+                            "Process '{}' restarted successfully (attempt {})",
+                            id, restart_attempt
+                        );
+                        // Continue monitoring loop
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!("Failed to restart process '{}': {}", id, e);
+                        let mut procs = processes.write().await;
+                        if let Some(proc) = procs.get_mut(&id) {
+                            proc.status = ProcessStatus::Crashed { exit_code };
+                        }
+                    }
+                }
+            } else if !matches!(proc.status, ProcessStatus::Stopped) {
+                proc.status = ProcessStatus::Crashed { exit_code };
+            }
+        }
+        break;
     }
 }
 

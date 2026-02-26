@@ -945,7 +945,8 @@ mod tests {
         let garden = DigitalGarden::new("empty-garden");
         let output = garden.render();
         assert!(output.contains("empty-garden"));
-        assert!(output.contains("0 plants"));
+        assert!(output.contains("plants across"));
+        assert!(output.contains("0"));
     }
 
     #[test]

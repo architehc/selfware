@@ -385,6 +385,8 @@ impl Agent {
         };
 
         // Snapshot file before edit/write for undo support
+        // TODO: consider spawn_blocking for large files — std::fs::read_to_string
+        // blocks the async runtime thread, but for typical source files this is fine.
         if matches!(name, "file_edit" | "file_write" | "file_delete") {
             if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
                 if let Ok(content) = std::fs::read_to_string(path) {

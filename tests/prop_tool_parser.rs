@@ -3,16 +3,16 @@ use proptest::prelude::*;
 
 proptest! {
     #[test]
-    fn test_parse_tool_calls_never_panics(s in "\PC*") {
+    fn test_parse_tool_calls_never_panics(s in r"\PC*") {
         let _ = parse_tool_calls(&s);
     }
 
     #[test]
     fn test_xml_format_robustness(
         name in "[a-zA-Z_][a-zA-Z0-9_]*",
-        args in "\PC*",
-        prefix in "\PC*",
-        suffix in "\PC*"
+        args in r"\PC*",
+        prefix in r"\PC*",
+        suffix in r"\PC*"
     ) {
         let content = format!("{}<tool><name>{}</name><arguments>{}</arguments></tool>{}", 
             prefix, name, args, suffix);
@@ -27,8 +27,8 @@ proptest! {
     #[test]
     fn test_json_block_robustness(
         name in "[a-zA-Z_][a-zA-Z0-9_]*",
-        prefix in "\PC*",
-        suffix in "\PC*"
+        prefix in r"\PC*",
+        suffix in r"\PC*"
     ) {
         let json_str = format!(r#"{{"tool": "{}", "arguments": {{}}}}"#, name);
         let content = format!("{}```json
@@ -45,9 +45,9 @@ proptest! {
     #[test]
     fn test_qwen3_alt_format_robustness(
         name in "[a-zA-Z_][a-zA-Z0-9_]*",
-        args in "\PC*",
-        prefix in "\PC*",
-        suffix in "\PC*"
+        args in r"\PC*",
+        prefix in r"\PC*",
+        suffix in r"\PC*"
     ) {
         let content = format!("{}<tool><name={}</name><arguments>{}</arguments></tool>{}", 
             prefix, name, args, suffix);
@@ -63,8 +63,8 @@ proptest! {
         name in "[a-zA-Z_][a-zA-Z0-9_]*",
         key in "[a-zA-Z_][a-zA-Z0-9_]*",
         val in "[^<]*",
-        prefix in "\PC*",
-        suffix in "\PC*"
+        prefix in r"\PC*",
+        suffix in r"\PC*"
     ) {
         let content = format!("{}<function={}><parameter={}>{}</parameter></function>{}", 
             prefix, name, key, val, suffix);
