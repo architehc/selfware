@@ -6,6 +6,17 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
 
+/// Returns the platform-appropriate shell and flag for command execution.
+///
+/// On Windows, returns `("cmd", "/C")`. On Unix-like systems, returns `("sh", "-c")`.
+pub fn default_shell() -> (&'static str, &'static str) {
+    if cfg!(target_os = "windows") {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    }
+}
+
 pub struct ShellExec;
 
 #[async_trait]
@@ -74,8 +85,9 @@ impl Tool for ShellExec {
             }
         }
 
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-c").arg(&args.command);
+        let (shell, flag) = default_shell();
+        let mut cmd = tokio::process::Command::new(shell);
+        cmd.arg(flag).arg(&args.command);
 
         if let Some(cwd) = &args.cwd {
             cmd.current_dir(cwd);

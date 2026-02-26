@@ -2,9 +2,10 @@ use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rand::RngCore;
 use sha2::Sha256;
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 /// Manager for at-rest encryption of sensitive data.
@@ -12,22 +13,63 @@ pub struct EncryptionManager {
     key: [u8; 32],
 }
 
-/// Application-specific salt for PBKDF2 key derivation.
-const KDF_SALT: &[u8] = b"selfware-encryption-v1";
+/// Length of the per-installation random salt in bytes.
+const SALT_LEN: usize = 32;
 
 /// Number of PBKDF2 iterations. 100,000 is the OWASP minimum recommendation
 /// for PBKDF2-HMAC-SHA256 as of 2023.
 const KDF_ITERATIONS: u32 = 100_000;
 
-/// Derive a 256-bit encryption key from a password using PBKDF2-HMAC-SHA256.
+/// Return the path where the per-installation salt is stored.
+fn salt_file_path() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("selfware")
+        .join("encryption_salt")
+}
+
+/// Load or generate the per-installation salt.
 ///
-/// BREAKING CHANGE: This replaces the previous plain SHA-256 derivation.
-/// Existing encrypted session data created before this change will NOT be
-/// decryptable with keys derived by this function. A migration or
-/// re-encryption step is required for any pre-existing data.
+/// On first use, a cryptographically random salt is generated and persisted.
+/// Subsequent calls read the existing salt. This ensures each installation
+/// has a unique salt, preventing rainbow-table attacks.
+fn load_or_create_salt() -> Result<Vec<u8>> {
+    let path = salt_file_path();
+
+    if path.exists() {
+        let data = std::fs::read(&path).context("Failed to read encryption salt file")?;
+        if data.len() == SALT_LEN {
+            return Ok(data);
+        }
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).context("Failed to create selfware data directory")?;
+    }
+
+    let mut salt = vec![0u8; SALT_LEN];
+    rand::rng().fill_bytes(&mut salt);
+    std::fs::write(&path, &salt).context("Failed to write encryption salt file")?;
+    Ok(salt)
+}
+
+/// Derive a 256-bit encryption key from a password using PBKDF2-HMAC-SHA256
+/// with a per-installation random salt.
 fn derive_key(password: &str) -> [u8; 32] {
+    let salt = load_or_create_salt().unwrap_or_else(|_| {
+        // Last-resort fallback: derive from machine-specific data.
+        let mut fallback = Vec::new();
+        fallback.extend_from_slice(b"selfware-fallback-");
+        if let Ok(name) = whoami::username() {
+            fallback.extend_from_slice(name.as_bytes());
+        }
+        if let Ok(host) = whoami::hostname() {
+            fallback.extend_from_slice(host.as_bytes());
+        }
+        fallback
+    });
     let mut key = [0u8; 32];
-    pbkdf2::pbkdf2_hmac::<Sha256>(password.as_bytes(), KDF_SALT, KDF_ITERATIONS, &mut key);
+    pbkdf2::pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt, KDF_ITERATIONS, &mut key);
     key
 }
 

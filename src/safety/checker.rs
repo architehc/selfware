@@ -174,7 +174,7 @@ impl SafetyChecker {
     /// 2. Check against regex patterns for dangerous commands
     /// 3. Detect command chaining that might bypass simple checks
     /// 4. Block base64-encoded command execution
-    fn check_shell_command(&self, cmd: &str) -> Result<()> {
+    pub fn check_shell_command(&self, cmd: &str) -> Result<()> {
         // Normalize the command: collapse whitespace, lowercase for pattern matching
         let normalized = normalize_shell_command(cmd);
 
@@ -325,6 +325,56 @@ impl SafetyChecker {
             anyhow::bail!("Blocked request to link-local address range (169.254.x.x)");
         }
 
+        // DNS rebinding protection: resolve hostname and check resulting IPs.
+        if let Ok(parsed) = url::Url::parse(url) {
+            if let Some(host) = parsed.host_str() {
+                if host.parse::<std::net::IpAddr>().is_err() {
+                    use std::net::ToSocketAddrs;
+                    let port = parsed.port().unwrap_or(match parsed.scheme() {
+                        "https" => 443,
+                        _ => 80,
+                    });
+                    if let Ok(addrs) = (host, port).to_socket_addrs() {
+                        for addr in addrs {
+                            let ip = addr.ip();
+                            match ip {
+                                std::net::IpAddr::V4(v4) => {
+                                    let octets = v4.octets();
+                                    if octets[0] == 169 && octets[1] == 254 {
+                                        anyhow::bail!("DNS rebinding blocked: {} -> {}", host, ip);
+                                    }
+                                    if octets == [100, 100, 100, 200] {
+                                        anyhow::bail!("DNS rebinding blocked: {} -> {}", host, ip);
+                                    }
+                                    if octets[0] == 127 {
+                                        anyhow::bail!("DNS rebinding blocked: {} -> {}", host, ip);
+                                    }
+                                    if octets[0] == 10
+                                        || (octets[0] == 172 && (octets[1] & 0xf0) == 16)
+                                        || (octets[0] == 192 && octets[1] == 168)
+                                    {
+                                        anyhow::bail!("DNS rebinding blocked: {} -> {}", host, ip);
+                                    }
+                                }
+                                std::net::IpAddr::V6(v6) => {
+                                    if v6.is_loopback() {
+                                        anyhow::bail!("DNS rebinding blocked: {} -> {}", host, ip);
+                                    }
+                                    let segs = v6.segments();
+                                    if segs[0] & 0xffc0 == 0xfe80 {
+                                        anyhow::bail!("DNS rebinding blocked: {} -> {}", host, ip);
+                                    }
+                                    if segs[0] & 0xfe00 == 0xfc00 {
+                                        anyhow::bail!("DNS rebinding blocked: {} -> {}", host, ip);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -470,31 +520,54 @@ static SUSPICIOUS_SUBSTITUTION_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 /// - Handles escaped characters
 /// - Normalizes path separators
 fn normalize_shell_command(cmd: &str) -> String {
-    // Collapse multiple spaces/tabs to single space
-    let mut result = cmd.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Extract quoted regions and replace with placeholders so normalization
+    // does not alter their content (prevents injection via quote destruction).
+    let mut quoted_segments: Vec<String> = Vec::new();
+    let mut unquoted = String::with_capacity(cmd.len());
+    let bytes = cmd.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if (c == b'"' || c == b'\'') && (i == 0 || bytes[i - 1] != b'\\') {
+            let quote = c;
+            let seg_start = i;
+            i += 1;
+            while i < bytes.len() && !(bytes[i] == quote && bytes[i - 1] != b'\\') {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+            let placeholder = format!("\x00Q{}\x00", quoted_segments.len());
+            quoted_segments.push(cmd[seg_start..i].to_string());
+            unquoted.push_str(&placeholder);
+        } else {
+            unquoted.push(c as char);
+            i += 1;
+        }
+    }
 
-    // Normalize multiple slashes to single slash (except at start for absolute paths)
+    // Normalize only the unquoted portions
+    let mut result: String = unquoted.split_whitespace().collect::<Vec<_>>().join(" ");
     while result.contains("//") {
         result = result.replace("//", "/");
     }
-
-    // Remove common escape sequences that might be used for obfuscation
     result = result.replace("\\n", "").replace("\\t", " ");
-
-    // Handle backtick command substitution - mark for inspection
-    // We don't execute, but we want to check content
     result = result.replace('`', "$(");
     result = result.replace("$(", " $( ");
     result = result.replace(')', " ) ");
-
-    // Normalize pipe spacing
     result = result.replace(" | ", "|");
     result = result.replace("| ", "|");
     result = result.replace(" |", "|");
     result = result.replace('|', " | ");
+    result = result.split_whitespace().collect::<Vec<_>>().join(" ");
 
-    // Collapse spaces again after all transformations
-    result.split_whitespace().collect::<Vec<_>>().join(" ")
+    // Restore quoted segments verbatim
+    for (idx, segment) in quoted_segments.iter().enumerate() {
+        let placeholder = format!("\x00Q{}\x00", idx);
+        result = result.replace(&placeholder, segment);
+    }
+    result
 }
 
 /// Split a shell command on command separators (; && ||)

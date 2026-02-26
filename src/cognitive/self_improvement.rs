@@ -13,6 +13,9 @@ use std::path::Path;
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Global limit for record vectors to prevent unbounded memory growth in long-running sessions.
+const MAX_ENTRIES: usize = 10_000;
+
 /// Outcome of a task or action
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Outcome {
@@ -172,7 +175,7 @@ impl PromptOptimizer {
             records: Vec::new(),
             patterns: HashMap::new(),
             task_stats: HashMap::new(),
-            max_records: 10000,
+            max_records: MAX_ENTRIES,
         }
     }
 
@@ -191,10 +194,21 @@ impl PromptOptimizer {
         stats.avg_tokens =
             (old_total_tokens + record.tokens_used as f32) / stats.total_attempts as f32;
 
+        // Trim task_stats if it grows too large
+        if self.task_stats.len() > MAX_ENTRIES / 10 {
+            let mut entries: Vec<_> = self.task_stats.iter()
+                .map(|(k, v)| (k.clone(), v.total_attempts))
+                .collect();
+            entries.sort_by_key(|(_, count)| *count);
+            for (key, _) in entries.iter().take(entries.len() / 2) {
+                self.task_stats.remove(key);
+            }
+        }
+
         // Store record
         self.records.push(record);
 
-        // Trim if needed
+        // Trim if needed — remove oldest entries
         if self.records.len() > self.max_records {
             self.records.drain(0..self.max_records / 2);
         }
@@ -313,7 +327,7 @@ impl PromptOptimizer {
             records: snapshot.records,
             patterns: snapshot.patterns,
             task_stats: snapshot.task_stats,
-            max_records: 10000,
+            max_records: MAX_ENTRIES,
         }
     }
 }
@@ -442,7 +456,7 @@ impl ToolSelectionLearner {
             records: Vec::new(),
             tool_stats: HashMap::new(),
             context_tools: HashMap::new(),
-            max_records: 10000,
+            max_records: MAX_ENTRIES,
         }
     }
 
@@ -483,10 +497,19 @@ impl ToolSelectionLearner {
             tool_scores.push((record.tool.clone(), record.outcome.score()));
         }
 
+        // Trim context_tools if it grows too large
+        if self.context_tools.len() > MAX_ENTRIES / 10 {
+            let mut entries: Vec<_> = self.context_tools.keys().cloned().collect();
+            entries.truncate(entries.len() / 2);
+            for key in entries {
+                self.context_tools.remove(&key);
+            }
+        }
+
         // Store record
         self.records.push(record);
 
-        // Trim if needed
+        // Trim if needed — remove oldest entries
         if self.records.len() > self.max_records {
             self.records.drain(0..self.max_records / 2);
         }
@@ -596,7 +619,7 @@ impl ToolSelectionLearner {
             records: snapshot.records,
             tool_stats: snapshot.tool_stats,
             context_tools: snapshot.context_tools,
-            max_records: 10000,
+            max_records: MAX_ENTRIES,
         }
     }
 }
@@ -744,7 +767,7 @@ impl ErrorPatternLearner {
             records: Vec::new(),
             patterns: HashMap::new(),
             type_counts: HashMap::new(),
-            max_records: 5000,
+            max_records: MAX_ENTRIES,
         }
     }
 
@@ -764,10 +787,21 @@ impl ErrorPatternLearner {
             .or_insert_with(|| ErrorPattern::new(&pattern_id, &record.error_type));
         pattern.update(&record);
 
+        // Trim patterns if they grow too large
+        if self.patterns.len() > MAX_ENTRIES / 10 {
+            let mut entries: Vec<_> = self.patterns.iter()
+                .map(|(k, v)| (k.clone(), v.count))
+                .collect();
+            entries.sort_by_key(|(_, count)| *count);
+            for (key, _) in entries.iter().take(entries.len() / 2) {
+                self.patterns.remove(key);
+            }
+        }
+
         // Store record
         self.records.push(record);
 
-        // Trim if needed
+        // Trim if needed — remove oldest entries
         if self.records.len() > self.max_records {
             self.records.drain(0..self.max_records / 2);
         }
@@ -875,7 +909,7 @@ impl ErrorPatternLearner {
             records: snapshot.records,
             patterns: snapshot.patterns,
             type_counts: snapshot.type_counts,
-            max_records: 5000,
+            max_records: MAX_ENTRIES,
         }
     }
 }

@@ -4,6 +4,49 @@ use crate::config::SafetyConfig;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 
+/// ELOOP errno value (symlink encountered with O_NOFOLLOW).
+#[cfg(target_os = "linux")]
+const ELOOP: i32 = 40;
+#[cfg(target_os = "macos")]
+const ELOOP: i32 = 62;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+const ELOOP: i32 = -1;
+
+/// O_NOFOLLOW flag value for OpenOptions::custom_flags.
+#[cfg(target_os = "linux")]
+const O_NOFOLLOW: i32 = 0o0400000;
+#[cfg(target_os = "macos")]
+const O_NOFOLLOW: i32 = 0x0100;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+const O_NOFOLLOW: i32 = 0;
+
+/// Atomically open a path with O_NOFOLLOW to prevent TOCTOU symlink races.
+/// Returns the real path of the opened file descriptor.
+#[cfg(unix)]
+fn open_nofollow_and_resolve(path: &Path) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+
+    let fd = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)?;
+
+    let fd_path = format!("/proc/self/fd/{}", fd.as_raw_fd());
+    let proc_path = Path::new(&fd_path);
+    if proc_path.exists() {
+        std::fs::read_link(proc_path)
+    } else {
+        // macOS: /proc unavailable. O_NOFOLLOW succeeded so path is not a symlink.
+        path.canonicalize()
+    }
+}
+
+#[cfg(not(unix))]
+fn open_nofollow_and_resolve(path: &Path) -> std::io::Result<PathBuf> {
+    path.canonicalize()
+}
+
 #[derive(Clone)]
 pub struct PathValidator {
     config: SafetyConfig,
@@ -33,24 +76,35 @@ impl PathValidator {
             self.working_dir.join(path_buf)
         };
 
-        // Canonicalize FIRST to eliminate TOCTOU window — the security
-        // decision is always based on the resolved canonical path, not the
-        // original which could be swapped between check and use.
-        let canonical = resolved
-            .canonicalize()
-            .unwrap_or_else(|_| normalize_path(&resolved));
-        let canonical_str = strip_unc_prefix(&canonical.to_string_lossy());
-
-        // Defense-in-depth: check for symlink attacks on the original path
-        // AFTER canonicalization so the security boundary is the canonical path.
-        if resolved.exists() {
-            self.check_symlink_safety(&resolved)?;
-        } else if let Some(parent) = resolved.parent() {
-            // For new files, check the parent directory
-            if parent.exists() {
-                self.check_symlink_safety(parent)?;
+        // Use O_NOFOLLOW atomic open to eliminate TOCTOU symlink races.
+        // For existing files, open with O_NOFOLLOW and resolve from the fd.
+        let canonical = if resolved.exists() {
+            match open_nofollow_and_resolve(&resolved) {
+                Ok(real_path) => real_path,
+                Err(e) if e.raw_os_error() == Some(ELOOP) => {
+                    // O_NOFOLLOW returns ELOOP for symlinks
+                    self.check_symlink_safety(&resolved)?;
+                    resolved.canonicalize().unwrap_or_else(|_| normalize_path(&resolved))
+                }
+                Err(_) => resolved.canonicalize().unwrap_or_else(|_| normalize_path(&resolved)),
             }
-        }
+        } else if let Some(parent) = resolved.parent() {
+            if parent.exists() {
+                match open_nofollow_and_resolve(parent) {
+                    Ok(real_parent) => real_parent.join(resolved.file_name().unwrap_or_default()),
+                    Err(e) if e.raw_os_error() == Some(ELOOP) => {
+                        self.check_symlink_safety(parent)?;
+                        resolved.canonicalize().unwrap_or_else(|_| normalize_path(&resolved))
+                    }
+                    Err(_) => normalize_path(&resolved),
+                }
+            } else {
+                normalize_path(&resolved)
+            }
+        } else {
+            normalize_path(&resolved)
+        };
+        let canonical_str = strip_unc_prefix(&canonical.to_string_lossy());
 
         // Strict path traversal check
         if path.contains("..") {

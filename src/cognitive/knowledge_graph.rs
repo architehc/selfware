@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Atomic counter for unique entity IDs
 static ENTITY_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -612,6 +613,9 @@ impl CodeSmellInstance {
     }
 }
 
+/// Maximum number of entities before LRU eviction kicks in.
+const MAX_GRAPH_ENTITIES: usize = 50_000;
+
 /// The codebase knowledge graph
 #[derive(Debug)]
 pub struct KnowledgeGraph {
@@ -633,6 +637,8 @@ pub struct KnowledgeGraph {
     source_relations: HashMap<String, HashSet<String>>,
     /// Relations by target
     target_relations: HashMap<String, HashSet<String>>,
+    /// Last-access timestamps for LRU eviction (entity ID -> epoch secs)
+    access_times: HashMap<String, u64>,
 }
 
 impl Default for KnowledgeGraph {
@@ -654,12 +660,105 @@ impl KnowledgeGraph {
             file_index: HashMap::new(),
             source_relations: HashMap::new(),
             target_relations: HashMap::new(),
+            access_times: HashMap::new(),
         }
+    }
+
+    /// Get current epoch seconds for access tracking.
+    fn now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
+    /// Touch an entity to mark it as recently used.
+    fn touch(&mut self, id: &str) {
+        self.access_times.insert(id.to_string(), Self::now_secs());
+    }
+
+    /// Evict least-recently-used entities until we are under MAX_GRAPH_ENTITIES.
+    fn evict_lru(&mut self) {
+        if self.entities.len() <= MAX_GRAPH_ENTITIES {
+            return;
+        }
+
+        let target = MAX_GRAPH_ENTITIES * 9 / 10; // Evict down to 90% capacity
+        let mut entries: Vec<_> = self.access_times.iter()
+            .map(|(id, &ts)| (id.clone(), ts))
+            .collect();
+        entries.sort_by_key(|(_, ts)| *ts);
+
+        let to_remove = self.entities.len() - target;
+        for (id, _) in entries.into_iter().take(to_remove) {
+            self.remove_entity_internal(&id);
+        }
+    }
+
+    /// Remove an entity and all associated relations and index entries.
+    fn remove_entity_internal(&mut self, id: &str) {
+        if let Some(entity) = self.entities.remove(id) {
+            // Clean up name index
+            if let Some(ids) = self.name_index.get_mut(&entity.name) {
+                ids.remove(id);
+                if ids.is_empty() {
+                    self.name_index.remove(&entity.name);
+                }
+            }
+            // Clean up type index
+            if let Some(ids) = self.type_index.get_mut(&entity.entity_type) {
+                ids.remove(id);
+                if ids.is_empty() {
+                    self.type_index.remove(&entity.entity_type);
+                }
+            }
+            // Clean up file index
+            if let Some(ref file) = entity.file {
+                if let Some(ids) = self.file_index.get_mut(file) {
+                    ids.remove(id);
+                    if ids.is_empty() {
+                        self.file_index.remove(file);
+                    }
+                }
+            }
+        }
+
+        // Remove relations involving this entity
+        let rel_ids_from: Vec<String> = self.source_relations
+            .remove(id)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let rel_ids_to: Vec<String> = self.target_relations
+            .remove(id)
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+        for rel_id in rel_ids_from.iter().chain(rel_ids_to.iter()) {
+            if let Some(rel) = self.relations.remove(rel_id) {
+                if rel.source_id == id {
+                    if let Some(ids) = self.target_relations.get_mut(&rel.target_id) {
+                        ids.remove(rel_id);
+                    }
+                }
+                if rel.target_id == id {
+                    if let Some(ids) = self.source_relations.get_mut(&rel.source_id) {
+                        ids.remove(rel_id);
+                    }
+                }
+            }
+        }
+
+        self.access_times.remove(id);
     }
 
     /// Add an entity
     pub fn add_entity(&mut self, entity: Entity) -> String {
         let id = entity.id.clone();
+
+        // Evict LRU entities if at capacity
+        self.evict_lru();
 
         // Index by name
         self.name_index
@@ -682,6 +781,7 @@ impl KnowledgeGraph {
         }
 
         self.entities.insert(id.clone(), entity);
+        self.touch(&id);
         id
     }
 
@@ -693,6 +793,10 @@ impl KnowledgeGraph {
     /// Add a relation
     pub fn add_relation(&mut self, relation: Relation) -> String {
         let id = relation.id.clone();
+
+        // Touch source and target entities (marks them as recently used)
+        self.touch(&relation.source_id);
+        self.touch(&relation.target_id);
 
         // Index by source
         self.source_relations

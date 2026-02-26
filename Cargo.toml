@@ -31,6 +31,7 @@ tempfile = "3.9"
 base64 = "0.22"
 glob = "0.3"
 sha2 = "0.10"
+shlex = "1"
 pbkdf2 = "0.12"
 hmac = "0.12"
 hex = "0.4"
@@ -53,6 +54,7 @@ pulldown-cmark = "0.13"  # Markdown parsing (0.12+ has breaking API changes)
 similar = "2.4"  # Diff algorithm
 unicode-width = "0.2"  # Unicode character display width
 rand = "0.9"  # Random number generation
+url = "2"  # URL parsing for SSRF protection
 ctrlc = "3"
 
 # Vector Memory & RAG

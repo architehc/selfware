@@ -617,6 +617,8 @@ pub struct WorkflowExecutor {
     llm_handler: Option<LlmHandler>,
     /// Dry-run mode (log but don't execute)
     dry_run: bool,
+    /// Safety checker for validating shell commands before execution
+    safety_checker: crate::safety::SafetyChecker,
 }
 
 impl WorkflowExecutor {
@@ -627,6 +629,9 @@ impl WorkflowExecutor {
             tool_handler: None,
             llm_handler: None,
             dry_run: false,
+            safety_checker: crate::safety::SafetyChecker::new(
+                &crate::config::SafetyConfig::default(),
+            ),
         }
     }
 
@@ -637,6 +642,9 @@ impl WorkflowExecutor {
             tool_handler: None,
             llm_handler: None,
             dry_run: true,
+            safety_checker: crate::safety::SafetyChecker::new(
+                &crate::config::SafetyConfig::default(),
+            ),
         }
     }
 
@@ -1167,6 +1175,9 @@ impl WorkflowExecutor {
                     return Ok(VarValue::String(format!("(dry-run) {}", resolved_cmd)));
                 }
 
+                // Safety check before execution
+                self.safety_checker.check_shell_command(&resolved_cmd)?;
+
                 // Execute shell command for real
                 context.log(
                     LogLevel::Info,
@@ -1174,13 +1185,27 @@ impl WorkflowExecutor {
                     None,
                 );
 
-                let output = Command::new("sh")
-                    .arg("-c")
+                let (shell, flag) = crate::tools::shell::default_shell();
+                let shell_future = Command::new(shell)
+                    .arg(flag)
                     .arg(&resolved_cmd)
                     .current_dir(&dir)
-                    .output()
-                    .await
-                    .map_err(|e| anyhow!("Failed to execute command: {}", e))?;
+                    .output();
+
+                const WORKFLOW_SHELL_TIMEOUT_SECS: u64 = 300;
+                let output = tokio::time::timeout(
+                    Duration::from_secs(WORKFLOW_SHELL_TIMEOUT_SECS),
+                    shell_future,
+                )
+                .await
+                .map_err(|_| {
+                    anyhow!(
+                        "Command '{}' timed out after {}s",
+                        resolved_cmd,
+                        WORKFLOW_SHELL_TIMEOUT_SECS
+                    )
+                })?
+                .map_err(|e| anyhow!("Failed to execute command: {}", e))?;
 
                 let stdout = String::from_utf8_lossy(&output.stdout).to_string();
                 let stderr = String::from_utf8_lossy(&output.stderr).to_string();

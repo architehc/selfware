@@ -428,14 +428,13 @@ impl TimelineEntry {
     }
 }
 
-/// Compute a simple hash of content
+/// Compute a SHA-256 hash of content for integrity checking.
+///
+/// Using a cryptographic hash instead of `DefaultHasher` ensures consistent,
+/// deterministic results across Rust versions and platforms.
 fn compute_hash(content: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    content.hash(&mut hasher);
-    format!("{:x}", hasher.finish())
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(content.as_bytes()))
 }
 
 /// Truncate string with ellipsis
