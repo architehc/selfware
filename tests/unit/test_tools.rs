@@ -52,11 +52,13 @@ async fn test_tool_registry() {
 // ---------------------------------------------------------------------------
 
 /// Verify that FileRead returns an error (not a panic) when the target path
-/// does not exist on the filesystem.
+/// does not exist on the filesystem. Uses a relative path within the project
+/// directory so that the safety path validator allows it through.
 #[tokio::test]
 async fn test_file_read_nonexistent_path_returns_error() {
     let tool = FileRead::new();
-    let args = json!({"path": "/tmp/__selfware_test_nonexistent_12345.txt"});
+    // Use a relative path so it passes the allowed-paths check ("./**")
+    let args = json!({"path": "__selfware_test_nonexistent_12345.txt"});
 
     let result = tool.execute(args).await;
     assert!(
@@ -128,11 +130,13 @@ async fn test_file_edit_empty_old_string_returns_error() {
 }
 
 /// Verify that DirectoryTree returns an error (or an empty listing) when
-/// asked to list a directory that does not exist on the filesystem.
+/// asked to list a directory that does not exist on the filesystem. Uses a
+/// relative path so that the safety path validator allows it through.
 #[tokio::test]
 async fn test_directory_tree_nonexistent_directory_returns_error() {
     let tool = DirectoryTree::new();
-    let args = json!({"path": "/tmp/__selfware_test_nonexistent_dir_98765"});
+    // Use a relative path so it passes the allowed-paths check ("./**")
+    let args = json!({"path": "__selfware_test_nonexistent_dir_98765"});
 
     let result = tool.execute(args).await;
     // WalkDir silently yields zero entries for a non-existent root, so
@@ -175,13 +179,13 @@ async fn test_shell_exec_empty_command_returns_error_or_nonzero() {
 }
 
 /// Verify that FileRead with a path to a directory (rather than a file)
-/// returns an error instead of panicking.
+/// returns an error instead of panicking. Uses "src" which is a directory
+/// that exists within the project (and passes the safety path validator).
 #[tokio::test]
 async fn test_file_read_directory_path_returns_error() {
-    let temp_dir = tempfile::TempDir::new().unwrap();
-
     let tool = FileRead::new();
-    let args = json!({"path": temp_dir.path().to_str().unwrap()});
+    // "src" is a directory that exists in the project root
+    let args = json!({"path": "src"});
 
     let result = tool.execute(args).await;
     assert!(
@@ -191,18 +195,17 @@ async fn test_file_read_directory_path_returns_error() {
 }
 
 /// Verify that FileWrite rejects content that exceeds the 10 MB write size
-/// limit, returning an error rather than allocating a huge file.
+/// limit, returning an error rather than allocating a huge file. Uses a
+/// relative path so that the safety path validator allows it through.
 #[tokio::test]
 async fn test_file_write_oversized_content_returns_error() {
-    let temp_dir = tempfile::TempDir::new().unwrap();
-    let file_path = temp_dir.path().join("big.txt");
-
     // 10 MB + 1 byte
     let content = "x".repeat(10 * 1024 * 1024 + 1);
 
     let tool = FileWrite::new();
+    // Use a relative path within the project so it passes allowed-paths
     let args = json!({
-        "path": file_path.to_str().unwrap(),
+        "path": "__selfware_test_big_file.txt",
         "content": content
     });
 
@@ -217,4 +220,7 @@ async fn test_file_write_oversized_content_returns_error() {
         "Unexpected error message: {}",
         err_msg
     );
+
+    // Clean up in case the file was somehow created
+    let _ = std::fs::remove_file("__selfware_test_big_file.txt");
 }
