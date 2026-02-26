@@ -3150,20 +3150,22 @@ mod tests {
 
     #[test]
     fn test_trim_message_history_removes_oldest_non_system() {
+        // Use long messages so the total clearly exceeds a small budget.
+        let long = "x".repeat(500);
         let mut msgs = vec![
             Message::system("system prompt"),
-            Message::user("first user message"),
-            Message::assistant("first reply"),
-            Message::user("second user message"),
-            Message::assistant("second reply"),
+            Message::user(&long),
+            Message::assistant(&long),
+            Message::user(&long),
+            Message::assistant(&long),
         ];
 
-        // Use a very small budget to force trimming
-        trim_messages(&mut msgs, 50);
+        // Budget of 20 tokens forces almost everything to be trimmed.
+        trim_messages(&mut msgs, 20);
 
-        // System message must survive
+        // System message must survive.
         assert_eq!(msgs[0].role, "system");
-        // At least some messages should have been removed
+        // At least some non-system messages should have been removed.
         assert!(msgs.len() < 5);
     }
 
