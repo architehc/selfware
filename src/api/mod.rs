@@ -531,7 +531,7 @@ impl ApiClient {
             .header("Content-Type", "application/json");
 
         if let Some(ref key) = self.config.api_key {
-            request = request.header("Authorization", format!("Bearer {}", key));
+            request = request.header("Authorization", format!("Bearer {}", key.expose()));
         }
 
         let response = request

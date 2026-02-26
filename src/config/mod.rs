@@ -10,8 +10,81 @@
 pub mod typed;
 
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::path::PathBuf;
+
+/// A string wrapper that prevents accidental logging of secrets.
+///
+/// `Display` and `Debug` both emit `[REDACTED]`.  To access the
+/// underlying value, call [`expose()`](RedactedString::expose).
+///
+/// Serializes / deserializes transparently as a plain string so that
+/// existing TOML config files continue to work unchanged.
+#[derive(Clone)]
+pub struct RedactedString(String);
+
+impl RedactedString {
+    /// Create a new `RedactedString` wrapping the given secret.
+    pub fn new(secret: impl Into<String>) -> Self {
+        Self(secret.into())
+    }
+
+    /// Return a reference to the underlying secret.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for RedactedString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[REDACTED]")
+    }
+}
+
+impl std::fmt::Debug for RedactedString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[REDACTED]")
+    }
+}
+
+impl PartialEq for RedactedString {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for RedactedString {}
+
+impl PartialEq<str> for RedactedString {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl Serialize for RedactedString {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RedactedString {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(RedactedString(s))
+    }
+}
+
+impl From<String> for RedactedString {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for RedactedString {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
 
 /// Execution mode for tool approval
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
@@ -49,13 +122,13 @@ pub struct Config {
     pub max_tokens: usize,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
-    // SECURITY NOTE: `api_key` is stored as a plain `String`. The key material
-    // may linger in memory after the value is dropped because Rust's allocator
-    // does not guarantee zeroing. Ideally this should use a wrapper like
-    // `secrecy::SecretString` that zeroes on drop. The custom `Debug` impl
-    // below ensures the key is never printed in logs or debug output.
     /// API authentication key (can also be set via `SELFWARE_API_KEY` env var).
-    pub api_key: Option<String>,
+    ///
+    /// Wrapped in [`RedactedString`] so that `Display` and `Debug` both
+    /// emit `[REDACTED]` -- preventing accidental exposure in logs or
+    /// error messages.  Use `api_key.as_ref().map(|k| k.expose())` to
+    /// access the raw value.
+    pub api_key: Option<RedactedString>,
 
     #[serde(default)]
     pub safety: SafetyConfig,
@@ -92,8 +165,8 @@ pub struct Config {
     pub show_tokens: bool,
 }
 
-// Manual `Debug` implementation that redacts the `api_key` field to prevent
-// accidental exposure of credentials in logs, error messages, or debug output.
+// Manual `Debug` implementation that delegates to `RedactedString`'s `Debug`
+// (which prints `[REDACTED]`) to prevent accidental exposure of credentials.
 impl std::fmt::Debug for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Config")
@@ -101,7 +174,7 @@ impl std::fmt::Debug for Config {
             .field("model", &self.model)
             .field("max_tokens", &self.max_tokens)
             .field("temperature", &self.temperature)
-            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("api_key", &self.api_key)
             .field("safety", &self.safety)
             .field("agent", &self.agent)
             .field("yolo", &self.yolo)
@@ -519,7 +592,7 @@ impl Config {
             config.model = model;
         }
         if let Ok(api_key) = std::env::var("SELFWARE_API_KEY") {
-            config.api_key = Some(api_key);
+            config.api_key = Some(RedactedString::new(api_key));
         }
         if let Ok(max_tokens) = std::env::var("SELFWARE_MAX_TOKENS") {
             if let Ok(n) = max_tokens.parse::<usize>() {
@@ -699,7 +772,7 @@ impl Config {
             );
         }
         if let Some(ref key) = self.api_key {
-            if key.is_empty() {
+            if key.expose().is_empty() {
                 eprintln!("Config warning: api_key is set but empty");
             }
         }
@@ -943,7 +1016,10 @@ mod tests {
             api_key = "sk-test-12345"
         "#;
         let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.api_key, Some("sk-test-12345".to_string()));
+        assert_eq!(
+            config.api_key.as_ref().map(|k| k.expose().to_string()),
+            Some("sk-test-12345".to_string())
+        );
     }
 
     #[test]
@@ -999,7 +1075,7 @@ mod tests {
     #[test]
     fn test_config_debug_redacts_api_key() {
         let config = Config {
-            api_key: Some("sk-super-secret-key-12345".to_string()),
+            api_key: Some(RedactedString::new("sk-super-secret-key-12345")),
             ..Config::default()
         };
         let debug_str = format!("{:?}", config);
@@ -1058,7 +1134,7 @@ mod tests {
             model: "test-model".to_string(),
             max_tokens: 4096,
             temperature: 0.7,
-            api_key: Some("test-key".to_string()),
+            api_key: Some(RedactedString::new("test-key")),
             safety: SafetyConfig {
                 allowed_paths: vec!["/home/**".to_string()],
                 denied_paths: vec!["**/.git/**".to_string()],
@@ -1255,7 +1331,10 @@ mod tests {
             api_key = ""
         "#;
         let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.api_key, Some("".to_string()));
+        assert_eq!(
+            config.api_key.as_ref().map(|k| k.expose().to_string()),
+            Some("".to_string())
+        );
     }
 
     #[test]

@@ -23,7 +23,7 @@ pub fn test_config() -> Config {
         model,
         max_tokens: 4096, // Keep small for faster responses
         temperature: 0.7,
-        api_key: env::var("SELFWARE_API_KEY").ok(),
+        api_key: env::var("SELFWARE_API_KEY").ok().map(selfware::config::RedactedString::new),
         safety: SafetyConfig {
             allowed_paths: vec!["/tmp/**".to_string(), "./**".to_string()],
             denied_paths: vec![],

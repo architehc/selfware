@@ -361,9 +361,34 @@ impl CheckpointManager {
     ///
     /// Supports both the new envelope format (with SHA-256 checksum) and the
     /// legacy bare-checkpoint format for backward compatibility.
+    ///
+    /// If the primary file is corrupted (invalid JSON, truncated, failed
+    /// integrity check), this automatically attempts recovery via
+    /// [`recover_from_corruption`](Self::recover_from_corruption).
     pub fn load(&self, task_id: &str) -> Result<TaskCheckpoint> {
         let path = self.checkpoint_path(task_id);
-        let json = fs::read_to_string(&path)
+
+        match self.try_load_from_path(&path) {
+            Ok(checkpoint) => Ok(checkpoint),
+            Err(primary_err) => {
+                // The primary file is missing or corrupt -- attempt recovery.
+                tracing::warn!(
+                    "Primary checkpoint load failed for {:?}: {}. Attempting recovery.",
+                    path,
+                    primary_err
+                );
+                self.recover_from_corruption(task_id)
+                    .with_context(|| format!(
+                        "Recovery also failed for task '{}'. Original error: {}",
+                        task_id, primary_err
+                    ))
+            }
+        }
+    }
+
+    /// Attempt to load and verify a checkpoint from a specific path.
+    fn try_load_from_path(&self, path: &std::path::Path) -> Result<TaskCheckpoint> {
+        let json = fs::read_to_string(path)
             .with_context(|| format!("Failed to read checkpoint from {:?}", path))?;
 
         // Try to parse as an envelope first (new format with integrity check)
@@ -382,6 +407,91 @@ impl CheckpointManager {
         let checkpoint: TaskCheckpoint =
             serde_json::from_str(&json).context("Failed to deserialize checkpoint")?;
         Ok(checkpoint)
+    }
+
+    /// Attempt to recover a corrupted checkpoint.
+    ///
+    /// Strategy:
+    /// 1. Try loading from the `.json.bak` backup (created by [`save`]).
+    /// 2. If the backup is also unusable, create a fresh checkpoint with the
+    ///    task ID preserved so the caller can resume from a clean state.
+    pub fn recover_from_corruption(&self, task_id: &str) -> Result<TaskCheckpoint> {
+        let backup_path = self.checkpoint_path(task_id).with_extension("json.bak");
+
+        // Attempt 1: try the backup file
+        if backup_path.exists() {
+            match self.try_load_from_path(&backup_path) {
+                Ok(checkpoint) => {
+                    tracing::info!(
+                        "Recovered checkpoint for task '{}' from backup {:?}",
+                        task_id,
+                        backup_path
+                    );
+                    // Re-save the recovered checkpoint as the primary file so
+                    // subsequent loads succeed without hitting recovery again.
+                    if let Err(e) = self.save(&checkpoint) {
+                        tracing::warn!(
+                            "Failed to re-save recovered checkpoint for '{}': {}",
+                            task_id,
+                            e
+                        );
+                    }
+                    return Ok(checkpoint);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Backup checkpoint {:?} is also corrupt: {}",
+                        backup_path,
+                        e
+                    );
+                }
+            }
+        }
+
+        // Attempt 2: create a fresh checkpoint so the caller can continue.
+        tracing::warn!(
+            "Creating fresh checkpoint for task '{}' after recovery failure",
+            task_id
+        );
+        let fresh = TaskCheckpoint::new(task_id.to_string(), String::new());
+        self.save(&fresh)
+            .with_context(|| format!("Failed to save fresh checkpoint for '{}'", task_id))?;
+        Ok(fresh)
+    }
+
+    /// Save a checkpoint with retry and exponential backoff.
+    ///
+    /// Attempts up to 3 saves with delays of 100 ms, 500 ms, and 2000 ms
+    /// between failures.  Each failure is logged.  Returns the first success
+    /// or the last error.
+    pub fn save_with_retry(&self, checkpoint: &TaskCheckpoint) -> Result<()> {
+        const DELAYS_MS: [u64; 3] = [100, 500, 2000];
+
+        let mut last_err: Option<anyhow::Error> = None;
+
+        for (attempt, delay_ms) in DELAYS_MS.iter().enumerate() {
+            if attempt > 0 {
+                if let Some(ref e) = last_err {
+                    tracing::warn!(
+                        "Checkpoint save attempt {}/3 failed for task '{}': {}. Retrying in {} ms.",
+                        attempt,
+                        checkpoint.task_id,
+                        e,
+                        delay_ms
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(*delay_ms));
+            }
+
+            match self.save(checkpoint) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Checkpoint save failed")))
     }
 
     /// List all saved tasks
@@ -1156,5 +1266,165 @@ mod tests {
         let ids: Vec<&str> = tasks.iter().map(|t| t.task_id.as_str()).collect();
         assert!(ids.contains(&"env_task"));
         assert!(ids.contains(&"bare_task"));
+    }
+
+    // ---- Corruption recovery tests ----
+
+    #[test]
+    fn test_recover_from_corruption_uses_backup() {
+        let dir = tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        // Save a valid checkpoint (this also creates the primary file)
+        let checkpoint =
+            TaskCheckpoint::new("recover_bak".to_string(), "Backup recovery".to_string());
+        manager.save(&checkpoint).unwrap();
+
+        // Manually create a backup copy of the valid file
+        let primary = dir.path().join("recover_bak.json");
+        let backup = dir.path().join("recover_bak.json.bak");
+        std::fs::copy(&primary, &backup).unwrap();
+
+        // Now corrupt the primary file
+        std::fs::write(&primary, "THIS IS NOT JSON").unwrap();
+
+        // Load should recover from the backup
+        let loaded = manager.load("recover_bak").unwrap();
+        assert_eq!(loaded.task_id, "recover_bak");
+        assert_eq!(loaded.task_description, "Backup recovery");
+    }
+
+    #[test]
+    fn test_recover_from_corruption_creates_fresh_when_no_backup() {
+        let dir = tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        // Write a corrupt primary file with no backup
+        let primary = dir.path().join("no_bak.json");
+        std::fs::write(&primary, "CORRUPT DATA").unwrap();
+
+        // Load should create a fresh checkpoint
+        let loaded = manager.load("no_bak").unwrap();
+        assert_eq!(loaded.task_id, "no_bak");
+        assert_eq!(loaded.task_description, "");
+        assert_eq!(loaded.status, TaskStatus::InProgress);
+    }
+
+    #[test]
+    fn test_recover_from_corruption_creates_fresh_when_backup_also_corrupt() {
+        let dir = tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        // Write corrupt primary and corrupt backup
+        let primary = dir.path().join("both_bad.json");
+        let backup = dir.path().join("both_bad.json.bak");
+        std::fs::write(&primary, "CORRUPT").unwrap();
+        std::fs::write(&backup, "ALSO CORRUPT").unwrap();
+
+        // Load should create a fresh checkpoint
+        let loaded = manager.load("both_bad").unwrap();
+        assert_eq!(loaded.task_id, "both_bad");
+        assert_eq!(loaded.task_description, "");
+    }
+
+    #[test]
+    fn test_recover_from_corruption_resaves_recovered() {
+        let dir = tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        // Save a valid checkpoint
+        let checkpoint =
+            TaskCheckpoint::new("resave_test".to_string(), "Resave after recovery".to_string());
+        manager.save(&checkpoint).unwrap();
+
+        // Create backup, then corrupt primary
+        let primary = dir.path().join("resave_test.json");
+        let backup = dir.path().join("resave_test.json.bak");
+        std::fs::copy(&primary, &backup).unwrap();
+        std::fs::write(&primary, "CORRUPT").unwrap();
+
+        // First load triggers recovery
+        let loaded = manager.load("resave_test").unwrap();
+        assert_eq!(loaded.task_description, "Resave after recovery");
+
+        // Remove backup; second load should succeed from re-saved primary
+        std::fs::remove_file(&backup).unwrap();
+        let loaded2 = manager.load("resave_test").unwrap();
+        assert_eq!(loaded2.task_description, "Resave after recovery");
+    }
+
+    #[test]
+    fn test_recover_detects_integrity_failure_and_falls_back() {
+        let dir = tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        // Save a valid checkpoint
+        let checkpoint = TaskCheckpoint::new(
+            "integrity_recover".to_string(),
+            "Integrity recovery".to_string(),
+        );
+        manager.save(&checkpoint).unwrap();
+
+        // Create a good backup
+        let primary = dir.path().join("integrity_recover.json");
+        let backup = dir.path().join("integrity_recover.json.bak");
+        std::fs::copy(&primary, &backup).unwrap();
+
+        // Tamper with primary envelope payload (valid JSON but bad hash)
+        let content = std::fs::read_to_string(&primary).unwrap();
+        let mut envelope: serde_json::Value = serde_json::from_str(&content).unwrap();
+        envelope["payload"]["task_description"] =
+            serde_json::Value::String("TAMPERED".to_string());
+        std::fs::write(&primary, serde_json::to_string_pretty(&envelope).unwrap()).unwrap();
+
+        // Load should detect integrity failure and recover from backup
+        let loaded = manager.load("integrity_recover").unwrap();
+        assert_eq!(loaded.task_description, "Integrity recovery");
+    }
+
+    // ---- Retry logic tests ----
+
+    #[test]
+    fn test_save_with_retry_succeeds_immediately() {
+        let dir = tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        let checkpoint =
+            TaskCheckpoint::new("retry_ok".to_string(), "Retry success".to_string());
+        manager.save_with_retry(&checkpoint).unwrap();
+
+        let loaded = manager.load("retry_ok").unwrap();
+        assert_eq!(loaded.task_id, "retry_ok");
+    }
+
+    #[test]
+    fn test_save_with_retry_fails_on_readonly_dir() {
+        // Create a directory and make it read-only so saves fail
+        let dir = tempdir().unwrap();
+        let readonly_dir = dir.path().join("readonly_checkpoints");
+        std::fs::create_dir_all(&readonly_dir).unwrap();
+        let manager = CheckpointManager::new(readonly_dir.clone()).unwrap();
+
+        // Make directory read-only
+        let mut perms = std::fs::metadata(&readonly_dir).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        {
+            perms.set_readonly(true);
+        }
+        std::fs::set_permissions(&readonly_dir, perms.clone()).unwrap();
+
+        let checkpoint = TaskCheckpoint::new(
+            "retry_fail".to_string(),
+            "Should fail all retries".to_string(),
+        );
+        let result = manager.save_with_retry(&checkpoint);
+        assert!(result.is_err());
+
+        // Restore permissions so tempdir cleanup works
+        #[allow(clippy::permissions_set_readonly_false)]
+        {
+            perms.set_readonly(false);
+        }
+        std::fs::set_permissions(&readonly_dir, perms).unwrap();
     }
 }
