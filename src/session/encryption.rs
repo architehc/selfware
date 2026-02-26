@@ -94,7 +94,31 @@ impl Drop for EncryptionManager {
 static INSTANCE: OnceLock<EncryptionManager> = OnceLock::new();
 
 impl EncryptionManager {
-    /// Initialize the global encryption manager with a password
+    /// Create a new per-session (non-global) encryption manager from a raw
+    /// 256-bit key.
+    ///
+    /// This enables multi-agent scenarios where different sessions use
+    /// different encryption contexts.  The caller is responsible for
+    /// deriving the key (e.g. via PBKDF2).
+    pub fn new_instance(key: [u8; 32]) -> Self {
+        EncryptionManager { key }
+    }
+
+    /// Create a new per-session encryption manager from a password.
+    ///
+    /// Convenience wrapper around [`new_instance`](Self::new_instance)
+    /// that derives a 256-bit key via PBKDF2-HMAC-SHA256 with the
+    /// installation salt.
+    pub fn new_from_password(password: &str) -> Self {
+        let key = derive_key(password);
+        Self::new_instance(key)
+    }
+
+    /// Initialize the global encryption manager with a password.
+    ///
+    /// This is the legacy entry-point.  For per-session usage prefer
+    /// [`new_from_password`](Self::new_from_password) or
+    /// [`new_instance`](Self::new_instance).
     pub fn init(password: &str) -> Result<()> {
         let key = derive_key(password);
 
@@ -179,8 +203,7 @@ impl EncryptionManager {
     /// Create an EncryptionManager directly (test only, bypasses OnceLock)
     #[cfg(test)]
     pub fn new_for_test(password: &str) -> Self {
-        let key = derive_key(password);
-        EncryptionManager { key }
+        Self::new_from_password(password)
     }
 }
 
@@ -247,5 +270,48 @@ mod tests {
             enc1, enc2,
             "Same plaintext should produce different ciphertext due to random nonce"
         );
+    }
+
+    // ---- Per-session instance tests ----
+
+    #[test]
+    fn new_instance_roundtrip() {
+        let key = [0x42u8; 32];
+        let mgr = EncryptionManager::new_instance(key);
+        let plaintext = b"per-session secret";
+        let encrypted = mgr.encrypt(plaintext).unwrap();
+        let decrypted = mgr.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn new_from_password_roundtrip() {
+        let mgr = EncryptionManager::new_from_password("session-password-xyz");
+        let plaintext = b"multi-agent data";
+        let encrypted = mgr.encrypt(plaintext).unwrap();
+        let decrypted = mgr.decrypt(&encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn different_instances_have_different_keys() {
+        let mgr_a = EncryptionManager::new_from_password("password-a");
+        let mgr_b = EncryptionManager::new_from_password("password-b");
+        let encrypted = mgr_a.encrypt(b"secret").unwrap();
+        // mgr_b should not be able to decrypt data encrypted by mgr_a
+        let result = mgr_b.decrypt(&encrypted);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn new_instance_with_raw_key() {
+        let key_a = [0xAAu8; 32];
+        let key_b = [0xBBu8; 32];
+        let mgr_a = EncryptionManager::new_instance(key_a);
+        let mgr_b = EncryptionManager::new_instance(key_b);
+
+        let encrypted = mgr_a.encrypt(b"data").unwrap();
+        assert!(mgr_b.decrypt(&encrypted).is_err());
+        assert_eq!(mgr_a.decrypt(&encrypted).unwrap(), b"data");
     }
 }

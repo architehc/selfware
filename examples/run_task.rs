@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
         temperature: 0.7,
 
         // API key (if required by your backend)
-        api_key: std::env::var("SELFWARE_API_KEY").ok(),
+        api_key: std::env::var("SELFWARE_API_KEY").ok().map(selfware::config::RedactedString::new),
 
         // Safety configuration
         safety: SafetyConfig {

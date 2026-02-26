@@ -54,7 +54,7 @@ fn slow_model_config() -> Config {
         model,
         max_tokens: 8192, // Larger for complex responses
         temperature: 0.3, // Lower for more deterministic behavior
-        api_key: env::var("SELFWARE_API_KEY").ok(),
+        api_key: env::var("SELFWARE_API_KEY").ok().map(selfware::config::RedactedString::new),
         safety: SafetyConfig {
             allowed_paths: vec!["/tmp/**".to_string(), "./**".to_string()],
             denied_paths: vec![],
