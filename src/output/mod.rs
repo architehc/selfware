@@ -223,10 +223,10 @@ pub(crate) fn semantic_summary(
         // === Search ===
         "grep_search" | "ripgrep_search" => {
             let pattern = extract_pattern(args).unwrap_or("?");
-            let short_pattern = if pattern.len() > 30 {
-                &pattern[..30]
+            let short_pattern = if pattern.chars().count() > 30 {
+                pattern.chars().take(30).collect::<String>()
             } else {
-                pattern
+                pattern.to_string()
             };
             let matches = result_json(result)
                 .and_then(|v| v.get("matches").and_then(|m| m.as_array().map(|a| a.len())))
@@ -321,7 +321,11 @@ pub(crate) fn semantic_summary(
         "http_request" => {
             let method = args.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
             let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("?");
-            let short_url = if url.len() > 40 { &url[..40] } else { url };
+            let short_url = if url.chars().count() > 40 {
+                url.chars().take(40).collect::<String>()
+            } else {
+                url.to_string()
+            };
             format!("HTTP {} {}", method, short_url)
         }
 
@@ -452,23 +456,39 @@ pub(crate) fn semantic_summary(
         // === Browser automation ===
         "browser_fetch" => {
             let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("?");
-            let short_url = if url.len() > 40 { &url[..40] } else { url };
+            let short_url = if url.chars().count() > 40 {
+                url.chars().take(40).collect::<String>()
+            } else {
+                url.to_string()
+            };
             format!("Fetch {}", short_url)
         }
         "browser_screenshot" => {
             let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("page");
-            let short_url = if url.len() > 40 { &url[..40] } else { url };
+            let short_url = if url.chars().count() > 40 {
+                url.chars().take(40).collect::<String>()
+            } else {
+                url.to_string()
+            };
             format!("Screenshot {}", short_url)
         }
         "browser_pdf" => {
             let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("page");
-            let short_url = if url.len() > 40 { &url[..40] } else { url };
+            let short_url = if url.chars().count() > 40 {
+                url.chars().take(40).collect::<String>()
+            } else {
+                url.to_string()
+            };
             format!("PDF {}", short_url)
         }
         "browser_eval" => "Browser eval".to_string(),
         "browser_links" => {
             let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("page");
-            let short_url = if url.len() > 40 { &url[..40] } else { url };
+            let short_url = if url.chars().count() > 40 {
+                url.chars().take(40).collect::<String>()
+            } else {
+                url.to_string()
+            };
             format!("Links from {}", short_url)
         }
 
@@ -526,8 +546,14 @@ pub(crate) fn tool_activity_message(name: &str, args: &serde_json::Value) -> Str
         "shell_exec" => format!(
             "Running {}...",
             extract_command(args)
-                .map(|c| if c.len() > 40 { &c[..40] } else { c })
-                .unwrap_or("command")
+                .map(|c| {
+                    if c.chars().count() > 40 {
+                        c.chars().take(40).collect::<String>()
+                    } else {
+                        c.to_string()
+                    }
+                })
+                .unwrap_or_else(|| "command".to_string())
         ),
         "cargo_test" => "Running tests...".to_string(),
         "cargo_check" => "Checking project...".to_string(),

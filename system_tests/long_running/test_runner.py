@@ -139,8 +139,23 @@ class CheckpointManager:
     def restore_checkpoint(self, checkpoint_path: Path) -> bool:
         """Restore from a checkpoint"""
         logger.info(f"Restoring from checkpoint: {checkpoint_path}")
-        # Implementation would restore agent states, etc.
-        return True
+        try:
+            # Extract task_id from filename (e.g., "task_123.json")
+            task_id = checkpoint_path.stem
+            result = subprocess.run(
+                ['selfware', 'resume', task_id],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                logger.info(f"Successfully resumed task {task_id}")
+                return True
+            else:
+                logger.error(f"Failed to resume task {task_id}: {result.stderr}")
+                return False
+        except Exception as e:
+            logger.error(f"Error during checkpoint restore: {e}")
+            return False
 
 
 class TestMonitor:
@@ -283,21 +298,46 @@ class MegaTestRunner:
         return True
     
     def _update_metrics(self):
-        """Update current metrics"""
+        """Update current metrics by reading the latest selfware checkpoint"""
         now = time.time()
         elapsed = now - self.phase_start_time
         
         self.metrics.elapsed_seconds = int(elapsed)
         self.metrics.phase = self.current_phase
         
+        # Locate selfware checkpoints
+        checkpoint_dir = Path.home() / ".selfware" / "checkpoints"
+        if not checkpoint_dir.exists():
+            return
+
+        # Find the latest checkpoint file
+        checkpoints = sorted(checkpoint_dir.glob("*.json"), key=os.path.getmtime, reverse=True)
+        if not checkpoints:
+            return
+
+        latest_cp_path = checkpoints[0]
+        try:
+            with open(latest_cp_path, 'r') as f:
+                data = json.load(f)
+                # Handle both envelope and legacy formats
+                payload = data.get("payload", data)
+                
+                self.metrics.total_tokens = payload.get("estimated_tokens", 0)
+                self.metrics.tasks_completed = payload.get("current_step", 0)
+                self.metrics.checkpoint_count = len(checkpoints)
+                self.metrics.errors_encountered = len(payload.get("errors", []))
+                
+                # If git info is available, update LoC estimate (simplified)
+                git_info = payload.get("git_checkpoint")
+                if git_info:
+                    # In a real scenario, we might run 'cloc' or similar
+                    self.metrics.lines_of_code = 1000 + (self.metrics.tasks_completed * 50)
+        except Exception as e:
+            logger.debug(f"Could not read latest checkpoint: {e}")
+
         # Calculate token rate
         if elapsed > 0:
             self.metrics.tokens_per_minute = self.metrics.total_tokens / (elapsed / 60)
-        
-        # TODO: Query actual agent metrics
-        # For now, use simulated growth
-        self.metrics.lines_of_code = int(1000 + elapsed * 0.5)
-        self.metrics.test_coverage = min(0.90, 0.30 + elapsed * 0.0001)
     
     def _create_checkpoint(self):
         """Create a checkpoint"""
@@ -309,12 +349,26 @@ class MegaTestRunner:
         logger.info(f"Checkpoint created: {checkpoint_path}")
     
     def _health_check(self) -> bool:
-        """Perform health check"""
-        # TODO: Implement actual health checks
-        # - Check agent responsiveness
-        # - Verify file system state
-        # - Validate git repository
-        # - Check resource usage
+        """Perform health check by verifying recent checkpoint updates"""
+        checkpoint_dir = Path.home() / ".selfware" / "checkpoints"
+        if not checkpoint_dir.exists():
+            return True # No checkpoints yet, still healthy
+
+        checkpoints = sorted(checkpoint_dir.glob("*.json"), key=os.path.getmtime, reverse=True)
+        if not checkpoints:
+            return True
+
+        latest_cp_path = checkpoints[0]
+        try:
+            mtime = os.path.getmtime(latest_cp_path)
+            # If no update for more than 5 minutes, consider it unhealthy
+            if time.time() - mtime > 300:
+                logger.warning(f"Health check: No checkpoint update for {int(time.time() - mtime)}s")
+                return False
+        except Exception as e:
+            logger.error(f"Health check failed to read mtime: {e}")
+            return False
+            
         return True
     
     def _attempt_recovery(self) -> bool:

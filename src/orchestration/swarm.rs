@@ -975,22 +975,20 @@ impl Swarm {
 
     /// Get swarm statistics
     pub fn stats(&self) -> SwarmStats {
-        let by_role: HashMap<AgentRole, usize> =
-            self.agents.values().fold(HashMap::new(), |mut acc, a| {
-                *acc.entry(a.role).or_insert(0) += 1;
-                acc
-            });
+        let mut by_role = HashMap::new();
+        let mut by_status = HashMap::new();
+        let mut total_trust = 0.0;
 
-        let by_status: HashMap<AgentStatus, usize> =
-            self.agents.values().fold(HashMap::new(), |mut acc, a| {
-                *acc.entry(a.status).or_insert(0) += 1;
-                acc
-            });
+        for agent in self.agents.values() {
+            *by_role.entry(agent.role).or_insert(0) += 1;
+            *by_status.entry(agent.status).or_insert(0) += 1;
+            total_trust += agent.trust_score;
+        }
 
         let avg_trust = if self.agents.is_empty() {
             0.0
         } else {
-            self.agents.values().map(|a| a.trust_score).sum::<f32>() / self.agents.len() as f32
+            total_trust / self.agents.len() as f32
         };
 
         SwarmStats {

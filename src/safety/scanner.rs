@@ -331,7 +331,7 @@ impl SecretScanner {
         if secret.len() <= 8 {
             "*".repeat(secret.len())
         } else {
-            format!("{}...{}", &secret[..4], "*".repeat(secret.len() - 4))
+            format!("{}...{}", secret.chars().take(4).collect::<String>(), "*".repeat(secret.chars().count().saturating_sub(4)))
         }
     }
 

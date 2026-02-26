@@ -862,10 +862,10 @@ To call a tool, use this EXACT XML structure:
 
         // Model name
         let model_name = &self.config.model;
-        let short_model = if model_name.len() > 15 {
-            &model_name[..15]
+        let short_model = if model_name.chars().count() > 15 {
+            model_name.chars().take(15).collect::<String>()
         } else {
-            model_name
+            model_name.clone()
         };
 
         // Mode indicator
@@ -926,17 +926,17 @@ To call a tool, use this EXACT XML structure:
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| ".".to_string());
-        let short_cwd = if cwd.len() > 40 {
-            format!("...{}", &cwd[cwd.len() - 37..])
+        let short_cwd = if cwd.chars().count() > 40 {
+            format!("...{}", cwd.chars().skip(cwd.chars().count() - 37).collect::<String>())
         } else {
             cwd
         };
 
         let model_name = &self.config.model;
-        let short_model = if model_name.len() > 20 {
-            &model_name[..20]
+        let short_model = if model_name.chars().count() > 20 {
+            model_name.chars().take(20).collect::<String>()
         } else {
-            model_name
+            model_name.clone()
         };
 
         let (k_tokens, k_window) = (tokens as f64 / 1000.0, window as f64 / 1000.0);

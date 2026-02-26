@@ -83,8 +83,8 @@ pub struct MemoryEntryView {
 impl MemoryEntryView {
     /// Create from a MemoryEntry
     pub fn from_entry(entry: &MemoryEntry) -> Self {
-        let preview = if entry.value.len() > 50 {
-            format!("{}...", &entry.value[..50])
+        let preview = if entry.value.chars().count() > 50 {
+            format!("{}...", entry.value.chars().take(50).collect::<String>())
         } else {
             entry.value.clone()
         };
