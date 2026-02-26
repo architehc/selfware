@@ -137,8 +137,8 @@ mod tests {
 
     #[test]
     fn test_value_as_string_float() {
-        let s = Value::Float(3.14).as_string();
-        assert!(s.contains("3.14"));
+        let s = Value::Float(3.15).as_string();
+        assert!(s.contains("3.15"));
     }
 
     #[test]

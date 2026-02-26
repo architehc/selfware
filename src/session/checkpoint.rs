@@ -290,11 +290,11 @@ impl CheckpointManager {
         redact::redact_json(&mut json_value);
 
         // Wrap in an integrity envelope with SHA-256 checksum
-        let envelope = CheckpointEnvelope::wrap(json_value)
-            .context("Failed to create checkpoint envelope")?;
+        let envelope =
+            CheckpointEnvelope::wrap(json_value).context("Failed to create checkpoint envelope")?;
 
-        let json = serde_json::to_string_pretty(&envelope)
-            .context("Failed to format checkpoint JSON")?;
+        let json =
+            serde_json::to_string_pretty(&envelope).context("Failed to format checkpoint JSON")?;
 
         // Atomic write: write to a temp file in the same directory, then rename.
         // `rename` within the same filesystem is atomic on Unix/Windows.
@@ -389,14 +389,13 @@ impl CheckpointManager {
             if path.extension().and_then(|s| s.to_str()) == Some("json") {
                 if let Ok(json) = fs::read_to_string(&path) {
                     // Try envelope format first, then legacy bare format
-                    let checkpoint_opt =
-                        serde_json::from_str::<CheckpointEnvelope>(&json)
-                            .ok()
-                            .and_then(|env| {
-                                env.verify().ok()?;
-                                serde_json::from_value::<TaskCheckpoint>(env.payload).ok()
-                            })
-                            .or_else(|| serde_json::from_str::<TaskCheckpoint>(&json).ok());
+                    let checkpoint_opt = serde_json::from_str::<CheckpointEnvelope>(&json)
+                        .ok()
+                        .and_then(|env| {
+                            env.verify().ok()?;
+                            serde_json::from_value::<TaskCheckpoint>(env.payload).ok()
+                        })
+                        .or_else(|| serde_json::from_str::<TaskCheckpoint>(&json).ok());
 
                     if let Some(checkpoint) = checkpoint_opt {
                         summaries.push(checkpoint.to_summary());
@@ -1040,8 +1039,8 @@ mod tests {
         let payload = serde_json::json!({"task_id": "test"});
         let mut envelope = CheckpointEnvelope::wrap(payload).unwrap();
         // Corrupt the hash
-        envelope.sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
-            .to_string();
+        envelope.sha256 =
+            "0000000000000000000000000000000000000000000000000000000000000000".to_string();
         assert!(envelope.verify().is_err());
     }
 
@@ -1074,8 +1073,7 @@ mod tests {
         let path = dir.path().join("corrupt_test.json");
         let content = std::fs::read_to_string(&path).unwrap();
         let mut envelope: serde_json::Value = serde_json::from_str(&content).unwrap();
-        envelope["payload"]["task_description"] =
-            serde_json::Value::String("TAMPERED".to_string());
+        envelope["payload"]["task_description"] = serde_json::Value::String("TAMPERED".to_string());
         std::fs::write(&path, serde_json::to_string_pretty(&envelope).unwrap()).unwrap();
 
         // Load should fail with integrity error

@@ -23,12 +23,12 @@ use crate::config::Config;
 use crate::memory::AgentMemory;
 use crate::output;
 use crate::safety::SafetyChecker;
-use crate::tools::file::init_safety_config;
 #[cfg(feature = "resilience")]
 use crate::self_healing::{SelfHealingConfig, SelfHealingEngine};
 use crate::session::chat_store::ChatStore;
 use crate::session::edit_history::EditHistory;
 use crate::telemetry::{enter_agent_step, record_state_transition};
+use crate::tools::file::init_safety_config;
 use crate::tools::ToolRegistry;
 use crate::verification::{VerificationConfig, VerificationGate};
 
@@ -140,7 +140,10 @@ impl Agent {
                     engine
                 }
                 Err(e) => {
-                    warn!("Failed to load improvement engine state: {}, starting fresh", e);
+                    warn!(
+                        "Failed to load improvement engine state: {}, starting fresh",
+                        e
+                    );
                     SelfImprovementEngine::new()
                 }
             }
@@ -471,9 +474,7 @@ To call a tool, use this EXACT XML structure:
                     tool,
                     score * 100.0
                 );
-                self.cognitive_state
-                    .working_memory
-                    .add_fact(&hint);
+                self.cognitive_state.working_memory.add_fact(&hint);
             }
         }
 

@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
         // Generation parameters
         temperature: 0.7,
         max_tokens: 4096,
-        
+
         // Failure policy
         failure_policy: selfware::multiagent::MultiAgentFailurePolicy::BestEffort,
     };

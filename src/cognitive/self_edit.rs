@@ -220,13 +220,20 @@ impl SelfEditOrchestrator {
         targets.retain(|t| t.confidence > 0.5);
 
         // Sort by priority (descending)
-        targets.sort_by(|a, b| b.priority.partial_cmp(&a.priority).unwrap_or(std::cmp::Ordering::Equal));
+        targets.sort_by(|a, b| {
+            b.priority
+                .partial_cmp(&a.priority)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         targets
     }
 
     /// Select the best target to work on
-    pub fn select_target<'a>(&self, targets: &'a [ImprovementTarget]) -> Option<&'a ImprovementTarget> {
+    pub fn select_target<'a>(
+        &self,
+        targets: &'a [ImprovementTarget],
+    ) -> Option<&'a ImprovementTarget> {
         targets.first()
     }
 
@@ -330,10 +337,7 @@ impl SelfEditOrchestrator {
     }
 
     /// Evaluate effectiveness of an improvement from before/after metrics
-    pub fn evaluate(
-        before: &PerformanceSnapshot,
-        after: &PerformanceSnapshot,
-    ) -> f64 {
+    pub fn evaluate(before: &PerformanceSnapshot, after: &PerformanceSnapshot) -> f64 {
         after.effectiveness_delta(before)
     }
 
@@ -410,8 +414,7 @@ mod tests {
 
     #[test]
     fn test_deny_list() {
-        let orchestrator =
-            SelfEditOrchestrator::new(PathBuf::from("/tmp/selfware_test"));
+        let orchestrator = SelfEditOrchestrator::new(PathBuf::from("/tmp/selfware_test"));
         let target = ImprovementTarget::new(
             ImprovementCategory::CodeQuality,
             "edit safety",
@@ -433,8 +436,7 @@ mod tests {
 
     #[test]
     fn test_build_improvement_prompt() {
-        let orchestrator =
-            SelfEditOrchestrator::new(PathBuf::from("/tmp/selfware_test"));
+        let orchestrator = SelfEditOrchestrator::new(PathBuf::from("/tmp/selfware_test"));
         let target = ImprovementTarget::new(
             ImprovementCategory::ErrorHandling,
             "Add retry logic",
@@ -577,10 +579,7 @@ mod tests {
         let targets = orchestrator.analyze_self();
 
         // Should find at least the TODO
-        assert!(
-            !targets.is_empty(),
-            "Should find TODO target in test dir"
-        );
+        assert!(!targets.is_empty(), "Should find TODO target in test dir");
         assert!(targets[0].description.contains("TODO"));
         assert_eq!(targets[0].source, ImprovementSource::TechDebt);
         assert_eq!(targets[0].category, ImprovementCategory::CodeQuality);
@@ -603,7 +602,11 @@ mod tests {
         assert!(!targets.is_empty());
         // All returned targets should have confidence > 0.5
         for t in &targets {
-            assert!(t.confidence > 0.5, "confidence {} should be > 0.5", t.confidence);
+            assert!(
+                t.confidence > 0.5,
+                "confidence {} should be > 0.5",
+                t.confidence
+            );
         }
 
         std::fs::remove_dir_all(&tmp).ok();
@@ -651,8 +654,7 @@ mod tests {
         assert_eq!(orchestrator.history()[0].target_id, "imp-1");
 
         // Verify persistence — create new orchestrator from same path
-        let orchestrator2 =
-            SelfEditOrchestrator::with_history_path(tmp.clone(), history_path);
+        let orchestrator2 = SelfEditOrchestrator::with_history_path(tmp.clone(), history_path);
         assert_eq!(orchestrator2.history().len(), 1);
         assert_eq!(orchestrator2.history()[0].description, "Added retry");
 
@@ -666,8 +668,7 @@ mod tests {
         let history_path = tmp.join("history.json");
         std::fs::remove_file(&history_path).ok();
 
-        let mut orchestrator =
-            SelfEditOrchestrator::with_history_path(tmp.clone(), history_path);
+        let mut orchestrator = SelfEditOrchestrator::with_history_path(tmp.clone(), history_path);
 
         // Record a rolled-back attempt
         let record = ImprovementRecord {
@@ -719,7 +720,10 @@ mod tests {
 
         let json = serde_json::to_string(&target).unwrap();
         let deserialized: ImprovementTarget = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.category, ImprovementCategory::VerificationLogic);
+        assert_eq!(
+            deserialized.category,
+            ImprovementCategory::VerificationLogic
+        );
         assert_eq!(deserialized.source, ImprovementSource::LLMReflection);
         assert!((deserialized.priority - 0.56).abs() < 0.001);
     }

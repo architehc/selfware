@@ -425,8 +425,10 @@ fn test_config_flag() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_workdir_flag() {
+    let tmp = std::env::temp_dir();
+    let tmp_str = tmp.to_string_lossy();
     let output = Command::new(get_binary_path())
-        .args(["-C", "/tmp", "--help"])
+        .args(["-C", &tmp_str, "--help"])
         .output()
         .expect("Failed to run selfware");
 

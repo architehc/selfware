@@ -207,8 +207,16 @@ async fn test_file_write_read_roundtrip() {
         .get("file_read")
         .expect("file_read tool should exist");
 
+    // Set test mode so the safety validator permits absolute paths
+    // (integration tests don't run under #[cfg(test)] context)
+    std::env::set_var("SELFWARE_TEST_MODE", "1");
+
     let test_content = "Integration test content: Hello, Selfware!";
-    let test_path = "/tmp/selfware_integration_test_file.txt";
+    let test_path = std::env::temp_dir()
+        .join("selfware_integration_test_file.txt")
+        .to_string_lossy()
+        .to_string();
+    let test_path = test_path.as_str();
 
     // Write the file
     let write_args = json!({

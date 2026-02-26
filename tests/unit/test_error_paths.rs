@@ -12,7 +12,16 @@ use selfware::safety::SafetyChecker;
 use selfware::tools::file::{DirectoryTree, FileEdit, FileRead, FileWrite};
 use selfware::tools::Tool;
 use std::fs;
+use std::sync::Once;
 use tempfile::tempdir;
+
+static INIT: Once = Once::new();
+
+fn setup_test_mode() {
+    INIT.call_once(|| {
+        std::env::set_var("SELFWARE_TEST_MODE", "1");
+    });
+}
 
 // ============================================================================
 // FileRead Error Path Tests
@@ -23,6 +32,7 @@ mod file_read_error_tests {
 
     #[tokio::test]
     async fn test_file_read_missing_path_arg() {
+        setup_test_mode();
         let tool = FileRead;
         let result = tool.execute(serde_json::json!({})).await;
         assert!(result.is_err());
@@ -30,6 +40,7 @@ mod file_read_error_tests {
 
     #[tokio::test]
     async fn test_file_read_invalid_json() {
+        setup_test_mode();
         let tool = FileRead;
         let result = tool.execute(serde_json::json!("not an object")).await;
         assert!(result.is_err());
@@ -37,6 +48,7 @@ mod file_read_error_tests {
 
     #[tokio::test]
     async fn test_file_read_nonexistent_file() {
+        setup_test_mode();
         let tool = FileRead;
         let result = tool
             .execute(serde_json::json!({
@@ -50,6 +62,7 @@ mod file_read_error_tests {
 
     #[tokio::test]
     async fn test_file_read_directory_instead_of_file() {
+        setup_test_mode();
         let dir = tempdir().unwrap();
         let tool = FileRead;
         let result = tool
@@ -62,6 +75,7 @@ mod file_read_error_tests {
 
     #[tokio::test]
     async fn test_file_read_invalid_line_range() {
+        setup_test_mode();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("test.txt");
         fs::write(&file_path, "line1\nline2\nline3").unwrap();
@@ -79,6 +93,7 @@ mod file_read_error_tests {
 
     #[tokio::test]
     async fn test_file_read_line_range_beyond_file() {
+        setup_test_mode();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("test.txt");
         fs::write(&file_path, "line1\nline2").unwrap();
@@ -97,6 +112,7 @@ mod file_read_error_tests {
 
     #[tokio::test]
     async fn test_file_read_empty_file() {
+        setup_test_mode();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("empty.txt");
         fs::write(&file_path, "").unwrap();
@@ -123,6 +139,7 @@ mod file_write_error_tests {
 
     #[tokio::test]
     async fn test_file_write_missing_path() {
+        setup_test_mode();
         let tool = FileWrite;
         let result = tool
             .execute(serde_json::json!({
@@ -134,6 +151,7 @@ mod file_write_error_tests {
 
     #[tokio::test]
     async fn test_file_write_missing_content() {
+        setup_test_mode();
         let tool = FileWrite;
         let result = tool
             .execute(serde_json::json!({
@@ -145,6 +163,7 @@ mod file_write_error_tests {
 
     #[tokio::test]
     async fn test_file_write_invalid_json() {
+        setup_test_mode();
         let tool = FileWrite;
         let result = tool.execute(serde_json::json!(null)).await;
         assert!(result.is_err());
@@ -152,6 +171,7 @@ mod file_write_error_tests {
 
     #[tokio::test]
     async fn test_file_write_creates_parent_dirs() {
+        setup_test_mode();
         let dir = tempdir().unwrap();
         let nested_path = dir.path().join("a/b/c/test.txt");
 
@@ -168,6 +188,7 @@ mod file_write_error_tests {
 
     #[tokio::test]
     async fn test_file_write_backup_created() {
+        setup_test_mode();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("original.txt");
         fs::write(&file_path, "original content").unwrap();
@@ -193,6 +214,7 @@ mod file_write_error_tests {
 
     #[tokio::test]
     async fn test_file_write_no_backup() {
+        setup_test_mode();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("no_backup.txt");
         fs::write(&file_path, "original").unwrap();
@@ -222,6 +244,7 @@ mod file_edit_error_tests {
 
     #[tokio::test]
     async fn test_file_edit_file_not_found() {
+        setup_test_mode();
         let tool = FileEdit;
         let result = tool
             .execute(serde_json::json!({
@@ -235,6 +258,7 @@ mod file_edit_error_tests {
 
     #[tokio::test]
     async fn test_file_edit_no_match() {
+        setup_test_mode();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("test.txt");
         fs::write(&file_path, "hello world").unwrap();
@@ -253,6 +277,7 @@ mod file_edit_error_tests {
 
     #[tokio::test]
     async fn test_file_edit_multiple_matches() {
+        setup_test_mode();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("test.txt");
         fs::write(&file_path, "foo bar foo baz foo").unwrap();
@@ -272,6 +297,7 @@ mod file_edit_error_tests {
 
     #[tokio::test]
     async fn test_file_edit_missing_args() {
+        setup_test_mode();
         let tool = FileEdit;
 
         // Missing old_str
@@ -295,6 +321,7 @@ mod file_edit_error_tests {
 
     #[tokio::test]
     async fn test_file_edit_delete_text() {
+        setup_test_mode();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("test.txt");
         fs::write(&file_path, "hello world").unwrap();
@@ -313,6 +340,7 @@ mod file_edit_error_tests {
 
     #[tokio::test]
     async fn test_file_edit_multiline() {
+        setup_test_mode();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("test.txt");
         fs::write(&file_path, "line1\nline2\nline3").unwrap();
@@ -342,6 +370,7 @@ mod directory_tree_error_tests {
 
     #[tokio::test]
     async fn test_directory_tree_nonexistent() {
+        setup_test_mode();
         let tool = DirectoryTree;
         let result = tool
             .execute(serde_json::json!({
@@ -360,6 +389,7 @@ mod directory_tree_error_tests {
 
     #[tokio::test]
     async fn test_directory_tree_file_instead_of_dir() {
+        setup_test_mode();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("file.txt");
         fs::write(&file_path, "content").unwrap();
@@ -376,6 +406,7 @@ mod directory_tree_error_tests {
 
     #[tokio::test]
     async fn test_directory_tree_max_depth_zero() {
+        setup_test_mode();
         let dir = tempdir().unwrap();
         fs::create_dir_all(dir.path().join("a/b/c")).unwrap();
         fs::write(dir.path().join("a/b/c/deep.txt"), "").unwrap();
@@ -392,6 +423,7 @@ mod directory_tree_error_tests {
 
     #[tokio::test]
     async fn test_directory_tree_hidden_files() {
+        setup_test_mode();
         let dir = tempdir().unwrap();
         fs::write(dir.path().join(".hidden"), "").unwrap();
         fs::write(dir.path().join("visible"), "").unwrap();

@@ -1395,15 +1395,9 @@ impl SelfImprovementEngine {
             prompt_optimizer: RwLock::new(PromptOptimizer::from_snapshot(
                 snapshot.prompt_optimizer,
             )),
-            tool_learner: RwLock::new(ToolSelectionLearner::from_snapshot(
-                snapshot.tool_learner,
-            )),
-            error_learner: RwLock::new(ErrorPatternLearner::from_snapshot(
-                snapshot.error_learner,
-            )),
-            usage_analyzer: RwLock::new(UsageAnalyzer::from_snapshot(
-                snapshot.usage_analyzer,
-            )),
+            tool_learner: RwLock::new(ToolSelectionLearner::from_snapshot(snapshot.tool_learner)),
+            error_learner: RwLock::new(ErrorPatternLearner::from_snapshot(snapshot.error_learner)),
+            usage_analyzer: RwLock::new(UsageAnalyzer::from_snapshot(snapshot.usage_analyzer)),
             learning_enabled: snapshot.learning_enabled,
         })
     }
@@ -1805,7 +1799,13 @@ mod tests {
             engine.record_tool("file_read", "reading", Outcome::Success, 50, None);
         }
         for _ in 0..3 {
-            engine.record_tool("file_write", "writing", Outcome::Failure, 100, Some("permission denied".to_string()));
+            engine.record_tool(
+                "file_write",
+                "writing",
+                Outcome::Failure,
+                100,
+                Some("permission denied".to_string()),
+            );
         }
 
         let tmp = std::env::temp_dir().join("selfware_test_engine_tools.json");
@@ -1825,7 +1825,13 @@ mod tests {
     fn test_save_load_preserves_error_patterns() {
         let engine = SelfImprovementEngine::new();
         engine.record_error("timeout waiting", "timeout", "api_call", "shell_exec", None);
-        engine.record_error("timeout waiting", "timeout", "api_call", "shell_exec", Some("retry".to_string()));
+        engine.record_error(
+            "timeout waiting",
+            "timeout",
+            "api_call",
+            "shell_exec",
+            Some("retry".to_string()),
+        );
 
         let tmp = std::env::temp_dir().join("selfware_test_engine_errors.json");
         engine.save(&tmp).unwrap();
@@ -1860,7 +1866,9 @@ mod tests {
 
     #[test]
     fn test_load_nonexistent_file_errors() {
-        let result = SelfImprovementEngine::load(std::path::Path::new("/tmp/selfware_nonexistent_engine_12345.json"));
+        let result = SelfImprovementEngine::load(std::path::Path::new(
+            "/tmp/selfware_nonexistent_engine_12345.json",
+        ));
         assert!(result.is_err());
     }
 
@@ -1879,7 +1887,12 @@ mod tests {
 
     #[test]
     fn test_outcome_serialization_roundtrip() {
-        for outcome in [Outcome::Success, Outcome::Partial, Outcome::Failure, Outcome::Abandoned] {
+        for outcome in [
+            Outcome::Success,
+            Outcome::Partial,
+            Outcome::Failure,
+            Outcome::Abandoned,
+        ] {
             let json = serde_json::to_string(&outcome).unwrap();
             let deserialized: Outcome = serde_json::from_str(&json).unwrap();
             assert_eq!(deserialized, outcome);
@@ -1888,10 +1901,14 @@ mod tests {
 
     #[test]
     fn test_prompt_record_serialization_roundtrip() {
-        let record = PromptRecord::new("test prompt".to_string(), "code".to_string(), Outcome::Success)
-            .with_quality(0.85)
-            .with_tokens(1500)
-            .with_response_time(2000);
+        let record = PromptRecord::new(
+            "test prompt".to_string(),
+            "code".to_string(),
+            Outcome::Success,
+        )
+        .with_quality(0.85)
+        .with_tokens(1500)
+        .with_response_time(2000);
         let json = serde_json::to_string(&record).unwrap();
         let deserialized: PromptRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.prompt, "test prompt");
@@ -1902,9 +1919,13 @@ mod tests {
 
     #[test]
     fn test_tool_usage_record_serialization_roundtrip() {
-        let record = ToolUsageRecord::new("cargo_check".to_string(), "building".to_string(), Outcome::Failure)
-            .with_execution_time(5000)
-            .with_error("compilation error".to_string());
+        let record = ToolUsageRecord::new(
+            "cargo_check".to_string(),
+            "building".to_string(),
+            Outcome::Failure,
+        )
+        .with_execution_time(5000)
+        .with_error("compilation error".to_string());
         let json = serde_json::to_string(&record).unwrap();
         let deserialized: ToolUsageRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.tool, "cargo_check");
@@ -1920,11 +1941,15 @@ mod tests {
             "io_error".to_string(),
             "loading config".to_string(),
             "file_read".to_string(),
-        ).with_recovery("use default".to_string());
+        )
+        .with_recovery("use default".to_string());
         let json = serde_json::to_string(&record).unwrap();
         let deserialized: ErrorRecord = serde_json::from_str(&json).unwrap();
         assert!(deserialized.recovered);
-        assert_eq!(deserialized.recovery_action, Some("use default".to_string()));
+        assert_eq!(
+            deserialized.recovery_action,
+            Some("use default".to_string())
+        );
     }
 
     #[test]
@@ -2003,19 +2028,29 @@ mod tests {
         let engine = SelfImprovementEngine::new();
         let suggestions = engine.suggest_prompt_improvements("x", "code");
         assert!(!suggestions.is_empty());
-        assert!(suggestions.iter().any(|s| s.suggestion_type == SuggestionType::AddContext));
+        assert!(suggestions
+            .iter()
+            .any(|s| s.suggestion_type == SuggestionType::AddContext));
     }
 
     #[test]
     fn test_tool_selection_learner_common_errors() {
         let mut learner = ToolSelectionLearner::new();
         learner.record(
-            ToolUsageRecord::new("shell_exec".to_string(), "running".to_string(), Outcome::Failure)
-                .with_error("permission denied".to_string()),
+            ToolUsageRecord::new(
+                "shell_exec".to_string(),
+                "running".to_string(),
+                Outcome::Failure,
+            )
+            .with_error("permission denied".to_string()),
         );
         learner.record(
-            ToolUsageRecord::new("shell_exec".to_string(), "running".to_string(), Outcome::Failure)
-                .with_error("permission denied".to_string()),
+            ToolUsageRecord::new(
+                "shell_exec".to_string(),
+                "running".to_string(),
+                Outcome::Failure,
+            )
+            .with_error("permission denied".to_string()),
         );
         let errors = learner.common_errors_for("shell_exec");
         assert!(!errors.is_empty());

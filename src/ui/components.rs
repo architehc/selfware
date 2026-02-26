@@ -504,7 +504,7 @@ mod tests {
         for phase in phases {
             let step = render_step(1, phase);
             assert!(step.contains("Step"));
-        assert!(step.contains("1"));
+            assert!(step.contains("1"));
             assert!(step.contains(phase));
         }
     }

@@ -39,7 +39,9 @@ impl EncryptionManager {
         let key = derive_key(password);
 
         let manager = EncryptionManager { key };
-        INSTANCE.set(manager).map_err(|_| anyhow::anyhow!("Encryption already initialized"))?;
+        INSTANCE
+            .set(manager)
+            .map_err(|_| anyhow::anyhow!("Encryption already initialized"))?;
         Ok(())
     }
 
@@ -51,7 +53,7 @@ impl EncryptionManager {
     /// Encrypt data using AES-256-GCM
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
         let cipher = Aes256Gcm::new(&self.key.into());
-        
+
         // Generate a random 12-byte nonce
         let mut nonce_bytes = [0u8; 12];
         rand::rng().fill_bytes(&mut nonce_bytes);
@@ -65,7 +67,7 @@ impl EncryptionManager {
         let mut result = Vec::with_capacity(nonce_bytes.len() + ciphertext.len());
         result.extend_from_slice(&nonce_bytes);
         result.extend_from_slice(&ciphertext);
-        
+
         Ok(result)
     }
 
@@ -76,7 +78,7 @@ impl EncryptionManager {
         }
 
         let cipher = Aes256Gcm::new(&self.key.into());
-        
+
         let (nonce_bytes, ciphertext) = encrypted_data.split_at(12);
         let nonce = Nonce::from_slice(nonce_bytes);
 
@@ -89,8 +91,11 @@ impl EncryptionManager {
 
     /// Try to load password from OS keychain
     pub fn load_from_keychain() -> Result<Option<String>> {
-        let entry = keyring::Entry::new("selfware", &whoami::username().unwrap_or_else(|_| "selfware_user".to_string()))
-            .map_err(|e| anyhow::anyhow!("Keyring error: {}", e))?;
+        let entry = keyring::Entry::new(
+            "selfware",
+            &whoami::username().unwrap_or_else(|_| "selfware_user".to_string()),
+        )
+        .map_err(|e| anyhow::anyhow!("Keyring error: {}", e))?;
         match entry.get_password() {
             Ok(p) => Ok(Some(p)),
             Err(keyring::Error::NoEntry) => Ok(None),
@@ -100,9 +105,14 @@ impl EncryptionManager {
 
     /// Save password to OS keychain
     pub fn save_to_keychain(password: &str) -> Result<()> {
-        let entry = keyring::Entry::new("selfware", &whoami::username().unwrap_or_else(|_| "selfware_user".to_string()))
+        let entry = keyring::Entry::new(
+            "selfware",
+            &whoami::username().unwrap_or_else(|_| "selfware_user".to_string()),
+        )
+        .map_err(|e| anyhow::anyhow!("Keyring error: {}", e))?;
+        entry
+            .set_password(password)
             .map_err(|e| anyhow::anyhow!("Keyring error: {}", e))?;
-        entry.set_password(password).map_err(|e| anyhow::anyhow!("Keyring error: {}", e))?;
         Ok(())
     }
 
@@ -173,6 +183,9 @@ mod tests {
         let plaintext = b"same data";
         let enc1 = mgr.encrypt(plaintext).unwrap();
         let enc2 = mgr.encrypt(plaintext).unwrap();
-        assert_ne!(enc1, enc2, "Same plaintext should produce different ciphertext due to random nonce");
+        assert_ne!(
+            enc1, enc2,
+            "Same plaintext should produce different ciphertext due to random nonce"
+        );
     }
 }

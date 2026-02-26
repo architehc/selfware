@@ -172,7 +172,10 @@ impl Agent {
             if let Err(e) = metrics_store.record(&snapshot) {
                 warn!("Failed to record performance metrics: {}", e);
             } else {
-                info!("Recorded performance snapshot ({} tool calls, {} errors)", tool_calls, errors_total);
+                info!(
+                    "Recorded performance snapshot ({} tool calls, {} errors)",
+                    tool_calls, errors_total
+                );
             }
         }
 

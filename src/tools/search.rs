@@ -17,8 +17,7 @@ const REGEX_CACHE_MAX: usize = 64;
 /// Global cache of compiled regex patterns, keyed by their source string.
 /// When the cache exceeds [`REGEX_CACHE_MAX`] entries, it is cleared entirely
 /// (simple but bounded eviction strategy).
-static REGEX_CACHE: Lazy<Mutex<HashMap<String, Regex>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static REGEX_CACHE: Lazy<Mutex<HashMap<String, Regex>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Return a cached `Regex` for `pattern`, compiling and caching it on first use.
 fn cached_regex(pattern: &str) -> Result<Regex> {

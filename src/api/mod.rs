@@ -514,10 +514,11 @@ impl ApiClient {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            return Err(ApiError::HttpStatus { 
-                status: status.as_u16(), 
-                message: text 
-            }.into());
+            return Err(ApiError::HttpStatus {
+                status: status.as_u16(),
+                message: text,
+            }
+            .into());
         }
 
         Ok(StreamingResponse::new(response))
@@ -554,10 +555,7 @@ impl ApiClient {
                 request = request.header("Authorization", format!("Bearer {}", key));
             }
 
-            let result = request
-                .json(body)
-                .send()
-                .await;
+            let result = request.json(body).send().await;
 
             match result {
                 Ok(response) => {
@@ -590,10 +588,13 @@ impl ApiClient {
                     {
                         let error_text = response.text().await.unwrap_or_default();
                         warn!("Retryable error ({}): {}", status, error_text);
-                        last_error = Some(ApiError::HttpStatus { 
-                            status: status.as_u16(), 
-                            message: error_text 
-                        }.into());
+                        last_error = Some(
+                            ApiError::HttpStatus {
+                                status: status.as_u16(),
+                                message: error_text,
+                            }
+                            .into(),
+                        );
 
                         // Check for Retry-After header
                         if status == StatusCode::TOO_MANY_REQUESTS {
@@ -605,10 +606,11 @@ impl ApiClient {
                     // Non-retryable error
                     let status_code = status.as_u16();
                     let error_text = response.text().await.unwrap_or_default();
-                    return Err(ApiError::HttpStatus { 
-                        status: status_code, 
-                        message: error_text 
-                    }.into());
+                    return Err(ApiError::HttpStatus {
+                        status: status_code,
+                        message: error_text,
+                    }
+                    .into());
                 }
                 Err(e) => {
                     // Network errors are generally retryable

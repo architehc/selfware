@@ -1407,8 +1407,14 @@ mod tests {
     #[test]
     fn test_semantic_summary_git() {
         let args = serde_json::json!({});
-        assert_eq!(semantic_summary("git_log", &args, None, true, 10), "Git log");
-        assert_eq!(semantic_summary("git_commit", &args, None, true, 10), "Git commit");
+        assert_eq!(
+            semantic_summary("git_log", &args, None, true, 10),
+            "Git log"
+        );
+        assert_eq!(
+            semantic_summary("git_commit", &args, None, true, 10),
+            "Git commit"
+        );
     }
 
     #[test]

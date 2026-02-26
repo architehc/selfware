@@ -59,11 +59,7 @@ impl PerformanceSnapshot {
             } else {
                 1.0
             },
-            first_try_verification_rate: if verification_passed_first {
-                1.0
-            } else {
-                0.0
-            },
+            first_try_verification_rate: if verification_passed_first { 1.0 } else { 0.0 },
             avg_tokens: tokens as f64,
             test_pass_rate: if task_succeeded { 1.0 } else { 0.0 },
             compilation_errors_per_task: (errors_total - errors_recovered) as f64,
@@ -217,8 +213,7 @@ mod tests {
 
     #[test]
     fn test_performance_snapshot_from_checkpoint() {
-        let snapshot =
-            PerformanceSnapshot::from_checkpoint_data(5, 10, 2, 1, true, 5000, true);
+        let snapshot = PerformanceSnapshot::from_checkpoint_data(5, 10, 2, 1, true, 5000, true);
         assert_eq!(snapshot.task_success_rate, 1.0);
         assert_eq!(snapshot.avg_iterations, 5.0);
         assert_eq!(snapshot.avg_tool_calls, 10.0);
@@ -236,16 +231,14 @@ mod tests {
 
     #[test]
     fn test_performance_snapshot_with_label() {
-        let snapshot =
-            PerformanceSnapshot::from_checkpoint_data(5, 10, 2, 1, true, 5000, true)
-                .with_label("pre-improve-42");
+        let snapshot = PerformanceSnapshot::from_checkpoint_data(5, 10, 2, 1, true, 5000, true)
+            .with_label("pre-improve-42");
         assert_eq!(snapshot.label, Some("pre-improve-42".to_string()));
     }
 
     #[test]
     fn test_performance_snapshot_failed_task() {
-        let snapshot =
-            PerformanceSnapshot::from_checkpoint_data(10, 20, 5, 0, false, 8000, false);
+        let snapshot = PerformanceSnapshot::from_checkpoint_data(10, 20, 5, 0, false, 8000, false);
         assert_eq!(snapshot.task_success_rate, 0.0);
         assert_eq!(snapshot.first_try_verification_rate, 0.0);
         assert_eq!(snapshot.error_recovery_rate, 0.0);
@@ -254,8 +247,7 @@ mod tests {
 
     #[test]
     fn test_performance_snapshot_no_errors() {
-        let snapshot =
-            PerformanceSnapshot::from_checkpoint_data(3, 5, 0, 0, true, 2000, true);
+        let snapshot = PerformanceSnapshot::from_checkpoint_data(3, 5, 0, 0, true, 2000, true);
         // No errors means recovery rate defaults to 1.0
         assert_eq!(snapshot.error_recovery_rate, 1.0);
         assert_eq!(snapshot.compilation_errors_per_task, 0.0);
@@ -382,13 +374,17 @@ mod tests {
 
         let store = MetricsStore::with_path(tmp.clone());
         store
-            .record(&PerformanceSnapshot::from_checkpoint_data(1, 1, 0, 0, true, 100, true))
+            .record(&PerformanceSnapshot::from_checkpoint_data(
+                1, 1, 0, 0, true, 100, true,
+            ))
             .unwrap();
 
         // Create a new store instance pointing to same file — should see previous data
         let store2 = MetricsStore::with_path(tmp.clone());
         store2
-            .record(&PerformanceSnapshot::from_checkpoint_data(2, 2, 0, 0, true, 200, true))
+            .record(&PerformanceSnapshot::from_checkpoint_data(
+                2, 2, 0, 0, true, 200, true,
+            ))
             .unwrap();
 
         let trend = store2.trend(10).unwrap();

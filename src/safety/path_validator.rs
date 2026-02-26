@@ -424,10 +424,7 @@ mod tests {
         let validator = PathValidator::new(&config, cwd);
         let result = validator.validate("safe_path\0/etc/passwd");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("null bytes"));
+        assert!(result.unwrap_err().to_string().contains("null bytes"));
     }
 
     #[test]
@@ -437,9 +434,6 @@ mod tests {
         let validator = PathValidator::new(&config, cwd);
         let result = validator.validate("some/file.txt\0");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("null bytes"));
+        assert!(result.unwrap_err().to_string().contains("null bytes"));
     }
 }
