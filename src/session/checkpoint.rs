@@ -36,11 +36,42 @@ struct CheckpointEnvelope {
 
 impl CheckpointEnvelope {
     fn get_hmac_key() -> Vec<u8> {
-        // Fallback for getting a unique machine key to tie the checkpoint to this system.
-        let mut key = b"selfware-checkpoint-hmac-key".to_vec();
-        if let Ok(name) = whoami::username() {
-            key.extend_from_slice(name.as_bytes());
+        let path = dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("selfware")
+            .join("checkpoint_hmac_key");
+
+        if let Ok(key) = std::fs::read(&path) {
+            if key.len() == 32 {
+                return key;
+            }
         }
+
+        let mut key = vec![0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rng(), &mut key);
+
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&path)
+            {
+                let _ = std::io::Write::write_all(&mut file, &key);
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = std::fs::write(&path, &key);
+        }
+
         key
     }
 

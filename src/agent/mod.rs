@@ -1798,6 +1798,22 @@ To call a tool, use this EXACT XML structure:
         self.loop_control.reset_for_task();
         let task_description = task.to_string();
 
+        let cancel_token = self.cancel_token();
+        let ctrl_c_handle = tokio::spawn(async move {
+            if let Ok(()) = tokio::signal::ctrl_c().await {
+                cancel_token.store(true, std::sync::atomic::Ordering::Relaxed);
+                println!("\n🦊 Received shutdown signal. Gracefully stopping agent and saving checkpoint...");
+            }
+        });
+
+        struct AbortOnDrop(tokio::task::JoinHandle<()>);
+        impl Drop for AbortOnDrop {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let _ctrl_c_guard = AbortOnDrop(ctrl_c_handle);
+
         #[cfg(feature = "tui")]
         self.emit_tui_event(TuiEvent::AgentStarted);
 

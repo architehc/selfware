@@ -171,3 +171,49 @@ pub enum ResourceError {
     #[error("Resource unavailable: {0}")]
     Unavailable(String),
 }
+
+pub const EXIT_SUCCESS: u8 = 0;
+pub const EXIT_ERROR: u8 = 1;
+pub const EXIT_CONFIG_ERROR: u8 = 2;
+pub const EXIT_API_ERROR: u8 = 4;
+pub const EXIT_SAFETY_ERROR: u8 = 5;
+pub const EXIT_CONFIRMATION_REQUIRED: u8 = 6;
+
+/// Determine the appropriate process exit code for an error.
+pub fn get_exit_code(e: &anyhow::Error) -> u8 {
+    if is_confirmation_error(e) {
+        return EXIT_CONFIRMATION_REQUIRED;
+    }
+
+    if let Some(selfware_err) = e.downcast_ref::<SelfwareError>() {
+        return match selfware_err {
+            SelfwareError::Config(_) => EXIT_CONFIG_ERROR,
+            SelfwareError::Api(_) => EXIT_API_ERROR,
+            SelfwareError::Safety(_) => EXIT_SAFETY_ERROR,
+            _ => EXIT_ERROR,
+        };
+    }
+
+    // Direct enum unwraps fallback
+    if e.downcast_ref::<ApiError>().is_some() {
+        return EXIT_API_ERROR;
+    }
+    if e.downcast_ref::<SafetyError>().is_some() {
+        return EXIT_SAFETY_ERROR;
+    }
+    if e.downcast_ref::<AgentError>().is_some() {
+        return EXIT_ERROR;
+    }
+
+    // Fallback string matching only for cases where specific types aren't available
+    let msg = e.to_string().to_lowercase();
+    if msg.contains("config") {
+        return EXIT_CONFIG_ERROR;
+    } else if msg.contains("api error") || msg.contains("network") {
+        return EXIT_API_ERROR;
+    } else if msg.contains("safety") || msg.contains("blocked") {
+        return EXIT_SAFETY_ERROR;
+    }
+
+    EXIT_ERROR
+}

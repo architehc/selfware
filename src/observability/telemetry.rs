@@ -15,6 +15,8 @@ use std::sync::OnceLock;
 use std::time::Instant;
 use tracing::{error, info, info_span, Span};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use metrics_exporter_prometheus::PrometheusBuilder;
+
 
 /// Maximum number of in-memory log entries before rotation.
 /// When this limit is reached, `rotate_if_needed()` will discard the oldest half.
@@ -158,7 +160,6 @@ pub fn init_tracing() {
     if std::env::var("RUST_LOG").is_ok() {
         init_tracing_with_filter(&std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()));
     }
-    // If RUST_LOG not set, don't initialize tracing at all - keeps CLI output clean
 }
 
 /// Initialize tracing only for debug/verbose mode
@@ -166,13 +167,15 @@ pub fn init_tracing_verbose() {
     init_tracing_with_filter("info")
 }
 
-/// Initialize with custom filter string
+/// Initialize with custom filter string, file log rotation, and OpenTelemetry
 pub fn init_tracing_with_filter(filter: &str) {
     // Skip if already initialized
     use std::sync::Once;
     static INIT: Once = Once::new();
 
     INIT.call_once(|| {
+        let filter_layer = EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("warn"));
+
         let fmt_layer = tracing_subscriber::fmt::layer()
             .with_target(false)
             .with_thread_ids(false)
@@ -183,13 +186,55 @@ pub fn init_tracing_with_filter(filter: &str) {
             .compact()
             .with_writer(std::io::stderr); // Write to stderr, not stdout
 
-        let filter_layer = EnvFilter::try_new(filter).unwrap_or_else(|_| EnvFilter::new("warn"));
+        // Implement Log Rotation with daily rolling
+        let log_dir = dirs::data_local_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("selfware").join("logs");
+        let _ = std::fs::create_dir_all(&log_dir);
+        let file_appender = tracing_appender::rolling::daily(log_dir, "selfware.log");
+        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+        // Leak the guard so the background thread stays alive for the life of the program
+        std::mem::forget(_guard);
+        
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_writer(non_blocking)
+            .with_ansi(false)
+            .with_file(true)
+            .with_line_number(true);
 
-        let _ = tracing_subscriber::registry()
+        // OpenTelemetry setup (if endpoint provided via env)
+        let subscriber = tracing_subscriber::registry()
             .with(filter_layer)
             .with(fmt_layer)
-            .try_init();
+            .with(file_layer);
+
+        if let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
+            use opentelemetry_otlp::WithExportConfig;
+            if let Ok(tracer) = opentelemetry_otlp::new_pipeline()
+                .tracing()
+                .with_exporter(
+                    opentelemetry_otlp::new_exporter()
+                        .tonic()
+                        .with_endpoint(endpoint),
+                )
+                .install_batch(opentelemetry_sdk::runtime::Tokio)
+            {
+                let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+                let _ = subscriber.with(telemetry).try_init();
+                return; // Early return to avoid double init
+            }
+        }
+        
+        let _ = subscriber.try_init();
     });
+}
+
+/// Start Prometheus Metrics Exporter (if in daemon mode)
+pub fn start_prometheus_exporter(bind_addr: std::net::SocketAddr) -> anyhow::Result<()> {
+    PrometheusBuilder::new()
+        .with_http_listener(bind_addr)
+        .install()
+        .map_err(|e| anyhow::anyhow!("Failed to start Prometheus exporter: {}", e))
 }
 
 /// Create a span for tracking tool execution with automatic duration and outcome logging

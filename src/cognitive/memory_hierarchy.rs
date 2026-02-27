@@ -6,7 +6,7 @@
 //! - Semantic Memory: Codebase and long-term knowledge (~700K tokens)
 
 use anyhow::Result;
-use parking_lot::RwLock;
+use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -161,7 +161,7 @@ impl HierarchicalMemory {
     ) -> Result<()> {
         info!("Initializing Selfware codebase index...");
 
-        let mut semantic = self.semantic.write();
+        let mut semantic = self.semantic.write().await;
         semantic.index_codebase(selfware_path).await?;
         self.usage.semantic_tokens = semantic.total_tokens();
 
@@ -210,7 +210,7 @@ impl HierarchicalMemory {
                 max_tokens,
                 include_related,
             } => {
-                let semantic = self.semantic.read();
+                let semantic = self.semantic.read().await;
                 let code_context =
                     semantic.retrieve_code_context(query, max_tokens, include_related)?;
                 RetrievedContext::Semantic(code_context)
@@ -235,7 +235,7 @@ impl HierarchicalMemory {
             .await?;
 
         let semantic = {
-            let sem = self.semantic.read();
+            let sem = self.semantic.read().await;
             sem.retrieve_code_context(query, self.budget.semantic_memory / 4, true)?
         };
 
@@ -247,14 +247,14 @@ impl HierarchicalMemory {
     }
 
     /// Get current memory statistics
-    pub fn get_stats(&self) -> MemoryStats {
+    pub async fn get_stats(&self) -> MemoryStats {
         MemoryStats {
             budget: self.budget.clone(),
             usage: self.usage.clone(),
             metrics: self.metrics.clone(),
             working_entries: self.working.len(),
             episodic_entries: self.episodic.len(),
-            semantic_files: self.semantic.read().file_count(),
+            semantic_files: self.semantic.read().await.file_count(),
         }
     }
 
@@ -629,6 +629,12 @@ impl EpisodicMemory {
             return Ok(true);
         }
         if let Some(episode) = self.tiers.high.pop_front() {
+            self.current_tokens -= episode.token_count;
+            self.vector_index.remove(&episode.embedding_id);
+            return Ok(true);
+        }
+        if !self.tiers.critical.is_empty() {
+            let episode = self.tiers.critical.remove(0);
             self.current_tokens -= episode.token_count;
             self.vector_index.remove(&episode.embedding_id);
             return Ok(true);

@@ -22,7 +22,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2022]
-        rust: [stable, beta]
+        rust: [stable]
         exclude:
           # Only test beta on Linux to save CI time
           - os: macos-14

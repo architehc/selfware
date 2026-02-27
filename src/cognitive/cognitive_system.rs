@@ -4,7 +4,7 @@
 //! into a cohesive system for 1M token context management.
 
 use anyhow::Result;
-use parking_lot::RwLock;
+use tokio::sync::RwLock;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -89,7 +89,7 @@ pub struct CognitiveSystemStats {
 
 impl CognitiveSystem {
     /// Create new cognitive system
-    // TODO: Migrate from parking_lot::RwLock to tokio::sync::RwLock
+    
     #[allow(clippy::await_holding_lock)]
     pub async fn new(
         config: &Config,
@@ -113,19 +113,19 @@ impl CognitiveSystem {
         // Initialize Selfware codebase index
         let selfware_path = std::env::current_dir()?;
         {
-            let mut mem = memory.write();
+            let mut mem = memory.write().await;
             mem.initialize_selfware_index(&selfware_path).await?;
         }
 
         // Create self-reference system
         let self_ref = Arc::new(RwLock::new(SelfReferenceSystem::new(
-            memory.read().semantic.clone(),
+            memory.read().await.semantic.clone(),
             selfware_path,
         )));
 
         // Initialize self-model
         {
-            let mut self_ref = self_ref.write();
+            let mut self_ref = self_ref.write().await;
             self_ref.initialize_self_model().await?;
         }
 
@@ -151,25 +151,25 @@ impl CognitiveSystem {
 
         // Set task type if different
         {
-            let mut budget = self.budget.write();
+            let mut budget = self.budget.write().await;
             budget.set_task_type(options.task_type);
         }
 
         // Get allocation
         let allocation = {
-            let budget = self.budget.read();
+            let budget = self.budget.read().await;
             budget.get_allocation().clone()
         };
 
         // Get working memory context
         let working = {
-            let memory = self.memory.read();
+            let memory = self.memory.read().await;
             memory.working.get_context()
         };
 
         // Get episodic context
         let episodic = {
-            let memory = self.memory.read();
+            let memory = self.memory.read().await;
             memory
                 .episodic
                 .retrieve_relevant(query, 10, Importance::Normal)
@@ -177,8 +177,8 @@ impl CognitiveSystem {
         };
 
         // Get semantic/code context
-        let semantic_arc = self.memory.read().semantic.clone();
-        let semantic = semantic_arc.read().retrieve_code_context(
+        let semantic_arc = self.memory.read().await.semantic.clone();
+        let semantic = semantic_arc.read().await.retrieve_code_context(
             query,
             allocation.semantic_memory / 2,
             true,
@@ -188,7 +188,7 @@ impl CognitiveSystem {
         let self_context = if options.force_self_improvement
             || (options.include_self_ref && self.is_self_improvement_query(query))
         {
-            let self_ref = self.self_ref.read();
+            let self_ref = self.self_ref.read().await;
             Some(
                 self_ref
                     .get_improvement_context(query, allocation.semantic_memory / 4)
@@ -248,29 +248,29 @@ impl CognitiveSystem {
     }
 
     /// Add message to working memory
-    pub fn add_message(&self, message: Message, importance: f32) {
-        let mut memory = self.memory.write();
+    pub async fn add_message(&self, message: Message, importance: f32) {
+        let mut memory = self.memory.write().await;
         memory.add_message(message, importance);
 
         // Record usage
         let usage = memory.usage.clone();
         drop(memory);
 
-        let mut budget = self.budget.write();
+        let mut budget = self.budget.write().await;
         budget.record_usage(&usage);
     }
 
     /// Record an episode
     #[allow(clippy::await_holding_lock)]
     pub async fn record_episode(&self, episode: Episode) -> Result<()> {
-        let mut memory = self.memory.write();
+        let mut memory = self.memory.write().await;
         memory.record_episode(episode).await?;
 
         // Record usage
         let usage = memory.usage.clone();
         drop(memory);
 
-        let mut budget = self.budget.write();
+        let mut budget = self.budget.write().await;
         budget.record_usage(&usage);
 
         Ok(())
@@ -305,7 +305,7 @@ impl CognitiveSystem {
 
     /// Adapt token budget based on usage
     pub async fn adapt_budget(&self) -> Result<AdaptationResult> {
-        let mut budget = self.budget.write();
+        let mut budget = self.budget.write().await;
         let result = budget.adapt();
 
         if result.adapted {
@@ -315,7 +315,7 @@ impl CognitiveSystem {
             let new_allocation = result.new_allocation.clone();
             drop(budget);
 
-            let mut memory = self.memory.write();
+            let mut memory = self.memory.write().await;
             memory.budget = new_allocation;
         }
 
@@ -325,10 +325,10 @@ impl CognitiveSystem {
     /// Get self-improvement context
     #[allow(clippy::await_holding_lock)]
     pub async fn get_self_improvement_context(&self, goal: &str) -> Result<SelfImprovementContext> {
-        let self_ref = self.self_ref.read();
+        let self_ref = self.self_ref.read().await;
 
         let allocation = {
-            let budget = self.budget.read();
+            let budget = self.budget.read().await;
             budget.get_allocation().clone()
         };
 
@@ -340,14 +340,14 @@ impl CognitiveSystem {
     /// Read own source code
     #[allow(clippy::await_holding_lock)]
     pub async fn read_own_code(&self, module_path: &str) -> Result<String> {
-        let self_ref = self.self_ref.read();
+        let self_ref = self.self_ref.read().await;
         let options = SourceRetrievalOptions::default();
         self_ref.read_own_code(module_path, &options).await
     }
 
     /// Track a code modification
-    pub fn track_modification(&self, modification: CodeModification) {
-        let mut self_ref = self.self_ref.write();
+    pub async fn track_modification(&self, modification: CodeModification) {
+        let mut self_ref = self.self_ref.write().await;
         self_ref.track_modification(modification);
     }
 
@@ -357,25 +357,25 @@ impl CognitiveSystem {
     }
 
     /// Set task type explicitly
-    pub fn set_task_type(&self, task_type: TaskType) {
-        let mut budget = self.budget.write();
+    pub async fn set_task_type(&self, task_type: TaskType) {
+        let mut budget = self.budget.write().await;
         budget.set_task_type(task_type);
     }
 
     /// Get system statistics
-    pub fn get_stats(&self) -> CognitiveSystemStats {
+    pub async fn get_stats(&self) -> CognitiveSystemStats {
         let memory_stats = {
-            let memory = self.memory.read();
-            memory.get_stats()
+            let memory = self.memory.read().await;
+            memory.get_stats().await
         };
 
         let budget_stats = {
-            let budget = self.budget.read();
+            let budget = self.budget.read().await;
             budget.get_stats()
         };
 
         let (modules, capabilities, modifications) = {
-            let self_ref = self.self_ref.read();
+            let self_ref = self.self_ref.read().await;
             let model = self_ref.get_self_model();
             (
                 model.modules.len(),
@@ -396,19 +396,19 @@ impl CognitiveSystem {
     /// Compress memory if over budget
     #[allow(clippy::await_holding_lock)]
     pub async fn compress_if_needed(&self) -> Result<bool> {
-        let mut memory = self.memory.write();
+        let mut memory = self.memory.write().await;
         memory.compress_if_needed().await
     }
 
     /// Check if memory is within budget
-    pub fn is_within_budget(&self) -> bool {
-        let memory = self.memory.read();
+    pub async fn is_within_budget(&self) -> bool {
+        let memory = self.memory.read().await;
         memory.is_within_budget()
     }
 
     /// Get self-model reference
-    pub fn get_self_model(&self) -> SelfModel {
-        let self_ref = self.self_ref.read();
+    pub async fn get_self_model(&self) -> SelfModel {
+        let self_ref = self.self_ref.read().await;
         self_ref.get_self_model().clone()
     }
 
@@ -438,14 +438,14 @@ impl CognitiveSystem {
     }
 
     /// Reset to defaults
-    pub fn reset(&self) {
-        let mut budget = self.budget.write();
+    pub async fn reset(&self) {
+        let mut budget = self.budget.write().await;
         budget.reset();
 
         let new_allocation = budget.get_allocation().clone();
         drop(budget);
 
-        let mut memory = self.memory.write();
+        let mut memory = self.memory.write().await;
         memory.budget = new_allocation;
     }
 }

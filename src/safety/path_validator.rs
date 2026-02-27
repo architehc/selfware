@@ -121,10 +121,10 @@ impl PathValidator {
             Ok(real_path) => real_path,
             Err(e) if e.raw_os_error() == Some(ELOOP) => {
                 // O_NOFOLLOW returns ELOOP for symlinks
-                self.check_symlink_safety(&resolved)?;
-                resolved
+                let safe_target = self.check_symlink_safety(&resolved)?;
+                safe_target
                     .canonicalize()
-                    .unwrap_or_else(|_| normalize_path(&resolved))
+                    .unwrap_or_else(|_| normalize_path(&safe_target))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // If it doesn't exist, check parent atomically
@@ -134,10 +134,11 @@ impl PathValidator {
                             real_parent.join(resolved.file_name().unwrap_or_default())
                         }
                         Err(e) if e.raw_os_error() == Some(ELOOP) => {
-                            self.check_symlink_safety(parent)?;
-                            resolved
+                            let safe_parent = self.check_symlink_safety(parent)?;
+                            safe_parent
                                 .canonicalize()
-                                .unwrap_or_else(|_| normalize_path(&resolved))
+                                .unwrap_or_else(|_| normalize_path(&safe_parent))
+                                .join(resolved.file_name().unwrap_or_default())
                         }
                         Err(_) => normalize_path(&resolved),
                     }
@@ -250,7 +251,7 @@ impl PathValidator {
     }
 
     /// Check for symlink-based attacks.
-    pub fn check_symlink_safety(&self, path: &Path) -> Result<()> {
+    pub fn check_symlink_safety(&self, path: &Path) -> Result<PathBuf> {
         let mut current = path.to_path_buf();
         let mut visited = std::collections::HashSet::new();
         let max_depth = 40; // Linux default MAXSYMLINKS
@@ -303,7 +304,7 @@ impl PathValidator {
             );
         }
 
-        Ok(())
+        Ok(current)
     }
 }
 

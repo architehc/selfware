@@ -29,16 +29,25 @@ impl DynamicTool {
             let get_name: Symbol<unsafe extern "C" fn() -> *const c_char> =
                 library.get(b"get_name")?;
             let name_ptr = get_name();
+            if name_ptr.is_null() {
+                anyhow::bail!("get_name returned null pointer");
+            }
             let name = CStr::from_ptr(name_ptr).to_string_lossy().into_owned();
 
             let get_description: Symbol<unsafe extern "C" fn() -> *const c_char> =
                 library.get(b"get_description")?;
             let desc_ptr = get_description();
+            if desc_ptr.is_null() {
+                anyhow::bail!("get_description returned null pointer");
+            }
             let description = CStr::from_ptr(desc_ptr).to_string_lossy().into_owned();
 
             let get_schema: Symbol<unsafe extern "C" fn() -> *const c_char> =
                 library.get(b"get_schema")?;
             let schema_ptr = get_schema();
+            if schema_ptr.is_null() {
+                anyhow::bail!("get_schema returned null pointer");
+            }
             let schema_str = CStr::from_ptr(schema_ptr).to_string_lossy();
             let schema: Value = serde_json::from_str(&schema_str)?;
 

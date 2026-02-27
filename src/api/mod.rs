@@ -10,6 +10,8 @@ pub mod types;
 
 use crate::errors::ApiError;
 use types::*;
+use std::sync::Arc;
+use crate::supervision::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerError};
 
 /// Trait abstraction over the LLM API client, enabling test mocking.
 #[async_trait]
@@ -445,6 +447,7 @@ pub struct ApiClient {
     config: crate::config::Config,
     base_url: String,
     retry_config: RetryConfig,
+    circuit_breaker: Arc<CircuitBreaker>,
 }
 
 impl ApiClient {
@@ -463,6 +466,7 @@ impl ApiClient {
             base_url: config.endpoint.clone(),
             config: config.clone(),
             retry_config: RetryConfig::from_settings(&config.retry),
+            circuit_breaker: Arc::new(CircuitBreaker::new(CircuitBreakerConfig::default())),
         })
     }
 
@@ -475,6 +479,23 @@ impl ApiClient {
 
     /// Send a completion request (e.g. for FIM)
     pub async fn completion(
+        &self,
+        prompt: &str,
+        max_tokens: Option<usize>,
+        stop: Option<Vec<String>>,
+    ) -> Result<types::CompletionResponse> {
+        self.circuit_breaker
+            .call(|| self.completion_inner(prompt, max_tokens, stop.clone()))
+            .await
+            .map_err(|e| match e {
+                CircuitBreakerError::CircuitOpen => {
+                    anyhow::anyhow!("Circuit breaker is open - API is unavailable")
+                }
+                CircuitBreakerError::OperationFailed(err) => err,
+            })
+    }
+
+    async fn completion_inner(
         &self,
         prompt: &str,
         max_tokens: Option<usize>,
@@ -558,6 +579,23 @@ impl ApiClient {
         tools: Option<Vec<ToolDefinition>>,
         thinking: ThinkingMode,
     ) -> Result<StreamingResponse> {
+        self.circuit_breaker
+            .call(|| self.chat_stream_inner(messages.clone(), tools.clone(), thinking.clone()))
+            .await
+            .map_err(|e| match e {
+                CircuitBreakerError::CircuitOpen => {
+                    anyhow::anyhow!("Circuit breaker is open - API is unavailable")
+                }
+                CircuitBreakerError::OperationFailed(err) => err,
+            })
+    }
+
+    async fn chat_stream_inner(
+        &self,
+        messages: Vec<Message>,
+        tools: Option<Vec<ToolDefinition>>,
+        thinking: ThinkingMode,
+    ) -> Result<StreamingResponse> {
         let mut messages = messages;
         if let ThinkingMode::Disabled = thinking {
             let sys_msg = crate::api::types::Message::system("CRITICAL INSTRUCTION: DO NOT use <think> blocks or any thinking process in your response. Output your final response directly and immediately.");
@@ -619,8 +657,20 @@ impl ApiClient {
         ))
     }
 
-    /// Send request with exponential backoff retry logic
+    /// Send request with exponential backoff retry logic, wrapped in a circuit breaker
     async fn send_with_retry(&self, body: &serde_json::Value) -> Result<ChatResponse> {
+        self.circuit_breaker
+            .call(|| self.send_with_retry_inner(body))
+            .await
+            .map_err(|e| match e {
+                CircuitBreakerError::CircuitOpen => {
+                    anyhow::anyhow!("Circuit breaker is open - API is unavailable")
+                }
+                CircuitBreakerError::OperationFailed(err) => err,
+            })
+    }
+
+    async fn send_with_retry_inner(&self, body: &serde_json::Value) -> Result<ChatResponse> {
         let url = format!("{}/chat/completions", self.base_url);
         let mut last_error: Option<anyhow::Error> = None;
         let mut delay_ms = self.retry_config.initial_delay_ms;

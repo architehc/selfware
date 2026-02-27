@@ -22,5 +22,8 @@ mod model_format_tests;
 mod qwen3_tests;
 mod test_agent_loop;
 mod tool_tests;
+mod supervision_tests;
+mod cli_tests;
+mod errors_tests;
 
 pub use helpers::*;

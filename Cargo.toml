@@ -11,7 +11,7 @@ keywords = ["ai", "agent", "local-first", "cli", "automation"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
-tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "process"] }
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "process", "signal"] }
 anyhow = "1.0"
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
@@ -73,6 +73,13 @@ sysinfo = "0.38.2"
 nvml-wrapper = "0.12.0"
 zstd = "0.13.3"
 tokenizers = { version = "0.22.2", features = ["hf-hub", "http"] }
+tracing-appender = "0.2.4"
+opentelemetry = "0.21.0"
+opentelemetry_sdk = { version = "0.21.0", features = ["rt-tokio"] }
+opentelemetry-otlp = "0.14.0"
+tracing-opentelemetry = "0.22.0"
+metrics = "0.21.0"
+metrics-exporter-prometheus = "0.12.1"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30", features = ["signal"] }
@@ -106,6 +113,8 @@ extras = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-ana
 tokio-test = "0.4"
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1.5"
+assert_cmd = "2.1.2"
+predicates = "3.1.4"
 
 [lib]
 name = "selfware"

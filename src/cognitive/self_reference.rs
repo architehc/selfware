@@ -4,7 +4,7 @@
 //! This is the foundation for recursive self-improvement.
 
 use anyhow::{anyhow, Result};
-use parking_lot::RwLock;
+use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -260,7 +260,7 @@ impl SelfReferenceSystem {
         info!("Initializing self-model from codebase...");
 
         let semantic_arc = Arc::clone(&self.semantic);
-        let semantic = semantic_arc.read();
+        let semantic = semantic_arc.read().await;
 
         // Build module models
         self.build_module_models(&semantic)?;
@@ -628,7 +628,7 @@ impl SelfReferenceSystem {
 
         // Get relevant code
         let relevant_code = {
-            let semantic = self.semantic.read();
+            let semantic = self.semantic.read().await;
             semantic.retrieve_code_context(goal, max_tokens * 6 / 10, true)?
         };
 
@@ -666,7 +666,7 @@ impl SelfReferenceSystem {
             return Ok(cached.content.clone());
         }
 
-        let semantic = self.semantic.read();
+        let semantic = self.semantic.read().await;
 
         // Get main file
         let mut content = if let Some(file) = semantic.get_file(module_path) {

@@ -49,7 +49,24 @@ fn load_or_create_salt() -> Result<Vec<u8>> {
 
     let mut salt = vec![0u8; SALT_LEN];
     rand::rng().fill_bytes(&mut salt);
-    std::fs::write(&path, &salt).context("Failed to write encryption salt file")?;
+    
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .context("Failed to create encryption salt file with secure permissions")?;
+        std::io::Write::write_all(&mut file, &salt).context("Failed to write encryption salt")?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&path, &salt).context("Failed to write encryption salt file")?;
+    }
+    
     Ok(salt)
 }
 

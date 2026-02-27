@@ -473,10 +473,8 @@ mod tests {
         let completer = SelfwareCompleter::new(vec![], vec!["/help".into()]);
 
         // Starting with / should be command context
-        match completer.detect_context("/hel", 4) {
-            CompletionContext::Command(prefix) => assert_eq!(prefix, "/hel"),
-            _ => panic!("Expected Command context"),
-        }
+        let ctx = completer.detect_context("/hel", 4);
+        assert!(matches!(ctx, CompletionContext::Command(prefix) if prefix == "/hel"));
     }
 
     #[test]
@@ -484,20 +482,16 @@ mod tests {
         let completer = SelfwareCompleter::new(vec![], vec![]);
 
         // After /analyze, should be path context
-        match completer.detect_context("/analyze ./src", 14) {
-            CompletionContext::Path(prefix) => assert_eq!(prefix, "./src"),
-            _ => panic!("Expected Path context"),
-        }
+        let ctx = completer.detect_context("/analyze ./src", 14);
+        assert!(matches!(ctx, CompletionContext::Path(prefix) if prefix == "./src"));
     }
 
     #[test]
     fn test_detect_context_path_after_review() {
         let completer = SelfwareCompleter::new(vec![], vec![]);
 
-        match completer.detect_context("/review main.rs", 15) {
-            CompletionContext::Path(prefix) => assert_eq!(prefix, "main.rs"),
-            _ => panic!("Expected Path context"),
-        }
+        let ctx = completer.detect_context("/review main.rs", 15);
+        assert!(matches!(ctx, CompletionContext::Path(prefix) if prefix == "main.rs"));
     }
 
     #[test]
@@ -505,10 +499,8 @@ mod tests {
         let completer = SelfwareCompleter::new(vec!["file_read".into()], vec![]);
 
         // Alphanumeric with underscore should be tool context
-        match completer.detect_context("file_re", 7) {
-            CompletionContext::Tool(prefix) => assert_eq!(prefix, "file_re"),
-            _ => panic!("Expected Tool context"),
-        }
+        let ctx = completer.detect_context("file_re", 7);
+        assert!(matches!(ctx, CompletionContext::Tool(prefix) if prefix == "file_re"));
     }
 
     #[test]
@@ -516,10 +508,8 @@ mod tests {
         let completer = SelfwareCompleter::new(vec![], vec![]);
 
         // Empty should be None
-        match completer.detect_context("", 0) {
-            CompletionContext::None => {}
-            _ => panic!("Expected None context"),
-        }
+        let ctx = completer.detect_context("", 0);
+        assert!(matches!(ctx, CompletionContext::None));
     }
 
     #[test]

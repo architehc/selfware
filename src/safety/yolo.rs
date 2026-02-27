@@ -507,13 +507,32 @@ impl std::fmt::Display for AuditSummary {
     }
 }
 
-/// Extract path from tool arguments
+/// Extract path from tool arguments (recursively)
 fn extract_path(args: &serde_json::Value) -> Option<String> {
-    args.get("path")
-        .or_else(|| args.get("file"))
-        .or_else(|| args.get("directory"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+    match args {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                if k == "path" || k == "file" || k == "directory" {
+                    if let Some(s) = v.as_str() {
+                        return Some(s.to_string());
+                    }
+                }
+                if let Some(res) = extract_path(v) {
+                    return Some(res);
+                }
+            }
+            None
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr {
+                if let Some(res) = extract_path(v) {
+                    return Some(res);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 /// Pre-compiled regexes for destructive command detection.
