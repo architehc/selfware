@@ -1,0 +1,63 @@
+# Selfware E2E Configuration for Remote Qwen3 Endpoint
+
+endpoint = "https://crazyshit.ngrok.io/v1"
+model = "Qwen/Qwen3-Coder-Next-FP8"
+max_tokens = 1010000
+temperature = 0.2
+
+[safety]
+allowed_paths = ["./**", "/tmp/selfware/**"]
+denied_paths = ["**/.git/**"]
+require_confirmation = []  # E2E runs fully autonomous
+
+[agent]
+max_iterations = 500
+step_timeout_secs = 300
+token_budget = 1010000
+native_function_calling = false
+streaming = true
+
+[yolo]
+enabled = true
+max_operations = 500
+max_hours = 8.0
+allow_git_push = false
+allow_destructive_shell = false
+audit_log_path = "./e2e-audit.log"
+status_interval = 25
+
+[continuous_work]
+enabled = true
+checkpoint_interval_tools = 10
+checkpoint_interval_secs = 300
+auto_recovery = true
+max_recovery_attempts = 5
+
+[retry]
+max_retries = 8
+base_delay_ms = 1000
+max_delay_ms = 30000
+
+[resources]
+[resources.gpu]
+monitor_interval_seconds = 10
+temperature_threshold = 90
+memory_utilization_threshold = 0.95
+throttle_on_overheat = true
+
+[resources.memory]
+warning_threshold = 0.8
+critical_threshold = 0.9
+emergency_threshold = 0.95
+
+[resources.disk]
+max_usage_percent = 0.9
+maintenance_interval_seconds = 3600
+compress_after_days = 1
+
+[resources.quotas]
+max_gpu_memory_per_model = 32_000_000_000 # 32GB
+max_concurrent_requests = 1
+max_context_tokens = 1_000_000
+max_queued_tasks = 1000
+max_checkpoint_size = 2_000_000_000
