@@ -1178,7 +1178,9 @@ impl WorkflowExecutor {
 
                 // Validate working_dir is within the project scope
                 let dir_path = std::path::Path::new(&dir);
-                let canonical_scope = context.working_dir.canonicalize()
+                let canonical_scope = context
+                    .working_dir
+                    .canonicalize()
                     .unwrap_or_else(|_| context.working_dir.clone());
                 if let Ok(canonical_dir) = dir_path.canonicalize() {
                     if !canonical_dir.starts_with(&canonical_scope) {

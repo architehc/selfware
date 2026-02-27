@@ -9,14 +9,13 @@
 //! - Configurable sampling rate for non-error events
 //! - Log rotation with configurable entry limits
 
+use metrics_exporter_prometheus::PrometheusBuilder;
 use regex::Regex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::OnceLock;
 use std::time::Instant;
 use tracing::{error, info, info_span, Span};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
-use metrics_exporter_prometheus::PrometheusBuilder;
-
 
 /// Maximum number of in-memory log entries before rotation.
 /// When this limit is reached, `rotate_if_needed()` will discard the oldest half.
@@ -189,13 +188,14 @@ pub fn init_tracing_with_filter(filter: &str) {
         // Implement Log Rotation with daily rolling
         let log_dir = dirs::data_local_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join("selfware").join("logs");
+            .join("selfware")
+            .join("logs");
         let _ = std::fs::create_dir_all(&log_dir);
         let file_appender = tracing_appender::rolling::daily(log_dir, "selfware.log");
         let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
         // Leak the guard so the background thread stays alive for the life of the program
         std::mem::forget(_guard);
-        
+
         let file_layer = tracing_subscriber::fmt::layer()
             .with_writer(non_blocking)
             .with_ansi(false)
@@ -224,7 +224,7 @@ pub fn init_tracing_with_filter(filter: &str) {
                 return; // Early return to avoid double init
             }
         }
-        
+
         let _ = subscriber.try_init();
     });
 }

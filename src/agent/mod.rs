@@ -47,7 +47,7 @@ use planning::Planner;
 use tui_events::{EventEmitter, NoopEmitter};
 
 /// Upper bound for queued interactive messages to avoid unbounded memory growth.
-pub(crate) const MAX_PENDING_MESSAGES: usize = 256;
+pub(crate) const MAX_PENDING_MESSAGES: usize = 100;
 
 /// Core agent that orchestrates LLM reasoning with tool execution.
 ///

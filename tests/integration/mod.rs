@@ -11,19 +11,19 @@
 //! For deep testing with slow local models:
 //!   SELFWARE_TIMEOUT=900 cargo test --features integration deep_
 
+mod cli_tests;
 mod conversation_tests;
 mod deep_tests;
 mod e2e_tests;
+mod errors_tests;
 mod extended_e2e;
 mod helpers;
 #[cfg(not(target_os = "windows"))]
 mod interactive_tests;
 mod model_format_tests;
 mod qwen3_tests;
+mod supervision_tests;
 mod test_agent_loop;
 mod tool_tests;
-mod supervision_tests;
-mod cli_tests;
-mod errors_tests;
 
 pub use helpers::*;

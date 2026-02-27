@@ -32,9 +32,8 @@ static CONST_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^\s*(pub(\(.*?\))?\s+)?const\s+(\w+)").expect("const regex"));
 static TYPE_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^\s*(pub(\(.*?\))?\s+)?type\s+(\w+)").expect("type regex"));
-static MACRO_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^\s*(pub(\(.*?\))?\s+)?macro_rules!\s+(\w+)").expect("macro regex")
-});
+static MACRO_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\s*(pub(\(.*?\))?\s+)?macro_rules!\s+(\w+)").expect("macro regex"));
 static MOD_REGEX: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^\s*(pub(\(.*?\))?\s+)?mod\s+(\w+)").expect("mod regex"));
 

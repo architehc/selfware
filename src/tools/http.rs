@@ -151,9 +151,8 @@ impl Tool for HttpRequest {
                         if !allow_private {
                             // Check hostname string first
                             if is_private_network_host(&host) {
-                                return attempt.error(
-                                    "Blocked redirect to private/internal network address",
-                                );
+                                return attempt
+                                    .error("Blocked redirect to private/internal network address");
                             }
                             // Also resolve DNS to catch public hostnames pointing to private IPs
                             if host.parse::<std::net::IpAddr>().is_err() {

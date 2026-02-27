@@ -323,7 +323,7 @@ pub async fn run() -> Result<()> {
 
     // Apply execution mode to config
     config.execution_mode = exec_mode;
-    
+
     if config.execution_mode == ExecutionMode::Daemon {
         let addr = "0.0.0.0:9090".parse().unwrap();
         if let Err(e) = crate::telemetry::start_prometheus_exporter(addr) {

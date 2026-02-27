@@ -91,7 +91,11 @@ impl ContextCompressor {
         .await
         .map_err(|_| anyhow::anyhow!("Context compression API call timed out after 120s"))??;
 
-        let summary = response.choices[0].message.content.clone();
+        let summary = response
+            .choices
+            .first()
+            .map(|c| c.message.content.clone())
+            .unwrap_or_else(|| "[Context compression failed: empty API response]".to_string());
         info!("Generated summary: {} chars", summary.len());
 
         let mut compressed = Vec::new();

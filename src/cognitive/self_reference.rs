@@ -4,11 +4,11 @@
 //! This is the foundation for recursive self-improvement.
 
 use anyhow::{anyhow, Result};
-use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 use crate::cognitive::memory_hierarchy::{CodeContext, FileContent, IndexedFile, SemanticMemory};

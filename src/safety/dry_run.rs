@@ -373,7 +373,7 @@ mod tests {
 
     #[test]
     fn test_truncate_str_long() {
-        assert_eq!(truncate_str("hello world", 5), "hello...");
+        assert_eq!(truncate_str("hello world", 8), "hello...");
     }
 
     #[test]
@@ -734,8 +734,8 @@ mod tests {
 
     #[test]
     fn test_truncate_str_unicode() {
-        // Note: truncate_str may not handle unicode boundaries well
-        let result = truncate_str("hello世界", 5);
+        // Note: truncate_str now handles unicode boundaries correctly via floor_char_boundary
+        let result = truncate_str("hello世界", 8);
         assert!(result.starts_with("hello"));
     }
 

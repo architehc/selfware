@@ -219,7 +219,9 @@ impl Agent {
                     let path_str = path.to_string();
                     match name.as_str() {
                         "file_read" => {
-                            if !self.context_files.contains(&path_str) {
+                            if self.context_files.len() < 500
+                                && !self.context_files.contains(&path_str)
+                            {
                                 self.context_files.push(path_str);
                             }
                         }
@@ -229,7 +231,9 @@ impl Agent {
                             self.stale_files.remove(&path_str);
                         }
                         "file_write" | "file_edit" => {
-                            self.stale_files.insert(path_str);
+                            if self.stale_files.len() < 500 {
+                                self.stale_files.insert(path_str);
+                            }
                         }
                         _ => {}
                     }

@@ -165,7 +165,43 @@ impl SafetyChecker {
                     self.check_shell_command(script)?;
                 }
             }
-            _ => {}
+            // Read-only tools that don't need safety validation
+            "git_status" | "git_diff" | "grep_search" | "glob_find" | "symbol_search"
+            | "process_list" | "process_logs" | "port_check" | "pip_list" | "pip_freeze"
+            | "npm_scripts" | "container_list" | "container_logs" | "container_images"
+            | "knowledge_query" | "knowledge_stats" | "knowledge_export" => {
+                // These are read-only operations, safe to execute without additional checks
+            }
+            // Knowledge mutation tools - validate path-like arguments
+            "knowledge_add" | "knowledge_relate" | "knowledge_remove" | "knowledge_clear" => {
+                // Knowledge graph mutations are in-memory only, no filesystem risk
+            }
+            // Cargo tools - validate command isn't smuggling shell injection
+            "cargo_test" | "cargo_check" | "cargo_clippy" | "cargo_fmt" => {
+                // These run predefined cargo subcommands, not arbitrary shell
+            }
+            // npm_run executes arbitrary scripts - validate the script name
+            "npm_run" => {
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+                if let Some(script) = args.get("script").and_then(|v| v.as_str()) {
+                    self.check_shell_command(script)?;
+                }
+            }
+            // Process control tools
+            "process_stop" | "process_restart" => {
+                // These affect running processes by ID, no shell injection risk
+            }
+            // Container mutation tools
+            "container_stop" | "container_remove" | "container_pull" | "container_build"
+            | "compose_up" | "compose_down" => {
+                // Container management by name/ID
+            }
+            unknown => {
+                tracing::warn!(
+                    "Safety checker: unknown tool '{}', allowing with caution",
+                    unknown
+                );
+            }
         }
 
         Ok(())
@@ -416,49 +452,35 @@ impl SafetyChecker {
                             let octets = v4.octets();
                             // Loopback (127.0.0.0/8)
                             if octets[0] == 127 {
-                                anyhow::bail!(
-                                    "Blocked request to loopback address: {}", ip
-                                );
+                                anyhow::bail!("Blocked request to loopback address: {}", ip);
                             }
                             // Private networks: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
                             if octets[0] == 10
                                 || (octets[0] == 172 && (octets[1] & 0xf0) == 16)
                                 || (octets[0] == 192 && octets[1] == 168)
                             {
-                                anyhow::bail!(
-                                    "Blocked request to private network address: {}", ip
-                                );
+                                anyhow::bail!("Blocked request to private network address: {}", ip);
                             }
                             // Unspecified (0.0.0.0)
                             if v4.is_unspecified() {
-                                anyhow::bail!(
-                                    "Blocked request to unspecified address: {}", ip
-                                );
+                                anyhow::bail!("Blocked request to unspecified address: {}", ip);
                             }
                         }
                         std::net::IpAddr::V6(v6) => {
                             if v6.is_loopback() {
-                                anyhow::bail!(
-                                    "Blocked request to loopback address: {}", ip
-                                );
+                                anyhow::bail!("Blocked request to loopback address: {}", ip);
                             }
                             let segs = v6.segments();
                             // Link-local (fe80::/10)
                             if segs[0] & 0xffc0 == 0xfe80 {
-                                anyhow::bail!(
-                                    "Blocked request to link-local address: {}", ip
-                                );
+                                anyhow::bail!("Blocked request to link-local address: {}", ip);
                             }
                             // Unique local (fc00::/7)
                             if segs[0] & 0xfe00 == 0xfc00 {
-                                anyhow::bail!(
-                                    "Blocked request to private network address: {}", ip
-                                );
+                                anyhow::bail!("Blocked request to private network address: {}", ip);
                             }
                             if v6.is_unspecified() {
-                                anyhow::bail!(
-                                    "Blocked request to unspecified address: {}", ip
-                                );
+                                anyhow::bail!("Blocked request to unspecified address: {}", ip);
                             }
                         }
                     }

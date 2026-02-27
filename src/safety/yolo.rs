@@ -567,7 +567,9 @@ static DESTRUCTIVE_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
 /// Check if a shell command is destructive
 fn is_destructive_command(cmd: &str) -> bool {
     let normalized = normalize_input(cmd);
-    DESTRUCTIVE_PATTERNS.iter().any(|re| re.is_match(&normalized))
+    DESTRUCTIVE_PATTERNS
+        .iter()
+        .any(|re| re.is_match(&normalized))
 }
 
 /// Summarize arguments for audit log (truncate long values)

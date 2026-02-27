@@ -9,9 +9,11 @@ use tracing::{debug, warn};
 pub mod types;
 
 use crate::errors::ApiError;
-use types::*;
+use crate::supervision::circuit_breaker::{
+    CircuitBreaker, CircuitBreakerConfig, CircuitBreakerError,
+};
 use std::sync::Arc;
-use crate::supervision::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerError};
+use types::*;
 
 /// Trait abstraction over the LLM API client, enabling test mocking.
 #[async_trait]

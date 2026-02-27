@@ -6,10 +6,10 @@
 //! - Semantic Memory: Codebase and long-term knowledge (~700K tokens)
 
 use anyhow::Result;
-use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 use crate::api::types::Message;
@@ -436,7 +436,9 @@ impl WorkingMemory {
                 let age_b = (now - b.1.timestamp).max(1) as f32;
                 let score_a = a.1.importance / age_a;
                 let score_b = b.1.importance / age_b;
-                score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
+                score_a
+                    .partial_cmp(&score_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
         {
             if let Some(entry) = self.messages.remove(idx) {

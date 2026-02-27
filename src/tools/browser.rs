@@ -338,8 +338,10 @@ async fn fetch_with_curl(
     cmd.args([
         "-s",
         "-L",
-        "--max-redirs", "5",
-        "--proto", "=https,http",
+        "--max-redirs",
+        "5",
+        "--proto",
+        "=https,http",
         "--max-time",
         &timeout_secs.to_string(),
     ]);

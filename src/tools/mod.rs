@@ -10,6 +10,7 @@ pub mod container;
 pub mod file;
 pub mod fim;
 pub mod git;
+#[cfg(feature = "hot-reload")]
 pub mod hot_reload;
 pub mod http;
 pub mod knowledge;

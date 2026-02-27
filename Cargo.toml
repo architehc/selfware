@@ -105,9 +105,11 @@ log-analysis = []
 tokens = []
 # Recursive self-improvement loop
 self-improvement = []
+# Dynamic library hot-reload (security-sensitive, off by default)
+hot-reload = []
 
 # Convenience feature that enables all optional modules
-extras = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-analysis", "tokens", "self-improvement"]
+extras = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-analysis", "tokens", "self-improvement", "hot-reload"]
 
 [dev-dependencies]
 tokio-test = "0.4"

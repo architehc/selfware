@@ -23,6 +23,24 @@ pub struct DynamicTool {
 impl DynamicTool {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let lib_path = path.as_ref().to_path_buf();
+
+        // Security: only allow loading from explicitly configured plugin directories
+        let canonical = lib_path
+            .canonicalize()
+            .map_err(|e| anyhow!("Cannot resolve plugin path {:?}: {}", lib_path, e))?;
+
+        // Reject paths outside the current working directory unless explicitly allowed
+        let cwd = std::env::current_dir()
+            .map_err(|e| anyhow!("Cannot determine current directory: {}", e))?;
+        let plugin_dir = cwd.join(".selfware").join("plugins");
+        if !canonical.starts_with(&plugin_dir) {
+            anyhow::bail!(
+                "Dynamic tool loading restricted to {:?}. Got: {:?}",
+                plugin_dir,
+                canonical
+            );
+        }
+
         unsafe {
             let library = Arc::new(Library::new(&lib_path)?);
 
