@@ -26,20 +26,26 @@ impl DynamicTool {
         unsafe {
             let library = Arc::new(Library::new(&lib_path)?);
 
-            let get_name: Symbol<unsafe extern "C" fn() -> *const c_char> = library.get(b"get_name")?;
+            let get_name: Symbol<unsafe extern "C" fn() -> *const c_char> =
+                library.get(b"get_name")?;
             let name_ptr = get_name();
             let name = CStr::from_ptr(name_ptr).to_string_lossy().into_owned();
 
-            let get_description: Symbol<unsafe extern "C" fn() -> *const c_char> = library.get(b"get_description")?;
+            let get_description: Symbol<unsafe extern "C" fn() -> *const c_char> =
+                library.get(b"get_description")?;
             let desc_ptr = get_description();
             let description = CStr::from_ptr(desc_ptr).to_string_lossy().into_owned();
 
-            let get_schema: Symbol<unsafe extern "C" fn() -> *const c_char> = library.get(b"get_schema")?;
+            let get_schema: Symbol<unsafe extern "C" fn() -> *const c_char> =
+                library.get(b"get_schema")?;
             let schema_ptr = get_schema();
             let schema_str = CStr::from_ptr(schema_ptr).to_string_lossy();
             let schema: Value = serde_json::from_str(&schema_str)?;
 
-            info!("Successfully loaded dynamic tool '{}' from {:?}", name, lib_path);
+            info!(
+                "Successfully loaded dynamic tool '{}' from {:?}",
+                name, lib_path
+            );
 
             Ok(Self {
                 library,
@@ -72,11 +78,14 @@ impl Tool for DynamicTool {
         let library = self.library.clone();
 
         tokio::task::spawn_blocking(move || unsafe {
-            let execute_sym: Symbol<unsafe extern "C" fn(*const c_char) -> *mut c_char> = 
-                library.get(b"execute").map_err(|e| anyhow!("Failed to find execute symbol: {}", e))?;
-                
-            let free_sym: Symbol<unsafe extern "C" fn(*mut c_char)> = 
-                library.get(b"free_string").map_err(|e| anyhow!("Failed to find free_string symbol: {}", e))?;
+            let execute_sym: Symbol<unsafe extern "C" fn(*const c_char) -> *mut c_char> = library
+                .get(b"execute")
+                .map_err(|e| anyhow!("Failed to find execute symbol: {}", e))?;
+
+            let free_sym: Symbol<unsafe extern "C" fn(*mut c_char)> =
+                library
+                    .get(b"free_string")
+                    .map_err(|e| anyhow!("Failed to find free_string symbol: {}", e))?;
 
             let result_ptr = execute_sym(c_args.as_ptr());
             if result_ptr.is_null() {
@@ -117,10 +126,14 @@ impl HotReloadManager {
         let tool = DynamicTool::load(path.as_ref())?;
         let name = tool.name().to_string();
         let arc_tool = Arc::new(tool);
-        
-        self.tool_paths.insert(name.clone(), path.as_ref().to_path_buf());
-        self.tools.write().await.insert(name.clone(), arc_tool.clone());
-        
+
+        self.tool_paths
+            .insert(name.clone(), path.as_ref().to_path_buf());
+        self.tools
+            .write()
+            .await
+            .insert(name.clone(), arc_tool.clone());
+
         Ok(arc_tool)
     }
 
@@ -129,13 +142,16 @@ impl HotReloadManager {
             info!("Hot-reloading tool '{}' from {:?}", name, path);
             let tool = DynamicTool::load(&path)?;
             let arc_tool = Arc::new(tool);
-            self.tools.write().await.insert(name.to_string(), arc_tool.clone());
+            self.tools
+                .write()
+                .await
+                .insert(name.to_string(), arc_tool.clone());
             Ok(arc_tool)
         } else {
             Err(anyhow!("Tool '{}' not registered for hot-reloading", name))
         }
     }
-    
+
     pub async fn get_tool(&self, name: &str) -> Option<Arc<DynamicTool>> {
         self.tools.read().await.get(name).cloned()
     }

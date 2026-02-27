@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Resource management configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ResourcesConfig {
     #[serde(default)]
     pub gpu: GpuConfig,
@@ -89,4 +88,3 @@ impl Default for ResourceQuotas {
         }
     }
 }
-

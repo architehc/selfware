@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::metrics::PerformanceSnapshot;
+use super::metrics::{MetricsStore, PerformanceSnapshot};
 use crate::cognitive::compilation_manager::CompilationSandbox;
 
 /// Source of an improvement target
@@ -201,7 +201,133 @@ impl SelfEditOrchestrator {
         }
     }
 
-    /// Analyze the codebase for improvement targets
+    /// Introspect past performance to identify systemic weaknesses
+    pub fn introspect_performance(&self) -> Vec<ImprovementTarget> {
+        let snapshots = MetricsStore::new().trend(12).unwrap_or_default();
+        self.introspect_performance_from_snapshots(&snapshots)
+    }
+
+    fn introspect_performance_from_snapshots(
+        &self,
+        snapshots: &[PerformanceSnapshot],
+    ) -> Vec<ImprovementTarget> {
+        let mut targets = Vec::new();
+
+        if snapshots.is_empty() {
+            return targets;
+        }
+
+        let latest = snapshots.last().expect("checked non-empty");
+
+        let recent_count = snapshots.len().min(5);
+        let recent = &snapshots[snapshots.len() - recent_count..];
+        let previous = if snapshots.len() > recent_count {
+            let prev_count = recent_count.min(snapshots.len() - recent_count);
+            Some(
+                &snapshots
+                    [snapshots.len() - recent_count - prev_count..snapshots.len() - recent_count],
+            )
+        } else {
+            None
+        };
+
+        let avg = |set: &[PerformanceSnapshot], f: fn(&PerformanceSnapshot) -> f64| -> f64 {
+            set.iter().map(f).sum::<f64>() / set.len() as f64
+        };
+
+        let recent_comp_errors = avg(recent, |s| s.compilation_errors_per_task);
+        if recent_comp_errors >= 1.0 {
+            targets.push(
+                ImprovementTarget::new(
+                    ImprovementCategory::CodeQuality,
+                    format!(
+                        "Reduce compilation errors (recent avg {:.2} per task)",
+                        recent_comp_errors
+                    ),
+                    "Performance introspection detected repeated compile failures across recent tasks.",
+                    ImprovementSource::ErrorPattern,
+                )
+                .with_file("src/agent/execution.rs")
+                .with_scores(0.9, 0.85),
+            );
+        }
+
+        let recent_tool_calls = avg(recent, |s| s.avg_tool_calls);
+        let prev_tool_calls = previous.map(|set| avg(set, |s| s.avg_tool_calls));
+        if recent_tool_calls >= 14.0
+            || prev_tool_calls.is_some_and(|prev| prev > 0.0 && recent_tool_calls / prev > 1.2)
+        {
+            let rationale = if let Some(prev) = prev_tool_calls {
+                format!(
+                    "Recent tool-call average {:.1} regressed from {:.1} (>20% increase).",
+                    recent_tool_calls, prev
+                )
+            } else {
+                format!(
+                    "Recent tool-call average {:.1} exceeds efficiency threshold.",
+                    recent_tool_calls
+                )
+            };
+            targets.push(
+                ImprovementTarget::new(
+                    ImprovementCategory::ToolPipeline,
+                    "Reduce tool-call churn by batching read/search operations",
+                    rationale,
+                    ImprovementSource::MetricsRegression,
+                )
+                .with_file("src/agent/execution.rs")
+                .with_scores(0.8, 0.75),
+            );
+        }
+
+        let recent_verify = avg(recent, |s| s.first_try_verification_rate);
+        let prev_verify = previous.map(|set| avg(set, |s| s.first_try_verification_rate));
+        if recent_verify <= 0.5 || prev_verify.is_some_and(|prev| recent_verify + 0.15 < prev) {
+            let rationale = if let Some(prev) = prev_verify {
+                format!(
+                    "First-try verification dropped from {:.0}% to {:.0}%.",
+                    prev * 100.0,
+                    recent_verify * 100.0
+                )
+            } else {
+                format!(
+                    "First-try verification remains low at {:.0}%.",
+                    recent_verify * 100.0
+                )
+            };
+            targets.push(
+                ImprovementTarget::new(
+                    ImprovementCategory::VerificationLogic,
+                    "Improve verification-first execution behavior",
+                    rationale,
+                    ImprovementSource::MetricsRegression,
+                )
+                .with_file("src/agent/mod.rs")
+                .with_scores(0.85, 0.8),
+            );
+        }
+
+        let recent_recovery = avg(recent, |s| s.error_recovery_rate);
+        if recent_recovery <= 0.65 && latest.task_success_rate < 0.9 {
+            targets.push(
+                ImprovementTarget::new(
+                    ImprovementCategory::ErrorHandling,
+                    "Harden error recovery and retry strategy",
+                    format!(
+                        "Recovery rate {:.0}% is below target and success rate is {:.0}%.",
+                        recent_recovery * 100.0,
+                        latest.task_success_rate * 100.0
+                    ),
+                    ImprovementSource::MetricsRegression,
+                )
+                .with_file("src/agent/mod.rs")
+                .with_scores(0.8, 0.7),
+            );
+        }
+
+        targets
+    }
+
     pub fn analyze_self(&self) -> Vec<ImprovementTarget> {
         let mut targets = Vec::new();
 
@@ -210,6 +336,9 @@ impl SelfEditOrchestrator {
 
         // Scan for common code quality improvements
         targets.extend(self.scan_code_quality());
+        if self.project_root.join("src").exists() {
+            targets.extend(self.introspect_performance());
+        }
 
         // Filter out targets in denied files
         targets.retain(|t| !self.is_denied(t));
@@ -586,9 +715,13 @@ mod tests {
 
         // Should find at least the TODO
         assert!(!targets.is_empty(), "Should find TODO target in test dir");
-        assert!(targets[0].description.contains("TODO"));
-        assert_eq!(targets[0].source, ImprovementSource::TechDebt);
-        assert_eq!(targets[0].category, ImprovementCategory::CodeQuality);
+        assert!(targets.iter().any(|t| t.description.contains("TODO")));
+        assert!(targets
+            .iter()
+            .any(|t| t.source == ImprovementSource::TechDebt));
+        assert!(targets
+            .iter()
+            .any(|t| t.category == ImprovementCategory::CodeQuality));
 
         // Cleanup
         std::fs::remove_dir_all(&tmp).ok();
@@ -695,6 +828,51 @@ mod tests {
         assert!(failed.contains(&ImprovementCategory::PromptTemplate));
 
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_introspect_performance_from_snapshots_detects_regression() {
+        let orchestrator = SelfEditOrchestrator::new(PathBuf::from("/tmp/selfware_test"));
+        let mut snapshots = Vec::new();
+        for _ in 0..5 {
+            snapshots.push(PerformanceSnapshot {
+                timestamp: 1,
+                task_success_rate: 0.95,
+                avg_iterations: 5.0,
+                avg_tool_calls: 8.0,
+                error_recovery_rate: 0.9,
+                first_try_verification_rate: 0.85,
+                avg_tokens: 5000.0,
+                test_pass_rate: 0.95,
+                compilation_errors_per_task: 0.1,
+                label: None,
+            });
+        }
+        for _ in 0..5 {
+            snapshots.push(PerformanceSnapshot {
+                timestamp: 2,
+                task_success_rate: 0.7,
+                avg_iterations: 8.0,
+                avg_tool_calls: 18.0,
+                error_recovery_rate: 0.5,
+                first_try_verification_rate: 0.35,
+                avg_tokens: 9000.0,
+                test_pass_rate: 0.7,
+                compilation_errors_per_task: 2.1,
+                label: None,
+            });
+        }
+
+        let targets = orchestrator.introspect_performance_from_snapshots(&snapshots);
+        assert!(targets
+            .iter()
+            .any(|t| t.category == ImprovementCategory::VerificationLogic));
+        assert!(targets
+            .iter()
+            .any(|t| t.category == ImprovementCategory::ToolPipeline));
+        assert!(targets
+            .iter()
+            .any(|t| t.category == ImprovementCategory::CodeQuality));
     }
 
     #[test]

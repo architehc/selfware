@@ -4,15 +4,13 @@
 //! and finally to a conservative heuristic if tokenizer initialization fails.
 
 use once_cell::sync::Lazy;
+use std::sync::Mutex;
 use tiktoken_rs::{cl100k_base, CoreBPE};
 use tokenizers::Tokenizer;
 use tracing::{debug, warn};
-use std::sync::Mutex;
 
 // Try to load Qwen tokenizer, fallback to OpenAI cl100k
-static TOKENIZER: Lazy<Mutex<TokenizerState>> = Lazy::new(|| {
-    Mutex::new(TokenizerState::new())
-});
+static TOKENIZER: Lazy<Mutex<TokenizerState>> = Lazy::new(|| Mutex::new(TokenizerState::new()));
 
 enum TokenizerState {
     Qwen(Tokenizer),
@@ -30,7 +28,10 @@ impl TokenizerState {
                 return TokenizerState::Qwen(tokenizer);
             }
             Err(e) => {
-                warn!("Failed to load Qwen tokenizer: {}. Falling back to tiktoken cl100k", e);
+                warn!(
+                    "Failed to load Qwen tokenizer: {}. Falling back to tiktoken cl100k",
+                    e
+                );
             }
         }
 
@@ -42,15 +43,12 @@ impl TokenizerState {
 
     fn count(&self, content: &str) -> usize {
         match self {
-            TokenizerState::Qwen(t) => {
-                t.encode(content, false).map(|e| e.get_tokens().len()).unwrap_or_else(|_| heuristic_estimate(content))
-            }
-            TokenizerState::Tiktoken(bpe) => {
-                bpe.encode_with_special_tokens(content).len()
-            }
-            TokenizerState::Heuristic => {
-                heuristic_estimate(content)
-            }
+            TokenizerState::Qwen(t) => t
+                .encode(content, false)
+                .map(|e| e.get_tokens().len())
+                .unwrap_or_else(|_| heuristic_estimate(content)),
+            TokenizerState::Tiktoken(bpe) => bpe.encode_with_special_tokens(content).len(),
+            TokenizerState::Heuristic => heuristic_estimate(content),
         }
     }
 }

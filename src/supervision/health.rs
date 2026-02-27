@@ -10,7 +10,7 @@ use tracing::{debug, error, warn};
 pub trait HealthCheck: Send + Sync {
     /// Get the name of this health check
     fn name(&self) -> &str;
-    
+
     /// Perform the health check
     async fn check(&self) -> HealthStatus;
 }
@@ -80,26 +80,26 @@ impl HealthMonitor {
             results: Arc::new(RwLock::new(Vec::new())),
         }
     }
-    
+
     /// Add a health check
     pub fn add_check(&mut self, check: Box<dyn HealthCheck + Send + Sync>) {
         self.checks.push(check);
     }
-    
+
     /// Start the health monitor loop
     pub async fn start(&self) {
         let mut interval = tokio::time::interval(self.interval);
-        
+
         loop {
             interval.tick().await;
-            
+
             let mut results = Vec::new();
-            
+
             for check in &self.checks {
                 let start = Instant::now();
                 let status = check.check().await;
                 let response_time = start.elapsed();
-                
+
                 results.push(HealthCheckResult {
                     name: check.name().to_string(),
                     status,
@@ -107,10 +107,10 @@ impl HealthMonitor {
                     response_time,
                 });
             }
-            
+
             // Store results
             *self.results.write().await = results.clone();
-            
+
             // Log any issues
             for result in &results {
                 match &result.status {
@@ -125,19 +125,25 @@ impl HealthMonitor {
             }
         }
     }
-    
+
     /// Get current health status
     pub async fn health(&self) -> OverallHealth {
         let results = self.results.read().await.clone();
-        
-        let status = if results.iter().all(|r| matches!(r.status, HealthStatus::Healthy)) {
+
+        let status = if results
+            .iter()
+            .all(|r| matches!(r.status, HealthStatus::Healthy))
+        {
             OverallStatus::Healthy
-        } else if results.iter().any(|r| matches!(r.status, HealthStatus::Unhealthy { .. })) {
+        } else if results
+            .iter()
+            .any(|r| matches!(r.status, HealthStatus::Unhealthy { .. }))
+        {
             OverallStatus::Unhealthy
         } else {
             OverallStatus::Degraded
         };
-        
+
         OverallHealth {
             status,
             checks: results,
@@ -162,7 +168,7 @@ impl AgentHealthCheck {
             name: name.into(),
         }
     }
-    
+
     /// Record a heartbeat
     pub async fn heartbeat(&self) {
         *self.last_heartbeat.write().await = Some(Instant::now());
@@ -175,10 +181,10 @@ impl HealthCheck for AgentHealthCheck {
     fn name(&self) -> &str {
         &self.name
     }
-    
+
     async fn check(&self) -> HealthStatus {
         let last = *self.last_heartbeat.read().await;
-        
+
         match last {
             None => HealthStatus::Unhealthy {
                 reason: "No heartbeat received".to_string(),
@@ -186,7 +192,7 @@ impl HealthCheck for AgentHealthCheck {
             },
             Some(instant) => {
                 let elapsed = instant.elapsed();
-                
+
                 if elapsed > self.heartbeat_timeout * 2 {
                     HealthStatus::Unhealthy {
                         reason: format!("Heartbeat timeout: {:?}", elapsed),
@@ -223,7 +229,7 @@ impl HealthCheck for GpuHealthCheck {
     fn name(&self) -> &str {
         "gpu"
     }
-    
+
     async fn check(&self) -> HealthStatus {
         let Some(nvml) = self.nvml.as_ref() else {
             return HealthStatus::Unhealthy {
@@ -231,11 +237,12 @@ impl HealthCheck for GpuHealthCheck {
                 severity: Severity::Critical,
             };
         };
-        
+
         match nvml.device_by_index(0) {
             Ok(device) => {
                 // Check temperature
-                let temp = device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu);
+                let temp =
+                    device.temperature(nvml_wrapper::enum_wrappers::device::TemperatureSensor::Gpu);
                 match temp {
                     Ok(t) if t > 90 => HealthStatus::Unhealthy {
                         reason: format!("GPU overheating: {}°C", t),
@@ -279,17 +286,17 @@ impl HealthCheck for MemoryHealthCheck {
     fn name(&self) -> &str {
         "memory"
     }
-    
+
     async fn check(&self) -> HealthStatus {
         use sysinfo::System;
-        
+
         let mut system = System::new_all();
         system.refresh_all();
-        
+
         let total = system.total_memory() as f32;
         let used = system.used_memory() as f32;
         let usage = used / total;
-        
+
         if usage > self.critical_threshold {
             HealthStatus::Unhealthy {
                 reason: format!("Memory critical: {:.1}% used", usage * 100.0),
@@ -314,7 +321,11 @@ pub struct DiskHealthCheck {
 
 impl DiskHealthCheck {
     /// Create a new disk health check
-    pub fn new(path: impl Into<std::path::PathBuf>, warning_threshold: f32, critical_threshold: f32) -> Self {
+    pub fn new(
+        path: impl Into<std::path::PathBuf>,
+        warning_threshold: f32,
+        critical_threshold: f32,
+    ) -> Self {
         Self {
             path: path.into(),
             warning_threshold,
@@ -328,18 +339,18 @@ impl HealthCheck for DiskHealthCheck {
     fn name(&self) -> &str {
         "disk"
     }
-    
+
     async fn check(&self) -> HealthStatus {
         use sysinfo::Disks;
-        
+
         let disks = Disks::new_with_refreshed_list();
-        
+
         for disk in disks.list() {
             if disk.mount_point() == self.path {
                 let total = disk.total_space() as f32;
                 let available = disk.available_space() as f32;
                 let usage = 1.0 - (available / total);
-                
+
                 if usage > self.critical_threshold {
                     return HealthStatus::Unhealthy {
                         reason: format!("Disk critical: {:.1}% full", usage * 100.0),
@@ -354,7 +365,7 @@ impl HealthCheck for DiskHealthCheck {
                 }
             }
         }
-        
+
         HealthStatus::Degraded {
             reason: format!("Disk {} not found", self.path.display()),
         }

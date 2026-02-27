@@ -1,11 +1,11 @@
 use crate::cognitive::compilation_manager::CompilationSandbox;
-use crate::cognitive::self_edit::SelfEditOrchestrator;
 use crate::cognitive::metrics::MetricsStore;
-use crate::errors::{SelfwareError, Result};
+use crate::cognitive::self_edit::SelfEditOrchestrator;
+use crate::errors::{Result, SelfwareError};
 use std::path::PathBuf;
-use std::time::Duration;
-use tracing::{info, warn, error, debug};
 use std::process::Command;
+use std::time::Duration;
+use tracing::{debug, error, info, warn};
 
 /// The outer loop for Recursive Self-Improvement
 pub struct RSIOrchestrator {
@@ -71,14 +71,14 @@ impl RSIOrchestrator {
             info!("No improvement targets found in this cycle.");
             return Ok(false);
         }
-        
+
         // Pick highest priority target
         let target = targets.into_iter().next().unwrap();
         info!("Selected improvement target: {:?}", target);
 
         // 3. Create Sandbox
         let sandbox = self.edit_orchestrator.create_sandbox()?;
-        
+
         // 4. Apply Mutation
         // In reality, the LLM would generate the code. Here we simulate the change being applied
         // by the agent in the sandbox.
@@ -101,16 +101,22 @@ impl RSIOrchestrator {
 
         // 7. Evaluate
         if new_score > baseline_score {
-            info!("Mutation improved fitness ({} > {}). Merging.", new_score, baseline_score);
+            info!(
+                "Mutation improved fitness ({} > {}). Merging.",
+                new_score, baseline_score
+            );
             self.merge_sandbox(sandbox).await?;
-            
+
             // Record success
             self.record_improvement(target.id, true).await?;
             Ok(true)
         } else {
-            info!("Mutation degraded or did not improve fitness ({} <= {}). Rolling back.", new_score, baseline_score);
+            info!(
+                "Mutation degraded or did not improve fitness ({} <= {}). Rolling back.",
+                new_score, baseline_score
+            );
             sandbox.cleanup()?;
-            
+
             // Record failure
             self.record_improvement(target.id, false).await?;
             Ok(false)
@@ -130,36 +136,45 @@ impl RSIOrchestrator {
     async fn run_benchmark_and_get_score(&self, work_dir: &std::path::Path) -> Result<f64> {
         info!("Running E2E benchmark suite in {:?}", work_dir);
         let script_path = work_dir.join("system_tests/projecte2e/run_projecte2e.sh");
-        
+
         // This might take a long time
         let output = Command::new("bash")
             .arg(&script_path)
             .current_dir(work_dir)
             .output()
-            .map_err(|e| SelfwareError::Internal(format!("Failed to run benchmark script: {}", e)))?;
-            
+            .map_err(|e| {
+                SelfwareError::Internal(format!("Failed to run benchmark script: {}", e))
+            })?;
+
         if !output.status.success() {
-            warn!("Benchmark script returned non-zero exit code: {}", String::from_utf8_lossy(&output.stderr));
+            warn!(
+                "Benchmark script returned non-zero exit code: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
-        
+
         // Parse the TSV
         let reports_dir = work_dir.join("system_tests/projecte2e/reports/latest");
         let results_tsv = reports_dir.join("results.tsv");
-        
+
         if !results_tsv.exists() {
-            return Err(SelfwareError::Internal("Benchmark results.tsv not found".to_string()));
+            return Err(SelfwareError::Internal(
+                "Benchmark results.tsv not found".to_string(),
+            ));
         }
-        
+
         let tsv_content = std::fs::read_to_string(&results_tsv)
             .map_err(|e| SelfwareError::Internal(format!("Failed to read results.tsv: {}", e)))?;
-            
+
         // Calculate average score from the TSV
         // Format: scenario|type|difficulty|baseline|post|agent|timeout|duration|score|changed|error|notes
         let mut total_score = 0.0;
         let mut count = 0;
-        
+
         for (i, line) in tsv_content.lines().enumerate() {
-            if i == 0 { continue; } // Skip header
+            if i == 0 {
+                continue;
+            } // Skip header
             let parts: Vec<&str> = line.split('|').collect();
             if parts.len() > 8 {
                 if let Ok(score) = parts[8].parse::<f64>() {
@@ -168,34 +183,37 @@ impl RSIOrchestrator {
                 }
             }
         }
-        
+
         if count == 0 {
             return Ok(0.0);
         }
-        
+
         Ok(total_score / count as f64)
     }
 
     async fn merge_sandbox(&self, sandbox: CompilationSandbox) -> Result<()> {
         // Use git or file copy to merge back from work_dir to original_dir
         info!("Merging sandbox changes back to main workspace...");
-        
+
         let output = Command::new("rsync")
             .arg("-av")
             .arg("--exclude=.git")
             .arg("--exclude=target")
             .arg(format!("{}/", sandbox.work_dir().display()))
             .arg(format!("{}/", self.project_root.display()))
-            .output().map_err(|e| SelfwareError::Internal(e.to_string()))?;
+            .output()
+            .map_err(|e| SelfwareError::Internal(e.to_string()))?;
 
         if !output.status.success() {
-            return Err(SelfwareError::Internal("Failed to merge sandbox".to_string()));
+            return Err(SelfwareError::Internal(
+                "Failed to merge sandbox".to_string(),
+            ));
         }
 
         sandbox.cleanup()?;
         Ok(())
     }
-    
+
     async fn record_improvement(&mut self, _target_id: String, _success: bool) -> Result<()> {
         // Update meta-learner and store history
         Ok(())

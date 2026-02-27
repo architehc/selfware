@@ -4,7 +4,7 @@ use crate::config::MemoryConfig;
 use crate::errors::ResourceError;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn, error};
+use tracing::{debug, error, info, warn};
 
 /// Memory manager for system RAM
 pub struct MemoryManager {
@@ -43,7 +43,7 @@ impl MemoryManager {
     /// Create a new memory manager
     pub async fn new(config: &MemoryConfig) -> Result<Self, ResourceError> {
         let (action_tx, mut action_rx) = mpsc::channel(10);
-        
+
         // Start action handler
         tokio::spawn(async move {
             while let Some(action) = action_rx.recv().await {
@@ -75,25 +75,25 @@ impl MemoryManager {
                 }
             }
         });
-        
+
         Ok(Self {
             config: config.clone(),
             action_tx,
             allocated: AtomicU64::new(0),
         })
     }
-    
+
     /// Get current memory usage
     pub async fn get_usage(&self) -> Result<MemoryUsage, ResourceError> {
         use sysinfo::System;
-        
+
         let mut system = System::new_all();
         system.refresh_all();
-        
+
         let total = system.total_memory();
         let used = system.used_memory();
         let available = system.available_memory();
-        
+
         Ok(MemoryUsage {
             used,
             total,
@@ -105,24 +105,27 @@ impl MemoryManager {
             },
         })
     }
-    
+
     /// Monitor memory continuously
     pub async fn monitor(&self) {
-        let mut interval = tokio::time::interval(
-            std::time::Duration::from_secs(self.config.monitor_interval_seconds)
-        );
-        
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+            self.config.monitor_interval_seconds,
+        ));
+
         loop {
             interval.tick().await;
-            
+
             if let Ok(usage) = self.get_usage().await {
                 // metrics::gauge!("memory.used_bytes", usage.used as f64);
                 // metrics::gauge!("memory.available_bytes", usage.available as f64);
                 // metrics::gauge!("memory.percent", usage.percent as f64);
-                
+
                 // Check thresholds
                 if usage.percent > self.config.emergency_threshold {
-                    warn!(percent = usage.percent, "Memory emergency threshold reached");
+                    warn!(
+                        percent = usage.percent,
+                        "Memory emergency threshold reached"
+                    );
                     self.trigger_emergency_cleanup().await;
                 } else if usage.percent > self.config.critical_threshold {
                     warn!(percent = usage.percent, "Memory critical threshold reached");
@@ -134,55 +137,75 @@ impl MemoryManager {
             }
         }
     }
-    
+
     /// Trigger warning-level cleanup
     pub async fn trigger_warning_cleanup(&self) {
         let _ = self.action_tx.send(MemoryAction::FlushCaches).await;
     }
-    
+
     /// Trigger critical-level cleanup
     pub async fn trigger_critical_cleanup(&self) {
         let _ = self.action_tx.send(MemoryAction::FlushCaches).await;
-        let _ = self.action_tx.send(MemoryAction::ReduceContext { target_tokens: 32768 }).await;
-        let _ = self.action_tx.send(MemoryAction::PauseTasks { 
-            priority_threshold: 1 
-        }).await;
+        let _ = self
+            .action_tx
+            .send(MemoryAction::ReduceContext {
+                target_tokens: 32768,
+            })
+            .await;
+        let _ = self
+            .action_tx
+            .send(MemoryAction::PauseTasks {
+                priority_threshold: 1,
+            })
+            .await;
     }
-    
+
     /// Trigger emergency-level cleanup
     pub async fn trigger_emergency_cleanup(&self) {
         let _ = self.action_tx.send(MemoryAction::FlushCaches).await;
-        let _ = self.action_tx.send(MemoryAction::ReduceContext { target_tokens: 8192 }).await;
+        let _ = self
+            .action_tx
+            .send(MemoryAction::ReduceContext {
+                target_tokens: 8192,
+            })
+            .await;
         let _ = self.action_tx.send(MemoryAction::OffloadModels).await;
-        let _ = self.action_tx.send(MemoryAction::PauseTasks { 
-            priority_threshold: 2 
-        }).await;
+        let _ = self
+            .action_tx
+            .send(MemoryAction::PauseTasks {
+                priority_threshold: 2,
+            })
+            .await;
     }
-    
+
     /// Allocate memory
     pub fn allocate(&self, bytes: u64) -> Result<(), ResourceError> {
         let current = self.allocated.fetch_add(bytes, Ordering::SeqCst);
-        debug!(allocated_bytes = bytes, total_allocated = current + bytes, "Memory allocated");
+        debug!(
+            allocated_bytes = bytes,
+            total_allocated = current + bytes,
+            "Memory allocated"
+        );
         Ok(())
     }
-    
+
     /// Free allocated memory
     pub fn free(&self, bytes: u64) {
         let _ = self.allocated.fetch_sub(bytes, Ordering::SeqCst);
         debug!(freed_bytes = bytes, "Memory freed");
     }
-    
+
     /// Get allocated memory
     pub fn get_allocated(&self) -> u64 {
         self.allocated.load(Ordering::Relaxed)
     }
-    
+
     /// Check if enough memory is available
     pub async fn check_available(&self, required_bytes: u64) -> Result<bool, ResourceError> {
         let usage = self.get_usage().await?;
         Ok(usage.available >= required_bytes)
     }
-    
+
     /// Estimate memory for operation
     pub fn estimate_for_tokens(&self, tokens: usize, bytes_per_token: usize) -> u64 {
         (tokens * bytes_per_token) as u64

@@ -1,21 +1,26 @@
+use selfware::analysis::vector_store::{EmbeddingBackend, MockEmbeddingProvider};
+use selfware::api::ApiClient;
 use selfware::cognitive::cognitive_system::CognitiveSystem;
 use selfware::config::Config;
-use selfware::api::ApiClient;
-use selfware::analysis::vector_store::{EmbeddingBackend, MockEmbeddingProvider};
 use std::sync::Arc;
 
 #[tokio::test]
 async fn test_1m_token_context_initialization() {
     let mut config = Config::default();
     config.max_tokens = 1_000_000;
-    
+
     let api_client = Arc::new(ApiClient::new(&config).unwrap());
     let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::new(1536)));
-    
-    let system = CognitiveSystem::new(&config, api_client, embedding).await.unwrap();
+
+    let system = CognitiveSystem::new(&config, api_client, embedding)
+        .await
+        .unwrap();
     let budget = system.memory.read().budget.clone();
-    
-    let total = budget.working_memory + budget.episodic_memory + budget.semantic_memory + budget.response_reserve;
+
+    let total = budget.working_memory
+        + budget.episodic_memory
+        + budget.semantic_memory
+        + budget.response_reserve;
     assert!(total >= 1_000_000, "Should have at least 1M token budget");
     assert!(budget.working_memory > 0);
     assert!(budget.semantic_memory > 0);

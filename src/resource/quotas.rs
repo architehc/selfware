@@ -21,11 +21,11 @@ impl AdaptiveQuotas {
             current: RwLock::new(base),
         }
     }
-    
+
     /// Adjust quotas based on resource pressure
     pub async fn adjust_for_pressure(&self, pressure: ResourcePressure) {
         let mut current = self.current.write().await;
-        
+
         match pressure {
             ResourcePressure::None => {
                 // Reset to base quotas
@@ -33,7 +33,8 @@ impl AdaptiveQuotas {
             }
             ResourcePressure::Low => {
                 // Slight reduction
-                current.max_concurrent_requests = self.base.max_concurrent_requests.saturating_sub(1);
+                current.max_concurrent_requests =
+                    self.base.max_concurrent_requests.saturating_sub(1);
             }
             ResourcePressure::Medium => {
                 // Moderate reduction
@@ -55,11 +56,11 @@ impl AdaptiveQuotas {
             }
         }
     }
-    
+
     /// Check if a resource request is within quotas
     pub async fn check(&self, request: &ResourceRequest) -> Result<(), ResourceError> {
         let quotas = self.current.read().await;
-        
+
         if request.gpu_memory_bytes > quotas.max_gpu_memory_per_model {
             return Err(ResourceError::QuotaExceeded {
                 resource: "gpu_memory_per_model".to_string(),
@@ -67,7 +68,7 @@ impl AdaptiveQuotas {
                 limit: quotas.max_gpu_memory_per_model,
             });
         }
-        
+
         if request.system_memory_bytes > quotas.max_context_tokens as u64 * 100 {
             return Err(ResourceError::QuotaExceeded {
                 resource: "system_memory".to_string(),
@@ -75,15 +76,15 @@ impl AdaptiveQuotas {
                 limit: quotas.max_context_tokens as u64 * 100,
             });
         }
-        
+
         Ok(())
     }
-    
+
     /// Get current quotas
     pub async fn current(&self) -> ResourceQuotas {
         self.current.read().await.clone()
     }
-    
+
     /// Get base quotas
     pub fn base(&self) -> &ResourceQuotas {
         &self.base
@@ -108,7 +109,7 @@ impl ResourceLimitTracker {
             current_queued_tasks: AtomicUsize::new(0),
         }
     }
-    
+
     /// Try to allocate GPU memory
     pub fn allocate_gpu_memory(&self, bytes: u64) -> Result<GPUAllocationGuard<'_>, ResourceError> {
         let mut current = self.current_gpu_memory.load(Ordering::SeqCst);
@@ -121,18 +122,23 @@ impl ResourceLimitTracker {
                     limit: self.quotas.max_gpu_memory_per_model,
                 });
             }
-            match self.current_gpu_memory.compare_exchange_weak(current, new_total, Ordering::SeqCst, Ordering::SeqCst) {
+            match self.current_gpu_memory.compare_exchange_weak(
+                current,
+                new_total,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
                 Ok(_) => break,
                 Err(c) => current = c,
             }
         }
-        
+
         Ok(GPUAllocationGuard {
             tracker: self,
             bytes,
         })
     }
-    
+
     /// Try to start a concurrent request
     pub fn start_request(&self) -> Result<RequestGuard<'_>, ResourceError> {
         let mut current = self.current_concurrent_requests.load(Ordering::SeqCst);
@@ -144,15 +150,20 @@ impl ResourceLimitTracker {
                     limit: self.quotas.max_concurrent_requests as u64,
                 });
             }
-            match self.current_concurrent_requests.compare_exchange_weak(current, current + 1, Ordering::SeqCst, Ordering::SeqCst) {
+            match self.current_concurrent_requests.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
                 Ok(_) => break,
                 Err(c) => current = c,
             }
         }
-        
+
         Ok(RequestGuard { tracker: self })
     }
-    
+
     /// Try to queue a task
     pub fn queue_task(&self) -> Result<TaskGuard<'_>, ResourceError> {
         let mut current = self.current_queued_tasks.load(Ordering::SeqCst);
@@ -164,30 +175,36 @@ impl ResourceLimitTracker {
                     limit: self.quotas.max_queued_tasks as u64,
                 });
             }
-            match self.current_queued_tasks.compare_exchange_weak(current, current + 1, Ordering::SeqCst, Ordering::SeqCst) {
+            match self.current_queued_tasks.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
                 Ok(_) => break,
                 Err(c) => current = c,
             }
         }
-        
+
         Ok(TaskGuard { tracker: self })
     }
-    
+
     /// Release GPU memory
     fn release_gpu_memory(&self, bytes: u64) {
         self.current_gpu_memory.fetch_sub(bytes, Ordering::SeqCst);
     }
-    
+
     /// Release request slot
     fn release_request(&self) {
-        self.current_concurrent_requests.fetch_sub(1, Ordering::SeqCst);
+        self.current_concurrent_requests
+            .fetch_sub(1, Ordering::SeqCst);
     }
-    
+
     /// Release task slot
     fn release_task(&self) {
         self.current_queued_tasks.fetch_sub(1, Ordering::SeqCst);
     }
-    
+
     /// Get current usage
     pub fn usage(&self) -> ResourceUsage {
         ResourceUsage {

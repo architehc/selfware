@@ -5,12 +5,12 @@
 //! - Episodic Memory: Recent experiences and events (~200K tokens)
 //! - Semantic Memory: Codebase and long-term knowledge (~700K tokens)
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use anyhow::Result;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use anyhow::Result;
-use tracing::{info, debug};
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
+use tracing::{debug, info};
 
 use crate::api::types::Message;
 use crate::token_count::estimate_tokens_with_overhead;
@@ -59,7 +59,7 @@ impl TokenBudget {
             response_reserve: 100_000,
         }
     }
-    
+
     /// Create budget optimized for conversation
     pub fn for_conversation() -> Self {
         Self {
@@ -69,7 +69,7 @@ impl TokenBudget {
             response_reserve: 100_000,
         }
     }
-    
+
     /// Create budget optimized for self-improvement
     pub fn for_self_improvement() -> Self {
         Self {
@@ -79,12 +79,12 @@ impl TokenBudget {
             response_reserve: 100_000,
         }
     }
-    
+
     /// Total allocated tokens
     pub fn total_allocated(&self) -> usize {
         self.working_memory + self.episodic_memory + self.semantic_memory
     }
-    
+
     /// Total available including reserve
     pub fn total_available(&self) -> usize {
         self.total_allocated() + self.response_reserve
@@ -136,14 +136,12 @@ pub struct MemoryMetrics {
 
 impl HierarchicalMemory {
     /// Create new hierarchical memory system
-    pub async fn new(
-        budget: TokenBudget,
-        embedding: Arc<EmbeddingBackend>,
-    ) -> Result<Self> {
-        let semantic = Arc::new(RwLock::new(
-            SemanticMemory::new(budget.semantic_memory, embedding.clone())
-        ));
-        
+    pub async fn new(budget: TokenBudget, embedding: Arc<EmbeddingBackend>) -> Result<Self> {
+        let semantic = Arc::new(RwLock::new(SemanticMemory::new(
+            budget.semantic_memory,
+            embedding.clone(),
+        )));
+
         Ok(Self {
             budget: budget.clone(),
             working: WorkingMemory::new(budget.working_memory),
@@ -154,36 +152,39 @@ impl HierarchicalMemory {
             embedding,
         })
     }
-    
+
     /// Initialize with Selfware codebase indexing
-    pub async fn initialize_selfware_index(&mut self, selfware_path: &std::path::Path) -> Result<()> {
+    pub async fn initialize_selfware_index(
+        &mut self,
+        selfware_path: &std::path::Path,
+    ) -> Result<()> {
         info!("Initializing Selfware codebase index...");
-        
+
         let mut semantic = self.semantic.write();
         semantic.index_codebase(selfware_path).await?;
         self.usage.semantic_tokens = semantic.total_tokens();
-        
+
         info!(
             "Selfware index initialized: {} tokens",
             self.usage.semantic_tokens
         );
-        
+
         Ok(())
     }
-    
+
     /// Add message to working memory
     pub fn add_message(&mut self, message: Message, importance: f32) {
         self.working.add_message(message, importance);
         self.usage.working_tokens = self.working.total_tokens();
     }
-    
+
     /// Record an episode
     pub async fn record_episode(&mut self, episode: Episode) -> Result<()> {
         self.episodic.record(episode).await?;
         self.usage.episodic_tokens = self.episodic.total_tokens();
         Ok(())
     }
-    
+
     /// Retrieve relevant context for a query
     pub async fn retrieve_context(
         &self,
@@ -191,66 +192,59 @@ impl HierarchicalMemory {
         context_type: ContextType,
     ) -> Result<RetrievedContext> {
         let start = std::time::Instant::now();
-        
+
         let context = match context_type {
-            ContextType::Working => {
-                RetrievedContext::Working(self.working.get_context())
-            }
-            ContextType::Episodic { limit, min_importance } => {
-                let episodes = self.episodic.retrieve_relevant(
-                    query,
-                    limit,
-                    min_importance,
-                ).await?;
+            ContextType::Working => RetrievedContext::Working(self.working.get_context()),
+            ContextType::Episodic {
+                limit,
+                min_importance,
+            } => {
+                let episodes = self
+                    .episodic
+                    .retrieve_relevant(query, limit, min_importance)
+                    .await?;
                 RetrievedContext::Episodic(episodes)
             }
-            ContextType::Semantic { max_tokens, include_related } => {
+            ContextType::Semantic {
+                max_tokens,
+                include_related,
+            } => {
                 let semantic = self.semantic.read();
-                let code_context = semantic.retrieve_code_context(
-                    query,
-                    max_tokens,
-                    include_related,
-                )?;
+                let code_context =
+                    semantic.retrieve_code_context(query, max_tokens, include_related)?;
                 RetrievedContext::Semantic(code_context)
             }
-            ContextType::Complete => {
-                self.build_complete_context(query).await?
-            }
+            ContextType::Complete => self.build_complete_context(query).await?,
         };
-        
+
         let _elapsed = start.elapsed().as_millis() as f64;
         // Update average retrieval time
         // self.metrics.avg_retrieval_time_ms = ...
-        
+
         Ok(context)
     }
-    
+
     /// Build complete context from all layers
     async fn build_complete_context(&self, query: &str) -> Result<RetrievedContext> {
         let working = self.working.get_context();
-        
-        let episodic = self.episodic.retrieve_relevant(
-            query,
-            10,
-            Importance::Normal,
-        ).await?;
-        
+
+        let episodic = self
+            .episodic
+            .retrieve_relevant(query, 10, Importance::Normal)
+            .await?;
+
         let semantic = {
             let sem = self.semantic.read();
-            sem.retrieve_code_context(
-                query,
-                self.budget.semantic_memory / 4,
-                true,
-            )?
+            sem.retrieve_code_context(query, self.budget.semantic_memory / 4, true)?
         };
-        
+
         Ok(RetrievedContext::Complete {
             working,
             episodic,
             semantic,
         })
     }
-    
+
     /// Get current memory statistics
     pub fn get_stats(&self) -> MemoryStats {
         MemoryStats {
@@ -262,18 +256,18 @@ impl HierarchicalMemory {
             semantic_files: self.semantic.read().file_count(),
         }
     }
-    
+
     /// Check if memory is within budget
     pub fn is_within_budget(&self) -> bool {
         self.usage.working_tokens <= self.budget.working_memory
             && self.usage.episodic_tokens <= self.budget.episodic_memory
             && self.usage.semantic_tokens <= self.budget.semantic_memory
     }
-    
+
     /// Force compression if over budget
     pub async fn compress_if_needed(&mut self) -> Result<bool> {
         let mut compressed = false;
-        
+
         if self.usage.episodic_tokens > self.budget.episodic_memory {
             debug!("Episodic memory over budget, compressing...");
             self.episodic.compress_oldest().await?;
@@ -281,7 +275,7 @@ impl HierarchicalMemory {
             self.metrics.compressions += 1;
             compressed = true;
         }
-        
+
         Ok(compressed)
     }
 }
@@ -292,9 +286,15 @@ pub enum ContextType {
     /// Working memory only
     Working,
     /// Episodic memory with parameters
-    Episodic { limit: usize, min_importance: Importance },
+    Episodic {
+        limit: usize,
+        min_importance: Importance,
+    },
     /// Semantic memory with parameters
-    Semantic { max_tokens: usize, include_related: bool },
+    Semantic {
+        max_tokens: usize,
+        include_related: bool,
+    },
     /// Complete context from all layers
     Complete,
 }
@@ -356,8 +356,14 @@ pub struct ActiveCodeContext {
 #[derive(Debug, Clone)]
 pub enum CodeContent {
     Full(String),
-    Summary { overview: String, key_functions: Vec<String> },
-    Reference { path: String, summary: String },
+    Summary {
+        overview: String,
+        key_functions: Vec<String>,
+    },
+    Reference {
+        path: String,
+        summary: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -393,10 +399,10 @@ impl WorkingMemory {
             current_task: None,
         }
     }
-    
+
     pub fn add_message(&mut self, message: Message, importance: f32) {
         let tokens = estimate_tokens_with_overhead(&message.content, 50);
-        
+
         let entry = WorkingMemoryEntry {
             message: message.clone(),
             token_count: tokens,
@@ -404,22 +410,23 @@ impl WorkingMemory {
             timestamp: current_timestamp_secs(),
             compressible: message.role != "system",
         };
-        
+
         // Evict if necessary
         while self.current_tokens + tokens > self.max_tokens {
             if !self.evict_least_important() {
                 break;
             }
         }
-        
+
         self.current_tokens += tokens;
         self.messages.push_back(entry);
     }
-    
+
     fn evict_least_important(&mut self) -> bool {
         let now = current_timestamp_secs();
-        
-        if let Some((idx, _)) = self.messages
+
+        if let Some((idx, _)) = self
+            .messages
             .iter()
             .enumerate()
             .filter(|(_, e)| e.compressible)
@@ -429,7 +436,8 @@ impl WorkingMemory {
                 let score_a = a.1.importance / age_a;
                 let score_b = b.1.importance / age_b;
                 score_a.partial_cmp(&score_b).unwrap()
-            }) {
+            })
+        {
             if let Some(entry) = self.messages.remove(idx) {
                 self.current_tokens -= entry.token_count;
                 return true;
@@ -437,7 +445,7 @@ impl WorkingMemory {
         }
         false
     }
-    
+
     pub fn get_context(&self) -> WorkingContext {
         WorkingContext {
             messages: self.messages.iter().map(|e| e.message.clone()).collect(),
@@ -445,10 +453,10 @@ impl WorkingMemory {
             current_task: self.current_task.clone(),
         }
     }
-    
+
     pub fn set_active_code(&mut self, path: String, content: String) {
         let tokens = estimate_tokens_with_overhead(&content, 0);
-        
+
         let code_content = if tokens > 10_000 {
             CodeContent::Reference {
                 path: path.clone(),
@@ -457,7 +465,7 @@ impl WorkingMemory {
         } else {
             CodeContent::Full(content)
         };
-        
+
         if let Some(existing) = self.active_code.iter_mut().find(|c| c.path == path) {
             existing.content = code_content;
             existing.last_accessed = current_timestamp_secs();
@@ -469,15 +477,16 @@ impl WorkingMemory {
                 edit_history: Vec::new(),
             });
         }
-        
-        self.active_code.sort_by(|a, b| b.last_accessed.cmp(&a.last_accessed));
+
+        self.active_code
+            .sort_by(|a, b| b.last_accessed.cmp(&a.last_accessed));
         self.active_code.truncate(10);
     }
-    
+
     pub fn total_tokens(&self) -> usize {
         self.current_tokens
     }
-    
+
     pub fn len(&self) -> usize {
         self.messages.len()
     }
@@ -567,24 +576,24 @@ impl EpisodicMemory {
             embedding,
         }
     }
-    
+
     pub async fn record(&mut self, mut episode: Episode) -> Result<()> {
         episode.token_count = estimate_tokens_with_overhead(&episode.content, 100);
-        
+
         // Generate embedding
         let embedding_vec = self.embedding.embed(&episode.content).await?;
         self.vector_index.add(episode.id.clone(), embedding_vec)?;
         episode.embedding_id = episode.id.clone();
-        
+
         self.add_to_tier(episode);
         self.maintain_budget().await?;
-        
+
         Ok(())
     }
-    
+
     fn add_to_tier(&mut self, episode: Episode) {
         self.current_tokens += episode.token_count;
-        
+
         match episode.importance {
             Importance::Critical => self.tiers.critical.push(episode),
             Importance::High => self.tiers.high.push_back(episode),
@@ -592,7 +601,7 @@ impl EpisodicMemory {
             Importance::Low | Importance::Transient => self.tiers.low.push_back(episode),
         }
     }
-    
+
     async fn maintain_budget(&mut self) -> Result<()> {
         while self.current_tokens > self.max_tokens {
             if self.try_evict_lowest().await? {
@@ -602,7 +611,7 @@ impl EpisodicMemory {
         }
         Ok(())
     }
-    
+
     async fn try_evict_lowest(&mut self) -> Result<bool> {
         if let Some(episode) = self.tiers.low.pop_front() {
             self.current_tokens -= episode.token_count;
@@ -621,7 +630,7 @@ impl EpisodicMemory {
         }
         Ok(false)
     }
-    
+
     pub async fn compress_oldest(&mut self) -> Result<()> {
         // Compress oldest normal episodes
         if let Some(episode) = self.tiers.normal.pop_front() {
@@ -633,14 +642,14 @@ impl EpisodicMemory {
         }
         Ok(())
     }
-    
+
     fn create_summary(&self, episode: &Episode) -> Episode {
         let summary_content = format!(
             "[SUMMARY] {}: {}",
             episode.episode_type.as_str(),
             &episode.content.chars().take(200).collect::<String>()
         );
-        
+
         Episode {
             id: format!("summary-{}", episode.id),
             episode_type: episode.episode_type,
@@ -655,7 +664,7 @@ impl EpisodicMemory {
             original_id: Some(episode.id.clone()),
         }
     }
-    
+
     pub async fn retrieve_relevant(
         &self,
         query: &str,
@@ -664,7 +673,7 @@ impl EpisodicMemory {
     ) -> Result<Vec<Episode>> {
         let query_embedding = self.embedding.embed(query).await?;
         let results = self.vector_index.search(&query_embedding, limit * 2);
-        
+
         let mut episodes = Vec::new();
         for result in results {
             if let Some(episode) = self.find_episode(&result.0) {
@@ -676,23 +685,25 @@ impl EpisodicMemory {
                 }
             }
         }
-        
+
         Ok(episodes)
     }
-    
+
     fn find_episode(&self, id: &str) -> Option<Episode> {
-        self.tiers.critical.iter()
+        self.tiers
+            .critical
+            .iter()
             .chain(self.tiers.high.iter())
             .chain(self.tiers.normal.iter())
             .chain(self.tiers.low.iter())
             .find(|e| e.id == id)
             .cloned()
     }
-    
+
     pub fn total_tokens(&self) -> usize {
         self.current_tokens
     }
-    
+
     pub fn len(&self) -> usize {
         self.tiers.critical.len()
             + self.tiers.high.len()
@@ -762,12 +773,12 @@ impl SemanticMemory {
             embedding,
         }
     }
-    
+
     pub async fn index_codebase(&mut self, root_path: &std::path::Path) -> Result<()> {
         info!("Indexing codebase at: {}", root_path.display());
-        
+
         let mut entries = tokio::fs::read_dir(root_path).await?;
-        
+
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             if path.is_file() && Self::is_source_file(&path) {
@@ -776,25 +787,27 @@ impl SemanticMemory {
                 self.index_directory(&path).await?;
             }
         }
-        
-        info!("Indexed {} files, {} tokens", self.files.len(), self.total_tokens);
+
+        info!(
+            "Indexed {} files, {} tokens",
+            self.files.len(),
+            self.total_tokens
+        );
         Ok(())
     }
-    
+
     async fn index_directory(&mut self, dir: &std::path::Path) -> Result<()> {
         let mut stack = vec![dir.to_path_buf()];
-        
+
         while let Some(current_dir) = stack.pop() {
             let mut entries = tokio::fs::read_dir(&current_dir).await?;
-            
+
             while let Some(entry) = entries.next_entry().await? {
                 let path = entry.path();
                 if path.is_file() && Self::is_source_file(&path) {
                     self.index_file(&path).await?;
                 } else if path.is_dir() {
-                    let name = path.file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("");
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                     if !name.starts_with('.') && name != "target" {
                         stack.push(path);
                     }
@@ -803,15 +816,15 @@ impl SemanticMemory {
         }
         Ok(())
     }
-    
+
     async fn index_file(&mut self, path: &std::path::Path) -> Result<()> {
         let content = match tokio::fs::read_to_string(path).await {
             Ok(c) => c,
             Err(_) => return Ok(()), // Skip binary files
         };
-        
+
         let token_count = estimate_tokens_with_overhead(&content, 0);
-        
+
         // Determine content strategy
         let file_content = if token_count < 5_000 {
             FileContent::Full(content)
@@ -820,25 +833,25 @@ impl SemanticMemory {
         } else {
             FileContent::Summary(content.chars().take(5000).collect())
         };
-        
+
         let indexed = IndexedFile {
             path: path.to_string_lossy().to_string(),
             content: file_content,
             token_count,
             last_modified: 0, // TODO: Get actual modified time
         };
-        
+
         self.total_tokens += token_count;
         self.files.insert(indexed.path.clone(), indexed);
-        
+
         Ok(())
     }
-    
+
     fn chunk_content(&self, content: &str) -> Vec<ContentChunk> {
         let lines: Vec<&str> = content.lines().collect();
         let mut chunks = Vec::new();
         let chunk_size = 100; // lines per chunk
-        
+
         for (i, chunk_lines) in lines.chunks(chunk_size).enumerate() {
             let chunk_content = chunk_lines.join("\n");
             chunks.push(ContentChunk {
@@ -849,10 +862,10 @@ impl SemanticMemory {
                 content: chunk_content,
             });
         }
-        
+
         chunks
     }
-    
+
     pub fn retrieve_code_context(
         &self,
         query: &str,
@@ -861,43 +874,44 @@ impl SemanticMemory {
     ) -> Result<CodeContext> {
         // Simple keyword-based retrieval for now
         // TODO: Implement semantic search with embeddings
-        
+
         let query_lower = query.to_lowercase();
         let keywords: Vec<&str> = query_lower.split_whitespace().collect();
-        
-        let mut scored_files: Vec<(String, f32, usize)> = self.files
+
+        let mut scored_files: Vec<(String, f32, usize)> = self
+            .files
             .iter()
             .map(|(path, file)| {
                 let path_lower = path.to_lowercase();
-                let score = keywords.iter()
-                    .filter(|k| path_lower.contains(*k))
-                    .count() as f32;
+                let score = keywords.iter().filter(|k| path_lower.contains(*k)).count() as f32;
                 (path.clone(), score, file.token_count)
             })
             .filter(|(_, score, _)| *score > 0.0)
             .collect();
-        
+
         scored_files.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-        
+
         let mut context = CodeContext {
             files: Vec::new(),
             total_tokens: 0,
         };
-        
+
         for (path, score, tokens) in scored_files {
             if context.total_tokens + tokens > max_tokens {
                 break;
             }
-            
+
             if let Some(file) = self.files.get(&path) {
                 let content = match &file.content {
                     FileContent::Full(c) => c.clone(),
-                    FileContent::Chunked(chunks) => {
-                        chunks.iter().map(|c| c.content.as_str()).collect::<Vec<_>>().join("\n")
-                    }
+                    FileContent::Chunked(chunks) => chunks
+                        .iter()
+                        .map(|c| c.content.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
                     FileContent::Summary(s) => s.clone(),
                 };
-                
+
                 context.files.push(FileContextEntry {
                     path: path.clone(),
                     content,
@@ -906,21 +920,21 @@ impl SemanticMemory {
                 context.total_tokens += tokens;
             }
         }
-        
+
         Ok(context)
     }
-    
+
     fn is_source_file(path: &std::path::Path) -> bool {
         matches!(
             path.extension().and_then(|e| e.to_str()),
             Some("rs") | Some("py") | Some("js") | Some("ts") | Some("go") | Some("java")
         )
     }
-    
+
     pub fn total_tokens(&self) -> usize {
         self.total_tokens
     }
-    
+
     pub fn file_count(&self) -> usize {
         self.files.len()
     }

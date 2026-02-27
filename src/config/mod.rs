@@ -7,8 +7,8 @@
 //! - Safety settings (allowed paths, blocked commands)
 //! - Tool-specific options
 
-pub mod typed;
 pub mod resources;
+pub mod typed;
 
 pub use resources::*;
 

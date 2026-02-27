@@ -3,15 +3,15 @@
 //! Enables the agent to read, understand, and modify its own source code.
 //! This is the foundation for recursive self-improvement.
 
+use anyhow::{anyhow, Result};
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
-use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
-use anyhow::{Result, anyhow};
-use tracing::{info, debug};
+use tracing::{debug, info};
 
-use crate::cognitive::memory_hierarchy::{SemanticMemory, CodeContext, IndexedFile, FileContent};
+use crate::cognitive::memory_hierarchy::{CodeContext, FileContent, IndexedFile, SemanticMemory};
 use crate::token_count::estimate_tokens_with_overhead;
 
 /// System for agent self-reference and self-improvement
@@ -65,12 +65,12 @@ pub struct ModuleSelfModel {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModuleImportance {
-    Core,       // Essential for basic operation
-    Cognitive,  // Learning, memory, reasoning
-    Agent,      // Execution and control
-    Tool,       // Tools and integrations
-    Utility,    // Helper utilities
-    Optional,   // Can be disabled
+    Core,      // Essential for basic operation
+    Cognitive, // Learning, memory, reasoning
+    Agent,     // Execution and control
+    Tool,      // Tools and integrations
+    Utility,   // Helper utilities
+    Optional,  // Can be disabled
 }
 
 /// Architecture model
@@ -201,14 +201,21 @@ impl SelfImprovementContext {
             self.suggestions.join("\n")
         )
     }
-    
+
     fn format_code_context(&self) -> String {
-        self.relevant_code.files.iter()
-            .map(|f| format!("### {} (score: {:.2})\n{}\n", f.path, f.relevance_score, f.content))
+        self.relevant_code
+            .files
+            .iter()
+            .map(|f| {
+                format!(
+                    "### {} (score: {:.2})\n{}\n",
+                    f.path, f.relevance_score, f.content
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }
-    
+
     /// Estimate total tokens
     pub fn estimate_tokens(&self) -> usize {
         estimate_tokens_with_overhead(&self.to_prompt(), 0)
@@ -237,10 +244,7 @@ impl Default for SourceRetrievalOptions {
 
 impl SelfReferenceSystem {
     /// Create new self-reference system
-    pub fn new(
-        semantic: Arc<RwLock<SemanticMemory>>,
-        selfware_path: PathBuf,
-    ) -> Self {
+    pub fn new(semantic: Arc<RwLock<SemanticMemory>>, selfware_path: PathBuf) -> Self {
         Self {
             semantic,
             self_model: SelfModel::default(),
@@ -250,60 +254,104 @@ impl SelfReferenceSystem {
             selfware_path,
         }
     }
-    
+
     /// Initialize self-model from codebase analysis
     pub async fn initialize_self_model(&mut self) -> Result<()> {
         info!("Initializing self-model from codebase...");
-        
+
         let semantic_arc = Arc::clone(&self.semantic);
         let semantic = semantic_arc.read();
-        
+
         // Build module models
         self.build_module_models(&semantic)?;
-        
+
         // Infer architecture
         self.infer_architecture(&semantic)?;
-        
+
         // Identify capabilities
         self.identify_capabilities(&semantic)?;
-        
+
         // Identify limitations
         self.identify_limitations(&semantic)?;
-        
+
         info!(
             "Self-model initialized: {} modules, {} capabilities",
             self.self_model.modules.len(),
             self.self_model.capabilities.len()
         );
-        
+
         Ok(())
     }
-    
+
     /// Build models for each module
     fn build_module_models(&mut self, semantic: &SemanticMemory) -> Result<()> {
         // Key Selfware modules
         let module_definitions: Vec<(&str, &str, ModuleImportance)> = vec![
-            ("src/memory.rs", "Memory management and context tracking", ModuleImportance::Core),
-            ("src/cognitive/mod.rs", "Cognitive system coordination", ModuleImportance::Cognitive),
-            ("src/cognitive/episodic.rs", "Episodic memory for experiences", ModuleImportance::Cognitive),
-            ("src/cognitive/knowledge_graph.rs", "Knowledge graph for relationships", ModuleImportance::Cognitive),
-            ("src/cognitive/rag.rs", "Retrieval-augmented generation", ModuleImportance::Cognitive),
-            ("src/cognitive/self_improvement.rs", "Self-improvement capabilities", ModuleImportance::Cognitive),
-            ("src/agent/context.rs", "Agent context management", ModuleImportance::Agent),
-            ("src/agent/execution.rs", "Agent execution engine", ModuleImportance::Agent),
-            ("src/api/client.rs", "API client for LLM communication", ModuleImportance::Core),
-            ("src/tools/mod.rs", "Tool definitions and registry", ModuleImportance::Tool),
-            ("src/config.rs", "Configuration management", ModuleImportance::Core),
+            (
+                "src/memory.rs",
+                "Memory management and context tracking",
+                ModuleImportance::Core,
+            ),
+            (
+                "src/cognitive/mod.rs",
+                "Cognitive system coordination",
+                ModuleImportance::Cognitive,
+            ),
+            (
+                "src/cognitive/episodic.rs",
+                "Episodic memory for experiences",
+                ModuleImportance::Cognitive,
+            ),
+            (
+                "src/cognitive/knowledge_graph.rs",
+                "Knowledge graph for relationships",
+                ModuleImportance::Cognitive,
+            ),
+            (
+                "src/cognitive/rag.rs",
+                "Retrieval-augmented generation",
+                ModuleImportance::Cognitive,
+            ),
+            (
+                "src/cognitive/self_improvement.rs",
+                "Self-improvement capabilities",
+                ModuleImportance::Cognitive,
+            ),
+            (
+                "src/agent/context.rs",
+                "Agent context management",
+                ModuleImportance::Agent,
+            ),
+            (
+                "src/agent/execution.rs",
+                "Agent execution engine",
+                ModuleImportance::Agent,
+            ),
+            (
+                "src/api/client.rs",
+                "API client for LLM communication",
+                ModuleImportance::Core,
+            ),
+            (
+                "src/tools/mod.rs",
+                "Tool definitions and registry",
+                ModuleImportance::Tool,
+            ),
+            (
+                "src/config.rs",
+                "Configuration management",
+                ModuleImportance::Core,
+            ),
             ("src/errors.rs", "Error handling", ModuleImportance::Core),
         ];
-        
+
         for (path, purpose, importance) in module_definitions {
             let token_count = if let Some(file) = semantic.get_file(path) {
                 file.token_count
             } else {
                 0
             };
-            
+
             let model = ModuleSelfModel {
                 path: path.to_string(),
                 purpose: purpose.to_string(),
@@ -315,13 +363,13 @@ impl SelfReferenceSystem {
                 last_modified: 0,
                 importance,
             };
-            
+
             self.self_model.modules.insert(path.to_string(), model);
         }
-        
+
         Ok(())
     }
-    
+
     /// Generate module description
     fn generate_module_description(&self, path: &str, purpose: &str) -> String {
         format!(
@@ -330,7 +378,7 @@ impl SelfReferenceSystem {
             path, purpose
         )
     }
-    
+
     /// Infer key components from path
     fn infer_key_components(&self, path: &str) -> Vec<String> {
         match path {
@@ -349,30 +397,27 @@ impl SelfReferenceSystem {
                 "CodeChunk".to_string(),
                 "SearchResult".to_string(),
             ],
-            "src/agent/context.rs" => vec![
-                "ContextCompressor".to_string(),
-                "ContextWindow".to_string(),
-            ],
+            "src/agent/context.rs" => {
+                vec!["ContextCompressor".to_string(), "ContextWindow".to_string()]
+            }
             _ => Vec::new(),
         }
     }
-    
+
     /// Infer module dependencies
     fn infer_dependencies(&self, path: &str) -> Vec<String> {
         match path {
             "src/memory.rs" => vec!["src/config.rs".to_string()],
-            "src/cognitive/mod.rs" => vec![
-                "src/memory.rs".to_string(),
-                "src/api/client.rs".to_string(),
-            ],
-            "src/agent/context.rs" => vec![
-                "src/memory.rs".to_string(),
-                "src/api/client.rs".to_string(),
-            ],
+            "src/cognitive/mod.rs" => {
+                vec!["src/memory.rs".to_string(), "src/api/client.rs".to_string()]
+            }
+            "src/agent/context.rs" => {
+                vec!["src/memory.rs".to_string(), "src/api/client.rs".to_string()]
+            }
             _ => Vec::new(),
         }
     }
-    
+
     /// Infer module dependents
     fn infer_dependents(&self, path: &str) -> Vec<String> {
         match path {
@@ -387,7 +432,7 @@ impl SelfReferenceSystem {
             _ => Vec::new(),
         }
     }
-    
+
     /// Infer system architecture
     fn infer_architecture(&mut self, _semantic: &SemanticMemory) -> Result<()> {
         self.self_model.architecture = ArchitectureModel {
@@ -469,14 +514,14 @@ impl SelfReferenceSystem {
                 "Context".to_string(),
             ],
         };
-        
+
         Ok(())
     }
-    
+
     /// Identify system capabilities
     fn identify_capabilities(&mut self, semantic: &SemanticMemory) -> Result<()> {
         let mut capabilities = Vec::new();
-        
+
         // Memory management capability
         if semantic.get_file("src/memory.rs").is_some() {
             capabilities.push(Capability {
@@ -490,7 +535,7 @@ impl SelfReferenceSystem {
                 ],
             });
         }
-        
+
         // Episodic memory capability
         if semantic.get_file("src/cognitive/episodic.rs").is_some() {
             capabilities.push(Capability {
@@ -504,7 +549,7 @@ impl SelfReferenceSystem {
                 ],
             });
         }
-        
+
         // RAG capability
         if semantic.get_file("src/cognitive/rag.rs").is_some() {
             capabilities.push(Capability {
@@ -518,9 +563,12 @@ impl SelfReferenceSystem {
                 ],
             });
         }
-        
+
         // Self-improvement capability
-        if semantic.get_file("src/cognitive/self_improvement.rs").is_some() {
+        if semantic
+            .get_file("src/cognitive/self_improvement.rs")
+            .is_some()
+        {
             capabilities.push(Capability {
                 name: "Self-Improvement".to_string(),
                 description: "Analyze and modify own source code".to_string(),
@@ -536,9 +584,12 @@ impl SelfReferenceSystem {
                 ],
             });
         }
-        
+
         // Knowledge graph capability
-        if semantic.get_file("src/cognitive/knowledge_graph.rs").is_some() {
+        if semantic
+            .get_file("src/cognitive/knowledge_graph.rs")
+            .is_some()
+        {
             capabilities.push(Capability {
                 name: "Knowledge Graph".to_string(),
                 description: "Track relationships between code entities".to_string(),
@@ -550,11 +601,11 @@ impl SelfReferenceSystem {
                 ],
             });
         }
-        
+
         self.self_model.capabilities = capabilities;
         Ok(())
     }
-    
+
     /// Identify known limitations
     fn identify_limitations(&mut self, _semantic: &SemanticMemory) -> Result<()> {
         self.self_model.limitations = vec![
@@ -566,7 +617,7 @@ impl SelfReferenceSystem {
         ];
         Ok(())
     }
-    
+
     /// Get context for self-improvement task
     pub async fn get_improvement_context(
         &self,
@@ -574,25 +625,25 @@ impl SelfReferenceSystem {
         max_tokens: usize,
     ) -> Result<SelfImprovementContext> {
         debug!("Building self-improvement context for: {}", goal);
-        
+
         // Get relevant code
         let relevant_code = {
             let semantic = self.semantic.read();
             semantic.retrieve_code_context(goal, max_tokens * 6 / 10, true)?
         };
-        
+
         // Format self-model (20% of budget)
         let self_model_str = self.format_self_model(max_tokens * 2 / 10);
-        
+
         // Format architecture (10% of budget)
         let architecture_str = self.format_architecture(max_tokens / 10);
-        
+
         // Format recent modifications (10% of budget)
         let recent_mods_str = self.format_recent_modifications(max_tokens / 10);
-        
+
         // Generate suggestions
         let suggestions = self.generate_suggestions(goal);
-        
+
         Ok(SelfImprovementContext {
             goal: goal.to_string(),
             self_model: self_model_str,
@@ -602,7 +653,7 @@ impl SelfReferenceSystem {
             suggestions,
         })
     }
-    
+
     /// Read own source code
     pub async fn read_own_code(
         &self,
@@ -614,43 +665,45 @@ impl SelfReferenceSystem {
             debug!("Cache hit for {}", module_path);
             return Ok(cached.content.clone());
         }
-        
+
         let semantic = self.semantic.read();
-        
+
         // Get main file
         let mut content = if let Some(file) = semantic.get_file(module_path) {
             self.format_file_content(file)
         } else {
             return Err(anyhow!("Module not found: {}", module_path));
         };
-        
+
         // Add dependencies if requested
         if options.include_dependencies {
             if let Some(module) = self.self_model.modules.get(module_path) {
                 for dep_path in &module.dependencies {
                     if let Some(dep_file) = semantic.get_file(dep_path) {
                         let dep_content = self.format_file_content(dep_file);
-                        content.push_str(&format!("\n\n// Dependency: {}\n{}", dep_path, dep_content));
+                        content
+                            .push_str(&format!("\n\n// Dependency: {}\n{}", dep_path, dep_content));
                     }
                 }
             }
         }
-        
+
         // Check token limit
         let tokens = estimate_tokens_with_overhead(&content, 0);
         if tokens > options.max_tokens {
             content = self.truncate_to_tokens(&content, options.max_tokens);
         }
-        
+
         Ok(content)
     }
-    
+
     /// Format file content for context
     fn format_file_content(&self, file: &IndexedFile) -> String {
         match &file.content {
             FileContent::Full(c) => format!("// File: {}\n{}", file.path, c),
             FileContent::Chunked(chunks) => {
-                let content: String = chunks.iter()
+                let content: String = chunks
+                    .iter()
                     .map(|c| format!("// Lines {}-{}\n{}", c.start_line, c.end_line, c.content))
                     .collect::<Vec<_>>()
                     .join("\n");
@@ -659,20 +712,20 @@ impl SelfReferenceSystem {
             FileContent::Summary(s) => format!("// File: {} (summary)\n{}", file.path, s),
         }
     }
-    
+
     /// Track a code modification
     pub fn track_modification(&mut self, modification: CodeModification) {
         self.recent_modifications.push_back(modification);
-        
+
         // Keep bounded
         if self.recent_modifications.len() > self.max_modifications {
             self.recent_modifications.pop_front();
         }
-        
+
         // Update self-model
         self.update_self_model_for_modification();
     }
-    
+
     /// Update self-model after modification
     fn update_self_model_for_modification(&mut self) {
         // Update module last_modified times
@@ -682,28 +735,31 @@ impl SelfReferenceSystem {
             }
         }
     }
-    
+
     /// Format self-model for context
     fn format_self_model(&self, max_tokens: usize) -> String {
         let mut context = String::new();
-        
+
         context.push_str("# Selfware Self-Model\n\n");
-        
+
         // Capabilities
         context.push_str("## Capabilities\n");
         for cap in &self.self_model.capabilities {
             context.push_str(&format!(
                 "- **{}** (confidence: {:.0}%): {}\n",
-                cap.name, cap.confidence * 100.0, cap.description
+                cap.name,
+                cap.confidence * 100.0,
+                cap.description
             ));
         }
         context.push('\n');
-        
+
         // Key modules
         context.push_str("## Key Modules\n");
         for (path, module) in &self.self_model.modules {
-            if module.importance == ModuleImportance::Core 
-                || module.importance == ModuleImportance::Cognitive {
+            if module.importance == ModuleImportance::Core
+                || module.importance == ModuleImportance::Cognitive
+            {
                 context.push_str(&format!(
                     "- **{}** ({} tokens): {}\n",
                     path, module.token_count, module.purpose
@@ -711,13 +767,13 @@ impl SelfReferenceSystem {
             }
         }
         context.push('\n');
-        
+
         // Limitations
         context.push_str("## Known Limitations\n");
         for limitation in &self.self_model.limitations {
             context.push_str(&format!("- {}\n", limitation));
         }
-        
+
         // Truncate if needed
         let tokens = estimate_tokens_with_overhead(&context, 0);
         if tokens > max_tokens {
@@ -726,13 +782,13 @@ impl SelfReferenceSystem {
             context
         }
     }
-    
+
     /// Format architecture for context
     fn format_architecture(&self, max_tokens: usize) -> String {
         let mut context = String::new();
-        
+
         context.push_str("# Architecture Overview\n\n");
-        
+
         // Layers
         context.push_str("## Layers\n");
         for layer in &self.self_model.architecture.layers {
@@ -744,13 +800,13 @@ impl SelfReferenceSystem {
             }
             context.push('\n');
         }
-        
+
         // Design patterns
         context.push_str("## Design Patterns\n");
         for pattern in &self.self_model.architecture.design_patterns {
             context.push_str(&format!("- {}\n", pattern));
         }
-        
+
         // Truncate if needed
         let tokens = estimate_tokens_with_overhead(&context, 0);
         if tokens > max_tokens {
@@ -759,13 +815,13 @@ impl SelfReferenceSystem {
             context
         }
     }
-    
+
     /// Format recent modifications
     fn format_recent_modifications(&self, max_tokens: usize) -> String {
         let mut context = String::new();
-        
+
         context.push_str("# Recent Modifications\n\n");
-        
+
         for modification in self.recent_modifications.iter().rev().take(10) {
             context.push_str(&format!(
                 "- [{}] {}: {} ({} tokens)\n",
@@ -775,11 +831,11 @@ impl SelfReferenceSystem {
                 modification.tokens_changed
             ));
         }
-        
+
         if self.recent_modifications.is_empty() {
             context.push_str("No recent modifications.\n");
         }
-        
+
         // Truncate if needed
         let tokens = estimate_tokens_with_overhead(&context, 0);
         if tokens > max_tokens {
@@ -788,50 +844,51 @@ impl SelfReferenceSystem {
             context
         }
     }
-    
+
     /// Generate improvement suggestions
     fn generate_suggestions(&self, goal: &str) -> Vec<String> {
         let mut suggestions = Vec::new();
         let goal_lower = goal.to_lowercase();
-        
+
         if goal_lower.contains("memory") {
-            suggestions.push("Consider the token budget allocation in memory_hierarchy.rs".to_string());
+            suggestions
+                .push("Consider the token budget allocation in memory_hierarchy.rs".to_string());
             suggestions.push("Review eviction strategies in WorkingMemory".to_string());
         }
-        
+
         if goal_lower.contains("performance") || goal_lower.contains("speed") {
             suggestions.push("Check for unnecessary cloning in hot paths".to_string());
             suggestions.push("Consider caching frequently accessed data".to_string());
         }
-        
+
         if goal_lower.contains("error") || goal_lower.contains("bug") {
             suggestions.push("Review error handling patterns".to_string());
             suggestions.push("Check for unwrap() calls that could panic".to_string());
         }
-        
+
         suggestions.push("Run tests after making changes".to_string());
         suggestions.push("Update documentation for modified modules".to_string());
-        
+
         suggestions
     }
-    
+
     /// Truncate content to token limit
     fn truncate_to_tokens(&self, content: &str, max_tokens: usize) -> String {
         let chars_per_token = 4;
         let max_chars = max_tokens * chars_per_token;
-        
+
         if content.len() <= max_chars {
             content.to_string()
         } else {
             format!("{}...[truncated]", &content[..max_chars])
         }
     }
-    
+
     /// Get self-model reference
     pub fn get_self_model(&self) -> &SelfModel {
         &self.self_model
     }
-    
+
     /// Get recent modifications
     pub fn get_recent_modifications(&self) -> &VecDeque<CodeModification> {
         &self.recent_modifications
@@ -851,8 +908,7 @@ impl ModificationType {
 }
 
 fn format_timestamp(timestamp: u64) -> String {
-    let datetime = chrono::DateTime::from_timestamp(timestamp as i64, 0)
-        .unwrap_or_default();
+    let datetime = chrono::DateTime::from_timestamp(timestamp as i64, 0).unwrap_or_default();
     datetime.format("%Y-%m-%d %H:%M").to_string()
 }
 
@@ -863,7 +919,7 @@ fn format_timestamp(timestamp: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cognitive::token_budget::{TokenBudgetAllocator, TaskType};
+    use crate::cognitive::token_budget::{TaskType, TokenBudgetAllocator};
 
     #[test]
     fn test_task_type_suggestion() {

@@ -473,7 +473,6 @@ impl ApiClient {
         self
     }
 
-
     /// Send a completion request (e.g. for FIM)
     pub async fn completion(
         &self,
@@ -492,8 +491,11 @@ impl ApiClient {
             stop,
         };
 
-        let mut request = self.client.post(&url).header("Content-Type", "application/json");
-        
+        let mut request = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json");
+
         if let Some(ref key) = self.config.api_key {
             request = request.header("Authorization", format!("Bearer {}", key.expose()));
         }
@@ -520,13 +522,12 @@ impl ApiClient {
         tools: Option<Vec<ToolDefinition>>,
         thinking: ThinkingMode,
     ) -> Result<ChatResponse> {
-
         let mut messages = messages;
         if let ThinkingMode::Disabled = thinking {
             let sys_msg = crate::api::types::Message::system("CRITICAL INSTRUCTION: DO NOT use <think> blocks or any thinking process in your response. Output your final response directly and immediately.");
             messages.insert(0, sys_msg);
         }
-        
+
         let mut body = serde_json::json!({
             "model": self.config.model,
             "messages": messages,
@@ -538,14 +539,13 @@ impl ApiClient {
         if let Some(ref tools) = tools {
             body["tools"] = serde_json::json!(tools);
         }
-        
+
         if let ThinkingMode::Budget(tokens) = thinking {
             body["thinking"] = serde_json::json!({
                 "type": "enabled",
                 "budget_tokens": tokens
             });
         }
-
 
         self.send_with_retry(&body).await
     }
@@ -558,7 +558,6 @@ impl ApiClient {
         tools: Option<Vec<ToolDefinition>>,
         thinking: ThinkingMode,
     ) -> Result<StreamingResponse> {
-
         let mut messages = messages;
         if let ThinkingMode::Disabled = thinking {
             let sys_msg = crate::api::types::Message::system("CRITICAL INSTRUCTION: DO NOT use <think> blocks or any thinking process in your response. Output your final response directly and immediately.");
@@ -576,14 +575,13 @@ impl ApiClient {
         if let Some(ref tools) = tools {
             body["tools"] = serde_json::json!(tools);
         }
-        
+
         if let ThinkingMode::Budget(tokens) = thinking {
             body["thinking"] = serde_json::json!({
                 "type": "enabled",
                 "budget_tokens": tokens
             });
         }
-
 
         let url = format!("{}/chat/completions", self.base_url);
         debug!("Starting streaming request to {}", url);

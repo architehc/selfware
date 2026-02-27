@@ -14,6 +14,9 @@ use std::path::Path;
 /// The complete cognitive state of the agent
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CognitiveState {
+    pub strategic_goals: Vec<StrategicGoal>,
+    pub active_tactical_plan: Option<TacticalPlan>,
+    pub active_operational_plan: Option<OperationalPlan>,
     /// Current working memory (survives compression)
     pub working_memory: WorkingMemory,
     /// Episodic memory - lessons learned
@@ -37,6 +40,9 @@ impl CognitiveState {
             working_memory: WorkingMemory::new(),
             episodic_memory: EpisodicMemory::new(),
             cycle_phase: CyclePhase::Plan,
+            strategic_goals: Vec::new(),
+            active_tactical_plan: None,
+            active_operational_plan: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -67,11 +73,164 @@ impl CognitiveState {
         self.updated_at = Utc::now();
     }
 
+    /// Register/update a long-lived strategic goal.
+    pub fn upsert_strategic_goal(&mut self, id: impl Into<String>, description: impl Into<String>) {
+        let id = id.into();
+        if let Some(existing) = self.strategic_goals.iter_mut().find(|g| g.id == id) {
+            existing.description = description.into();
+        } else {
+            self.strategic_goals.push(StrategicGoal {
+                id,
+                description: description.into(),
+                criteria_for_success: Vec::new(),
+                status: StepStatus::InProgress,
+                tactical_plans: Vec::new(),
+            });
+        }
+        self.updated_at = Utc::now();
+    }
+
+    /// Set the active tactical plan.
+    pub fn set_active_tactical_plan(
+        &mut self,
+        id: impl Into<String>,
+        description: impl Into<String>,
+        operational_tasks: Vec<String>,
+    ) {
+        self.active_tactical_plan = Some(TacticalPlan {
+            id: id.into(),
+            description: description.into(),
+            status: StepStatus::InProgress,
+            operational_tasks,
+        });
+        self.updated_at = Utc::now();
+    }
+
+    /// Start (or replace) the current operational plan.
+    pub fn set_operational_plan(&mut self, task_id: impl Into<String>, steps: Vec<String>) {
+        let steps = steps
+            .into_iter()
+            .enumerate()
+            .map(|(index, description)| PlanStep {
+                index: index + 1,
+                description,
+                status: StepStatus::Pending,
+                notes: None,
+            })
+            .collect();
+        self.active_operational_plan = Some(OperationalPlan {
+            task_id: task_id.into(),
+            steps,
+        });
+        self.updated_at = Utc::now();
+    }
+
+    /// Ensure a step exists in the active operational plan and mark it in progress.
+    pub fn start_operational_step(&mut self, task_id: &str, index: usize, description: &str) {
+        if index == 0 {
+            return;
+        }
+
+        let plan = self
+            .active_operational_plan
+            .get_or_insert_with(|| OperationalPlan {
+                task_id: task_id.to_string(),
+                steps: Vec::new(),
+            });
+
+        if plan.task_id != task_id {
+            *plan = OperationalPlan {
+                task_id: task_id.to_string(),
+                steps: Vec::new(),
+            };
+        }
+
+        if let Some(step) = plan.steps.iter_mut().find(|s| s.index == index) {
+            if step.description.is_empty() {
+                step.description = description.to_string();
+            }
+            if step.status == StepStatus::Pending {
+                step.status = StepStatus::InProgress;
+            }
+        } else {
+            plan.steps.push(PlanStep {
+                index,
+                description: description.to_string(),
+                status: StepStatus::InProgress,
+                notes: None,
+            });
+            plan.steps.sort_by_key(|s| s.index);
+        }
+        self.updated_at = Utc::now();
+    }
+
+    /// Mark an operational step as complete.
+    pub fn complete_operational_step(&mut self, index: usize, notes: Option<String>) {
+        if let Some(plan) = self.active_operational_plan.as_mut() {
+            if let Some(step) = plan.steps.iter_mut().find(|s| s.index == index) {
+                step.status = StepStatus::Completed;
+                step.notes = notes;
+            }
+        }
+        self.updated_at = Utc::now();
+    }
+
+    /// Mark an operational step as failed.
+    pub fn fail_operational_step(&mut self, index: usize, reason: &str) {
+        if let Some(plan) = self.active_operational_plan.as_mut() {
+            if let Some(step) = plan.steps.iter_mut().find(|s| s.index == index) {
+                step.status = StepStatus::Failed;
+                step.notes = Some(reason.to_string());
+            }
+        }
+        self.updated_at = Utc::now();
+    }
+
     /// Generate a summary for context compression
     pub fn summary(&self) -> String {
+        let strategic_summary = if self.strategic_goals.is_empty() {
+            "None".to_string()
+        } else {
+            self.strategic_goals
+                .iter()
+                .take(3)
+                .map(|g| format!("- [{}] {}", format!("{:?}", g.status), g.description))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let tactical_summary = self
+            .active_tactical_plan
+            .as_ref()
+            .map(|p| format!("[{:?}] {} ({})", p.status, p.description, p.id))
+            .unwrap_or_else(|| "None".to_string());
+
+        let operational_summary = self
+            .active_operational_plan
+            .as_ref()
+            .map(|p| {
+                let total = p.steps.len();
+                let completed = p
+                    .steps
+                    .iter()
+                    .filter(|s| s.status == StepStatus::Completed)
+                    .count();
+                format!("task={} {} / {} steps", p.task_id, completed, total)
+            })
+            .unwrap_or_else(|| "None".to_string());
+
         format!(
             r#"=== COGNITIVE STATE ===
 Phase: {:?}
+
+[Strategic Goals]
+{}
+
+[Active Tactical Plan]
+{}
+
+[Active Operational Plan]
+{}
 
 [Current Plan]
 {}
@@ -89,6 +248,9 @@ Phase: {:?}
 {}
 === END COGNITIVE STATE ==="#,
             self.cycle_phase,
+            strategic_summary,
+            tactical_summary,
+            operational_summary,
             self.working_memory
                 .current_plan
                 .as_deref()
@@ -253,6 +415,32 @@ impl WorkingMemory {
     pub fn clear(&mut self) {
         *self = Self::new();
     }
+}
+
+/// Strategic level goal spanning multiple sessions/days
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategicGoal {
+    pub id: String,
+    pub description: String,
+    pub criteria_for_success: Vec<String>,
+    pub status: StepStatus,
+    pub tactical_plans: Vec<TacticalPlan>,
+}
+
+/// Tactical level plan spanning hours/multiple operational tasks
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TacticalPlan {
+    pub id: String,
+    pub description: String,
+    pub status: StepStatus,
+    pub operational_tasks: Vec<String>, // Task IDs
+}
+
+/// Operational level plan (current task execution)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperationalPlan {
+    pub task_id: String,
+    pub steps: Vec<PlanStep>,
 }
 
 /// A step in the plan
@@ -612,6 +800,36 @@ mod tests {
 
         assert_eq!(state.cycle_phase, CyclePhase::Do);
         assert!(state.working_memory.active_hypothesis.is_some());
+    }
+
+    #[test]
+    fn test_multiscale_planning_flow() {
+        let mut state = CognitiveState::new();
+        state.upsert_strategic_goal("g1", "Ship production-ready autonomy");
+        state.set_active_tactical_plan(
+            "t1",
+            "Stabilize execution loop",
+            vec!["task-1".to_string()],
+        );
+        state.set_operational_plan(
+            "task-1",
+            vec![
+                "Plan".to_string(),
+                "Execute".to_string(),
+                "Verify".to_string(),
+            ],
+        );
+
+        state.start_operational_step("task-1", 2, "Execute");
+        state.complete_operational_step(2, Some("done".to_string()));
+        state.fail_operational_step(3, "verification failed");
+
+        assert_eq!(state.strategic_goals.len(), 1);
+        assert!(state.active_tactical_plan.is_some());
+        let op = state.active_operational_plan.as_ref().unwrap();
+        assert_eq!(op.steps.len(), 3);
+        assert_eq!(op.steps[1].status, StepStatus::Completed);
+        assert_eq!(op.steps[2].status, StepStatus::Failed);
     }
 
     #[test]

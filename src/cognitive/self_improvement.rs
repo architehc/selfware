@@ -174,6 +174,25 @@ pub struct TaskPromptStats {
     pub best_patterns: Vec<String>,
 }
 
+/// A scored prompt variant in an A/B tournament.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptVariantScore {
+    pub variant_id: String,
+    pub strategy: String,
+    pub prompt: String,
+    pub predicted_quality: f32,
+}
+
+/// Result of an automated prompt evolution tournament.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptTournamentResult {
+    pub task_type: String,
+    pub winner_prompt: String,
+    pub winner_strategy: String,
+    pub winner_score: f32,
+    pub variants: Vec<PromptVariantScore>,
+}
+
 impl PromptOptimizer {
     pub fn new() -> Self {
         Self {
@@ -294,6 +313,155 @@ impl PromptOptimizer {
         }
 
         suggestions
+    }
+
+    /// Run an A/B tournament with mutated variants and return the winner.
+    pub fn evolve_prompt(
+        &mut self,
+        task_type: &str,
+        baseline_prompt: &str,
+    ) -> PromptTournamentResult {
+        let variants = self.generate_prompt_variants(task_type, baseline_prompt);
+        let mut scored: Vec<PromptVariantScore> = variants
+            .into_iter()
+            .map(|(id, strategy, prompt)| PromptVariantScore {
+                variant_id: id,
+                strategy,
+                predicted_quality: self.estimate_prompt_quality(task_type, &prompt),
+                prompt,
+            })
+            .collect();
+
+        scored.sort_by(|a, b| {
+            b.predicted_quality
+                .partial_cmp(&a.predicted_quality)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let winner = scored.first().cloned().unwrap_or(PromptVariantScore {
+            variant_id: "baseline".to_string(),
+            strategy: "baseline".to_string(),
+            prompt: baseline_prompt.to_string(),
+            predicted_quality: self.estimate_prompt_quality(task_type, baseline_prompt),
+        });
+
+        // Persist the winner as a learned pattern so future tournaments have memory.
+        let pattern_id = format!("evo-{}-{}", task_type, winner.variant_id);
+        let mut pattern = PromptPattern::new(&pattern_id, &winner.prompt);
+        pattern.effective_for.push(task_type.to_string());
+        pattern.usage_count = 1;
+        pattern.avg_quality = winner.predicted_quality;
+        pattern.success_rate = winner.predicted_quality;
+        self.register_pattern(pattern);
+
+        PromptTournamentResult {
+            task_type: task_type.to_string(),
+            winner_prompt: winner.prompt,
+            winner_strategy: winner.strategy,
+            winner_score: winner.predicted_quality,
+            variants: scored,
+        }
+    }
+
+    fn generate_prompt_variants(
+        &self,
+        task_type: &str,
+        baseline_prompt: &str,
+    ) -> Vec<(String, String, String)> {
+        let mut variants = vec![
+            (
+                "baseline".to_string(),
+                "baseline".to_string(),
+                baseline_prompt.to_string(),
+            ),
+            (
+                "verify_first".to_string(),
+                "add_verification_clause".to_string(),
+                format!(
+                    "{}\n\nBefore finalizing, explicitly verify assumptions and list validation checks.",
+                    baseline_prompt
+                ),
+            ),
+            (
+                "structured_output".to_string(),
+                "force_structure".to_string(),
+                format!(
+                    "{}\n\nRespond in sections: Plan, Changes, Verification, Risks.",
+                    baseline_prompt
+                ),
+            ),
+            (
+                "concise_steps".to_string(),
+                "concise_step_plan".to_string(),
+                format!(
+                    "{}\n\nKeep each step concise and actionable; avoid redundant narration.",
+                    baseline_prompt
+                ),
+            ),
+        ];
+
+        for (idx, pattern) in self.best_patterns_for(task_type).iter().take(2).enumerate() {
+            let rendered = Self::render_pattern_template(&pattern.template);
+            variants.push((
+                format!("pattern_{}", idx + 1),
+                format!("pattern_{}", pattern.id),
+                rendered,
+            ));
+        }
+
+        // Deduplicate by normalized text while keeping order.
+        let mut seen = std::collections::HashSet::new();
+        variants
+            .into_iter()
+            .filter(|(_, _, prompt)| seen.insert(Self::normalize_prompt(prompt)))
+            .collect()
+    }
+
+    fn render_pattern_template(template: &str) -> String {
+        template
+            .replace("{action}", "complete the requested task")
+            .replace("{target}", "codebase")
+    }
+
+    fn estimate_prompt_quality(&self, task_type: &str, prompt: &str) -> f32 {
+        let norm = Self::normalize_prompt(prompt);
+        let matching: Vec<&PromptRecord> = self
+            .records
+            .iter()
+            .filter(|r| r.task_type == task_type && Self::normalize_prompt(&r.prompt) == norm)
+            .collect();
+
+        let historical = if matching.is_empty() {
+            self.task_stats
+                .get(task_type)
+                .map(|s| s.avg_quality)
+                .unwrap_or(0.5)
+        } else {
+            matching.iter().map(|r| r.quality_score).sum::<f32>() / matching.len() as f32
+        };
+
+        // Structural priors for unseen prompts.
+        let mut score = historical;
+        let lower = prompt.to_lowercase();
+        if lower.contains("verify") || lower.contains("validation") {
+            score += 0.05;
+        }
+        if lower.contains("step") || lower.contains("plan") {
+            score += 0.03;
+        }
+        if (200..=1800).contains(&prompt.len()) {
+            score += 0.02;
+        }
+
+        score.clamp(0.0, 1.0)
+    }
+
+    fn normalize_prompt(prompt: &str) -> String {
+        prompt
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
     }
 
     /// Get overall statistics
@@ -1345,6 +1513,18 @@ impl SelfImprovementEngine {
         }
     }
 
+    /// Evolve a prompt via an automated A/B tournament and return the winning variant.
+    pub fn evolve_prompt(&self, prompt: &str, task_type: &str) -> Option<PromptTournamentResult> {
+        if !self.learning_enabled {
+            return None;
+        }
+        if let Ok(mut optimizer) = self.prompt_optimizer.write() {
+            Some(optimizer.evolve_prompt(task_type, prompt))
+        } else {
+            None
+        }
+    }
+
     /// Start a usage session
     pub fn start_session(&self, session_id: &str) {
         if let Ok(mut analyzer) = self.usage_analyzer.write() {
@@ -1538,6 +1718,26 @@ mod tests {
         let optimizer = PromptOptimizer::new();
         let suggestions = optimizer.suggest_improvements("x", "code");
         assert!(!suggestions.is_empty()); // Should suggest adding context
+    }
+
+    #[test]
+    fn test_prompt_optimizer_evolve_prompt() {
+        let mut optimizer = PromptOptimizer::new();
+        for _ in 0..4 {
+            optimizer.record(
+                PromptRecord::new(
+                    "Use a step-by-step plan and verify output".to_string(),
+                    "system_prompt".to_string(),
+                    Outcome::Success,
+                )
+                .with_quality(0.9),
+            );
+        }
+
+        let result = optimizer.evolve_prompt("system_prompt", "You are a coding agent.");
+        assert!(!result.variants.is_empty());
+        assert!(result.winner_score >= 0.0);
+        assert!(!result.winner_prompt.is_empty());
     }
 
     #[test]
@@ -1755,6 +1955,16 @@ mod tests {
 
         let stats = engine.get_stats();
         assert!(stats.tool_stats.is_some());
+    }
+
+    #[test]
+    fn test_self_improvement_engine_evolve_prompt() {
+        let engine = SelfImprovementEngine::new();
+        let result = engine.evolve_prompt("You are Selfware.", "system_prompt");
+        assert!(result.is_some());
+        let result = result.unwrap();
+        assert!(!result.winner_prompt.is_empty());
+        assert!(!result.variants.is_empty());
     }
 
     #[test]

@@ -3,8 +3,8 @@
 //! Manages token allocation across memory layers based on task type
 //! and adapts based on actual usage patterns.
 
-use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use tracing::{debug, info};
 
 use crate::cognitive::memory_hierarchy::{MemoryUsage, TokenBudget};
@@ -76,7 +76,7 @@ impl TaskType {
             },
         }
     }
-    
+
     /// Human-readable description
     pub fn description(&self) -> &'static str {
         match self {
@@ -105,7 +105,7 @@ impl AllocationRatios {
     pub fn is_valid(&self) -> bool {
         self.working + self.episodic + self.semantic + self.reserve == 100
     }
-    
+
     /// Convert to actual token counts
     pub fn to_token_allocation(&self, total: usize) -> TokenBudget {
         TokenBudget {
@@ -159,7 +159,7 @@ impl TokenBudgetAllocator {
     pub fn new(total_tokens: usize, task_type: TaskType) -> Self {
         let ratios = task_type.allocation_ratios();
         let allocation = ratios.to_token_allocation(total_tokens);
-        
+
         Self {
             total_tokens,
             allocation,
@@ -170,7 +170,7 @@ impl TokenBudgetAllocator {
             adaptation_threshold: 0.3,
         }
     }
-    
+
     /// Create with custom initial allocation
     pub fn with_allocation(total_tokens: usize, allocation: TokenBudget) -> Self {
         Self {
@@ -183,17 +183,17 @@ impl TokenBudgetAllocator {
             adaptation_threshold: 0.3,
         }
     }
-    
+
     /// Get current allocation
     pub fn get_allocation(&self) -> &TokenBudget {
         &self.allocation
     }
-    
+
     /// Get current task type
     pub fn get_task_type(&self) -> TaskType {
         self.task_type
     }
-    
+
     /// Change task type and reallocate
     pub fn set_task_type(&mut self, task_type: TaskType) {
         if self.task_type != task_type {
@@ -201,15 +201,15 @@ impl TokenBudgetAllocator {
                 "Changing task type from {:?} to {:?}",
                 self.task_type, task_type
             );
-            
+
             self.task_type = task_type;
             let ratios = task_type.allocation_ratios();
             self.allocation = ratios.to_token_allocation(self.total_tokens);
-            
+
             debug!("New allocation: {:?}", self.allocation);
         }
     }
-    
+
     /// Record usage snapshot
     pub fn record_usage(&mut self, usage: &MemoryUsage) {
         let snapshot = UsageSnapshot {
@@ -219,15 +219,15 @@ impl TokenBudgetAllocator {
             semantic_used: usage.semantic_tokens,
             task_type: self.task_type,
         };
-        
+
         self.usage_history.push_back(snapshot);
-        
+
         // Keep history bounded
         if self.usage_history.len() > self.max_history {
             self.usage_history.pop_front();
         }
     }
-    
+
     /// Adapt allocation based on usage history
     pub fn adapt(&mut self) -> AdaptationResult {
         if !self.adaptation_enabled {
@@ -238,7 +238,7 @@ impl TokenBudgetAllocator {
                 reason: "Adaptation disabled".to_string(),
             };
         }
-        
+
         if self.usage_history.len() < 5 {
             return AdaptationResult {
                 adapted: false,
@@ -247,15 +247,16 @@ impl TokenBudgetAllocator {
                 reason: "Insufficient history".to_string(),
             };
         }
-        
+
         // Calculate average usage for current task type
-        let relevant_history: Vec<_> = self.usage_history
+        let relevant_history: Vec<_> = self
+            .usage_history
             .iter()
             .filter(|s| s.task_type == self.task_type)
             .rev()
             .take(10)
             .collect();
-        
+
         if relevant_history.is_empty() {
             return AdaptationResult {
                 adapted: false,
@@ -264,93 +265,108 @@ impl TokenBudgetAllocator {
                 reason: "No relevant history".to_string(),
             };
         }
-        
-        let avg_working: usize = relevant_history.iter()
+
+        let avg_working: usize = relevant_history
+            .iter()
             .map(|s| s.working_used)
-            .sum::<usize>() / relevant_history.len();
-        let avg_episodic: usize = relevant_history.iter()
+            .sum::<usize>()
+            / relevant_history.len();
+        let avg_episodic: usize = relevant_history
+            .iter()
             .map(|s| s.episodic_used)
-            .sum::<usize>() / relevant_history.len();
-        let avg_semantic: usize = relevant_history.iter()
+            .sum::<usize>()
+            / relevant_history.len();
+        let avg_semantic: usize = relevant_history
+            .iter()
             .map(|s| s.semantic_used)
-            .sum::<usize>() / relevant_history.len();
-        
+            .sum::<usize>()
+            / relevant_history.len();
+
         // Calculate utilization ratios
         let working_ratio = avg_working as f32 / self.allocation.working_memory.max(1) as f32;
         let episodic_ratio = avg_episodic as f32 / self.allocation.episodic_memory.max(1) as f32;
         let semantic_ratio = avg_semantic as f32 / self.allocation.semantic_memory.max(1) as f32;
-        
+
         debug!(
             "Utilization ratios - working: {:.2}, episodic: {:.2}, semantic: {:.2}",
             working_ratio, episodic_ratio, semantic_ratio
         );
-        
+
         let old_allocation = self.allocation.clone();
         let mut adapted = false;
         let mut reasons = Vec::new();
-        
+
         // Reallocate from underutilized to overutilized
         // Minimum transfer to avoid thrashing
         let min_transfer = self.total_tokens / 50; // 2% of total
-        
+
         // Working -> Semantic
-        if working_ratio < (1.0 - self.adaptation_threshold) 
-            && semantic_ratio > (1.0 + self.adaptation_threshold) {
+        if working_ratio < (1.0 - self.adaptation_threshold)
+            && semantic_ratio > (1.0 + self.adaptation_threshold)
+        {
             let transfer = ((self.allocation.working_memory as f32 * 0.1) as usize)
                 .max(min_transfer)
                 .min(self.allocation.working_memory / 4);
-            
+
             if transfer > 0 {
                 self.allocation.working_memory -= transfer;
                 self.allocation.semantic_memory += transfer;
                 adapted = true;
                 reasons.push(format!(
                     "Moved {} tokens from working to semantic (working {:.0}%, semantic {:.0}%)",
-                    transfer, working_ratio * 100.0, semantic_ratio * 100.0
+                    transfer,
+                    working_ratio * 100.0,
+                    semantic_ratio * 100.0
                 ));
             }
         }
-        
+
         // Episodic -> Semantic
         if episodic_ratio < (1.0 - self.adaptation_threshold)
-            && semantic_ratio > (1.0 + self.adaptation_threshold) {
+            && semantic_ratio > (1.0 + self.adaptation_threshold)
+        {
             let transfer = ((self.allocation.episodic_memory as f32 * 0.1) as usize)
                 .max(min_transfer)
                 .min(self.allocation.episodic_memory / 4);
-            
+
             if transfer > 0 {
                 self.allocation.episodic_memory -= transfer;
                 self.allocation.semantic_memory += transfer;
                 adapted = true;
                 reasons.push(format!(
                     "Moved {} tokens from episodic to semantic (episodic {:.0}%, semantic {:.0}%)",
-                    transfer, episodic_ratio * 100.0, semantic_ratio * 100.0
+                    transfer,
+                    episodic_ratio * 100.0,
+                    semantic_ratio * 100.0
                 ));
             }
         }
-        
+
         // Semantic -> Working (if semantic underutilized)
         if semantic_ratio < (1.0 - self.adaptation_threshold)
-            && working_ratio > (1.0 + self.adaptation_threshold) {
+            && working_ratio > (1.0 + self.adaptation_threshold)
+        {
             let transfer = ((self.allocation.semantic_memory as f32 * 0.05) as usize)
                 .max(min_transfer)
                 .min(self.allocation.semantic_memory / 10);
-            
+
             if transfer > 0 {
                 self.allocation.semantic_memory -= transfer;
                 self.allocation.working_memory += transfer;
                 adapted = true;
                 reasons.push(format!(
                     "Moved {} tokens from semantic to working (semantic {:.0}%, working {:.0}%)",
-                    transfer, semantic_ratio * 100.0, working_ratio * 100.0
+                    transfer,
+                    semantic_ratio * 100.0,
+                    working_ratio * 100.0
                 ));
             }
         }
-        
+
         if adapted {
             info!("Token budget adapted: {}", reasons.join("; "));
         }
-        
+
         AdaptationResult {
             adapted,
             old_allocation,
@@ -358,29 +374,32 @@ impl TokenBudgetAllocator {
             reason: reasons.join("; "),
         }
     }
-    
+
     /// Force a specific allocation
     pub fn force_allocation(&mut self, allocation: TokenBudget) {
         info!("Forcing token allocation: {:?}", allocation);
         self.allocation = allocation;
         self.adaptation_enabled = false; // Disable auto-adaptation
     }
-    
+
     /// Enable/disable adaptation
     pub fn set_adaptation_enabled(&mut self, enabled: bool) {
         self.adaptation_enabled = enabled;
-        debug!("Adaptation {}", if enabled { "enabled" } else { "disabled" });
+        debug!(
+            "Adaptation {}",
+            if enabled { "enabled" } else { "disabled" }
+        );
     }
-    
+
     /// Set adaptation threshold
     pub fn set_adaptation_threshold(&mut self, threshold: f32) {
         self.adaptation_threshold = threshold.clamp(0.1, 0.5);
     }
-    
+
     /// Get usage statistics
     pub fn get_stats(&self) -> BudgetStats {
         let recent_usage: Vec<_> = self.usage_history.iter().rev().take(10).collect();
-        
+
         BudgetStats {
             total_tokens: self.total_tokens,
             current_allocation: self.allocation.clone(),
@@ -407,7 +426,7 @@ impl TokenBudgetAllocator {
             },
         }
     }
-    
+
     /// Reset to default allocation for current task type
     pub fn reset(&mut self) {
         let ratios = self.task_type.allocation_ratios();
@@ -415,32 +434,37 @@ impl TokenBudgetAllocator {
         self.adaptation_enabled = true;
         info!("Token budget reset to defaults for {:?}", self.task_type);
     }
-    
+
     /// Suggest optimal task type based on query
     pub fn suggest_task_type(query: &str) -> TaskType {
         let query_lower = query.to_lowercase();
-        
-        if query_lower.contains("improve") 
-            || query_lower.contains("refactor") 
+
+        if query_lower.contains("improve")
+            || query_lower.contains("refactor")
             || query_lower.contains("optimize")
-            || query_lower.contains("enhance") {
+            || query_lower.contains("enhance")
+        {
             TaskType::SelfImprovement
         } else if query_lower.contains("debug")
             || query_lower.contains("fix")
             || query_lower.contains("error")
-            || query_lower.contains("bug") {
+            || query_lower.contains("bug")
+        {
             TaskType::Debugging
         } else if query_lower.contains("generate")
             || query_lower.contains("create")
-            || query_lower.contains("write") {
+            || query_lower.contains("write")
+        {
             TaskType::CodeGeneration
         } else if query_lower.contains("analyze")
             || query_lower.contains("understand")
-            || query_lower.contains("review") {
+            || query_lower.contains("review")
+        {
             TaskType::CodeAnalysis
         } else if query_lower.contains("learn")
             || query_lower.contains("study")
-            || query_lower.contains("remember") {
+            || query_lower.contains("remember")
+        {
             TaskType::Learning
         } else {
             TaskType::Conversation
@@ -500,7 +524,7 @@ mod tests {
             semantic: 60,
             reserve: 10,
         };
-        
+
         let budget = ratios.to_token_allocation(1_000_000);
         assert_eq!(budget.working_memory, 100_000);
         assert_eq!(budget.episodic_memory, 200_000);
@@ -514,12 +538,12 @@ mod tests {
             TokenBudgetAllocator::suggest_task_type("How do I improve the memory system?"),
             TaskType::SelfImprovement
         );
-        
+
         assert_eq!(
             TokenBudgetAllocator::suggest_task_type("Debug this error in the code"),
             TaskType::Debugging
         );
-        
+
         assert_eq!(
             TokenBudgetAllocator::suggest_task_type("Generate a new function"),
             TaskType::CodeGeneration
@@ -529,7 +553,7 @@ mod tests {
     #[test]
     fn test_adaptation() {
         let mut allocator = TokenBudgetAllocator::new(1_000_000, TaskType::Conversation);
-        
+
         // Simulate underutilization of working memory and overutilization of semantic
         for _ in 0..10 {
             allocator.record_usage(&MemoryUsage {
@@ -538,12 +562,14 @@ mod tests {
                 semantic_tokens: 650_000, // Over budget
             });
         }
-        
+
         let result = allocator.adapt();
-        
+
         // Should have adapted
         assert!(result.adapted);
-        assert!(result.new_allocation.semantic_memory > result.old_allocation.semantic_memory
-            || result.new_allocation.working_memory < result.old_allocation.working_memory);
+        assert!(
+            result.new_allocation.semantic_memory > result.old_allocation.semantic_memory
+                || result.new_allocation.working_memory < result.old_allocation.working_memory
+        );
     }
 }

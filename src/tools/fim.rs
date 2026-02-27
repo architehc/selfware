@@ -41,22 +41,38 @@ impl Tool for FileFimEdit {
     }
 
     async fn execute(&self, args: Value) -> Result<Value> {
-        let path = args["path"].as_str().ok_or_else(|| anyhow!("Missing path"))?;
-        let start_line = args["start_line"].as_u64().ok_or_else(|| anyhow!("Missing start_line"))? as usize;
-        let end_line = args["end_line"].as_u64().ok_or_else(|| anyhow!("Missing end_line"))? as usize;
-        let instruction = args["instruction"].as_str().ok_or_else(|| anyhow!("Missing instruction"))?;
+        let path = args["path"]
+            .as_str()
+            .ok_or_else(|| anyhow!("Missing path"))?;
+        let start_line = args["start_line"]
+            .as_u64()
+            .ok_or_else(|| anyhow!("Missing start_line"))? as usize;
+        let end_line = args["end_line"]
+            .as_u64()
+            .ok_or_else(|| anyhow!("Missing end_line"))? as usize;
+        let instruction = args["instruction"]
+            .as_str()
+            .ok_or_else(|| anyhow!("Missing instruction"))?;
 
         let content = fs::read_to_string(path).await?;
         let lines: Vec<&str> = content.lines().collect();
 
-        if start_line == 0 || start_line > lines.len() || end_line < start_line || end_line > lines.len() {
+        if start_line == 0
+            || start_line > lines.len()
+            || end_line < start_line
+            || end_line > lines.len()
+        {
             return Err(anyhow!("Invalid line range"));
         }
 
-        let prefix = lines[..start_line - 1].join("
-");
-        let suffix = lines[end_line..].join("
-");
+        let prefix = lines[..start_line - 1].join(
+            "
+",
+        );
+        let suffix = lines[end_line..].join(
+            "
+",
+        );
 
         // Format prompt using Qwen's specific FIM tokens (or standard FIM)
         // Qwen 2.5 Coder uses <|fim_prefix|>, <|fim_suffix|>, <|fim_middle|>
@@ -69,9 +85,21 @@ impl Tool for FileFimEdit {
             prefix, instruction, suffix
         );
 
-        let response = self.client.completion(&prompt, Some(2048), Some(vec!["<|file_separator|>".to_string(), "<|endoftext|>".to_string()])).await?;
-        
-        let middle = response.choices.first()
+        let response = self
+            .client
+            .completion(
+                &prompt,
+                Some(2048),
+                Some(vec![
+                    "<|file_separator|>".to_string(),
+                    "<|endoftext|>".to_string(),
+                ]),
+            )
+            .await?;
+
+        let middle = response
+            .choices
+            .first()
             .map(|c| c.text.clone())
             .unwrap_or_default();
 
