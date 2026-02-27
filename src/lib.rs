@@ -46,7 +46,9 @@ pub mod cognitive;
 pub mod devops;
 pub mod observability;
 pub mod orchestration;
+pub mod resource;
 pub mod session;
+pub mod supervision;
 pub mod testing;
 
 // Backward-compatible re-exports for safety module

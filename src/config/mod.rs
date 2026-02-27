@@ -8,6 +8,9 @@
 //! - Tool-specific options
 
 pub mod typed;
+pub mod resources;
+
+pub use resources::*;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -148,6 +151,9 @@ pub struct Config {
     #[serde(default)]
     pub retry: RetrySettings,
 
+    #[serde(default)]
+    pub resources: ResourcesConfig,
+
     /// Runtime execution mode (set via CLI, not persisted)
     #[serde(skip)]
     pub execution_mode: ExecutionMode,
@@ -181,6 +187,7 @@ impl std::fmt::Debug for Config {
             .field("ui", &self.ui)
             .field("continuous_work", &self.continuous_work)
             .field("retry", &self.retry)
+            .field("resources", &self.resources)
             .field("execution_mode", &self.execution_mode)
             .field("compact_mode", &self.compact_mode)
             .field("verbose_mode", &self.verbose_mode)
@@ -400,6 +407,7 @@ impl Default for Config {
             ui: UiConfig::default(),
             continuous_work: ContinuousWorkConfig::default(),
             retry: RetrySettings::default(),
+            resources: ResourcesConfig::default(),
             execution_mode: ExecutionMode::default(),
             compact_mode: false,
             verbose_mode: false,

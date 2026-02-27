@@ -22,6 +22,9 @@ pub enum SelfwareError {
     #[error("Session error: {0}")]
     Session(#[from] SessionError),
 
+    #[error("Resource error: {0}")]
+    Resource(#[from] ResourceError),
+
     #[error("Configuration error: {0}")]
     Config(String),
 
@@ -145,4 +148,26 @@ pub fn is_confirmation_error(e: &anyhow::Error) -> bool {
     }
 
     false
+}
+
+#[derive(Error, Debug)]
+pub enum ResourceError {
+    #[error("Memory exhausted: {0}")]
+    MemoryExhausted(String),
+
+    #[error("GPU error: {0}")]
+    Gpu(String),
+
+    #[error("Disk exhausted: {0}")]
+    DiskExhausted(String),
+
+    #[error("Resource quota exceeded for {resource}: used {used}, limit {limit}")]
+    QuotaExceeded {
+        resource: String,
+        used: u64,
+        limit: u64,
+    },
+    
+    #[error("Resource unavailable: {0}")]
+    Unavailable(String),
 }
