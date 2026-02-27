@@ -3,6 +3,7 @@
 //! Entity relationships, cross-file references, semantic linking,
 //! pattern recognition, and code smell detection.
 
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -29,7 +30,7 @@ fn generate_pattern_id() -> String {
 }
 
 /// Entity type in the knowledge graph
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EntityType {
     /// A module/file
     Module,
@@ -83,7 +84,7 @@ impl std::fmt::Display for EntityType {
 }
 
 /// Relation type between entities
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RelationType {
     /// One entity calls another
     Calls,
@@ -171,7 +172,7 @@ impl RelationType {
 }
 
 /// An entity in the knowledge graph
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entity {
     /// Unique identifier
     pub id: String,
@@ -265,7 +266,7 @@ impl Entity {
 }
 
 /// Visibility level
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Visibility {
     /// Public
     Public,
@@ -292,7 +293,7 @@ impl std::fmt::Display for Visibility {
 }
 
 /// A relation between two entities
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Relation {
     /// Unique identifier
     pub id: String,
@@ -348,7 +349,7 @@ impl Relation {
 }
 
 /// A pattern detected in code
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pattern {
     /// Unique identifier
     pub id: String,
@@ -406,7 +407,7 @@ impl Pattern {
 }
 
 /// Pattern type
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PatternType {
     /// Design pattern (Singleton, Factory, etc.)
     DesignPattern,
@@ -433,7 +434,7 @@ impl std::fmt::Display for PatternType {
 }
 
 /// Example of a pattern in code
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PatternExample {
     /// File path
     pub file: PathBuf,
@@ -463,7 +464,7 @@ impl PatternExample {
 }
 
 /// Code smell type
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CodeSmell {
     /// Large function/method
     LongMethod,
@@ -574,7 +575,7 @@ impl CodeSmell {
 }
 
 /// A detected code smell instance
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeSmellInstance {
     /// Code smell type
     pub smell: CodeSmell,
@@ -596,7 +597,7 @@ impl CodeSmellInstance {
     /// Create a new code smell instance
     pub fn new(smell: CodeSmell, entity_id: impl Into<String>, file: PathBuf, line: usize) -> Self {
         Self {
-            smell,
+            smell: smell.clone(),
             entity_id: entity_id.into(),
             file,
             line,
@@ -617,7 +618,7 @@ impl CodeSmellInstance {
 const MAX_GRAPH_ENTITIES: usize = 50_000;
 
 /// The codebase knowledge graph
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeGraph {
     /// Entities by ID
     entities: HashMap<String, Entity>,
@@ -648,7 +649,30 @@ impl Default for KnowledgeGraph {
 }
 
 impl KnowledgeGraph {
+    /// Save the knowledge graph to a JSON file
+    pub fn save_to_file(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, json)?;
+        Ok(())
+    }
+
+    /// Load the knowledge graph from a JSON file
+    pub fn load_from_file(path: &std::path::Path) -> anyhow::Result<Self> {
+        if path.exists() {
+            let json = std::fs::read_to_string(path)?;
+            let graph = serde_json::from_str(&json)?;
+            Ok(graph)
+        } else {
+            Ok(Self::new())
+        }
+    }
+
     /// Create a new knowledge graph
+    
+
     pub fn new() -> Self {
         Self {
             entities: HashMap::new(),
@@ -772,7 +796,7 @@ impl KnowledgeGraph {
 
         // Index by type
         self.type_index
-            .entry(entity.entity_type)
+            .entry(entity.entity_type.clone())
             .or_default()
             .insert(id.clone());
 
@@ -894,7 +918,7 @@ impl KnowledgeGraph {
         let mut results = Vec::new();
 
         for rel in self.relations_from(entity_id) {
-            if relation_type.is_none_or(|rt| rt == rel.relation_type) {
+            if relation_type.clone().is_none_or(|rt| rt == rel.relation_type) {
                 if let Some(entity) = self.entities.get(&rel.target_id) {
                     results.push((entity, rel));
                 }
@@ -913,7 +937,7 @@ impl KnowledgeGraph {
         let mut results = Vec::new();
 
         for rel in self.relations_to(entity_id) {
-            if relation_type.is_none_or(|rt| rt == rel.relation_type) {
+            if relation_type.clone().is_none_or(|rt| rt == rel.relation_type) {
                 if let Some(entity) = self.entities.get(&rel.source_id) {
                     results.push((entity, rel));
                 }
@@ -927,7 +951,7 @@ impl KnowledgeGraph {
     pub fn entity_count_by_type(&self) -> HashMap<EntityType, usize> {
         self.type_index
             .iter()
-            .map(|(t, ids)| (*t, ids.len()))
+            .map(|(t, ids)| (t.clone(), ids.len()))
             .collect()
     }
 
@@ -1059,6 +1083,8 @@ impl Default for RustEntityExtractor {
 
 impl RustEntityExtractor {
     /// Create a new extractor
+    
+
     pub fn new() -> Self {
         Self {
             _module_path: Vec::new(),
@@ -1091,24 +1117,24 @@ impl RustEntityExtractor {
 
             // Extract function
             if let Some(entity) =
-                self.extract_function(trimmed, file_path, line_num + 1, visibility)
+                self.extract_function(trimmed, file_path, line_num + 1, visibility.clone())
             {
                 entities.push(entity);
             }
 
             // Extract struct
-            if let Some(entity) = self.extract_struct(trimmed, file_path, line_num + 1, visibility)
+            if let Some(entity) = self.extract_struct(trimmed, file_path, line_num + 1, visibility.clone())
             {
                 entities.push(entity);
             }
 
             // Extract enum
-            if let Some(entity) = self.extract_enum(trimmed, file_path, line_num + 1, visibility) {
+            if let Some(entity) = self.extract_enum(trimmed, file_path, line_num + 1, visibility.clone()) {
                 entities.push(entity);
             }
 
             // Extract trait
-            if let Some(entity) = self.extract_trait(trimmed, file_path, line_num + 1, visibility) {
+            if let Some(entity) = self.extract_trait(trimmed, file_path, line_num + 1, visibility.clone()) {
                 entities.push(entity);
             }
 
@@ -1284,6 +1310,8 @@ impl Default for SmellDetector {
 
 impl SmellDetector {
     /// Create new detector with defaults
+    
+
     pub fn new() -> Self {
         Self {
             max_function_lines: 50,
@@ -1507,7 +1535,6 @@ impl SmellDetector {
 }
 
 /// Pattern recognizer
-#[derive(Debug)]
 pub struct PatternRecognizer {
     /// Known pattern signatures
     pattern_signatures: Vec<(String, PatternType, Vec<String>)>,
@@ -1521,6 +1548,8 @@ impl Default for PatternRecognizer {
 
 impl PatternRecognizer {
     /// Create new recognizer with default patterns
+    
+
     pub fn new() -> Self {
         let signatures = vec![
             // Singleton pattern
@@ -1601,7 +1630,7 @@ impl PatternRecognizer {
             if !matches.is_empty() {
                 let confidence = matches.len() as f32 / keywords.len() as f32;
                 if confidence >= 0.5 {
-                    results.push((name.clone(), *pattern_type, confidence));
+                    results.push((name.clone(), pattern_type.clone(), confidence));
                 }
             }
         }
@@ -1625,6 +1654,8 @@ impl Default for SemanticLinker {
 
 impl SemanticLinker {
     /// Create new linker
+    
+
     pub fn new() -> Self {
         let mut patterns = HashMap::new();
 
@@ -2107,6 +2138,7 @@ impl ConfigBuilder {
         let linker = SemanticLinker::new();
 
         let code = r#"
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use crate::config::Config;
 use super::helper::Helper;
