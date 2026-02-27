@@ -5,8 +5,11 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use regex::Regex;
 use serde_json::{json, Value};
+use std::net::{IpAddr, ToSocketAddrs};
 use std::process::Stdio;
+use std::sync::LazyLock;
 use tokio::process::Command;
 
 use super::Tool;
@@ -21,6 +24,16 @@ pub enum BrowserType {
     Chrome(String), // Path to chrome/chromium
     Playwright,     // Use playwright CLI
     Curl,           // Fallback to curl for simple fetches
+}
+
+#[derive(Debug, Clone)]
+struct PinnedTarget {
+    url: String,
+    host: String,
+    port: u16,
+    ip: IpAddr,
+    host_is_ip: bool,
+    resolver_rule: String,
 }
 
 /// Detect available browser for automation
@@ -136,24 +149,32 @@ impl Tool for BrowserFetch {
             .and_then(|v| v.as_u64())
             .unwrap_or(30);
         let user_agent = args.get("user_agent").and_then(|v| v.as_str());
+        let pinned_target = resolve_and_pin_target(url)?;
 
         let browser = detect_browser().await?;
 
         match browser {
             BrowserType::Chrome(chrome_path) => {
-                fetch_with_chrome(&chrome_path, url, timeout_secs, user_agent, &args).await
+                fetch_with_chrome(
+                    &chrome_path,
+                    &pinned_target,
+                    timeout_secs,
+                    user_agent,
+                    &args,
+                )
+                .await
             }
             BrowserType::Playwright => {
-                fetch_with_playwright(url, timeout_secs, user_agent, &args).await
+                fetch_with_playwright(&pinned_target, timeout_secs, user_agent, &args).await
             }
-            BrowserType::Curl => fetch_with_curl(url, timeout_secs, user_agent).await,
+            BrowserType::Curl => fetch_with_curl(&pinned_target, timeout_secs, user_agent).await,
         }
     }
 }
 
 async fn fetch_with_chrome(
     chrome_path: &str,
-    url: &str,
+    target: &PinnedTarget,
     timeout_secs: u64,
     user_agent: Option<&str>,
     args: &Value,
@@ -177,10 +198,13 @@ async fn fetch_with_chrome(
     if let Some(ua) = user_agent {
         cmd.arg(format!("--user-agent={}", ua));
     }
+    if !target.host_is_ip {
+        cmd.arg(format!("--host-resolver-rules={}", target.resolver_rule));
+    }
 
     // Use dump-dom to get rendered HTML
     cmd.arg("--dump-dom");
-    cmd.arg(url);
+    cmd.arg(&target.url);
 
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -205,7 +229,8 @@ async fn fetch_with_chrome(
     Ok(json!({
         "success": output.status.success(),
         "browser": "chrome",
-        "url": url,
+        "url": target.url,
+        "resolved_ip": target.ip.to_string(),
         "html": truncate_output(&html, 10000),
         "text": truncate_output(&text_content, 5000),
         "html_length": html.len(),
@@ -236,20 +261,28 @@ fn escape_js_string(s: &str) -> String {
 }
 
 async fn fetch_with_playwright(
-    url: &str,
+    target: &PinnedTarget,
     timeout_secs: u64,
     user_agent: Option<&str>,
     _args: &Value,
 ) -> Result<Value> {
-    let safe_url = escape_js_string(url);
+    let safe_url = escape_js_string(&target.url);
     let ua_option = user_agent
         .map(|ua| format!("userAgent: '{}'", escape_js_string(ua)))
         .unwrap_or_default();
+    let launch_args = if target.host_is_ip {
+        "[]".to_string()
+    } else {
+        format!(
+            "['--host-resolver-rules={}']",
+            escape_js_string(&target.resolver_rule)
+        )
+    };
     let script = format!(
         r#"
 const {{ chromium }} = require('playwright');
 (async () => {{
-    const browser = await chromium.launch({{ headless: true }});
+    const browser = await chromium.launch({{ headless: true, args: {} }});
     const context = await browser.newContext({{
         {}
     }});
@@ -260,6 +293,7 @@ const {{ chromium }} = require('playwright');
     await browser.close();
 }})();
 "#,
+        launch_args,
         ua_option,
         safe_url,
         timeout_secs * 1000
@@ -286,7 +320,8 @@ const {{ chromium }} = require('playwright');
     Ok(json!({
         "success": output.status.success(),
         "browser": "playwright",
-        "url": url,
+        "url": target.url,
+        "resolved_ip": target.ip.to_string(),
         "html": truncate_output(&html, 10000),
         "text": truncate_output(&text_content, 5000),
         "html_length": html.len(),
@@ -294,7 +329,11 @@ const {{ chromium }} = require('playwright');
     }))
 }
 
-async fn fetch_with_curl(url: &str, timeout_secs: u64, user_agent: Option<&str>) -> Result<Value> {
+async fn fetch_with_curl(
+    target: &PinnedTarget,
+    timeout_secs: u64,
+    user_agent: Option<&str>,
+) -> Result<Value> {
     let mut cmd = Command::new("curl");
     cmd.args([
         "-s",
@@ -302,6 +341,12 @@ async fn fetch_with_curl(url: &str, timeout_secs: u64, user_agent: Option<&str>)
         "--max-time",
         &timeout_secs.to_string(),
     ]);
+    if !target.host_is_ip {
+        cmd.args([
+            "--resolve",
+            &format!("{}:{}:{}", target.host, target.port, target.ip),
+        ]);
+    }
 
     if let Some(ua) = user_agent {
         cmd.args(["-A", ua]);
@@ -309,7 +354,7 @@ async fn fetch_with_curl(url: &str, timeout_secs: u64, user_agent: Option<&str>)
         cmd.args(["-A", "Mozilla/5.0 (compatible; Selfware/1.0)"]);
     }
 
-    cmd.arg(url);
+    cmd.arg(&target.url);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
@@ -322,7 +367,8 @@ async fn fetch_with_curl(url: &str, timeout_secs: u64, user_agent: Option<&str>)
     Ok(json!({
         "success": output.status.success(),
         "browser": "curl",
-        "url": url,
+        "url": target.url,
+        "resolved_ip": target.ip.to_string(),
         "html": truncate_output(&html, 10000),
         "text": truncate_output(&text_content, 5000),
         "html_length": html.len(),
@@ -386,6 +432,7 @@ impl Tool for BrowserScreenshot {
             .get("url")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("url is required"))?;
+        let pinned_target = resolve_and_pin_target(url)?;
 
         let output_path = args
             .get("output_path")
@@ -412,8 +459,14 @@ impl Tool for BrowserScreenshot {
                     &format!("--window-size={},{}", width, height),
                     &format!("--screenshot={}", output_path),
                     &format!("--timeout={}", timeout_secs * 1000),
-                    url,
                 ]);
+                if !pinned_target.host_is_ip {
+                    cmd.arg(format!(
+                        "--host-resolver-rules={}",
+                        pinned_target.resolver_rule
+                    ));
+                }
+                cmd.arg(&pinned_target.url);
 
                 cmd.stdout(Stdio::piped());
                 cmd.stderr(Stdio::piped());
@@ -439,7 +492,8 @@ impl Tool for BrowserScreenshot {
                 Ok(json!({
                     "success": output.status.success() && file_exists,
                     "browser": "chrome",
-                    "url": url,
+                    "url": pinned_target.url,
+                    "resolved_ip": pinned_target.ip.to_string(),
                     "output_path": output_path,
                     "file_exists": file_exists,
                     "file_size": file_size,
@@ -448,17 +502,25 @@ impl Tool for BrowserScreenshot {
                 }))
             }
             BrowserType::Playwright => {
-                let safe_url = escape_js_string(url);
+                let safe_url = escape_js_string(&pinned_target.url);
                 let safe_output_path = escape_js_string(output_path);
                 let full_page = args
                     .get("full_page")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+                let launch_args = if pinned_target.host_is_ip {
+                    "[]".to_string()
+                } else {
+                    format!(
+                        "['--host-resolver-rules={}']",
+                        escape_js_string(&pinned_target.resolver_rule)
+                    )
+                };
                 let script = format!(
                     r#"
 const {{ chromium }} = require('playwright');
 (async () => {{
-    const browser = await chromium.launch({{ headless: true }});
+    const browser = await chromium.launch({{ headless: true, args: {} }});
     const page = await browser.newPage({{ viewport: {{ width: {}, height: {} }} }});
     await page.goto('{}', {{ timeout: {} }});
     await page.screenshot({{ path: '{}', fullPage: {} }});
@@ -466,6 +528,7 @@ const {{ chromium }} = require('playwright');
     console.log('Screenshot saved');
 }})();
 "#,
+                    launch_args,
                     width,
                     height,
                     safe_url,
@@ -498,7 +561,8 @@ const {{ chromium }} = require('playwright');
                 Ok(json!({
                     "success": output.status.success() && file_exists,
                     "browser": "playwright",
-                    "url": url,
+                    "url": pinned_target.url,
+                    "resolved_ip": pinned_target.ip.to_string(),
                     "output_path": output_path,
                     "file_exists": file_exists,
                     "file_size": file_size,
@@ -555,6 +619,7 @@ impl Tool for BrowserPdf {
             .get("url")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("url is required"))?;
+        let pinned_target = resolve_and_pin_target(url)?;
 
         let output_path = args
             .get("output_path")
@@ -578,8 +643,14 @@ impl Tool for BrowserPdf {
                     "--disable-dev-shm-usage",
                     &format!("--print-to-pdf={}", output_path),
                     &format!("--timeout={}", timeout_secs * 1000),
-                    url,
                 ]);
+                if !pinned_target.host_is_ip {
+                    cmd.arg(format!(
+                        "--host-resolver-rules={}",
+                        pinned_target.resolver_rule
+                    ));
+                }
+                cmd.arg(&pinned_target.url);
 
                 cmd.stdout(Stdio::piped());
                 cmd.stderr(Stdio::piped());
@@ -603,7 +674,8 @@ impl Tool for BrowserPdf {
                 Ok(json!({
                     "success": output.status.success() && file_exists,
                     "browser": "chrome",
-                    "url": url,
+                    "url": pinned_target.url,
+                    "resolved_ip": pinned_target.ip.to_string(),
                     "output_path": output_path,
                     "file_exists": file_exists,
                     "file_size": file_size,
@@ -658,6 +730,7 @@ impl Tool for BrowserEval {
             .get("url")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("url is required"))?;
+        let pinned_target = resolve_and_pin_target(url)?;
 
         let script = args
             .get("script")
@@ -676,15 +749,23 @@ impl Tool for BrowserEval {
                 // Pass user script as a JSON-encoded string and evaluate via
                 // new Function() to avoid interpolating untrusted code into the
                 // Node source template.
-                let safe_url = escape_js_string(url);
+                let safe_url = escape_js_string(&pinned_target.url);
                 let script_json = serde_json::to_string(script)
                     .context("Failed to JSON-encode script")?;
+                let launch_args = if pinned_target.host_is_ip {
+                    "[]".to_string()
+                } else {
+                    format!(
+                        "['--host-resolver-rules={}']",
+                        escape_js_string(&pinned_target.resolver_rule)
+                    )
+                };
 
                 let node_script = format!(
                     r#"
 const {{ chromium }} = require('playwright');
 (async () => {{
-    const browser = await chromium.launch({{ headless: true }});
+    const browser = await chromium.launch({{ headless: true, args: {} }});
     const page = await browser.newPage();
     await page.goto('{}', {{ timeout: {} }});
     const userScript = {};
@@ -695,6 +776,7 @@ const {{ chromium }} = require('playwright');
     await browser.close();
 }})();
 "#,
+                    launch_args,
                     safe_url,
                     timeout_secs * 1000,
                     script_json
@@ -723,7 +805,8 @@ const {{ chromium }} = require('playwright');
                 Ok(json!({
                     "success": output.status.success(),
                     "browser": "playwright",
-                    "url": url,
+                    "url": pinned_target.url,
+                    "resolved_ip": pinned_target.ip.to_string(),
                     "result": result,
                     "stderr": if stderr.is_empty() { None } else { Some(truncate_output(&stderr, 500)) }
                 }))
@@ -790,9 +873,8 @@ impl Tool for BrowserLinks {
 
         let filter = args.get("filter").and_then(|v| v.as_str());
 
-        // Extract links using regex
-        let link_regex = regex::Regex::new(r#"href=["']([^"']+)["']"#).unwrap();
-        let mut links: Vec<String> = link_regex
+        // Extract links using precompiled regex.
+        let mut links: Vec<String> = LINK_HREF_REGEX
             .captures_iter(html)
             .filter_map(|cap| cap.get(1).map(|m| m.as_str().to_string()))
             .filter(|link| {
@@ -822,18 +904,98 @@ impl Tool for BrowserLinks {
 // Helper Functions
 // ============================================================================
 
+fn resolve_and_pin_target(url: &str) -> Result<PinnedTarget> {
+    let parsed = url::Url::parse(url).context("Invalid URL")?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        anyhow::bail!("Only HTTP and HTTPS URLs are allowed");
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("URL host is required"))?
+        .to_string();
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let host_is_ip = host.parse::<IpAddr>().is_ok();
+    let allow_private = std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1";
+
+    let ip = if let Ok(ip) = host.parse::<IpAddr>() {
+        ip
+    } else {
+        let addrs: Vec<_> = (host.as_str(), port)
+            .to_socket_addrs()
+            .with_context(|| format!("Failed to resolve host {}", host))?
+            .collect();
+
+        if addrs.is_empty() {
+            anyhow::bail!("Host {} did not resolve to any addresses", host);
+        }
+
+        if !allow_private && addrs.iter().any(|addr| is_private_network_ip(&addr.ip())) {
+            anyhow::bail!(
+                "DNS rebinding blocked: {} resolves to private/internal address",
+                host
+            );
+        }
+
+        addrs[0].ip()
+    };
+
+    if !allow_private && is_private_network_ip(&ip) {
+        anyhow::bail!(
+            "Blocked request to private/internal network address: {}",
+            ip
+        );
+    }
+    if allow_private && is_private_network_ip(&ip) {
+        tracing::warn!(
+            "Allowing browser request to private network (SELFWARE_ALLOW_PRIVATE_NETWORK=1): {} -> {}",
+            host,
+            ip
+        );
+    }
+
+    Ok(PinnedTarget {
+        url: url.to_string(),
+        host: host.clone(),
+        port,
+        ip,
+        host_is_ip,
+        resolver_rule: format!("MAP {} {},EXCLUDE localhost", host, ip),
+    })
+}
+
+fn is_private_network_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+        }
+    }
+}
+
+static LINK_HREF_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"href=["']([^"']+)["']"#).expect("valid href regex"));
+static SCRIPT_TAG_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?is)<script[^>]*>.*?</script>").expect("valid script regex"));
+static STYLE_TAG_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?is)<style[^>]*>.*?</style>").expect("valid style regex"));
+static HTML_TAG_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<[^>]+>").expect("valid html tag regex"));
+static WHITESPACE_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\s+").expect("valid whitespace regex"));
+
 /// Extract text content from HTML (simple implementation)
 fn extract_text_from_html(html: &str) -> String {
-    // Remove script and style tags
-    let script_regex = regex::Regex::new(r"(?is)<script[^>]*>.*?</script>").unwrap();
-    let style_regex = regex::Regex::new(r"(?is)<style[^>]*>.*?</style>").unwrap();
-    let tag_regex = regex::Regex::new(r"<[^>]+>").unwrap();
-    let whitespace_regex = regex::Regex::new(r"\s+").unwrap();
-
-    let text = script_regex.replace_all(html, "");
-    let text = style_regex.replace_all(&text, "");
-    let text = tag_regex.replace_all(&text, " ");
-    let text = whitespace_regex.replace_all(&text, " ");
+    // Regexes are precompiled in LazyLock statics to avoid repeated allocation.
+    let text = SCRIPT_TAG_REGEX.replace_all(html, "");
+    let text = STYLE_TAG_REGEX.replace_all(&text, "");
+    let text = HTML_TAG_REGEX.replace_all(&text, " ");
+    let text = WHITESPACE_REGEX.replace_all(&text, " ");
 
     // Decode common HTML entities
     text.replace("&nbsp;", " ")
@@ -920,6 +1082,25 @@ mod tests {
         assert!(text.contains("World"));
         assert!(!text.contains("alert"));
         assert!(!text.contains("<"));
+    }
+
+    #[test]
+    fn test_resolve_and_pin_target_rejects_non_http_scheme() {
+        let result = resolve_and_pin_target("file:///etc/passwd");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_and_pin_target_blocks_private_ip() {
+        let result = resolve_and_pin_target("http://127.0.0.1/test");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_and_pin_target_allows_public_ip() {
+        let pinned = resolve_and_pin_target("https://1.1.1.1/").unwrap();
+        assert_eq!(pinned.ip.to_string(), "1.1.1.1");
+        assert!(pinned.host_is_ip);
     }
 
     #[test]

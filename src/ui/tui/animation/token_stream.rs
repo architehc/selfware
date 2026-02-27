@@ -211,7 +211,7 @@ impl Widget for &TokenStream {
             for y in area.y..area.y + area.height {
                 // Alternate wave patterns vertically
                 let symbol_idx = (wave_idx + (y - area.y) as usize) % wave_symbols.len();
-                buf.get_mut(x, y)
+                buf[(x, y)]
                     .set_symbol(wave_symbols[symbol_idx])
                     .set_style(Style::default().fg(wave_color));
             }
@@ -235,18 +235,18 @@ impl Widget for &TokenStream {
                 let color = particle.size.color();
 
                 // Draw particle with glow effect
-                buf.get_mut(x, y)
+                buf[(x, y)]
                     .set_symbol(symbol)
                     .set_style(Style::default().fg(color).add_modifier(Modifier::BOLD));
 
                 // Glow on sides
                 if x > area.x {
-                    buf.get_mut(x - 1, y)
+                    buf[(x - 1, y)]
                         .set_symbol("·")
                         .set_style(Style::default().fg(color));
                 }
                 if x < area.x + area.width - 1 {
-                    buf.get_mut(x + 1, y)
+                    buf[(x + 1, y)]
                         .set_symbol("·")
                         .set_style(Style::default().fg(color));
                 }
@@ -271,7 +271,7 @@ impl Widget for &TokenStream {
             for (i, ch) in stats.chars().enumerate() {
                 let x = area.x + i as u16;
                 if x < area.x + area.width {
-                    buf.get_mut(x, stats_y)
+                    buf[(x, stats_y)]
                         .set_symbol(&ch.to_string())
                         .set_style(Style::default().fg(Color::Gray));
                 }

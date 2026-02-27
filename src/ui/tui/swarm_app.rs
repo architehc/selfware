@@ -91,7 +91,7 @@ impl SwarmApp {
 
     /// Render the application
     pub fn render(&mut self, frame: &mut Frame) {
-        let area = frame.size();
+        let area = frame.area();
 
         // Calculate layouts
         let layouts = self.layout_engine.calculate_layout(area);

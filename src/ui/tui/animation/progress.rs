@@ -145,7 +145,7 @@ impl Widget for &AnimatedProgressBar {
                 if i as u16 >= label_len {
                     break;
                 }
-                buf.get_mut(area.x + i as u16, area.y)
+                buf[(area.x + i as u16, area.y)]
                     .set_symbol(&ch.to_string())
                     .set_style(Style::default().fg(Color::White));
             }
@@ -161,7 +161,7 @@ impl Widget for &AnimatedProgressBar {
                 Color::DarkGray
             };
 
-            buf.get_mut(bar_start + x, area.y)
+            buf[(bar_start + x, area.y)]
                 .set_symbol(&symbol.to_string())
                 .set_style(Style::default().fg(color));
         }
@@ -172,7 +172,7 @@ impl Widget for &AnimatedProgressBar {
             let pct_start = bar_start + bar_width + 1;
             for (i, ch) in pct.chars().enumerate() {
                 if pct_start + (i as u16) < area.x + area.width {
-                    buf.get_mut(pct_start + i as u16, area.y)
+                    buf[(pct_start + i as u16, area.y)]
                         .set_symbol(&ch.to_string())
                         .set_style(Style::default().fg(Color::Gray));
                 }

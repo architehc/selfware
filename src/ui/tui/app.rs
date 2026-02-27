@@ -184,7 +184,7 @@ impl App {
 
     /// Render the application
     pub fn render(&self, frame: &mut Frame) {
-        let area = frame.size();
+        let area = frame.area();
 
         // Create main layout
         let chunks = Layout::default()
@@ -280,7 +280,7 @@ impl App {
 
         // Show cursor
         if self.state == AppState::Chatting {
-            frame.set_cursor(inner.x + 2 + self.cursor as u16, inner.y);
+            frame.set_cursor_position((inner.x + 2 + self.cursor as u16, inner.y));
         }
     }
 

@@ -169,7 +169,7 @@ impl Widget for &MessageFlow {
                     color
                 };
 
-                buf.get_mut(x, y)
+                buf[(x, y)]
                     .set_symbol("·")
                     .set_style(Style::default().fg(trail_color));
             }
@@ -181,7 +181,7 @@ impl Widget for &MessageFlow {
         let y = py.round() as u16;
 
         if x >= area.x && x < area.x + area.width && y >= area.y && y < area.y + area.height {
-            buf.get_mut(x, y)
+            buf[(x, y)]
                 .set_symbol(symbol)
                 .set_style(Style::default().fg(color).add_modifier(Modifier::BOLD));
         }

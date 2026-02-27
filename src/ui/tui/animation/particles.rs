@@ -295,7 +295,7 @@ impl Widget for &ParticleSystem {
                     style = style.add_modifier(Modifier::BOLD);
                 }
 
-                buf.get_mut(x, y)
+                buf[(x, y)]
                     .set_symbol(&particle.symbol.to_string())
                     .set_style(style);
             }

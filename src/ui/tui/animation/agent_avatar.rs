@@ -271,38 +271,38 @@ impl Widget for &AgentAvatar {
 
         // Draw border
         // Top
-        buf.get_mut(area.x, area.y)
+        buf[(area.x, area.y)]
             .set_symbol("┌")
             .set_style(border_style);
         for x in area.x + 1..area.x + area.width - 1 {
-            buf.get_mut(x, area.y)
+            buf[(x, area.y)]
                 .set_symbol("─")
                 .set_style(border_style);
         }
-        buf.get_mut(area.x + area.width - 1, area.y)
+        buf[(area.x + area.width - 1, area.y)]
             .set_symbol("┐")
             .set_style(border_style);
 
         // Sides
         for y in area.y + 1..area.y + area.height - 1 {
-            buf.get_mut(area.x, y)
+            buf[(area.x, y)]
                 .set_symbol("│")
                 .set_style(border_style);
-            buf.get_mut(area.x + area.width - 1, y)
+            buf[(area.x + area.width - 1, y)]
                 .set_symbol("│")
                 .set_style(border_style);
         }
 
         // Bottom
-        buf.get_mut(area.x, area.y + area.height - 1)
+        buf[(area.x, area.y + area.height - 1)]
             .set_symbol("└")
             .set_style(border_style);
         for x in area.x + 1..area.x + area.width - 1 {
-            buf.get_mut(x, area.y + area.height - 1)
+            buf[(x, area.y + area.height - 1)]
                 .set_symbol("─")
                 .set_style(border_style);
         }
-        buf.get_mut(area.x + area.width - 1, area.y + area.height - 1)
+        buf[(area.x + area.width - 1, area.y + area.height - 1)]
             .set_symbol("┘")
             .set_style(border_style);
 
@@ -321,7 +321,7 @@ impl Widget for &AgentAvatar {
         for ch in icon.chars() {
             let char_width = ch.width().unwrap_or(1) as u16;
             if inner_x + x_offset + char_width <= area.x + area.width - 1 {
-                buf.get_mut(inner_x + x_offset, inner_y)
+                buf[(inner_x + x_offset, inner_y)]
                     .set_symbol(&ch.to_string())
                     .set_style(Style::default().fg(self.role.color()));
                 x_offset += char_width;
@@ -334,7 +334,7 @@ impl Widget for &AgentAvatar {
         for (i, ch) in name_display.chars().enumerate() {
             let x = inner_x + x_offset + 1 + i as u16;
             if x < area.x + area.width - 1 {
-                buf.get_mut(x, inner_y)
+                buf[(x, inner_y)]
                     .set_symbol(&ch.to_string())
                     .set_style(content_style);
             }
@@ -354,7 +354,7 @@ impl Widget for &AgentAvatar {
                 let symbol = if i < dots_filled { "●" } else { "○" };
                 let x = inner_x + i as u16 * 2;
                 if x < area.x + area.width - 1 {
-                    buf.get_mut(x, activity_y)
+                    buf[(x, activity_y)]
                         .set_symbol(symbol)
                         .set_style(Style::default().fg(activity_color));
                 }
@@ -364,7 +364,7 @@ impl Widget for &AgentAvatar {
             let status = self.activity.symbol();
             let status_x = inner_x + 11;
             if status_x < area.x + area.width - 1 {
-                buf.get_mut(status_x, activity_y)
+                buf[(status_x, activity_y)]
                     .set_symbol(status)
                     .set_style(
                         Style::default()
@@ -388,7 +388,7 @@ impl Widget for &AgentAvatar {
             for ch in display_text.chars() {
                 let char_width = ch.width().unwrap_or(1) as u16;
                 if inner_x + token_x_offset + char_width <= area.x + area.width - 1 {
-                    buf.get_mut(inner_x + token_x_offset, token_y)
+                    buf[(inner_x + token_x_offset, token_y)]
                         .set_symbol(&ch.to_string())
                         .set_style(Style::default().fg(Color::Gray));
                     token_x_offset += char_width;

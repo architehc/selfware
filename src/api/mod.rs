@@ -124,7 +124,11 @@ impl StreamingResponse {
                                 return;
                             }
                         }
-                        if tx.send(Err(anyhow::anyhow!("Stream error: {}", e))).await.is_err() {
+                        if tx
+                            .send(Err(anyhow::anyhow!("Stream error: {}", e)))
+                            .await
+                            .is_err()
+                        {
                             warn!("Streaming receiver dropped while sending stream error");
                         }
                         return;
@@ -1549,6 +1553,49 @@ mod tests {
         assert_eq!(config.initial_delay_ms, 0);
         assert_eq!(config.max_delay_ms, 0);
         // Even with doubling, 0 * 2 = 0
+    }
+
+    #[tokio::test]
+    async fn test_stream_timeout_flushes_buffered_tool_calls() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let sse_event = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_timeout","type":"function","function":{"name":"git_status","arguments":"{}"}}]}}]}
+
+"#;
+            let chunk = format!("{:X}\r\n{}\r\n", sse_event.len(), sse_event);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{}",
+                chunk
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            // Keep connection open so the client hits its chunk timeout.
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        });
+
+        let response = reqwest::get(format!("http://{}", addr)).await.unwrap();
+        let stream = StreamingResponse::new(response, Duration::from_millis(50));
+        let mut rx = stream.into_channel().await;
+
+        let first = rx.recv().await.unwrap().unwrap();
+        assert!(matches!(
+            first,
+            StreamChunk::ToolCall(ToolCall { id, .. }) if id == "call_timeout"
+        ));
+
+        let second = rx.recv().await.unwrap();
+        assert!(second.is_err());
+        assert!(second
+            .unwrap_err()
+            .to_string()
+            .contains("Stream timeout: no data"));
+
+        let _ = server.await;
     }
 }
 

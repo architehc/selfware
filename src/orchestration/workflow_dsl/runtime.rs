@@ -613,12 +613,10 @@ mod tests {
         let mut runtime = Runtime::new();
         let _ = runtime.execute(&ast).unwrap();
 
-        assert!(
-            runtime
-                .history
-                .iter()
-                .any(|e| e.event_type == "parallel_sequential_fallback")
-        );
+        assert!(runtime
+            .history
+            .iter()
+            .any(|e| e.event_type == "parallel_sequential_fallback"));
     }
 
     #[test]

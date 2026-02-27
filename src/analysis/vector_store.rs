@@ -1409,7 +1409,10 @@ impl VectorStore {
             // Atomic write for embeddings index
             if let Some(index) = self.indices.get(name) {
                 let index_path = storage_path.join(format!("{}.idx", name));
-                let data = bincode::serialize(&(&index.embeddings, &index.chunk_ids))?;
+                let data = bincode::serde::encode_to_vec(
+                    (&index.embeddings, &index.chunk_ids),
+                    bincode::config::standard(),
+                )?;
 
                 let tmp_idx = index_path.with_extension(format!("idx.tmp.{}", pid));
                 std::fs::write(&tmp_idx, &data)?;
@@ -1455,8 +1458,8 @@ impl VectorStore {
                 let index_path = storage_path.join(format!("{}.idx", name));
                 if index_path.exists() {
                     let data = std::fs::read(&index_path)?;
-                    let (embeddings, chunk_ids): (Vec<Vec<f32>>, Vec<String>) =
-                        bincode::deserialize(&data)?;
+                    let ((embeddings, chunk_ids), _): ((Vec<Vec<f32>>, Vec<String>), usize) =
+                        bincode::serde::decode_from_slice(&data, bincode::config::standard())?;
 
                     // Validate parallel array invariant: embeddings and chunk_ids
                     // must have the same length, otherwise the index is corrupt.

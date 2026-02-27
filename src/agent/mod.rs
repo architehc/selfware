@@ -2495,6 +2495,7 @@ mod tests {
     use crate::api::types::{ToolCall, ToolFunction};
     use crate::config::{Config, ExecutionMode};
     use crate::errors::AgentError;
+    use crate::testing::mock_api::MockLlmServer;
     use crate::tool_parser::parse_tool_calls;
     use loop_control::{AgentLoop, AgentState};
 
@@ -2616,6 +2617,80 @@ mod tests {
                 arguments: args.to_string(),
             },
         }
+    }
+
+    fn mock_agent_config(endpoint: String, streaming: bool) -> Config {
+        Config {
+            endpoint,
+            model: "mock-model".to_string(),
+            agent: crate::config::AgentConfig {
+                max_iterations: 8,
+                step_timeout_secs: 5,
+                streaming,
+                native_function_calling: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_agent_run_task_e2e_tool_workflow_with_mock_api() {
+        let server = MockLlmServer::builder()
+            .with_response(
+                r#"<tool>
+<name>file_read</name>
+<arguments>{"path":"./Cargo.toml"}</arguments>
+</tool>"#,
+            )
+            .with_response("Task complete: read finished.")
+            .build()
+            .await;
+
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let result = agent.run_task("Read Cargo.toml and finish").await;
+        assert!(result.is_ok(), "run_task should succeed with mock API");
+        assert!(
+            agent
+                .messages
+                .iter()
+                .any(|m| m.content.contains("<tool_result>")),
+            "agent should have executed at least one tool call"
+        );
+        assert!(
+            agent
+                .context_files
+                .iter()
+                .any(|p| p.ends_with("Cargo.toml")),
+            "file_read should add Cargo.toml to context tracking"
+        );
+        assert!(agent.last_assistant_response.contains("Task complete"));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_agent_run_task_streaming_fallback_to_non_streaming() {
+        let server = MockLlmServer::builder()
+            .with_response("Plan: answer directly.")
+            .with_error(503, r#"{"error":"temporary stream failure"}"#)
+            .with_response("Fallback completed successfully.")
+            .build()
+            .await;
+
+        let config = mock_agent_config(format!("{}/v1", server.url()), true);
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let result = agent.run_task("Respond with a short completion").await;
+        assert!(
+            result.is_ok(),
+            "run_task should recover by falling back to non-streaming chat"
+        );
+        assert!(agent.last_assistant_response.contains("Fallback completed"));
+
+        server.stop().await;
     }
 
     #[test]

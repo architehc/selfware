@@ -622,19 +622,75 @@ impl Agent {
         }
 
         let (content, reasoning) = if self.config.agent.streaming {
-            let (content, reasoning, stream_tool_calls) = self
-                .chat_streaming(request_messages, self.api_tools(), ThinkingMode::Enabled)
-                .await?;
+            match self
+                .chat_streaming(
+                    request_messages.clone(),
+                    self.api_tools(),
+                    ThinkingMode::Enabled,
+                )
+                .await
+            {
+                Ok((content, reasoning, stream_tool_calls)) => {
+                    if self.config.agent.native_function_calling && stream_tool_calls.is_some() {
+                        native_tool_calls = stream_tool_calls.clone();
+                        info!(
+                            "Received {} native tool calls from stream",
+                            native_tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
+                        );
+                    }
+                    (content, reasoning)
+                }
+                Err(stream_err) => {
+                    warn!(
+                        "Streaming request failed ({}); retrying this step with non-streaming API",
+                        stream_err
+                    );
 
-            if self.config.agent.native_function_calling && stream_tool_calls.is_some() {
-                native_tool_calls = stream_tool_calls.clone();
-                info!(
-                    "Received {} native tool calls from stream",
-                    native_tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
-                );
+                    let response = self
+                        .client
+                        .chat(request_messages, self.api_tools(), ThinkingMode::Enabled)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "Streaming failed: {}. Non-streaming fallback request also failed",
+                                stream_err
+                            )
+                        })?;
+
+                    let choice = response
+                        .choices
+                        .into_iter()
+                        .next()
+                        .context("No response from model")?;
+
+                    let message = choice.message;
+                    let content = message.content.clone();
+                    let reasoning = message.reasoning_content.clone();
+
+                    if self.config.agent.native_function_calling && message.tool_calls.is_some() {
+                        native_tool_calls = message.tool_calls.clone();
+                        info!(
+                            "Received {} native tool calls from fallback API",
+                            native_tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
+                        );
+                    }
+
+                    debug!(
+                        "Fallback model response content ({} chars): {}",
+                        content.len(),
+                        content
+                    );
+                    if content.is_empty() {
+                        warn!("Fallback model returned empty content!");
+                    }
+                    if let Some(ref r) = reasoning {
+                        println!("{} {}", "Thinking:".dimmed(), r.dimmed());
+                        debug!("Fallback reasoning ({} chars): {}", r.len(), r);
+                    }
+
+                    (content, reasoning)
+                }
             }
-
-            (content, reasoning)
         } else {
             let response = self
                 .client

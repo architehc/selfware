@@ -298,7 +298,7 @@ impl TuiTerminal {
 
     /// Get terminal size
     pub fn size(&self) -> Result<Rect> {
-        Ok(self.terminal.size()?)
+        Ok(self.terminal.size()?.into())
     }
 
     /// Restore terminal to normal state
@@ -471,7 +471,7 @@ pub fn run_tui(model: &str) -> Result<Vec<String>> {
                 }
 
                 // Layout engine manages pane positions
-                let _panes = layout_engine.calculate_layout(frame.size());
+                let _panes = layout_engine.calculate_layout(frame.area());
 
                 // Status indicator would show connection state
                 let _ = &status_indicator;
@@ -642,7 +642,7 @@ pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
         if needs_redraw && last_draw.elapsed() >= min_draw_interval {
             // Render the dashboard
             terminal.terminal().draw(|frame| {
-                let area = frame.size();
+                let area = frame.area();
 
                 // Calculate pane layouts
                 let pane_layouts = layout_engine.calculate_layout(area);
@@ -987,7 +987,7 @@ pub fn run_tui_dashboard_with_events(
 
             // Render the dashboard
             terminal.terminal().draw(|frame| {
-                let area = frame.size();
+                let area = frame.area();
                 let pane_layouts = layout_engine.calculate_layout(area);
 
                 for (pane_id, pane_area) in &pane_layouts {
@@ -1377,7 +1377,7 @@ fn render_chat_pane(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
 
     // Show cursor if focused and chatting
     if focused && app.state == AppState::Chatting {
-        frame.set_cursor(input_inner.x + 2 + app.cursor as u16, input_inner.y);
+        frame.set_cursor_position((input_inner.x + 2 + app.cursor as u16, input_inner.y));
     }
 }
 
