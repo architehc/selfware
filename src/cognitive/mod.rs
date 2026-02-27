@@ -28,6 +28,7 @@ pub mod token_budget;
 pub mod self_reference;
 pub mod cognitive_system;
 pub mod compilation_manager;
+pub mod rsi_orchestrator;
 
 // Re-exports for backward compatibility (cognitive.rs used to export these directly)
 pub use state::{

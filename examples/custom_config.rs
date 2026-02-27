@@ -164,6 +164,8 @@ fn build_custom_config() -> Config {
         // API retry settings
         retry: Default::default(),
 
+        resources: selfware::config::ResourcesConfig::default(),
+
         // Default execution mode
         execution_mode: ExecutionMode::Normal,
 

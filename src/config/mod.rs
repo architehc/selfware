@@ -1186,6 +1186,7 @@ mod tests {
                 base_delay_ms: 500,
                 max_delay_ms: 20000,
             },
+            resources: crate::config::ResourcesConfig::default(),
             execution_mode: ExecutionMode::default(),
             compact_mode: false,
             verbose_mode: false,
