@@ -1820,23 +1820,6 @@ To call a tool, use this EXACT XML structure:
             .map(|c| c.task_id.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         self.start_learning_session(&learning_session_id, &task_description);
-        if self.cognitive_state.active_tactical_plan.is_none() {
-            self.cognitive_state.set_active_tactical_plan(
-                format!("tactical-{}", learning_session_id),
-                format!("Resume task: {}", task_description),
-                vec![learning_session_id.clone()],
-            );
-        }
-        if self.cognitive_state.active_operational_plan.is_none() {
-            self.cognitive_state.set_operational_plan(
-                learning_session_id.clone(),
-                vec![
-                    "Resume planning".to_string(),
-                    "Resume execution".to_string(),
-                    "Re-verify completion".to_string(),
-                ],
-            );
-        }
         self.cognitive_state.upsert_strategic_goal(
             "strategic-agent-reliability",
             "Improve long-term autonomous task reliability and production readiness",
@@ -2404,6 +2387,23 @@ To call a tool, use this EXACT XML structure:
             .map(|c| c.task_id.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         self.start_learning_session(&learning_session_id, &task_description);
+        if self.cognitive_state.active_tactical_plan.is_none() {
+            self.cognitive_state.set_active_tactical_plan(
+                format!("tactical-{}", learning_session_id),
+                format!("Resume task: {}", task_description),
+                vec![learning_session_id.clone()],
+            );
+        }
+        if self.cognitive_state.active_operational_plan.is_none() {
+            self.cognitive_state.set_operational_plan(
+                learning_session_id.clone(),
+                vec![
+                    "Resume planning".to_string(),
+                    "Resume execution".to_string(),
+                    "Re-verify completion".to_string(),
+                ],
+            );
+        }
 
         #[cfg(feature = "resilience")]
         let mut recovery_attempts = 0u32;
