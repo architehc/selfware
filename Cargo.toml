@@ -43,7 +43,7 @@ whoami = "2.1"
 
 # Modern CLI/TUI
 reedline = "0.45"
-crossterm = "0.27"
+crossterm = "0.29"
 ratatui = "0.30"
 fuzzy-matcher = "0.3"
 syntect = "5.2"
