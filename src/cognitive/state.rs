@@ -194,7 +194,7 @@ impl CognitiveState {
             self.strategic_goals
                 .iter()
                 .take(3)
-                .map(|g| format!("- [{}] {}", format!("{:?}", g.status), g.description))
+                .map(|g| format!("- [{:?}] {}", g.status, g.description))
                 .collect::<Vec<_>>()
                 .join("\n")
         };

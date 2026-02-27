@@ -671,7 +671,6 @@ impl KnowledgeGraph {
     }
 
     /// Create a new knowledge graph
-
     pub fn new() -> Self {
         Self {
             entities: HashMap::new(),
@@ -1088,7 +1087,6 @@ impl Default for RustEntityExtractor {
 
 impl RustEntityExtractor {
     /// Create a new extractor
-
     pub fn new() -> Self {
         Self {
             _module_path: Vec::new(),
@@ -1319,7 +1317,6 @@ impl Default for SmellDetector {
 
 impl SmellDetector {
     /// Create new detector with defaults
-
     pub fn new() -> Self {
         Self {
             max_function_lines: 50,
@@ -1556,7 +1553,6 @@ impl Default for PatternRecognizer {
 
 impl PatternRecognizer {
     /// Create new recognizer with default patterns
-
     pub fn new() -> Self {
         let signatures = vec![
             // Singleton pattern
@@ -1661,7 +1657,6 @@ impl Default for SemanticLinker {
 
 impl SemanticLinker {
     /// Create new linker
-
     pub fn new() -> Self {
         let mut patterns = HashMap::new();
 

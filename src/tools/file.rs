@@ -19,7 +19,7 @@ use tempfile::NamedTempFile;
 /// NOTE: This global exists for backward compatibility. Prefer using the
 /// per-instance `safety_config` field on tool structs for multi-agent scenarios
 /// where each agent may have a different safety configuration.
-static SAFETY_CONFIG: OnceLock<SafetyConfig> = OnceLock::new();
+pub(super) static SAFETY_CONFIG: OnceLock<SafetyConfig> = OnceLock::new();
 
 /// Register the runtime-loaded safety configuration for tool path validation.
 ///
@@ -469,7 +469,7 @@ fn default_three() -> usize {
 /// When `instance_config` is `Some`, it takes priority (dependency-injected config
 /// for multi-agent isolation). Otherwise falls back to the global `SAFETY_CONFIG`,
 /// and finally to `SafetyConfig::default()`.
-fn validate_tool_path(path: &str, instance_config: Option<&SafetyConfig>) -> Result<()> {
+pub(super) fn validate_tool_path(path: &str, instance_config: Option<&SafetyConfig>) -> Result<()> {
     #[cfg(test)]
     {
         if std::env::var("SELFWARE_TEST_MODE").is_ok() {

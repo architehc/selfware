@@ -6,8 +6,10 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn test_1m_token_context_initialization() {
-    let mut config = Config::default();
-    config.max_tokens = 1_000_000;
+    let config = Config {
+        max_tokens: 1_000_000,
+        ..Config::default()
+    };
 
     let api_client = Arc::new(ApiClient::new(&config).unwrap());
     let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::new(1536)));

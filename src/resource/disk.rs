@@ -12,7 +12,7 @@ pub struct DiskManager {
     config: DiskConfig,
     checkpoints_path: PathBuf,
     logs_path: PathBuf,
-    models_path: PathBuf,
+    _models_path: PathBuf,
 }
 
 /// Disk usage statistics
@@ -75,7 +75,7 @@ impl DiskManager {
             config: config.clone(),
             checkpoints_path,
             logs_path,
-            models_path,
+            _models_path: models_path,
         })
     }
 

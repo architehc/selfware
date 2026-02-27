@@ -10,11 +10,33 @@
 use crate::bm25::BM25Index;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use once_cell::sync::Lazy;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+
+// Pre-compiled regexes for Rust symbol indexing (compiled once, reused across calls)
+static FN_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\s*(pub(\(.*?\))?\s+)?(async\s+)?fn\s+(\w+)").expect("fn regex"));
+static STRUCT_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\s*(pub(\(.*?\))?\s+)?struct\s+(\w+)").expect("struct regex"));
+static ENUM_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\s*(pub(\(.*?\))?\s+)?enum\s+(\w+)").expect("enum regex"));
+static TRAIT_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\s*(pub(\(.*?\))?\s+)?trait\s+(\w+)").expect("trait regex"));
+static IMPL_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\s*impl(<.*?>)?\s+(\w+)").expect("impl regex"));
+static CONST_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\s*(pub(\(.*?\))?\s+)?const\s+(\w+)").expect("const regex"));
+static TYPE_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\s*(pub(\(.*?\))?\s+)?type\s+(\w+)").expect("type regex"));
+static MACRO_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^\s*(pub(\(.*?\))?\s+)?macro_rules!\s+(\w+)").expect("macro regex")
+});
+static MOD_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\s*(pub(\(.*?\))?\s+)?mod\s+(\w+)").expect("mod regex"));
 
 // TODO: Consider migrating to tokio::sync::RwLock if ProjectIntelligence methods become async.
 // Currently all methods are synchronous, so std::sync::RwLock is correct and avoids
@@ -1221,100 +1243,143 @@ impl ProjectIntelligence {
 
     /// Index symbols from Rust source
     fn index_rust_symbols(&self, index: &mut SymbolIndex, file: &Path, content: &str) {
-        let fn_regex = Regex::new(r"^\s*(pub(\(.*?\))?\s+)?(async\s+)?fn\s+(\w+)").unwrap();
-        let struct_regex = Regex::new(r"^\s*(pub(\(.*?\))?\s+)?struct\s+(\w+)").unwrap();
-        let enum_regex = Regex::new(r"^\s*(pub(\(.*?\))?\s+)?enum\s+(\w+)").unwrap();
-        let trait_regex = Regex::new(r"^\s*(pub(\(.*?\))?\s+)?trait\s+(\w+)").unwrap();
-        let impl_regex = Regex::new(r"^\s*impl(<.*?>)?\s+(\w+)").unwrap();
-        let const_regex = Regex::new(r"^\s*(pub(\(.*?\))?\s+)?const\s+(\w+)").unwrap();
-        let type_regex = Regex::new(r"^\s*(pub(\(.*?\))?\s+)?type\s+(\w+)").unwrap();
-        let macro_regex = Regex::new(r"^\s*(pub(\(.*?\))?\s+)?macro_rules!\s+(\w+)").unwrap();
-        let mod_regex = Regex::new(r"^\s*(pub(\(.*?\))?\s+)?mod\s+(\w+)").unwrap();
-
         for (line_num, line) in content.lines().enumerate() {
             let line_num = line_num + 1;
 
             // Functions
-            if let Some(caps) = fn_regex.captures(line) {
+            if let Some(caps) = FN_REGEX.captures(line) {
                 let vis = Visibility::parse(caps.get(1).map(|m| m.as_str()).unwrap_or(""));
-                let name = caps.get(4).unwrap().as_str().to_string();
-                let symbol = Symbol::new(name, SymbolKind::Function, file.to_path_buf(), line_num)
+                if let Some(name_match) = caps.get(4) {
+                    let symbol = Symbol::new(
+                        name_match.as_str().to_string(),
+                        SymbolKind::Function,
+                        file.to_path_buf(),
+                        line_num,
+                    )
                     .with_visibility(vis)
                     .with_signature(line.trim().to_string());
-                index.add(symbol);
+                    index.add(symbol);
+                }
             }
             // Structs
-            else if let Some(caps) = struct_regex.captures(line) {
+            else if let Some(caps) = STRUCT_REGEX.captures(line) {
                 let vis = Visibility::parse(caps.get(1).map(|m| m.as_str()).unwrap_or(""));
-                let name = caps.get(3).unwrap().as_str().to_string();
-                let symbol = Symbol::new(name, SymbolKind::Struct, file.to_path_buf(), line_num)
+                if let Some(name_match) = caps.get(3) {
+                    let symbol = Symbol::new(
+                        name_match.as_str().to_string(),
+                        SymbolKind::Struct,
+                        file.to_path_buf(),
+                        line_num,
+                    )
                     .with_visibility(vis)
                     .with_signature(line.trim().to_string());
-                index.add(symbol);
+                    index.add(symbol);
+                }
             }
             // Enums
-            else if let Some(caps) = enum_regex.captures(line) {
+            else if let Some(caps) = ENUM_REGEX.captures(line) {
                 let vis = Visibility::parse(caps.get(1).map(|m| m.as_str()).unwrap_or(""));
-                let name = caps.get(3).unwrap().as_str().to_string();
-                let symbol = Symbol::new(name, SymbolKind::Enum, file.to_path_buf(), line_num)
+                if let Some(name_match) = caps.get(3) {
+                    let symbol = Symbol::new(
+                        name_match.as_str().to_string(),
+                        SymbolKind::Enum,
+                        file.to_path_buf(),
+                        line_num,
+                    )
                     .with_visibility(vis)
                     .with_signature(line.trim().to_string());
-                index.add(symbol);
+                    index.add(symbol);
+                }
             }
             // Traits
-            else if let Some(caps) = trait_regex.captures(line) {
+            else if let Some(caps) = TRAIT_REGEX.captures(line) {
                 let vis = Visibility::parse(caps.get(1).map(|m| m.as_str()).unwrap_or(""));
-                let name = caps.get(3).unwrap().as_str().to_string();
-                let symbol = Symbol::new(name, SymbolKind::Trait, file.to_path_buf(), line_num)
+                if let Some(name_match) = caps.get(3) {
+                    let symbol = Symbol::new(
+                        name_match.as_str().to_string(),
+                        SymbolKind::Trait,
+                        file.to_path_buf(),
+                        line_num,
+                    )
                     .with_visibility(vis)
                     .with_signature(line.trim().to_string());
-                index.add(symbol);
+                    index.add(symbol);
+                }
             }
             // Impls
-            else if let Some(caps) = impl_regex.captures(line) {
-                let name = caps.get(2).unwrap().as_str().to_string();
-                let symbol = Symbol::new(name, SymbolKind::Impl, file.to_path_buf(), line_num)
+            else if let Some(caps) = IMPL_REGEX.captures(line) {
+                if let Some(name_match) = caps.get(2) {
+                    let symbol = Symbol::new(
+                        name_match.as_str().to_string(),
+                        SymbolKind::Impl,
+                        file.to_path_buf(),
+                        line_num,
+                    )
                     .with_signature(line.trim().to_string());
-                index.add(symbol);
+                    index.add(symbol);
+                }
             }
             // Constants
-            else if let Some(caps) = const_regex.captures(line) {
+            else if let Some(caps) = CONST_REGEX.captures(line) {
                 let vis = Visibility::parse(caps.get(1).map(|m| m.as_str()).unwrap_or(""));
-                let name = caps.get(3).unwrap().as_str().to_string();
-                let symbol = Symbol::new(name, SymbolKind::Const, file.to_path_buf(), line_num)
+                if let Some(name_match) = caps.get(3) {
+                    let symbol = Symbol::new(
+                        name_match.as_str().to_string(),
+                        SymbolKind::Const,
+                        file.to_path_buf(),
+                        line_num,
+                    )
                     .with_visibility(vis)
                     .with_signature(line.trim().to_string());
-                index.add(symbol);
+                    index.add(symbol);
+                }
             }
             // Type aliases
-            else if let Some(caps) = type_regex.captures(line) {
+            else if let Some(caps) = TYPE_REGEX.captures(line) {
                 let vis = Visibility::parse(caps.get(1).map(|m| m.as_str()).unwrap_or(""));
-                let name = caps.get(3).unwrap().as_str().to_string();
-                let symbol = Symbol::new(name, SymbolKind::Type, file.to_path_buf(), line_num)
+                if let Some(name_match) = caps.get(3) {
+                    let symbol = Symbol::new(
+                        name_match.as_str().to_string(),
+                        SymbolKind::Type,
+                        file.to_path_buf(),
+                        line_num,
+                    )
                     .with_visibility(vis)
                     .with_signature(line.trim().to_string());
-                index.add(symbol);
+                    index.add(symbol);
+                }
             }
             // Macros
-            else if let Some(caps) = macro_regex.captures(line) {
+            else if let Some(caps) = MACRO_REGEX.captures(line) {
                 let vis = Visibility::parse(caps.get(1).map(|m| m.as_str()).unwrap_or(""));
-                let name = caps.get(3).unwrap().as_str().to_string();
-                let symbol = Symbol::new(name, SymbolKind::Macro, file.to_path_buf(), line_num)
+                if let Some(name_match) = caps.get(3) {
+                    let symbol = Symbol::new(
+                        name_match.as_str().to_string(),
+                        SymbolKind::Macro,
+                        file.to_path_buf(),
+                        line_num,
+                    )
                     .with_visibility(vis)
                     .with_signature(line.trim().to_string());
-                index.add(symbol);
+                    index.add(symbol);
+                }
             }
             // Modules
-            else if let Some(caps) = mod_regex.captures(line) {
+            else if let Some(caps) = MOD_REGEX.captures(line) {
                 let vis = Visibility::parse(caps.get(1).map(|m| m.as_str()).unwrap_or(""));
-                let name = caps.get(3).unwrap().as_str().to_string();
-                // Skip module declarations that just reference other files
-                if !line.contains(';') || line.contains('{') {
-                    let symbol =
-                        Symbol::new(name, SymbolKind::Module, file.to_path_buf(), line_num)
-                            .with_visibility(vis)
-                            .with_signature(line.trim().to_string());
-                    index.add(symbol);
+                if let Some(name_match) = caps.get(3) {
+                    // Skip module declarations that just reference other files
+                    if !line.contains(';') || line.contains('{') {
+                        let symbol = Symbol::new(
+                            name_match.as_str().to_string(),
+                            SymbolKind::Module,
+                            file.to_path_buf(),
+                            line_num,
+                        )
+                        .with_visibility(vis)
+                        .with_signature(line.trim().to_string());
+                        index.add(symbol);
+                    }
                 }
             }
         }

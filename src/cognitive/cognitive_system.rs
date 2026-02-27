@@ -33,9 +33,9 @@ pub struct CognitiveSystem {
     /// Self-reference system
     pub self_ref: Arc<RwLock<SelfReferenceSystem>>,
     /// API client for LLM operations
-    api_client: Arc<ApiClient>,
+    _api_client: Arc<ApiClient>,
     /// Configuration
-    config: Config,
+    _config: Config,
 }
 
 /// Complete context for LLM prompt
@@ -89,6 +89,8 @@ pub struct CognitiveSystemStats {
 
 impl CognitiveSystem {
     /// Create new cognitive system
+    // TODO: Migrate from parking_lot::RwLock to tokio::sync::RwLock
+    #[allow(clippy::await_holding_lock)]
     pub async fn new(
         config: &Config,
         api_client: Arc<ApiClient>,
@@ -133,12 +135,13 @@ impl CognitiveSystem {
             memory,
             budget,
             self_ref,
-            api_client,
-            config: config.clone(),
+            _api_client: api_client,
+            _config: config.clone(),
         })
     }
 
     /// Build complete context for LLM
+    #[allow(clippy::await_holding_lock)]
     pub async fn build_context(
         &self,
         query: &str,
@@ -258,6 +261,7 @@ impl CognitiveSystem {
     }
 
     /// Record an episode
+    #[allow(clippy::await_holding_lock)]
     pub async fn record_episode(&self, episode: Episode) -> Result<()> {
         let mut memory = self.memory.write();
         memory.record_episode(episode).await?;
@@ -319,6 +323,7 @@ impl CognitiveSystem {
     }
 
     /// Get self-improvement context
+    #[allow(clippy::await_holding_lock)]
     pub async fn get_self_improvement_context(&self, goal: &str) -> Result<SelfImprovementContext> {
         let self_ref = self.self_ref.read();
 
@@ -333,6 +338,7 @@ impl CognitiveSystem {
     }
 
     /// Read own source code
+    #[allow(clippy::await_holding_lock)]
     pub async fn read_own_code(&self, module_path: &str) -> Result<String> {
         let self_ref = self.self_ref.read();
         let options = SourceRetrievalOptions::default();
@@ -388,6 +394,7 @@ impl CognitiveSystem {
     }
 
     /// Compress memory if over budget
+    #[allow(clippy::await_holding_lock)]
     pub async fn compress_if_needed(&self) -> Result<bool> {
         let mut memory = self.memory.write();
         memory.compress_if_needed().await
@@ -535,7 +542,7 @@ fn generate_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_millis();
     format!("ep-{}", timestamp)
 }
@@ -544,7 +551,7 @@ fn generate_id() -> String {
 fn current_timestamp_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs()
 }
 

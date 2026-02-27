@@ -13,7 +13,7 @@ use tracing::{debug, warn};
 static TOKENIZER: Lazy<Mutex<TokenizerState>> = Lazy::new(|| Mutex::new(TokenizerState::new()));
 
 enum TokenizerState {
-    Qwen(Tokenizer),
+    Qwen(Box<Tokenizer>),
     Tiktoken(CoreBPE),
     Heuristic,
 }
@@ -25,7 +25,7 @@ impl TokenizerState {
         match Tokenizer::from_pretrained("Qwen/Qwen2.5-Coder-32B", None) {
             Ok(tokenizer) => {
                 debug!("Successfully loaded Qwen tokenizer from HF Hub");
-                return TokenizerState::Qwen(tokenizer);
+                return TokenizerState::Qwen(Box::new(tokenizer));
             }
             Err(e) => {
                 warn!(

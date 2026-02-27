@@ -106,7 +106,7 @@ pub struct HierarchicalMemory {
     /// Memory statistics and metrics
     pub metrics: MemoryMetrics,
     /// Embedding backend
-    embedding: Arc<EmbeddingBackend>,
+    _embedding: Arc<EmbeddingBackend>,
 }
 
 /// Memory usage tracking
@@ -149,11 +149,12 @@ impl HierarchicalMemory {
             semantic,
             usage: MemoryUsage::default(),
             metrics: MemoryMetrics::default(),
-            embedding,
+            _embedding: embedding,
         })
     }
 
     /// Initialize with Selfware codebase indexing
+    #[allow(clippy::await_holding_lock)]
     pub async fn initialize_selfware_index(
         &mut self,
         selfware_path: &std::path::Path,
@@ -435,7 +436,7 @@ impl WorkingMemory {
                 let age_b = (now - b.1.timestamp).max(1) as f32;
                 let score_a = a.1.importance / age_a;
                 let score_b = b.1.importance / age_b;
-                score_a.partial_cmp(&score_b).unwrap()
+                score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
             })
         {
             if let Some(entry) = self.messages.remove(idx) {
@@ -489,6 +490,10 @@ impl WorkingMemory {
 
     pub fn len(&self) -> usize {
         self.messages.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
     }
 }
 
@@ -710,6 +715,13 @@ impl EpisodicMemory {
             + self.tiers.normal.len()
             + self.tiers.low.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.tiers.critical.is_empty()
+            && self.tiers.high.is_empty()
+            && self.tiers.normal.is_empty()
+            && self.tiers.low.is_empty()
+    }
 }
 
 // ============================================================================
@@ -718,11 +730,11 @@ impl EpisodicMemory {
 
 /// Semantic memory for codebase and knowledge
 pub struct SemanticMemory {
-    max_tokens: usize,
+    _max_tokens: usize,
     total_tokens: usize,
     files: HashMap<String, IndexedFile>,
-    vector_store: VectorStore,
-    embedding: Arc<EmbeddingBackend>,
+    _vector_store: VectorStore,
+    _embedding: Arc<EmbeddingBackend>,
 }
 
 pub struct IndexedFile {
@@ -766,11 +778,11 @@ impl SemanticMemory {
 
     pub fn new(max_tokens: usize, embedding: Arc<EmbeddingBackend>) -> Self {
         Self {
-            max_tokens,
+            _max_tokens: max_tokens,
             total_tokens: 0,
             files: HashMap::new(),
-            vector_store: VectorStore::new(embedding.clone()),
-            embedding,
+            _vector_store: VectorStore::new(embedding.clone()),
+            _embedding: embedding,
         }
     }
 
@@ -889,7 +901,7 @@ impl SemanticMemory {
             .filter(|(_, score, _)| *score > 0.0)
             .collect();
 
-        scored_files.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        scored_files.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut context = CodeContext {
             files: Vec::new(),
@@ -947,7 +959,7 @@ impl SemanticMemory {
 fn current_timestamp_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs()
 }
 

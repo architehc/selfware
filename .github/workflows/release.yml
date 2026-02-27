@@ -98,7 +98,7 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/selfware dist/
           cp README.md LICENSE dist/ 2>/dev/null || true
-          cp selfware.toml dist/selfware.toml.example 2>/dev/null || true
+          cp selfware.example.toml dist/selfware.toml.example 2>/dev/null || true
           cd dist
           tar -czvf ../${{ matrix.name }}.tar.gz *
 
@@ -110,7 +110,7 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/selfware.exe" -Destination "dist/"
           Copy-Item "README.md" -Destination "dist/" -ErrorAction SilentlyContinue
           Copy-Item "LICENSE" -Destination "dist/" -ErrorAction SilentlyContinue
-          Copy-Item "selfware.toml" -Destination "dist/selfware.toml.example" -ErrorAction SilentlyContinue
+          Copy-Item "selfware.example.toml" -Destination "dist/selfware.toml.example" -ErrorAction SilentlyContinue
           Compress-Archive -Path "dist/*" -DestinationPath "${{ matrix.name }}.zip"
 
       - name: Upload artifact

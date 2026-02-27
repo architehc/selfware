@@ -1,19 +1,36 @@
+use super::file::validate_tool_path;
 use super::Tool;
 use crate::api::ApiClient;
+use crate::config::SafetyConfig;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::fs;
 
-/// A tool that uses Fill-in-the-Middle (FIM) to intelligently edit code
+/// A tool that uses Fill-in-the-Middle (FIM) to intelligently edit code.
+/// Supports optional per-instance safety configuration for multi-agent
+/// scenarios via [`FileFimEdit::with_safety_config`].
 pub struct FileFimEdit {
     client: Arc<ApiClient>,
+    /// Per-instance safety config. When `Some`, overrides the global `SAFETY_CONFIG`.
+    /// When `None`, falls back to the global or default config (backward compatible).
+    pub safety_config: Option<SafetyConfig>,
 }
 
 impl FileFimEdit {
     pub fn new(client: Arc<ApiClient>) -> Self {
-        Self { client }
+        Self {
+            client,
+            safety_config: None,
+        }
+    }
+
+    pub fn with_safety_config(client: Arc<ApiClient>, config: SafetyConfig) -> Self {
+        Self {
+            client,
+            safety_config: Some(config),
+        }
     }
 }
 
@@ -53,6 +70,9 @@ impl Tool for FileFimEdit {
         let instruction = args["instruction"]
             .as_str()
             .ok_or_else(|| anyhow!("Missing instruction"))?;
+
+        // Validate path safety BEFORE any file I/O
+        validate_tool_path(path, self.safety_config.as_ref())?;
 
         let content = fs::read_to_string(path).await?;
         let lines: Vec<&str> = content.lines().collect();

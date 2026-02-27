@@ -6,7 +6,7 @@ use tracing::{error, info};
 /// Configuration for the compilation sandbox
 #[derive(Debug, Clone)]
 pub struct CompilationSandbox {
-    original_dir: PathBuf,
+    _original_dir: PathBuf,
     work_dir: PathBuf,
 }
 
@@ -46,7 +46,7 @@ impl CompilationSandbox {
         }
 
         Ok(Self {
-            original_dir,
+            _original_dir: original_dir,
             work_dir,
         })
     }

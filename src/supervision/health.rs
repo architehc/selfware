@@ -41,7 +41,7 @@ pub enum Severity {
 pub struct HealthMonitor {
     checks: Vec<Box<dyn HealthCheck + Send + Sync>>,
     interval: Duration,
-    failure_threshold: u32,
+    _failure_threshold: u32,
     results: Arc<RwLock<Vec<HealthCheckResult>>>,
 }
 
@@ -76,7 +76,7 @@ impl HealthMonitor {
         Self {
             checks: Vec::new(),
             interval,
-            failure_threshold,
+            _failure_threshold: failure_threshold,
             results: Arc::new(RwLock::new(Vec::new())),
         }
     }
@@ -213,6 +213,12 @@ impl HealthCheck for AgentHealthCheck {
 /// GPU health check
 pub struct GpuHealthCheck {
     nvml: Option<nvml_wrapper::Nvml>,
+}
+
+impl Default for GpuHealthCheck {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GpuHealthCheck {

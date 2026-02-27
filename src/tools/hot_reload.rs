@@ -17,7 +17,7 @@ pub struct DynamicTool {
     name: String,
     description: String,
     schema: Value,
-    lib_path: PathBuf,
+    _lib_path: PathBuf,
 }
 
 impl DynamicTool {
@@ -52,7 +52,7 @@ impl DynamicTool {
                 name,
                 description,
                 schema,
-                lib_path,
+                _lib_path: lib_path,
             })
         }
     }

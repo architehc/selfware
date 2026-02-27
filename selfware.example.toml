@@ -1,13 +1,14 @@
+# Selfware configuration
+# Copy this file to selfware.toml and adjust values for your setup.
+
 # Set this to your OpenAI-compatible API endpoint (e.g., local vLLM/sglang server, ngrok tunnel, etc.)
 endpoint = "http://localhost:8080/v1"
-model = "Qwen/Qwen3-Coder-Next-FP8"
+model = "your-model-name-here"
 max_tokens = 98304
 
-# Safety section is nested - that part was correct
 [safety]
 allowed_paths = ["./**", "~/**"]
 denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
-
 
 [agent]
 max_iterations = 500

@@ -27,7 +27,7 @@ pub struct SelfReferenceSystem {
     /// Maximum modifications to track
     max_modifications: usize,
     /// Selfware source path
-    selfware_path: PathBuf,
+    _selfware_path: PathBuf,
 }
 
 /// The agent's model of itself
@@ -251,7 +251,7 @@ impl SelfReferenceSystem {
             code_cache: HashMap::new(),
             recent_modifications: VecDeque::new(),
             max_modifications: 100,
-            selfware_path,
+            _selfware_path: selfware_path,
         }
     }
 

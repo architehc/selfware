@@ -10,42 +10,120 @@ use tracing::{debug, error, info, warn};
 /// The outer loop for Recursive Self-Improvement
 pub struct RSIOrchestrator {
     edit_orchestrator: SelfEditOrchestrator,
-    metrics: MetricsStore,
+    _metrics: MetricsStore,
     project_root: PathBuf,
     is_running: bool,
+    /// Hard upper bound on the number of improvement iterations before the loop terminates.
+    max_iterations: usize,
+    /// Tracks how many improvement cycles have failed in a row without a single success.
+    consecutive_failures: usize,
+    /// Circuit-breaker threshold: if this many consecutive failures occur, the loop aborts.
+    max_consecutive_failures: usize,
 }
 
 impl RSIOrchestrator {
     pub fn new(project_root: PathBuf) -> Self {
         Self {
             edit_orchestrator: SelfEditOrchestrator::new(project_root.clone()),
-            metrics: MetricsStore::new(),
+            _metrics: MetricsStore::new(),
             project_root,
             is_running: false,
+            max_iterations: 100,
+            consecutive_failures: 0,
+            max_consecutive_failures: 5,
         }
     }
 
-    /// Run the RSI outer loop indefinitely
+    /// Run the RSI outer loop with safety guardrails.
+    ///
+    /// The loop will terminate if any of the following conditions are met:
+    /// - `max_iterations` cycles have been executed.
+    /// - `max_consecutive_failures` failures occur in a row (circuit breaker).
+    /// - `stop()` is called externally.
     pub async fn run_loop(&mut self) -> Result<()> {
         self.is_running = true;
-        info!("Starting outer RSI loop...");
+        self.consecutive_failures = 0;
+        let mut iteration: usize = 0;
 
-        while self.is_running {
+        info!(
+            "Starting outer RSI loop (max_iterations={}, max_consecutive_failures={})...",
+            self.max_iterations, self.max_consecutive_failures
+        );
+
+        while self.is_running && iteration < self.max_iterations {
+            iteration += 1;
+            info!("RSI iteration {}/{}", iteration, self.max_iterations);
+
+            // Warn when approaching the iteration limit
+            let remaining = self.max_iterations - iteration;
+            if remaining <= 10 && remaining > 0 {
+                warn!(
+                    "Approaching iteration limit: {} iterations remaining",
+                    remaining
+                );
+            }
+
             match self.execute_improvement_cycle().await {
                 Ok(true) => {
                     info!("Improvement cycle successful and merged.");
+                    self.consecutive_failures = 0;
                 }
                 Ok(false) => {
                     info!("Improvement cycle did not yield a better fitness score. Changes discarded.");
+                    // A cycle that completes without error but produces no improvement is not
+                    // counted as a failure for circuit-breaker purposes.
+                    self.consecutive_failures = 0;
                 }
                 Err(e) => {
-                    error!("Improvement cycle failed: {}", e);
-                    // Implement exponential backoff here if needed
+                    self.consecutive_failures += 1;
+                    error!(
+                        "Improvement cycle failed ({} consecutive failure(s)): {}",
+                        self.consecutive_failures, e
+                    );
+
+                    // Warn when approaching the circuit-breaker threshold
+                    if self.consecutive_failures >= self.max_consecutive_failures {
+                        error!(
+                            "Circuit breaker tripped: {} consecutive failures reached the limit of {}. \
+                             Aborting RSI loop to prevent runaway damage.",
+                            self.consecutive_failures, self.max_consecutive_failures
+                        );
+                        return Err(SelfwareError::Internal(format!(
+                            "RSI loop aborted: {} consecutive failures (limit: {})",
+                            self.consecutive_failures, self.max_consecutive_failures
+                        )));
+                    }
+
+                    if self.consecutive_failures >= self.max_consecutive_failures - 1 {
+                        warn!(
+                            "Next failure will trip the circuit breaker ({}/{} consecutive failures)",
+                            self.consecutive_failures, self.max_consecutive_failures
+                        );
+                    }
+
+                    // Exponential backoff: 60s * 2^(failures-1), capped at 3600s
+                    let backoff_secs = std::cmp::min(
+                        60u64.saturating_mul(1u64 << (self.consecutive_failures - 1)),
+                        3600,
+                    );
+                    warn!(
+                        "Backing off for {} seconds before next attempt",
+                        backoff_secs
+                    );
+                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                    continue;
                 }
             }
 
-            // Sleep before next cycle to prevent thrashing
+            // Normal inter-cycle sleep (only on non-error paths; errors use backoff above)
             tokio::time::sleep(Duration::from_secs(60)).await;
+        }
+
+        if iteration >= self.max_iterations {
+            warn!(
+                "RSI loop terminated: reached maximum iteration limit of {}",
+                self.max_iterations
+            );
         }
 
         Ok(())

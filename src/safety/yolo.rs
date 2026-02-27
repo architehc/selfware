@@ -7,6 +7,8 @@
 // Feature-gated module
 
 use chrono::{DateTime, Utc};
+use once_cell::sync::Lazy;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -122,11 +124,17 @@ impl YoloConfig {
     }
 
     /// Check if an operation is forbidden
+    ///
+    /// Uses regex word-boundary matching with whitespace normalization to prevent
+    /// bypass via extra whitespace, backslash escapes, or other trivial variations.
     pub fn is_forbidden(&self, operation: &str) -> bool {
-        let op_lower = operation.to_lowercase();
-        self.forbidden_operations
-            .iter()
-            .any(|f| op_lower.contains(&f.to_lowercase()))
+        let normalized = normalize_input(operation);
+        self.forbidden_operations.iter().any(|f| {
+            let pattern = build_boundary_pattern(f);
+            Regex::new(&pattern)
+                .map(|re| re.is_match(&normalized))
+                .unwrap_or(false)
+        })
     }
 
     /// Check if a path is protected
@@ -137,6 +145,50 @@ impl YoloConfig {
             expanded.starts_with(&protected) || expanded == protected
         })
     }
+}
+
+/// Normalize input for security matching.
+///
+/// Collapses multiple whitespace characters into a single space and trims
+/// leading/trailing whitespace. This prevents bypass via extra spacing.
+fn normalize_input(input: &str) -> String {
+    static WS_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").unwrap());
+    WS_RE.replace_all(input.trim(), " ").to_lowercase()
+}
+
+/// Build a regex pattern with word boundaries from a literal forbidden string.
+///
+/// - Splits the pattern on whitespace and escapes each token for regex
+/// - Joins tokens with `\s+` for flexible whitespace matching
+/// - Adds `\b` word boundaries at start/end when the boundary character is
+///   a word character (alphanumeric or underscore), preventing partial-word matches
+fn build_boundary_pattern(pattern: &str) -> String {
+    let trimmed = pattern.trim().to_lowercase();
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+    if tokens.is_empty() {
+        return String::new();
+    }
+
+    // Escape each token individually, then join with flexible whitespace
+    let escaped_tokens: Vec<String> = tokens.iter().map(|t| regex::escape(t)).collect();
+    let flexible = escaped_tokens.join(r"\s+");
+
+    // Add word boundaries where appropriate based on the original (unescaped) tokens
+    let first_char = tokens.first().and_then(|t| t.chars().next());
+    let last_char = tokens.last().and_then(|t| t.chars().last());
+
+    let prefix = if first_char.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+        r"\b"
+    } else {
+        ""
+    };
+    let suffix = if last_char.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+        r"\b"
+    } else {
+        ""
+    };
+
+    format!("(?i){}{}{}", prefix, flexible, suffix)
 }
 
 /// Expand ~ to home directory
@@ -464,8 +516,11 @@ fn extract_path(args: &serde_json::Value) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// Check if a shell command is destructive
-fn is_destructive_command(cmd: &str) -> bool {
+/// Pre-compiled regexes for destructive command detection.
+///
+/// Each pattern uses word-boundary matching and flexible whitespace to prevent
+/// bypass via extra spacing, backslash insertion, or other trivial variations.
+static DESTRUCTIVE_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
     let patterns = [
         "rm -rf",
         "rm -r",
@@ -481,10 +536,19 @@ fn is_destructive_command(cmd: &str) -> bool {
         "> /dev/",
         "dd if=",
     ];
-    let cmd_lower = cmd.to_lowercase();
     patterns
         .iter()
-        .any(|p| cmd_lower.contains(&p.to_lowercase()))
+        .filter_map(|p| {
+            let re_pattern = build_boundary_pattern(p);
+            Regex::new(&re_pattern).ok()
+        })
+        .collect()
+});
+
+/// Check if a shell command is destructive
+fn is_destructive_command(cmd: &str) -> bool {
+    let normalized = normalize_input(cmd);
+    DESTRUCTIVE_PATTERNS.iter().any(|re| re.is_match(&normalized))
 }
 
 /// Summarize arguments for audit log (truncate long values)
