@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::metrics::PerformanceSnapshot;
+use crate::cognitive::compilation_manager::CompilationSandbox;
 
 /// Source of an improvement target
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -227,6 +228,11 @@ impl SelfEditOrchestrator {
         });
 
         targets
+    }
+
+    /// Creates a compilation sandbox for the agent to safely apply changes
+    pub fn create_sandbox(&self) -> Result<CompilationSandbox> {
+        CompilationSandbox::new(&self.project_root)
     }
 
     /// Select the best target to work on

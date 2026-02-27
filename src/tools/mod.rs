@@ -9,6 +9,7 @@ pub mod cargo;
 pub mod container;
 pub mod file;
 pub mod git;
+pub mod hot_reload;
 pub mod http;
 pub mod knowledge;
 pub mod package;
