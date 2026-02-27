@@ -303,6 +303,14 @@ pub fn init_test_tracing() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn sampling_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("sampling test lock poisoned")
+    }
 
     #[test]
     fn test_record_state_transition_does_not_panic() {
@@ -749,6 +757,7 @@ mod tests {
 
     #[test]
     fn test_set_and_get_sampling_rate() {
+        let _guard = sampling_test_guard();
         // Save original and restore after test
         let original = sampling_rate();
         set_sampling_rate(0.5);
@@ -773,6 +782,7 @@ mod tests {
 
     #[test]
     fn test_should_sample_full_rate() {
+        let _guard = sampling_test_guard();
         let original = sampling_rate();
         set_sampling_rate(1.0);
         // At full rate, should always sample
@@ -784,6 +794,7 @@ mod tests {
 
     #[test]
     fn test_should_sample_zero_rate() {
+        let _guard = sampling_test_guard();
         let original = sampling_rate();
         set_sampling_rate(0.0);
         // At zero rate, should never sample

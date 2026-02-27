@@ -66,12 +66,14 @@ keyring = "3.2"
 # Workflows
 serde_yaml = "0.9"  # YAML workflow definitions
 zeroize = "1.8.2"
+parking_lot = "0.12.5"
+lru = "0.16.3"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30", features = ["signal"] }
 
 [features]
-default = []
+default = ["self-improvement"]
 integration = []  # Enable with: cargo test --features integration
 
 # Semantic feature flags (replacing monolithic "extras")
