@@ -22,7 +22,10 @@ pub enum BackoffStrategy {
 impl BackoffStrategy {
     pub fn duration(&self, attempt: u32) -> Duration {
         match self {
-            Self::Exponential { base_seconds, max_seconds } => {
+            Self::Exponential {
+                base_seconds,
+                max_seconds,
+            } => {
                 let secs = (*base_seconds).checked_shl(attempt).unwrap_or(*max_seconds);
                 Duration::from_secs(secs.min(*max_seconds))
             }
@@ -63,17 +66,25 @@ pub struct ChildSpec {
 /// Restart type for child
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestartType {
-    Permanent,  // Always restart
-    Transient,  // Restart only on abnormal exit
-    Temporary,  // Never restart
+    Permanent, // Always restart
+    Transient, // Restart only on abnormal exit
+    Temporary, // Never restart
 }
 
 /// Child event from supervised component
 #[derive(Debug, Clone)]
 pub enum ChildEvent {
-    Crashed { child_id: String, error: String },
-    Exited { child_id: String, reason: ExitReason },
-    Heartbeat { child_id: String },
+    Crashed {
+        child_id: String,
+        error: String,
+    },
+    Exited {
+        child_id: String,
+        reason: ExitReason,
+    },
+    Heartbeat {
+        child_id: String,
+    },
 }
 
 /// Exit reason
@@ -114,26 +125,26 @@ impl Supervisor {
             children: Vec::new(),
         }
     }
-    
+
     /// Start the supervisor
     pub async fn start(self) -> Result<SupervisorHandle, SelfwareError> {
         let (tx, mut rx) = mpsc::channel(100);
-        
-        let restart_counts: Arc<RwLock<HashMap<String, Vec<Instant>>>> = 
+
+        let restart_counts: Arc<RwLock<HashMap<String, Vec<Instant>>>> =
             Arc::new(RwLock::new(HashMap::new()));
-        
+
         tokio::spawn(async move {
             info!("Supervision tree started");
-            
+
             while let Some(event) = rx.recv().await {
                 match event {
                     ChildEvent::Crashed { child_id, error } => {
                         error!(child_id = %child_id, error = %error, "Child crashed");
-                        
+
                         if self.should_restart(&child_id, &restart_counts).await {
                             let backoff = self.calculate_backoff(&child_id, &restart_counts).await;
                             warn!(child_id = %child_id, backoff_ms = backoff.as_millis(), "Restarting child");
-                            
+
                             tokio::time::sleep(backoff).await;
                             self.restart_child(&child_id).await;
                         } else {
@@ -154,13 +165,13 @@ impl Supervisor {
                     }
                 }
             }
-            
+
             info!("Supervision tree stopped");
         });
-        
+
         Ok(SupervisorHandle { tx })
     }
-    
+
     /// Check if a child should be restarted
     async fn should_restart(
         &self,
@@ -168,17 +179,18 @@ impl Supervisor {
         restart_counts: &Arc<RwLock<HashMap<String, Vec<Instant>>>>,
     ) -> bool {
         let counts = restart_counts.read().await;
-        
+
         if let Some(times) = counts.get(child_id) {
-            let window_start = Instant::now() - Duration::from_secs(self.restart_policy.max_seconds as u64);
+            let window_start =
+                Instant::now() - Duration::from_secs(self.restart_policy.max_seconds as u64);
             let recent_restarts = times.iter().filter(|&&t| t > window_start).count();
-            
+
             recent_restarts < self.restart_policy.max_restarts as usize
         } else {
             true
         }
     }
-    
+
     /// Calculate backoff duration
     async fn calculate_backoff(
         &self,
@@ -186,25 +198,22 @@ impl Supervisor {
         restart_counts: &Arc<RwLock<HashMap<String, Vec<Instant>>>>,
     ) -> Duration {
         let counts = restart_counts.read().await;
-        
-        let attempt = counts
-            .get(child_id)
-            .map(|v| v.len() as u32)
-            .unwrap_or(0);
-        
+
+        let attempt = counts.get(child_id).map(|v| v.len() as u32).unwrap_or(0);
+
         self.restart_policy.backoff_strategy.duration(attempt)
     }
-    
+
     /// Restart a child
     async fn restart_child(&self, child_id: &str) {
         info!(child_id = %child_id, "Restarting child");
         // In a real implementation, this would restart the actual component
     }
-    
+
     /// Handle abnormal exit
     async fn handle_abnormal_exit(&self, child_id: &str, reason: ExitReason) {
         warn!(child_id = %child_id, reason = ?reason, "Handling abnormal exit");
-        
+
         match self.strategy {
             SupervisionStrategy::OneForAll => {
                 // Restart all children
@@ -232,7 +241,7 @@ impl Supervisor {
             }
         }
     }
-    
+
     /// Escalate failure to parent supervisor
     async fn escalate(&self, child_id: &str, error: &str) {
         error!(child_id = %child_id, error = %error, "Escalating failure");
@@ -247,13 +256,13 @@ impl SupervisorBuilder {
         self.strategy = strategy;
         self
     }
-    
+
     /// Set restart policy
     pub fn with_restart_policy(mut self, policy: RestartPolicy) -> Self {
         self.restart_policy = policy;
         self
     }
-    
+
     /// Add a child to supervise
     pub fn add_child(mut self, id: impl Into<String>, _component: Arc<dyn Send + Sync>) -> Self {
         self.children.push(ChildSpec {
@@ -263,7 +272,7 @@ impl SupervisorBuilder {
         });
         self
     }
-    
+
     /// Build the supervisor
     pub fn build(self) -> Supervisor {
         Supervisor {

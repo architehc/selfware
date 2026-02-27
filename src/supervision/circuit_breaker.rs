@@ -42,9 +42,9 @@ impl Default for CircuitBreakerConfig {
 /// Circuit state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CircuitState {
-    Closed,    // Normal operation
-    Open,      // Failing, rejecting requests
-    HalfOpen,  // Testing if service recovered
+    Closed,   // Normal operation
+    Open,     // Failing, rejecting requests
+    HalfOpen, // Testing if service recovered
 }
 
 /// Circuit breaker error
@@ -79,7 +79,7 @@ impl CircuitBreaker {
             last_state_change: RwLock::new(Instant::now()),
         }
     }
-    
+
     /// Get current circuit state
     pub fn current_state(&self) -> CircuitState {
         match self.state.load(Ordering::Relaxed) {
@@ -89,22 +89,19 @@ impl CircuitBreaker {
             _ => CircuitState::Closed,
         }
     }
-    
+
     /// Check if we should attempt reset
     pub async fn should_attempt_reset(&self) -> bool {
         if self.current_state() != CircuitState::Open {
             return false;
         }
-        
+
         let last_change = *self.last_state_change.read().await;
         last_change.elapsed() >= self.config.reset_timeout
     }
-    
+
     /// Execute operation with circuit breaker protection
-    pub async fn call<F, Fut, T, E>(
-        &self,
-        operation: F,
-    ) -> Result<T, CircuitBreakerError<E>>
+    pub async fn call<F, Fut, T, E>(&self, operation: F) -> Result<T, CircuitBreakerError<E>>
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<T, E>>,
@@ -120,8 +117,8 @@ impl CircuitBreaker {
                 }
             }
             CircuitState::HalfOpen => {
-                let requests = self.success_count.load(Ordering::Relaxed) + 
-                              self.failure_count.load(Ordering::Relaxed);
+                let requests = self.success_count.load(Ordering::Relaxed)
+                    + self.failure_count.load(Ordering::Relaxed);
                 if requests >= self.config.half_open_max_requests {
                     warn!("Half-open max requests reached");
                     return Err(CircuitBreakerError::CircuitOpen);
@@ -129,7 +126,7 @@ impl CircuitBreaker {
             }
             CircuitState::Closed => {}
         }
-        
+
         // Execute operation
         match operation().await {
             Ok(result) => {
@@ -142,12 +139,12 @@ impl CircuitBreaker {
             }
         }
     }
-    
+
     /// Handle successful operation
     async fn on_success(&self) {
         let success_count = self.success_count.fetch_add(1, Ordering::SeqCst) + 1;
         debug!(success_count = success_count, "Operation succeeded");
-        
+
         if self.current_state() == CircuitState::HalfOpen {
             if success_count >= self.config.success_threshold {
                 info!("Circuit breaker closing after successful recovery");
@@ -158,14 +155,14 @@ impl CircuitBreaker {
             self.failure_count.store(0, Ordering::SeqCst);
         }
     }
-    
+
     /// Handle failed operation
     async fn on_failure(&self) {
         let failure_count = self.failure_count.fetch_add(1, Ordering::SeqCst) + 1;
         *self.last_failure_time.write().await = Some(Instant::now());
-        
+
         warn!(failure_count = failure_count, "Operation failed");
-        
+
         if self.current_state() == CircuitState::HalfOpen {
             // Any failure in half-open goes back to open
             info!("Failure in half-open, reopening circuit");
@@ -175,7 +172,7 @@ impl CircuitBreaker {
             self.transition_to(CircuitState::Open).await;
         }
     }
-    
+
     /// Transition to a new state
     async fn transition_to(&self, new_state: CircuitState) {
         let state_num = match new_state {
@@ -183,14 +180,14 @@ impl CircuitBreaker {
             CircuitState::Open => 1,
             CircuitState::HalfOpen => 2,
         };
-        
+
         let old_state = self.state.swap(state_num, Ordering::SeqCst);
         *self.last_state_change.write().await = Instant::now();
-        
+
         // Reset counters on state change
         self.failure_count.store(0, Ordering::SeqCst);
         self.success_count.store(0, Ordering::SeqCst);
-        
+
         info!(
             old_state = ?match old_state {
                 0 => CircuitState::Closed,
@@ -202,7 +199,7 @@ impl CircuitBreaker {
             "Circuit breaker state changed"
         );
     }
-    
+
     /// Get metrics
     pub fn metrics(&self) -> CircuitBreakerMetrics {
         CircuitBreakerMetrics {

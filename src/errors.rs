@@ -167,7 +167,7 @@ pub enum ResourceError {
         used: u64,
         limit: u64,
     },
-    
+
     #[error("Resource unavailable: {0}")]
     Unavailable(String),
 }

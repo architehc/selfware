@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
         // Use YOLO mode for this example so verification tools can run
         // in non-interactive environments.
         execution_mode: ExecutionMode::Yolo,
-        
+
         resources: selfware::config::ResourcesConfig::default(),
 
         // YOLO mode settings (not used in AutoEdit mode)

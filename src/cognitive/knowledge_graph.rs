@@ -671,7 +671,6 @@ impl KnowledgeGraph {
     }
 
     /// Create a new knowledge graph
-    
 
     pub fn new() -> Self {
         Self {
@@ -918,7 +917,10 @@ impl KnowledgeGraph {
         let mut results = Vec::new();
 
         for rel in self.relations_from(entity_id) {
-            if relation_type.clone().is_none_or(|rt| rt == rel.relation_type) {
+            if relation_type
+                .clone()
+                .is_none_or(|rt| rt == rel.relation_type)
+            {
                 if let Some(entity) = self.entities.get(&rel.target_id) {
                     results.push((entity, rel));
                 }
@@ -937,7 +939,10 @@ impl KnowledgeGraph {
         let mut results = Vec::new();
 
         for rel in self.relations_to(entity_id) {
-            if relation_type.clone().is_none_or(|rt| rt == rel.relation_type) {
+            if relation_type
+                .clone()
+                .is_none_or(|rt| rt == rel.relation_type)
+            {
                 if let Some(entity) = self.entities.get(&rel.source_id) {
                     results.push((entity, rel));
                 }
@@ -1083,7 +1088,6 @@ impl Default for RustEntityExtractor {
 
 impl RustEntityExtractor {
     /// Create a new extractor
-    
 
     pub fn new() -> Self {
         Self {
@@ -1123,18 +1127,23 @@ impl RustEntityExtractor {
             }
 
             // Extract struct
-            if let Some(entity) = self.extract_struct(trimmed, file_path, line_num + 1, visibility.clone())
+            if let Some(entity) =
+                self.extract_struct(trimmed, file_path, line_num + 1, visibility.clone())
             {
                 entities.push(entity);
             }
 
             // Extract enum
-            if let Some(entity) = self.extract_enum(trimmed, file_path, line_num + 1, visibility.clone()) {
+            if let Some(entity) =
+                self.extract_enum(trimmed, file_path, line_num + 1, visibility.clone())
+            {
                 entities.push(entity);
             }
 
             // Extract trait
-            if let Some(entity) = self.extract_trait(trimmed, file_path, line_num + 1, visibility.clone()) {
+            if let Some(entity) =
+                self.extract_trait(trimmed, file_path, line_num + 1, visibility.clone())
+            {
                 entities.push(entity);
             }
 
@@ -1310,7 +1319,6 @@ impl Default for SmellDetector {
 
 impl SmellDetector {
     /// Create new detector with defaults
-    
 
     pub fn new() -> Self {
         Self {
@@ -1548,7 +1556,6 @@ impl Default for PatternRecognizer {
 
 impl PatternRecognizer {
     /// Create new recognizer with default patterns
-    
 
     pub fn new() -> Self {
         let signatures = vec![
@@ -1654,7 +1661,6 @@ impl Default for SemanticLinker {
 
 impl SemanticLinker {
     /// Create new linker
-    
 
     pub fn new() -> Self {
         let mut patterns = HashMap::new();

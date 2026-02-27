@@ -129,13 +129,36 @@ pub struct ErrorLog {
 }
 
 /// Git state at checkpoint time
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GitCheckpointInfo {
     pub branch: String,
     pub commit_hash: String,
     pub dirty: bool,
     pub staged_files: Vec<String>,
     pub modified_files: Vec<String>,
+}
+
+/// Represents the delta/diff between two checkpoints
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckpointDelta {
+    pub task_id: String,
+    pub base_version: u32,
+    pub target_version: u32,
+
+    // Updates
+    pub updated_at: DateTime<Utc>,
+    pub status: Option<TaskStatus>,
+    pub current_step: Option<usize>,
+    pub current_iteration: Option<usize>,
+
+    // Context additions (we only append messages in the context window)
+    pub new_messages: Vec<Message>,
+    pub new_memory_entries: Vec<MemoryEntry>,
+    pub new_tool_calls: Vec<ToolCallLog>,
+    pub new_errors: Vec<ErrorLog>,
+
+    pub updated_tokens: Option<usize>,
+    pub git_checkpoint: Option<GitCheckpointInfo>,
 }
 
 /// A complete checkpoint of task state
@@ -163,6 +186,127 @@ pub struct TaskCheckpoint {
 
     // Git state
     pub git_checkpoint: Option<GitCheckpointInfo>,
+}
+
+impl TaskCheckpoint {
+    fn touch(&mut self) {
+        self.version = self.version.saturating_add(1);
+        self.updated_at = Utc::now();
+    }
+
+    /// Computes a differential payload to reduce disk IO during saves
+    pub fn compute_delta(&self, base: &TaskCheckpoint) -> Option<CheckpointDelta> {
+        if self.task_id != base.task_id || self.version <= base.version {
+            return None;
+        }
+
+        let status = (self.status != base.status).then_some(self.status.clone());
+        let current_step = (self.current_step != base.current_step).then_some(self.current_step);
+        let current_iteration =
+            (self.current_iteration != base.current_iteration).then_some(self.current_iteration);
+        let updated_tokens =
+            (self.estimated_tokens != base.estimated_tokens).then_some(self.estimated_tokens);
+        if self.git_checkpoint != base.git_checkpoint && self.git_checkpoint.is_none() {
+            // Delta format cannot encode "explicitly clear git checkpoint".
+            // Force a full checkpoint write for this transition.
+            return None;
+        }
+        let git_checkpoint = (self.git_checkpoint != base.git_checkpoint)
+            .then(|| self.git_checkpoint.clone())
+            .flatten();
+
+        // Only capture appended elements. If vectors shrank or changed in place, prefer full save.
+        let new_messages = if self.messages.len() >= base.messages.len() {
+            self.messages[base.messages.len()..].to_vec()
+        } else {
+            return None;
+        };
+        let new_memory_entries = if self.memory_entries.len() >= base.memory_entries.len() {
+            self.memory_entries[base.memory_entries.len()..].to_vec()
+        } else {
+            return None;
+        };
+        let new_tool_calls = if self.tool_calls.len() >= base.tool_calls.len() {
+            self.tool_calls[base.tool_calls.len()..].to_vec()
+        } else {
+            return None;
+        };
+        let new_errors = if self.errors.len() >= base.errors.len() {
+            self.errors[base.errors.len()..].to_vec()
+        } else {
+            return None;
+        };
+
+        let has_changes = status.is_some()
+            || current_step.is_some()
+            || current_iteration.is_some()
+            || !new_messages.is_empty()
+            || !new_memory_entries.is_empty()
+            || !new_tool_calls.is_empty()
+            || !new_errors.is_empty()
+            || updated_tokens.is_some()
+            || git_checkpoint.is_some();
+
+        if !has_changes {
+            return None;
+        }
+
+        Some(CheckpointDelta {
+            task_id: self.task_id.clone(),
+            base_version: base.version,
+            target_version: self.version,
+            updated_at: self.updated_at,
+            status,
+            current_step,
+            current_iteration,
+            new_messages,
+            new_memory_entries,
+            new_tool_calls,
+            new_errors,
+            updated_tokens,
+            git_checkpoint,
+        })
+    }
+
+    /// Applies a delta to an existing checkpoint to hydrate the full state
+    pub fn apply_delta(&mut self, delta: &CheckpointDelta) -> Result<()> {
+        if self.task_id != delta.task_id {
+            return Err(anyhow::anyhow!("Delta task ID mismatch"));
+        }
+        if self.version != delta.base_version {
+            return Err(anyhow::anyhow!(
+                "Delta base version mismatch: expected {}, got {}",
+                self.version,
+                delta.base_version
+            ));
+        }
+
+        self.version = delta.target_version;
+        self.updated_at = delta.updated_at;
+
+        if let Some(ref status) = delta.status {
+            self.status = status.clone();
+        }
+        if let Some(step) = delta.current_step {
+            self.current_step = step;
+        }
+        if let Some(iter) = delta.current_iteration {
+            self.current_iteration = iter;
+        }
+        self.messages.extend(delta.new_messages.clone());
+        self.memory_entries.extend(delta.new_memory_entries.clone());
+        self.tool_calls.extend(delta.new_tool_calls.clone());
+        self.errors.extend(delta.new_errors.clone());
+
+        if let Some(tokens) = delta.updated_tokens {
+            self.estimated_tokens = tokens;
+        }
+        if let Some(ref git) = delta.git_checkpoint {
+            self.git_checkpoint = Some(git.clone());
+        }
+
+        Ok(())
+    }
 }
 
 /// Summary of a task for listing
@@ -217,7 +361,7 @@ impl TaskCheckpoint {
     /// Add a tool call log entry
     pub fn log_tool_call(&mut self, log: ToolCallLog) {
         self.tool_calls.push(log);
-        self.updated_at = Utc::now();
+        self.touch();
     }
 
     /// Add an error log entry
@@ -228,31 +372,37 @@ impl TaskCheckpoint {
             error,
             recovered,
         });
-        self.updated_at = Utc::now();
+        self.touch();
     }
 
     /// Update the step
     pub fn set_step(&mut self, step: usize) {
         self.current_step = step;
-        self.updated_at = Utc::now();
+        self.touch();
     }
 
     /// Update the loop iteration count
     pub fn set_iteration(&mut self, iteration: usize) {
         self.current_iteration = iteration;
-        self.updated_at = Utc::now();
+        self.touch();
     }
 
     /// Update the status
     pub fn set_status(&mut self, status: TaskStatus) {
         self.status = status;
-        self.updated_at = Utc::now();
+        self.touch();
     }
 
     /// Update messages
     pub fn set_messages(&mut self, messages: Vec<Message>) {
         self.messages = messages;
-        self.updated_at = Utc::now();
+        self.touch();
+    }
+
+    /// Update token estimate and bump checkpoint version.
+    pub fn set_estimated_tokens(&mut self, estimated_tokens: usize) {
+        self.estimated_tokens = estimated_tokens;
+        self.touch();
     }
 }
 
@@ -260,6 +410,11 @@ impl TaskCheckpoint {
 pub struct CheckpointManager {
     checkpoints_dir: PathBuf,
 }
+
+/// Maximum number of incremental deltas before forcing a compacted full write.
+const MAX_DELTA_ENTRIES_BEFORE_COMPACT: usize = 24;
+/// Maximum delta log size before forcing compaction.
+const MAX_DELTA_FILE_BYTES: u64 = 512 * 1024;
 
 impl CheckpointManager {
     /// Create a new checkpoint manager
@@ -288,6 +443,12 @@ impl CheckpointManager {
         self.checkpoints_dir.join(format!("{}.json", task_id))
     }
 
+    /// Get the path for a checkpoint delta log
+    fn checkpoint_delta_path(&self, task_id: &str) -> PathBuf {
+        self.checkpoints_dir
+            .join(format!("{}.delta.jsonl", task_id))
+    }
+
     /// Save a checkpoint to disk (with secrets redacted and integrity hash).
     ///
     /// Security: The checkpoint data is run through `redact::redact_json()`
@@ -296,10 +457,107 @@ impl CheckpointManager {
     /// `TaskCheckpoint` struct intentionally does not include config-level
     /// secrets such as `api_key` -- those live only in `Config`.
     ///
-    /// Integrity: A SHA-256 checksum is computed over the JSON payload and
+    /// Integrity: An HMAC-SHA-256 digest is computed over the JSON payload and
     /// stored in a wrapper envelope so that `load()` can verify the file has
     /// not been corrupted or tampered with.
     pub fn save(&self, checkpoint: &TaskCheckpoint) -> Result<()> {
+        let full_path = self.checkpoint_path(&checkpoint.task_id);
+
+        // Prefer a compact delta write when possible to reduce SSD wear.
+        if full_path.exists() {
+            if let Ok(base) = self.try_load_from_path(&full_path) {
+                if let Some(delta) = checkpoint.compute_delta(&base) {
+                    if self.delta_is_efficient(checkpoint, &delta)?
+                        && self.append_delta(&checkpoint.task_id, &delta).is_ok()
+                    {
+                        if self.should_compact_deltas(&checkpoint.task_id)? {
+                            self.save_full_checkpoint(checkpoint)?;
+                            self.clear_delta_log(&checkpoint.task_id)?;
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        // Fallback to full checkpoint write when no efficient delta exists.
+        self.save_full_checkpoint(checkpoint)?;
+        self.clear_delta_log(&checkpoint.task_id)?;
+        Ok(())
+    }
+
+    fn delta_is_efficient(
+        &self,
+        checkpoint: &TaskCheckpoint,
+        delta: &CheckpointDelta,
+    ) -> Result<bool> {
+        let full_size = serde_json::to_vec(checkpoint)
+            .context("Failed to estimate full checkpoint size")?
+            .len();
+        let delta_size = serde_json::to_vec(delta)
+            .context("Failed to estimate checkpoint delta size")?
+            .len();
+
+        // Require a meaningful reduction, not just a few bytes.
+        Ok(delta_size + 128 < full_size)
+    }
+
+    fn append_delta(&self, task_id: &str, delta: &CheckpointDelta) -> Result<()> {
+        let path = self.checkpoint_delta_path(task_id);
+        let mut json_value =
+            serde_json::to_value(delta).context("Failed to serialize checkpoint delta")?;
+        redact::redact_json(&mut json_value);
+        let envelope = CheckpointEnvelope::wrap(json_value)
+            .context("Failed to create checkpoint delta envelope")?;
+        let line = serde_json::to_string(&envelope)
+            .context("Failed to serialize checkpoint delta envelope")?;
+
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("Failed to open checkpoint delta log {:?}", path))?;
+        file.write_all(line.as_bytes())
+            .with_context(|| format!("Failed to write checkpoint delta log {:?}", path))?;
+        file.write_all(b"\n")
+            .with_context(|| format!("Failed to write checkpoint delta newline {:?}", path))?;
+        file.sync_all()
+            .with_context(|| format!("Failed to fsync checkpoint delta log {:?}", path))?;
+        Ok(())
+    }
+
+    fn should_compact_deltas(&self, task_id: &str) -> Result<bool> {
+        let path = self.checkpoint_delta_path(task_id);
+        if !path.exists() {
+            return Ok(false);
+        }
+
+        let metadata = fs::metadata(&path)
+            .with_context(|| format!("Failed to stat checkpoint delta log {:?}", path))?;
+        if metadata.len() > MAX_DELTA_FILE_BYTES {
+            return Ok(true);
+        }
+
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read checkpoint delta log {:?}", path))?;
+        let line_count = content
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count();
+        Ok(line_count >= MAX_DELTA_ENTRIES_BEFORE_COMPACT)
+    }
+
+    fn clear_delta_log(&self, task_id: &str) -> Result<()> {
+        let delta_path = self.checkpoint_delta_path(task_id);
+        if delta_path.exists() {
+            fs::remove_file(&delta_path).with_context(|| {
+                format!("Failed to delete checkpoint delta log {:?}", delta_path)
+            })?;
+        }
+        Ok(())
+    }
+
+    fn save_full_checkpoint(&self, checkpoint: &TaskCheckpoint) -> Result<()> {
         let path = self.checkpoint_path(&checkpoint.task_id);
 
         // Serialize to JSON value first so we can redact secrets
@@ -309,7 +567,7 @@ impl CheckpointManager {
         // Redact any secrets in the checkpoint data
         redact::redact_json(&mut json_value);
 
-        // Wrap in an integrity envelope with SHA-256 checksum
+        // Wrap in an integrity envelope
         let envelope =
             CheckpointEnvelope::wrap(json_value).context("Failed to create checkpoint envelope")?;
 
@@ -317,7 +575,6 @@ impl CheckpointManager {
             serde_json::to_string_pretty(&envelope).context("Failed to format checkpoint JSON")?;
 
         // Atomic write: write to a temp file in the same directory, then rename.
-        // `rename` within the same filesystem is atomic on Unix/Windows.
         let suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -342,12 +599,10 @@ impl CheckpointManager {
                 .with_context(|| format!("Failed to fsync checkpoint temp file {:?}", tmp_path))?;
         }
         // Keep a backup of the previous checkpoint so it can be recovered
-        // if the new one turns out to be corrupt or the rename is interrupted.
         if path.exists() {
             let backup_path = path.with_extension("json.bak");
             if let Err(e) = fs::rename(&path, &backup_path) {
                 tracing::warn!("Failed to create checkpoint backup: {}", e);
-                // Continue anyway — losing the backup is better than failing the save
             }
         }
 
@@ -379,7 +634,7 @@ impl CheckpointManager {
 
     /// Load a checkpoint from disk, verifying integrity.
     ///
-    /// Supports both the new envelope format (with SHA-256 checksum) and the
+    /// Supports both the new envelope format (with HMAC integrity digest) and the
     /// legacy bare-checkpoint format for backward compatibility.
     ///
     /// If the primary file is corrupted (invalid JSON, truncated, failed
@@ -388,7 +643,10 @@ impl CheckpointManager {
     pub fn load(&self, task_id: &str) -> Result<TaskCheckpoint> {
         let path = self.checkpoint_path(task_id);
 
-        match self.try_load_from_path(&path) {
+        match self.try_load_from_path(&path).and_then(|mut checkpoint| {
+            self.apply_deltas(task_id, &mut checkpoint)?;
+            Ok(checkpoint)
+        }) {
             Ok(checkpoint) => Ok(checkpoint),
             Err(primary_err) => {
                 // The primary file is missing or corrupt -- attempt recovery.
@@ -405,6 +663,56 @@ impl CheckpointManager {
                 })
             }
         }
+    }
+
+    fn apply_deltas(&self, task_id: &str, checkpoint: &mut TaskCheckpoint) -> Result<()> {
+        let path = self.checkpoint_delta_path(task_id);
+        if !path.exists() {
+            return Ok(());
+        }
+
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read checkpoint delta log {:?}", path))?;
+        for (line_no, line) in content.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            let delta = if let Ok(envelope) = serde_json::from_str::<CheckpointEnvelope>(line) {
+                envelope.verify().with_context(|| {
+                    format!(
+                        "Checkpoint delta integrity check failed for {:?} line {}",
+                        path,
+                        line_no + 1
+                    )
+                })?;
+                serde_json::from_value::<CheckpointDelta>(envelope.payload).with_context(|| {
+                    format!(
+                        "Failed to deserialize checkpoint delta from {:?} line {}",
+                        path,
+                        line_no + 1
+                    )
+                })?
+            } else {
+                serde_json::from_str::<CheckpointDelta>(line).with_context(|| {
+                    format!(
+                        "Failed to deserialize legacy checkpoint delta from {:?} line {}",
+                        path,
+                        line_no + 1
+                    )
+                })?
+            };
+
+            checkpoint.apply_delta(&delta).with_context(|| {
+                format!(
+                    "Failed to apply checkpoint delta from {:?} line {}",
+                    path,
+                    line_no + 1
+                )
+            })?;
+        }
+
+        Ok(())
     }
 
     /// Attempt to load and verify a checkpoint from a specific path.
@@ -524,19 +832,18 @@ impl CheckpointManager {
             let path = entry.path();
 
             if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                if let Ok(json) = fs::read_to_string(&path) {
-                    // Try envelope format first, then legacy bare format
-                    let checkpoint_opt = serde_json::from_str::<CheckpointEnvelope>(&json)
-                        .ok()
-                        .and_then(|env| {
-                            env.verify().ok()?;
-                            serde_json::from_value::<TaskCheckpoint>(env.payload).ok()
-                        })
-                        .or_else(|| serde_json::from_str::<TaskCheckpoint>(&json).ok());
-
-                    if let Some(checkpoint) = checkpoint_opt {
-                        summaries.push(checkpoint.to_summary());
+                if let Ok(mut checkpoint) = self.try_load_from_path(&path) {
+                    if let Some(task_id) = path.file_stem().and_then(|s| s.to_str()) {
+                        if let Err(e) = self.apply_deltas(task_id, &mut checkpoint) {
+                            tracing::warn!(
+                                "Skipping checkpoint {:?} due to invalid deltas: {}",
+                                path,
+                                e
+                            );
+                            continue;
+                        }
                     }
+                    summaries.push(checkpoint.to_summary());
                 }
             }
         }
@@ -553,6 +860,18 @@ impl CheckpointManager {
         if path.exists() {
             fs::remove_file(&path)
                 .with_context(|| format!("Failed to delete checkpoint: {:?}", path))?;
+        }
+        let backup_path = path.with_extension("json.bak");
+        if backup_path.exists() {
+            fs::remove_file(&backup_path).with_context(|| {
+                format!("Failed to delete checkpoint backup: {:?}", backup_path)
+            })?;
+        }
+        let delta_path = self.checkpoint_delta_path(task_id);
+        if delta_path.exists() {
+            fs::remove_file(&delta_path).with_context(|| {
+                format!("Failed to delete checkpoint delta log: {:?}", delta_path)
+            })?;
         }
         Ok(())
     }
@@ -1004,6 +1323,67 @@ mod tests {
         let mut checkpoint = TaskCheckpoint::new("task_1".to_string(), "Test".to_string());
         checkpoint.estimated_tokens = 5000;
         assert_eq!(checkpoint.estimated_tokens, 5000);
+    }
+
+    #[test]
+    fn test_checkpoint_delta_round_trip() {
+        let mut base = TaskCheckpoint::new("task_delta".to_string(), "Delta test".to_string());
+        base.set_messages(vec![Message::user("hello")]);
+        base.set_step(1);
+
+        let mut next = base.clone();
+        next.set_iteration(2);
+        next.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "file_read".to_string(),
+            arguments: "{}".to_string(),
+            result: Some("ok".to_string()),
+            success: true,
+            duration_ms: Some(10),
+        });
+
+        let delta = next.compute_delta(&base).unwrap();
+        let mut hydrated = base.clone();
+        hydrated.apply_delta(&delta).unwrap();
+
+        assert_eq!(hydrated.current_iteration, next.current_iteration);
+        assert_eq!(hydrated.tool_calls.len(), next.tool_calls.len());
+        assert_eq!(hydrated.version, next.version);
+    }
+
+    #[test]
+    fn test_checkpoint_manager_replays_delta_log() {
+        let dir = tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        let mut checkpoint =
+            TaskCheckpoint::new("task_delta_mgr".to_string(), "Delta manager".to_string());
+        let mut large_messages = Vec::new();
+        for i in 0..30 {
+            large_messages.push(Message::user(format!("message-{} {}", i, "x".repeat(120))));
+        }
+        checkpoint.set_messages(large_messages);
+        manager.save(&checkpoint).unwrap();
+
+        checkpoint.set_step(2);
+        checkpoint.set_iteration(3);
+        checkpoint.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "shell_exec".to_string(),
+            arguments: "{\"command\":\"true\"}".to_string(),
+            result: Some("ok".to_string()),
+            success: true,
+            duration_ms: Some(1),
+        });
+        manager.save(&checkpoint).unwrap();
+
+        let delta_path = manager.checkpoint_delta_path("task_delta_mgr");
+        assert!(delta_path.exists(), "expected delta log to exist");
+
+        let loaded = manager.load("task_delta_mgr").unwrap();
+        assert_eq!(loaded.current_step, 2);
+        assert_eq!(loaded.current_iteration, 3);
+        assert_eq!(loaded.tool_calls.len(), 1);
     }
 
     #[test]

@@ -110,7 +110,9 @@ impl Agent {
     pub async fn new(config: Config) -> Result<Self> {
         let client = ApiClient::new(&config)?;
         let mut tools = ToolRegistry::new();
-        tools.register(crate::tools::fim::FileFimEdit::new(std::sync::Arc::new(client.clone())));
+        tools.register(crate::tools::fim::FileFimEdit::new(std::sync::Arc::new(
+            client.clone(),
+        )));
         let memory = AgentMemory::new(&config)?;
         let safety = SafetyChecker::new(&config.safety);
         // Publish the user-loaded safety config so file tools honour allowed_paths etc.
@@ -244,6 +246,15 @@ To call a tool, use this EXACT XML structure:
             system_prompt.push_str("\n\n## Global Lessons Learned\nDo not repeat past mistakes. Consider these lessons:\n");
             for lesson in recent_lessons {
                 system_prompt.push_str(&format!("- {}\n", lesson));
+            }
+        }
+        if let Some(tournament) = self_improvement.evolve_prompt(&system_prompt, "system_prompt") {
+            if tournament.winner_prompt != system_prompt {
+                info!(
+                    "Applied evolved system prompt variant '{}' (predicted quality {:.2})",
+                    tournament.winner_strategy, tournament.winner_score
+                );
+                system_prompt = tournament.winner_prompt;
             }
         }
 
@@ -486,9 +497,6 @@ To call a tool, use this EXACT XML structure:
             }
         }
 
-        
-        
-        
         // 3. LLM Functional Reflection (Every 5 steps)
         if step > 0 && step.is_multiple_of(5) {
             info!("Triggering functional reflection for step {}", step);
@@ -498,15 +506,15 @@ To call a tool, use this EXACT XML structure:
                 Be concise. Output your reflection as a single paragraph.",
                 step
             );
-            
+
             let mut messages = self.messages.clone();
             messages.push(crate::api::types::Message::user(reflection_prompt));
-            
-            if let Ok(response) = self.client.chat(
-                messages,
-                None,
-                crate::api::ThinkingMode::Disabled,
-            ).await {
+
+            if let Ok(response) = self
+                .client
+                .chat(messages, None, crate::api::ThinkingMode::Disabled)
+                .await
+            {
                 if let Some(choice) = response.choices.first() {
                     let text = choice.message.content.clone();
                     if !text.is_empty() {
@@ -518,7 +526,9 @@ To call a tool, use this EXACT XML structure:
                             timestamp: chrono::Utc::now(),
                         };
                         self.cognitive_state.episodic_memory.record_lesson(lesson);
-                        self.cognitive_state.working_memory.add_fact(&format!("Reflection (Step {}): {}", step, text));
+                        self.cognitive_state
+                            .working_memory
+                            .add_fact(&format!("Reflection (Step {}): {}", step, text));
                     }
                 }
             }
@@ -526,12 +536,12 @@ To call a tool, use this EXACT XML structure:
 
         // 4. Mark the plan step complete with notes
 
-
-
         let notes = format!("Step {} completed", step);
         self.cognitive_state
             .working_memory
             .complete_step(step, Some(notes));
+        self.cognitive_state
+            .complete_operational_step(step, Some(format!("Step {} completed", step)));
 
         self.cognitive_state.set_phase(CyclePhase::Do);
     }
@@ -1810,6 +1820,40 @@ To call a tool, use this EXACT XML structure:
             .map(|c| c.task_id.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         self.start_learning_session(&learning_session_id, &task_description);
+        if self.cognitive_state.active_tactical_plan.is_none() {
+            self.cognitive_state.set_active_tactical_plan(
+                format!("tactical-{}", learning_session_id),
+                format!("Resume task: {}", task_description),
+                vec![learning_session_id.clone()],
+            );
+        }
+        if self.cognitive_state.active_operational_plan.is_none() {
+            self.cognitive_state.set_operational_plan(
+                learning_session_id.clone(),
+                vec![
+                    "Resume planning".to_string(),
+                    "Resume execution".to_string(),
+                    "Re-verify completion".to_string(),
+                ],
+            );
+        }
+        self.cognitive_state.upsert_strategic_goal(
+            "strategic-agent-reliability",
+            "Improve long-term autonomous task reliability and production readiness",
+        );
+        self.cognitive_state.set_active_tactical_plan(
+            format!("tactical-{}", learning_session_id),
+            format!("Execute task: {}", task_description),
+            vec![learning_session_id.clone()],
+        );
+        self.cognitive_state.set_operational_plan(
+            learning_session_id.clone(),
+            vec![
+                "Plan approach".to_string(),
+                "Execute and verify".to_string(),
+                "Finalize result".to_string(),
+            ],
+        );
 
         let msg = Message::user(task);
         self.memory.add_message(&msg);
@@ -1936,6 +1980,8 @@ To call a tool, use this EXACT XML structure:
                                 self.cognitive_state
                                     .working_memory
                                     .fail_step(1, &e.to_string());
+                                self.cognitive_state
+                                    .fail_operational_step(1, &e.to_string());
                                 if let Some(ref mut checkpoint) = self.current_checkpoint {
                                     checkpoint.log_error(0, e.to_string(), true);
                                 }
@@ -1954,6 +2000,15 @@ To call a tool, use this EXACT XML structure:
                 AgentState::Executing { step } => {
                     let _span = enter_agent_step("Executing", step);
                     output::step_start(step + 1, "Executing");
+                    if let Some(task_id) =
+                        self.current_checkpoint.as_ref().map(|c| c.task_id.clone())
+                    {
+                        self.cognitive_state.start_operational_step(
+                            &task_id,
+                            step + 1,
+                            &format!("Execution step {}", step + 1),
+                        );
+                    }
                     // Update progress based on step
                     let step_progress = ((step + 1) as f64 * 0.1).min(0.9);
                     progress.update_progress(step_progress);
@@ -2011,6 +2066,8 @@ To call a tool, use this EXACT XML structure:
                             self.cognitive_state
                                 .working_memory
                                 .fail_step(step + 1, &e.to_string());
+                            self.cognitive_state
+                                .fail_operational_step(step + 1, &e.to_string());
                             self.cognitive_state
                                 .episodic_memory
                                 .what_failed("execution", &e.to_string());
@@ -2400,6 +2457,15 @@ To call a tool, use this EXACT XML structure:
                         "{} Executing...",
                         format!("📝 Step {}", step + 1).bright_blue()
                     );
+                    if let Some(task_id) =
+                        self.current_checkpoint.as_ref().map(|c| c.task_id.clone())
+                    {
+                        self.cognitive_state.start_operational_step(
+                            &task_id,
+                            step + 1,
+                            &format!("Execution step {}", step + 1),
+                        );
+                    }
                     match self.execute_step_with_logging(&task_description).await {
                         Ok(completed) => {
                             if self.is_cancelled() {
@@ -2447,6 +2513,8 @@ To call a tool, use this EXACT XML structure:
                             self.cognitive_state
                                 .working_memory
                                 .fail_step(step + 1, &e.to_string());
+                            self.cognitive_state
+                                .fail_operational_step(step + 1, &e.to_string());
 
                             if let Some(ref mut checkpoint) = self.current_checkpoint {
                                 checkpoint.log_error(step, e.to_string(), true);

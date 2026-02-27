@@ -23,12 +23,12 @@ pub mod self_improvement;
 pub mod state;
 
 // New modules for 1M context support
-pub mod memory_hierarchy;
-pub mod token_budget;
-pub mod self_reference;
 pub mod cognitive_system;
 pub mod compilation_manager;
+pub mod memory_hierarchy;
 pub mod rsi_orchestrator;
+pub mod self_reference;
+pub mod token_budget;
 
 // Re-exports for backward compatibility (cognitive.rs used to export these directly)
 pub use state::{
@@ -37,16 +37,9 @@ pub use state::{
 };
 
 // Re-export key types for new memory architecture
+pub use cognitive_system::{CognitiveSystem, ContextBuildOptions, LlmContext};
 pub use memory_hierarchy::{
-    HierarchicalMemory, TokenBudget, TOTAL_CONTEXT_TOKENS,
-    Episode, Importance, EpisodeType,
+    Episode, EpisodeType, HierarchicalMemory, Importance, TokenBudget, TOTAL_CONTEXT_TOKENS,
 };
-pub use token_budget::{
-    TokenBudgetAllocator, TaskType,
-};
-pub use self_reference::{
-    SelfReferenceSystem, SelfImprovementContext, SelfModel,
-};
-pub use cognitive_system::{
-    CognitiveSystem, LlmContext, ContextBuildOptions,
-};
+pub use self_reference::{SelfImprovementContext, SelfModel, SelfReferenceSystem};
+pub use token_budget::{TaskType, TokenBudgetAllocator};

@@ -275,9 +275,7 @@ impl Widget for &AgentAvatar {
             .set_symbol("┌")
             .set_style(border_style);
         for x in area.x + 1..area.x + area.width - 1 {
-            buf[(x, area.y)]
-                .set_symbol("─")
-                .set_style(border_style);
+            buf[(x, area.y)].set_symbol("─").set_style(border_style);
         }
         buf[(area.x + area.width - 1, area.y)]
             .set_symbol("┐")
@@ -285,9 +283,7 @@ impl Widget for &AgentAvatar {
 
         // Sides
         for y in area.y + 1..area.y + area.height - 1 {
-            buf[(area.x, y)]
-                .set_symbol("│")
-                .set_style(border_style);
+            buf[(area.x, y)].set_symbol("│").set_style(border_style);
             buf[(area.x + area.width - 1, y)]
                 .set_symbol("│")
                 .set_style(border_style);
@@ -364,13 +360,11 @@ impl Widget for &AgentAvatar {
             let status = self.activity.symbol();
             let status_x = inner_x + 11;
             if status_x < area.x + area.width - 1 {
-                buf[(status_x, activity_y)]
-                    .set_symbol(status)
-                    .set_style(
-                        Style::default()
-                            .fg(activity_color)
-                            .add_modifier(Modifier::BOLD),
-                    );
+                buf[(status_x, activity_y)].set_symbol(status).set_style(
+                    Style::default()
+                        .fg(activity_color)
+                        .add_modifier(Modifier::BOLD),
+                );
             }
         }
 

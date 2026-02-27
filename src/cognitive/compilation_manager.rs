@@ -22,17 +22,17 @@ impl CompilationSandbox {
     pub fn new(project_root: impl AsRef<Path>) -> Result<Self> {
         let original_dir = project_root.as_ref().to_path_buf();
         let work_dir = original_dir.join(".selfware-sandbox");
-        
+
         info!("Setting up compilation sandbox at {:?}", work_dir);
-        
+
         // Remove old sandbox if it exists
         if work_dir.exists() {
             std::fs::remove_dir_all(&work_dir)?;
         }
-        
+
         // Use git to clone the current state to ensure we get a clean working tree
         // without copying untracked files or build artifacts, but including staged/unstaged changes
-        
+
         // First clone the repo
         let status = Command::new("git")
             .arg("clone")
@@ -40,17 +40,17 @@ impl CompilationSandbox {
             .arg(&original_dir)
             .arg(&work_dir)
             .status()?;
-            
+
         if !status.success() {
             return Err(anyhow!("Failed to clone repository into sandbox"));
         }
-        
+
         Ok(Self {
             original_dir,
             work_dir,
         })
     }
-    
+
     pub fn work_dir(&self) -> &Path {
         &self.work_dir
     }
@@ -62,7 +62,7 @@ impl CompilationSandbox {
             .arg("check")
             .current_dir(&self.work_dir)
             .output()?;
-            
+
         self.parse_output(output)
     }
 
@@ -74,7 +74,7 @@ impl CompilationSandbox {
             .arg("--release")
             .current_dir(&self.work_dir)
             .output()?;
-            
+
         self.parse_output(output)
     }
 
@@ -85,7 +85,7 @@ impl CompilationSandbox {
             .arg("test")
             .current_dir(&self.work_dir)
             .output()?;
-            
+
         self.parse_output(output)
     }
 
@@ -93,21 +93,27 @@ impl CompilationSandbox {
     pub fn verify(&self) -> Result<bool> {
         let check_res = self.check()?;
         if !check_res.success {
-            error!("Sandbox check failed:
-{}", check_res.stderr);
+            error!(
+                "Sandbox check failed:
+{}",
+                check_res.stderr
+            );
             return Ok(false);
         }
-        
+
         let test_res = self.test()?;
         if !test_res.success {
-            error!("Sandbox test failed:
-{}", test_res.stderr);
+            error!(
+                "Sandbox test failed:
+{}",
+                test_res.stderr
+            );
             return Ok(false);
         }
-        
+
         Ok(true)
     }
-    
+
     /// Cleanup the sandbox
     pub fn cleanup(self) -> Result<()> {
         if self.work_dir.exists() {

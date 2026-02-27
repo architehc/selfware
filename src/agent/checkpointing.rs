@@ -92,7 +92,7 @@ impl Agent {
         checkpoint.set_step(self.loop_control.current_step());
         checkpoint.set_iteration(self.loop_control.current_iteration());
         checkpoint.set_messages(self.messages.clone());
-        checkpoint.estimated_tokens = self.memory.total_tokens();
+        checkpoint.set_estimated_tokens(self.memory.total_tokens());
 
         // Capture git state
         if let Ok(cwd) = std::env::current_dir() {
@@ -194,6 +194,23 @@ impl Agent {
 
         if let Some(ref mut checkpoint) = self.current_checkpoint {
             checkpoint.set_status(TaskStatus::Completed);
+        }
+        if let Some(plan) = self.cognitive_state.active_tactical_plan.as_mut() {
+            plan.status = crate::cognitive::StepStatus::Completed;
+        }
+        if let Some(plan) = self.cognitive_state.active_operational_plan.as_mut() {
+            for step in &mut plan.steps {
+                if matches!(
+                    step.status,
+                    crate::cognitive::StepStatus::Pending
+                        | crate::cognitive::StepStatus::InProgress
+                ) {
+                    step.status = crate::cognitive::StepStatus::Completed;
+                    if step.notes.is_none() {
+                        step.notes = Some("Auto-completed at task finalization".to_string());
+                    }
+                }
+            }
         }
 
         // Generate final summary of what worked and failed
@@ -306,6 +323,11 @@ impl Agent {
 
     /// Mark current task as failed
     pub(super) fn fail_checkpoint(&mut self, reason: &str) -> Result<()> {
+        if let Some(plan) = self.cognitive_state.active_tactical_plan.as_mut() {
+            plan.status = crate::cognitive::StepStatus::Failed;
+        }
+        self.cognitive_state
+            .fail_operational_step(self.loop_control.current_step() + 1, reason);
         if let Some(ref mut checkpoint) = self.current_checkpoint {
             checkpoint.set_status(TaskStatus::Failed);
             checkpoint.log_error(self.loop_control.current_step(), reason.to_string(), false);
