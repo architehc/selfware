@@ -3,7 +3,6 @@
 use crate::config::MemoryConfig;
 use crate::errors::ResourceError;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn, error};
 

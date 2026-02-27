@@ -5,8 +5,8 @@
 
 use std::sync::Arc;
 use parking_lot::RwLock;
-use anyhow::{Result, anyhow};
-use tracing::{info, debug, warn, error};
+use anyhow::Result;
+use tracing::{info, debug, warn};
 
 use crate::api::types::Message;
 use crate::api::ApiClient;
@@ -15,16 +15,14 @@ use crate::token_count::estimate_tokens_with_overhead;
 use crate::vector_store::EmbeddingBackend;
 
 use super::memory_hierarchy::{
-    HierarchicalMemory, TokenBudget, MemoryUsage, MemoryStats,
-    WorkingMemory, WorkingContext, EpisodicMemory, Episode, EpisodeType, Importance,
-    SemanticMemory, CodeContext, RetrievedContext, ContextType,
-    TOTAL_CONTEXT_TOKENS, DEFAULT_WORKING_TOKENS, DEFAULT_EPISODIC_TOKENS, DEFAULT_SEMANTIC_TOKENS,
+    HierarchicalMemory, TokenBudget, MemoryStats, WorkingContext, Episode, EpisodeType, Importance, CodeContext,
+    TOTAL_CONTEXT_TOKENS,
 };
 use super::token_budget::{
     TokenBudgetAllocator, TaskType, AdaptationResult, BudgetStats,
 };
 use super::self_reference::{
-    SelfReferenceSystem, SelfImprovementContext, SelfModel, CodeModification, ModificationType,
+    SelfReferenceSystem, SelfImprovementContext, SelfModel, CodeModification,
     SourceRetrievalOptions,
 };
 

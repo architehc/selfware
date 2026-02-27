@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 /// Configuration for the compilation sandbox
 #[derive(Debug, Clone)]

@@ -3,15 +3,15 @@
 //! Enables the agent to read, understand, and modify its own source code.
 //! This is the foundation for recursive self-improvement.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use anyhow::{Result, anyhow};
-use tracing::{info, debug, warn};
+use tracing::{info, debug};
 
-use crate::cognitive::memory_hierarchy::{SemanticMemory, CodeContext, FileContextEntry, IndexedFile, FileContent};
+use crate::cognitive::memory_hierarchy::{SemanticMemory, CodeContext, IndexedFile, FileContent};
 use crate::token_count::estimate_tokens_with_overhead;
 
 /// System for agent self-reference and self-improvement
@@ -697,7 +697,7 @@ impl SelfReferenceSystem {
                 cap.name, cap.confidence * 100.0, cap.description
             ));
         }
-        context.push_str("\n");
+        context.push('\n');
         
         // Key modules
         context.push_str("## Key Modules\n");
@@ -710,7 +710,7 @@ impl SelfReferenceSystem {
                 ));
             }
         }
-        context.push_str("\n");
+        context.push('\n');
         
         // Limitations
         context.push_str("## Known Limitations\n");

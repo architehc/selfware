@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 /// Resource management configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct ResourcesConfig {
     #[serde(default)]
     pub gpu: GpuConfig,
@@ -89,13 +90,3 @@ impl Default for ResourceQuotas {
     }
 }
 
-impl Default for ResourcesConfig {
-    fn default() -> Self {
-        Self {
-            gpu: GpuConfig::default(),
-            memory: MemoryConfig::default(),
-            disk: DiskConfig::default(),
-            quotas: ResourceQuotas::default(),
-        }
-    }
-}

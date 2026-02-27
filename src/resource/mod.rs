@@ -15,7 +15,7 @@ pub mod quotas;
 pub use disk::DiskManager;
 pub use gpu::GpuManager;
 pub use memory::MemoryManager;
-pub use quotas::AdaptiveQuotas; use crate::config::ResourceQuotas;
+pub use quotas::AdaptiveQuotas; 
 
 /// Resource manager for coordinating all resource types
 pub struct ResourceManager {
@@ -103,7 +103,7 @@ impl ResourceManager {
             
             // Update adaptive quotas
             {
-                let mut quotas = self.quotas.write().await;
+                let quotas = self.quotas.write().await;
                 quotas.adjust_for_pressure(pressure).await;
             }
         }

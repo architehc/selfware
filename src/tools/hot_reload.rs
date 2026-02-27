@@ -1,13 +1,13 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use libloading::{Library, Symbol};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::info;
 
 use crate::tools::Tool;
 
@@ -97,6 +97,12 @@ impl Tool for DynamicTool {
 pub struct HotReloadManager {
     tools: Arc<RwLock<std::collections::HashMap<String, Arc<DynamicTool>>>>,
     tool_paths: std::collections::HashMap<String, PathBuf>,
+}
+
+impl Default for HotReloadManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HotReloadManager {

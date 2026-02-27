@@ -110,7 +110,7 @@ impl ResourceLimitTracker {
     }
     
     /// Try to allocate GPU memory
-    pub fn allocate_gpu_memory(&self, bytes: u64) -> Result<GPUAllocationGuard, ResourceError> {
+    pub fn allocate_gpu_memory(&self, bytes: u64) -> Result<GPUAllocationGuard<'_>, ResourceError> {
         let mut current = self.current_gpu_memory.load(Ordering::SeqCst);
         loop {
             let new_total = current + bytes;
@@ -134,7 +134,7 @@ impl ResourceLimitTracker {
     }
     
     /// Try to start a concurrent request
-    pub fn start_request(&self) -> Result<RequestGuard, ResourceError> {
+    pub fn start_request(&self) -> Result<RequestGuard<'_>, ResourceError> {
         let mut current = self.current_concurrent_requests.load(Ordering::SeqCst);
         loop {
             if current >= self.quotas.max_concurrent_requests {
@@ -154,7 +154,7 @@ impl ResourceLimitTracker {
     }
     
     /// Try to queue a task
-    pub fn queue_task(&self) -> Result<TaskGuard, ResourceError> {
+    pub fn queue_task(&self) -> Result<TaskGuard<'_>, ResourceError> {
         let mut current = self.current_queued_tasks.load(Ordering::SeqCst);
         loop {
             if current >= self.quotas.max_queued_tasks {

@@ -1,6 +1,6 @@
 //! Process supervision and recovery mechanisms
 
-use crate::errors::{SelfwareError, ResourceError as SupervisionError};
+use crate::errors::SelfwareError;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

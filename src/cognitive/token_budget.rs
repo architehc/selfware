@@ -5,9 +5,9 @@
 
 use std::collections::VecDeque;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
-use crate::cognitive::memory_hierarchy::{MemoryUsage, TokenBudget, TOTAL_CONTEXT_TOKENS};
+use crate::cognitive::memory_hierarchy::{MemoryUsage, TokenBudget};
 
 /// Task types for specialized token allocation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

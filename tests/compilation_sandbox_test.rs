@@ -1,7 +1,5 @@
 use selfware::cognitive::compilation_manager::CompilationSandbox;
 use std::env;
-use std::fs;
-use std::path::PathBuf;
 
 #[test]
 fn test_sandbox_creation_and_cleanup() {

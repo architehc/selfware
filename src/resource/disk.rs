@@ -81,7 +81,7 @@ impl DiskManager {
     
     /// Get disk usage
     pub async fn get_usage(&self) -> Result<DiskUsage, ResourceError> {
-        use sysinfo::{System, Disks};
+        use sysinfo::Disks;
         
         let disks = Disks::new_with_refreshed_list();
         

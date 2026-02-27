@@ -330,7 +330,7 @@ impl HealthCheck for DiskHealthCheck {
     }
     
     async fn check(&self) -> HealthStatus {
-        use sysinfo::{System, Disks};
+        use sysinfo::Disks;
         
         let disks = Disks::new_with_refreshed_list();
         

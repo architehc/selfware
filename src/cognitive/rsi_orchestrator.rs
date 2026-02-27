@@ -1,8 +1,7 @@
 use crate::cognitive::compilation_manager::CompilationSandbox;
-use crate::cognitive::self_edit::{SelfEditOrchestrator, ImprovementRecord};
-use crate::cognitive::metrics::{MetricsStore, PerformanceSnapshot};
+use crate::cognitive::self_edit::SelfEditOrchestrator;
+use crate::cognitive::metrics::MetricsStore;
 use crate::errors::{SelfwareError, Result};
-use anyhow::Context;
 use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{info, warn, error, debug};
@@ -197,7 +196,7 @@ impl RSIOrchestrator {
         Ok(())
     }
     
-    async fn record_improvement(&mut self, target_id: String, success: bool) -> Result<()> {
+    async fn record_improvement(&mut self, _target_id: String, _success: bool) -> Result<()> {
         // Update meta-learner and store history
         Ok(())
     }

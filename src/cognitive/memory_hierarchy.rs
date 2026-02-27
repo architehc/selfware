@@ -5,15 +5,14 @@
 //! - Episodic Memory: Recent experiences and events (~200K tokens)
 //! - Semantic Memory: Codebase and long-term knowledge (~700K tokens)
 
-use std::collections::{HashMap, VecDeque, BTreeMap};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use anyhow::{Result, anyhow};
-use tracing::{info, warn, debug};
+use anyhow::Result;
+use tracing::{info, debug};
 
 use crate::api::types::Message;
-use crate::config::Config;
 use crate::token_count::estimate_tokens_with_overhead;
 use crate::vector_store::{EmbeddingBackend, VectorIndex, VectorStore};
 
@@ -219,7 +218,7 @@ impl HierarchicalMemory {
             }
         };
         
-        let elapsed = start.elapsed().as_millis() as f64;
+        let _elapsed = start.elapsed().as_millis() as f64;
         // Update average retrieval time
         // self.metrics.avg_retrieval_time_ms = ...
         
@@ -858,7 +857,7 @@ impl SemanticMemory {
         &self,
         query: &str,
         max_tokens: usize,
-        include_related: bool,
+        _include_related: bool,
     ) -> Result<CodeContext> {
         // Simple keyword-based retrieval for now
         // TODO: Implement semantic search with embeddings

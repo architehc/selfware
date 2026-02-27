@@ -490,7 +490,7 @@ To call a tool, use this EXACT XML structure:
         
         
         // 3. LLM Functional Reflection (Every 5 steps)
-        if step > 0 && step % 5 == 0 {
+        if step > 0 && step.is_multiple_of(5) {
             info!("Triggering functional reflection for step {}", step);
             let reflection_prompt = format!(
                 "You have just completed step {}. Reflect on the last 5 steps.

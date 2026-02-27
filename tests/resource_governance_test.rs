@@ -1,7 +1,6 @@
 use selfware::config::{ResourcesConfig, ResourceQuotas};
 use selfware::resource::{AdaptiveQuotas, ResourcePressure};
 use selfware::resource::quotas::ResourceLimitTracker;
-use std::sync::Arc;
 
 #[tokio::test]
 async fn test_resource_limit_tracker_quotas() {
@@ -14,7 +13,7 @@ async fn test_resource_limit_tracker_quotas() {
 
     // Test GPU memory allocation
     let guard1 = tracker.allocate_gpu_memory(500).unwrap();
-    let guard2 = tracker.allocate_gpu_memory(500).unwrap();
+    let _guard2 = tracker.allocate_gpu_memory(500).unwrap();
     
     // This should fail
     let guard3_result = tracker.allocate_gpu_memory(1);
@@ -26,7 +25,7 @@ async fn test_resource_limit_tracker_quotas() {
     let _guard3 = tracker.allocate_gpu_memory(1).unwrap();
 
     // Test concurrent requests
-    let req1 = tracker.start_request().unwrap();
+    let _req1 = tracker.start_request().unwrap();
     let req2 = tracker.start_request().unwrap();
     
     let req3_result = tracker.start_request();
