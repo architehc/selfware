@@ -1,12 +1,59 @@
 //! Shared token counting utilities.
 //!
-//! Uses `tiktoken-rs` for accurate counts and falls back to a conservative
-//! heuristic if tokenizer initialization fails.
+//! Uses `tokenizers` for accurate counts against Qwen models, falls back to `tiktoken-rs`
+//! and finally to a conservative heuristic if tokenizer initialization fails.
 
 use once_cell::sync::Lazy;
 use tiktoken_rs::{cl100k_base, CoreBPE};
+use tokenizers::Tokenizer;
+use tracing::{debug, warn};
+use std::sync::Mutex;
 
-static TOKENIZER: Lazy<Option<CoreBPE>> = Lazy::new(|| cl100k_base().ok());
+// Try to load Qwen tokenizer, fallback to OpenAI cl100k
+static TOKENIZER: Lazy<Mutex<TokenizerState>> = Lazy::new(|| {
+    Mutex::new(TokenizerState::new())
+});
+
+enum TokenizerState {
+    Qwen(Tokenizer),
+    Tiktoken(CoreBPE),
+    Heuristic,
+}
+
+impl TokenizerState {
+    fn new() -> Self {
+        // Try to load Qwen tokenizer from HF hub
+        // We use a known Qwen2.5-Coder or similar repo since they share the same vocabulary
+        match Tokenizer::from_pretrained("Qwen/Qwen2.5-Coder-32B", None) {
+            Ok(tokenizer) => {
+                debug!("Successfully loaded Qwen tokenizer from HF Hub");
+                return TokenizerState::Qwen(tokenizer);
+            }
+            Err(e) => {
+                warn!("Failed to load Qwen tokenizer: {}. Falling back to tiktoken cl100k", e);
+            }
+        }
+
+        match cl100k_base() {
+            Ok(bpe) => TokenizerState::Tiktoken(bpe),
+            Err(_) => TokenizerState::Heuristic,
+        }
+    }
+
+    fn count(&self, content: &str) -> usize {
+        match self {
+            TokenizerState::Qwen(t) => {
+                t.encode(content, false).map(|e| e.get_tokens().len()).unwrap_or_else(|_| heuristic_estimate(content))
+            }
+            TokenizerState::Tiktoken(bpe) => {
+                bpe.encode_with_special_tokens(content).len()
+            }
+            TokenizerState::Heuristic => {
+                heuristic_estimate(content)
+            }
+        }
+    }
+}
 
 /// Estimate token count for content and add a fixed per-message overhead.
 #[inline]
@@ -17,10 +64,11 @@ pub fn estimate_tokens_with_overhead(content: &str, message_overhead: usize) -> 
 /// Estimate tokens for raw content.
 #[inline]
 pub fn estimate_content_tokens(content: &str) -> usize {
-    TOKENIZER
-        .as_ref()
-        .map(|bpe| bpe.encode_with_special_tokens(content).len())
-        .unwrap_or_else(|| heuristic_estimate(content))
+    if let Ok(state) = TOKENIZER.lock() {
+        state.count(content)
+    } else {
+        heuristic_estimate(content)
+    }
 }
 
 fn heuristic_estimate(content: &str) -> usize {

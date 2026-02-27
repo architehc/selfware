@@ -439,6 +439,7 @@ impl RetryConfig {
 ///
 /// Supports both synchronous and streaming requests, native tool calling,
 /// thinking/reasoning modes, and configurable retry logic.
+#[derive(Clone)]
 pub struct ApiClient {
     client: Client,
     config: crate::config::Config,
@@ -472,12 +473,60 @@ impl ApiClient {
         self
     }
 
+
+    /// Send a completion request (e.g. for FIM)
+    pub async fn completion(
+        &self,
+        prompt: &str,
+        max_tokens: Option<usize>,
+        stop: Option<Vec<String>>,
+    ) -> Result<types::CompletionResponse> {
+        let url = format!("{}/completions", self.base_url);
+
+        let req = types::CompletionRequest {
+            model: self.config.model.clone(),
+            prompt: prompt.to_string(),
+            max_tokens,
+            temperature: Some(0.1),
+            top_p: Some(0.9),
+            stop,
+        };
+
+        let mut request = self.client.post(&url).header("Content-Type", "application/json");
+        
+        if let Some(ref key) = self.config.api_key {
+            request = request.header("Authorization", format!("Bearer {}", key.expose()));
+        }
+
+        let response = request.json(&req).send().await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(ApiError::HttpStatus {
+                status: status.as_u16(),
+                message: text,
+            }
+            .into());
+        }
+
+        let resp: types::CompletionResponse = response.json().await?;
+        Ok(resp)
+    }
+
     pub async fn chat(
         &self,
         messages: Vec<Message>,
         tools: Option<Vec<ToolDefinition>>,
         thinking: ThinkingMode,
     ) -> Result<ChatResponse> {
+
+        let mut messages = messages;
+        if let ThinkingMode::Disabled = thinking {
+            let sys_msg = crate::api::types::Message::system("CRITICAL INSTRUCTION: DO NOT use <think> blocks or any thinking process in your response. Output your final response directly and immediately.");
+            messages.insert(0, sys_msg);
+        }
+        
         let mut body = serde_json::json!({
             "model": self.config.model,
             "messages": messages,
@@ -489,21 +538,14 @@ impl ApiClient {
         if let Some(ref tools) = tools {
             body["tools"] = serde_json::json!(tools);
         }
-
-        match thinking {
-            ThinkingMode::Enabled => {
-                // Default behavior, no special config needed
-            }
-            ThinkingMode::Disabled => {
-                body["thinking"] = serde_json::json!({"type": "disabled"});
-            }
-            ThinkingMode::Budget(tokens) => {
-                body["thinking"] = serde_json::json!({
-                    "type": "enabled",
-                    "budget_tokens": tokens
-                });
-            }
+        
+        if let ThinkingMode::Budget(tokens) = thinking {
+            body["thinking"] = serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": tokens
+            });
         }
+
 
         self.send_with_retry(&body).await
     }
@@ -516,6 +558,13 @@ impl ApiClient {
         tools: Option<Vec<ToolDefinition>>,
         thinking: ThinkingMode,
     ) -> Result<StreamingResponse> {
+
+        let mut messages = messages;
+        if let ThinkingMode::Disabled = thinking {
+            let sys_msg = crate::api::types::Message::system("CRITICAL INSTRUCTION: DO NOT use <think> blocks or any thinking process in your response. Output your final response directly and immediately.");
+            messages.insert(0, sys_msg);
+        }
+
         let mut body = serde_json::json!({
             "model": self.config.model,
             "messages": messages,
@@ -527,19 +576,14 @@ impl ApiClient {
         if let Some(ref tools) = tools {
             body["tools"] = serde_json::json!(tools);
         }
-
-        match thinking {
-            ThinkingMode::Enabled => {}
-            ThinkingMode::Disabled => {
-                body["thinking"] = serde_json::json!({"type": "disabled"});
-            }
-            ThinkingMode::Budget(tokens) => {
-                body["thinking"] = serde_json::json!({
-                    "type": "enabled",
-                    "budget_tokens": tokens
-                });
-            }
+        
+        if let ThinkingMode::Budget(tokens) = thinking {
+            body["thinking"] = serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": tokens
+            });
         }
+
 
         let url = format!("{}/chat/completions", self.base_url);
         debug!("Starting streaming request to {}", url);

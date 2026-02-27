@@ -72,6 +72,7 @@ libloading = "0.9.0"
 sysinfo = "0.38.2"
 nvml-wrapper = "0.12.0"
 zstd = "0.13.3"
+tokenizers = { version = "0.22.2", features = ["hf-hub", "http"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30", features = ["signal"] }

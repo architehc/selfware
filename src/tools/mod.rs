@@ -8,6 +8,7 @@ pub mod browser;
 pub mod cargo;
 pub mod container;
 pub mod file;
+pub mod fim;
 pub mod git;
 pub mod hot_reload;
 pub mod http;

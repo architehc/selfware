@@ -109,7 +109,8 @@ pub struct Agent {
 impl Agent {
     pub async fn new(config: Config) -> Result<Self> {
         let client = ApiClient::new(&config)?;
-        let tools = ToolRegistry::new();
+        let mut tools = ToolRegistry::new();
+        tools.register(crate::tools::fim::FileFimEdit::new(std::sync::Arc::new(client.clone())));
         let memory = AgentMemory::new(&config)?;
         let safety = SafetyChecker::new(&config.safety);
         // Publish the user-loaded safety config so file tools honour allowed_paths etc.
