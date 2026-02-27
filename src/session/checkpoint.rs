@@ -465,16 +465,34 @@ impl CheckpointManager {
 
         // Prefer a compact delta write when possible to reduce SSD wear.
         if full_path.exists() {
-            if let Ok(base) = self.try_load_from_path(&full_path) {
+            if let Ok(mut base) = self.try_load_from_path(&full_path) {
+                if let Err(e) = self.apply_deltas(&checkpoint.task_id, &mut base) {
+                    tracing::warn!(
+                        "Failed to hydrate checkpoint with deltas before save ({}). Falling back to full save.",
+                        e
+                    );
+                    self.save_full_checkpoint(checkpoint)?;
+                    self.clear_delta_log(&checkpoint.task_id)?;
+                    return Ok(());
+                }
+
                 if let Some(delta) = checkpoint.compute_delta(&base) {
-                    if self.delta_is_efficient(checkpoint, &delta)?
-                        && self.append_delta(&checkpoint.task_id, &delta).is_ok()
-                    {
-                        if self.should_compact_deltas(&checkpoint.task_id)? {
-                            self.save_full_checkpoint(checkpoint)?;
-                            self.clear_delta_log(&checkpoint.task_id)?;
+                    if self.delta_is_efficient(checkpoint, &delta)? {
+                        match self.append_delta(&checkpoint.task_id, &delta) {
+                            Ok(()) => {
+                                if self.should_compact_deltas(&checkpoint.task_id)? {
+                                    self.save_full_checkpoint(checkpoint)?;
+                                    self.clear_delta_log(&checkpoint.task_id)?;
+                                }
+                                return Ok(());
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to append checkpoint delta: {}. Falling back to full save.",
+                                    e
+                                );
+                            }
                         }
-                        return Ok(());
                     }
                 }
             }
