@@ -89,7 +89,6 @@ pub struct CognitiveSystemStats {
 
 impl CognitiveSystem {
     /// Create new cognitive system
-    
     #[allow(clippy::await_holding_lock)]
     pub async fn new(
         config: &Config,

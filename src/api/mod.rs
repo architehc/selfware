@@ -580,7 +580,7 @@ impl ApiClient {
         thinking: ThinkingMode,
     ) -> Result<StreamingResponse> {
         self.circuit_breaker
-            .call(|| self.chat_stream_inner(messages.clone(), tools.clone(), thinking.clone()))
+            .call(|| self.chat_stream_inner(messages.clone(), tools.clone(), thinking))
             .await
             .map_err(|e| match e {
                 CircuitBreakerError::CircuitOpen => {
@@ -698,7 +698,7 @@ impl ApiClient {
                 .header("Content-Type", "application/json");
 
             if let Some(ref key) = self.config.api_key {
-                request = request.header("Authorization", format!("Bearer {}", key));
+                request = request.header("Authorization", format!("Bearer {}", key.expose()));
             }
 
             let result = request.json(body).send().await;

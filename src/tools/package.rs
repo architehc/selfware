@@ -682,9 +682,10 @@ fn truncate_output(output: &str, max_len: usize) -> String {
     if output.len() <= max_len {
         output.to_string()
     } else {
+        let end = output.floor_char_boundary(max_len);
         format!(
             "{}... [truncated, {} total chars]",
-            &output[..max_len],
+            &output[..end],
             output.len()
         )
     }

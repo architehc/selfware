@@ -337,7 +337,9 @@ async fn fetch_with_curl(
     let mut cmd = Command::new("curl");
     cmd.args([
         "-s",
-        "-L", // Follow redirects
+        "-L",
+        "--max-redirs", "5",
+        "--proto", "=https,http",
         "--max-time",
         &timeout_secs.to_string(),
     ]);
@@ -1013,9 +1015,10 @@ fn truncate_output(output: &str, max_len: usize) -> String {
     if output.len() <= max_len {
         output.to_string()
     } else {
+        let end = output.floor_char_boundary(max_len);
         format!(
             "{}... [truncated, {} total chars]",
-            &output[..max_len],
+            &output[..end],
             output.len()
         )
     }

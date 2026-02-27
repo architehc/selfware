@@ -399,60 +399,66 @@ impl SafetyChecker {
             anyhow::bail!("Blocked request to link-local address range (169.254.x.x)");
         }
 
-        // DNS rebinding protection: resolve hostname and check resulting IPs.
+        // DNS pinning is handled by the tool layer (http.rs, browser.rs) which
+        // resolves DNS once and pins the IP via reqwest's builder.resolve() or
+        // chromium's --host-resolver-rules. The safety checker validates URL
+        // format and hostname strings only, avoiding redundant DNS resolution
+        // that would create a TOCTOU gap (attacker DNS could return a safe IP
+        // at validation time, then switch to an internal IP for the real request).
         //
-        // SECURITY TODO: DNS rebinding TOCTOU -- This check resolves DNS at
-        // validation time, but the subsequent HTTP request (via reqwest) will
-        // re-resolve DNS independently.  An attacker-controlled DNS server
-        // could return a safe IP here and then switch to 169.254.169.254 (or
-        // another internal address) for the actual request, bypassing this
-        // check entirely.
-        //
-        // Fix: Use a custom `reqwest::dns::Resolve` implementation that pins
-        // the resolved IP from validation, so the HTTP client reuses the
-        // already-validated address instead of performing a second lookup.
+        // We still block IP literals pointing at private/internal ranges here,
+        // since those don't require DNS resolution to validate.
         if let Ok(parsed) = url::Url::parse(url) {
             if let Some(host) = parsed.host_str() {
-                if host.parse::<std::net::IpAddr>().is_err() {
-                    use std::net::ToSocketAddrs;
-                    let port = parsed.port().unwrap_or(match parsed.scheme() {
-                        "https" => 443,
-                        _ => 80,
-                    });
-                    if let Ok(addrs) = (host, port).to_socket_addrs() {
-                        for addr in addrs {
-                            let ip = addr.ip();
-                            match ip {
-                                std::net::IpAddr::V4(v4) => {
-                                    let octets = v4.octets();
-                                    if octets[0] == 169 && octets[1] == 254 {
-                                        anyhow::bail!("DNS rebinding blocked: {} -> {}", host, ip);
-                                    }
-                                    if octets == [100, 100, 100, 200] {
-                                        anyhow::bail!("DNS rebinding blocked: {} -> {}", host, ip);
-                                    }
-                                    if octets[0] == 127 {
-                                        anyhow::bail!("DNS rebinding blocked: {} -> {}", host, ip);
-                                    }
-                                    if octets[0] == 10
-                                        || (octets[0] == 172 && (octets[1] & 0xf0) == 16)
-                                        || (octets[0] == 192 && octets[1] == 168)
-                                    {
-                                        anyhow::bail!("DNS rebinding blocked: {} -> {}", host, ip);
-                                    }
-                                }
-                                std::net::IpAddr::V6(v6) => {
-                                    if v6.is_loopback() {
-                                        anyhow::bail!("DNS rebinding blocked: {} -> {}", host, ip);
-                                    }
-                                    let segs = v6.segments();
-                                    if segs[0] & 0xffc0 == 0xfe80 {
-                                        anyhow::bail!("DNS rebinding blocked: {} -> {}", host, ip);
-                                    }
-                                    if segs[0] & 0xfe00 == 0xfc00 {
-                                        anyhow::bail!("DNS rebinding blocked: {} -> {}", host, ip);
-                                    }
-                                }
+                if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                    match ip {
+                        std::net::IpAddr::V4(v4) => {
+                            let octets = v4.octets();
+                            // Loopback (127.0.0.0/8)
+                            if octets[0] == 127 {
+                                anyhow::bail!(
+                                    "Blocked request to loopback address: {}", ip
+                                );
+                            }
+                            // Private networks: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                            if octets[0] == 10
+                                || (octets[0] == 172 && (octets[1] & 0xf0) == 16)
+                                || (octets[0] == 192 && octets[1] == 168)
+                            {
+                                anyhow::bail!(
+                                    "Blocked request to private network address: {}", ip
+                                );
+                            }
+                            // Unspecified (0.0.0.0)
+                            if v4.is_unspecified() {
+                                anyhow::bail!(
+                                    "Blocked request to unspecified address: {}", ip
+                                );
+                            }
+                        }
+                        std::net::IpAddr::V6(v6) => {
+                            if v6.is_loopback() {
+                                anyhow::bail!(
+                                    "Blocked request to loopback address: {}", ip
+                                );
+                            }
+                            let segs = v6.segments();
+                            // Link-local (fe80::/10)
+                            if segs[0] & 0xffc0 == 0xfe80 {
+                                anyhow::bail!(
+                                    "Blocked request to link-local address: {}", ip
+                                );
+                            }
+                            // Unique local (fc00::/7)
+                            if segs[0] & 0xfe00 == 0xfc00 {
+                                anyhow::bail!(
+                                    "Blocked request to private network address: {}", ip
+                                );
+                            }
+                            if v6.is_unspecified() {
+                                anyhow::bail!(
+                                    "Blocked request to unspecified address: {}", ip
+                                );
                             }
                         }
                     }

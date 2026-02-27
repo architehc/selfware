@@ -182,6 +182,8 @@ pub struct SecretPattern {
     pub name: String,
     /// Regex pattern
     pub pattern: String,
+    /// Pre-compiled regex (avoids recompilation on every scan and enables size limits)
+    pub compiled: Option<regex::Regex>,
     /// Severity
     pub severity: SecuritySeverity,
     /// Description
@@ -190,9 +192,14 @@ pub struct SecretPattern {
 
 impl SecretPattern {
     pub fn new(name: &str, pattern: &str, severity: SecuritySeverity) -> Self {
+        let compiled = regex::RegexBuilder::new(pattern)
+            .size_limit(1 << 20) // 1 MB limit to mitigate ReDoS
+            .build()
+            .ok();
         Self {
             name: name.to_string(),
             pattern: pattern.to_string(),
+            compiled,
             severity,
             description: format!("Potential {} detected", name),
         }
@@ -334,7 +341,7 @@ impl SecretScanner {
             }
 
             for pattern in &self.patterns {
-                if let Ok(re) = regex::Regex::new(&pattern.pattern) {
+                if let Some(ref re) = pattern.compiled {
                     for mat in re.find_iter(line) {
                         let mut finding = SecurityFinding::new(
                             &pattern.name,
