@@ -1176,6 +1176,27 @@ impl WorkflowExecutor {
                     .map(|d| context.substitute(d))
                     .unwrap_or_else(|| context.working_dir.to_string_lossy().to_string());
 
+                // Validate working_dir is within the project scope
+                let dir_path = std::path::Path::new(&dir);
+                let canonical_scope = context.working_dir.canonicalize()
+                    .unwrap_or_else(|_| context.working_dir.clone());
+                if let Ok(canonical_dir) = dir_path.canonicalize() {
+                    if !canonical_dir.starts_with(&canonical_scope) {
+                        anyhow::bail!(
+                            "Workflow working_dir '{}' is outside project scope '{}'",
+                            dir,
+                            context.working_dir.display()
+                        );
+                    }
+                } else if dir_path.is_absolute() && !dir_path.starts_with(&canonical_scope) {
+                    // If we can't canonicalize (dir doesn't exist yet), at least check prefix
+                    anyhow::bail!(
+                        "Workflow working_dir '{}' is outside project scope '{}'",
+                        dir,
+                        context.working_dir.display()
+                    );
+                }
+
                 if self.dry_run {
                     context.log(
                         LogLevel::Info,

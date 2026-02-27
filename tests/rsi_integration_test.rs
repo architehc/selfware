@@ -17,7 +17,7 @@ async fn test_1m_token_context_initialization() {
     let system = CognitiveSystem::new(&config, api_client, embedding)
         .await
         .unwrap();
-    let budget = system.memory.read().budget.clone();
+    let budget = system.memory.read().await.budget.clone();
 
     let total = budget.working_memory
         + budget.episodic_memory

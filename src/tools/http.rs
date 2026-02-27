@@ -144,14 +144,33 @@ impl Tool for HttpRequest {
                     if attempt.previous().len() > 10 {
                         return attempt.error("Too many redirects");
                     }
-                    if let Some(host) = attempt.url().host_str() {
+                    if let Some(host) = attempt.url().host_str().map(|h| h.to_owned()) {
                         let allow_private = std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK")
                             .unwrap_or_default()
                             == "1";
-                        if !allow_private && is_private_network_host(host) {
-                            return attempt.error(
-                                "Blocked request to private/internal network address on redirect",
-                            );
+                        if !allow_private {
+                            // Check hostname string first
+                            if is_private_network_host(&host) {
+                                return attempt.error(
+                                    "Blocked redirect to private/internal network address",
+                                );
+                            }
+                            // Also resolve DNS to catch public hostnames pointing to private IPs
+                            if host.parse::<std::net::IpAddr>().is_err() {
+                                use std::net::ToSocketAddrs;
+                                let port = attempt.url().port_or_known_default().unwrap_or(80);
+                                if let Ok(addrs) = (host.as_str(), port).to_socket_addrs() {
+                                    for addr in addrs {
+                                        if is_private_network_host(&addr.ip().to_string()) {
+                                            return attempt.error(format!(
+                                                "Blocked redirect: {} resolves to private IP {}",
+                                                host,
+                                                addr.ip()
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     attempt.follow()
