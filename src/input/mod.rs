@@ -168,7 +168,8 @@ impl SelfwareEditor {
         let editor_cmd = std::env::var("VISUAL")
             .or_else(|_| std::env::var("EDITOR"))
             .unwrap_or_else(|_| "vi".to_string());
-        let temp_file = std::env::temp_dir().join("selfware_edit_buffer.tmp");
+        let temp_file =
+            std::env::temp_dir().join(format!("selfware_edit_{}.tmp", std::process::id()));
         let buffer_editor = std::process::Command::new(editor_cmd);
 
         let mut editor = Reedline::create()

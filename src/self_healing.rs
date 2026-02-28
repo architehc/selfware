@@ -30,6 +30,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tracing::{error, warn};
 
 mod executor;
 
@@ -191,7 +192,10 @@ impl ErrorLearner {
 
         // Add to recent errors (recover from poisoned lock)
         {
-            let mut errors = self.errors.write().unwrap_or_else(|e| e.into_inner());
+            let mut errors = self.errors.write().unwrap_or_else(|e| {
+                error!("ErrorLearner::errors write lock poisoned - recovering from potentially corrupt state");
+                e.into_inner()
+            });
             errors.push_back(error.clone());
 
             // Remove old errors outside window
@@ -214,7 +218,10 @@ impl ErrorLearner {
         let errors = self
             .errors
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| {
+                warn!("ErrorLearner::errors read lock poisoned - recovering from potentially corrupt state");
+                e.into_inner()
+            })
             .clone();
 
         // Group by error type and context
@@ -226,7 +233,10 @@ impl ErrorLearner {
 
         // Create patterns from groups that exceed threshold (recover from poisoned lock)
         {
-            let mut patterns = self.patterns.write().unwrap_or_else(|e| e.into_inner());
+            let mut patterns = self.patterns.write().unwrap_or_else(|e| {
+                error!("ErrorLearner::patterns write lock poisoned - recovering from potentially corrupt state");
+                e.into_inner()
+            });
             for (key, group) in groups {
                 if group.len() >= self.config.pattern_threshold as usize {
                     let first = group.first().unwrap();
@@ -272,7 +282,10 @@ impl ErrorLearner {
         let history = self
             .recovery_history
             .read()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(|e| {
+                warn!("ErrorLearner::recovery_history read lock poisoned - recovering from potentially corrupt state");
+                e.into_inner()
+            });
         if let Some(results) = history.get(pattern_id) {
             // Find strategy with highest success rate
             let mut strategy_stats: HashMap<String, (u32, u32)> = HashMap::new(); // (success, total)
@@ -305,7 +318,10 @@ impl ErrorLearner {
         let mut history = self
             .recovery_history
             .write()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(|e| {
+                error!("ErrorLearner::recovery_history write lock poisoned - recovering from potentially corrupt state");
+                e.into_inner()
+            });
         let results = history.entry(pattern_id.to_string()).or_default();
         results.push(RecoveryResult {
             strategy: strategy.to_string(),
@@ -326,7 +342,10 @@ impl ErrorLearner {
     pub fn patterns(&self) -> Vec<ErrorPattern> {
         self.patterns
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| {
+                warn!("ErrorLearner::patterns read lock poisoned - recovering from potentially corrupt state");
+                e.into_inner()
+            })
             .values()
             .cloned()
             .collect()
@@ -341,7 +360,10 @@ impl ErrorLearner {
 
         self.patterns
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| {
+                warn!("ErrorLearner::patterns read lock poisoned in recommend_recovery - recovering from potentially corrupt state");
+                e.into_inner()
+            })
             .get(&key)?
             .recommended_recovery
             .clone()
@@ -356,7 +378,10 @@ impl ErrorLearner {
             active_patterns: self
                 .patterns
                 .read()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(|e| {
+                    warn!("ErrorLearner::patterns read lock poisoned in summary - recovering from potentially corrupt state");
+                    e.into_inner()
+                })
                 .len(),
         }
     }
@@ -365,15 +390,24 @@ impl ErrorLearner {
     pub fn clear(&self) {
         self.errors
             .write()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| {
+                error!("ErrorLearner::errors write lock poisoned in clear - recovering from potentially corrupt state");
+                e.into_inner()
+            })
             .clear();
         self.patterns
             .write()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| {
+                error!("ErrorLearner::patterns write lock poisoned in clear - recovering from potentially corrupt state");
+                e.into_inner()
+            })
             .clear();
         self.recovery_history
             .write()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| {
+                error!("ErrorLearner::recovery_history write lock poisoned in clear - recovering from potentially corrupt state");
+                e.into_inner()
+            })
             .clear();
     }
 }
@@ -591,7 +625,10 @@ impl StateManager {
             .fetch_add(checkpoint.size_bytes as u64, Ordering::Relaxed);
 
         {
-            let mut checkpoints = self.checkpoints.write().unwrap_or_else(|e| e.into_inner());
+            let mut checkpoints = self.checkpoints.write().unwrap_or_else(|e| {
+                error!("StateManager::checkpoints write lock poisoned - recovering from potentially corrupt state");
+                e.into_inner()
+            });
             checkpoints.push_back(checkpoint);
 
             // Limit checkpoints
@@ -603,7 +640,10 @@ impl StateManager {
         *self
             .last_checkpoint
             .write()
-            .unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+            .unwrap_or_else(|e| {
+                error!("StateManager::last_checkpoint write lock poisoned - recovering from potentially corrupt state");
+                e.into_inner()
+            }) = Some(Instant::now());
 
         id
     }
@@ -617,7 +657,10 @@ impl StateManager {
         let last = self
             .last_checkpoint
             .read()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(|e| {
+                warn!("StateManager::last_checkpoint read lock poisoned - recovering from potentially corrupt state");
+                e.into_inner()
+            });
         if let Some(instant) = *last {
             return instant.elapsed() >= Duration::from_secs(self.config.checkpoint_interval_secs);
         }
@@ -630,7 +673,10 @@ impl StateManager {
             .restores_performed
             .fetch_add(1, Ordering::Relaxed);
 
-        let checkpoints = self.checkpoints.read().unwrap_or_else(|e| e.into_inner());
+        let checkpoints = self.checkpoints.read().unwrap_or_else(|e| {
+            warn!("StateManager::checkpoints read lock poisoned in restore - recovering from potentially corrupt state");
+            e.into_inner()
+        });
 
         if let Some(id) = checkpoint_id {
             checkpoints.iter().find(|c| c.id == id).cloned()
@@ -644,7 +690,10 @@ impl StateManager {
     pub fn latest(&self) -> Option<StateCheckpoint> {
         self.checkpoints
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| {
+                warn!("StateManager::checkpoints read lock poisoned in latest - recovering from potentially corrupt state");
+                e.into_inner()
+            })
             .back()
             .cloned()
     }
@@ -653,7 +702,10 @@ impl StateManager {
     pub fn all(&self) -> Vec<StateCheckpoint> {
         self.checkpoints
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| {
+                warn!("StateManager::checkpoints read lock poisoned in all - recovering from potentially corrupt state");
+                e.into_inner()
+            })
             .iter()
             .cloned()
             .collect()
@@ -663,7 +715,10 @@ impl StateManager {
     pub fn clear(&self) {
         self.checkpoints
             .write()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| {
+                error!("StateManager::checkpoints write lock poisoned in clear - recovering from potentially corrupt state");
+                e.into_inner()
+            })
             .clear();
     }
 
@@ -676,7 +731,10 @@ impl StateManager {
             active_checkpoints: self
                 .checkpoints
                 .read()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(|e| {
+                    warn!("StateManager::checkpoints read lock poisoned in summary - recovering from potentially corrupt state");
+                    e.into_inner()
+                })
                 .len(),
         }
     }
@@ -774,7 +832,10 @@ impl HealthPredictor {
             .as_secs();
 
         {
-            let mut history = self.history.write().unwrap_or_else(|e| e.into_inner());
+            let mut history = self.history.write().unwrap_or_else(|e| {
+                error!("HealthPredictor::history write lock poisoned - recovering from potentially corrupt state");
+                e.into_inner()
+            });
             let points = history.entry(component.to_string()).or_default();
             points.push(HealthDataPoint {
                 timestamp: now,
@@ -798,7 +859,10 @@ impl HealthPredictor {
         let history = self
             .history
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| {
+                warn!("HealthPredictor::history read lock poisoned - recovering from potentially corrupt state");
+                e.into_inner()
+            })
             .get(component)
             .cloned()
             .unwrap_or_default();
@@ -858,7 +922,10 @@ impl HealthPredictor {
 
         self.predictions
             .write()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| {
+                error!("HealthPredictor::predictions write lock poisoned - recovering from potentially corrupt state");
+                e.into_inner()
+            })
             .insert(component.to_string(), prediction);
     }
 
@@ -866,7 +933,10 @@ impl HealthPredictor {
     pub fn predict(&self, component: &str) -> Option<HealthPrediction> {
         self.predictions
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| {
+                warn!("HealthPredictor::predictions read lock poisoned in predict - recovering from potentially corrupt state");
+                e.into_inner()
+            })
             .get(component)
             .cloned()
     }
@@ -875,7 +945,10 @@ impl HealthPredictor {
     pub fn all_predictions(&self) -> Vec<HealthPrediction> {
         self.predictions
             .read()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| {
+                warn!("HealthPredictor::predictions read lock poisoned in all_predictions - recovering from potentially corrupt state");
+                e.into_inner()
+            })
             .values()
             .cloned()
             .collect()
@@ -905,11 +978,17 @@ impl HealthPredictor {
     pub fn clear(&self) {
         self.history
             .write()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| {
+                error!("HealthPredictor::history write lock poisoned in clear - recovering from potentially corrupt state");
+                e.into_inner()
+            })
             .clear();
         self.predictions
             .write()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| {
+                error!("HealthPredictor::predictions write lock poisoned in clear - recovering from potentially corrupt state");
+                e.into_inner()
+            })
             .clear();
     }
 }

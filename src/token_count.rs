@@ -4,13 +4,15 @@
 //! and finally to a conservative heuristic if tokenizer initialization fails.
 
 use once_cell::sync::Lazy;
-use std::sync::Mutex;
 use tiktoken_rs::{cl100k_base, CoreBPE};
 use tokenizers::Tokenizer;
 use tracing::{debug, warn};
 
-// Try to load Qwen tokenizer, fallback to OpenAI cl100k
-static TOKENIZER: Lazy<Mutex<TokenizerState>> = Lazy::new(|| Mutex::new(TokenizerState::new()));
+// Try to load Qwen tokenizer, fallback to OpenAI cl100k.
+// TokenizerState is Send + Sync (both Tokenizer and CoreBPE are), and
+// count() only requires &self, so no Mutex is needed — Lazy alone provides
+// safe one-time initialization and lock-free concurrent reads.
+static TOKENIZER: Lazy<TokenizerState> = Lazy::new(TokenizerState::new);
 
 enum TokenizerState {
     Qwen(Box<Tokenizer>),
@@ -62,11 +64,7 @@ pub fn estimate_tokens_with_overhead(content: &str, message_overhead: usize) -> 
 /// Estimate tokens for raw content.
 #[inline]
 pub fn estimate_content_tokens(content: &str) -> usize {
-    if let Ok(state) = TOKENIZER.lock() {
-        state.count(content)
-    } else {
-        heuristic_estimate(content)
-    }
+    TOKENIZER.count(content)
 }
 
 fn heuristic_estimate(content: &str) -> usize {

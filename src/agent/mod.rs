@@ -127,7 +127,7 @@ impl Agent {
             .join("selfware")
             .join("global_episodic_memory.json");
 
-        if let Ok(content) = std::fs::read_to_string(&global_memory_path) {
+        if let Ok(content) = tokio::fs::read_to_string(&global_memory_path).await {
             if let Ok(loaded_memory) =
                 serde_json::from_str::<crate::cognitive::EpisodicMemory>(&content)
             {
@@ -870,23 +870,44 @@ To call a tool, use this EXACT XML structure:
     /// Trim the message history so total estimated tokens stay within
     /// `max_context_tokens`. Removes the oldest non-system messages first.
     fn trim_message_history(&mut self) {
-        loop {
-            let total: usize = self
-                .messages
-                .iter()
-                .map(|m| crate::token_count::estimate_tokens_with_overhead(&m.content, 4))
-                .sum();
-            if total <= self.max_context_tokens {
+        let total: usize = self
+            .messages
+            .iter()
+            .map(|m| crate::token_count::estimate_tokens_with_overhead(&m.content, 4))
+            .sum();
+        if total <= self.max_context_tokens {
+            return;
+        }
+
+        // Collect per-message token counts once (O(N)) instead of recomputing
+        // every iteration.
+        let token_counts: Vec<usize> = self
+            .messages
+            .iter()
+            .map(|m| crate::token_count::estimate_tokens_with_overhead(&m.content, 4))
+            .collect();
+
+        // Walk non-system messages oldest-first and mark them for removal until
+        // the total fits within budget.
+        let mut remaining = total;
+        let mut keep = vec![true; self.messages.len()];
+        for (i, tokens) in token_counts.iter().enumerate() {
+            if remaining <= self.max_context_tokens {
                 break;
             }
-            // Find the first non-system message and remove it.
-            if let Some(pos) = self.messages.iter().position(|m| m.role != "system") {
-                self.messages.remove(pos);
-            } else {
-                // Only system messages left -- nothing more to trim.
-                break;
+            if self.messages[i].role != "system" {
+                keep[i] = false;
+                remaining -= tokens;
             }
         }
+
+        // Retain only the messages we decided to keep (single O(N) pass).
+        let mut idx = 0;
+        self.messages.retain(|_| {
+            let k = keep[idx];
+            idx += 1;
+            k
+        });
     }
 
     /// Estimate total tokens from accumulated messages (the actual context sent to API)
@@ -2317,7 +2338,8 @@ To call a tool, use this EXACT XML structure:
     /// Review code in a specific file
     pub async fn review(&mut self, file_path: &str) -> Result<()> {
         // Read the file first
-        let content = std::fs::read_to_string(file_path)
+        let content = tokio::fs::read_to_string(file_path)
+            .await
             .with_context(|| format!("Failed to read file: {}", file_path))?;
 
         let task = Planner::review_prompt(file_path, &content);
@@ -3342,20 +3364,37 @@ mod tests {
     /// Helper that mirrors `Agent::trim_message_history` logic so we can
     /// verify the algorithm without constructing a full Agent instance.
     fn trim_messages(messages: &mut Vec<Message>, max_tokens: usize) {
-        loop {
-            let total: usize = messages
-                .iter()
-                .map(|m| crate::token_count::estimate_tokens_with_overhead(&m.content, 4))
-                .sum();
-            if total <= max_tokens {
+        let total: usize = messages
+            .iter()
+            .map(|m| crate::token_count::estimate_tokens_with_overhead(&m.content, 4))
+            .sum();
+        if total <= max_tokens {
+            return;
+        }
+
+        let token_counts: Vec<usize> = messages
+            .iter()
+            .map(|m| crate::token_count::estimate_tokens_with_overhead(&m.content, 4))
+            .collect();
+
+        let mut remaining = total;
+        let mut keep = vec![true; messages.len()];
+        for (i, tokens) in token_counts.iter().enumerate() {
+            if remaining <= max_tokens {
                 break;
             }
-            if let Some(pos) = messages.iter().position(|m| m.role != "system") {
-                messages.remove(pos);
-            } else {
-                break;
+            if messages[i].role != "system" {
+                keep[i] = false;
+                remaining -= tokens;
             }
         }
+
+        let mut idx = 0;
+        messages.retain(|_| {
+            let k = keep[idx];
+            idx += 1;
+            k
+        });
     }
 
     #[test]

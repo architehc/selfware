@@ -17,7 +17,7 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -28,6 +28,28 @@ pub const EMBEDDING_DIM: usize = 384;
 
 /// Maximum chunks per collection
 pub const MAX_CHUNKS: usize = 100_000;
+
+/// Maximum vocabulary size for TF-IDF provider before eviction occurs
+pub const MAX_VOCABULARY_SIZE: usize = 50_000;
+
+/// Wrapper around `f32` that implements `Ord` via `total_cmp` for use in
+/// `BinaryHeap`. This avoids pulling in an external crate like `ordered-float`.
+#[derive(Clone, Copy, PartialEq)]
+struct OrdF32(f32);
+
+impl Eq for OrdF32 {}
+
+impl PartialOrd for OrdF32 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OrdF32 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.total_cmp(&other.0)
+    }
+}
 
 /// Chunk types for code organization
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -397,12 +419,14 @@ impl VectorCollection {
     /// Remove chunk by ID
     pub fn remove_chunk(&mut self, id: &str) -> Option<CodeChunk> {
         if let Some(&idx) = self.id_index.get(id) {
-            let chunk = self.chunks.remove(idx);
+            // Use swap_remove for O(1) removal instead of O(N) shift
+            let chunk = self.chunks.swap_remove(idx);
+            self.id_index.remove(id);
 
-            // Rebuild index (O(n) but infrequent)
-            self.id_index.clear();
-            for (i, c) in self.chunks.iter().enumerate() {
-                self.id_index.insert(c.id.clone(), i);
+            // If the removed element wasn't the last one, update the index
+            // for the element that was swapped into position `idx`
+            if idx < self.chunks.len() {
+                self.id_index.insert(self.chunks[idx].id.clone(), idx);
             }
 
             // Update file index
@@ -424,22 +448,12 @@ impl VectorCollection {
     /// Remove all chunks for a file
     pub fn remove_file(&mut self, path: &Path) {
         if let Some(chunk_ids) = self.file_index.remove(path) {
-            // Collect indices to remove, then remove in reverse order
-            let mut indices_to_remove: Vec<usize> = chunk_ids
-                .iter()
-                .filter_map(|id| self.id_index.get(id).copied())
-                .collect();
+            let ids_to_remove: HashSet<&String> = chunk_ids.iter().collect();
 
-            // Sort in reverse order so we remove from end first
-            indices_to_remove.sort_by(|a, b| b.cmp(a));
+            // Retain only chunks not in the removal set -- O(N) single pass
+            self.chunks.retain(|c| !ids_to_remove.contains(&c.id));
 
-            for idx in indices_to_remove {
-                if idx < self.chunks.len() {
-                    self.chunks.remove(idx);
-                }
-            }
-
-            // Rebuild index
+            // Rebuild id_index after bulk removal
             self.id_index.clear();
             for (i, c) in self.chunks.iter().enumerate() {
                 self.id_index.insert(c.id.clone(), i);
@@ -548,7 +562,10 @@ impl EmbeddingProvider for MockEmbeddingProvider {
 /// Simple TF-IDF based embedding provider (no external dependencies)
 pub struct TfIdfEmbeddingProvider {
     dimension: usize,
+    /// Maps token -> dimension index
     vocabulary: Arc<RwLock<HashMap<String, usize>>>,
+    /// Tracks usage count per token for eviction decisions
+    usage_counts: Arc<RwLock<HashMap<String, u64>>>,
 }
 
 impl TfIdfEmbeddingProvider {
@@ -557,6 +574,7 @@ impl TfIdfEmbeddingProvider {
         Self {
             dimension,
             vocabulary: Arc::new(RwLock::new(HashMap::new())),
+            usage_counts: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -569,15 +587,65 @@ impl TfIdfEmbeddingProvider {
     }
 
     fn get_or_create_index(&self, token: &str) -> usize {
-        let read = self.vocabulary.read().unwrap_or_else(|e| e.into_inner());
-        if let Some(&idx) = read.get(token) {
+        // Fast path: token already in vocabulary
+        {
+            let read = self.vocabulary.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(&idx) = read.get(token) {
+                drop(read);
+                // Increment usage count
+                let mut counts = self.usage_counts.write().unwrap_or_else(|e| e.into_inner());
+                *counts.entry(token.to_string()).or_default() += 1;
+                return idx;
+            }
+        }
+
+        // Slow path: insert new token
+        let mut write = self.vocabulary.write().unwrap_or_else(|e| e.into_inner());
+        // Double-check after acquiring write lock
+        if let Some(&idx) = write.get(token) {
+            drop(write);
+            let mut counts = self.usage_counts.write().unwrap_or_else(|e| e.into_inner());
+            *counts.entry(token.to_string()).or_default() += 1;
             return idx;
         }
-        drop(read);
 
-        let mut write = self.vocabulary.write().unwrap_or_else(|e| e.into_inner());
         let idx = write.len() % self.dimension;
         write.insert(token.to_string(), idx);
+
+        // Evict least-used terms if vocabulary exceeds the cap
+        if write.len() > MAX_VOCABULARY_SIZE {
+            let mut counts = self.usage_counts.write().unwrap_or_else(|e| e.into_inner());
+            let evict_count = write.len() - MAX_VOCABULARY_SIZE;
+
+            warn!(
+                "TF-IDF vocabulary exceeded cap of {}; evicting {} least-used terms",
+                MAX_VOCABULARY_SIZE, evict_count
+            );
+
+            // Find the least-used terms to evict
+            let mut terms_by_usage: Vec<(String, u64)> = write
+                .keys()
+                .map(|k| {
+                    let count = counts.get(k).copied().unwrap_or(0);
+                    (k.clone(), count)
+                })
+                .collect();
+            terms_by_usage.sort_by_key(|(_, count)| *count);
+
+            for (term, _) in terms_by_usage.into_iter().take(evict_count) {
+                // Don't evict the token we just inserted
+                if term != token {
+                    write.remove(&term);
+                    counts.remove(&term);
+                }
+            }
+        }
+
+        // Track usage for the newly inserted token
+        drop(write);
+        let mut counts = self.usage_counts.write().unwrap_or_else(|e| e.into_inner());
+        *counts.entry(token.to_string()).or_default() += 1;
+
         idx
     }
 }
@@ -671,31 +739,64 @@ impl VectorIndex {
     /// Remove embedding by chunk ID
     pub fn remove(&mut self, chunk_id: &str) {
         if let Some(pos) = self.chunk_ids.iter().position(|id| id == chunk_id) {
-            self.embeddings.remove(pos);
-            self.chunk_ids.remove(pos);
+            // Use swap_remove for O(1) removal instead of O(N) shift
+            self.embeddings.swap_remove(pos);
+            self.chunk_ids.swap_remove(pos);
         }
     }
 
     /// Search for similar embeddings
+    ///
+    /// Uses a min-heap to efficiently track the top-k results without
+    /// sorting the entire result set. Also applies early termination
+    /// when all top-k results have similarity > 0.95.
     pub fn search(&self, query: &[f32], k: usize) -> Vec<(String, f32)> {
-        if query.len() != self.dimension {
+        if query.len() != self.dimension || k == 0 {
             return Vec::new();
         }
 
-        let mut scores: Vec<(usize, f32)> = self
-            .embeddings
-            .iter()
-            .enumerate()
-            .map(|(i, emb)| (i, Self::cosine_similarity(query, emb)))
-            .collect();
+        // Min-heap: stores (OrderedFloat(score), index) so the smallest
+        // score is at the top, letting us efficiently evict the worst
+        // candidate when a better one is found.
+        // We use a wrapper to get Ord on f32 via total_cmp.
+        let mut heap: BinaryHeap<std::cmp::Reverse<(OrdF32, usize)>> =
+            BinaryHeap::with_capacity(k + 1);
+        /// Threshold for early termination: if we have k results all above
+        /// this similarity, further searching is unlikely to improve results.
+        const EARLY_TERM_THRESHOLD: f32 = 0.95;
 
-        scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        for (i, emb) in self.embeddings.iter().enumerate() {
+            let score = Self::cosine_similarity(query, emb);
 
-        scores
+            if heap.len() < k {
+                heap.push(std::cmp::Reverse((OrdF32(score), i)));
+            } else if let Some(&std::cmp::Reverse((OrdF32(min_score), _))) = heap.peek() {
+                // Only consider this vector if it beats the current k-th best
+                if score > min_score {
+                    heap.pop();
+                    heap.push(std::cmp::Reverse((OrdF32(score), i)));
+                }
+            }
+
+            // Early termination: if we have k results and the worst is
+            // already above the threshold, further search is unlikely
+            // to meaningfully improve results.
+            if heap.len() == k {
+                if let Some(&std::cmp::Reverse((OrdF32(min_score), _))) = heap.peek() {
+                    if min_score > EARLY_TERM_THRESHOLD {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Extract results sorted by score descending
+        let mut results: Vec<(String, f32)> = heap
             .into_iter()
-            .take(k)
-            .map(|(i, score)| (self.chunk_ids[i].clone(), score))
-            .collect()
+            .map(|std::cmp::Reverse((OrdF32(score), i))| (self.chunk_ids[i].clone(), score))
+            .collect();
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results
     }
 
     /// Cosine similarity between two vectors

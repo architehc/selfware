@@ -325,7 +325,7 @@ pub async fn run() -> Result<()> {
     config.execution_mode = exec_mode;
 
     if config.execution_mode == ExecutionMode::Daemon {
-        let addr = "0.0.0.0:9090".parse().unwrap();
+        let addr = "127.0.0.1:9090".parse().unwrap();
         if let Err(e) = crate::telemetry::start_prometheus_exporter(addr) {
             tracing::warn!("Failed to start prometheus exporter: {}", e);
         } else {
