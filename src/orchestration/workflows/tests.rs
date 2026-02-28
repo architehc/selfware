@@ -1525,7 +1525,13 @@ fn test_tdd_template_step_count_and_ids() {
     let ids: Vec<&str> = wf.steps.iter().map(|s| s.id.as_str()).collect();
     assert_eq!(
         ids,
-        vec!["write_test", "run_test_red", "implement", "run_test_green", "refactor"]
+        vec![
+            "write_test",
+            "run_test_red",
+            "implement",
+            "run_test_green",
+            "refactor"
+        ]
     );
 }
 
@@ -1821,7 +1827,11 @@ fn test_tdd_template_variable_substitution_in_prompts() {
     ctx.set_var("test_file", "tests/login_test.rs");
 
     // write_test step uses ${feature} placeholder
-    if let StepType::Llm { ref prompt, ref context } = wf.steps[0].step_type {
+    if let StepType::Llm {
+        ref prompt,
+        ref context,
+    } = wf.steps[0].step_type
+    {
         let substituted = ctx.substitute(prompt);
         assert_eq!(substituted, "Write a failing test for: user login");
         let ctx_sub = ctx.substitute(&context[0]);

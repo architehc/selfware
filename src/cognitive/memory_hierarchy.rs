@@ -14,7 +14,9 @@ use tracing::{debug, info};
 
 use crate::api::types::Message;
 use crate::token_count::estimate_tokens_with_overhead;
-use crate::vector_store::{EmbeddingBackend, MockEmbeddingProvider, VectorIndex, VectorStore};
+#[cfg(test)]
+use crate::vector_store::MockEmbeddingProvider;
+use crate::vector_store::{EmbeddingBackend, VectorIndex, VectorStore};
 
 /// Total context tokens for Qwen3 Coder 1M context
 pub const TOTAL_CONTEXT_TOKENS: usize = 1_000_000;
@@ -1357,10 +1359,16 @@ mod tests {
 
         // find_episode should find each by ID using the index
         assert!(em.find_episode("ep-c").is_some());
-        assert_eq!(em.find_episode("ep-c").unwrap().importance, Importance::Critical);
+        assert_eq!(
+            em.find_episode("ep-c").unwrap().importance,
+            Importance::Critical
+        );
 
         assert!(em.find_episode("ep-h").is_some());
-        assert_eq!(em.find_episode("ep-h").unwrap().importance, Importance::High);
+        assert_eq!(
+            em.find_episode("ep-h").unwrap().importance,
+            Importance::High
+        );
 
         assert!(em.find_episode("ep-n").is_some());
         assert!(em.find_episode("ep-l").is_some());
@@ -1464,7 +1472,11 @@ mod tests {
         let mut em = EpisodicMemory::new(100_000, embedding);
 
         // Add a normal episode
-        let normal_ep = make_episode("ep-norm", Importance::Normal, "a fairly long episode content that should be compressed into a shorter summary");
+        let normal_ep = make_episode(
+            "ep-norm",
+            Importance::Normal,
+            "a fairly long episode content that should be compressed into a shorter summary",
+        );
         let original_tokens = normal_ep.token_count;
         em.add_to_tier(normal_ep);
         assert_eq!(em.tiers.normal.len(), 1);

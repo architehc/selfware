@@ -345,13 +345,13 @@ mod tests {
             )
         };
 
-        assert_eq!(compute_backoff(1), 60);    // 60 * 2^0 = 60
-        assert_eq!(compute_backoff(2), 120);   // 60 * 2^1 = 120
-        assert_eq!(compute_backoff(3), 240);   // 60 * 2^2 = 240
-        assert_eq!(compute_backoff(4), 480);   // 60 * 2^3 = 480
-        assert_eq!(compute_backoff(5), 960);   // 60 * 2^4 = 960
-        assert_eq!(compute_backoff(6), 1920);  // 60 * 2^5 = 1920
-        assert_eq!(compute_backoff(7), 3600);  // 60 * 2^6 = 3840, capped at 3600
+        assert_eq!(compute_backoff(1), 60); // 60 * 2^0 = 60
+        assert_eq!(compute_backoff(2), 120); // 60 * 2^1 = 120
+        assert_eq!(compute_backoff(3), 240); // 60 * 2^2 = 240
+        assert_eq!(compute_backoff(4), 480); // 60 * 2^3 = 480
+        assert_eq!(compute_backoff(5), 960); // 60 * 2^4 = 960
+        assert_eq!(compute_backoff(6), 1920); // 60 * 2^5 = 1920
+        assert_eq!(compute_backoff(7), 3600); // 60 * 2^6 = 3840, capped at 3600
     }
 
     #[test]

@@ -359,9 +359,7 @@ mod tests {
             max_seconds: 120,
             backoff_strategy: BackoffStrategy::Fixed { seconds: 3 },
         };
-        let supervisor = Supervisor::builder()
-            .with_restart_policy(policy)
-            .build();
+        let supervisor = Supervisor::builder().with_restart_policy(policy).build();
         assert_eq!(supervisor.restart_policy.max_restarts, 10);
         assert_eq!(supervisor.restart_policy.max_seconds, 120);
     }

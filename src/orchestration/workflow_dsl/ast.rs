@@ -119,7 +119,7 @@ mod tests {
         let id = AstNode::Identifier("my_var".into());
         let s = AstNode::StringLit("hello".into());
         let i = AstNode::IntegerLit(42);
-        let f = AstNode::FloatLit(3.14);
+        let f = AstNode::FloatLit(1.23);
         let b = AstNode::BooleanLit(true);
         let cmd = AstNode::Command("echo hello".into());
 
@@ -127,7 +127,7 @@ mod tests {
         assert!(format!("{:?}", id).contains("my_var"));
         assert!(format!("{:?}", s).contains("hello"));
         assert!(format!("{:?}", i).contains("42"));
-        assert!(format!("{:?}", f).contains("3.14"));
+        assert!(format!("{:?}", f).contains("1.23"));
         assert!(format!("{:?}", b).contains("true"));
         assert!(format!("{:?}", cmd).contains("echo hello"));
     }
@@ -136,12 +136,10 @@ mod tests {
     fn test_workflow_node() {
         let wf = AstNode::Workflow {
             name: "build".into(),
-            body: vec![
-                AstNode::Step {
-                    name: "check".into(),
-                    command: Box::new(AstNode::Command("cargo check".into())),
-                },
-            ],
+            body: vec![AstNode::Step {
+                name: "check".into(),
+                command: Box::new(AstNode::Command("cargo check".into())),
+            }],
         };
 
         if let AstNode::Workflow { name, body } = &wf {
@@ -204,7 +202,12 @@ mod tests {
             else_branch: Some(vec![AstNode::Command("echo no".into())]),
         };
 
-        if let AstNode::If { condition, then_branch, else_branch } = &if_node {
+        if let AstNode::If {
+            condition,
+            then_branch,
+            else_branch,
+        } = &if_node
+        {
             assert!(matches!(condition.as_ref(), AstNode::BooleanLit(true)));
             assert_eq!(then_branch.len(), 1);
             assert!(else_branch.is_some());
@@ -244,7 +247,12 @@ mod tests {
             }],
         };
 
-        if let AstNode::For { variable, iterable, body } = &for_node {
+        if let AstNode::For {
+            variable,
+            iterable,
+            body,
+        } = &for_node
+        {
             assert_eq!(variable, "item");
             assert!(matches!(iterable.as_ref(), AstNode::ArrayLit(items) if items.len() == 3));
             assert_eq!(body.len(), 1);
@@ -402,17 +410,15 @@ mod tests {
     fn test_clone_preserves_deep_structure() {
         let original = AstNode::Workflow {
             name: "test".into(),
-            body: vec![
-                AstNode::If {
-                    condition: Box::new(AstNode::Binary {
-                        left: Box::new(AstNode::Identifier("x".into())),
-                        operator: ">".into(),
-                        right: Box::new(AstNode::IntegerLit(0)),
-                    }),
-                    then_branch: vec![AstNode::Command("echo positive".into())],
-                    else_branch: Some(vec![AstNode::Command("echo non-positive".into())]),
-                },
-            ],
+            body: vec![AstNode::If {
+                condition: Box::new(AstNode::Binary {
+                    left: Box::new(AstNode::Identifier("x".into())),
+                    operator: ">".into(),
+                    right: Box::new(AstNode::IntegerLit(0)),
+                }),
+                then_branch: vec![AstNode::Command("echo positive".into())],
+                else_branch: Some(vec![AstNode::Command("echo non-positive".into())]),
+            }],
         };
 
         let cloned = original.clone();

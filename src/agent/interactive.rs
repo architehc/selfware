@@ -1521,10 +1521,31 @@ mod tests {
     #[test]
     fn slash_command_routing_exact_matches() {
         let commands = vec![
-            "/help", "/status", "/stats", "/compress", "/clear", "/tools",
-            "/mode", "/ctx", "/context", "/diff", "/git", "/undo", "/cost",
-            "/model", "/compact", "/verbose", "/config", "/memory", "/copy",
-            "/restore", "/vim", "/theme", "/queue", "/swarm", "/chat",
+            "/help",
+            "/status",
+            "/stats",
+            "/compress",
+            "/clear",
+            "/tools",
+            "/mode",
+            "/ctx",
+            "/context",
+            "/diff",
+            "/git",
+            "/undo",
+            "/cost",
+            "/model",
+            "/compact",
+            "/verbose",
+            "/config",
+            "/memory",
+            "/copy",
+            "/restore",
+            "/vim",
+            "/theme",
+            "/queue",
+            "/swarm",
+            "/chat",
         ];
         for cmd in &commands {
             assert!(

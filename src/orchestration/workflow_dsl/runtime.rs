@@ -139,27 +139,27 @@ impl Runtime {
                 // forked child runtimes.
                 type ParallelResult = Result<(Value, HashMap<String, Value>), String>;
                 let results: Vec<ParallelResult> = std::thread::scope(|scope| {
-                        let handles: Vec<_> = body
-                            .iter()
-                            .map(|node| {
-                                let mut child = self.fork();
-                                let node = node.clone();
-                                scope.spawn(move || {
-                                    let result = child.eval(&node)?;
-                                    // Return result together with any new/updated globals
-                                    Ok((result, child.globals))
-                                })
+                    let handles: Vec<_> = body
+                        .iter()
+                        .map(|node| {
+                            let mut child = self.fork();
+                            let node = node.clone();
+                            scope.spawn(move || {
+                                let result = child.eval(&node)?;
+                                // Return result together with any new/updated globals
+                                Ok((result, child.globals))
                             })
-                            .collect();
+                        })
+                        .collect();
 
-                        handles
-                            .into_iter()
-                            .map(|h| {
-                                h.join()
-                                    .unwrap_or_else(|_| Err("Parallel step panicked".to_string()))
-                            })
-                            .collect()
-                    });
+                    handles
+                        .into_iter()
+                        .map(|h| {
+                            h.join()
+                                .unwrap_or_else(|_| Err("Parallel step panicked".to_string()))
+                        })
+                        .collect()
+                });
 
                 // Collect values and merge globals from completed steps.
                 // Report which steps failed, if any.

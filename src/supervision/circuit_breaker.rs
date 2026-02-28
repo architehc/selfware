@@ -266,8 +266,7 @@ mod tests {
     async fn test_success_keeps_circuit_closed() {
         let cb = CircuitBreaker::new(fast_config());
 
-        let result: Result<i32, CircuitBreakerError<String>> =
-            cb.call(|| async { Ok(42) }).await;
+        let result: Result<i32, CircuitBreakerError<String>> = cb.call(|| async { Ok(42) }).await;
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 42);
@@ -280,8 +279,9 @@ mod tests {
 
         // Cause 2 failures (threshold is 3)
         for _ in 0..2 {
-            let _: Result<i32, _> =
-                cb.call(|| async { Err::<i32, String>("fail".into()) }).await;
+            let _: Result<i32, _> = cb
+                .call(|| async { Err::<i32, String>("fail".into()) })
+                .await;
         }
 
         assert_eq!(cb.current_state(), CircuitState::Closed);
@@ -294,8 +294,9 @@ mod tests {
 
         // Cause 3 failures (threshold is 3)
         for _ in 0..3 {
-            let _: Result<i32, _> =
-                cb.call(|| async { Err::<i32, String>("fail".into()) }).await;
+            let _: Result<i32, _> = cb
+                .call(|| async { Err::<i32, String>("fail".into()) })
+                .await;
         }
 
         assert_eq!(cb.current_state(), CircuitState::Open);
@@ -307,14 +308,14 @@ mod tests {
 
         // Trip the breaker
         for _ in 0..3 {
-            let _: Result<i32, _> =
-                cb.call(|| async { Err::<i32, String>("fail".into()) }).await;
+            let _: Result<i32, _> = cb
+                .call(|| async { Err::<i32, String>("fail".into()) })
+                .await;
         }
         assert_eq!(cb.current_state(), CircuitState::Open);
 
         // Next call should be rejected immediately
-        let result: Result<i32, CircuitBreakerError<String>> =
-            cb.call(|| async { Ok(42) }).await;
+        let result: Result<i32, CircuitBreakerError<String>> = cb.call(|| async { Ok(42) }).await;
 
         assert!(matches!(result, Err(CircuitBreakerError::CircuitOpen)));
     }
@@ -325,8 +326,9 @@ mod tests {
 
         // Trip the breaker
         for _ in 0..3 {
-            let _: Result<i32, _> =
-                cb.call(|| async { Err::<i32, String>("fail".into()) }).await;
+            let _: Result<i32, _> = cb
+                .call(|| async { Err::<i32, String>("fail".into()) })
+                .await;
         }
         assert_eq!(cb.current_state(), CircuitState::Open);
 
@@ -337,8 +339,7 @@ mod tests {
         assert!(cb.should_attempt_reset().await);
 
         // Next call should transition to half-open and succeed
-        let result: Result<i32, CircuitBreakerError<String>> =
-            cb.call(|| async { Ok(1) }).await;
+        let result: Result<i32, CircuitBreakerError<String>> = cb.call(|| async { Ok(1) }).await;
         assert!(result.is_ok());
         assert_eq!(cb.current_state(), CircuitState::HalfOpen);
     }
@@ -349,8 +350,9 @@ mod tests {
 
         // Trip the breaker
         for _ in 0..3 {
-            let _: Result<i32, _> =
-                cb.call(|| async { Err::<i32, String>("fail".into()) }).await;
+            let _: Result<i32, _> = cb
+                .call(|| async { Err::<i32, String>("fail".into()) })
+                .await;
         }
 
         // Wait for reset timeout
@@ -372,21 +374,22 @@ mod tests {
 
         // Trip the breaker
         for _ in 0..3 {
-            let _: Result<i32, _> =
-                cb.call(|| async { Err::<i32, String>("fail".into()) }).await;
+            let _: Result<i32, _> = cb
+                .call(|| async { Err::<i32, String>("fail".into()) })
+                .await;
         }
 
         // Wait for reset timeout
         tokio::time::sleep(Duration::from_millis(60)).await;
 
         // One success to get into half-open
-        let _: Result<i32, CircuitBreakerError<String>> =
-            cb.call(|| async { Ok(1) }).await;
+        let _: Result<i32, CircuitBreakerError<String>> = cb.call(|| async { Ok(1) }).await;
         assert_eq!(cb.current_state(), CircuitState::HalfOpen);
 
         // Fail in half-open -> back to open
-        let _: Result<i32, _> =
-            cb.call(|| async { Err::<i32, String>("fail again".into()) }).await;
+        let _: Result<i32, _> = cb
+            .call(|| async { Err::<i32, String>("fail again".into()) })
+            .await;
         assert_eq!(cb.current_state(), CircuitState::Open);
     }
 
@@ -406,8 +409,9 @@ mod tests {
         let cb = CircuitBreaker::new(config);
 
         // Trip breaker
-        let _: Result<i32, _> =
-            cb.call(|| async { Err::<i32, String>("fail".into()) }).await;
+        let _: Result<i32, _> = cb
+            .call(|| async { Err::<i32, String>("fail".into()) })
+            .await;
         assert_eq!(cb.current_state(), CircuitState::Open);
 
         // Should not reset yet (timeout is 60s)
@@ -420,14 +424,14 @@ mod tests {
 
         // Cause 2 failures (below threshold of 3)
         for _ in 0..2 {
-            let _: Result<i32, _> =
-                cb.call(|| async { Err::<i32, String>("fail".into()) }).await;
+            let _: Result<i32, _> = cb
+                .call(|| async { Err::<i32, String>("fail".into()) })
+                .await;
         }
         assert_eq!(cb.metrics().failure_count, 2);
 
         // A success should reset failure count
-        let _: Result<i32, CircuitBreakerError<String>> =
-            cb.call(|| async { Ok(1) }).await;
+        let _: Result<i32, CircuitBreakerError<String>> = cb.call(|| async { Ok(1) }).await;
         assert_eq!(cb.metrics().failure_count, 0);
     }
 
@@ -436,8 +440,7 @@ mod tests {
         let cb = CircuitBreaker::new(fast_config());
 
         for _ in 0..4 {
-            let _: Result<i32, CircuitBreakerError<String>> =
-                cb.call(|| async { Ok(1) }).await;
+            let _: Result<i32, CircuitBreakerError<String>> = cb.call(|| async { Ok(1) }).await;
         }
 
         let metrics = cb.metrics();

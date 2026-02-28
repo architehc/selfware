@@ -297,7 +297,10 @@ mod tests {
         // Then reset
         aq.adjust_for_pressure(ResourcePressure::None).await;
         let current = aq.current().await;
-        assert_eq!(current.max_concurrent_requests, base.max_concurrent_requests);
+        assert_eq!(
+            current.max_concurrent_requests,
+            base.max_concurrent_requests
+        );
         assert_eq!(current.max_context_tokens, base.max_context_tokens);
     }
 
@@ -386,7 +389,7 @@ mod tests {
     #[tokio::test]
     async fn test_quota_check_fails_system_memory_exceeded() {
         let aq = AdaptiveQuotas::new(small_quotas()); // max_context_tokens = 1000
-        // system_memory limit is max_context_tokens * 100 = 100_000
+                                                      // system_memory limit is max_context_tokens * 100 = 100_000
         let request = ResourceRequest {
             gpu_memory_bytes: 0,
             system_memory_bytes: 200_000, // exceeds 100_000

@@ -366,7 +366,10 @@ mod tests {
         device
             .memory_allocated
             .store(10_000_000_000, Ordering::Relaxed);
-        assert_eq!(device.memory_allocated.load(Ordering::Relaxed), 10_000_000_000);
+        assert_eq!(
+            device.memory_allocated.load(Ordering::Relaxed),
+            10_000_000_000
+        );
     }
 
     // ---- GpuManager allocate/free tests ----

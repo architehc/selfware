@@ -247,32 +247,52 @@ fn test_error_conversion_chains() {
     // AgentError -> SelfwareError
     let agent_err = AgentError::Cancelled;
     let selfware_err: SelfwareError = agent_err.into();
-    assert!(matches!(selfware_err, SelfwareError::Agent(AgentError::Cancelled)));
+    assert!(matches!(
+        selfware_err,
+        SelfwareError::Agent(AgentError::Cancelled)
+    ));
 
     // ApiError -> SelfwareError
     let api_err = ApiError::Timeout;
     let selfware_err: SelfwareError = api_err.into();
-    assert!(matches!(selfware_err, SelfwareError::Api(ApiError::Timeout)));
+    assert!(matches!(
+        selfware_err,
+        SelfwareError::Api(ApiError::Timeout)
+    ));
 
     // ToolError -> SelfwareError
     let tool_err = ToolError::Timeout;
     let selfware_err: SelfwareError = tool_err.into();
-    assert!(matches!(selfware_err, SelfwareError::Tool(ToolError::Timeout)));
+    assert!(matches!(
+        selfware_err,
+        SelfwareError::Tool(ToolError::Timeout)
+    ));
 
     // SafetyError -> SelfwareError
-    let safety_err = SafetyError::PathTraversal { path: "x".to_string() };
+    let safety_err = SafetyError::PathTraversal {
+        path: "x".to_string(),
+    };
     let selfware_err: SelfwareError = safety_err.into();
-    assert!(matches!(selfware_err, SelfwareError::Safety(SafetyError::PathTraversal { .. })));
+    assert!(matches!(
+        selfware_err,
+        SelfwareError::Safety(SafetyError::PathTraversal { .. })
+    ));
 
     // SessionError -> SelfwareError
     let session_err = SessionError::HistoryCorrupted("bad".to_string());
     let selfware_err: SelfwareError = session_err.into();
-    assert!(matches!(selfware_err, SelfwareError::Session(SessionError::HistoryCorrupted(_))));
+    assert!(matches!(
+        selfware_err,
+        SelfwareError::Session(SessionError::HistoryCorrupted(_))
+    ));
 
     // ResourceError -> SelfwareError
     let resource_err = ResourceError::Unavailable("gone".to_string());
     let selfware_err: SelfwareError = resource_err.into();
-    assert!(matches!(selfware_err, SelfwareError::Resource(ResourceError::Unavailable(_))));
+    assert!(matches!(
+        selfware_err,
+        SelfwareError::Resource(ResourceError::Unavailable(_))
+    ));
 }
 
 // =========================================================================

@@ -939,7 +939,11 @@ mod tests {
     // =========================================================================
     // Helper: mirrors should_prompt_for_action logic for standalone testing
     // =========================================================================
-    fn should_prompt_for_action(content: &str, has_no_tool_calls: bool, use_last_message: bool) -> bool {
+    fn should_prompt_for_action(
+        content: &str,
+        has_no_tool_calls: bool,
+        use_last_message: bool,
+    ) -> bool {
         if !has_no_tool_calls || use_last_message || content.len() >= 1000 {
             return false;
         }
@@ -957,12 +961,36 @@ mod tests {
 
     #[test]
     fn test_should_prompt_when_intent_phrase_present() {
-        assert!(should_prompt_for_action("Let me check the file", true, false));
-        assert!(should_prompt_for_action("I'll fix that bug now", true, false));
-        assert!(should_prompt_for_action("I will refactor the module", true, false));
-        assert!(should_prompt_for_action("Let's start by reading the code", true, false));
-        assert!(should_prompt_for_action("First, I need to understand", true, false));
-        assert!(should_prompt_for_action("Going to investigate", true, false));
+        assert!(should_prompt_for_action(
+            "Let me check the file",
+            true,
+            false
+        ));
+        assert!(should_prompt_for_action(
+            "I'll fix that bug now",
+            true,
+            false
+        ));
+        assert!(should_prompt_for_action(
+            "I will refactor the module",
+            true,
+            false
+        ));
+        assert!(should_prompt_for_action(
+            "Let's start by reading the code",
+            true,
+            false
+        ));
+        assert!(should_prompt_for_action(
+            "First, I need to understand",
+            true,
+            false
+        ));
+        assert!(should_prompt_for_action(
+            "Going to investigate",
+            true,
+            false
+        ));
     }
 
     #[test]
@@ -985,7 +1013,11 @@ mod tests {
     #[test]
     fn test_should_not_prompt_for_plain_response() {
         assert!(!should_prompt_for_action("The answer is 42.", true, false));
-        assert!(!should_prompt_for_action("Here is the result.", true, false));
+        assert!(!should_prompt_for_action(
+            "Here is the result.",
+            true,
+            false
+        ));
     }
 
     #[test]
@@ -1002,7 +1034,7 @@ mod tests {
     #[test]
     fn test_collect_tool_calls_from_native_calls() {
         // Simulates collect_tool_calls when native_function_calling = true
-        let native_calls = vec![
+        let native_calls = [
             ApiToolCall {
                 id: "call_1".to_string(),
                 call_type: "function".to_string(),
@@ -1133,10 +1165,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_tool_call_context_without_native_fc() {
-        let server = MockLlmServer::builder()
-            .with_response("done")
-            .build()
-            .await;
+        let server = MockLlmServer::builder().with_response("done").build().await;
 
         let config = mock_config(format!("{}/v1", server.url()));
         let agent = Agent::new(config).await.unwrap();
@@ -1155,10 +1184,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_tool_call_context_with_native_fc_and_id() {
-        let server = MockLlmServer::builder()
-            .with_response("done")
-            .build()
-            .await;
+        let server = MockLlmServer::builder().with_response("done").build().await;
 
         let mut config = mock_config(format!("{}/v1", server.url()));
         config.agent.native_function_calling = true;
@@ -1198,9 +1224,8 @@ mod tests {
     #[test]
     fn test_warn_condition_no_warn_when_calls_present() {
         let content = "Using tool_name to execute function";
-        let tool_calls: Vec<CollectedToolCall> = vec![
-            ("file_read".to_string(), "{}".to_string(), None),
-        ];
+        let tool_calls: Vec<CollectedToolCall> =
+            vec![("file_read".to_string(), "{}".to_string(), None)];
 
         let should_warn = tool_calls.is_empty()
             && (content.contains("<tool")

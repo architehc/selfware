@@ -429,10 +429,8 @@ impl Agent {
 
 #[cfg(test)]
 mod tests {
-    use crate::checkpoint::{
-        TaskCheckpoint, TaskStatus, ToolCallLog, ErrorLog, GitCheckpointInfo,
-    };
     use crate::api::types::Message;
+    use crate::checkpoint::{GitCheckpointInfo, TaskCheckpoint, TaskStatus, ToolCallLog};
     use crate::config::ContinuousWorkConfig;
     use chrono::Utc;
 

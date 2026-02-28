@@ -1162,19 +1162,13 @@ mod tests {
 
     #[test]
     fn default_workflow_name_no_extension() {
-        assert_eq!(
-            default_workflow_name(Path::new("Makefile")),
-            "Makefile"
-        );
+        assert_eq!(default_workflow_name(Path::new("Makefile")), "Makefile");
     }
 
     #[test]
     fn default_workflow_name_falls_back_for_empty_path() {
         // Path with no file stem returns the default
-        assert_eq!(
-            default_workflow_name(Path::new("/")),
-            DEFAULT_WORKFLOW_NAME
-        );
+        assert_eq!(default_workflow_name(Path::new("/")), DEFAULT_WORKFLOW_NAME);
     }
 
     // ── Theme / OutputFormat enum tests ──
@@ -1195,11 +1189,14 @@ mod tests {
 
     #[test]
     fn constants_have_reasonable_values() {
-        assert!(DEFAULT_MULTI_CHAT_CONCURRENCY >= 1);
-        assert!(DEFAULT_MULTI_CHAT_CONCURRENCY <= 64);
-        assert!(JOURNAL_DESC_MAX_CHARS > 0);
-        assert!(COMMIT_HASH_PREFIX_CHARS > 0);
-        assert!(MAX_JOURNAL_ERRORS_DISPLAY > 0);
+        let concurrency = DEFAULT_MULTI_CHAT_CONCURRENCY;
+        assert!((1..=64).contains(&concurrency));
+        let desc_max: usize = JOURNAL_DESC_MAX_CHARS;
+        assert_ne!(desc_max, 0);
+        let hash_prefix: usize = COMMIT_HASH_PREFIX_CHARS;
+        assert_ne!(hash_prefix, 0);
+        let max_errors: usize = MAX_JOURNAL_ERRORS_DISPLAY;
+        assert_ne!(max_errors, 0);
         assert!(!DEFAULT_WORKFLOW_NAME.is_empty());
     }
 }

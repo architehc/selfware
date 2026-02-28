@@ -745,12 +745,8 @@ mod tests {
             total_tokens: 0,
         };
 
-        let tokens = CognitiveSystem::estimate_context_tokens(
-            &working,
-            &episodic,
-            &semantic,
-            &None,
-        );
+        let tokens =
+            CognitiveSystem::estimate_context_tokens(&working, &episodic, &semantic, &None);
 
         assert_eq!(tokens, 0);
     }
@@ -768,12 +764,8 @@ mod tests {
             total_tokens: 0,
         };
 
-        let tokens = CognitiveSystem::estimate_context_tokens(
-            &working,
-            &episodic,
-            &semantic,
-            &None,
-        );
+        let tokens =
+            CognitiveSystem::estimate_context_tokens(&working, &episodic, &semantic, &None);
 
         // Each message adds estimate_tokens_with_overhead(content, 50)
         // "Hello" ~ 1 token + 50 overhead = ~51
@@ -793,12 +785,8 @@ mod tests {
             total_tokens: 0,
         };
 
-        let tokens = CognitiveSystem::estimate_context_tokens(
-            &working,
-            &episodic,
-            &semantic,
-            &None,
-        );
+        let tokens =
+            CognitiveSystem::estimate_context_tokens(&working, &episodic, &semantic, &None);
 
         let expected_episodic: usize = episodic.iter().map(|e| e.token_count).sum();
         assert_eq!(tokens, expected_episodic);
@@ -817,12 +805,8 @@ mod tests {
             total_tokens: 500,
         };
 
-        let tokens = CognitiveSystem::estimate_context_tokens(
-            &working,
-            &episodic,
-            &semantic,
-            &None,
-        );
+        let tokens =
+            CognitiveSystem::estimate_context_tokens(&working, &episodic, &semantic, &None);
 
         assert_eq!(tokens, 500);
     }
@@ -837,12 +821,8 @@ mod tests {
             total_tokens: 200,
         };
 
-        let tokens = CognitiveSystem::estimate_context_tokens(
-            &working,
-            &episodic,
-            &semantic,
-            &None,
-        );
+        let tokens =
+            CognitiveSystem::estimate_context_tokens(&working, &episodic, &semantic, &None);
 
         // Should be sum of all three components
         let working_tokens = estimate_tokens_with_overhead("Hello", 50);
@@ -872,12 +852,8 @@ mod tests {
             suggestions: vec!["Suggestion".to_string()],
         });
 
-        let tokens = CognitiveSystem::estimate_context_tokens(
-            &working,
-            &episodic,
-            &semantic,
-            &self_ctx,
-        );
+        let tokens =
+            CognitiveSystem::estimate_context_tokens(&working, &episodic, &semantic, &self_ctx);
 
         assert!(tokens > 0, "Self-improvement context should add tokens");
     }
@@ -933,7 +909,11 @@ mod tests {
     fn test_llm_context_to_prompt_with_episodic() {
         let ctx = LlmContext {
             working: make_working_context(Vec::new()),
-            episodic: vec![make_episode("ep-1", Importance::Normal, "Found a bug in the parser")],
+            episodic: vec![make_episode(
+                "ep-1",
+                Importance::Normal,
+                "Found a bug in the parser",
+            )],
             semantic: CodeContext {
                 files: Vec::new(),
                 total_tokens: 0,
