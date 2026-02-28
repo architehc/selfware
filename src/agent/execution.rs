@@ -153,15 +153,13 @@ impl Agent {
                 continue;
             }
 
-            #[cfg(feature = "tui")]
-            self.emit_tui_event(TuiEvent::ToolStarted { name: name.clone() });
+            self.emit_event(AgentEvent::ToolStarted { name: name.clone() });
 
             let args =
                 match self.parse_tool_args(&name, &args_str, &call_id, use_native_fc, start_time) {
                     Some(args) => args,
                     None => {
-                        #[cfg(feature = "tui")]
-                        self.emit_tui_event(TuiEvent::ToolCompleted {
+                        self.emit_event(AgentEvent::ToolCompleted {
                             name: name.clone(),
                             success: false,
                             duration_ms: start_time.elapsed().as_millis() as u64,
@@ -177,8 +175,7 @@ impl Agent {
                 .await?;
 
             let duration_ms = start_time.elapsed().as_millis() as u64;
-            #[cfg(feature = "tui")]
-            self.emit_tui_event(TuiEvent::ToolCompleted {
+            self.emit_event(AgentEvent::ToolCompleted {
                 name: name.clone(),
                 success,
                 duration_ms,

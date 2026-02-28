@@ -372,6 +372,12 @@ pub struct SafetyConfig {
     pub protected_branches: Vec<String>,
     #[serde(default = "default_require_confirmation")]
     pub require_confirmation: Vec<String>,
+    /// When true, config files with overly permissive permissions (group- or
+    /// world-readable, i.e. mode & 0o077 != 0) cause a hard error instead of a
+    /// warning.  Can also be activated via `SELFWARE_STRICT_PERMISSIONS=1`.
+    /// Default: false (backward compatible -- warn only).
+    #[serde(default)]
+    pub strict_permissions: bool,
 }
 
 /// Agent behavior settings: iteration limits, timeouts, token budgets, and calling mode.
@@ -424,6 +430,7 @@ impl Default for SafetyConfig {
             denied_paths: default_denied_paths(),
             protected_branches: default_protected_branches(),
             require_confirmation: default_require_confirmation(),
+            strict_permissions: false,
         }
     }
 }
@@ -526,12 +533,28 @@ impl Config {
     /// On Unix, check whether a config file has overly permissive permissions
     /// (group- or world-readable). Since the config may contain API keys, we
     /// warn the user to tighten permissions.
+    ///
+    /// When `strict` is true, world/group-readable permissions cause a hard
+    /// error instead of a warning. Strict mode can be enabled via the
+    /// `safety.strict_permissions` config option or the
+    /// `SELFWARE_STRICT_PERMISSIONS=1` environment variable.
     #[cfg(unix)]
-    fn check_config_file_permissions(path: &str) {
+    fn check_config_file_permissions(path: &str, strict: bool) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         if let Ok(metadata) = std::fs::metadata(path) {
             let mode = metadata.permissions().mode();
             if mode & 0o077 != 0 {
+                if strict {
+                    bail!(
+                        "Config file '{}' has insecure permissions (mode {:o}). \
+                         The file is accessible by other users and may contain API keys. \
+                         Fix with: chmod 600 {} — or disable strict mode by setting \
+                         safety.strict_permissions = false",
+                        path,
+                        mode & 0o777,
+                        path
+                    );
+                }
                 warn!(
                     config_path = %path,
                     file_mode = format_args!("{:o}", mode & 0o777),
@@ -541,6 +564,7 @@ impl Config {
                 );
             }
         }
+        Ok(())
     }
 
     pub fn load(path: Option<&str>) -> Result<Self> {
@@ -585,11 +609,17 @@ impl Config {
             }
         };
 
-        // On Unix, warn if the config file is world-readable since it may
-        // contain API keys.
+        // On Unix, check if the config file has overly permissive permissions.
+        // Strict mode (error instead of warning) is enabled by either the
+        // config option `safety.strict_permissions = true` or the environment
+        // variable `SELFWARE_STRICT_PERMISSIONS=1`.
         #[cfg(unix)]
         if let Some(ref cfg_path) = loaded_from_path {
-            Self::check_config_file_permissions(cfg_path);
+            let env_strict = std::env::var("SELFWARE_STRICT_PERMISSIONS")
+                .map(|v| v == "1")
+                .unwrap_or(false);
+            let strict = config.safety.strict_permissions || env_strict;
+            Self::check_config_file_permissions(cfg_path, strict)?;
         }
         // Suppress unused-variable warning on non-Unix platforms
         let _ = &loaded_from_path;
@@ -1163,6 +1193,7 @@ mod tests {
                 denied_paths: vec!["**/.git/**".to_string()],
                 protected_branches: vec!["main".to_string()],
                 require_confirmation: vec!["deploy".to_string()],
+                strict_permissions: false,
             },
             agent: AgentConfig {
                 max_iterations: 50,

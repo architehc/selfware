@@ -87,6 +87,7 @@ async fn test_file_write_restricted_directory_returns_error() {
         denied_paths: vec!["/etc/**".to_string()],
         protected_branches: vec![],
         require_confirmation: vec![],
+        strict_permissions: false,
     };
 
     let tool = FileWrite::with_safety_config(safety);

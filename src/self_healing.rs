@@ -1023,7 +1023,87 @@ pub enum ErrorClass {
 }
 
 impl ErrorClass {
+    /// Classify an `anyhow::Error` by attempting typed downcasts first,
+    /// then falling back to the string-based [`classify`](Self::classify) method.
+    ///
+    /// Typed checks are more robust than string matching because they survive
+    /// refactoring -- if an upstream library changes its error messages, the
+    /// typed downcast still works. String matching is kept as a fallback for
+    /// errors that cannot be represented by a concrete type.
+    pub fn classify_anyhow(error: &anyhow::Error) -> Self {
+        // --- Typed downcasts (preferred) ---
+
+        // reqwest::Error -- covers network, timeout, and HTTP status errors
+        if let Some(reqwest_err) = error.downcast_ref::<reqwest::Error>() {
+            if reqwest_err.is_timeout() {
+                return ErrorClass::Timeout;
+            }
+            if reqwest_err.is_connect() {
+                return ErrorClass::Network;
+            }
+            if let Some(status) = reqwest_err.status() {
+                return match status.as_u16() {
+                    429 => ErrorClass::RateLimit,
+                    401 | 403 => ErrorClass::AuthError,
+                    _ => ErrorClass::Network,
+                };
+            }
+            // Other reqwest errors (e.g., redirect, body, decode) are network-ish
+            return ErrorClass::Network;
+        }
+
+        // std::io::Error -- covers OS-level failures
+        if let Some(io_err) = error.downcast_ref::<std::io::Error>() {
+            return match io_err.kind() {
+                std::io::ErrorKind::TimedOut => ErrorClass::Timeout,
+                std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::NotConnected
+                | std::io::ErrorKind::AddrNotAvailable
+                | std::io::ErrorKind::AddrInUse => ErrorClass::Network,
+                std::io::ErrorKind::PermissionDenied => ErrorClass::AuthError,
+                std::io::ErrorKind::OutOfMemory => ErrorClass::ResourceExhaustion,
+                _ => {
+                    // Fall through to string matching for uncommon io errors
+                    let msg = io_err.to_string();
+                    if msg.contains("no space") || msg.contains("disk full") {
+                        ErrorClass::ResourceExhaustion
+                    } else {
+                        ErrorClass::Unknown
+                    }
+                }
+            };
+        }
+
+        // serde_json::Error -- JSON parse/deserialization failures
+        if error.downcast_ref::<serde_json::Error>().is_some() {
+            return ErrorClass::ParseError;
+        }
+
+        // --- Fallback: string-based classification ---
+        let message = format!("{:#}", error);
+        let error_type = error
+            .chain()
+            .last()
+            .map(|e| {
+                // Use the root cause type name when available via Debug
+                let dbg = format!("{:?}", e);
+                // Extract just the type prefix if it looks like "TypeName { ... }"
+                dbg.split_whitespace()
+                    .next()
+                    .unwrap_or("unknown")
+                    .to_string()
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        Self::classify(&error_type, &message)
+    }
+
     /// Classify an error based on its type and message content.
+    ///
+    /// This is the string-based fallback used when the original typed error is
+    /// not available. Prefer [`classify_anyhow`](Self::classify_anyhow) when
+    /// you have an `anyhow::Error`.
     pub fn classify(error_type: &str, message: &str) -> Self {
         let msg = message.to_lowercase();
         let etype = error_type.to_lowercase();
@@ -2029,6 +2109,51 @@ mod tests {
         let json = serde_json::to_string(&class).unwrap();
         let deserialized: ErrorClass = serde_json::from_str(&json).unwrap();
         assert_eq!(class, deserialized);
+    }
+
+    // ================================================================
+    // classify_anyhow typed downcast tests
+    // ================================================================
+
+    #[test]
+    fn test_classify_anyhow_io_connection_refused() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused");
+        let err: anyhow::Error = io_err.into();
+        assert_eq!(ErrorClass::classify_anyhow(&err), ErrorClass::Network);
+    }
+
+    #[test]
+    fn test_classify_anyhow_io_timed_out() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out");
+        let err: anyhow::Error = io_err.into();
+        assert_eq!(ErrorClass::classify_anyhow(&err), ErrorClass::Timeout);
+    }
+
+    #[test]
+    fn test_classify_anyhow_io_permission_denied() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let err: anyhow::Error = io_err.into();
+        assert_eq!(ErrorClass::classify_anyhow(&err), ErrorClass::AuthError);
+    }
+
+    #[test]
+    fn test_classify_anyhow_serde_json_error() {
+        let json_err = serde_json::from_str::<serde_json::Value>("not valid json").unwrap_err();
+        let err: anyhow::Error = json_err.into();
+        assert_eq!(ErrorClass::classify_anyhow(&err), ErrorClass::ParseError);
+    }
+
+    #[test]
+    fn test_classify_anyhow_fallback_to_string() {
+        // An anyhow error with no typed inner error falls back to string matching
+        let err = anyhow::anyhow!("rate limit exceeded");
+        assert_eq!(ErrorClass::classify_anyhow(&err), ErrorClass::RateLimit);
+    }
+
+    #[test]
+    fn test_classify_anyhow_unknown_fallback() {
+        let err = anyhow::anyhow!("something completely unrecognizable");
+        assert_eq!(ErrorClass::classify_anyhow(&err), ErrorClass::Unknown);
     }
 
     // ================================================================

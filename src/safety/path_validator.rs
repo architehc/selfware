@@ -351,6 +351,7 @@ mod tests {
             denied_paths: denied.into_iter().map(|s| s.to_string()).collect(),
             protected_branches: vec![],
             require_confirmation: vec![],
+            strict_permissions: false,
         }
     }
 

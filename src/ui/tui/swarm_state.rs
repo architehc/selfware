@@ -556,4 +556,352 @@ mod tests {
             assert!(state.get_agent("nonexistent").is_none());
         }
     }
+
+    #[test]
+    fn test_get_agent_mut() {
+        let swarm = Arc::new(RwLock::new(create_dev_swarm()));
+        let mut state = SwarmUiState::new(swarm);
+        state.sync();
+
+        if let Some(first_agent) = state.agents.first() {
+            let id = first_agent.id.clone();
+            let agent = state.get_agent_mut(&id).unwrap();
+            agent.trust_score = 0.99;
+            assert!((state.get_agent(&id).unwrap().trust_score - 0.99).abs() < f32::EPSILON);
+        }
+        assert!(state.get_agent_mut("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_avatar_role_mapping() {
+        use crate::ui::tui::animation::agent_avatar::AgentRole as AvatarRole;
+
+        let cases = vec![
+            (AgentRole::Architect, Some(AvatarRole::Architect)),
+            (AgentRole::Coder, Some(AvatarRole::Coder)),
+            (AgentRole::Tester, Some(AvatarRole::Tester)),
+            (AgentRole::Reviewer, Some(AvatarRole::Reviewer)),
+            (AgentRole::Documenter, Some(AvatarRole::Documenter)),
+            (AgentRole::DevOps, Some(AvatarRole::DevOps)),
+            (AgentRole::Security, Some(AvatarRole::Security)),
+            (AgentRole::Performance, Some(AvatarRole::Performance)),
+            (AgentRole::General, None),
+        ];
+
+        for (role, expected) in cases {
+            let agent = Agent::new("Test", role);
+            let ui_state = AgentUiState::from_agent(&agent);
+            assert_eq!(
+                ui_state.avatar_role(),
+                expected,
+                "avatar_role mismatch for {:?}",
+                role
+            );
+        }
+    }
+
+    #[test]
+    fn test_status_to_activity_all_variants() {
+        assert_eq!(
+            AgentUiState::status_to_activity(AgentStatus::Idle),
+            ActivityLevel::Idle
+        );
+        assert_eq!(
+            AgentUiState::status_to_activity(AgentStatus::Working),
+            ActivityLevel::High
+        );
+        assert_eq!(
+            AgentUiState::status_to_activity(AgentStatus::Waiting),
+            ActivityLevel::Medium
+        );
+        assert_eq!(
+            AgentUiState::status_to_activity(AgentStatus::Completed),
+            ActivityLevel::Complete
+        );
+        assert_eq!(
+            AgentUiState::status_to_activity(AgentStatus::Error),
+            ActivityLevel::Error
+        );
+        assert_eq!(
+            AgentUiState::status_to_activity(AgentStatus::Paused),
+            ActivityLevel::Idle
+        );
+    }
+
+    #[test]
+    fn test_agent_ui_state_from_agent_fields() {
+        let mut agent = Agent::new("Alice", AgentRole::Architect);
+        agent.trust_score = 0.9;
+        agent.status = AgentStatus::Working;
+
+        let ui = AgentUiState::from_agent(&agent);
+        assert_eq!(ui.id, agent.id);
+        assert_eq!(ui.name, "Alice");
+        assert_eq!(ui.role, AgentRole::Architect);
+        assert_eq!(ui.status, AgentStatus::Working);
+        assert_eq!(ui.activity, ActivityLevel::High);
+        assert!((ui.trust_score - 0.9).abs() < f32::EPSILON);
+        assert_eq!(ui.tokens_processed, 0);
+        assert!(ui.current_task.is_none());
+        assert_eq!(ui.position, (0, 0));
+        // New agent with no tasks has success_rate 1.0
+        assert!((ui.success_rate - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_decision_view_from_decision() {
+        use crate::orchestration::swarm::{Decision, DecisionStatus, Vote};
+
+        let mut decision = Decision::new(
+            "Use Rust or Go?",
+            vec!["Rust".to_string(), "Go".to_string()],
+        );
+        // Add a vote
+        decision
+            .votes
+            .push(Vote::new("agent1", AgentRole::Coder, "Rust", 0.9, "Performance"));
+
+        let view = DecisionView::from_decision(&decision);
+        assert_eq!(view.id, decision.id);
+        assert_eq!(view.question, "Use Rust or Go?");
+        assert_eq!(view.options, vec!["Rust".to_string(), "Go".to_string()]);
+        assert_eq!(view.vote_count, 1);
+        assert_eq!(view.status, DecisionStatus::Pending);
+        assert!(view.outcome.is_none());
+    }
+
+    #[test]
+    fn test_decision_view_with_outcome() {
+        use crate::orchestration::swarm::{Decision, DecisionStatus};
+
+        let mut decision = Decision::new("Framework?", vec!["A".to_string(), "B".to_string()]);
+        decision.status = DecisionStatus::Resolved;
+        decision.outcome = Some("A".to_string());
+
+        let view = DecisionView::from_decision(&decision);
+        assert_eq!(view.status, DecisionStatus::Resolved);
+        assert_eq!(view.outcome, Some("A".to_string()));
+    }
+
+    #[test]
+    fn test_task_view_from_task() {
+        use crate::orchestration::swarm::{SwarmTask, TaskStatus};
+
+        let task = SwarmTask::new("Implement auth")
+            .with_role(AgentRole::Coder)
+            .with_priority(8);
+
+        let view = TaskView::from_task(&task);
+        assert_eq!(view.id, task.id);
+        assert_eq!(view.description, "Implement auth");
+        assert_eq!(view.priority, 8);
+        assert_eq!(view.status, TaskStatus::Pending);
+        assert!(view.assigned_agents.is_empty());
+        assert_eq!(view.result_count, 0);
+    }
+
+    #[test]
+    fn test_task_view_with_results() {
+        use crate::orchestration::swarm::SwarmTask;
+
+        let mut task = SwarmTask::new("Build feature");
+        task.results
+            .insert("agent1".to_string(), "Done".to_string());
+        task.results
+            .insert("agent2".to_string(), "Done".to_string());
+        task.assigned_agents = vec!["agent1".to_string(), "agent2".to_string()];
+
+        let view = TaskView::from_task(&task);
+        assert_eq!(view.result_count, 2);
+        assert_eq!(view.assigned_agents.len(), 2);
+    }
+
+    #[test]
+    fn test_memory_entry_view_short_value() {
+        use crate::orchestration::swarm::MemoryEntry;
+
+        let entry = MemoryEntry {
+            key: "k".to_string(),
+            value: "short".to_string(),
+            created_by: "a1".to_string(),
+            created_at: 0,
+            modified_by: Some("a2".to_string()),
+            modified_at: Some(100),
+            access_count: 0,
+            tags: vec![],
+        };
+
+        let view = MemoryEntryView::from_entry(&entry);
+        assert_eq!(view.value_preview, "short");
+        assert!(!view.value_preview.ends_with("..."));
+        assert_eq!(view.key, "k");
+        assert_eq!(view.created_by, "a1");
+        assert_eq!(view.modified_by, Some("a2".to_string()));
+        assert!(view.tags.is_empty());
+    }
+
+    #[test]
+    fn test_memory_entry_view_exactly_50_chars() {
+        use crate::orchestration::swarm::MemoryEntry;
+
+        // Exactly 50 chars: should NOT truncate
+        let value: String = "a".repeat(50);
+        let entry = MemoryEntry {
+            key: "k".to_string(),
+            value: value.clone(),
+            created_by: "a1".to_string(),
+            created_at: 0,
+            modified_by: None,
+            modified_at: None,
+            access_count: 0,
+            tags: vec![],
+        };
+
+        let view = MemoryEntryView::from_entry(&entry);
+        assert_eq!(view.value_preview, value);
+        assert!(!view.value_preview.ends_with("..."));
+    }
+
+    #[test]
+    fn test_memory_entry_view_51_chars_truncates() {
+        use crate::orchestration::swarm::MemoryEntry;
+
+        let value: String = "b".repeat(51);
+        let entry = MemoryEntry {
+            key: "k".to_string(),
+            value,
+            created_by: "a1".to_string(),
+            created_at: 0,
+            modified_by: None,
+            modified_at: None,
+            access_count: 0,
+            tags: vec![],
+        };
+
+        let view = MemoryEntryView::from_entry(&entry);
+        assert!(view.value_preview.ends_with("..."));
+        // 50 chars + "..." = 53 chars
+        assert_eq!(view.value_preview.chars().count(), 53);
+    }
+
+    #[test]
+    fn test_calculate_agent_positions() {
+        let swarm = Arc::new(RwLock::new(create_dev_swarm()));
+        let mut state = SwarmUiState::new(swarm);
+        state.sync();
+
+        // Dev swarm has 4 agents, arranged in 2 columns
+        assert_eq!(state.agents.len(), 4);
+        // Agent 0: col=0, row=0 => (0*15, 0*5) = (0, 0)
+        assert_eq!(state.agents[0].position, (0, 0));
+        // Agent 1: col=1, row=0 => (1*15, 0*5) = (15, 0)
+        assert_eq!(state.agents[1].position, (15, 0));
+        // Agent 2: col=0, row=1 => (0*15, 1*5) = (0, 5)
+        assert_eq!(state.agents[2].position, (0, 5));
+        // Agent 3: col=1, row=1 => (1*15, 1*5) = (15, 5)
+        assert_eq!(state.agents[3].position, (15, 5));
+    }
+
+    #[test]
+    fn test_swarm_stats_default() {
+        let stats = SwarmStats::default();
+        assert_eq!(stats.total_agents, 0);
+        assert_eq!(stats.active_agents, 0);
+        assert_eq!(stats.idle_agents, 0);
+        assert_eq!(stats.pending_tasks, 0);
+        assert_eq!(stats.completed_tasks, 0);
+        assert_eq!(stats.pending_decisions, 0);
+        assert!((stats.average_trust - 0.0).abs() < f32::EPSILON);
+        assert_eq!(stats.memory_entries, 0);
+    }
+
+    #[test]
+    fn test_event_type_all_icons() {
+        // Verify every variant has a non-empty icon
+        let variants = vec![
+            EventType::AgentStarted,
+            EventType::AgentCompleted,
+            EventType::AgentError,
+            EventType::TaskCreated,
+            EventType::TaskCompleted,
+            EventType::DecisionCreated,
+            EventType::DecisionResolved,
+            EventType::MemoryUpdated,
+            EventType::ConsensusReached,
+            EventType::ConflictDetected,
+            EventType::VoteCast,
+        ];
+        for v in variants {
+            assert!(!v.icon().is_empty(), "icon empty for {:?}", v);
+        }
+    }
+
+    #[test]
+    fn test_add_event_without_agent_id() {
+        let swarm = Arc::new(RwLock::new(create_dev_swarm()));
+        let mut state = SwarmUiState::new(swarm);
+
+        state.add_event(EventType::MemoryUpdated, "Memory changed", None);
+
+        assert_eq!(state.events.len(), 1);
+        assert!(state.events[0].agent_id.is_none());
+        assert_eq!(state.events[0].message, "Memory changed");
+        assert!(!state.events[0].timestamp.is_empty());
+    }
+
+    #[test]
+    fn test_event_log_overflow_preserves_latest() {
+        let swarm = Arc::new(RwLock::new(create_dev_swarm()));
+        let mut state = SwarmUiState::new(swarm);
+
+        for i in 0..110 {
+            state.add_event(EventType::MemoryUpdated, format!("Event {}", i), None);
+        }
+
+        assert_eq!(state.events.len(), 100);
+        // The oldest events (0..9) should have been evicted
+        assert_eq!(state.events[0].message, "Event 10");
+        assert_eq!(state.events[99].message, "Event 109");
+    }
+
+    #[test]
+    fn test_swarm_ui_state_new_is_empty() {
+        let swarm = Arc::new(RwLock::new(create_dev_swarm()));
+        let state = SwarmUiState::new(swarm);
+
+        // Before sync, all collections are empty
+        assert!(state.agents.is_empty());
+        assert!(state.memory_entries.is_empty());
+        assert!(state.decisions.is_empty());
+        assert!(state.tasks.is_empty());
+        assert!(state.events.is_empty());
+    }
+
+    #[test]
+    fn test_sync_updates_stats() {
+        use crate::orchestration::swarm::Swarm;
+
+        let mut swarm = Swarm::new();
+        swarm.add_agent(Agent::new("A1", AgentRole::Coder));
+        swarm.add_agent(Agent::new("A2", AgentRole::Tester));
+        let swarm = Arc::new(RwLock::new(swarm));
+        let mut state = SwarmUiState::new(swarm);
+
+        state.sync();
+
+        assert_eq!(state.stats.total_agents, 2);
+        // Both agents start Idle
+        assert_eq!(state.stats.idle_agents, 2);
+        assert_eq!(state.stats.active_agents, 0);
+    }
+
+    #[test]
+    fn test_swarm_ref_is_shared() {
+        let swarm = Arc::new(RwLock::new(create_dev_swarm()));
+        let state = SwarmUiState::new(Arc::clone(&swarm));
+
+        // swarm() returns a clone of the Arc
+        let s = state.swarm();
+        assert!(Arc::ptr_eq(&s, &swarm));
+    }
 }

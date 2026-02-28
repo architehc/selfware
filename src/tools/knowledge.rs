@@ -539,10 +539,7 @@ impl Tool for KnowledgeQuery {
                     "incoming_edges": edges_to
                 }));
             } else {
-                return Ok(json!({
-                    "success": false,
-                    "error": format!("Node not found: {}", node_id)
-                }));
+                anyhow::bail!("Node not found: {}", node_id);
             }
         }
 
@@ -648,10 +645,7 @@ impl Tool for KnowledgeClear {
             .unwrap_or(false);
 
         if !confirm {
-            return Ok(json!({
-                "success": false,
-                "error": "Must set confirm: true to clear the knowledge graph"
-            }));
+            anyhow::bail!("Must set confirm: true to clear the knowledge graph");
         }
 
         let mut graph = KNOWLEDGE_GRAPH.write().await;
@@ -705,18 +699,15 @@ impl Tool for KnowledgeRemove {
 
         let mut graph = KNOWLEDGE_GRAPH.write().await;
 
-        if let Some(removed) = graph.remove_node(node_id) {
-            Ok(json!({
-                "success": true,
-                "removed": removed,
-                "message": format!("Removed node: {}", node_id)
-            }))
-        } else {
-            Ok(json!({
-                "success": false,
-                "error": format!("Node not found: {}", node_id)
-            }))
-        }
+        let removed = graph
+            .remove_node(node_id)
+            .ok_or_else(|| anyhow::anyhow!("Node not found: {}", node_id))?;
+
+        Ok(json!({
+            "success": true,
+            "removed": removed,
+            "message": format!("Removed node: {}", node_id)
+        }))
     }
 }
 
@@ -1067,8 +1058,12 @@ mod tests {
     #[tokio::test]
     async fn test_knowledge_clear_no_confirm() {
         let tool = KnowledgeClear;
-        let result = tool.execute(json!({})).await.unwrap();
-        assert_eq!(result["success"], false);
+        let result = tool.execute(json!({})).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Must set confirm"));
     }
 
     // Additional comprehensive tests

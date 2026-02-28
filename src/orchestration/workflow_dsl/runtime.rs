@@ -2,11 +2,13 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use tracing::warn;
+use std::sync::Arc;
 
 use super::ast::AstNode;
 use super::value::Value;
-use super::CommandExecutor;
+
+/// Shared command executor (Arc so it can be cloned across parallel threads).
+type SharedCommandExecutor = Arc<dyn Fn(&str) -> (bool, String, String) + Send + Sync>;
 
 /// Workflow runtime/executor
 pub struct Runtime {
@@ -16,10 +18,8 @@ pub struct Runtime {
     pub functions: HashMap<String, AstNode>,
     /// Execution history (bounded, O(1) front removal)
     pub history: VecDeque<ExecutionEvent>,
-    /// Built-in command executor
-    command_executor: Option<CommandExecutor>,
-    /// Whether we've already warned that `parallel` is sequential in this runtime.
-    parallel_fallback_warned: bool,
+    /// Built-in command executor (Arc-wrapped for sharing across parallel tasks)
+    command_executor: Option<SharedCommandExecutor>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -29,7 +29,6 @@ impl std::fmt::Debug for Runtime {
             .field("functions", &self.functions)
             .field("history_len", &self.history.len())
             .field("command_executor", &self.command_executor.is_some())
-            .field("parallel_fallback_warned", &self.parallel_fallback_warned)
             .finish()
     }
 }
@@ -64,7 +63,6 @@ impl Runtime {
             functions: HashMap::new(),
             history: VecDeque::new(),
             command_executor: None,
-            parallel_fallback_warned: false,
         }
     }
 
@@ -73,8 +71,19 @@ impl Runtime {
     where
         F: Fn(&str) -> (bool, String, String) + Send + Sync + 'static,
     {
-        self.command_executor = Some(Box::new(executor));
+        self.command_executor = Some(Arc::new(executor));
         self
+    }
+
+    /// Create a lightweight child runtime that shares the same executor
+    /// but has its own copy of globals, functions, and history.
+    fn fork(&self) -> Self {
+        Self {
+            globals: self.globals.clone(),
+            functions: self.functions.clone(),
+            history: VecDeque::new(),
+            command_executor: self.command_executor.clone(),
+        }
     }
 
     /// Execute AST nodes
@@ -123,25 +132,66 @@ impl Runtime {
             }
 
             AstNode::Parallel { body } => {
-                // TODO: Execute steps concurrently with tokio::join! or
-                // futures::future::join_all. This requires:
-                //   1. Making eval() async (and the entire Runtime API async)
-                //   2. Splitting &mut self ownership (e.g. Arc<Mutex<Runtime>>)
-                //      so multiple futures can access runtime state concurrently
-                // Until then, steps run sequentially. For actual concurrent
-                // execution, use the async WorkflowExecutor.
-                if !self.parallel_fallback_warned {
-                    warn!(
-                        "Workflow DSL `parallel` blocks execute sequentially in Runtime; use WorkflowExecutor for true parallelism"
-                    );
-                    self.parallel_fallback_warned = true;
+                self.log_event("parallel_start", "parallel");
+
+                // Execute each node in its own thread using std::thread::scope,
+                // which allows the threads to borrow `self` data through the
+                // forked child runtimes.
+                let results: Vec<Result<(Value, HashMap<String, Value>), String>> =
+                    std::thread::scope(|scope| {
+                        let handles: Vec<_> = body
+                            .iter()
+                            .map(|node| {
+                                let mut child = self.fork();
+                                let node = node.clone();
+                                scope.spawn(move || {
+                                    let result = child.eval(&node)?;
+                                    // Return result together with any new/updated globals
+                                    Ok((result, child.globals))
+                                })
+                            })
+                            .collect();
+
+                        handles
+                            .into_iter()
+                            .map(|h| {
+                                h.join().unwrap_or_else(|_| {
+                                    Err("Parallel step panicked".to_string())
+                                })
+                            })
+                            .collect()
+                    });
+
+                // Collect values and merge globals from completed steps.
+                // Report which steps failed, if any.
+                let mut values = Vec::with_capacity(results.len());
+                let mut errors = Vec::new();
+                for (i, result) in results.into_iter().enumerate() {
+                    match result {
+                        Ok((value, child_globals)) => {
+                            // Merge child globals into parent (later steps win on conflict)
+                            for (k, v) in child_globals {
+                                self.globals.insert(k, v);
+                            }
+                            values.push(value);
+                        }
+                        Err(e) => {
+                            errors.push(format!("step {}: {}", i + 1, e));
+                            values.push(Value::Null);
+                        }
+                    }
                 }
-                self.log_event("parallel_sequential_fallback", "parallel");
-                let mut results = Vec::new();
-                for node in body {
-                    results.push(self.eval(node)?);
+
+                self.log_event("parallel_end", "parallel");
+
+                if errors.is_empty() {
+                    Ok(Value::Array(values))
+                } else {
+                    Err(format!(
+                        "Parallel execution failed: {}",
+                        errors.join("; ")
+                    ))
                 }
-                Ok(Value::Array(results))
             }
 
             AstNode::Sequence { body } => self.execute(body),
@@ -606,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn test_runtime_parallel_logs_sequential_fallback_event() {
+    fn test_runtime_parallel_logs_parallel_events() {
         let tokens = Lexer::new("parallel { let a = 1; let b = 2 }").tokenize();
         let mut parser = Parser::new(tokens);
         let ast = parser.parse().unwrap();
@@ -616,7 +666,11 @@ mod tests {
         assert!(runtime
             .history
             .iter()
-            .any(|e| e.event_type == "parallel_sequential_fallback"));
+            .any(|e| e.event_type == "parallel_start"));
+        assert!(runtime
+            .history
+            .iter()
+            .any(|e| e.event_type == "parallel_end"));
     }
 
     #[test]

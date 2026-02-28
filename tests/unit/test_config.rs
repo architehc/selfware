@@ -164,6 +164,7 @@ mod safety_config_tests {
             denied_paths: vec!["/dangerous".to_string()],
             protected_branches: vec!["main".to_string()],
             require_confirmation: vec!["git push".to_string()],
+            strict_permissions: false,
         };
 
         let toml = toml::to_string(&config).unwrap();

@@ -507,4 +507,287 @@ mod tests {
         let app = SwarmApp::default();
         assert_eq!(app.state, SwarmAppState::Running);
     }
+
+    #[test]
+    fn test_with_config_agent_count() {
+        let roles = vec![
+            AgentRole::Coder,
+            AgentRole::Tester,
+            AgentRole::Architect,
+        ];
+        let app = SwarmApp::with_config(roles);
+        // After initial sync in constructor, agents should be populated
+        assert_eq!(app.swarm_state.agents.len(), 3);
+    }
+
+    #[test]
+    fn test_handle_event_refresh() {
+        let mut app = SwarmApp::new();
+        let initial_event_count = app.swarm_state.events.len();
+
+        let event = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('r'),
+            KeyModifiers::NONE,
+        ));
+        let cont = app.handle_event(event);
+        assert!(cont);
+        // Refresh adds a "Manual refresh" event
+        assert!(app.swarm_state.events.len() > initial_event_count);
+        let last_event = app.swarm_state.events.last().unwrap();
+        assert_eq!(last_event.message, "Manual refresh");
+    }
+
+    #[test]
+    fn test_handle_event_zoom_toggle() {
+        let mut app = SwarmApp::new();
+        let was_zoomed = app.layout_engine.is_zoomed();
+
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::NONE,
+        )));
+        assert_ne!(app.layout_engine.is_zoomed(), was_zoomed);
+
+        // Press z again to toggle back
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.layout_engine.is_zoomed(), was_zoomed);
+    }
+
+    #[test]
+    fn test_handle_event_esc_unzooms() {
+        let mut app = SwarmApp::new();
+
+        // Zoom first
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::NONE,
+        )));
+        assert!(app.layout_engine.is_zoomed());
+
+        // Now Esc should unzoom
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
+        assert!(!app.layout_engine.is_zoomed());
+    }
+
+    #[test]
+    fn test_handle_event_esc_noop_when_not_zoomed() {
+        let mut app = SwarmApp::new();
+        assert!(!app.layout_engine.is_zoomed());
+
+        let esc = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ));
+        let cont = app.handle_event(esc);
+        assert!(cont); // Should not quit
+        assert!(!app.layout_engine.is_zoomed()); // Still not zoomed
+    }
+
+    #[test]
+    fn test_help_mode_consumes_all_input() {
+        let mut app = SwarmApp::new();
+
+        // Enter help mode
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('?'),
+            KeyModifiers::NONE,
+        )));
+        assert!(app.show_help);
+
+        // 'q' while in help should NOT quit - it should be consumed
+        let q_event = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('q'),
+            KeyModifiers::NONE,
+        ));
+        let cont = app.handle_event(q_event);
+        assert!(cont); // Should continue, not quit
+        assert!(app.show_help); // Still in help
+    }
+
+    #[test]
+    fn test_help_mode_exit_with_question_mark() {
+        let mut app = SwarmApp::new();
+
+        // Enter help mode
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('?'),
+            KeyModifiers::NONE,
+        )));
+        assert!(app.show_help);
+
+        // '?' while in help should dismiss it
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('?'),
+            KeyModifiers::NONE,
+        )));
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn test_on_tick_when_paused() {
+        let mut app = SwarmApp::new();
+        app.toggle_pause();
+        assert_eq!(app.state, SwarmAppState::Paused);
+
+        // Force sync interval to be exceeded
+        app.last_sync = Instant::now() - Duration::from_secs(10);
+        let stale_sync = app.last_sync;
+
+        app.on_tick();
+
+        // When paused, last_sync should NOT be updated
+        assert_eq!(app.last_sync, stale_sync);
+    }
+
+    #[test]
+    fn test_on_tick_when_running_no_sync_needed() {
+        let mut app = SwarmApp::new();
+        assert_eq!(app.state, SwarmAppState::Running);
+
+        // last_sync was just set in constructor, so interval not exceeded
+        let sync_before = app.last_sync;
+        app.on_tick();
+
+        // With default 500ms interval and immediate tick, last_sync may or may not update
+        // but it should not panic
+        assert!(app.last_sync >= sync_before);
+    }
+
+    #[test]
+    fn test_add_sample_task() {
+        let mut app = SwarmApp::new();
+        let events_before = app.swarm_state.events.len();
+
+        // Press 't' to add a sample task
+        let event = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('t'),
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(event);
+
+        // Should have added an event about the new task
+        assert!(app.swarm_state.events.len() > events_before);
+        let last = app.swarm_state.events.last().unwrap();
+        assert_eq!(last.message, "New task added to queue");
+    }
+
+    #[test]
+    fn test_create_sample_decision() {
+        let mut app = SwarmApp::new();
+        let events_before = app.swarm_state.events.len();
+
+        let event = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(event);
+
+        assert!(app.swarm_state.events.len() > events_before);
+        let last = app.swarm_state.events.last().unwrap();
+        assert!(last.message.starts_with("Created decision:"));
+    }
+
+    #[test]
+    fn test_cast_sample_vote_after_decision() {
+        let mut app = SwarmApp::new();
+
+        // First create a decision
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::NONE,
+        )));
+
+        let events_before = app.swarm_state.events.len();
+
+        // Now vote on it
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::NONE,
+        )));
+
+        // Should have added a vote event
+        assert!(app.swarm_state.events.len() > events_before);
+        let last = app.swarm_state.events.last().unwrap();
+        assert!(last.message.contains("voted on"));
+    }
+
+    #[test]
+    fn test_cast_vote_no_decisions() {
+        let mut app = SwarmApp::new();
+        let events_before = app.swarm_state.events.len();
+
+        // Vote with no decisions - should silently do nothing
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('v'),
+            KeyModifiers::NONE,
+        )));
+
+        // No new event should be added
+        assert_eq!(app.swarm_state.events.len(), events_before);
+    }
+
+    #[test]
+    fn test_sync_event() {
+        let mut app = SwarmApp::new();
+
+        let event = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('s'),
+            KeyModifiers::NONE,
+        ));
+        // Should not panic
+        let cont = app.handle_event(event);
+        assert!(cont);
+    }
+
+    #[test]
+    fn test_pause_adds_events() {
+        let mut app = SwarmApp::new();
+        let events_before = app.swarm_state.events.len();
+
+        app.toggle_pause();
+        assert_eq!(app.state, SwarmAppState::Paused);
+        // Should have added "Swarm paused" event
+        let pause_event = &app.swarm_state.events[events_before];
+        assert_eq!(pause_event.message, "Swarm paused");
+
+        app.toggle_pause();
+        assert_eq!(app.state, SwarmAppState::Running);
+        // Should have added "Swarm resumed" event
+        let resume_event = &app.swarm_state.events[events_before + 1];
+        assert_eq!(resume_event.message, "Swarm resumed");
+    }
+
+    #[test]
+    fn test_swarm_app_state_debug() {
+        // Ensure Debug is implemented
+        let state = SwarmAppState::Running;
+        let debug_str = format!("{:?}", state);
+        assert_eq!(debug_str, "Running");
+    }
+
+    #[test]
+    fn test_swarm_app_state_clone_copy() {
+        let state = SwarmAppState::Help;
+        let cloned = state;
+        assert_eq!(cloned, SwarmAppState::Help);
+    }
+
+    #[test]
+    fn test_initial_sync_on_creation() {
+        let app = SwarmApp::new();
+        // Constructor calls sync and adds an initialization event
+        assert!(!app.swarm_state.events.is_empty());
+        assert_eq!(
+            app.swarm_state.events[0].message,
+            "Swarm UI initialized"
+        );
+        // dev swarm has 4 agents
+        assert_eq!(app.swarm_state.agents.len(), 4);
+    }
 }

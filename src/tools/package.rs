@@ -240,11 +240,10 @@ impl Tool for NpmScripts {
         let package_json_path = Path::new(path).join("package.json");
 
         if !package_json_path.exists() {
-            return Ok(json!({
-                "success": false,
-                "error": "package.json not found",
-                "path": package_json_path.display().to_string()
-            }));
+            anyhow::bail!(
+                "package.json not found: {}",
+                package_json_path.display()
+            );
         }
 
         let content = tokio::fs::read_to_string(&package_json_path)
@@ -340,10 +339,7 @@ impl Tool for PipInstall {
         let user = args.get("user").and_then(|v| v.as_bool()).unwrap_or(false);
 
         if packages.is_empty() && requirements.is_none() {
-            return Ok(json!({
-                "success": false,
-                "error": "Either 'packages' or 'requirements' must be specified"
-            }));
+            anyhow::bail!("Either 'packages' or 'requirements' must be specified");
         }
 
         // Try python3 first, then python
@@ -793,20 +789,19 @@ mod tests {
         let tool = NpmScripts;
         let result = tool
             .execute(json!({"path": "/nonexistent/path"}))
-            .await
-            .unwrap();
-        assert_eq!(result["success"], false);
-        assert!(result["error"].as_str().unwrap().contains("not found"));
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
     }
 
     #[tokio::test]
     async fn test_pip_install_no_packages() {
         let tool = PipInstall;
-        let result = tool.execute(json!({})).await.unwrap();
-        assert_eq!(result["success"], false);
-        assert!(result["error"]
-            .as_str()
-            .unwrap()
+        let result = tool.execute(json!({})).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
             .contains("must be specified"));
     }
 }
