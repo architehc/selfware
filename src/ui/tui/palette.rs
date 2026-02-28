@@ -167,7 +167,7 @@ impl CommandPalette {
                 description: "Leave the workshop".into(),
                 command: "exit".into(),
                 category: CommandCategory::Navigation,
-                shortcut: Some("Ctrl+D".into()),
+                shortcut: Some("Ctrl+C".into()),
             },
         ]
     }

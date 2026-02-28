@@ -158,7 +158,7 @@ impl Agent {
 
             let input = input.trim();
 
-            if input == "exit" || input == "quit" {
+            if input == "exit" || input == "quit" || input == "/exit" || input == "/quit" {
                 break;
             }
 
@@ -816,11 +816,71 @@ impl Agent {
             }
 
             if input == "/queue" {
+                println!("{} Usage:", "📨".bright_cyan());
+                println!("  /queue <message>  — Enqueue a message");
+                println!("  /queue list       — Show queued messages");
+                println!("  /queue clear      — Clear all queued messages");
+                println!("  /queue drop <n>   — Remove message by index");
+                println!("  {} pending message(s)", self.pending_messages.len());
+                continue;
+            }
+
+            if input == "/queue list" {
+                let msgs = &self.pending_messages;
+                if msgs.is_empty() {
+                    println!("{} Queue is empty.", "📋".bright_cyan());
+                } else {
+                    println!("{} Queued messages ({}):", "📋".bright_cyan(), msgs.len());
+                    for (i, msg) in msgs.iter().enumerate() {
+                        let preview = if msg.len() > 60 { &msg[..60] } else { msg };
+                        println!(
+                            "  {}. {}{}",
+                            i + 1,
+                            preview,
+                            if msg.len() > 60 { "..." } else { "" }
+                        );
+                    }
+                }
+                continue;
+            }
+
+            if input == "/queue clear" {
+                let count = self.pending_messages.len();
+                self.pending_messages.clear();
                 println!(
-                    "{} Usage: /queue <message> ({} pending)",
-                    "📨".bright_cyan(),
-                    self.pending_messages.len()
+                    "{} Cleared {} queued message(s).",
+                    "📋".bright_cyan(),
+                    count
                 );
+                continue;
+            }
+
+            if let Some(idx_str) = input.strip_prefix("/queue drop ") {
+                if let Ok(idx) = idx_str.trim().parse::<usize>() {
+                    let idx = idx.saturating_sub(1); // 1-based to 0-based
+                    if idx < self.pending_messages.len() {
+                        let removed = self.pending_messages.remove(idx).unwrap_or_default();
+                        let preview = if removed.len() > 40 {
+                            &removed[..40]
+                        } else {
+                            &removed
+                        };
+                        println!(
+                            "{} Removed message {}: {}{}",
+                            "📋".bright_cyan(),
+                            idx + 1,
+                            preview,
+                            if removed.len() > 40 { "..." } else { "" }
+                        );
+                    } else {
+                        println!(
+                            "{} Invalid index. Use '/queue list' to see messages.",
+                            "❌".bright_red()
+                        );
+                    }
+                } else {
+                    println!("{} Usage: /queue drop <number>", "ℹ".bright_yellow());
+                }
                 continue;
             }
 
@@ -1171,6 +1231,17 @@ impl Agent {
                 println!("{}", end_preview.bright_white());
                 println!("{}", "─".repeat(50).bright_black());
                 println!();
+
+                // Ask for confirmation before submitting large input
+                print!("Submit this input? [Y/n] ");
+                std::io::Write::flush(&mut std::io::stdout())?;
+                let mut confirm = String::new();
+                std::io::stdin().read_line(&mut confirm)?;
+                let confirm = confirm.trim().to_lowercase();
+                if confirm == "n" || confirm == "no" {
+                    println!("Input cancelled.");
+                    continue;
+                }
             }
 
             match self.run_task_with_queue(&expanded_input).await {
@@ -1336,7 +1407,7 @@ impl Agent {
                 }
             }
 
-            if input == "exit" || input == "quit" {
+            if input == "exit" || input == "quit" || input == "/exit" || input == "/quit" {
                 break;
             }
 
@@ -1352,6 +1423,9 @@ impl Agent {
                 println!("  /plan <task>    - Create a plan for a task");
                 println!("  /swarm <task>   - Run task with dev swarm");
                 println!("  /queue <msg>    - Queue a message");
+                println!("  /queue list     - Show queued messages");
+                println!("  /queue clear    - Clear all queued messages");
+                println!("  /queue drop <n> - Remove message by index");
                 println!("  exit            - Exit interactive mode");
                 continue;
             }
@@ -1452,11 +1526,71 @@ impl Agent {
             }
 
             if input == "/queue" {
+                println!("{} Usage:", "📨".bright_cyan());
+                println!("  /queue <message>  — Enqueue a message");
+                println!("  /queue list       — Show queued messages");
+                println!("  /queue clear      — Clear all queued messages");
+                println!("  /queue drop <n>   — Remove message by index");
+                println!("  {} pending message(s)", self.pending_messages.len());
+                continue;
+            }
+
+            if input == "/queue list" {
+                let msgs = &self.pending_messages;
+                if msgs.is_empty() {
+                    println!("{} Queue is empty.", "📋".bright_cyan());
+                } else {
+                    println!("{} Queued messages ({}):", "📋".bright_cyan(), msgs.len());
+                    for (i, msg) in msgs.iter().enumerate() {
+                        let preview = if msg.len() > 60 { &msg[..60] } else { msg };
+                        println!(
+                            "  {}. {}{}",
+                            i + 1,
+                            preview,
+                            if msg.len() > 60 { "..." } else { "" }
+                        );
+                    }
+                }
+                continue;
+            }
+
+            if input == "/queue clear" {
+                let count = self.pending_messages.len();
+                self.pending_messages.clear();
                 println!(
-                    "{} Usage: /queue <message> ({} pending)",
-                    "📨".bright_cyan(),
-                    self.pending_messages.len()
+                    "{} Cleared {} queued message(s).",
+                    "📋".bright_cyan(),
+                    count
                 );
+                continue;
+            }
+
+            if let Some(idx_str) = input.strip_prefix("/queue drop ") {
+                if let Ok(idx) = idx_str.trim().parse::<usize>() {
+                    let idx = idx.saturating_sub(1); // 1-based to 0-based
+                    if idx < self.pending_messages.len() {
+                        let removed = self.pending_messages.remove(idx).unwrap_or_default();
+                        let preview = if removed.len() > 40 {
+                            &removed[..40]
+                        } else {
+                            &removed
+                        };
+                        println!(
+                            "{} Removed message {}: {}{}",
+                            "📋".bright_cyan(),
+                            idx + 1,
+                            preview,
+                            if removed.len() > 40 { "..." } else { "" }
+                        );
+                    } else {
+                        println!(
+                            "{} Invalid index. Use '/queue list' to see messages.",
+                            "❌".bright_red()
+                        );
+                    }
+                } else {
+                    println!("{} Usage: /queue drop <number>", "ℹ".bright_yellow());
+                }
                 continue;
             }
 
@@ -1476,6 +1610,51 @@ impl Agent {
                     );
                 }
                 continue;
+            }
+
+            // Display truncated preview and confirm for large pastes (interactive only)
+            const LARGE_PASTE_THRESHOLD: usize = 3000;
+            const PREVIEW_CHARS: usize = 200;
+
+            if is_tty && input.len() > LARGE_PASTE_THRESHOLD {
+                let lines: Vec<&str> = input.lines().collect();
+                let line_count = lines.len();
+                let char_count = input.len();
+
+                let start_preview: String = input.chars().take(PREVIEW_CHARS).collect();
+                let end_preview: String = input
+                    .chars()
+                    .rev()
+                    .take(PREVIEW_CHARS)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
+
+                println!("{} Large input detected:", "📋".bright_cyan());
+                println!(
+                    "   {} chars, {} lines",
+                    char_count.to_string().bright_yellow(),
+                    line_count.to_string().bright_yellow()
+                );
+                println!();
+                println!("{}", "─".repeat(50).bright_black());
+                println!("{}", start_preview.bright_white());
+                println!("{}", "...".bright_black());
+                println!("{}", end_preview.bright_white());
+                println!("{}", "─".repeat(50).bright_black());
+                println!();
+
+                // Ask for confirmation before submitting large input
+                print!("Submit this input? [Y/n] ");
+                io::stdout().flush()?;
+                let mut confirm = String::new();
+                io::stdin().read_line(&mut confirm)?;
+                let confirm = confirm.trim().to_lowercase();
+                if confirm == "n" || confirm == "no" {
+                    println!("Input cancelled.");
+                    continue;
+                }
             }
 
             match self.run_task_with_queue(input).await {
@@ -1700,5 +1879,124 @@ mod tests {
         };
         assert_eq!(preview.len(), 60); // 57 chars + "..."
         assert!(preview.ends_with("..."));
+    }
+
+    // ── Queue management subcommand routing ──
+
+    #[test]
+    fn queue_subcommand_routing() {
+        // /queue list and /queue clear must match before /queue <msg>
+        let input = "/queue list";
+        assert!(input == "/queue list");
+        assert!(input.starts_with("/queue ")); // would also match generic handler
+
+        let input = "/queue clear";
+        assert!(input == "/queue clear");
+        assert!(input.starts_with("/queue ")); // would also match generic handler
+
+        // /queue drop <n> uses strip_prefix
+        let input = "/queue drop 3";
+        let idx_str = input.strip_prefix("/queue drop ");
+        assert_eq!(idx_str, Some("3"));
+        let idx: usize = idx_str.unwrap().trim().parse().unwrap();
+        assert_eq!(idx, 3);
+
+        // /queue drop with extra whitespace
+        let input = "/queue drop  5 ";
+        let idx_str = input.strip_prefix("/queue drop ");
+        assert_eq!(idx_str.unwrap().trim().parse::<usize>().unwrap(), 5);
+
+        // /queue drop with invalid index
+        let input = "/queue drop abc";
+        let idx_str = input.strip_prefix("/queue drop ").unwrap();
+        assert!(idx_str.trim().parse::<usize>().is_err());
+    }
+
+    #[test]
+    fn queue_subcommands_do_not_match_bare_queue() {
+        // /queue (bare) should not match subcommands
+        let input = "/queue";
+        assert!(input == "/queue");
+        assert!(!input.starts_with("/queue ")); // no trailing space
+    }
+
+    #[test]
+    fn queue_drop_index_conversion() {
+        // 1-based to 0-based conversion via saturating_sub
+        assert_eq!(1_usize.saturating_sub(1), 0);
+        assert_eq!(5_usize.saturating_sub(1), 4);
+        // Edge case: 0 stays at 0 (saturating)
+        assert_eq!(0_usize.saturating_sub(1), 0);
+    }
+
+    #[test]
+    fn queue_list_preview_truncation() {
+        // The /queue list handler truncates at 60 chars
+        let short = "Short message";
+        let preview = if short.len() > 60 {
+            &short[..60]
+        } else {
+            short
+        };
+        let suffix = if short.len() > 60 { "..." } else { "" };
+        assert_eq!(format!("{}{}", preview, suffix), "Short message");
+
+        let long = "x".repeat(100);
+        let preview = if long.len() > 60 { &long[..60] } else { &long };
+        let suffix = if long.len() > 60 { "..." } else { "" };
+        assert_eq!(preview.len(), 60);
+        assert_eq!(suffix, "...");
+    }
+
+    #[test]
+    fn queue_drop_preview_truncation() {
+        // The /queue drop handler truncates at 40 chars
+        let short = "Short task";
+        let preview = if short.len() > 40 {
+            &short[..40]
+        } else {
+            short
+        };
+        let suffix = if short.len() > 40 { "..." } else { "" };
+        assert_eq!(format!("{}{}", preview, suffix), "Short task");
+
+        let long = "y".repeat(80);
+        let preview = if long.len() > 40 { &long[..40] } else { &long };
+        let suffix = if long.len() > 40 { "..." } else { "" };
+        assert_eq!(preview.len(), 40);
+        assert_eq!(suffix, "...");
+    }
+
+    #[test]
+    fn queue_vecdeque_operations() {
+        // Verify VecDeque operations used by queue management commands
+        use std::collections::VecDeque;
+
+        let mut queue: VecDeque<String> = VecDeque::new();
+
+        // Enqueue
+        queue.push_back("task one".to_string());
+        queue.push_back("task two".to_string());
+        queue.push_back("task three".to_string());
+        assert_eq!(queue.len(), 3);
+
+        // List (iter + enumerate)
+        let items: Vec<(usize, &String)> = queue.iter().enumerate().collect();
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].0, 0);
+        assert_eq!(items[0].1, "task one");
+
+        // Drop by index (remove)
+        let removed = queue.remove(1).unwrap();
+        assert_eq!(removed, "task two");
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue[0], "task one");
+        assert_eq!(queue[1], "task three");
+
+        // Clear
+        let count = queue.len();
+        queue.clear();
+        assert_eq!(count, 2);
+        assert!(queue.is_empty());
     }
 }

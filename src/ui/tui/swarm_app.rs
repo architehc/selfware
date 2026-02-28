@@ -37,6 +37,8 @@ pub struct SwarmApp {
     pub sync_interval: Duration,
     pub selected_decision: usize,
     pub input_buffer: String,
+    /// Tracks the last time 'q' was pressed for double-tap quit
+    pub last_q_press: Option<Instant>,
 }
 
 impl Default for SwarmApp {
@@ -66,6 +68,7 @@ impl SwarmApp {
             sync_interval: Duration::from_millis(500),
             selected_decision: 0,
             input_buffer: String::new(),
+            last_q_press: None,
         };
 
         // Initial sync
@@ -178,12 +181,27 @@ impl SwarmApp {
             }
 
             match key.code {
-                // Quit
+                // Quit immediately on Ctrl+C
                 KeyCode::Char('c') if key.modifiers == KeyModifiers::CONTROL => {
                     return false;
                 }
+                // Double-tap q to quit (prevents accidental quits)
                 KeyCode::Char('q') => {
-                    return false;
+                    let now = Instant::now();
+                    let timeout = Duration::from_secs(2);
+                    if let Some(last) = self.last_q_press {
+                        if now.duration_since(last) <= timeout {
+                            self.last_q_press = None;
+                            return false;
+                        }
+                    }
+                    self.last_q_press = Some(now);
+                    self.swarm_state.add_event(
+                        EventType::AgentStarted,
+                        "Press q again within 2s to quit",
+                        None,
+                    );
+                    return true;
                 }
 
                 // Help
@@ -420,14 +438,31 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_event_quit_q() {
+    fn test_handle_event_single_q_does_not_quit() {
         let mut app = SwarmApp::new();
         let event = Event::Key(crossterm::event::KeyEvent::new(
             KeyCode::Char('q'),
             KeyModifiers::NONE,
         ));
+        // Single q should arm quit but not actually quit
         let should_continue = app.handle_event(event);
-        assert!(!should_continue);
+        assert!(should_continue, "single q should not quit");
+        assert!(app.last_q_press.is_some(), "q press should be recorded");
+    }
+
+    #[test]
+    fn test_handle_event_double_q_quits() {
+        let mut app = SwarmApp::new();
+        let event = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('q'),
+            KeyModifiers::NONE,
+        ));
+        // First q arms
+        let should_continue = app.handle_event(event.clone());
+        assert!(should_continue, "first q should not quit");
+        // Second q within timeout quits
+        let should_continue = app.handle_event(event);
+        assert!(!should_continue, "second q should quit");
     }
 
     #[test]

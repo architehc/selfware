@@ -505,6 +505,66 @@ impl Agent {
                 .collect()
         };
 
+        // Pre-scan: estimate total tokens from file sizes before loading
+        let mut estimated_tokens: usize = 0;
+        let mut file_count: usize = 0;
+        for entry in WalkDir::new(".").into_iter().filter_map(|e| e.ok()) {
+            if entry.file_type().is_file() {
+                let p = entry.path().display().to_string();
+                if p.contains("/target/")
+                    || p.contains("/node_modules/")
+                    || p.contains("/.git/")
+                    || p.contains("/__pycache__/")
+                {
+                    continue;
+                }
+                let ext = entry
+                    .path()
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
+                if extensions.contains(&ext) {
+                    if let Ok(meta) = entry.metadata() {
+                        // Rough estimate: ~4 chars per token
+                        estimated_tokens += meta.len() as usize / 4;
+                        file_count += 1;
+                    }
+                }
+            }
+        }
+
+        let budget = self.memory.context_window();
+        if budget > 0 && estimated_tokens > budget {
+            println!(
+                "{} Estimated {} tokens from {} files exceeds context budget of {}. \
+                 Use '/ctx load <specific-dir>' to load a subset.",
+                "❌".bright_red(),
+                estimated_tokens,
+                file_count,
+                budget
+            );
+            return Ok(0);
+        }
+        if budget > 0 {
+            let pct = (estimated_tokens * 100) / budget;
+            if pct > 75 {
+                tracing::warn!(
+                    "/ctx load: estimated {} tokens from {} files (~{}% of context budget). \
+                     Consider loading specific subdirectories instead.",
+                    estimated_tokens,
+                    file_count,
+                    pct
+                );
+                println!(
+                    "{} Loading {} files (~{} tokens, ~{}% of budget). Large context may degrade performance.",
+                    "⚠️".bright_yellow(),
+                    file_count,
+                    estimated_tokens,
+                    pct
+                );
+            }
+        }
+
         println!();
         println!(
             "{} Loading files with extensions: {}",

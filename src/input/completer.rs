@@ -183,49 +183,12 @@ impl SelfwareCompleter {
 
     /// Get description for a command
     fn command_description(&self, cmd: &str) -> String {
-        match cmd {
-            "/help" => "Show available commands".to_string(),
-            "/status" => "Show agent status".to_string(),
-            "/stats" => "Detailed session statistics".to_string(),
-            "/mode" => "Cycle execution mode".to_string(),
-            "/ctx" => "Context window stats".to_string(),
-            "/ctx clear" => "Clear all context".to_string(),
-            "/ctx load" => "Load files into context".to_string(),
-            "/ctx reload" => "Reload loaded files".to_string(),
-            "/ctx copy" => "Copy sources to clipboard".to_string(),
-            "/compress" => "Compress context".to_string(),
-            "/context" => "Context window stats".to_string(),
-            "/memory" => "Show memory statistics".to_string(),
-            "/clear" => "Clear conversation history".to_string(),
-            "/tools" => "List available tools".to_string(),
-            "/analyze" => "Analyze codebase structure".to_string(),
-            "/review" => "Review code in file".to_string(),
-            "/plan" => "Create a plan for a task".to_string(),
-            "/swarm" => "Run task with dev swarm orchestration".to_string(),
-            "/queue" => "Queue a message for sequential execution".to_string(),
-            "/diff" => "Git diff --stat".to_string(),
-            "/git" => "Git status --short".to_string(),
-            "/undo" => "Undo last file edit".to_string(),
-            "/cost" => "Token usage & cost estimate".to_string(),
-            "/model" => "Model configuration".to_string(),
-            "/compact" => "Toggle compact mode".to_string(),
-            "/verbose" => "Toggle verbose mode".to_string(),
-            "/config" => "Show current config".to_string(),
-            "/garden" => "View digital garden".to_string(),
-            "/journal" => "Browse journal entries".to_string(),
-            "/palette" => "Open command palette".to_string(),
-            "/vim" => "Toggle vim/emacs mode".to_string(),
-            "/copy" => "Copy last response to clipboard".to_string(),
-            "/restore" => "List/restore edit checkpoints".to_string(),
-            "/chat" => "Chat session management".to_string(),
-            "/chat save" => "Save current chat session".to_string(),
-            "/chat resume" => "Resume a saved chat".to_string(),
-            "/chat list" => "List saved chats".to_string(),
-            "/chat delete" => "Delete a saved chat".to_string(),
-            "/theme" => "Switch color theme".to_string(),
-            "exit" => "Exit interactive mode".to_string(),
-            "quit" => "Exit interactive mode".to_string(),
-            _ => "Command".to_string(),
+        if let Some(desc) = super::command_registry::command_description(cmd) {
+            desc.to_string()
+        } else if cmd == "exit" || cmd == "quit" {
+            "Exit interactive mode".to_string()
+        } else {
+            "Command".to_string()
         }
     }
 
@@ -431,39 +394,36 @@ mod tests {
 
         assert_eq!(
             completer.command_description("/help"),
-            "Show available commands"
+            "Show help and available commands"
         );
         assert_eq!(
             completer.command_description("/status"),
-            "Show agent status"
+            "Show agent status and context usage"
         );
         assert_eq!(
             completer.command_description("/memory"),
-            "Show memory statistics"
+            "Show memory hierarchy status"
         );
-        assert_eq!(
-            completer.command_description("/clear"),
-            "Clear conversation history"
-        );
+        assert_eq!(completer.command_description("/clear"), "Clear the screen");
         assert_eq!(
             completer.command_description("/tools"),
             "List available tools"
         );
         assert_eq!(
             completer.command_description("/analyze"),
-            "Analyze codebase structure"
+            "Analyze the current codebase"
         );
         assert_eq!(
             completer.command_description("/review"),
-            "Review code in file"
+            "Review recent changes"
         );
         assert_eq!(
             completer.command_description("/swarm"),
-            "Run task with dev swarm orchestration"
+            "Launch multi-agent swarm"
         );
         assert_eq!(
             completer.command_description("/queue"),
-            "Queue a message for sequential execution"
+            "Enqueue a message for later processing"
         );
         assert_eq!(completer.command_description("/unknown"), "Command");
     }

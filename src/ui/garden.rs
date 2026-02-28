@@ -54,12 +54,12 @@ impl GrowthStage {
 
     pub fn glyph(&self) -> &'static str {
         match self {
-            GrowthStage::Seedling => Glyphs::SEEDLING,
-            GrowthStage::Sprout => Glyphs::SPROUT,
-            GrowthStage::Established => Glyphs::LEAF,
-            GrowthStage::Mature => Glyphs::TREE,
-            GrowthStage::Ancient => Glyphs::TREE,
-            GrowthStage::Wilting => Glyphs::FALLEN_LEAF,
+            GrowthStage::Seedling => Glyphs::seedling(),
+            GrowthStage::Sprout => Glyphs::sprout(),
+            GrowthStage::Established => Glyphs::leaf(),
+            GrowthStage::Mature => Glyphs::tree(),
+            GrowthStage::Ancient => Glyphs::tree(),
+            GrowthStage::Wilting => Glyphs::fallen_leaf(),
         }
     }
 
@@ -183,11 +183,11 @@ impl GardenBed {
 
     pub fn health_indicator(&self) -> &'static str {
         if self.health_score > 0.8 {
-            Glyphs::BLOOM
+            Glyphs::bloom()
         } else if self.health_score > 0.5 {
-            Glyphs::WILT
+            Glyphs::wilt()
         } else {
-            Glyphs::FROST
+            Glyphs::frost()
         }
     }
 }
@@ -265,7 +265,7 @@ impl DigitalGarden {
         // Header
         output.push_str(&format!(
             "\n{} Your Digital Garden: {}\n",
-            Glyphs::TREE,
+            Glyphs::tree(),
             self.project_name.as_str().emphasis()
         ));
         output.push_str(&format!(
@@ -300,12 +300,12 @@ impl DigitalGarden {
     {} {} lines of carefully tended code
     {} {} healthy, {} need attention
 "#,
-            Glyphs::SPROUT,
+            Glyphs::sprout(),
             self.total_plants.to_string().emphasis(),
             self.beds.len().to_string().muted(),
-            Glyphs::HARVEST,
+            Glyphs::harvest(),
             self.total_lines.to_string().garden_healthy(),
-            Glyphs::BLOOM,
+            Glyphs::bloom(),
             established.to_string().garden_healthy(),
             if wilting > 0 {
                 wilting.to_string().garden_wilting()
@@ -353,7 +353,7 @@ impl DigitalGarden {
             output.push_str(&format!(
                 "    {} {} {} — {} plants, {} lines\n",
                 bed.health_indicator(),
-                Glyphs::BRANCH.muted(),
+                Glyphs::branch().muted(),
                 bed.name.as_str().path_local(),
                 bed.plants.len().to_string().muted(),
                 bed.total_lines.to_string().muted()
@@ -363,7 +363,7 @@ impl DigitalGarden {
         if beds.len() > 10 {
             output.push_str(&format!(
                 "    {} ... and {} more beds\n",
-                Glyphs::LEAF_BRANCH.muted(),
+                Glyphs::leaf_branch().muted(),
                 (beds.len() - 10).to_string().muted()
             ));
         }
@@ -530,11 +530,11 @@ pub fn garden_status_short(garden: &DigitalGarden) -> String {
         garden.beds.values().map(|b| b.health_score).sum::<f32>() / garden.beds.len().max(1) as f32;
 
     let health_glyph = if health > 0.8 {
-        Glyphs::BLOOM
+        Glyphs::bloom()
     } else if health > 0.5 {
-        Glyphs::SPROUT
+        Glyphs::sprout()
     } else {
-        Glyphs::WILT
+        Glyphs::wilt()
     };
 
     format!("{} {} plants", health_glyph, garden.total_plants)
@@ -683,12 +683,12 @@ mod tests {
 
     #[test]
     fn test_growth_stage_glyph() {
-        assert_eq!(GrowthStage::Seedling.glyph(), Glyphs::SEEDLING);
-        assert_eq!(GrowthStage::Sprout.glyph(), Glyphs::SPROUT);
-        assert_eq!(GrowthStage::Established.glyph(), Glyphs::LEAF);
-        assert_eq!(GrowthStage::Mature.glyph(), Glyphs::TREE);
-        assert_eq!(GrowthStage::Ancient.glyph(), Glyphs::TREE);
-        assert_eq!(GrowthStage::Wilting.glyph(), Glyphs::FALLEN_LEAF);
+        assert_eq!(GrowthStage::Seedling.glyph(), Glyphs::seedling());
+        assert_eq!(GrowthStage::Sprout.glyph(), Glyphs::sprout());
+        assert_eq!(GrowthStage::Established.glyph(), Glyphs::leaf());
+        assert_eq!(GrowthStage::Mature.glyph(), Glyphs::tree());
+        assert_eq!(GrowthStage::Ancient.glyph(), Glyphs::tree());
+        assert_eq!(GrowthStage::Wilting.glyph(), Glyphs::fallen_leaf());
     }
 
     #[test]
@@ -813,7 +813,7 @@ mod tests {
 
         // 1 of 2 wilting = 0.5 health (not > 0.5, so FROST)
         assert_eq!(bed.health_score, 0.5);
-        assert_eq!(bed.health_indicator(), Glyphs::FROST);
+        assert_eq!(bed.health_indicator(), Glyphs::frost());
     }
 
     #[test]
@@ -843,7 +843,7 @@ mod tests {
         });
 
         assert_eq!(bed.health_score, 0.0);
-        assert_eq!(bed.health_indicator(), Glyphs::FROST);
+        assert_eq!(bed.health_indicator(), Glyphs::frost());
     }
 
     #[test]
@@ -851,7 +851,7 @@ mod tests {
         let mut bed = GardenBed::new("test");
 
         // Empty bed
-        assert_eq!(bed.health_indicator(), Glyphs::BLOOM);
+        assert_eq!(bed.health_indicator(), Glyphs::bloom());
 
         // Add healthy plant - should still be healthy
         bed.add_plant(GardenPlant {
@@ -865,7 +865,7 @@ mod tests {
             plant_type: PlantType::Vegetable,
         });
 
-        assert_eq!(bed.health_indicator(), Glyphs::BLOOM);
+        assert_eq!(bed.health_indicator(), Glyphs::bloom());
     }
 
     #[test]
@@ -1051,7 +1051,7 @@ mod tests {
 
         let status = garden_status_short(&garden);
         assert!(status.contains("5 plants"));
-        assert!(status.contains(Glyphs::BLOOM)); // Healthy indicator
+        assert!(status.contains(Glyphs::bloom())); // Healthy indicator
     }
 
     #[test]

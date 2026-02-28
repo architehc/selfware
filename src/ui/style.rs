@@ -4,8 +4,23 @@
 //! Like aged paper, wood grain, and amber resin.
 //! Supports multiple themes via the theme module.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use super::theme::current_theme;
 use colored::{Colorize, CustomColor};
+
+/// When true, all glyphs use plain ASCII instead of Unicode/emoji.
+static ASCII_MODE: AtomicBool = AtomicBool::new(false);
+
+/// Enable ASCII-only mode (no emoji or extended Unicode).
+pub fn set_ascii_mode(enabled: bool) {
+    ASCII_MODE.store(enabled, Ordering::Relaxed);
+}
+
+/// Check if ASCII mode is active.
+pub fn is_ascii_mode() -> bool {
+    ASCII_MODE.load(Ordering::Relaxed)
+}
 
 /// The Selfware color palette - warm, organic, hand-crafted
 pub struct Palette;
@@ -167,55 +182,264 @@ impl SelfwareStyle for String {
     }
 }
 
-/// Unicode glyphs for the workshop aesthetic
+/// Unicode glyphs for the workshop aesthetic.
+///
+/// Each glyph is exposed as a method that returns the Unicode version
+/// by default, or a plain-ASCII fallback when [`set_ascii_mode`]
+/// has been called.
 pub struct Glyphs;
 
 impl Glyphs {
     // Garden metaphors
-    pub const SEEDLING: &'static str = "🌱";
-    pub const SPROUT: &'static str = "🌿";
-    pub const TREE: &'static str = "🌳";
-    pub const LEAF: &'static str = "🍃";
-    pub const FALLEN_LEAF: &'static str = "🍂";
-    pub const FLOWER: &'static str = "🌸";
-    pub const HARVEST: &'static str = "🌾";
+    pub fn seedling() -> &'static str {
+        if is_ascii_mode() {
+            "[*]"
+        } else {
+            "🌱"
+        }
+    }
+    pub fn sprout() -> &'static str {
+        if is_ascii_mode() {
+            "[^]"
+        } else {
+            "🌿"
+        }
+    }
+    pub fn tree() -> &'static str {
+        if is_ascii_mode() {
+            "[T]"
+        } else {
+            "🌳"
+        }
+    }
+    pub fn leaf() -> &'static str {
+        if is_ascii_mode() {
+            "[-]"
+        } else {
+            "🍃"
+        }
+    }
+    pub fn fallen_leaf() -> &'static str {
+        if is_ascii_mode() {
+            "[.]"
+        } else {
+            "🍂"
+        }
+    }
+    pub fn flower() -> &'static str {
+        if is_ascii_mode() {
+            "[o]"
+        } else {
+            "🌸"
+        }
+    }
+    pub fn harvest() -> &'static str {
+        if is_ascii_mode() {
+            "[H]"
+        } else {
+            "🌾"
+        }
+    }
 
     // Workshop tools
-    pub const HAMMER: &'static str = "🔨";
-    pub const WRENCH: &'static str = "🔧";
-    pub const MAGNIFIER: &'static str = "🔍";
-    pub const SCISSORS: &'static str = "✂️";
-    pub const GEAR: &'static str = "⚙️";
-    pub const COMPASS: &'static str = "🧭";
+    pub fn hammer() -> &'static str {
+        if is_ascii_mode() {
+            "[#]"
+        } else {
+            "🔨"
+        }
+    }
+    pub fn wrench() -> &'static str {
+        if is_ascii_mode() {
+            "[%]"
+        } else {
+            "🔧"
+        }
+    }
+    pub fn magnifier() -> &'static str {
+        if is_ascii_mode() {
+            "[?]"
+        } else {
+            "🔍"
+        }
+    }
+    pub fn scissors() -> &'static str {
+        if is_ascii_mode() {
+            "[X]"
+        } else {
+            "✂️"
+        }
+    }
+    pub fn gear() -> &'static str {
+        if is_ascii_mode() {
+            "[G]"
+        } else {
+            "⚙️"
+        }
+    }
+    pub fn compass() -> &'static str {
+        if is_ascii_mode() {
+            "[>]"
+        } else {
+            "🧭"
+        }
+    }
 
     // Personal items
-    pub const JOURNAL: &'static str = "📓";
-    pub const BOOKMARK: &'static str = "🔖";
-    pub const LANTERN: &'static str = "🏮";
-    pub const KEY: &'static str = "🔑";
-    pub const HOME: &'static str = "🏠";
-    pub const CHEST: &'static str = "📦";
+    pub fn journal() -> &'static str {
+        if is_ascii_mode() {
+            "[J]"
+        } else {
+            "📓"
+        }
+    }
+    pub fn bookmark() -> &'static str {
+        if is_ascii_mode() {
+            "[!]"
+        } else {
+            "🔖"
+        }
+    }
+    pub fn lantern() -> &'static str {
+        if is_ascii_mode() {
+            "[i]"
+        } else {
+            "🏮"
+        }
+    }
+    pub fn key() -> &'static str {
+        if is_ascii_mode() {
+            "[K]"
+        } else {
+            "🔑"
+        }
+    }
+    pub fn home() -> &'static str {
+        if is_ascii_mode() {
+            "[~]"
+        } else {
+            "🏠"
+        }
+    }
+    pub fn chest() -> &'static str {
+        if is_ascii_mode() {
+            "[C]"
+        } else {
+            "📦"
+        }
+    }
 
     // Status indicators (organic)
-    pub const BLOOM: &'static str = "✿";
-    pub const WILT: &'static str = "❀";
-    pub const FROST: &'static str = "❄";
+    pub fn bloom() -> &'static str {
+        if is_ascii_mode() {
+            "[B]"
+        } else {
+            "✿"
+        }
+    }
+    pub fn wilt() -> &'static str {
+        if is_ascii_mode() {
+            "[W]"
+        } else {
+            "❀"
+        }
+    }
+    pub fn frost() -> &'static str {
+        if is_ascii_mode() {
+            "[F]"
+        } else {
+            "❄"
+        }
+    }
 
-    // Borders (hand-drawn feel)
-    pub const CORNER_TL: &'static str = "╭";
-    pub const CORNER_TR: &'static str = "╮";
-    pub const CORNER_BL: &'static str = "╰";
-    pub const CORNER_BR: &'static str = "╯";
-    pub const HORIZ: &'static str = "─";
-    pub const VERT: &'static str = "│";
-    pub const BRANCH: &'static str = "├";
-    pub const LEAF_BRANCH: &'static str = "└";
+    // Borders (hand-drawn feel) — widely supported unicode,
+    // but still provide ASCII fallback for minimal terminals
+    pub fn corner_tl() -> &'static str {
+        if is_ascii_mode() {
+            "+"
+        } else {
+            "╭"
+        }
+    }
+    pub fn corner_tr() -> &'static str {
+        if is_ascii_mode() {
+            "+"
+        } else {
+            "╮"
+        }
+    }
+    pub fn corner_bl() -> &'static str {
+        if is_ascii_mode() {
+            "+"
+        } else {
+            "╰"
+        }
+    }
+    pub fn corner_br() -> &'static str {
+        if is_ascii_mode() {
+            "+"
+        } else {
+            "╯"
+        }
+    }
+    pub fn horiz() -> &'static str {
+        if is_ascii_mode() {
+            "-"
+        } else {
+            "─"
+        }
+    }
+    pub fn vert() -> &'static str {
+        if is_ascii_mode() {
+            "|"
+        } else {
+            "│"
+        }
+    }
+    pub fn branch() -> &'static str {
+        if is_ascii_mode() {
+            "+"
+        } else {
+            "├"
+        }
+    }
+    pub fn leaf_branch() -> &'static str {
+        if is_ascii_mode() {
+            "+"
+        } else {
+            "└"
+        }
+    }
 
     // Progress indicators
-    pub const TENDING: &'static str = "◌";
-    pub const GROWING: &'static str = "◐";
-    pub const BLOOMING: &'static str = "◑";
-    pub const COMPLETE: &'static str = "●";
+    pub fn tending() -> &'static str {
+        if is_ascii_mode() {
+            "(.)"
+        } else {
+            "◌"
+        }
+    }
+    pub fn growing() -> &'static str {
+        if is_ascii_mode() {
+            "(o)"
+        } else {
+            "◐"
+        }
+    }
+    pub fn blooming() -> &'static str {
+        if is_ascii_mode() {
+            "(O)"
+        } else {
+            "◑"
+        }
+    }
+    pub fn complete() -> &'static str {
+        if is_ascii_mode() {
+            "(@)"
+        } else {
+            "●"
+        }
+    }
 }
 
 /// Tool operation names in workshop/garden language
@@ -275,22 +499,26 @@ pub fn tool_metaphor(tool_name: &str) -> &'static str {
 pub fn status_message(status: ToolStatus) -> String {
     match status {
         ToolStatus::Starting(tool) => {
-            format!("{} {} your garden...", Glyphs::SPROUT, tool_metaphor(tool))
+            format!(
+                "{} {} your garden...",
+                Glyphs::sprout(),
+                tool_metaphor(tool)
+            )
         }
         ToolStatus::Success(tool) => format!(
             "{} Finished {} — all is well.",
-            Glyphs::BLOOM,
+            Glyphs::bloom(),
             tool_metaphor(tool)
         ),
         ToolStatus::Warning(tool, msg) => format!(
             "{} {} complete, but the soil whispers: {}",
-            Glyphs::WILT,
+            Glyphs::wilt(),
             tool_metaphor(tool),
             msg
         ),
         ToolStatus::Error(tool, msg) => format!(
             "{} A frost has touched {} — {}",
-            Glyphs::FROST,
+            Glyphs::frost(),
             tool_metaphor(tool),
             msg
         ),
@@ -306,7 +534,6 @@ pub enum ToolStatus<'a> {
 }
 
 #[cfg(test)]
-#[allow(clippy::const_is_empty)]
 mod tests {
     use super::*;
 
@@ -365,55 +592,74 @@ mod tests {
 
     #[test]
     fn test_glyphs_exist() {
-        assert!(!Glyphs::SEEDLING.is_empty());
-        assert!(!Glyphs::HAMMER.is_empty());
-        assert!(!Glyphs::JOURNAL.is_empty());
+        set_ascii_mode(false);
+        assert!(!Glyphs::seedling().is_empty());
+        assert!(!Glyphs::hammer().is_empty());
+        assert!(!Glyphs::journal().is_empty());
     }
 
     #[test]
     fn test_all_glyphs() {
+        set_ascii_mode(false);
         // Garden metaphors
-        assert!(!Glyphs::SPROUT.is_empty());
-        assert!(!Glyphs::TREE.is_empty());
-        assert!(!Glyphs::LEAF.is_empty());
-        assert!(!Glyphs::FALLEN_LEAF.is_empty());
-        assert!(!Glyphs::FLOWER.is_empty());
-        assert!(!Glyphs::HARVEST.is_empty());
+        assert!(!Glyphs::sprout().is_empty());
+        assert!(!Glyphs::tree().is_empty());
+        assert!(!Glyphs::leaf().is_empty());
+        assert!(!Glyphs::fallen_leaf().is_empty());
+        assert!(!Glyphs::flower().is_empty());
+        assert!(!Glyphs::harvest().is_empty());
 
         // Workshop tools
-        assert!(!Glyphs::WRENCH.is_empty());
-        assert!(!Glyphs::MAGNIFIER.is_empty());
-        assert!(!Glyphs::SCISSORS.is_empty());
-        assert!(!Glyphs::GEAR.is_empty());
-        assert!(!Glyphs::COMPASS.is_empty());
+        assert!(!Glyphs::wrench().is_empty());
+        assert!(!Glyphs::magnifier().is_empty());
+        assert!(!Glyphs::scissors().is_empty());
+        assert!(!Glyphs::gear().is_empty());
+        assert!(!Glyphs::compass().is_empty());
 
         // Personal items
-        assert!(!Glyphs::BOOKMARK.is_empty());
-        assert!(!Glyphs::LANTERN.is_empty());
-        assert!(!Glyphs::KEY.is_empty());
-        assert!(!Glyphs::HOME.is_empty());
-        assert!(!Glyphs::CHEST.is_empty());
+        assert!(!Glyphs::bookmark().is_empty());
+        assert!(!Glyphs::lantern().is_empty());
+        assert!(!Glyphs::key().is_empty());
+        assert!(!Glyphs::home().is_empty());
+        assert!(!Glyphs::chest().is_empty());
 
         // Status indicators
-        assert!(!Glyphs::BLOOM.is_empty());
-        assert!(!Glyphs::WILT.is_empty());
-        assert!(!Glyphs::FROST.is_empty());
+        assert!(!Glyphs::bloom().is_empty());
+        assert!(!Glyphs::wilt().is_empty());
+        assert!(!Glyphs::frost().is_empty());
 
         // Borders
-        assert!(!Glyphs::CORNER_TL.is_empty());
-        assert!(!Glyphs::CORNER_TR.is_empty());
-        assert!(!Glyphs::CORNER_BL.is_empty());
-        assert!(!Glyphs::CORNER_BR.is_empty());
-        assert!(!Glyphs::HORIZ.is_empty());
-        assert!(!Glyphs::VERT.is_empty());
-        assert!(!Glyphs::BRANCH.is_empty());
-        assert!(!Glyphs::LEAF_BRANCH.is_empty());
+        assert!(!Glyphs::corner_tl().is_empty());
+        assert!(!Glyphs::corner_tr().is_empty());
+        assert!(!Glyphs::corner_bl().is_empty());
+        assert!(!Glyphs::corner_br().is_empty());
+        assert!(!Glyphs::horiz().is_empty());
+        assert!(!Glyphs::vert().is_empty());
+        assert!(!Glyphs::branch().is_empty());
+        assert!(!Glyphs::leaf_branch().is_empty());
 
         // Progress indicators
-        assert!(!Glyphs::TENDING.is_empty());
-        assert!(!Glyphs::GROWING.is_empty());
-        assert!(!Glyphs::BLOOMING.is_empty());
-        assert!(!Glyphs::COMPLETE.is_empty());
+        assert!(!Glyphs::tending().is_empty());
+        assert!(!Glyphs::growing().is_empty());
+        assert!(!Glyphs::blooming().is_empty());
+        assert!(!Glyphs::complete().is_empty());
+    }
+
+    #[test]
+    fn test_ascii_mode_toggle() {
+        set_ascii_mode(true);
+        assert_eq!(Glyphs::seedling(), "[*]");
+        assert_eq!(Glyphs::hammer(), "[#]");
+        assert_eq!(Glyphs::corner_tl(), "+");
+        assert_eq!(Glyphs::horiz(), "-");
+        assert_eq!(Glyphs::bloom(), "[B]");
+
+        set_ascii_mode(false);
+        assert_eq!(Glyphs::seedling(), "\u{1f331}");
+        assert_eq!(Glyphs::hammer(), "\u{1f528}");
+        assert_eq!(Glyphs::corner_tl(), "\u{256d}");
+        assert_eq!(Glyphs::horiz(), "\u{2500}");
+        assert_eq!(Glyphs::bloom(), "\u{273f}");
     }
 
     #[test]
@@ -450,32 +696,36 @@ mod tests {
 
     #[test]
     fn test_status_message_starting() {
+        set_ascii_mode(false);
         let msg = status_message(ToolStatus::Starting("file_read"));
         assert!(msg.contains("examining"));
-        assert!(msg.contains(Glyphs::SPROUT));
+        assert!(msg.contains(Glyphs::sprout()));
     }
 
     #[test]
     fn test_status_message_success() {
+        set_ascii_mode(false);
         let msg = status_message(ToolStatus::Success("git_commit"));
         assert!(msg.contains("preserving your harvest"));
-        assert!(msg.contains(Glyphs::BLOOM));
+        assert!(msg.contains(Glyphs::bloom()));
         assert!(msg.contains("all is well"));
     }
 
     #[test]
     fn test_status_message_warning() {
+        set_ascii_mode(false);
         let msg = status_message(ToolStatus::Warning("cargo_test", "some tests slow"));
         assert!(msg.contains("testing the soil"));
-        assert!(msg.contains(Glyphs::WILT));
+        assert!(msg.contains(Glyphs::wilt()));
         assert!(msg.contains("some tests slow"));
     }
 
     #[test]
     fn test_status_message_error() {
+        set_ascii_mode(false);
         let msg = status_message(ToolStatus::Error("cargo_check", "compilation failed"));
         assert!(msg.contains("inspecting the joinery"));
-        assert!(msg.contains(Glyphs::FROST));
+        assert!(msg.contains(Glyphs::frost()));
         assert!(msg.contains("compilation failed"));
     }
 

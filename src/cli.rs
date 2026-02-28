@@ -95,6 +95,10 @@ struct Cli {
     /// Always display token usage after each response
     #[arg(long)]
     show_tokens: bool,
+
+    /// Use ASCII-only output (no emoji or extended Unicode)
+    #[arg(long)]
+    ascii: bool,
 }
 
 /// Color theme for terminal output
@@ -262,6 +266,11 @@ pub async fn run() -> Result<()> {
         colored::control::set_override(false);
     }
 
+    // Apply --ascii mode (or SELFWARE_ASCII env var) for terminals without emoji support
+    if cli.ascii || std::env::var("SELFWARE_ASCII").is_ok() {
+        crate::ui::style::set_ascii_mode(true);
+    }
+
     // Change to working directory FIRST (before resolving relative paths)
     if let Some(ref workdir) = cli.workdir {
         std::env::set_current_dir(workdir)
@@ -270,7 +279,7 @@ pub async fn run() -> Result<()> {
         if !cli.quiet {
             println!(
                 "{} Entering garden: {}",
-                Glyphs::SPROUT,
+                Glyphs::sprout(),
                 workdir.as_str().path_local()
             );
         }
@@ -385,7 +394,11 @@ pub async fn run() -> Result<()> {
 
         if !cli.quiet {
             println!("{}", render_header(&ctx));
-            println!("\n{} {}\n", Glyphs::GEAR, "Headless Mode".workshop_title());
+            println!(
+                "\n{} {}\n",
+                Glyphs::gear(),
+                "Headless Mode".workshop_title()
+            );
         }
 
         let start = std::time::Instant::now();
@@ -481,7 +494,7 @@ async fn handle_command(
                 println!("{}", render_header(ctx));
                 println!(
                     "\n{} {} with {} concurrent streams\n",
-                    Glyphs::GEAR,
+                    Glyphs::gear(),
                     "Multi-Agent Workshop".workshop_title(),
                     concurrency.to_string().emphasis()
                 );
@@ -513,7 +526,7 @@ async fn handle_command(
                 println!("{}", render_header(ctx));
                 println!(
                     "{} {} your garden at {}...\n",
-                    Glyphs::MAGNIFIER,
+                    Glyphs::magnifier(),
                     "Surveying".craftsman_voice(),
                     path.as_str().path_local()
                 );
@@ -528,7 +541,7 @@ async fn handle_command(
                 println!("{}", render_header(ctx));
                 println!(
                     "\n{} {} at {}...\n",
-                    Glyphs::TREE,
+                    Glyphs::tree(),
                     "Visualizing your digital garden".craftsman_voice(),
                     path.as_str().path_local()
                 );
@@ -552,7 +565,7 @@ async fn handle_command(
             if swarm_mode && !quiet {
                 println!(
                     "{} {}",
-                    Glyphs::GEAR,
+                    Glyphs::gear(),
                     "Swarm mode enabled for dashboard session".craftsman_voice()
                 );
             }
@@ -564,7 +577,7 @@ async fn handle_command(
                 println!("{}", render_header(ctx));
                 println!(
                     "{} {} journal entry {}...",
-                    Glyphs::BOOKMARK,
+                    Glyphs::bookmark(),
                     "Opening".craftsman_voice(),
                     task_id.as_str().emphasis()
                 );
@@ -576,7 +589,7 @@ async fn handle_command(
                 if !quiet {
                     println!(
                         "{} Continuing: {}\n",
-                        Glyphs::SPROUT,
+                        Glyphs::sprout(),
                         task.craftsman_voice()
                     );
                 }
@@ -593,22 +606,22 @@ async fn handle_command(
             if tasks.is_empty() {
                 println!(
                     "\n{} {} Your journal is empty. Start a task to create entries.\n",
-                    Glyphs::JOURNAL,
+                    Glyphs::journal(),
                     "Note:".muted()
                 );
             } else {
                 println!(
                     "\n{} {}\n",
-                    Glyphs::JOURNAL,
+                    Glyphs::journal(),
                     "Your Journal Entries:".workshop_title()
                 );
 
                 for task in tasks {
                     let status_glyph = match task.status {
-                        checkpoint::TaskStatus::InProgress => Glyphs::GEAR,
-                        checkpoint::TaskStatus::Completed => Glyphs::BLOOM,
-                        checkpoint::TaskStatus::Failed => Glyphs::FROST,
-                        checkpoint::TaskStatus::Paused => Glyphs::BOOKMARK,
+                        checkpoint::TaskStatus::InProgress => Glyphs::gear(),
+                        checkpoint::TaskStatus::Completed => Glyphs::bloom(),
+                        checkpoint::TaskStatus::Failed => Glyphs::frost(),
+                        checkpoint::TaskStatus::Paused => Glyphs::bookmark(),
                     };
 
                     let desc =
@@ -622,7 +635,7 @@ async fn handle_command(
                     );
                     println!(
                         "      {} Step {} · {:?}",
-                        Glyphs::BRANCH.muted(),
+                        Glyphs::branch().muted(),
                         task.current_step.to_string().muted(),
                         task.status
                     );
@@ -639,45 +652,53 @@ async fn handle_command(
 
             println!(
                 "\n{} {}\n",
-                Glyphs::JOURNAL,
+                Glyphs::journal(),
                 "Journal Entry".workshop_title()
             );
 
             let weather = match checkpoint.status {
-                checkpoint::TaskStatus::InProgress => format!("{} Working", Glyphs::GEAR),
-                checkpoint::TaskStatus::Completed => format!("{} Complete", Glyphs::BLOOM),
-                checkpoint::TaskStatus::Failed => format!("{} Frost damage", Glyphs::FROST),
-                checkpoint::TaskStatus::Paused => format!("{} Resting", Glyphs::LEAF),
+                checkpoint::TaskStatus::InProgress => format!("{} Working", Glyphs::gear()),
+                checkpoint::TaskStatus::Completed => format!("{} Complete", Glyphs::bloom()),
+                checkpoint::TaskStatus::Failed => format!("{} Frost damage", Glyphs::frost()),
+                checkpoint::TaskStatus::Paused => format!("{} Resting", Glyphs::leaf()),
             };
 
             println!(
                 "   {} Entry ID:    {}",
-                Glyphs::KEY,
+                Glyphs::key(),
                 checkpoint.task_id.muted()
             );
-            println!("   {} Weather:     {}", Glyphs::SPROUT, weather);
+            println!("   {} Weather:     {}", Glyphs::sprout(), weather);
             println!(
                 "   {} Step:        {}",
-                Glyphs::BRANCH.muted(),
+                Glyphs::branch().muted(),
                 checkpoint.current_step
             );
             println!(
                 "   {} Started:     {}",
-                Glyphs::SEEDLING,
+                Glyphs::seedling(),
                 checkpoint.created_at.timestamp()
             );
             println!(
                 "   {} Last tended: {}",
-                Glyphs::LEAF,
+                Glyphs::leaf(),
                 checkpoint.updated_at.timestamp()
             );
             println!();
-            println!("   {} {}", Glyphs::JOURNAL, "Reflection:".craftsman_voice());
+            println!(
+                "   {} {}",
+                Glyphs::journal(),
+                "Reflection:".craftsman_voice()
+            );
             println!("   {}", checkpoint.task_description.as_str().emphasis());
             println!();
 
             if let Some(ref git) = checkpoint.git_checkpoint {
-                println!("   {} {}", Glyphs::TREE, "Garden State:".craftsman_voice());
+                println!(
+                    "   {} {}",
+                    Glyphs::tree(),
+                    "Garden State:".craftsman_voice()
+                );
                 println!("      Branch: {}", git.branch.as_str().path_local());
                 println!(
                     "      Commit: {}",
@@ -686,14 +707,14 @@ async fn handle_command(
                         .muted()
                 );
                 if git.dirty {
-                    println!("      {} Uncommitted changes", Glyphs::WILT);
+                    println!("      {} Uncommitted changes", Glyphs::wilt());
                 }
                 println!();
             }
 
             println!(
                 "   {} Growth rings: {} messages, {} tool calls",
-                Glyphs::HARVEST,
+                Glyphs::harvest(),
                 checkpoint.messages.len().to_string().garden_healthy(),
                 checkpoint.tool_calls.len().to_string().muted()
             );
@@ -701,7 +722,7 @@ async fn handle_command(
             if !checkpoint.errors.is_empty() {
                 println!(
                     "\n   {} {}",
-                    Glyphs::FROST,
+                    Glyphs::frost(),
                     "Frost damage:".garden_wilting()
                 );
                 for error in checkpoint
@@ -725,7 +746,7 @@ async fn handle_command(
             if !quiet {
                 println!(
                     "{} Journal entry {} has been composted.",
-                    Glyphs::FALLEN_LEAF,
+                    Glyphs::fallen_leaf(),
                     task_id.muted()
                 );
             }
@@ -776,32 +797,32 @@ async fn handle_command(
                     }
                     println!(
                         "\n{} {}\n",
-                        Glyphs::HOME,
+                        Glyphs::home(),
                         "Workshop Status".workshop_title()
                     );
 
                     let hosting = if ctx.is_local_model {
-                        format!("{} Running on your hardware (local)", Glyphs::HOME)
+                        format!("{} Running on your hardware (local)", Glyphs::home())
                             .garden_healthy()
                     } else {
-                        format!("{} Connected to remote model", Glyphs::COMPASS).garden_wilting()
+                        format!("{} Connected to remote model", Glyphs::compass()).garden_wilting()
                     };
 
                     println!(
                         "   {} Model: {}",
-                        Glyphs::GEAR,
+                        Glyphs::gear(),
                         ctx.model_name.as_str().emphasis()
                     );
                     println!("   {}", hosting);
                     println!(
                         "   {} Garden: {}",
-                        Glyphs::SPROUT,
+                        Glyphs::sprout(),
                         ctx.project_path.as_str().path_local()
                     );
 
                     println!(
                         "\n   {} Journal: {} entries ({} complete, {} in progress)",
-                        Glyphs::JOURNAL,
+                        Glyphs::journal(),
                         tasks.len().to_string().emphasis(),
                         completed.to_string().garden_healthy(),
                         in_progress.to_string().muted()
@@ -809,7 +830,7 @@ async fn handle_command(
 
                     println!(
                         "\n   {} This is your software. It runs on your terms.\n",
-                        Glyphs::KEY
+                        Glyphs::key()
                     );
                 }
             }
@@ -827,7 +848,7 @@ async fn handle_command(
                 println!("{}", render_header(ctx));
                 println!(
                     "\n{} {}\n",
-                    Glyphs::GEAR,
+                    Glyphs::gear(),
                     "Self-Improvement Analysis".workshop_title()
                 );
             }
@@ -839,14 +860,14 @@ async fn handle_command(
             if targets.is_empty() {
                 println!(
                     "   {} No improvement targets found. The codebase looks good!",
-                    Glyphs::BLOOM
+                    Glyphs::bloom()
                 );
                 return Ok(());
             }
 
             println!(
                 "   {} Found {} improvement targets:\n",
-                Glyphs::MAGNIFIER,
+                Glyphs::magnifier(),
                 targets.len().to_string().emphasis()
             );
 
@@ -867,7 +888,7 @@ async fn handle_command(
             }
 
             if dry_run {
-                println!("\n   {} Dry-run mode: no changes applied.", Glyphs::LEAF);
+                println!("\n   {} Dry-run mode: no changes applied.", Glyphs::leaf());
                 return Ok(());
             }
 
@@ -877,13 +898,16 @@ async fn handle_command(
             for cycle in 0..cycles {
                 let targets = orchestrator.analyze_self();
                 let Some(target) = orchestrator.select_target(&targets) else {
-                    println!("\n   {} No more improvement targets. Done!", Glyphs::BLOOM);
+                    println!(
+                        "\n   {} No more improvement targets. Done!",
+                        Glyphs::bloom()
+                    );
                     break;
                 };
 
                 println!(
                     "\n   {} Cycle {}/{}: applying '{}'",
-                    Glyphs::GEAR,
+                    Glyphs::gear(),
                     cycle + 1,
                     cycles,
                     target.description
@@ -892,10 +916,10 @@ async fn handle_command(
                 let prompt = orchestrator.build_improvement_prompt(target);
                 match agent.run_task(&prompt).await {
                     Ok(()) => {
-                        println!("   {} Improvement applied successfully.", Glyphs::BLOOM);
+                        println!("   {} Improvement applied successfully.", Glyphs::bloom());
                     }
                     Err(e) => {
-                        println!("   {} Improvement failed: {}", Glyphs::FROST, e);
+                        println!("   {} Improvement failed: {}", Glyphs::frost(), e);
                     }
                 }
             }
@@ -920,14 +944,14 @@ async fn handle_command(
             let mut executor = if dry_run {
                 println!(
                     "\n{} {} (dry-run mode)\n",
-                    Glyphs::GEAR,
+                    Glyphs::gear(),
                     "Workflow Execution".workshop_title()
                 );
                 WorkflowExecutor::new_dry_run()
             } else {
                 println!(
                     "\n{} {}\n",
-                    Glyphs::GEAR,
+                    Glyphs::gear(),
                     "Workflow Execution".workshop_title()
                 );
                 WorkflowExecutor::new()
@@ -950,11 +974,11 @@ async fn handle_command(
 
             println!(
                 "   {} Running workflow: {}",
-                Glyphs::COMPASS,
+                Glyphs::compass(),
                 workflow_name.clone().emphasis()
             );
             if !inputs.is_empty() {
-                println!("   {} Inputs: {:?}", Glyphs::JOURNAL, inputs);
+                println!("   {} Inputs: {:?}", Glyphs::journal(), inputs);
             }
             println!();
 
@@ -969,34 +993,34 @@ async fn handle_command(
                 crate::workflows::WorkflowStatus::Completed => {
                     println!(
                         "\n   {} Workflow completed successfully in {}ms",
-                        Glyphs::FLOWER,
+                        Glyphs::flower(),
                         result.duration_ms
                     );
                 }
                 crate::workflows::WorkflowStatus::Failed => {
                     println!(
                         "\n   {} Workflow failed after {}ms",
-                        Glyphs::FALLEN_LEAF,
+                        Glyphs::fallen_leaf(),
                         result.duration_ms
                     );
                 }
                 _ => {
                     println!(
                         "\n   {} Workflow ended with status: {:?}",
-                        Glyphs::LEAF,
+                        Glyphs::leaf(),
                         result.status
                     );
                 }
             }
 
             // Show step results
-            println!("\n   {} Steps executed:", Glyphs::JOURNAL);
+            println!("\n   {} Steps executed:", Glyphs::journal());
             for (id, step_result) in &result.step_results {
                 let status_icon = match step_result.status {
-                    crate::workflows::StepStatus::Completed => Glyphs::FLOWER,
-                    crate::workflows::StepStatus::Failed => Glyphs::FALLEN_LEAF,
-                    crate::workflows::StepStatus::Skipped => Glyphs::LEAF,
-                    _ => Glyphs::GEAR,
+                    crate::workflows::StepStatus::Completed => Glyphs::flower(),
+                    crate::workflows::StepStatus::Failed => Glyphs::fallen_leaf(),
+                    crate::workflows::StepStatus::Skipped => Glyphs::leaf(),
+                    _ => Glyphs::gear(),
                 };
                 println!("      {} {} ({:?})", status_icon, id, step_result.status);
             }
@@ -1032,7 +1056,7 @@ fn run_demo_scenario(scenario: DemoScenarioKind, fast: bool, quiet: bool) -> Res
     if !quiet {
         println!(
             "\n{} Running demo: {}\n",
-            Glyphs::GEAR,
+            Glyphs::gear(),
             scenario_impl.name().emphasis()
         );
     }
@@ -1043,7 +1067,7 @@ fn run_demo_scenario(scenario: DemoScenarioKind, fast: bool, quiet: bool) -> Res
         if !quiet {
             println!(
                 "   {} Stage {}/{}",
-                Glyphs::BRANCH,
+                Glyphs::branch(),
                 runner.current_stage(),
                 runner.total_stages()
             );
@@ -1054,7 +1078,7 @@ fn run_demo_scenario(scenario: DemoScenarioKind, fast: bool, quiet: bool) -> Res
     if !quiet {
         println!(
             "\n{} Demo complete in {:.2}s\n",
-            Glyphs::BLOOM,
+            Glyphs::bloom(),
             runner.elapsed().as_secs_f64()
         );
     }

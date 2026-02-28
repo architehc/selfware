@@ -3,6 +3,7 @@
 //! Rich terminal input with autocomplete, history, and vim keybindings.
 //! Built on reedline for a professional IDE-like experience.
 
+pub mod command_registry;
 mod completer;
 mod highlighter;
 mod prompt;
@@ -55,49 +56,7 @@ impl Default for InputConfig {
             syntax_highlight: true,
             show_hints: true,
             tool_names: vec![],
-            commands: vec![
-                "/help".into(),
-                "/status".into(),
-                "/stats".into(),
-                "/mode".into(),
-                "/ctx".into(),
-                "/ctx clear".into(),
-                "/ctx load".into(),
-                "/ctx reload".into(),
-                "/ctx copy".into(),
-                "/compress".into(),
-                "/context".into(),
-                "/memory".into(),
-                "/clear".into(),
-                "/tools".into(),
-                "/analyze".into(),
-                "/review".into(),
-                "/plan".into(),
-                "/swarm".into(),
-                "/queue".into(),
-                "/diff".into(),
-                "/git".into(),
-                "/undo".into(),
-                "/cost".into(),
-                "/model".into(),
-                "/compact".into(),
-                "/verbose".into(),
-                "/config".into(),
-                "/garden".into(),
-                "/journal".into(),
-                "/palette".into(),
-                "/vim".into(),
-                "/copy".into(),
-                "/restore".into(),
-                "/chat".into(),
-                "/chat save".into(),
-                "/chat resume".into(),
-                "/chat list".into(),
-                "/chat delete".into(),
-                "/theme".into(),
-                "exit".into(),
-                "quit".into(),
-            ],
+            commands: command_registry::command_names(),
         }
     }
 }

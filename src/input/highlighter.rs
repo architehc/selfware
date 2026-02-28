@@ -44,38 +44,9 @@ impl SelfwareHighlighter {
     /// Check if a word is a command
     fn is_command(&self, word: &str) -> bool {
         word.starts_with('/')
-            && matches!(
-                word,
-                "/help"
-                    | "/status"
-                    | "/stats"
-                    | "/mode"
-                    | "/ctx"
-                    | "/context"
-                    | "/compress"
-                    | "/memory"
-                    | "/clear"
-                    | "/tools"
-                    | "/analyze"
-                    | "/review"
-                    | "/plan"
-                    | "/diff"
-                    | "/git"
-                    | "/undo"
-                    | "/cost"
-                    | "/model"
-                    | "/compact"
-                    | "/verbose"
-                    | "/config"
-                    | "/garden"
-                    | "/journal"
-                    | "/palette"
-                    | "/vim"
-                    | "/copy"
-                    | "/restore"
-                    | "/chat"
-                    | "/theme"
-            )
+            && super::command_registry::COMMANDS
+                .iter()
+                .any(|c| c.name == word)
     }
 
     /// Check if a word looks like a path

@@ -62,9 +62,9 @@ impl WorkshopContext {
 /// Render the workshop header
 pub fn render_header(ctx: &WorkshopContext) -> String {
     let hosting = if ctx.is_local_model {
-        format!("{} Homestead", Glyphs::HOME).garden_healthy()
+        format!("{} Homestead", Glyphs::home()).garden_healthy()
     } else {
-        format!("{} Remote", Glyphs::COMPASS).garden_wilting()
+        format!("{} Remote", Glyphs::compass()).garden_wilting()
     };
 
     // Mode indicator with color
@@ -78,15 +78,15 @@ pub fn render_header(ctx: &WorkshopContext) -> String {
     let width = 65;
     let top_border = format!(
         "{}{}{}",
-        Glyphs::CORNER_TL,
-        Glyphs::HORIZ.repeat(width - 2),
-        Glyphs::CORNER_TR
+        Glyphs::corner_tl(),
+        Glyphs::horiz().repeat(width - 2),
+        Glyphs::corner_tr()
     );
     let bottom_border = format!(
         "{}{}{}",
-        Glyphs::CORNER_BL,
-        Glyphs::HORIZ.repeat(width - 2),
-        Glyphs::CORNER_BR
+        Glyphs::corner_bl(),
+        Glyphs::horiz().repeat(width - 2),
+        Glyphs::corner_br()
     );
 
     format!(
@@ -98,14 +98,14 @@ pub fn render_header(ctx: &WorkshopContext) -> String {
 {}
 "#,
         top_border.muted(),
-        Glyphs::VERT.muted(),
-        Glyphs::GEAR,
+        Glyphs::vert().muted(),
+        Glyphs::gear(),
         mode_str,
-        Glyphs::VERT.muted(),
-        Glyphs::VERT.muted(),
-        Glyphs::SPROUT,
+        Glyphs::vert().muted(),
+        Glyphs::vert().muted(),
+        Glyphs::sprout(),
         ctx.project_name.as_str().emphasis(),
-        Glyphs::VERT.muted(),
+        Glyphs::vert().muted(),
         hosting,
         ctx.tasks_completed.to_string().garden_healthy(),
         bottom_border.muted(),
@@ -115,17 +115,17 @@ pub fn render_header(ctx: &WorkshopContext) -> String {
 /// Render a minimal status line
 pub fn render_status_line(ctx: &WorkshopContext) -> String {
     let hosting = if ctx.is_local_model {
-        format!("{} yours", Glyphs::HOME)
+        format!("{} yours", Glyphs::home())
     } else {
-        format!("{} remote", Glyphs::COMPASS)
+        format!("{} remote", Glyphs::compass())
     };
 
     format!(
         "{} {} {} {} {}",
         hosting.muted(),
-        Glyphs::VERT.muted(),
+        Glyphs::vert().muted(),
         ctx.project_name.as_str().emphasis(),
-        Glyphs::VERT.muted(),
+        Glyphs::vert().muted(),
         ctx.model_name.as_str().muted(),
     )
 }
@@ -134,9 +134,9 @@ pub fn render_status_line(ctx: &WorkshopContext) -> String {
 pub fn render_task_start(task: &str) -> String {
     format!(
         "\n{} {} beginning a new task in your garden...\n{} {}\n",
-        Glyphs::SEEDLING,
+        Glyphs::seedling(),
         "Your companion is".craftsman_voice(),
-        Glyphs::JOURNAL,
+        Glyphs::journal(),
         task.emphasis()
     )
 }
@@ -144,17 +144,17 @@ pub fn render_task_start(task: &str) -> String {
 /// Render step progress
 pub fn render_step(step: usize, phase: &str) -> String {
     let phase_glyph = match phase.to_lowercase().as_str() {
-        "planning" => Glyphs::COMPASS,
-        "executing" => Glyphs::HAMMER,
-        "verifying" => Glyphs::MAGNIFIER,
-        "reflecting" => Glyphs::JOURNAL,
-        _ => Glyphs::GEAR,
+        "planning" => Glyphs::compass(),
+        "executing" => Glyphs::hammer(),
+        "verifying" => Glyphs::magnifier(),
+        "reflecting" => Glyphs::journal(),
+        _ => Glyphs::gear(),
     };
 
     format!(
         "{} {} Step {} · {}",
         phase_glyph,
-        Glyphs::BRANCH.muted(),
+        Glyphs::branch().muted(),
         step.to_string().emphasis(),
         phase.craftsman_voice()
     )
@@ -165,7 +165,7 @@ pub fn render_tool_call(tool_name: &str) -> String {
     let metaphor = super::style::tool_metaphor(tool_name);
     format!(
         "   {} {} {}...",
-        Glyphs::WRENCH,
+        Glyphs::wrench(),
         metaphor.craftsman_voice(),
         format!("({})", tool_name).muted()
     )
@@ -175,7 +175,7 @@ pub fn render_tool_call(tool_name: &str) -> String {
 pub fn render_tool_success(_tool_name: &str) -> String {
     format!(
         "   {} {}",
-        Glyphs::BLOOM.garden_healthy(),
+        Glyphs::bloom().garden_healthy(),
         "done".garden_healthy()
     )
 }
@@ -184,7 +184,7 @@ pub fn render_tool_success(_tool_name: &str) -> String {
 pub fn render_tool_error(_tool_name: &str, error: &str) -> String {
     format!(
         "   {} {} — {}",
-        Glyphs::FROST,
+        Glyphs::frost(),
         "a frost touched this".garden_wilting(),
         error.muted()
     )
@@ -201,7 +201,7 @@ pub fn render_task_complete(duration: Duration) -> String {
 
     format!(
         "\n{} {} Your garden has been tended. ({})\n",
-        Glyphs::HARVEST,
+        Glyphs::harvest(),
         "Task complete.".garden_healthy(),
         time_str.muted()
     )
@@ -211,7 +211,7 @@ pub fn render_task_complete(duration: Duration) -> String {
 pub fn render_error(message: &str) -> String {
     format!(
         "\n{} {} {}\n",
-        Glyphs::FROST,
+        Glyphs::frost(),
         "A chill in the workshop:".garden_wilting(),
         message
     )
@@ -221,7 +221,7 @@ pub fn render_error(message: &str) -> String {
 pub fn render_warning(message: &str) -> String {
     format!(
         "{} {} {}",
-        Glyphs::WILT,
+        Glyphs::wilt(),
         "Note:".garden_wilting(),
         message.muted()
     )
@@ -231,7 +231,7 @@ pub fn render_warning(message: &str) -> String {
 pub fn render_checkpoint_saved(task_id: &str) -> String {
     format!(
         "{} {} · {}",
-        Glyphs::BOOKMARK,
+        Glyphs::bookmark(),
         "Journal entry saved".craftsman_voice(),
         task_id.muted()
     )
@@ -269,9 +269,9 @@ impl GardenSpinner {
 
     pub fn finish(&self, success: bool) -> String {
         if success {
-            format!("{} {}", Glyphs::BLOOM, "Complete".garden_healthy())
+            format!("{} {}", Glyphs::bloom(), "Complete".garden_healthy())
         } else {
-            format!("{} {}", Glyphs::FROST, "Interrupted".garden_wilting())
+            format!("{} {}", Glyphs::frost(), "Interrupted".garden_wilting())
         }
     }
 }
@@ -280,7 +280,7 @@ impl GardenSpinner {
 pub fn workshop_prompt() -> String {
     format!(
         "\n{} {} ",
-        Glyphs::SPROUT,
+        Glyphs::sprout(),
         "What shall we tend to?".craftsman_voice()
     )
 }
@@ -302,15 +302,15 @@ pub fn render_welcome(ctx: &WorkshopContext) -> String {
 
 "#,
         render_header(ctx),
-        Glyphs::LANTERN,
+        Glyphs::lantern(),
         ctx.owner_name.as_str().emphasis(),
-        Glyphs::SPROUT,
+        Glyphs::sprout(),
         ctx.companion_name.as_str().tool_name(),
-        Glyphs::BOOKMARK,
-        Glyphs::BRANCH.muted(),
-        Glyphs::BRANCH.muted(),
-        Glyphs::BRANCH.muted(),
-        Glyphs::LEAF_BRANCH.muted(),
+        Glyphs::bookmark(),
+        Glyphs::branch().muted(),
+        Glyphs::branch().muted(),
+        Glyphs::branch().muted(),
+        Glyphs::leaf_branch().muted(),
     )
 }
 
@@ -318,7 +318,7 @@ pub fn render_welcome(ctx: &WorkshopContext) -> String {
 pub fn render_assistant_response(content: &str) -> String {
     format!(
         "\n{} {}\n\n{}\n",
-        Glyphs::SPROUT,
+        Glyphs::sprout(),
         "Your companion says:".craftsman_voice(),
         content
     )
@@ -326,7 +326,11 @@ pub fn render_assistant_response(content: &str) -> String {
 
 /// Render thinking/reasoning indicator
 pub fn render_thinking() -> String {
-    format!("{} {}", Glyphs::GEAR, "contemplating the garden...".muted())
+    format!(
+        "{} {}",
+        Glyphs::gear(),
+        "contemplating the garden...".muted()
+    )
 }
 
 /// Box drawing for important content
@@ -342,25 +346,25 @@ pub fn render_box(title: &str, content: &str) -> String {
 
     let top = format!(
         "{} {} {}",
-        Glyphs::CORNER_TL,
+        Glyphs::corner_tl(),
         format!(" {} ", title).emphasis(),
-        Glyphs::HORIZ.repeat(width.saturating_sub(title.len() + 5)),
+        Glyphs::horiz().repeat(width.saturating_sub(title.len() + 5)),
     );
 
     let bottom = format!(
         "{}{}{}",
-        Glyphs::CORNER_BL,
-        Glyphs::HORIZ.repeat(width),
-        Glyphs::CORNER_BR
+        Glyphs::corner_bl(),
+        Glyphs::horiz().repeat(width),
+        Glyphs::corner_br()
     );
 
     let mut result = format!("{}\n", top);
     for line in lines {
         result.push_str(&format!(
             "{} {:<width$} {}\n",
-            Glyphs::VERT,
+            Glyphs::vert(),
             line,
-            Glyphs::VERT,
+            Glyphs::vert(),
             width = max_width
         ));
     }
@@ -379,7 +383,7 @@ pub fn render_welcome_with_mascot(ctx: &WorkshopContext) -> String {
         "{}\n{}\n\n  {} Ready to tend your garden!\n",
         mascot,
         header,
-        Glyphs::FLOWER.garden_healthy()
+        Glyphs::flower().garden_healthy()
     )
 }
 
