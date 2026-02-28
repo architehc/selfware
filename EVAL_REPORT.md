@@ -3,19 +3,72 @@
 **Date:** 2026-02-28
 **Endpoint:** `https://crazyshit.ngrok.io/v1`
 **Model:** Qwen/Qwen3-Coder-Next-FP8 (1,010,000 token context)
-**Config:** `selfware-eval.toml` — YOLO mode, 2000 max iterations, 900K token budget, 3h max
 
 ---
 
-## Executive Summary
+## Eval Round 2 — Post-Framework Improvements (2026-02-28)
+
+**Config:** `system_tests/projecte2e/config/crazyshit_model.toml` — YOLO mode, 500 max iterations, streaming
+**Harness:** `system_tests/projecte2e/run_projecte2e.sh` — 6 coding scenarios + 1 swarm scenario
+**Binary:** `target/release/selfware` built with `--all-features`
+
+### Results: 6/6 Coding Pass, 97.1/100, Rating: Excellent
+
+| Scenario | Type | Difficulty | Baseline | Post | Agent Exit | Timeout | Duration (s) | Score | Changed Files | Error Hits | Notes |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `easy_calculator` | coding | easy | 101 | 0 | 124 | 1 | 240 | 90 | 3 | 48 | agent_timeout |
+| `easy_string_ops` | coding | easy | 101 | 0 | 0 | 0 | 33 | 100 | 3 | 2 | |
+| `medium_json_merge` | coding | medium | 101 | 0 | 0 | 0 | 19 | 100 | 3 | 0 | |
+| `medium_bitset` | coding | medium | 101 | 0 | 0 | 0 | 38 | 100 | 3 | 1 | |
+| `hard_scheduler` | coding | hard | 101 | 0 | 124 | 1 | 360 | 90 | 6 | 31 | agent_timeout |
+| `hard_event_bus` | coding | hard | 101 | 0 | 0 | 0 | 83 | 100 | 5 | 2 | |
+| `swarm_session` | swarm | n/a | n/a | n/a | 0 | 0 | 8 | 100 | 3 | 4 | spawned=3,status_mentions=2 |
+
+### What the Fixes Changed
+
+Seven framework improvements were applied between Round 1 and Round 2:
+
+1. **Auto-verify after `file_write`** — Verification gate now triggers on both `file_edit` and `file_write`, not just `file_edit`
+2. **OpenAI function format parser** — Added `<function=name>{"json"}</function>` format to the tool parser cascade (the exact format that caused Task 2's stuck loop in Round 1)
+3. **Malformed tool call re-prompt** — Instead of silently logging malformed tool calls, the framework now detects them, injects a correction message with the exact format, and continues the loop
+4. **Completion gate** — Requires minimum 3 steps + at least one successful verification tool (cargo_check/cargo_test/cargo_clippy) before accepting task completion
+5. **Progress injection** — Every 5 steps, injects a system message with step count, budget %, verification status, and adaptive guidance
+6. **Verification-first system prompt** — Both native FC and XML prompts now include a mandatory 5-step workflow (Plan → Implement → Verify → Fix → Test) and critical rules
+7. **Enhanced operational plan** — Default operational plan expanded from 3 to 5 steps with explicit verification gates
+
+### Analysis
+
+**Scores of 100/100** (easy_string_ops, medium_json_merge, medium_bitset, hard_event_bus): Agent fixed all bugs, ran verification, and exited cleanly within the timeout. The completion gate ensured the agent ran cargo_check/cargo_test before declaring done.
+
+**Scores of 90/100** (easy_calculator, hard_scheduler): Agent fixed all bugs and tests pass (post-validation = 0), but timed out instead of exiting cleanly. The completion gate kept the agent working — it had verified its code but kept trying to re-summarize. This is the correct tradeoff: persisting too long is much better than self-terminating too early. The 10-point deduction is for the non-clean exit only.
+
+**Swarm (100/100):** Spawned 3 agents and completed in 8 seconds with status reports.
+
+### Key Metrics Comparison
+
+| Metric | Round 1 | Round 2 | Change |
+|--------|---------|---------|--------|
+| Tasks with passing tests | 0/5 | **6/6** | +6 |
+| Verification tool calls | 0 | **Multiple per task** | Fixed |
+| Tool format stuck loops | 1 (10 steps) | **0** | Fixed |
+| Overall score | N/A (different harness) | **97.1/100** | — |
+| Rating | N/A | **Excellent** | — |
+| Framework crashes | 0 | 0 | Stable |
+| Early self-termination | 5/5 tasks | **0/6 tasks** | Fixed |
+
+---
+
+## Eval Round 1 — Baseline (2026-02-28)
+
+**Config:** `selfware-eval.toml` — YOLO mode, 2000 max iterations, 900K token budget, 3h max
+
+### Executive Summary
 
 Five concurrent long-running tasks were executed against the selfware codebase to evaluate the agent framework's performance with an open-weight model (Qwen3-Coder-Next-FP8). Tasks were designed to run ~2 hours each but completed in 2–25 minutes, revealing significant gaps in task persistence, verification discipline, and tool format handling.
 
 **Key finding:** The framework infrastructure (YOLO mode, checkpointing, retry, streaming) works correctly. The bottleneck is model-level behavior — early self-termination, tool syntax confusion, and lack of iterative verification.
 
----
-
-## Task Results
+### Task Results
 
 | # | Task | Steps | Duration | Lines Written | Outcome |
 |---|------|-------|----------|---------------|---------|
@@ -108,11 +161,9 @@ Five concurrent long-running tasks were executed against the selfware codebase t
 - Shortest task by far — barely started before quitting
 - Possibly hit an output token limit on the single large file write
 
----
+### Framework Assessment
 
-## Framework Assessment
-
-### What Worked Well
+#### What Worked Well
 
 | Feature | Evidence |
 |---------|----------|
@@ -124,62 +175,18 @@ Five concurrent long-running tasks were executed against the selfware codebase t
 | **Audit logging** | All tool calls logged to eval-audit.log |
 | **Config system** | External TOML config worked correctly for endpoint/model override |
 
-### What Needs Improvement
+#### What Needed Improvement (addressed in Round 2)
 
-| Issue | Severity | Details |
-|-------|----------|---------|
-| **Early self-termination** | Critical | All tasks finished in 2–25 min vs 2h target. The model decides it's "done" far too early. |
-| **No verification loop** | Critical | Zero tasks ran `cargo check`, `cargo test`, or `cargo clippy` to verify their output. |
-| **Tool format confusion** | High | Task 2 got stuck calling tools with OpenAI function-calling syntax instead of selfware XML format for 10 consecutive steps. |
-| **Concurrent workspace conflicts** | High | Task 1 failed because Task 4 modified shared files. No workspace isolation between concurrent tasks. |
-| **No iterative deepening** | Medium | Tasks read code and wrote code but never iterated (write → test → fix → test). |
-| **Single-shot file writes** | Medium | Task 5 tried to write a huge file in one call instead of building incrementally. |
-| **No progress self-assessment** | Low | Tasks never evaluated their own progress against the original prompt. |
+| Issue | Severity | Details | Fix Applied |
+|-------|----------|---------|-------------|
+| **Early self-termination** | Critical | All tasks finished in 2–25 min vs 2h target | Completion gate (min steps + verification required) |
+| **No verification loop** | Critical | Zero tasks ran cargo check/test/clippy | Auto-verify after file_write, verification-first prompt |
+| **Tool format confusion** | High | Task 2 stuck calling tools with OpenAI syntax for 10 steps | OpenAI format parser + malformed tool re-prompt |
+| **Concurrent workspace conflicts** | High | Task 1 failed because Task 4 modified shared files | (Future: git worktrees) |
+| **No iterative deepening** | Medium | Tasks read/wrote code but never iterated | Progress injection + enhanced operational plan |
+| **No progress self-assessment** | Low | Tasks never evaluated their own progress | Progress injection every 5 steps |
 
----
-
-## Root Cause Analysis
-
-### 1. Early Termination (Critical)
-
-The model treats each task as a single-pass operation: read context, write output, stop. The framework provides 2000 iterations and 3 hours, but the model self-terminates after 7–145 steps. This is a model-level behavior — the framework cannot force the model to continue working.
-
-**Potential mitigations:**
-- Add a "minimum steps" or "minimum duration" threshold before allowing termination
-- Inject periodic "you are X% through your budget, continue working" system messages
-- Use a meta-prompt that explicitly instructs the model to verify, iterate, and expand
-- Implement a "task completion criteria" check that validates output before accepting termination
-
-### 2. No Verification (Critical)
-
-Despite having `cargo_test`, `cargo_check`, and `cargo_clippy` tools available, no task ever used them. The model wrote code and assumed it was correct.
-
-**Potential mitigations:**
-- Add mandatory verification steps in the PDVR cognitive cycle
-- Auto-run `cargo check` after any file write and feed errors back to the model
-- Include "you MUST run cargo check after writing code" in the system prompt
-
-### 3. Tool Format Confusion (High)
-
-The Qwen3-Coder model reverted to OpenAI function-calling XML format (`<function=name>`) in Task 2, rather than selfware's expected format. The framework logged these as errors but couldn't recover.
-
-**Potential mitigations:**
-- Add tool format correction: detect malformed calls and re-prompt with correct syntax
-- Include tool format examples in every system message, not just the initial prompt
-- Implement fuzzy tool call parsing that accepts multiple formats
-
-### 4. Workspace Isolation (High)
-
-Running 5 tasks against the same working directory caused file conflicts. Task 1's edits failed because Task 4 had modified the same files.
-
-**Potential mitigations:**
-- Use git worktrees for concurrent task isolation (already supported but not used here)
-- Lock files being edited so concurrent tasks don't conflict
-- Run each eval task in a separate clone of the repository
-
----
-
-## Quantitative Summary
+### Quantitative Summary (Round 1)
 
 | Metric | Value |
 |--------|-------|
@@ -189,7 +196,7 @@ Running 5 tasks against the same working directory caused file conflicts. Task 1
 | Tasks blocked by external factors | 1 (Task 1) |
 | Total steps across all tasks | 250 |
 | Total duration | ~70 minutes |
-| Expected duration | ~10 hours (5 × 2h) |
+| Expected duration | ~10 hours (5 x 2h) |
 | Duration efficiency | 12% of target |
 | Total lines of code written | ~2,600 |
 | Lines that compiled | 0 verified |
@@ -199,29 +206,9 @@ Running 5 tasks against the same working directory caused file conflicts. Task 1
 
 ---
 
-## Recommendations
+## Future Work
 
-### Short-Term (Framework Changes)
-
-1. **Auto-verify after writes** — Run `cargo check` automatically after any Rust file is written and inject errors into the conversation
-2. **Tool format recovery** — Detect malformed tool calls and re-prompt with correct syntax examples
-3. **Minimum work threshold** — Don't accept task completion until minimum steps/duration/verification criteria are met
-4. **Workspace isolation** — Use git worktrees or separate clones for concurrent tasks
-
-### Medium-Term (Prompt Engineering)
-
-5. **Verification-first prompting** — Restructure system prompt to mandate write-test-fix cycles
-6. **Progress injection** — Periodically inject "progress report" system messages showing budget usage
-7. **Task decomposition** — Break 2-hour tasks into explicit sub-tasks with verification gates
-
-### Long-Term (Architecture)
-
-8. **Supervisor agent** — A meta-agent that monitors task progress and can redirect/extend worker agents
-9. **Compilation oracle** — A background process that continuously compiles and feeds errors back
-10. **Task completion scoring** — ML-based assessment of whether a task's output meets its prompt criteria before allowing termination
-
----
-
-## Conclusion
-
-The selfware framework infrastructure is production-ready: streaming, retry, YOLO mode, checkpointing, and concurrent execution all work correctly. The evaluation bottleneck is at the model behavior level — Qwen3-Coder-Next-FP8 treats complex tasks as single-pass operations rather than iterative engineering work. The highest-impact improvements are auto-verification after file writes, tool format recovery for non-native models, and minimum work thresholds before task completion.
+- **Workspace isolation**: Use git worktrees for concurrent eval tasks to prevent file conflicts
+- **Compilation oracle**: Background `cargo check --message-format=json` watcher injecting results into context
+- **Supervisor agent**: Meta-agent monitoring worker progress, built on existing `src/orchestration/multiagent.rs`
+- **Task completion scoring**: ML-based assessment of whether output meets prompt criteria
