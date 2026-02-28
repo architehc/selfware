@@ -790,7 +790,7 @@ impl CheckpointManager {
     /// Attempt to recover a corrupted checkpoint.
     ///
     /// Strategy:
-    /// 1. Try loading from the `.json.bak` backup (created by [`save`]).
+    /// 1. Try loading from the `.json.bak` backup (created by [`Self::save`]).
     /// 2. If the backup is also unusable, create a fresh checkpoint with the
     ///    task ID preserved so the caller can resume from a clean state.
     pub fn recover_from_corruption(&self, task_id: &str) -> Result<TaskCheckpoint> {

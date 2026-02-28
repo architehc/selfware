@@ -1285,7 +1285,7 @@ impl VectorStore {
     /// Search across collection.
     ///
     /// If all raw similarity scores are NaN a warning is logged. Callers
-    /// that hold a mutable reference can use [`search_or_rebuild`] instead
+    /// that hold a mutable reference can use [`Self::search_or_rebuild`] instead
     /// to automatically rebuild the index and retry.
     pub async fn search(
         &self,
