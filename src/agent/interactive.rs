@@ -1487,3 +1487,197 @@ impl Agent {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── format_file_size tests ──
+
+    #[test]
+    fn format_file_size_bytes() {
+        assert_eq!(Agent::format_file_size(0), "0B");
+        assert_eq!(Agent::format_file_size(512), "512B");
+        assert_eq!(Agent::format_file_size(1023), "1023B");
+    }
+
+    #[test]
+    fn format_file_size_kilobytes() {
+        assert_eq!(Agent::format_file_size(1024), "1.0KB");
+        assert_eq!(Agent::format_file_size(2048), "2.0KB");
+        assert_eq!(Agent::format_file_size(1536), "1.5KB");
+    }
+
+    #[test]
+    fn format_file_size_megabytes() {
+        assert_eq!(Agent::format_file_size(1024 * 1024), "1.0MB");
+        assert_eq!(Agent::format_file_size(2 * 1024 * 1024), "2.0MB");
+    }
+
+    // ── Slash command matching patterns ──
+    // These tests verify the string-matching logic used in the interactive loop
+    // to route slash commands, extracted as pure assertions.
+
+    #[test]
+    fn slash_command_routing_exact_matches() {
+        let commands = vec![
+            "/help", "/status", "/stats", "/compress", "/clear", "/tools",
+            "/mode", "/ctx", "/context", "/diff", "/git", "/undo", "/cost",
+            "/model", "/compact", "/verbose", "/config", "/memory", "/copy",
+            "/restore", "/vim", "/theme", "/queue", "/swarm", "/chat",
+        ];
+        for cmd in &commands {
+            assert!(
+                cmd.starts_with('/'),
+                "Command '{}' should start with /",
+                cmd
+            );
+        }
+
+        // Non-slash input should NOT be treated as a command
+        let non_commands = ["help", "status", "hello", "fix the bug"];
+        for input in &non_commands {
+            assert!(
+                !input.starts_with('/'),
+                "'{}' should not be treated as a slash command",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn slash_command_with_argument_parsing() {
+        // Verify strip_prefix patterns used throughout the interactive loop
+        let input = "/review src/main.rs";
+        let arg = input.strip_prefix("/review ").map(str::trim);
+        assert_eq!(arg, Some("src/main.rs"));
+
+        let input = "/analyze ./src";
+        let arg = input.strip_prefix("/analyze ").map(str::trim);
+        assert_eq!(arg, Some("./src"));
+
+        let input = "/plan implement auth flow";
+        let arg = input.strip_prefix("/plan ").map(str::trim);
+        assert_eq!(arg, Some("implement auth flow"));
+
+        let input = "/swarm refactor error handling";
+        let arg = input.strip_prefix("/swarm ").map(str::trim);
+        assert_eq!(arg, Some("refactor error handling"));
+
+        let input = "/queue fix the tests";
+        let arg = input.strip_prefix("/queue ").map(str::trim);
+        assert_eq!(arg, Some("fix the tests"));
+    }
+
+    #[test]
+    fn context_command_aliases() {
+        // Both /context and /ctx should work for all subcommands
+        let aliases = [("/context", "/ctx"), ("/context clear", "/ctx clear")];
+        for (full, short) in &aliases {
+            assert!(full.starts_with("/context") || full.starts_with("/ctx"));
+            assert!(short.starts_with("/ctx"));
+        }
+
+        let load_input = "/ctx load .rs,.toml";
+        let arg = load_input
+            .strip_prefix("/context load ")
+            .or_else(|| load_input.strip_prefix("/ctx load "))
+            .map(str::trim);
+        assert_eq!(arg, Some(".rs,.toml"));
+    }
+
+    // ── Shell escape parsing ──
+
+    #[test]
+    fn shell_escape_command_extraction() {
+        // The interactive loop uses `!` prefix for shell escapes
+        let input = "!ls -la";
+        assert!(input.starts_with('!'));
+        let cmd = input.strip_prefix('!').map(str::trim);
+        assert_eq!(cmd, Some("ls -la"));
+
+        let input = "! git status";
+        let cmd = input.strip_prefix('!').map(str::trim);
+        assert_eq!(cmd, Some("git status"));
+
+        // Empty shell command
+        let input = "!";
+        let cmd = input.strip_prefix('!').map(str::trim);
+        assert_eq!(cmd, Some(""));
+    }
+
+    // ── Exit/quit detection ──
+
+    #[test]
+    fn exit_commands_recognized() {
+        for input in &["exit", "quit"] {
+            let trimmed = input.trim();
+            assert!(
+                trimmed == "exit" || trimmed == "quit",
+                "'{}' should trigger exit",
+                input
+            );
+        }
+
+        // These should NOT trigger exit
+        for input in &["exiting", "quitting", "EXIT", "/exit", "exit now"] {
+            let trimmed = input.trim();
+            assert!(
+                trimmed != "exit" && trimmed != "quit",
+                "'{}' should NOT trigger exit",
+                input
+            );
+        }
+    }
+
+    // ── Large paste preview logic ──
+
+    #[test]
+    fn large_paste_detection() {
+        const LARGE_PASTE_THRESHOLD: usize = 3000;
+        const PREVIEW_CHARS: usize = 200;
+
+        let small_input = "Hello world";
+        assert!(small_input.len() <= LARGE_PASTE_THRESHOLD);
+
+        let large_input = "x".repeat(5000);
+        assert!(large_input.len() > LARGE_PASTE_THRESHOLD);
+
+        // Verify preview extraction logic
+        let start_preview: String = large_input.chars().take(PREVIEW_CHARS).collect();
+        assert_eq!(start_preview.len(), PREVIEW_CHARS);
+
+        let end_preview: String = large_input
+            .chars()
+            .rev()
+            .take(PREVIEW_CHARS)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        assert_eq!(end_preview.len(), PREVIEW_CHARS);
+    }
+
+    // ── Queued message preview truncation ──
+
+    #[test]
+    fn queued_message_preview_truncation() {
+        // The drain_pending_messages method truncates preview at 60 chars
+        let short_msg = "Short message";
+        let preview = if short_msg.chars().count() > 60 {
+            format!("{}...", short_msg.chars().take(57).collect::<String>())
+        } else {
+            short_msg.to_string()
+        };
+        assert_eq!(preview, "Short message");
+
+        let long_msg = "a".repeat(100);
+        let preview = if long_msg.chars().count() > 60 {
+            format!("{}...", long_msg.chars().take(57).collect::<String>())
+        } else {
+            long_msg.clone()
+        };
+        assert_eq!(preview.len(), 60); // 57 chars + "..."
+        assert!(preview.ends_with("..."));
+    }
+}

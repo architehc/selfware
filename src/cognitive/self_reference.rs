@@ -922,6 +922,38 @@ mod tests {
     use super::*;
     use crate::cognitive::token_budget::{TaskType, TokenBudgetAllocator};
 
+    // ========================================================================
+    // Helper functions
+    // ========================================================================
+
+    fn make_self_reference_system() -> SelfReferenceSystem {
+        let embedding = Arc::new(crate::vector_store::EmbeddingBackend::Mock(
+            crate::vector_store::MockEmbeddingProvider::default(),
+        ));
+        let semantic = Arc::new(RwLock::new(SemanticMemory::new(100_000, embedding)));
+        SelfReferenceSystem::new(semantic, PathBuf::from("/tmp/selfware-test"))
+    }
+
+    fn make_modification(
+        file_path: &str,
+        mod_type: ModificationType,
+        description: &str,
+    ) -> CodeModification {
+        CodeModification {
+            timestamp: 1000,
+            file_path: file_path.to_string(),
+            modification_type: mod_type,
+            description: description.to_string(),
+            tokens_changed: 50,
+            hash_before: "abc123".to_string(),
+            hash_after: "def456".to_string(),
+        }
+    }
+
+    // ========================================================================
+    // Existing tests
+    // ========================================================================
+
     #[test]
     fn test_task_type_suggestion() {
         assert_eq!(
@@ -935,5 +967,375 @@ mod tests {
         let model = SelfModel::default();
         assert!(model.modules.is_empty());
         assert!(model.capabilities.is_empty());
+    }
+
+    // ========================================================================
+    // SelfModel initialization tests
+    // ========================================================================
+
+    #[test]
+    fn test_self_model_default_has_empty_fields() {
+        let model = SelfModel::default();
+        assert!(model.modules.is_empty());
+        assert!(model.capabilities.is_empty());
+        assert!(model.limitations.is_empty());
+        assert!(model.recent_changes.is_empty());
+        assert!(model.version.is_empty());
+        assert!(model.architecture.layers.is_empty());
+        assert!(model.architecture.data_flows.is_empty());
+    }
+
+    #[test]
+    fn test_self_reference_system_new_has_empty_state() {
+        let sys = make_self_reference_system();
+        let model = sys.get_self_model();
+        assert!(model.modules.is_empty());
+        assert!(model.capabilities.is_empty());
+        assert!(sys.get_recent_modifications().is_empty());
+        assert!(sys.code_cache.is_empty());
+    }
+
+    // ========================================================================
+    // Key component inference tests
+    // ========================================================================
+
+    #[test]
+    fn test_infer_key_components_memory() {
+        let sys = make_self_reference_system();
+        let components = sys.infer_key_components("src/memory.rs");
+        assert_eq!(components.len(), 3);
+        assert!(components.contains(&"AgentMemory".to_string()));
+        assert!(components.contains(&"MemoryEntry".to_string()));
+        assert!(components.contains(&"ContextWindow".to_string()));
+    }
+
+    #[test]
+    fn test_infer_key_components_episodic() {
+        let sys = make_self_reference_system();
+        let components = sys.infer_key_components("src/cognitive/episodic.rs");
+        assert_eq!(components.len(), 3);
+        assert!(components.contains(&"EpisodicMemory".to_string()));
+        assert!(components.contains(&"Episode".to_string()));
+        assert!(components.contains(&"Importance".to_string()));
+    }
+
+    #[test]
+    fn test_infer_key_components_rag() {
+        let sys = make_self_reference_system();
+        let components = sys.infer_key_components("src/cognitive/rag.rs");
+        assert!(components.contains(&"RagSystem".to_string()));
+    }
+
+    #[test]
+    fn test_infer_key_components_context() {
+        let sys = make_self_reference_system();
+        let components = sys.infer_key_components("src/agent/context.rs");
+        assert!(components.contains(&"ContextCompressor".to_string()));
+        assert!(components.contains(&"ContextWindow".to_string()));
+    }
+
+    #[test]
+    fn test_infer_key_components_unknown_returns_empty() {
+        let sys = make_self_reference_system();
+        let components = sys.infer_key_components("src/unknown_module.rs");
+        assert!(components.is_empty());
+    }
+
+    // ========================================================================
+    // Dependency tracking tests
+    // ========================================================================
+
+    #[test]
+    fn test_infer_dependencies_memory() {
+        let sys = make_self_reference_system();
+        let deps = sys.infer_dependencies("src/memory.rs");
+        assert_eq!(deps, vec!["src/config.rs".to_string()]);
+    }
+
+    #[test]
+    fn test_infer_dependencies_cognitive_mod() {
+        let sys = make_self_reference_system();
+        let deps = sys.infer_dependencies("src/cognitive/mod.rs");
+        assert!(deps.contains(&"src/memory.rs".to_string()));
+        assert!(deps.contains(&"src/api/client.rs".to_string()));
+    }
+
+    #[test]
+    fn test_infer_dependencies_unknown_returns_empty() {
+        let sys = make_self_reference_system();
+        let deps = sys.infer_dependencies("src/tools/mod.rs");
+        assert!(deps.is_empty());
+    }
+
+    #[test]
+    fn test_infer_dependents_memory() {
+        let sys = make_self_reference_system();
+        let dependents = sys.infer_dependents("src/memory.rs");
+        assert!(dependents.contains(&"src/agent/context.rs".to_string()));
+        assert!(dependents.contains(&"src/cognitive/mod.rs".to_string()));
+    }
+
+    #[test]
+    fn test_infer_dependents_api_client() {
+        let sys = make_self_reference_system();
+        let dependents = sys.infer_dependents("src/api/client.rs");
+        assert!(dependents.contains(&"src/agent/context.rs".to_string()));
+        assert!(dependents.contains(&"src/cognitive/mod.rs".to_string()));
+    }
+
+    #[test]
+    fn test_infer_dependents_unknown_returns_empty() {
+        let sys = make_self_reference_system();
+        let dependents = sys.infer_dependents("src/config.rs");
+        assert!(dependents.is_empty());
+    }
+
+    // ========================================================================
+    // Code modification tracking tests
+    // ========================================================================
+
+    #[test]
+    fn test_track_modification_adds_to_queue() {
+        let mut sys = make_self_reference_system();
+        let modification = make_modification(
+            "src/memory.rs",
+            ModificationType::Modified,
+            "Updated memory eviction",
+        );
+
+        sys.track_modification(modification);
+        assert_eq!(sys.get_recent_modifications().len(), 1);
+    }
+
+    #[test]
+    fn test_track_modification_respects_max_limit() {
+        let mut sys = make_self_reference_system();
+        // max_modifications is 100 by default
+        for i in 0..110 {
+            sys.track_modification(make_modification(
+                &format!("src/file{}.rs", i),
+                ModificationType::Added,
+                &format!("Change {}", i),
+            ));
+        }
+
+        assert_eq!(sys.get_recent_modifications().len(), 100);
+    }
+
+    #[test]
+    fn test_track_modification_updates_module_last_modified() {
+        let mut sys = make_self_reference_system();
+
+        // First, add a module to the self-model
+        sys.self_model.modules.insert(
+            "src/memory.rs".to_string(),
+            ModuleSelfModel {
+                path: "src/memory.rs".to_string(),
+                purpose: "Memory management".to_string(),
+                description: "Test".to_string(),
+                key_components: Vec::new(),
+                dependencies: Vec::new(),
+                dependents: Vec::new(),
+                token_count: 0,
+                last_modified: 0,
+                importance: ModuleImportance::Core,
+            },
+        );
+
+        let modification = CodeModification {
+            timestamp: 12345,
+            file_path: "src/memory.rs".to_string(),
+            modification_type: ModificationType::Modified,
+            description: "Updated".to_string(),
+            tokens_changed: 10,
+            hash_before: "a".to_string(),
+            hash_after: "b".to_string(),
+        };
+
+        sys.track_modification(modification);
+
+        let module = sys.self_model.modules.get("src/memory.rs").unwrap();
+        assert_eq!(module.last_modified, 12345);
+    }
+
+    // ========================================================================
+    // ModificationType tests
+    // ========================================================================
+
+    #[test]
+    fn test_modification_type_as_str() {
+        assert_eq!(ModificationType::Added.as_str(), "added");
+        assert_eq!(ModificationType::Modified.as_str(), "modified");
+        assert_eq!(ModificationType::Deleted.as_str(), "deleted");
+        assert_eq!(ModificationType::Refactored.as_str(), "refactored");
+        assert_eq!(ModificationType::Moved.as_str(), "moved");
+    }
+
+    // ========================================================================
+    // Improvement suggestion generation tests
+    // ========================================================================
+
+    #[test]
+    fn test_generate_suggestions_memory_goal() {
+        let sys = make_self_reference_system();
+        let suggestions = sys.generate_suggestions("improve memory eviction");
+        assert!(suggestions
+            .iter()
+            .any(|s| s.contains("token budget allocation")));
+        assert!(suggestions
+            .iter()
+            .any(|s| s.contains("eviction strategies")));
+    }
+
+    #[test]
+    fn test_generate_suggestions_performance_goal() {
+        let sys = make_self_reference_system();
+        let suggestions = sys.generate_suggestions("improve performance of the system");
+        assert!(suggestions.iter().any(|s| s.contains("cloning")));
+        assert!(suggestions.iter().any(|s| s.contains("caching")));
+    }
+
+    #[test]
+    fn test_generate_suggestions_error_goal() {
+        let sys = make_self_reference_system();
+        let suggestions = sys.generate_suggestions("fix error handling bugs");
+        assert!(suggestions
+            .iter()
+            .any(|s| s.contains("error handling patterns")));
+        assert!(suggestions.iter().any(|s| s.contains("unwrap()")));
+    }
+
+    #[test]
+    fn test_generate_suggestions_always_includes_common() {
+        let sys = make_self_reference_system();
+        let suggestions = sys.generate_suggestions("arbitrary goal");
+        assert!(suggestions.iter().any(|s| s.contains("Run tests")));
+        assert!(suggestions.iter().any(|s| s.contains("documentation")));
+    }
+
+    // ========================================================================
+    // Self-model formatting tests
+    // ========================================================================
+
+    #[test]
+    fn test_format_recent_modifications_empty() {
+        let sys = make_self_reference_system();
+        let formatted = sys.format_recent_modifications(10_000);
+        assert!(formatted.contains("No recent modifications."));
+    }
+
+    #[test]
+    fn test_format_recent_modifications_with_entries() {
+        let mut sys = make_self_reference_system();
+        sys.track_modification(make_modification(
+            "src/memory.rs",
+            ModificationType::Modified,
+            "Updated memory system",
+        ));
+
+        let formatted = sys.format_recent_modifications(10_000);
+        assert!(formatted.contains("modified"));
+        assert!(formatted.contains("Updated memory system"));
+    }
+
+    #[test]
+    fn test_truncate_to_tokens_short_content() {
+        let sys = make_self_reference_system();
+        let content = "short";
+        let result = sys.truncate_to_tokens(content, 10_000);
+        assert_eq!(result, "short");
+    }
+
+    #[test]
+    fn test_truncate_to_tokens_long_content() {
+        let sys = make_self_reference_system();
+        let content = "a".repeat(100_000);
+        let result = sys.truncate_to_tokens(&content, 100); // 100 tokens ~ 400 chars
+        assert!(result.len() < content.len());
+        assert!(result.ends_with("...[truncated]"));
+    }
+
+    // ========================================================================
+    // SelfImprovementContext tests
+    // ========================================================================
+
+    #[test]
+    fn test_self_improvement_context_to_prompt() {
+        let ctx = SelfImprovementContext {
+            goal: "Improve memory".to_string(),
+            self_model: "Model info".to_string(),
+            architecture: "Arch info".to_string(),
+            recent_modifications: "None".to_string(),
+            relevant_code: CodeContext {
+                files: vec![],
+                total_tokens: 0,
+            },
+            suggestions: vec!["Suggestion 1".to_string(), "Suggestion 2".to_string()],
+        };
+
+        let prompt = ctx.to_prompt();
+        assert!(prompt.contains("# Self-Improvement Task"));
+        assert!(prompt.contains("Improve memory"));
+        assert!(prompt.contains("Model info"));
+        assert!(prompt.contains("Arch info"));
+        assert!(prompt.contains("Suggestion 1"));
+        assert!(prompt.contains("Suggestion 2"));
+    }
+
+    #[test]
+    fn test_self_improvement_context_estimate_tokens() {
+        let ctx = SelfImprovementContext {
+            goal: "Test goal".to_string(),
+            self_model: "Model".to_string(),
+            architecture: "Arch".to_string(),
+            recent_modifications: "None".to_string(),
+            relevant_code: CodeContext {
+                files: vec![],
+                total_tokens: 0,
+            },
+            suggestions: vec![],
+        };
+
+        let tokens = ctx.estimate_tokens();
+        assert!(tokens > 0);
+    }
+
+    // ========================================================================
+    // SourceRetrievalOptions tests
+    // ========================================================================
+
+    #[test]
+    fn test_source_retrieval_options_default() {
+        let opts = SourceRetrievalOptions::default();
+        assert!(opts.include_dependencies);
+        assert!(!opts.include_dependents);
+        assert_eq!(opts.max_tokens, 100_000);
+        assert!(!opts.include_tests);
+    }
+
+    // ========================================================================
+    // ModuleImportance and generate_module_description tests
+    // ========================================================================
+
+    #[test]
+    fn test_generate_module_description() {
+        let sys = make_self_reference_system();
+        let desc = sys.generate_module_description("src/memory.rs", "Memory management");
+        assert!(desc.contains("src/memory.rs"));
+        assert!(desc.contains("Memory management"));
+        assert!(desc.contains("Selfware"));
+    }
+
+    #[test]
+    fn test_format_timestamp_zero() {
+        let result = format_timestamp(0);
+        assert!(result.contains("1970"));
+    }
+
+    #[test]
+    fn test_format_timestamp_known_value() {
+        // 2024-01-01 00:00:00 UTC = 1704067200
+        let result = format_timestamp(1704067200);
+        assert!(result.contains("2024-01-01"));
     }
 }

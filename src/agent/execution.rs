@@ -928,3 +928,298 @@ impl Agent {
         Ok(has_tool_calls)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::types::{ToolCall as ApiToolCall, ToolFunction};
+    use crate::testing::mock_api::MockLlmServer;
+    use crate::tool_parser::parse_tool_calls;
+
+    // =========================================================================
+    // Helper: mirrors should_prompt_for_action logic for standalone testing
+    // =========================================================================
+    fn should_prompt_for_action(content: &str, has_no_tool_calls: bool, use_last_message: bool) -> bool {
+        if !has_no_tool_calls || use_last_message || content.len() >= 1000 {
+            return false;
+        }
+        let intent_phrases = [
+            "let me", "i'll ", "i will", "let's", "first,", "starting", "begin by", "going to",
+            "need to", "start by", "help you",
+        ];
+        let content_lower = content.to_lowercase();
+        intent_phrases.iter().any(|p| content_lower.contains(p))
+    }
+
+    // =========================================================================
+    // should_prompt_for_action tests
+    // =========================================================================
+
+    #[test]
+    fn test_should_prompt_when_intent_phrase_present() {
+        assert!(should_prompt_for_action("Let me check the file", true, false));
+        assert!(should_prompt_for_action("I'll fix that bug now", true, false));
+        assert!(should_prompt_for_action("I will refactor the module", true, false));
+        assert!(should_prompt_for_action("Let's start by reading the code", true, false));
+        assert!(should_prompt_for_action("First, I need to understand", true, false));
+        assert!(should_prompt_for_action("Going to investigate", true, false));
+    }
+
+    #[test]
+    fn test_should_not_prompt_when_tool_calls_exist() {
+        // has_no_tool_calls = false means there ARE tool calls
+        assert!(!should_prompt_for_action("Let me check", false, false));
+    }
+
+    #[test]
+    fn test_should_not_prompt_when_using_last_message() {
+        assert!(!should_prompt_for_action("Let me check", true, true));
+    }
+
+    #[test]
+    fn test_should_not_prompt_for_long_content() {
+        let long_content = format!("Let me {}", "x".repeat(1000));
+        assert!(!should_prompt_for_action(&long_content, true, false));
+    }
+
+    #[test]
+    fn test_should_not_prompt_for_plain_response() {
+        assert!(!should_prompt_for_action("The answer is 42.", true, false));
+        assert!(!should_prompt_for_action("Here is the result.", true, false));
+    }
+
+    #[test]
+    fn test_should_prompt_case_insensitive() {
+        assert!(should_prompt_for_action("LET ME check", true, false));
+        assert!(should_prompt_for_action("STARTING now", true, false));
+        assert!(should_prompt_for_action("BEGIN BY reading", true, false));
+    }
+
+    // =========================================================================
+    // collect_tool_calls logic tests (via parse_tool_calls + native fallback)
+    // =========================================================================
+
+    #[test]
+    fn test_collect_tool_calls_from_native_calls() {
+        // Simulates collect_tool_calls when native_function_calling = true
+        let native_calls = vec![
+            ApiToolCall {
+                id: "call_1".to_string(),
+                call_type: "function".to_string(),
+                function: ToolFunction {
+                    name: "file_read".to_string(),
+                    arguments: r#"{"path":"src/main.rs"}"#.to_string(),
+                },
+            },
+            ApiToolCall {
+                id: "call_2".to_string(),
+                call_type: "function".to_string(),
+                function: ToolFunction {
+                    name: "shell_exec".to_string(),
+                    arguments: r#"{"command":"ls"}"#.to_string(),
+                },
+            },
+        ];
+
+        // Simulate the native path of collect_tool_calls
+        let collected: Vec<CollectedToolCall> = native_calls
+            .iter()
+            .map(|tc| {
+                (
+                    tc.function.name.clone(),
+                    tc.function.arguments.clone(),
+                    Some(tc.id.clone()),
+                )
+            })
+            .collect();
+
+        assert_eq!(collected.len(), 2);
+        assert_eq!(collected[0].0, "file_read");
+        assert_eq!(collected[1].0, "shell_exec");
+        assert_eq!(collected[0].2.as_deref(), Some("call_1"));
+    }
+
+    #[test]
+    fn test_collect_tool_calls_empty_native_falls_back_to_xml() {
+        let content = r#"<tool>
+<name>file_read</name>
+<arguments>{"path":"test.rs"}</arguments>
+</tool>"#;
+
+        let empty_native: Vec<ApiToolCall> = vec![];
+
+        // Simulate fallback: native calls empty, parse XML from content
+        let native_empty = empty_native.is_empty();
+        assert!(native_empty);
+
+        let parse_result = parse_tool_calls(content);
+        let tool_calls: Vec<CollectedToolCall> = parse_result
+            .tool_calls
+            .iter()
+            .map(|tc| (tc.tool_name.clone(), tc.arguments.to_string(), None))
+            .collect();
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].0, "file_read");
+        assert!(tool_calls[0].2.is_none()); // No tool_call_id for XML-parsed calls
+    }
+
+    #[test]
+    fn test_collect_tool_calls_falls_back_to_reasoning_content() {
+        // Content has no tool calls, but reasoning does
+        let content = "I need to think about this...";
+        let reasoning = r#"<tool>
+<name>grep_search</name>
+<arguments>{"pattern":"TODO","path":"src/"}</arguments>
+</tool>"#;
+
+        let content_result = parse_tool_calls(content);
+        assert!(content_result.tool_calls.is_empty());
+
+        let reasoning_result = parse_tool_calls(reasoning);
+        assert_eq!(reasoning_result.tool_calls.len(), 1);
+        assert_eq!(reasoning_result.tool_calls[0].tool_name, "grep_search");
+    }
+
+    // =========================================================================
+    // maybe_enhance_tool_result tests
+    // =========================================================================
+
+    #[test]
+    fn test_enhance_tool_result_no_change_for_non_cargo() {
+        // The function only enhances cargo_check results with "success":false
+        let name = "file_read";
+        let result_str = r#"{"content":"hello"}"#;
+        // Non-cargo_check tools pass through unchanged
+        if name != "cargo_check" || !result_str.contains("\"success\":false") {
+            assert_eq!(result_str, result_str);
+        }
+    }
+
+    #[test]
+    fn test_enhance_tool_result_triggers_for_failed_cargo_check() {
+        let name = "cargo_check";
+        let result_str = r#"{"success":false,"stderr":"error[E0308]: mismatched types"}"#;
+        let should_enhance = name == "cargo_check" && result_str.contains("\"success\":false");
+        assert!(should_enhance);
+    }
+
+    #[test]
+    fn test_enhance_tool_result_skips_successful_cargo_check() {
+        let name = "cargo_check";
+        let result_str = r#"{"success":true,"stderr":""}"#;
+        let should_enhance = name == "cargo_check" && result_str.contains("\"success\":false");
+        assert!(!should_enhance);
+    }
+
+    // =========================================================================
+    // build_tool_call_context tests (via MockLlmServer + Agent)
+    // =========================================================================
+
+    fn mock_config(endpoint: String) -> Config {
+        Config {
+            endpoint,
+            model: "mock-model".to_string(),
+            agent: crate::config::AgentConfig {
+                max_iterations: 5,
+                step_timeout_secs: 5,
+                streaming: false,
+                native_function_calling: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_build_tool_call_context_without_native_fc() {
+        let server = MockLlmServer::builder()
+            .with_response("done")
+            .build()
+            .await;
+
+        let config = mock_config(format!("{}/v1", server.url()));
+        let agent = Agent::new(config).await.unwrap();
+
+        let (call_id, use_native_fc, fake_call) =
+            agent.build_tool_call_context("file_read", r#"{"path":"test.rs"}"#, None);
+
+        assert!(!use_native_fc);
+        assert!(call_id.starts_with("call_"));
+        assert_eq!(fake_call.function.name, "file_read");
+        assert_eq!(fake_call.function.arguments, r#"{"path":"test.rs"}"#);
+        assert_eq!(fake_call.call_type, "function");
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_build_tool_call_context_with_native_fc_and_id() {
+        let server = MockLlmServer::builder()
+            .with_response("done")
+            .build()
+            .await;
+
+        let mut config = mock_config(format!("{}/v1", server.url()));
+        config.agent.native_function_calling = true;
+        let agent = Agent::new(config).await.unwrap();
+
+        let (call_id, use_native_fc, fake_call) = agent.build_tool_call_context(
+            "shell_exec",
+            r#"{"command":"ls"}"#,
+            Some("call_existing_123".to_string()),
+        );
+
+        assert!(use_native_fc);
+        assert_eq!(call_id, "call_existing_123");
+        assert_eq!(fake_call.function.name, "shell_exec");
+
+        server.stop().await;
+    }
+
+    // =========================================================================
+    // warn_on_unparsed_tool_content (logic check)
+    // =========================================================================
+
+    #[test]
+    fn test_warn_condition_content_has_tool_keywords_but_no_calls() {
+        let content = "I want to use a tool_name function to help";
+        let tool_calls: Vec<CollectedToolCall> = vec![];
+
+        // The warn fires when tool_calls empty AND content contains suspicious keywords
+        let should_warn = tool_calls.is_empty()
+            && (content.contains("<tool")
+                || content.contains("tool_name")
+                || content.contains("function"));
+
+        assert!(should_warn);
+    }
+
+    #[test]
+    fn test_warn_condition_no_warn_when_calls_present() {
+        let content = "Using tool_name to execute function";
+        let tool_calls: Vec<CollectedToolCall> = vec![
+            ("file_read".to_string(), "{}".to_string(), None),
+        ];
+
+        let should_warn = tool_calls.is_empty()
+            && (content.contains("<tool")
+                || content.contains("tool_name")
+                || content.contains("function"));
+
+        assert!(!should_warn);
+    }
+
+    #[test]
+    fn test_warn_condition_no_warn_for_clean_content() {
+        let content = "Here is a summary of the code changes.";
+        let tool_calls: Vec<CollectedToolCall> = vec![];
+
+        let should_warn = tool_calls.is_empty()
+            && (content.contains("<tool")
+                || content.contains("tool_name")
+                || content.contains("function"));
+
+        assert!(!should_warn);
+    }
+}

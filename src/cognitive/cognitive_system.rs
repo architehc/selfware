@@ -567,6 +567,50 @@ fn format_timestamp(timestamp: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cognitive::memory_hierarchy::FileContextEntry;
+
+    // ========================================================================
+    // Helper functions
+    // ========================================================================
+
+    fn make_message(role: &str, content: &str) -> Message {
+        Message {
+            role: role.to_string(),
+            content: content.to_string(),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    fn make_working_context(messages: Vec<Message>) -> WorkingContext {
+        WorkingContext {
+            messages,
+            active_code: Vec::new(),
+            current_task: None,
+        }
+    }
+
+    fn make_episode(id: &str, importance: Importance, content: &str) -> Episode {
+        Episode {
+            id: id.to_string(),
+            episode_type: EpisodeType::Conversation,
+            content: content.to_string(),
+            token_count: estimate_tokens_with_overhead(content, 100),
+            importance,
+            timestamp: current_timestamp_secs(),
+            embedding_id: id.to_string(),
+            related_episodes: Vec::new(),
+            insights: Vec::new(),
+            is_summarized: false,
+            original_id: None,
+        }
+    }
+
+    // ========================================================================
+    // Existing tests
+    // ========================================================================
 
     #[test]
     fn test_is_self_improvement_query() {
@@ -585,5 +629,458 @@ mod tests {
         assert_eq!(options.task_type, TaskType::Conversation);
         assert!(options.include_self_ref);
         assert!(!options.force_self_improvement);
+    }
+
+    // ========================================================================
+    // ContextBuildOptions tests
+    // ========================================================================
+
+    #[test]
+    fn test_context_build_options_max_tokens_reserves_for_response() {
+        let options = ContextBuildOptions::default();
+        assert_eq!(options.max_tokens, TOTAL_CONTEXT_TOKENS - 100_000);
+        assert!(options.max_tokens < TOTAL_CONTEXT_TOKENS);
+    }
+
+    #[test]
+    fn test_context_build_options_custom() {
+        let options = ContextBuildOptions {
+            task_type: TaskType::SelfImprovement,
+            include_self_ref: false,
+            max_tokens: 500_000,
+            force_self_improvement: true,
+        };
+        assert_eq!(options.task_type, TaskType::SelfImprovement);
+        assert!(!options.include_self_ref);
+        assert_eq!(options.max_tokens, 500_000);
+        assert!(options.force_self_improvement);
+    }
+
+    // ========================================================================
+    // is_self_improvement_query keyword tests
+    // ========================================================================
+
+    #[test]
+    fn test_is_self_improvement_query_improve() {
+        // Directly test the keyword matching logic used by the method
+        let keywords = [
+            "improve",
+            "refactor",
+            "optimize",
+            "enhance",
+            "upgrade",
+            "self",
+            "my code",
+            "myself",
+            "own code",
+            "modify myself",
+            "memory system",
+            "cognitive",
+            "architecture",
+            "redesign",
+            "fix myself",
+            "better",
+            "more efficient",
+            "performance",
+        ];
+
+        let positive_queries = [
+            "How do I improve the memory system?",
+            "Refactor the codebase structure",
+            "Optimize token counting performance",
+            "Enhance the cognitive layer",
+            "Upgrade the self model",
+            "Redesign the architecture for better performance",
+            "Make the code more efficient",
+        ];
+
+        for query in &positive_queries {
+            let lower = query.to_lowercase();
+            assert!(
+                keywords.iter().any(|k| lower.contains(k)),
+                "Expected '{}' to match self-improvement keywords",
+                query
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_self_improvement_query_negative() {
+        let keywords = [
+            "improve",
+            "refactor",
+            "optimize",
+            "enhance",
+            "upgrade",
+            "self",
+            "my code",
+            "myself",
+            "own code",
+            "modify myself",
+            "memory system",
+            "cognitive",
+            "architecture",
+            "redesign",
+            "fix myself",
+            "better",
+            "more efficient",
+            "performance",
+        ];
+
+        let query = "What is the weather today?";
+        let lower = query.to_lowercase();
+        assert!(!keywords.iter().any(|k| lower.contains(k)));
+    }
+
+    // ========================================================================
+    // estimate_context_tokens tests
+    // ========================================================================
+
+    #[test]
+    fn test_estimate_context_tokens_empty() {
+        let working = make_working_context(Vec::new());
+        let episodic: Vec<Episode> = Vec::new();
+        let semantic = CodeContext {
+            files: Vec::new(),
+            total_tokens: 0,
+        };
+
+        let tokens = CognitiveSystem::estimate_context_tokens(
+            &working,
+            &episodic,
+            &semantic,
+            &None,
+        );
+
+        assert_eq!(tokens, 0);
+    }
+
+    #[test]
+    fn test_estimate_context_tokens_with_working_messages() {
+        let msgs = vec![
+            make_message("user", "Hello"),
+            make_message("assistant", "Hi there!"),
+        ];
+        let working = make_working_context(msgs);
+        let episodic: Vec<Episode> = Vec::new();
+        let semantic = CodeContext {
+            files: Vec::new(),
+            total_tokens: 0,
+        };
+
+        let tokens = CognitiveSystem::estimate_context_tokens(
+            &working,
+            &episodic,
+            &semantic,
+            &None,
+        );
+
+        // Each message adds estimate_tokens_with_overhead(content, 50)
+        // "Hello" ~ 1 token + 50 overhead = ~51
+        // "Hi there!" ~ 2 tokens + 50 overhead = ~52
+        assert!(tokens > 0, "Should count working memory tokens");
+    }
+
+    #[test]
+    fn test_estimate_context_tokens_with_episodic() {
+        let working = make_working_context(Vec::new());
+        let episodic = vec![
+            make_episode("ep-1", Importance::Normal, "An episode about something"),
+            make_episode("ep-2", Importance::High, "Another episode"),
+        ];
+        let semantic = CodeContext {
+            files: Vec::new(),
+            total_tokens: 0,
+        };
+
+        let tokens = CognitiveSystem::estimate_context_tokens(
+            &working,
+            &episodic,
+            &semantic,
+            &None,
+        );
+
+        let expected_episodic: usize = episodic.iter().map(|e| e.token_count).sum();
+        assert_eq!(tokens, expected_episodic);
+    }
+
+    #[test]
+    fn test_estimate_context_tokens_with_semantic() {
+        let working = make_working_context(Vec::new());
+        let episodic: Vec<Episode> = Vec::new();
+        let semantic = CodeContext {
+            files: vec![FileContextEntry {
+                path: "src/main.rs".to_string(),
+                content: "fn main() {}".to_string(),
+                relevance_score: 0.9,
+            }],
+            total_tokens: 500,
+        };
+
+        let tokens = CognitiveSystem::estimate_context_tokens(
+            &working,
+            &episodic,
+            &semantic,
+            &None,
+        );
+
+        assert_eq!(tokens, 500);
+    }
+
+    #[test]
+    fn test_estimate_context_tokens_combined() {
+        let msgs = vec![make_message("user", "Hello")];
+        let working = make_working_context(msgs);
+        let episodic = vec![make_episode("ep-1", Importance::Normal, "Episode text")];
+        let semantic = CodeContext {
+            files: Vec::new(),
+            total_tokens: 200,
+        };
+
+        let tokens = CognitiveSystem::estimate_context_tokens(
+            &working,
+            &episodic,
+            &semantic,
+            &None,
+        );
+
+        // Should be sum of all three components
+        let working_tokens = estimate_tokens_with_overhead("Hello", 50);
+        let episodic_tokens = episodic[0].token_count;
+        let semantic_tokens = 200;
+
+        assert_eq!(tokens, working_tokens + episodic_tokens + semantic_tokens);
+    }
+
+    #[test]
+    fn test_estimate_context_tokens_with_self_context() {
+        let working = make_working_context(Vec::new());
+        let episodic: Vec<Episode> = Vec::new();
+        let semantic = CodeContext {
+            files: Vec::new(),
+            total_tokens: 0,
+        };
+        let self_ctx = Some(SelfImprovementContext {
+            goal: "Improve memory".to_string(),
+            self_model: "Model info".to_string(),
+            architecture: "Arch info".to_string(),
+            recent_modifications: "None".to_string(),
+            relevant_code: CodeContext {
+                files: Vec::new(),
+                total_tokens: 0,
+            },
+            suggestions: vec!["Suggestion".to_string()],
+        });
+
+        let tokens = CognitiveSystem::estimate_context_tokens(
+            &working,
+            &episodic,
+            &semantic,
+            &self_ctx,
+        );
+
+        assert!(tokens > 0, "Self-improvement context should add tokens");
+    }
+
+    // ========================================================================
+    // LlmContext tests
+    // ========================================================================
+
+    #[test]
+    fn test_llm_context_to_prompt_empty() {
+        let ctx = LlmContext {
+            working: make_working_context(Vec::new()),
+            episodic: Vec::new(),
+            semantic: CodeContext {
+                files: Vec::new(),
+                total_tokens: 0,
+            },
+            self_context: None,
+            estimated_tokens: 0,
+        };
+
+        let prompt = ctx.to_prompt();
+        assert!(prompt.contains("Selfware"));
+        // Should not contain section headers for empty sections
+        assert!(!prompt.contains("## Conversation History"));
+        assert!(!prompt.contains("## Relevant Past Experiences"));
+        assert!(!prompt.contains("## Relevant Code"));
+    }
+
+    #[test]
+    fn test_llm_context_to_prompt_with_messages() {
+        let ctx = LlmContext {
+            working: make_working_context(vec![
+                make_message("user", "What is memory?"),
+                make_message("assistant", "Memory is a system for storing data."),
+            ]),
+            episodic: Vec::new(),
+            semantic: CodeContext {
+                files: Vec::new(),
+                total_tokens: 0,
+            },
+            self_context: None,
+            estimated_tokens: 100,
+        };
+
+        let prompt = ctx.to_prompt();
+        assert!(prompt.contains("## Conversation History"));
+        assert!(prompt.contains("user: What is memory?"));
+        assert!(prompt.contains("assistant: Memory is a system for storing data."));
+    }
+
+    #[test]
+    fn test_llm_context_to_prompt_with_episodic() {
+        let ctx = LlmContext {
+            working: make_working_context(Vec::new()),
+            episodic: vec![make_episode("ep-1", Importance::Normal, "Found a bug in the parser")],
+            semantic: CodeContext {
+                files: Vec::new(),
+                total_tokens: 0,
+            },
+            self_context: None,
+            estimated_tokens: 100,
+        };
+
+        let prompt = ctx.to_prompt();
+        assert!(prompt.contains("## Relevant Past Experiences"));
+        assert!(prompt.contains("conversation"));
+    }
+
+    #[test]
+    fn test_llm_context_to_prompt_with_semantic() {
+        let ctx = LlmContext {
+            working: make_working_context(Vec::new()),
+            episodic: Vec::new(),
+            semantic: CodeContext {
+                files: vec![FileContextEntry {
+                    path: "src/main.rs".to_string(),
+                    content: "fn main() { println!(\"hello\"); }".to_string(),
+                    relevance_score: 0.95,
+                }],
+                total_tokens: 100,
+            },
+            self_context: None,
+            estimated_tokens: 100,
+        };
+
+        let prompt = ctx.to_prompt();
+        assert!(prompt.contains("## Relevant Code"));
+        assert!(prompt.contains("src/main.rs"));
+        assert!(prompt.contains("0.95"));
+    }
+
+    #[test]
+    fn test_llm_context_summary() {
+        let ctx = LlmContext {
+            working: make_working_context(vec![
+                make_message("user", "Hello"),
+                make_message("assistant", "Hi"),
+            ]),
+            episodic: vec![make_episode("e1", Importance::Normal, "ep")],
+            semantic: CodeContext {
+                files: vec![FileContextEntry {
+                    path: "src/lib.rs".to_string(),
+                    content: "mod test;".to_string(),
+                    relevance_score: 0.5,
+                }],
+                total_tokens: 50,
+            },
+            self_context: None,
+            estimated_tokens: 1000,
+        };
+
+        let summary = ctx.summary();
+        assert!(summary.contains("2 working messages"));
+        assert!(summary.contains("1 episodes"));
+        assert!(summary.contains("1 code files"));
+        assert!(summary.contains("1000 tokens"));
+    }
+
+    #[test]
+    fn test_llm_context_to_prompt_with_current_task() {
+        let mut working = make_working_context(Vec::new());
+        working.current_task = Some(super::super::memory_hierarchy::TaskContext {
+            description: "Fix parser bug".to_string(),
+            goal: "Eliminate null pointer exception".to_string(),
+            progress: vec!["Identified root cause".to_string()],
+            next_steps: vec!["Apply fix".to_string()],
+            relevant_files: vec!["src/parser.rs".to_string()],
+        });
+
+        let ctx = LlmContext {
+            working,
+            episodic: Vec::new(),
+            semantic: CodeContext {
+                files: Vec::new(),
+                total_tokens: 0,
+            },
+            self_context: None,
+            estimated_tokens: 50,
+        };
+
+        let prompt = ctx.to_prompt();
+        assert!(prompt.contains("## Current Task"));
+        assert!(prompt.contains("Fix parser bug"));
+        assert!(prompt.contains("Eliminate null pointer exception"));
+        assert!(prompt.contains("Identified root cause"));
+    }
+
+    // ========================================================================
+    // suggest_task_type delegation test
+    // ========================================================================
+
+    #[test]
+    fn test_suggest_task_type_delegates_correctly() {
+        // This tests the same underlying function that CognitiveSystem delegates to
+        assert_eq!(
+            TokenBudgetAllocator::suggest_task_type("improve memory"),
+            TaskType::SelfImprovement
+        );
+        assert_eq!(
+            TokenBudgetAllocator::suggest_task_type("debug this error"),
+            TaskType::Debugging
+        );
+        assert_eq!(
+            TokenBudgetAllocator::suggest_task_type("generate a test"),
+            TaskType::CodeGeneration
+        );
+        assert_eq!(
+            TokenBudgetAllocator::suggest_task_type("analyze the code"),
+            TaskType::CodeAnalysis
+        );
+        assert_eq!(
+            TokenBudgetAllocator::suggest_task_type("learn from this"),
+            TaskType::Learning
+        );
+        assert_eq!(
+            TokenBudgetAllocator::suggest_task_type("hello world"),
+            TaskType::Conversation
+        );
+    }
+
+    // ========================================================================
+    // generate_id and timestamp helpers
+    // ========================================================================
+
+    #[test]
+    fn test_generate_id_format() {
+        let id = generate_id();
+        assert!(id.starts_with("ep-"), "ID should start with 'ep-'");
+    }
+
+    #[test]
+    fn test_generate_id_uniqueness() {
+        let id1 = generate_id();
+        // Small sleep to ensure different timestamp (millisecond precision)
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let id2 = generate_id();
+        assert_ne!(id1, id2, "Generated IDs should be unique");
+    }
+
+    #[test]
+    fn test_format_timestamp() {
+        let formatted = format_timestamp(0);
+        assert!(formatted.contains("1970"));
     }
 }

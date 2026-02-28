@@ -297,3 +297,173 @@ impl RSIOrchestrator {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rsi_orchestrator_new_defaults() {
+        let orch = RSIOrchestrator::new(PathBuf::from("/tmp/test_project"));
+        assert_eq!(orch.project_root, PathBuf::from("/tmp/test_project"));
+        assert!(!orch.is_running);
+        assert_eq!(orch.max_iterations, 100);
+        assert_eq!(orch.consecutive_failures, 0);
+        assert_eq!(orch.max_consecutive_failures, 5);
+    }
+
+    #[test]
+    fn test_rsi_orchestrator_stop() {
+        let mut orch = RSIOrchestrator::new(PathBuf::from("/tmp/test_project"));
+        // Initially not running
+        assert!(!orch.is_running);
+
+        // Simulate the state that run_loop sets
+        orch.is_running = true;
+        assert!(orch.is_running);
+
+        orch.stop();
+        assert!(!orch.is_running);
+    }
+
+    #[test]
+    fn test_rsi_orchestrator_stop_idempotent() {
+        let mut orch = RSIOrchestrator::new(PathBuf::from("/tmp/test_project"));
+        orch.stop();
+        orch.stop(); // second call should be fine
+        assert!(!orch.is_running);
+    }
+
+    #[test]
+    fn test_exponential_backoff_calculation() {
+        // Test the exponential backoff formula from run_loop:
+        // 60 * 2^(failures-1), capped at 3600
+        let compute_backoff = |consecutive_failures: usize| -> u64 {
+            std::cmp::min(
+                60u64.saturating_mul(1u64 << (consecutive_failures - 1)),
+                3600,
+            )
+        };
+
+        assert_eq!(compute_backoff(1), 60);    // 60 * 2^0 = 60
+        assert_eq!(compute_backoff(2), 120);   // 60 * 2^1 = 120
+        assert_eq!(compute_backoff(3), 240);   // 60 * 2^2 = 240
+        assert_eq!(compute_backoff(4), 480);   // 60 * 2^3 = 480
+        assert_eq!(compute_backoff(5), 960);   // 60 * 2^4 = 960
+        assert_eq!(compute_backoff(6), 1920);  // 60 * 2^5 = 1920
+        assert_eq!(compute_backoff(7), 3600);  // 60 * 2^6 = 3840, capped at 3600
+    }
+
+    #[test]
+    fn test_tsv_score_parsing_empty() {
+        // Simulate TSV parsing logic from run_benchmark_and_get_score
+        let tsv_content = "scenario|type|difficulty|baseline|post|agent|timeout|duration|score|changed|error|notes\n";
+        let (total_score, count) = parse_tsv_scores(tsv_content);
+        assert_eq!(count, 0);
+        assert_eq!(total_score, 0.0);
+    }
+
+    #[test]
+    fn test_tsv_score_parsing_single_row() {
+        let tsv_content = "scenario|type|difficulty|baseline|post|agent|timeout|duration|score|changed|error|notes\n\
+                           test1|unit|easy|0.5|0.8|agent1|30|15|0.85|yes||ok\n";
+        let (total_score, count) = parse_tsv_scores(tsv_content);
+        assert_eq!(count, 1);
+        assert!((total_score - 0.85).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_tsv_score_parsing_multiple_rows() {
+        let tsv_content = "scenario|type|difficulty|baseline|post|agent|timeout|duration|score|changed|error|notes\n\
+                           test1|unit|easy|0.5|0.8|agent1|30|15|0.80|yes||ok\n\
+                           test2|unit|medium|0.3|0.7|agent1|60|30|0.90|yes||ok\n\
+                           test3|unit|hard|0.1|0.5|agent1|120|60|0.70|no||fail\n";
+        let (total_score, count) = parse_tsv_scores(tsv_content);
+        assert_eq!(count, 3);
+        let avg = total_score / count as f64;
+        assert!((avg - 0.80).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_tsv_score_parsing_invalid_score() {
+        let tsv_content = "scenario|type|difficulty|baseline|post|agent|timeout|duration|score|changed|error|notes\n\
+                           test1|unit|easy|0.5|0.8|agent1|30|15|not_a_number|yes||ok\n";
+        let (total_score, count) = parse_tsv_scores(tsv_content);
+        assert_eq!(count, 0);
+        assert_eq!(total_score, 0.0);
+    }
+
+    #[test]
+    fn test_tsv_score_parsing_short_row() {
+        // Row with fewer than 9 columns should be skipped
+        let tsv_content = "scenario|type|difficulty|baseline|post|agent|timeout|duration|score|changed|error|notes\n\
+                           test1|unit|easy\n";
+        let (total_score, count) = parse_tsv_scores(tsv_content);
+        assert_eq!(count, 0);
+        assert_eq!(total_score, 0.0);
+    }
+
+    #[test]
+    fn test_consecutive_failures_tracking() {
+        let mut orch = RSIOrchestrator::new(PathBuf::from("/tmp/test_project"));
+        assert_eq!(orch.consecutive_failures, 0);
+
+        // Simulate failure increments
+        orch.consecutive_failures += 1;
+        assert_eq!(orch.consecutive_failures, 1);
+
+        orch.consecutive_failures += 1;
+        assert_eq!(orch.consecutive_failures, 2);
+
+        // Simulate reset on success
+        orch.consecutive_failures = 0;
+        assert_eq!(orch.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn test_circuit_breaker_threshold() {
+        let orch = RSIOrchestrator::new(PathBuf::from("/tmp/test_project"));
+        // Verify the circuit breaker triggers at exactly max_consecutive_failures
+        assert_eq!(orch.max_consecutive_failures, 5);
+
+        // Simulate reaching threshold
+        let mut failures = 0;
+        let should_trip = |failures: usize, max: usize| failures >= max;
+
+        for _ in 0..4 {
+            failures += 1;
+            assert!(
+                !should_trip(failures, orch.max_consecutive_failures),
+                "Should not trip at {} failures",
+                failures
+            );
+        }
+        failures += 1;
+        assert!(
+            should_trip(failures, orch.max_consecutive_failures),
+            "Should trip at {} failures",
+            failures
+        );
+    }
+
+    /// Helper: replicates the TSV score-parsing logic from run_benchmark_and_get_score.
+    fn parse_tsv_scores(tsv_content: &str) -> (f64, usize) {
+        let mut total_score = 0.0;
+        let mut count = 0;
+
+        for (i, line) in tsv_content.lines().enumerate() {
+            if i == 0 {
+                continue;
+            }
+            let parts: Vec<&str> = line.split('|').collect();
+            if parts.len() > 8 {
+                if let Ok(score) = parts[8].parse::<f64>() {
+                    total_score += score;
+                    count += 1;
+                }
+            }
+        }
+
+        (total_score, count)
+    }
+}

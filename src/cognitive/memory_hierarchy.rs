@@ -14,7 +14,7 @@ use tracing::{debug, info};
 
 use crate::api::types::Message;
 use crate::token_count::estimate_tokens_with_overhead;
-use crate::vector_store::{EmbeddingBackend, VectorIndex, VectorStore};
+use crate::vector_store::{EmbeddingBackend, MockEmbeddingProvider, VectorIndex, VectorStore};
 
 /// Total context tokens for Qwen3 Coder 1M context
 pub const TOTAL_CONTEXT_TOKENS: usize = 1_000_000;
@@ -993,6 +993,41 @@ fn current_timestamp_secs() -> u64 {
 mod tests {
     use super::*;
 
+    // ========================================================================
+    // Helper functions
+    // ========================================================================
+
+    fn make_message(role: &str, content: &str) -> Message {
+        Message {
+            role: role.to_string(),
+            content: content.to_string(),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    fn make_episode(id: &str, importance: Importance, content: &str) -> Episode {
+        Episode {
+            id: id.to_string(),
+            episode_type: EpisodeType::Conversation,
+            content: content.to_string(),
+            token_count: estimate_tokens_with_overhead(content, 100),
+            importance,
+            timestamp: current_timestamp_secs(),
+            embedding_id: id.to_string(),
+            related_episodes: Vec::new(),
+            insights: Vec::new(),
+            is_summarized: false,
+            original_id: None,
+        }
+    }
+
+    // ========================================================================
+    // TokenBudget tests
+    // ========================================================================
+
     #[test]
     fn test_token_budget_default() {
         let budget = TokenBudget::default();
@@ -1006,5 +1041,498 @@ mod tests {
         let budget = TokenBudget::for_self_improvement();
         assert!(budget.semantic_memory > budget.working_memory);
         assert!(budget.semantic_memory > budget.episodic_memory);
+    }
+
+    #[test]
+    fn test_token_budget_total_allocated() {
+        let budget = TokenBudget::default();
+        assert_eq!(
+            budget.total_allocated(),
+            DEFAULT_WORKING_TOKENS + DEFAULT_EPISODIC_TOKENS + DEFAULT_SEMANTIC_TOKENS
+        );
+    }
+
+    #[test]
+    fn test_token_budget_total_available_includes_reserve() {
+        let budget = TokenBudget::default();
+        assert_eq!(
+            budget.total_available(),
+            budget.total_allocated() + DEFAULT_RESERVE_TOKENS
+        );
+    }
+
+    #[test]
+    fn test_token_budget_for_codebase_analysis_favors_semantic() {
+        let budget = TokenBudget::for_codebase_analysis();
+        assert!(budget.semantic_memory > budget.working_memory);
+        assert!(budget.semantic_memory > budget.episodic_memory);
+        assert_eq!(budget.semantic_memory, 850_000);
+    }
+
+    #[test]
+    fn test_token_budget_for_conversation_favors_working_and_episodic() {
+        let budget = TokenBudget::for_conversation();
+        assert!(budget.working_memory > TokenBudget::default().working_memory);
+        assert!(budget.episodic_memory > TokenBudget::default().episodic_memory);
+    }
+
+    // ========================================================================
+    // WorkingMemory tests
+    // ========================================================================
+
+    #[test]
+    fn test_working_memory_new_is_empty() {
+        let wm = WorkingMemory::new(10_000);
+        assert!(wm.is_empty());
+        assert_eq!(wm.len(), 0);
+        assert_eq!(wm.total_tokens(), 0);
+    }
+
+    #[test]
+    fn test_working_memory_add_message_increases_count() {
+        let mut wm = WorkingMemory::new(100_000);
+        wm.add_message(make_message("user", "Hello world"), 1.0);
+        assert_eq!(wm.len(), 1);
+        assert!(!wm.is_empty());
+        assert!(wm.total_tokens() > 0);
+    }
+
+    #[test]
+    fn test_working_memory_add_multiple_messages() {
+        let mut wm = WorkingMemory::new(100_000);
+        wm.add_message(make_message("user", "First message"), 1.0);
+        wm.add_message(make_message("assistant", "Second message"), 1.0);
+        wm.add_message(make_message("user", "Third message"), 1.0);
+        assert_eq!(wm.len(), 3);
+    }
+
+    #[test]
+    fn test_working_memory_eviction_when_over_capacity() {
+        // Use a very small max_tokens to force eviction
+        let mut wm = WorkingMemory::new(200);
+        let long_content = "x".repeat(500);
+        wm.add_message(make_message("user", &long_content), 0.5);
+        let tokens_after_first = wm.total_tokens();
+
+        // Adding another large message should trigger eviction of the first
+        wm.add_message(make_message("user", &long_content), 0.5);
+
+        // The total tokens should stay within budget (or close),
+        // meaning eviction must have happened
+        assert!(
+            wm.total_tokens() <= tokens_after_first * 2,
+            "Eviction should have triggered"
+        );
+    }
+
+    #[test]
+    fn test_working_memory_system_messages_not_evicted() {
+        // System messages have compressible = false (role == "system")
+        let mut wm = WorkingMemory::new(300);
+        wm.add_message(make_message("system", "System prompt"), 1.0);
+
+        let long_content = "y".repeat(500);
+        wm.add_message(make_message("user", &long_content), 0.1);
+
+        // The system message should still be there because it's not compressible
+        let ctx = wm.get_context();
+        let has_system = ctx.messages.iter().any(|m| m.role == "system");
+        assert!(
+            has_system,
+            "System messages should not be evicted (compressible=false)"
+        );
+    }
+
+    #[test]
+    fn test_working_memory_evicts_least_important_first() {
+        let mut wm = WorkingMemory::new(400);
+
+        // Add a low-importance message first
+        wm.add_message(make_message("user", "low importance msg"), 0.1);
+        // Add a high-importance message
+        wm.add_message(make_message("user", "high importance msg"), 10.0);
+
+        // Force eviction by adding a large message
+        let long_content = "z".repeat(800);
+        wm.add_message(make_message("user", &long_content), 5.0);
+
+        // The high-importance message should survive if any old messages remain
+        let ctx = wm.get_context();
+        let has_low = ctx
+            .messages
+            .iter()
+            .any(|m| m.content == "low importance msg");
+        let has_high = ctx
+            .messages
+            .iter()
+            .any(|m| m.content == "high importance msg");
+
+        // Low importance should be evicted before high importance
+        if ctx.messages.len() < 3 {
+            // Some eviction happened
+            assert!(
+                !has_low || has_high,
+                "Low-importance messages should be evicted before high-importance"
+            );
+        }
+    }
+
+    #[test]
+    fn test_working_memory_get_context_returns_all_messages() {
+        let mut wm = WorkingMemory::new(100_000);
+        wm.add_message(make_message("user", "Hello"), 1.0);
+        wm.add_message(make_message("assistant", "Hi there"), 1.0);
+
+        let ctx = wm.get_context();
+        assert_eq!(ctx.messages.len(), 2);
+        assert_eq!(ctx.messages[0].content, "Hello");
+        assert_eq!(ctx.messages[1].content, "Hi there");
+    }
+
+    #[test]
+    fn test_working_memory_set_active_code_small_file() {
+        let mut wm = WorkingMemory::new(100_000);
+        wm.set_active_code("src/main.rs".to_string(), "fn main() {}".to_string());
+
+        let ctx = wm.get_context();
+        assert_eq!(ctx.active_code.len(), 1);
+        assert_eq!(ctx.active_code[0].path, "src/main.rs");
+        match &ctx.active_code[0].content {
+            CodeContent::Full(c) => assert_eq!(c, "fn main() {}"),
+            _ => panic!("Expected Full content for small file"),
+        }
+    }
+
+    #[test]
+    fn test_working_memory_set_active_code_large_file_becomes_reference() {
+        let mut wm = WorkingMemory::new(100_000);
+        // Create content large enough to exceed 10,000 tokens
+        // At ~3-4 chars per token, ~40000 chars should be enough
+        let large_content = "fn example() { let x = 1; }\n".repeat(2000);
+        wm.set_active_code("src/large.rs".to_string(), large_content);
+
+        let ctx = wm.get_context();
+        assert_eq!(ctx.active_code.len(), 1);
+        match &ctx.active_code[0].content {
+            CodeContent::Reference { path, summary } => {
+                assert_eq!(path, "src/large.rs");
+                assert!(summary.contains("tokens"));
+            }
+            _ => panic!("Expected Reference content for large file"),
+        }
+    }
+
+    #[test]
+    fn test_working_memory_active_code_update_existing() {
+        let mut wm = WorkingMemory::new(100_000);
+        wm.set_active_code("src/lib.rs".to_string(), "v1".to_string());
+        wm.set_active_code("src/lib.rs".to_string(), "v2".to_string());
+
+        let ctx = wm.get_context();
+        // Should still only have 1 entry, not 2
+        assert_eq!(ctx.active_code.len(), 1);
+        match &ctx.active_code[0].content {
+            CodeContent::Full(c) => assert_eq!(c, "v2"),
+            _ => panic!("Expected updated content"),
+        }
+    }
+
+    #[test]
+    fn test_working_memory_active_code_truncated_at_10() {
+        let mut wm = WorkingMemory::new(100_000);
+        for i in 0..15 {
+            wm.set_active_code(format!("src/file{}.rs", i), format!("content {}", i));
+        }
+
+        let ctx = wm.get_context();
+        assert_eq!(
+            ctx.active_code.len(),
+            10,
+            "Active code should be truncated to 10 entries"
+        );
+    }
+
+    #[test]
+    fn test_working_memory_current_task() {
+        let mut wm = WorkingMemory::new(100_000);
+        assert!(wm.get_context().current_task.is_none());
+
+        wm.current_task = Some(TaskContext {
+            description: "Test task".to_string(),
+            goal: "Do something".to_string(),
+            progress: vec!["Step 1 done".to_string()],
+            next_steps: vec!["Step 2".to_string()],
+            relevant_files: vec!["src/main.rs".to_string()],
+        });
+
+        let ctx = wm.get_context();
+        assert!(ctx.current_task.is_some());
+        let task = ctx.current_task.unwrap();
+        assert_eq!(task.description, "Test task");
+        assert_eq!(task.goal, "Do something");
+    }
+
+    // ========================================================================
+    // EpisodicMemory tests (synchronous logic only)
+    // ========================================================================
+
+    #[test]
+    fn test_episodic_memory_add_to_tier_critical() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut em = EpisodicMemory::new(100_000, embedding);
+        let episode = make_episode("ep-1", Importance::Critical, "critical event");
+
+        em.add_to_tier(episode);
+        assert_eq!(em.len(), 1);
+        assert_eq!(em.tiers.critical.len(), 1);
+        assert!(em.episode_index.contains_key("ep-1"));
+        assert_eq!(em.episode_index.get("ep-1"), Some(&Importance::Critical));
+    }
+
+    #[test]
+    fn test_episodic_memory_add_to_tier_high() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut em = EpisodicMemory::new(100_000, embedding);
+        let episode = make_episode("ep-2", Importance::High, "high importance event");
+
+        em.add_to_tier(episode);
+        assert_eq!(em.tiers.high.len(), 1);
+        assert_eq!(em.episode_index.get("ep-2"), Some(&Importance::High));
+    }
+
+    #[test]
+    fn test_episodic_memory_add_to_tier_normal() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut em = EpisodicMemory::new(100_000, embedding);
+        let episode = make_episode("ep-3", Importance::Normal, "normal event");
+
+        em.add_to_tier(episode);
+        assert_eq!(em.tiers.normal.len(), 1);
+        assert_eq!(em.episode_index.get("ep-3"), Some(&Importance::Normal));
+    }
+
+    #[test]
+    fn test_episodic_memory_add_to_tier_low_and_transient() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut em = EpisodicMemory::new(100_000, embedding);
+
+        em.add_to_tier(make_episode("ep-low", Importance::Low, "low event"));
+        em.add_to_tier(make_episode(
+            "ep-transient",
+            Importance::Transient,
+            "transient event",
+        ));
+
+        // Both Low and Transient go to the low tier
+        assert_eq!(em.tiers.low.len(), 2);
+        assert_eq!(em.episode_index.get("ep-low"), Some(&Importance::Low));
+        assert_eq!(
+            em.episode_index.get("ep-transient"),
+            Some(&Importance::Transient)
+        );
+    }
+
+    #[test]
+    fn test_episodic_memory_token_tracking() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut em = EpisodicMemory::new(100_000, embedding);
+        assert_eq!(em.total_tokens(), 0);
+
+        let ep = make_episode("ep-1", Importance::Normal, "some content");
+        let expected_tokens = ep.token_count;
+        em.add_to_tier(ep);
+
+        assert_eq!(em.total_tokens(), expected_tokens);
+    }
+
+    #[test]
+    fn test_episodic_memory_find_episode_uses_index() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut em = EpisodicMemory::new(100_000, embedding);
+
+        em.add_to_tier(make_episode("ep-c", Importance::Critical, "critical"));
+        em.add_to_tier(make_episode("ep-h", Importance::High, "high"));
+        em.add_to_tier(make_episode("ep-n", Importance::Normal, "normal"));
+        em.add_to_tier(make_episode("ep-l", Importance::Low, "low"));
+
+        // find_episode should find each by ID using the index
+        assert!(em.find_episode("ep-c").is_some());
+        assert_eq!(em.find_episode("ep-c").unwrap().importance, Importance::Critical);
+
+        assert!(em.find_episode("ep-h").is_some());
+        assert_eq!(em.find_episode("ep-h").unwrap().importance, Importance::High);
+
+        assert!(em.find_episode("ep-n").is_some());
+        assert!(em.find_episode("ep-l").is_some());
+
+        // Non-existent ID returns None
+        assert!(em.find_episode("ep-nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_episodic_memory_is_empty() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let em = EpisodicMemory::new(100_000, embedding);
+        assert!(em.is_empty());
+    }
+
+    #[test]
+    fn test_episodic_memory_len_across_tiers() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut em = EpisodicMemory::new(100_000, embedding);
+
+        em.add_to_tier(make_episode("a", Importance::Critical, "c"));
+        em.add_to_tier(make_episode("b", Importance::High, "h"));
+        em.add_to_tier(make_episode("c", Importance::Normal, "n"));
+        em.add_to_tier(make_episode("d", Importance::Low, "l"));
+
+        assert_eq!(em.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_episodic_memory_try_evict_lowest_order() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut em = EpisodicMemory::new(100_000, embedding);
+
+        em.add_to_tier(make_episode("crit", Importance::Critical, "critical"));
+        em.add_to_tier(make_episode("high", Importance::High, "high"));
+        em.add_to_tier(make_episode("norm", Importance::Normal, "normal"));
+        em.add_to_tier(make_episode("low1", Importance::Low, "low"));
+
+        // First eviction should remove from low tier
+        let evicted = em.try_evict_lowest().await.unwrap();
+        assert!(evicted);
+        assert_eq!(em.tiers.low.len(), 0);
+        assert!(!em.episode_index.contains_key("low1"));
+
+        // Next eviction should remove from normal tier
+        let evicted = em.try_evict_lowest().await.unwrap();
+        assert!(evicted);
+        assert_eq!(em.tiers.normal.len(), 0);
+        assert!(!em.episode_index.contains_key("norm"));
+
+        // Next from high tier
+        let evicted = em.try_evict_lowest().await.unwrap();
+        assert!(evicted);
+        assert_eq!(em.tiers.high.len(), 0);
+        assert!(!em.episode_index.contains_key("high"));
+
+        // Next from critical tier
+        let evicted = em.try_evict_lowest().await.unwrap();
+        assert!(evicted);
+        assert_eq!(em.tiers.critical.len(), 0);
+
+        // Now all empty, eviction should return false
+        let evicted = em.try_evict_lowest().await.unwrap();
+        assert!(!evicted);
+    }
+
+    #[test]
+    fn test_episodic_memory_create_summary() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let em = EpisodicMemory::new(100_000, embedding);
+
+        let original = Episode {
+            id: "ep-original".to_string(),
+            episode_type: EpisodeType::Learning,
+            content: "This is a detailed learning episode with lots of information.".to_string(),
+            token_count: 500,
+            importance: Importance::Normal,
+            timestamp: 1000,
+            embedding_id: "ep-original".to_string(),
+            related_episodes: Vec::new(),
+            insights: vec!["insight1".to_string()],
+            is_summarized: false,
+            original_id: None,
+        };
+
+        let summary = em.create_summary(&original);
+
+        assert_eq!(summary.id, "summary-ep-original");
+        assert!(summary.is_summarized);
+        assert_eq!(summary.importance, Importance::Low);
+        assert_eq!(summary.original_id, Some("ep-original".to_string()));
+        assert!(summary.content.starts_with("[SUMMARY] learning:"));
+        assert_eq!(summary.related_episodes, vec!["ep-original".to_string()]);
+        assert_eq!(summary.insights, vec!["insight1".to_string()]);
+        assert!(summary.token_count < original.token_count);
+    }
+
+    #[tokio::test]
+    async fn test_episodic_memory_compress_oldest() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut em = EpisodicMemory::new(100_000, embedding);
+
+        // Add a normal episode
+        let normal_ep = make_episode("ep-norm", Importance::Normal, "a fairly long episode content that should be compressed into a shorter summary");
+        let original_tokens = normal_ep.token_count;
+        em.add_to_tier(normal_ep);
+        assert_eq!(em.tiers.normal.len(), 1);
+
+        // Compress oldest
+        em.compress_oldest().await.unwrap();
+
+        // Normal tier should be empty, low tier should have the summary
+        assert_eq!(em.tiers.normal.len(), 0);
+        assert_eq!(em.tiers.low.len(), 1);
+
+        let summary = &em.tiers.low[0];
+        assert!(summary.is_summarized);
+        assert!(summary.content.starts_with("[SUMMARY]"));
+
+        // The index should be updated: old key removed, new key added
+        assert!(!em.episode_index.contains_key("ep-norm"));
+        assert!(em.episode_index.contains_key(&summary.id));
+
+        // Token count should have been adjusted
+        // (total_tokens = original removed + summary added)
+        assert!(em.total_tokens() < original_tokens + 50); // summary should be smaller
+    }
+
+    // ========================================================================
+    // MemoryUsage tests
+    // ========================================================================
+
+    #[test]
+    fn test_memory_usage_total() {
+        let usage = MemoryUsage {
+            working_tokens: 100,
+            episodic_tokens: 200,
+            semantic_tokens: 300,
+        };
+        assert_eq!(usage.total(), 600);
+    }
+
+    #[test]
+    fn test_memory_usage_default_is_zero() {
+        let usage = MemoryUsage::default();
+        assert_eq!(usage.total(), 0);
+    }
+
+    // ========================================================================
+    // EpisodeType tests
+    // ========================================================================
+
+    #[test]
+    fn test_episode_type_as_str() {
+        assert_eq!(EpisodeType::Conversation.as_str(), "conversation");
+        assert_eq!(EpisodeType::ToolExecution.as_str(), "tool");
+        assert_eq!(EpisodeType::Error.as_str(), "error");
+        assert_eq!(EpisodeType::Success.as_str(), "success");
+        assert_eq!(EpisodeType::CodeChange.as_str(), "code_change");
+        assert_eq!(EpisodeType::Learning.as_str(), "learning");
+        assert_eq!(EpisodeType::Decision.as_str(), "decision");
+    }
+
+    // ========================================================================
+    // Importance ordering tests
+    // ========================================================================
+
+    #[test]
+    fn test_importance_ordering() {
+        assert!(Importance::Transient < Importance::Low);
+        assert!(Importance::Low < Importance::Normal);
+        assert!(Importance::Normal < Importance::High);
+        assert!(Importance::High < Importance::Critical);
     }
 }

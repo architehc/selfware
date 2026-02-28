@@ -1090,3 +1090,116 @@ fn default_workflow_name(path: &std::path::Path) -> String {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    // ── truncate_with_ellipsis tests ──
+
+    #[test]
+    fn truncate_with_ellipsis_short_string_unchanged() {
+        assert_eq!(truncate_with_ellipsis("hello", 10), "hello");
+        assert_eq!(truncate_with_ellipsis("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_adds_dots_when_over_limit() {
+        // max_chars=8 means keep 5 chars + "..."
+        assert_eq!(truncate_with_ellipsis("hello world", 8), "hello...");
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_empty_string() {
+        assert_eq!(truncate_with_ellipsis("", 10), "");
+        assert_eq!(truncate_with_ellipsis("", 0), "");
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_unicode_chars() {
+        // Each emoji is 1 char but multiple bytes. "ab" = 2 chars, max=3 means no truncation needed for "ab"
+        assert_eq!(truncate_with_ellipsis("ab", 3), "ab");
+        // 5 chars total, max=4 => keep 1 + "..."
+        let result = truncate_with_ellipsis("abcde", 4);
+        assert_eq!(result, "a...");
+    }
+
+    #[test]
+    fn truncate_with_ellipsis_max_less_than_three() {
+        // max_chars=2, keep_chars = 2.saturating_sub(3) = 0, so just "..."
+        assert_eq!(truncate_with_ellipsis("hello", 2), "...");
+        assert_eq!(truncate_with_ellipsis("hello", 0), "...");
+    }
+
+    // ── take_prefix_chars tests ──
+
+    #[test]
+    fn take_prefix_chars_basic() {
+        assert_eq!(take_prefix_chars("abcdef", 3), "abc");
+        assert_eq!(take_prefix_chars("abcdef", 0), "");
+        assert_eq!(take_prefix_chars("abcdef", 100), "abcdef");
+    }
+
+    #[test]
+    fn take_prefix_chars_empty_string() {
+        assert_eq!(take_prefix_chars("", 5), "");
+    }
+
+    // ── default_workflow_name tests ──
+
+    #[test]
+    fn default_workflow_name_extracts_stem() {
+        assert_eq!(
+            default_workflow_name(Path::new("my_workflow.yaml")),
+            "my_workflow"
+        );
+        assert_eq!(
+            default_workflow_name(Path::new("/path/to/deploy.yml")),
+            "deploy"
+        );
+    }
+
+    #[test]
+    fn default_workflow_name_no_extension() {
+        assert_eq!(
+            default_workflow_name(Path::new("Makefile")),
+            "Makefile"
+        );
+    }
+
+    #[test]
+    fn default_workflow_name_falls_back_for_empty_path() {
+        // Path with no file stem returns the default
+        assert_eq!(
+            default_workflow_name(Path::new("/")),
+            DEFAULT_WORKFLOW_NAME
+        );
+    }
+
+    // ── Theme / OutputFormat enum tests ──
+
+    #[test]
+    fn theme_default_is_amber() {
+        let theme: Theme = Default::default();
+        assert!(matches!(theme, Theme::Amber));
+    }
+
+    #[test]
+    fn output_format_default_is_text() {
+        let fmt: OutputFormat = Default::default();
+        assert!(matches!(fmt, OutputFormat::Text));
+    }
+
+    // ── Constants sanity checks ──
+
+    #[test]
+    fn constants_have_reasonable_values() {
+        assert!(DEFAULT_MULTI_CHAT_CONCURRENCY >= 1);
+        assert!(DEFAULT_MULTI_CHAT_CONCURRENCY <= 64);
+        assert!(JOURNAL_DESC_MAX_CHARS > 0);
+        assert!(COMMIT_HASH_PREFIX_CHARS > 0);
+        assert!(MAX_JOURNAL_ERRORS_DISPLAY > 0);
+        assert!(!DEFAULT_WORKFLOW_NAME.is_empty());
+    }
+}

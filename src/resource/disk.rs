@@ -295,3 +295,163 @@ impl DiskManager {
         Ok(available >= required_bytes)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- StorageEstimate tests ----
+
+    #[test]
+    fn test_storage_estimate_total() {
+        let estimate = StorageEstimate {
+            checkpoints: 1_000_000,
+            logs: 200_000,
+            models: 5_000_000,
+            buffer: 500_000,
+        };
+        assert_eq!(estimate.total(), 6_700_000);
+    }
+
+    #[test]
+    fn test_storage_estimate_total_zero() {
+        let estimate = StorageEstimate {
+            checkpoints: 0,
+            logs: 0,
+            models: 0,
+            buffer: 0,
+        };
+        assert_eq!(estimate.total(), 0);
+    }
+
+    #[test]
+    fn test_storage_estimate_total_large_values() {
+        let estimate = StorageEstimate {
+            checkpoints: 100_000_000_000,
+            logs: 50_000_000_000,
+            models: 200_000_000_000,
+            buffer: 10_000_000_000,
+        };
+        assert_eq!(estimate.total(), 360_000_000_000);
+    }
+
+    #[test]
+    fn test_storage_estimate_clone() {
+        let estimate = StorageEstimate {
+            checkpoints: 42,
+            logs: 7,
+            models: 99,
+            buffer: 13,
+        };
+        let cloned = estimate.clone();
+        assert_eq!(cloned.checkpoints, 42);
+        assert_eq!(cloned.total(), estimate.total());
+    }
+
+    // ---- DiskUsage tests ----
+
+    #[test]
+    fn test_disk_usage_default() {
+        let usage = DiskUsage::default();
+        assert_eq!(usage.used, 0);
+        assert_eq!(usage.total, 0);
+        assert_eq!(usage.available, 0);
+        assert_eq!(usage.percent, 0.0);
+    }
+
+    #[test]
+    fn test_disk_usage_clone() {
+        let usage = DiskUsage {
+            used: 500_000_000_000,
+            total: 1_000_000_000_000,
+            available: 500_000_000_000,
+            percent: 0.5,
+        };
+        let cloned = usage.clone();
+        assert_eq!(cloned.used, usage.used);
+        assert_eq!(cloned.total, usage.total);
+        assert_eq!(cloned.available, usage.available);
+        assert_eq!(cloned.percent, usage.percent);
+    }
+
+    // ---- DiskManager estimation tests ----
+
+    /// Helper to create a DiskManager without async, for unit testing estimation logic.
+    fn make_test_disk_manager(config: &DiskConfig) -> DiskManager {
+        DiskManager {
+            config: config.clone(),
+            checkpoints_path: PathBuf::from("/tmp/test_checkpoints"),
+            logs_path: PathBuf::from("/tmp/test_logs"),
+            _models_path: PathBuf::from("/tmp/test_models"),
+        }
+    }
+
+    #[test]
+    fn test_estimate_storage_needs_one_day() {
+        let config = DiskConfig::default();
+        let dm = make_test_disk_manager(&config);
+        let estimate = dm.estimate_storage_needs(1);
+
+        // 1 day: 500MB checkpoints + 100MB logs + 10GB models + 1GB buffer
+        assert_eq!(estimate.checkpoints, 500 * 1024 * 1024);
+        assert_eq!(estimate.logs, 100 * 1024 * 1024);
+        assert_eq!(estimate.models, 10_000_000_000);
+        assert_eq!(estimate.buffer, 500 * 1024 * 1024 * 2); // 2-day buffer
+    }
+
+    #[test]
+    fn test_estimate_storage_needs_thirty_days() {
+        let config = DiskConfig::default();
+        let dm = make_test_disk_manager(&config);
+        let estimate = dm.estimate_storage_needs(30);
+
+        assert_eq!(estimate.checkpoints, 500 * 1024 * 1024 * 30);
+        assert_eq!(estimate.logs, 100 * 1024 * 1024 * 30);
+        // Buffer is always 2 days regardless of run length
+        assert_eq!(estimate.buffer, 500 * 1024 * 1024 * 2);
+    }
+
+    #[test]
+    fn test_estimate_storage_needs_zero_days() {
+        let config = DiskConfig::default();
+        let dm = make_test_disk_manager(&config);
+        let estimate = dm.estimate_storage_needs(0);
+
+        assert_eq!(estimate.checkpoints, 0);
+        assert_eq!(estimate.logs, 0);
+        // models and buffer are constant
+        assert_eq!(estimate.models, 10_000_000_000);
+        assert_eq!(estimate.buffer, 500 * 1024 * 1024 * 2);
+    }
+
+    #[test]
+    fn test_estimate_storage_total_scales_with_days() {
+        let config = DiskConfig::default();
+        let dm = make_test_disk_manager(&config);
+        let est1 = dm.estimate_storage_needs(1);
+        let est10 = dm.estimate_storage_needs(10);
+
+        // 10-day estimate should be larger than 1-day
+        assert!(est10.total() > est1.total());
+        // The variable parts (checkpoints + logs) should scale by 10x
+        assert_eq!(est10.checkpoints, est1.checkpoints * 10);
+        assert_eq!(est10.logs, est1.logs * 10);
+    }
+
+    #[test]
+    fn test_get_models_size_returns_placeholder() {
+        let config = DiskConfig::default();
+        let dm = make_test_disk_manager(&config);
+        // estimate_storage_needs calls get_models_size internally
+        let estimate = dm.estimate_storage_needs(1);
+        assert_eq!(estimate.models, 10_000_000_000);
+    }
+
+    #[test]
+    fn test_disk_config_defaults_reasonable() {
+        let config = DiskConfig::default();
+        assert!(config.max_usage_percent > 0.0 && config.max_usage_percent <= 1.0);
+        assert!(config.maintenance_interval_seconds > 0);
+        assert!(config.compress_after_days > 0);
+    }
+}
