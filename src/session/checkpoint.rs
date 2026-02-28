@@ -655,14 +655,37 @@ impl CheckpointManager {
             }
         }
 
-        if let Err(err) = fs::rename(&tmp_path, &path) {
-            let _ = fs::remove_file(&tmp_path);
-            return Err(err).with_context(|| {
-                format!(
-                    "Failed to atomically replace checkpoint {:?} from {:?}",
-                    path, tmp_path
-                )
-            });
+        if let Err(first_err) = fs::rename(&tmp_path, &path) {
+            // On Windows, `fs::rename` fails when the target already exists.
+            // Fallback: remove the destination and retry the rename.
+            if path.exists() {
+                if let Err(remove_err) = fs::remove_file(&path) {
+                    let _ = fs::remove_file(&tmp_path);
+                    return Err(remove_err).with_context(|| {
+                        format!(
+                            "Failed to remove existing checkpoint {:?} for atomic replace (original rename error: {})",
+                            path, first_err
+                        )
+                    });
+                }
+                if let Err(retry_err) = fs::rename(&tmp_path, &path) {
+                    let _ = fs::remove_file(&tmp_path);
+                    return Err(retry_err).with_context(|| {
+                        format!(
+                            "Failed to rename checkpoint {:?} from {:?} after removing target",
+                            path, tmp_path
+                        )
+                    });
+                }
+            } else {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(first_err).with_context(|| {
+                    format!(
+                        "Failed to atomically replace checkpoint {:?} from {:?}",
+                        path, tmp_path
+                    )
+                });
+            }
         }
         #[cfg(unix)]
         {

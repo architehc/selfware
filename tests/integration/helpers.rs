@@ -73,6 +73,39 @@ pub async fn check_model_health(config: &Config) -> Result<bool> {
     }
 }
 
+/// Check connectivity to an LLM endpoint and return whether it is reachable.
+///
+/// This is a convenience wrapper around [`check_model_health`] intended for use
+/// at the top of integration tests:
+///
+/// ```ignore
+/// if !require_llm_endpoint(&config).await {
+///     println!("Skipping: LLM endpoint not available");
+///     return;
+/// }
+/// ```
+pub async fn require_llm_endpoint(config: &Config) -> bool {
+    check_model_health(config).await.unwrap_or(false)
+}
+
+/// Check connectivity to an arbitrary LLM endpoint URL and return whether it
+/// is reachable.  Useful for test files that manage their own config (e.g.
+/// qwen3_tests) and only have a raw endpoint string.
+pub async fn require_llm_endpoint_url(endpoint: &str) -> bool {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    match client.get(format!("{}/models", endpoint)).send().await {
+        Ok(r) => r.status().is_success(),
+        Err(_) => false,
+    }
+}
+
 /// Skip test if model is not available.
 ///
 /// Prints a clearly visible SKIPPED message so that CI output does not

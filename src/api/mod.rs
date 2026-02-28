@@ -463,6 +463,20 @@ impl ApiClient {
             .build()
             .context("Failed to build HTTP client")?;
 
+        // Warn if the API endpoint uses plain HTTP to a non-local host.
+        // API keys are sent as Bearer tokens, so HTTP risks credential exposure.
+        // Local HTTP (localhost/127.0.0.1/[::1]) is allowed without warning
+        // since local LLM servers typically serve over HTTP.
+        if config.endpoint.starts_with("http://")
+            && !crate::config::is_local_endpoint(&config.endpoint)
+        {
+            warn!(
+                endpoint = %config.endpoint,
+                "API endpoint uses HTTP \u{2014} credentials may be transmitted in plaintext. \
+                 Use HTTPS in production."
+            );
+        }
+
         Ok(Self {
             client,
             base_url: config.endpoint.clone(),

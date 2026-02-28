@@ -15,6 +15,7 @@ pub use resources::*;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::path::PathBuf;
+use tracing::warn;
 
 /// A string wrapper that prevents accidental logging of secrets.
 ///
@@ -489,7 +490,7 @@ fn default_require_confirmation() -> Vec<String> {
 /// Check whether an endpoint URL points to a local address.
 /// Local addresses include localhost, 127.0.0.1, [::1], and 0.0.0.0.
 /// These are safe to use over plain HTTP since traffic stays on the machine.
-fn is_local_endpoint(endpoint: &str) -> bool {
+pub(crate) fn is_local_endpoint(endpoint: &str) -> bool {
     // Extract host portion from the URL (after scheme, before port/path)
     let after_scheme = if let Some(rest) = endpoint.strip_prefix("https://") {
         rest
@@ -531,11 +532,11 @@ impl Config {
         if let Ok(metadata) = std::fs::metadata(path) {
             let mode = metadata.permissions().mode();
             if mode & 0o077 != 0 {
-                eprintln!(
-                    "WARNING: Config file '{}' is accessible by other users (mode {:o}). \
+                warn!(
+                    config_path = %path,
+                    file_mode = format_args!("{:o}", mode & 0o777),
+                    "Config file is accessible by other users. \
                      This file may contain API keys. Consider running: chmod 600 {}",
-                    path,
-                    mode & 0o777,
                     path
                 );
             }
@@ -592,6 +593,19 @@ impl Config {
         }
         // Suppress unused-variable warning on non-Unix platforms
         let _ = &loaded_from_path;
+
+        // Warn if API keys are stored in the plaintext config file.
+        // Environment variables (checked below) are preferred since they
+        // are not persisted to disk.
+        if config.api_key.is_some() {
+            if let Some(ref cfg_path) = loaded_from_path {
+                warn!(
+                    config_path = %cfg_path,
+                    "API key loaded from plaintext config file. \
+                     Consider using the SELFWARE_API_KEY environment variable instead."
+                );
+            }
+        }
 
         // Override with environment variables
         if let Ok(endpoint) = std::env::var("SELFWARE_ENDPOINT") {

@@ -9,15 +9,13 @@ use serde_json::json;
 use std::time::Duration;
 
 // Re-import the macros from the test crate root
-use crate::{skip_if_no_model, skip_if_slow};
+use crate::skip_if_slow;
 
 /// Test that file_read tool works correctly
 #[tokio::test]
 #[cfg(feature = "integration")]
 async fn test_file_read_tool_execution() {
-    let config = test_config();
-    skip_if_no_model!(&config);
-
+    // Note: this test exercises a local tool and does NOT require an LLM endpoint.
     let registry = ToolRegistry::new();
     let tool = registry
         .get("file_read")

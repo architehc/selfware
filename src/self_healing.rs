@@ -1243,6 +1243,10 @@ impl SelfHealingEngine {
             // Record healthy recovery in predictor
             self.predictor.record("self_healing", true, None, 0);
 
+            // Reset backoff state so the next failure starts with fresh retry
+            // counters instead of inheriting the elevated delay from this cycle.
+            self.executor.reset_retry_state(&pattern_key);
+
             return Some(execution);
         }
 
@@ -1263,7 +1267,12 @@ impl SelfHealingEngine {
                 escalated_execution.success,
             );
 
-            if !escalated_execution.success {
+            if escalated_execution.success {
+                // Reset backoff for both the primary and escalated patterns
+                // so subsequent failures start from a clean slate.
+                self.executor.reset_retry_state(&pattern_key);
+                self.executor.reset_retry_state(&escalation_key);
+            } else {
                 self.predictor.record("self_healing", false, None, 1);
             }
 

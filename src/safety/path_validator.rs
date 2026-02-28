@@ -95,7 +95,8 @@ impl PathValidator {
         }
 
         // Reject short path components mixing ASCII dots with non-ASCII chars.
-        for component in path.split('/') {
+        // Split on both '/' and '\' to cover Unix and Windows path separators.
+        for component in path.split(&['/', '\\'][..]) {
             if component.is_empty() {
                 continue;
             }

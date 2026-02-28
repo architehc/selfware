@@ -508,6 +508,8 @@ pub struct EpisodicMemory {
     max_tokens: usize,
     current_tokens: usize,
     tiers: EpisodicTiers,
+    /// Index mapping episode ID -> importance tier for O(1) tier lookup
+    episode_index: HashMap<String, Importance>,
     vector_index: VectorIndex,
     embedding: Arc<EmbeddingBackend>,
 }
@@ -579,6 +581,7 @@ impl EpisodicMemory {
                 normal: VecDeque::new(),
                 low: VecDeque::new(),
             },
+            episode_index: HashMap::new(),
             vector_index: VectorIndex::new(1536),
             embedding,
         }
@@ -600,6 +603,8 @@ impl EpisodicMemory {
 
     fn add_to_tier(&mut self, episode: Episode) {
         self.current_tokens += episode.token_count;
+        self.episode_index
+            .insert(episode.id.clone(), episode.importance);
 
         match episode.importance {
             Importance::Critical => self.tiers.critical.push(episode),
@@ -622,22 +627,26 @@ impl EpisodicMemory {
     async fn try_evict_lowest(&mut self) -> Result<bool> {
         if let Some(episode) = self.tiers.low.pop_front() {
             self.current_tokens -= episode.token_count;
+            self.episode_index.remove(&episode.id);
             self.vector_index.remove(&episode.embedding_id);
             return Ok(true);
         }
         if let Some(episode) = self.tiers.normal.pop_front() {
             self.current_tokens -= episode.token_count;
+            self.episode_index.remove(&episode.id);
             self.vector_index.remove(&episode.embedding_id);
             return Ok(true);
         }
         if let Some(episode) = self.tiers.high.pop_front() {
             self.current_tokens -= episode.token_count;
+            self.episode_index.remove(&episode.id);
             self.vector_index.remove(&episode.embedding_id);
             return Ok(true);
         }
         if !self.tiers.critical.is_empty() {
             let episode = self.tiers.critical.remove(0);
             self.current_tokens -= episode.token_count;
+            self.episode_index.remove(&episode.id);
             self.vector_index.remove(&episode.embedding_id);
             return Ok(true);
         }
@@ -647,10 +656,13 @@ impl EpisodicMemory {
     pub async fn compress_oldest(&mut self) -> Result<()> {
         // Compress oldest normal episodes
         if let Some(episode) = self.tiers.normal.pop_front() {
+            self.episode_index.remove(&episode.id);
             let summary = self.create_summary(&episode);
             self.current_tokens -= episode.token_count;
             self.current_tokens += summary.token_count;
             // Store summary in low tier
+            self.episode_index
+                .insert(summary.id.clone(), summary.importance);
             self.tiers.low.push_back(summary);
         }
         Ok(())
@@ -703,14 +715,16 @@ impl EpisodicMemory {
     }
 
     fn find_episode(&self, id: &str) -> Option<Episode> {
-        self.tiers
-            .critical
-            .iter()
-            .chain(self.tiers.high.iter())
-            .chain(self.tiers.normal.iter())
-            .chain(self.tiers.low.iter())
-            .find(|e| e.id == id)
-            .cloned()
+        // Use the index to determine which tier contains the episode,
+        // then search only that tier instead of all four.
+        let importance = self.episode_index.get(id)?;
+        let mut iter: Box<dyn Iterator<Item = &Episode>> = match importance {
+            Importance::Critical => Box::new(self.tiers.critical.iter()),
+            Importance::High => Box::new(self.tiers.high.iter()),
+            Importance::Normal => Box::new(self.tiers.normal.iter()),
+            Importance::Low | Importance::Transient => Box::new(self.tiers.low.iter()),
+        };
+        iter.find(|e| e.id == id).cloned()
     }
 
     pub fn total_tokens(&self) -> usize {

@@ -119,6 +119,21 @@ impl Tool for ProcessStart {
             })
             .unwrap_or_default();
 
+        // Defense-in-depth: validate each argument for shell metacharacters.
+        // Although args are passed via Command::args() (not through a shell),
+        // which is inherently safe against shell injection, we still reject
+        // suspicious characters to prevent abuse when the command itself is a
+        // shell (e.g. "sh" with args ["-c", "rm -rf /"]).
+        for (i, arg) in args_list.iter().enumerate() {
+            if arg.chars().any(|c| FORBIDDEN_CHARS.contains(&c)) {
+                anyhow::bail!(
+                    "Blocked forbidden shell metacharacter in argument {}: {:?}",
+                    i,
+                    arg
+                );
+            }
+        }
+
         let cwd = args.get("cwd").and_then(|v| v.as_str()).map(PathBuf::from);
 
         let env: HashMap<String, String> = args
@@ -641,12 +656,29 @@ mod tests {
         let result = tool
             .execute(serde_json::json!({
                 "id": "test-env-tool",
-                "command": "sh",
-                "args": ["-c", "echo $MY_VAR"],
+                "command": "env",
+                "args": [],
                 "env": {"MY_VAR": "test_value"}
             }))
             .await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_process_start_rejects_metachar_in_args() {
+        let tool = ProcessStart;
+        let result = tool
+            .execute(serde_json::json!({
+                "id": "test-meta-args",
+                "command": "echo",
+                "args": ["hello; rm -rf /"]
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("forbidden shell metacharacter"));
     }
 
     #[tokio::test]

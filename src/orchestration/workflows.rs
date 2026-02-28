@@ -934,14 +934,30 @@ impl WorkflowExecutor {
                 .map(Duration::from_secs)
                 .unwrap_or(Duration::from_secs(300)); // Default 5 min timeout
 
-            let execution_result = tokio::time::timeout(
-                timeout_duration,
-                self.execute_step_with_workflow(&step.step_type, context, Some(workflow_steps)),
-            )
-            .await;
+            // Use tokio::select! to ensure the step future is explicitly
+            // dropped (cancelled) when the timeout fires, preventing
+            // background work from continuing after timeout.
+            // The step_fut borrow of `context` must end before we can
+            // use `context` again, so we scope the select block.
+            let execution_result = {
+                let step_fut =
+                    self.execute_step_with_workflow(&step.step_type, context, Some(workflow_steps));
+                tokio::pin!(step_fut);
+
+                tokio::select! {
+                    result = &mut step_fut => Some(result),
+                    _ = tokio::time::sleep(timeout_duration) => {
+                        // Timeout fired: step_fut is dropped at end of this
+                        // block, cancelling it. Any in-flight child processes
+                        // (with kill_on_drop) are also terminated.
+                        None
+                    }
+                }
+                // step_fut is dropped here, releasing the borrow on context
+            };
 
             match execution_result {
-                Ok(Ok(output)) => {
+                Some(Ok(output)) => {
                     return StepResult {
                         step_id: step.id.clone(),
                         status: StepStatus::Completed,
@@ -951,7 +967,7 @@ impl WorkflowExecutor {
                         retry_count: attempt,
                     };
                 }
-                Ok(Err(e)) => {
+                Some(Err(e)) => {
                     last_error = Some(e.to_string());
                     context.log(
                         LogLevel::Warn,
@@ -959,8 +975,8 @@ impl WorkflowExecutor {
                         Some(step.id.clone()),
                     );
                 }
-                Err(_) => {
-                    // Timeout elapsed
+                None => {
+                    // Timeout elapsed — step future has been cancelled
                     last_error = Some(format!(
                         "Step timed out after {} seconds",
                         timeout_duration.as_secs()
@@ -968,7 +984,7 @@ impl WorkflowExecutor {
                     context.log(
                         LogLevel::Warn,
                         format!(
-                            "Step {} timed out after {}s",
+                            "Step {} timed out after {}s — task cancelled",
                             step.id,
                             timeout_duration.as_secs()
                         ),
@@ -1223,6 +1239,7 @@ impl WorkflowExecutor {
                     .arg(flag)
                     .arg(&resolved_cmd)
                     .current_dir(&dir)
+                    .kill_on_drop(true)
                     .output();
 
                 const WORKFLOW_SHELL_TIMEOUT_SECS: u64 = 300;

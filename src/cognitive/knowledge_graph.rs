@@ -706,16 +706,22 @@ impl KnowledgeGraph {
         }
 
         let target = MAX_GRAPH_ENTITIES * 9 / 10; // Evict down to 90% capacity
+        let to_remove = self.entities.len() - target;
+
+        // Use partial sort (select_nth_unstable) which is O(N) instead of full
+        // O(N log N) sort. This partitions so that entries[..to_remove] contains
+        // the `to_remove` smallest (oldest) timestamps, which is all we need.
         let mut entries: Vec<_> = self
             .access_times
             .iter()
             .map(|(id, &ts)| (id.clone(), ts))
             .collect();
-        entries.sort_by_key(|(_, ts)| *ts);
 
-        let to_remove = self.entities.len() - target;
-        for (id, _) in entries.into_iter().take(to_remove) {
-            self.remove_entity_internal(&id);
+        if to_remove > 0 && to_remove <= entries.len() {
+            entries.select_nth_unstable_by_key(to_remove - 1, |(_, ts)| *ts);
+            for (id, _) in entries.into_iter().take(to_remove) {
+                self.remove_entity_internal(&id);
+            }
         }
     }
 
@@ -1643,10 +1649,22 @@ impl PatternRecognizer {
 }
 
 /// Semantic linker for cross-file references
-#[derive(Debug)]
 pub struct SemanticLinker {
-    /// Import patterns by language
-    import_patterns: HashMap<String, Vec<String>>,
+    /// Pre-compiled import regex patterns by language
+    import_patterns: HashMap<String, Vec<regex::Regex>>,
+}
+
+impl std::fmt::Debug for SemanticLinker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let readable: HashMap<_, Vec<_>> = self
+            .import_patterns
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.iter().map(|r| r.as_str()).collect()))
+            .collect();
+        f.debug_struct("SemanticLinker")
+            .field("import_patterns", &readable)
+            .finish()
+    }
 }
 
 impl Default for SemanticLinker {
@@ -1656,32 +1674,38 @@ impl Default for SemanticLinker {
 }
 
 impl SemanticLinker {
-    /// Create new linker
+    /// Compile a regex pattern. All patterns here are compile-time literals,
+    /// so failure indicates a programming error.
+    fn compile(pattern: &str) -> regex::Regex {
+        regex::Regex::new(pattern).expect("invalid regex literal in SemanticLinker")
+    }
+
+    /// Create new linker with pre-compiled regex patterns
     pub fn new() -> Self {
-        let mut patterns = HashMap::new();
+        let mut patterns: HashMap<String, Vec<regex::Regex>> = HashMap::new();
 
         patterns.insert(
             "rust".to_string(),
             vec![
-                r"use\s+(\w+(?:::\w+)*)".to_string(),
-                r"crate::(\w+(?:::\w+)*)".to_string(),
-                r"super::(\w+(?:::\w+)*)".to_string(),
+                Self::compile(r"use\s+(\w+(?:::\w+)*)"),
+                Self::compile(r"crate::(\w+(?:::\w+)*)"),
+                Self::compile(r"super::(\w+(?:::\w+)*)"),
             ],
         );
 
         patterns.insert(
             "javascript".to_string(),
             vec![
-                r#"import\s+.*\s+from\s+['"](.+)['"]"#.to_string(),
-                r#"require\(['"](.+)['"]\)"#.to_string(),
+                Self::compile(r#"import\s+.*\s+from\s+['"](.+)['"]"#),
+                Self::compile(r#"require\(['"](.+)['"]\)"#),
             ],
         );
 
         patterns.insert(
             "python".to_string(),
             vec![
-                r"from\s+(\w+(?:\.\w+)*)\s+import".to_string(),
-                r"import\s+(\w+(?:\.\w+)*)".to_string(),
+                Self::compile(r"from\s+(\w+(?:\.\w+)*)\s+import"),
+                Self::compile(r"import\s+(\w+(?:\.\w+)*)"),
             ],
         );
 
@@ -1690,7 +1714,7 @@ impl SemanticLinker {
         }
     }
 
-    /// Extract imports from code
+    /// Extract imports from code using pre-compiled regex patterns
     pub fn extract_imports(&self, content: &str, language: &str) -> Vec<String> {
         let patterns = match self.import_patterns.get(language) {
             Some(p) => p,
@@ -1699,12 +1723,10 @@ impl SemanticLinker {
 
         let mut imports = Vec::new();
 
-        for pattern in patterns {
-            if let Ok(re) = regex::Regex::new(pattern) {
-                for cap in re.captures_iter(content) {
-                    if let Some(m) = cap.get(1) {
-                        imports.push(m.as_str().to_string());
-                    }
+        for re in patterns {
+            for cap in re.captures_iter(content) {
+                if let Some(m) = cap.get(1) {
+                    imports.push(m.as_str().to_string());
                 }
             }
         }

@@ -231,6 +231,7 @@ impl Default for ExtendedTestHarness {
 #[ignore = "Simulation-only; run explicitly with: cargo test extended_coding_session --ignored"]
 async fn extended_coding_session_2h() {
     if skip_slow_tests() {
+        println!("Skipping: extended test (SELFWARE_SKIP_SLOW=1)");
         eprintln!("Skipping extended test (SELFWARE_SKIP_SLOW=1)");
         return;
     }
@@ -238,6 +239,7 @@ async fn extended_coding_session_2h() {
     let harness = match ExtendedTestHarness::new() {
         Ok(h) => h,
         Err(e) => {
+            println!("Skipping: failed to create harness: {}", e);
             eprintln!("Failed to create harness: {}", e);
             return;
         }
@@ -245,6 +247,7 @@ async fn extended_coding_session_2h() {
 
     // Check model availability
     if !check_model_health(&harness.config).await.unwrap_or(false) {
+        println!("Skipping: LLM endpoint not available");
         eprintln!("Model not available, skipping extended test");
         return;
     }
@@ -309,6 +312,7 @@ async fn extended_coding_session_2h() {
 #[ignore = "Simulation-only; run explicitly with: cargo test extended_multi_agent --ignored"]
 async fn extended_multi_agent_collaboration_1h() {
     if skip_slow_tests() {
+        println!("Skipping: extended test (SELFWARE_SKIP_SLOW=1)");
         eprintln!("Skipping extended test (SELFWARE_SKIP_SLOW=1)");
         return;
     }
@@ -316,12 +320,14 @@ async fn extended_multi_agent_collaboration_1h() {
     let harness = match ExtendedTestHarness::new() {
         Ok(h) => h,
         Err(e) => {
+            println!("Skipping: failed to create harness: {}", e);
             eprintln!("Failed to create harness: {}", e);
             return;
         }
     };
 
     if !check_model_health(&harness.config).await.unwrap_or(false) {
+        println!("Skipping: LLM endpoint not available");
         eprintln!("Model not available, skipping extended test");
         return;
     }

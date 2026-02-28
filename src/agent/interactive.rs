@@ -862,7 +862,7 @@ impl Agent {
                 if self.last_assistant_response.is_empty() {
                     println!("{} No response to copy", "ℹ".bright_yellow());
                 } else {
-                    match Self::copy_text_to_clipboard(&self.last_assistant_response) {
+                    match Self::copy_text_to_clipboard(&self.last_assistant_response).await {
                         Ok(()) => {
                             let len = self.last_assistant_response.len();
                             println!("{} Copied {} chars to clipboard", "📋".bright_green(), len);
@@ -1240,57 +1240,64 @@ impl Agent {
         self.pending_messages.push_back(msg.to_string());
     }
 
-    /// Copy text to clipboard using system clipboard tools
-    fn copy_text_to_clipboard(text: &str) -> Result<()> {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
+    /// Copy text to clipboard using system clipboard tools.
+    /// Runs blocking clipboard I/O on a dedicated thread to avoid
+    /// stalling the async runtime.
+    async fn copy_text_to_clipboard(text: &str) -> Result<()> {
+        let text = text.to_owned();
+        tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            use std::process::{Command, Stdio};
 
-        // Try xclip, xsel, wl-copy, pbcopy in order
-        let clipboard_cmd = if Command::new("which")
-            .arg("pbcopy")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-        {
-            Some(("pbcopy", vec![]))
-        } else if Command::new("which")
-            .arg("xclip")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-        {
-            Some(("xclip", vec!["-selection", "clipboard"]))
-        } else if Command::new("which")
-            .arg("xsel")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-        {
-            Some(("xsel", vec!["--clipboard", "--input"]))
-        } else if Command::new("which")
-            .arg("wl-copy")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-        {
-            Some(("wl-copy", vec![]))
-        } else {
-            None
-        };
+            // Try xclip, xsel, wl-copy, pbcopy in order
+            let clipboard_cmd = if Command::new("which")
+                .arg("pbcopy")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
+                Some(("pbcopy", vec![]))
+            } else if Command::new("which")
+                .arg("xclip")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
+                Some(("xclip", vec!["-selection", "clipboard"]))
+            } else if Command::new("which")
+                .arg("xsel")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
+                Some(("xsel", vec!["--clipboard", "--input"]))
+            } else if Command::new("which")
+                .arg("wl-copy")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
+                Some(("wl-copy", vec![]))
+            } else {
+                None
+            };
 
-        if let Some((cmd, args)) = clipboard_cmd {
-            let mut child = Command::new(cmd)
-                .args(&args)
-                .stdin(Stdio::piped())
-                .spawn()?;
-            if let Some(stdin) = child.stdin.as_mut() {
-                stdin.write_all(text.as_bytes())?;
+            if let Some((cmd, args)) = clipboard_cmd {
+                let mut child = Command::new(cmd)
+                    .args(&args)
+                    .stdin(Stdio::piped())
+                    .spawn()?;
+                if let Some(stdin) = child.stdin.as_mut() {
+                    stdin.write_all(text.as_bytes())?;
+                }
+                child.wait()?;
+                Ok(())
+            } else {
+                anyhow::bail!("No clipboard tool found (pbcopy, xclip, xsel, or wl-copy)")
             }
-            child.wait()?;
-            Ok(())
-        } else {
-            anyhow::bail!("No clipboard tool found (pbcopy, xclip, xsel, or wl-copy)")
-        }
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Clipboard task failed: {}", e))?
     }
 
     /// Basic interactive mode (fallback when reedline unavailable)

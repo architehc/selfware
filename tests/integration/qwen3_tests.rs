@@ -14,6 +14,8 @@ use selfware::config::{
     AgentConfig, Config, ExecutionMode, SafetyConfig, UiConfig, YoloFileConfig,
 };
 
+use super::helpers::require_llm_endpoint_url;
+
 /// Get Qwen3-Coder test configuration
 fn qwen3_config() -> Config {
     Config {
@@ -44,18 +46,26 @@ fn qwen3_config() -> Config {
 
 /// Check if Qwen3 model is available
 async fn qwen3_available() -> bool {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap();
-
     let endpoint = std::env::var("SELFWARE_ENDPOINT")
         .unwrap_or_else(|_| "http://localhost:8000/v1".to_string());
+    require_llm_endpoint_url(&endpoint).await
+}
 
-    match client.get(format!("{}/models", endpoint)).send().await {
-        Ok(r) => r.status().is_success(),
-        Err(_) => false,
-    }
+/// Macro-style helper: check Qwen3 availability and skip with a clear message
+/// if the endpoint is unreachable.  Prints to both stdout (for `cargo test`
+/// summary) and stderr (for CI log scanners).
+macro_rules! skip_if_no_qwen3 {
+    () => {
+        if !qwen3_available().await {
+            let test_path = module_path!();
+            println!(
+                "test {} ... SKIPPED (Qwen3 endpoint not available)",
+                test_path
+            );
+            eprintln!("SKIPPED: {} - Qwen3 endpoint not available", test_path);
+            return;
+        }
+    };
 }
 
 // ============================================================================
@@ -65,10 +75,7 @@ async fn qwen3_available() -> bool {
 #[tokio::test]
 #[cfg(feature = "integration")]
 async fn qwen3_test_health_check() {
-    if !qwen3_available().await {
-        eprintln!("Skipping: Qwen3 model not available");
-        return;
-    }
+    skip_if_no_qwen3!();
 
     let client = reqwest::Client::new();
     let endpoint = qwen3_config().endpoint;
@@ -88,10 +95,7 @@ async fn qwen3_test_health_check() {
 #[tokio::test]
 #[cfg(feature = "integration")]
 async fn qwen3_test_simple_completion() {
-    if !qwen3_available().await {
-        eprintln!("Skipping: Qwen3 model not available");
-        return;
-    }
+    skip_if_no_qwen3!();
 
     let config = qwen3_config();
     let client = ApiClient::new(&config).expect("Failed to create client");
@@ -119,10 +123,7 @@ async fn qwen3_test_simple_completion() {
 #[tokio::test]
 #[cfg(feature = "integration")]
 async fn qwen3_test_code_generation() {
-    if !qwen3_available().await {
-        eprintln!("Skipping: Qwen3 model not available");
-        return;
-    }
+    skip_if_no_qwen3!();
 
     let config = qwen3_config();
     let client = ApiClient::new(&config).expect("Failed to create client");
@@ -157,10 +158,7 @@ async fn qwen3_test_code_generation() {
 #[tokio::test]
 #[cfg(feature = "integration")]
 async fn qwen3_test_tool_call_format() {
-    if !qwen3_available().await {
-        eprintln!("Skipping: Qwen3 model not available");
-        return;
-    }
+    skip_if_no_qwen3!();
 
     let config = qwen3_config();
     let client = ApiClient::new(&config).expect("Failed to create client");
@@ -199,10 +197,7 @@ async fn qwen3_test_tool_call_format() {
 #[tokio::test]
 #[cfg(feature = "integration")]
 async fn qwen3_test_native_tool_calling() {
-    if !qwen3_available().await {
-        eprintln!("Skipping: Qwen3 model not available");
-        return;
-    }
+    skip_if_no_qwen3!();
 
     let config = qwen3_config();
     let client = ApiClient::new(&config).expect("Failed to create client");
@@ -272,10 +267,7 @@ async fn qwen3_test_native_tool_calling() {
 #[tokio::test]
 #[cfg(feature = "integration")]
 async fn qwen3_test_concurrent_requests() {
-    if !qwen3_available().await {
-        eprintln!("Skipping: Qwen3 model not available");
-        return;
-    }
+    skip_if_no_qwen3!();
 
     let config = qwen3_config();
     let client = Arc::new(ApiClient::new(&config).expect("Failed to create client"));
@@ -333,10 +325,7 @@ async fn qwen3_test_concurrent_requests() {
 #[tokio::test]
 #[cfg(feature = "integration")]
 async fn qwen3_test_parallel_agents_simulation() {
-    if !qwen3_available().await {
-        eprintln!("Skipping: Qwen3 model not available");
-        return;
-    }
+    skip_if_no_qwen3!();
 
     let config = qwen3_config();
     let client = Arc::new(ApiClient::new(&config).expect("Failed to create client"));
@@ -418,10 +407,7 @@ async fn qwen3_test_parallel_agents_simulation() {
 #[tokio::test]
 #[cfg(feature = "integration")]
 async fn qwen3_test_conversation_memory() {
-    if !qwen3_available().await {
-        eprintln!("Skipping: Qwen3 model not available");
-        return;
-    }
+    skip_if_no_qwen3!();
 
     let config = qwen3_config();
     let client = ApiClient::new(&config).expect("Failed to create client");
@@ -470,10 +456,7 @@ async fn qwen3_test_conversation_memory() {
 #[tokio::test]
 #[cfg(feature = "integration")]
 async fn qwen3_test_code_review() {
-    if !qwen3_available().await {
-        eprintln!("Skipping: Qwen3 model not available");
-        return;
-    }
+    skip_if_no_qwen3!();
 
     let config = qwen3_config();
     let client = ApiClient::new(&config).expect("Failed to create client");
@@ -512,10 +495,7 @@ fn calculate_average(numbers: Vec<i32>) -> f64 {
 #[tokio::test]
 #[cfg(feature = "integration")]
 async fn qwen3_test_bug_fix_suggestion() {
-    if !qwen3_available().await {
-        eprintln!("Skipping: Qwen3 model not available");
-        return;
-    }
+    skip_if_no_qwen3!();
 
     let config = qwen3_config();
     let client = ApiClient::new(&config).expect("Failed to create client");
@@ -551,10 +531,7 @@ def get_user_age(users, name):
 #[tokio::test]
 #[cfg(feature = "integration")]
 async fn qwen3_test_test_generation() {
-    if !qwen3_available().await {
-        eprintln!("Skipping: Qwen3 model not available");
-        return;
-    }
+    skip_if_no_qwen3!();
 
     let config = qwen3_config();
     let client = ApiClient::new(&config).expect("Failed to create client");
@@ -593,10 +570,7 @@ pub fn fibonacci(n: u32) -> u32 {
 #[tokio::test]
 #[cfg(feature = "integration")]
 async fn qwen3_test_refactoring() {
-    if !qwen3_available().await {
-        eprintln!("Skipping: Qwen3 model not available");
-        return;
-    }
+    skip_if_no_qwen3!();
 
     let config = qwen3_config();
     let client = ApiClient::new(&config).expect("Failed to create client");
@@ -642,10 +616,7 @@ function processData(d) {
 #[tokio::test]
 #[cfg(feature = "integration")]
 async fn qwen3_test_rapid_requests() {
-    if !qwen3_available().await {
-        eprintln!("Skipping: Qwen3 model not available");
-        return;
-    }
+    skip_if_no_qwen3!();
 
     let config = qwen3_config();
     let client = Arc::new(ApiClient::new(&config).expect("Failed to create client"));
@@ -703,10 +674,7 @@ async fn qwen3_test_rapid_requests() {
 #[tokio::test]
 #[cfg(feature = "integration")]
 async fn qwen3_test_long_context() {
-    if !qwen3_available().await {
-        eprintln!("Skipping: Qwen3 model not available");
-        return;
-    }
+    skip_if_no_qwen3!();
 
     let config = qwen3_config();
     let client = ApiClient::new(&config).expect("Failed to create client");
@@ -743,10 +711,7 @@ async fn qwen3_test_long_context() {
 #[tokio::test]
 #[cfg(feature = "integration")]
 async fn qwen3_test_tool_sequence() {
-    if !qwen3_available().await {
-        eprintln!("Skipping: Qwen3 model not available");
-        return;
-    }
+    skip_if_no_qwen3!();
 
     let config = qwen3_config();
     let client = ApiClient::new(&config).expect("Failed to create client");
@@ -792,10 +757,7 @@ After using tools, summarize what you did."#;
 #[tokio::test]
 #[cfg(feature = "integration")]
 async fn qwen3_test_10_concurrent_agents() {
-    if !qwen3_available().await {
-        eprintln!("Skipping: Qwen3 model not available");
-        return;
-    }
+    skip_if_no_qwen3!();
 
     let config = qwen3_config();
     let client = Arc::new(ApiClient::new(&config).expect("Failed to create client"));
@@ -913,10 +875,7 @@ async fn qwen3_test_10_concurrent_agents() {
 #[tokio::test]
 #[cfg(feature = "integration")]
 async fn qwen3_test_agent_tool_loop() {
-    if !qwen3_available().await {
-        eprintln!("Skipping: Qwen3 model not available");
-        return;
-    }
+    skip_if_no_qwen3!();
 
     let config = qwen3_config();
     let client = ApiClient::new(&config).expect("Failed to create client");
@@ -984,10 +943,7 @@ Complete tasks step by step."#;
 #[tokio::test]
 #[cfg(feature = "integration")]
 async fn qwen3_test_complex_coding_task() {
-    if !qwen3_available().await {
-        eprintln!("Skipping: Qwen3 model not available");
-        return;
-    }
+    skip_if_no_qwen3!();
 
     let config = qwen3_config();
     let client = ApiClient::new(&config).expect("Failed to create client");
@@ -1029,10 +985,7 @@ Output only the code, no explanations."#;
 #[tokio::test]
 #[cfg(feature = "integration")]
 async fn qwen3_test_error_recovery() {
-    if !qwen3_available().await {
-        eprintln!("Skipping: Qwen3 model not available");
-        return;
-    }
+    skip_if_no_qwen3!();
 
     let config = qwen3_config();
     let client = ApiClient::new(&config).expect("Failed to create client");
@@ -1071,10 +1024,7 @@ async fn qwen3_test_error_recovery() {
 #[tokio::test]
 #[cfg(feature = "integration")]
 async fn qwen3_test_continuous_dialogue() {
-    if !qwen3_available().await {
-        eprintln!("Skipping: Qwen3 model not available");
-        return;
-    }
+    skip_if_no_qwen3!();
 
     let config = qwen3_config();
     let client = ApiClient::new(&config).expect("Failed to create client");

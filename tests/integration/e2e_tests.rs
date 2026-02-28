@@ -149,7 +149,13 @@ async fn test_client_health() {
 
     let healthy = check_model_health(&config).await.unwrap_or(false);
 
-    if !healthy {
+    if healthy {
+        println!("Model endpoint at {} is healthy", config.endpoint);
+    } else {
+        println!(
+            "Skipping: LLM endpoint not available at {}",
+            config.endpoint
+        );
         eprintln!(
             "Warning: Model endpoint at {} is not healthy",
             config.endpoint

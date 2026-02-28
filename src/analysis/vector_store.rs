@@ -15,13 +15,43 @@
 //! - Persistence to disk
 
 use anyhow::{anyhow, Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
+
+// ---------------------------------------------------------------------------
+// Serde helpers for Arc<Path> and Arc<str>
+// ---------------------------------------------------------------------------
+
+mod arc_path_serde {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(path: &Arc<Path>, serializer: S) -> Result<S::Ok, S::Error> {
+        path.as_ref().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Arc<Path>, D::Error> {
+        let pb = PathBuf::deserialize(deserializer)?;
+        Ok(Arc::from(pb.as_path()))
+    }
+}
+
+mod arc_str_serde {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(s: &Arc<str>, serializer: S) -> Result<S::Ok, S::Error> {
+        s.as_ref().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Arc<str>, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(Arc::from(s.as_str()))
+    }
+}
 
 /// Embedding dimension (common for small models)
 pub const EMBEDDING_DIM: usize = 384;
@@ -102,10 +132,15 @@ impl ChunkType {
 }
 
 /// Metadata for a code chunk
+///
+/// `file_path` and `language` use `Arc` to avoid duplicating the same
+/// strings across many chunks originating from the same source file.
+/// Cloning an `Arc` is a cheap pointer copy instead of a heap allocation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkMetadata {
-    /// Source file path
-    pub file_path: PathBuf,
+    /// Source file path (shared across chunks from the same file)
+    #[serde(with = "arc_path_serde")]
+    pub file_path: Arc<Path>,
     /// Start line (1-indexed)
     pub start_line: usize,
     /// End line (1-indexed)
@@ -114,8 +149,9 @@ pub struct ChunkMetadata {
     pub chunk_type: ChunkType,
     /// Symbol name if applicable (function name, struct name, etc.)
     pub symbol_name: Option<String>,
-    /// Language identifier
-    pub language: String,
+    /// Language identifier (shared across chunks from the same file)
+    #[serde(with = "arc_str_serde")]
+    pub language: Arc<str>,
     /// Hash of content for deduplication
     pub content_hash: String,
     /// Timestamp when indexed
@@ -125,13 +161,17 @@ pub struct ChunkMetadata {
 }
 
 impl ChunkMetadata {
-    /// Create new metadata
+    /// Create new metadata.
+    ///
+    /// Accepts `Into<Arc<Path>>` and `Into<Arc<str>>` so callers can pass
+    /// a `PathBuf`, `&Path`, or a pre-existing `Arc<Path>` (cheap clone for
+    /// batches of chunks from the same file). Same for language strings.
     pub fn new(
-        file_path: PathBuf,
+        file_path: impl Into<Arc<Path>>,
         start_line: usize,
         end_line: usize,
         chunk_type: ChunkType,
-        language: &str,
+        language: impl Into<Arc<str>>,
         content: &str,
     ) -> Self {
         let mut hasher = Sha256::new();
@@ -144,12 +184,12 @@ impl ChunkMetadata {
             .as_secs();
 
         Self {
-            file_path,
+            file_path: file_path.into(),
             start_line,
             end_line,
             chunk_type,
             symbol_name: None,
-            language: language.to_string(),
+            language: language.into(),
             content_hash,
             indexed_at,
             tags: Vec::new(),
@@ -392,9 +432,9 @@ impl VectorCollection {
             ));
         }
 
-        // Update file index
+        // Update file index (convert Arc<Path> to PathBuf for the index key)
         self.file_index
-            .entry(chunk.metadata.file_path.clone())
+            .entry(chunk.metadata.file_path.to_path_buf())
             .or_default()
             .push(chunk.id.clone());
 
@@ -430,7 +470,7 @@ impl VectorCollection {
             }
 
             // Update file index
-            if let Some(file_chunks) = self.file_index.get_mut(&chunk.metadata.file_path) {
+            if let Some(file_chunks) = self.file_index.get_mut(chunk.metadata.file_path.as_ref()) {
                 file_chunks.retain(|cid| cid != id);
             }
 
@@ -970,6 +1010,11 @@ impl CodeChunker {
         let mut chunks = Vec::new();
         let lines: Vec<&str> = content.lines().collect();
 
+        // Pre-allocate shared Arc for the file path and language so all
+        // chunks from this file share the same allocation (cheap clone).
+        let shared_path: Arc<Path> = Arc::from(file_path);
+        let shared_lang: Arc<str> = Arc::from("rust");
+
         let mut current_start = 0;
         let mut current_type = ChunkType::CodeBlock;
         let mut brace_depth = 0;
@@ -984,11 +1029,11 @@ impl CodeChunker {
                         let chunk_content: String = lines[current_start..line_num].join("\n");
                         if chunk_content.len() >= self.min_chunk_size {
                             let metadata = ChunkMetadata::new(
-                                file_path.to_path_buf(),
+                                shared_path.clone(),
                                 current_start + 1,
                                 line_num,
                                 current_type,
-                                "rust",
+                                shared_lang.clone(),
                                 &chunk_content,
                             );
                             chunks.push(CodeChunk::new(chunk_content, metadata));
@@ -1013,11 +1058,11 @@ impl CodeChunker {
                 let symbol_name = self.extract_rust_symbol(&chunk_content, current_type);
 
                 let mut metadata = ChunkMetadata::new(
-                    file_path.to_path_buf(),
+                    shared_path.clone(),
                     current_start + 1,
                     line_num + 1,
                     current_type,
-                    "rust",
+                    shared_lang.clone(),
                     &chunk_content,
                 );
 
@@ -1038,11 +1083,11 @@ impl CodeChunker {
             let chunk_content: String = lines[current_start..].join("\n");
             if chunk_content.len() >= self.min_chunk_size {
                 let metadata = ChunkMetadata::new(
-                    file_path.to_path_buf(),
+                    shared_path.clone(),
                     current_start + 1,
                     lines.len(),
                     current_type,
-                    "rust",
+                    shared_lang.clone(),
                     &chunk_content,
                 );
                 chunks.push(CodeChunk::new(chunk_content, metadata));
@@ -1110,6 +1155,11 @@ impl CodeChunker {
         let mut chunks = Vec::new();
         let lines: Vec<&str> = content.lines().collect();
 
+        // Pre-allocate shared Arc for the file path and language so all
+        // chunks from this file share the same allocation (cheap clone).
+        let shared_path: Arc<Path> = Arc::from(file_path);
+        let shared_lang: Arc<str> = Arc::from(language);
+
         let mut start = 0;
         while start < lines.len() {
             let mut end = start;
@@ -1128,11 +1178,11 @@ impl CodeChunker {
 
             let chunk_content: String = lines[start..end].join("\n");
             let metadata = ChunkMetadata::new(
-                file_path.to_path_buf(),
+                shared_path.clone(),
                 start + 1,
                 end,
                 ChunkType::CodeBlock,
-                language,
+                shared_lang.clone(),
                 &chunk_content,
             );
             chunks.push(CodeChunk::new(chunk_content, metadata));
@@ -1656,7 +1706,7 @@ mod tests {
             "fn main() {}",
         );
 
-        assert_eq!(meta.file_path, PathBuf::from("src/lib.rs"));
+        assert_eq!(*meta.file_path, *Path::new("src/lib.rs"));
         assert_eq!(meta.start_line, 1);
         assert_eq!(meta.end_line, 10);
         assert_eq!(meta.chunk_type, ChunkType::Function);

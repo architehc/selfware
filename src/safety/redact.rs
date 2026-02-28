@@ -1,11 +1,14 @@
 //! Secrets redaction to prevent sensitive data from leaking to logs/checkpoints
 
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use std::borrow::Cow;
 use std::sync::OnceLock;
 
 /// Placeholder for redacted content
 const REDACTED: &str = "[REDACTED]";
+
+/// Maximum compiled regex size to mitigate ReDoS (catastrophic backtracking).
+const REGEX_SIZE_LIMIT: usize = 1 << 20; // 1 MB
 
 /// Common secret patterns to redact
 static SECRET_PATTERNS: OnceLock<Vec<SecretPattern>> = OnceLock::new();
@@ -15,99 +18,66 @@ struct SecretPattern {
     regex: Regex,
 }
 
+/// Try to compile a regex with a size limit to prevent ReDoS.
+/// Returns `None` (and logs a warning) if the pattern fails to compile.
+fn compile_pattern(name: &'static str, pattern: &str) -> Option<SecretPattern> {
+    match RegexBuilder::new(pattern)
+        .size_limit(REGEX_SIZE_LIMIT)
+        .build()
+    {
+        Ok(regex) => Some(SecretPattern { name, regex }),
+        Err(e) => {
+            // Log at module level; tracing may not be initialised during OnceLock
+            // init, so also use eprintln as a fallback visible in tests.
+            eprintln!(
+                "[redact] WARNING: secret pattern '{}' failed to compile (skipping): {}",
+                name, e
+            );
+            None
+        }
+    }
+}
+
 fn get_patterns() -> &'static Vec<SecretPattern> {
     SECRET_PATTERNS.get_or_init(|| {
-        vec![
+        let candidates: Vec<Option<SecretPattern>> = vec![
             // API Keys (generic)
-            SecretPattern {
-                name: "api_key",
-                regex: Regex::new(r#"(?i)(api[_-]?key|apikey)\s*[=:]\s*["']?([a-zA-Z0-9_\-]{20,})["']?"#).unwrap(),
-            },
+            compile_pattern("api_key", r#"(?i)(api[_-]?key|apikey)\s*[=:]\s*["']?([a-zA-Z0-9_\-]{20,})["']?"#),
             // Bearer tokens
-            SecretPattern {
-                name: "bearer_token",
-                regex: Regex::new(r#"(?i)(bearer\s+)([a-zA-Z0-9_\-\.]{20,})"#).unwrap(),
-            },
+            compile_pattern("bearer_token", r#"(?i)(bearer\s+)([a-zA-Z0-9_\-\.]{20,})"#),
             // AWS credentials
-            SecretPattern {
-                name: "aws_access_key",
-                regex: Regex::new(r#"(?i)(AKIA[A-Z0-9]{16})"#).unwrap(),
-            },
-            SecretPattern {
-                name: "aws_secret_key",
-                regex: Regex::new(r#"(?i)(aws[_-]?secret[_-]?access[_-]?key)\s*[=:]\s*["']?([a-zA-Z0-9/+=]{40})["']?"#).unwrap(),
-            },
+            compile_pattern("aws_access_key", r#"(?i)(AKIA[A-Z0-9]{16})"#),
+            compile_pattern("aws_secret_key", r#"(?i)(aws[_-]?secret[_-]?access[_-]?key)\s*[=:]\s*["']?([a-zA-Z0-9/+=]{40})["']?"#),
             // GitHub classic tokens (ghp_)
-            SecretPattern {
-                name: "github_token",
-                regex: Regex::new(r#"(ghp_[a-zA-Z0-9]{36})"#).unwrap(),
-            },
+            compile_pattern("github_token", r#"(ghp_[a-zA-Z0-9]{36})"#),
             // GitHub fine-grained personal access tokens (github_pat_)
-            SecretPattern {
-                name: "github_fine_grained_token",
-                regex: Regex::new(r#"(github_pat_[a-zA-Z0-9_]{22,})"#).unwrap(),
-            },
+            compile_pattern("github_fine_grained_token", r#"(github_pat_[a-zA-Z0-9_]{22,})"#),
             // GitLab tokens (glpat-)
-            SecretPattern {
-                name: "gitlab_token",
-                regex: Regex::new(r#"(glpat-[a-zA-Z0-9_\-]{20,})"#).unwrap(),
-            },
+            compile_pattern("gitlab_token", r#"(glpat-[a-zA-Z0-9_\-]{20,})"#),
             // OpenAI/Anthropic API keys
-            SecretPattern {
-                name: "openai_key",
-                regex: Regex::new(r#"(sk-[a-zA-Z0-9]{32,})"#).unwrap(),
-            },
+            compile_pattern("openai_key", r#"(sk-[a-zA-Z0-9]{32,})"#),
             // Google API keys
-            SecretPattern {
-                name: "google_api_key",
-                regex: Regex::new(r#"(AIza[a-zA-Z0-9_\-]{35})"#).unwrap(),
-            },
+            compile_pattern("google_api_key", r#"(AIza[a-zA-Z0-9_\-]{35})"#),
             // Stripe API keys (secret, restricted, and publishable)
-            SecretPattern {
-                name: "stripe_key",
-                regex: Regex::new(r#"(sk_live_[a-zA-Z0-9]{24,}|rk_live_[a-zA-Z0-9]{24,}|pk_live_[a-zA-Z0-9]{24,})"#).unwrap(),
-            },
+            compile_pattern("stripe_key", r#"(sk_live_[a-zA-Z0-9]{24,}|rk_live_[a-zA-Z0-9]{24,}|pk_live_[a-zA-Z0-9]{24,})"#),
             // Slack tokens (xoxb-, xoxp-, xoxs-, xoxa-, xoxr-)
-            SecretPattern {
-                name: "slack_token",
-                regex: Regex::new(r#"(xox[bpsar]-[a-zA-Z0-9\-]+)"#).unwrap(),
-            },
+            compile_pattern("slack_token", r#"(xox[bpsar]-[a-zA-Z0-9\-]+)"#),
             // Generic secret/password patterns
-            SecretPattern {
-                name: "password",
-                regex: Regex::new(r#"(?i)(password|passwd|pwd|secret)\s*[=:]\s*["']?([^\s"']{8,})["']?"#).unwrap(),
-            },
+            compile_pattern("password", r#"(?i)(password|passwd|pwd|secret)\s*[=:]\s*["']?([^\s"']{8,})["']?"#),
             // Private keys
-            SecretPattern {
-                name: "private_key",
-                regex: Regex::new(r#"-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----[\s\S]*?-----END\s+(RSA\s+)?PRIVATE\s+KEY-----"#).unwrap(),
-            },
+            compile_pattern("private_key", r#"-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----[\s\S]*?-----END\s+(RSA\s+)?PRIVATE\s+KEY-----"#),
             // Database connection strings
-            SecretPattern {
-                name: "db_connection",
-                regex: Regex::new(r#"(?i)(mongodb|postgres|mysql|redis)://[^\s"'<>]+"#).unwrap(),
-            },
+            compile_pattern("db_connection", r#"(?i)(mongodb|postgres|mysql|redis)://[^\s"'<>]+"#),
             // JWT tokens - full three-part tokens
-            SecretPattern {
-                name: "jwt",
-                regex: Regex::new(r#"eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*"#).unwrap(),
-            },
+            compile_pattern("jwt", r#"eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*"#),
             // JWT-like base64 tokens (eyJ prefix is base64 for {"): catch partial/header-only
-            SecretPattern {
-                name: "jwt_partial",
-                regex: Regex::new(r#"eyJ[a-zA-Z0-9_/+\-]{30,}"#).unwrap(),
-            },
+            compile_pattern("jwt_partial", r#"eyJ[a-zA-Z0-9_/+\-]{30,}"#),
             // Generic tokens in env vars
-            SecretPattern {
-                name: "env_token",
-                regex: Regex::new(r#"(?i)([A-Z_]*(?:TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL)[A-Z_]*)\s*[=:]\s*["']?([^\s"']{16,})["']?"#).unwrap(),
-            },
+            compile_pattern("env_token", r#"(?i)([A-Z_]*(?:TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL)[A-Z_]*)\s*[=:]\s*["']?([^\s"']{16,})["']?"#),
             // Generic high-entropy base64-encoded strings that look like API keys
-            SecretPattern {
-                name: "base64_secret",
-                regex: Regex::new(r#"(?i)(?:key|token|secret|password|credential|auth)\s*[=:]\s*["']?([A-Za-z0-9+/=_\-]{40,})["']?"#).unwrap(),
-            },
-        ]
+            compile_pattern("base64_secret", r#"(?i)(?:key|token|secret|password|credential|auth)\s*[=:]\s*["']?([A-Za-z0-9+/=_\-]{40,})["']?"#),
+        ];
+        candidates.into_iter().flatten().collect()
     })
 }
 

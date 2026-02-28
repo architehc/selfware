@@ -583,34 +583,71 @@ impl RagEngine {
     /// Deduplicate similar results
     fn deduplicate_results<'a>(&self, results: &'a [SearchResult]) -> Vec<&'a SearchResult> {
         let mut deduped: Vec<&SearchResult> = Vec::new();
+        // Index: file_path -> list of (start_line, end_line) ranges already in deduped
+        let mut file_ranges: HashMap<&Path, Vec<(usize, usize)>> = HashMap::new();
+        // Track content hashes we've already seen for exact-duplicate fast path
+        let mut seen_hashes: HashSet<&str> = HashSet::new();
 
         for result in results {
-            let dominated = deduped.iter().any(|existing| {
-                // Same file and overlapping lines
-                if existing.chunk.metadata.file_path == result.chunk.metadata.file_path {
-                    let overlap = (existing.chunk.metadata.start_line
-                        <= result.chunk.metadata.end_line)
-                        && (result.chunk.metadata.start_line <= existing.chunk.metadata.end_line);
-                    if overlap {
-                        return true;
+            // Fast path: skip exact content duplicates via content_hash
+            if !result.chunk.metadata.content_hash.is_empty()
+                && !seen_hashes.insert(&result.chunk.metadata.content_hash)
+            {
+                continue;
+            }
+
+            // Check file-path overlap using the indexed ranges (O(1) path lookup,
+            // then only compare ranges within the same file)
+            let mut dominated = false;
+            if let Some(ranges) = file_ranges.get(&*result.chunk.metadata.file_path) {
+                for &(start, end) in ranges {
+                    if start <= result.chunk.metadata.end_line
+                        && result.chunk.metadata.start_line <= end
+                    {
+                        dominated = true;
+                        break;
                     }
                 }
+            }
 
-                // Very similar content
-                if result.score > self.config.dedup_threshold
-                    && existing.score > self.config.dedup_threshold
-                {
+            // Content similarity check (only when not already dominated)
+            if !dominated && result.score > self.config.dedup_threshold {
+                for existing in &deduped {
+                    if existing.score <= self.config.dedup_threshold {
+                        continue;
+                    }
+                    // Length pre-filter: Jaccard similarity between two sets A and B is at most
+                    // min(|A|,|B|) / max(|A|,|B|). Skip if that upper bound is below threshold.
+                    let len_a = existing.chunk.content.len();
+                    let len_b = result.chunk.content.len();
+                    let (min_len, max_len) = if len_a < len_b {
+                        (len_a, len_b)
+                    } else {
+                        (len_b, len_a)
+                    };
+                    if max_len == 0
+                        || (min_len as f32 / max_len as f32) < self.config.dedup_threshold
+                    {
+                        continue;
+                    }
                     let similarity =
                         self.content_similarity(&existing.chunk.content, &result.chunk.content);
                     if similarity > self.config.dedup_threshold {
-                        return true;
+                        dominated = true;
+                        break;
                     }
                 }
-
-                false
-            });
+            }
 
             if !dominated {
+                // Update the file-range index
+                file_ranges
+                    .entry(&*result.chunk.metadata.file_path)
+                    .or_default()
+                    .push((
+                        result.chunk.metadata.start_line,
+                        result.chunk.metadata.end_line,
+                    ));
                 deduped.push(result);
             }
 
@@ -685,7 +722,7 @@ impl RagEngine {
             total_tokens += chunk_tokens;
 
             sources.push(ContextSource {
-                file: meta.file_path.clone(),
+                file: meta.file_path.to_path_buf(),
                 start_line: meta.start_line,
                 end_line: meta.end_line,
                 chunk_type: meta.chunk_type,
