@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: selfware-config
+  namespace: selfware
+data:
+  RUST_LOG: "info"
+  SELFWARE_HEALTH_PORT: "9091"

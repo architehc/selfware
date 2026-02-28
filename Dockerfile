@@ -61,6 +61,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libssl3 \
     libgcc-s1 \
+    curl \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
@@ -86,10 +87,11 @@ WORKDIR /home/selfware
 # Set environment variables
 ENV RUST_LOG=info
 ENV HOME=/home/selfware
+ENV SELFWARE_HEALTH_PORT=9091
 
-# Health check (optional, adjust command as needed)
+# Health check using HTTP endpoint with fallback to version check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD selfware --version || exit 1
+    CMD curl -sf http://127.0.0.1:9091/ || selfware --version || exit 1
 
 # Default entrypoint
 ENTRYPOINT ["selfware"]

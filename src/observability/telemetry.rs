@@ -12,8 +12,9 @@
 use metrics_exporter_prometheus::PrometheusBuilder;
 use regex::Regex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
+use tracing::Instrument;
 use tracing::{error, info, info_span, Span};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -58,6 +59,11 @@ pub fn should_sample() -> bool {
     let count = SAMPLE_COUNTER.fetch_add(1, Ordering::Relaxed);
     (count % 1_000_000) < rate_micro
 }
+
+/// Guard for the non-blocking tracing writer's background thread.
+/// Stored here instead of being leaked so it can be dropped for clean shutdown.
+static TRACING_GUARD: OnceLock<Mutex<Option<tracing_appender::non_blocking::WorkerGuard>>> =
+    OnceLock::new();
 
 /// In-memory log entry buffer for rotation tracking.
 static LOG_ENTRY_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -192,9 +198,9 @@ pub fn init_tracing_with_filter(filter: &str) {
             .join("logs");
         let _ = std::fs::create_dir_all(&log_dir);
         let file_appender = tracing_appender::rolling::daily(log_dir, "selfware.log");
-        let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-        // Leak the guard so the background thread stays alive for the life of the program
-        std::mem::forget(_guard);
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+        // Store the guard so the background thread stays alive; drop via shutdown_tracing()
+        let _ = TRACING_GUARD.set(Mutex::new(Some(guard)));
 
         let file_layer = tracing_subscriber::fmt::layer()
             .with_writer(non_blocking)
@@ -227,6 +233,52 @@ pub fn init_tracing_with_filter(filter: &str) {
 
         let _ = subscriber.try_init();
     });
+}
+
+/// Flush and shut down the tracing background writer.
+/// Call this during graceful shutdown to ensure all logs are flushed.
+pub fn shutdown_tracing() {
+    if let Some(guard_slot) = TRACING_GUARD.get() {
+        if let Ok(mut slot) = guard_slot.lock() {
+            drop(slot.take()); // Drop the guard, flushing the writer
+        }
+    }
+}
+
+/// Application-wide metrics counters
+pub struct Metrics {
+    pub api_requests: AtomicU64,
+    pub api_errors: AtomicU64,
+    pub tool_executions: AtomicU64,
+    pub tool_errors: AtomicU64,
+    pub tokens_processed: AtomicU64,
+}
+
+static METRICS: Metrics = Metrics {
+    api_requests: AtomicU64::new(0),
+    api_errors: AtomicU64::new(0),
+    tool_executions: AtomicU64::new(0),
+    tool_errors: AtomicU64::new(0),
+    tokens_processed: AtomicU64::new(0),
+};
+
+pub fn increment_api_requests() {
+    METRICS.api_requests.fetch_add(1, Ordering::Relaxed);
+}
+pub fn increment_api_errors() {
+    METRICS.api_errors.fetch_add(1, Ordering::Relaxed);
+}
+pub fn increment_tool_executions() {
+    METRICS.tool_executions.fetch_add(1, Ordering::Relaxed);
+}
+pub fn increment_tool_errors() {
+    METRICS.tool_errors.fetch_add(1, Ordering::Relaxed);
+}
+pub fn add_tokens_processed(count: u64) {
+    METRICS.tokens_processed.fetch_add(count, Ordering::Relaxed);
+}
+pub fn get_metrics() -> &'static Metrics {
+    &METRICS
 }
 
 /// Start Prometheus Metrics Exporter (if in daemon mode)
@@ -268,34 +320,40 @@ where
         error = tracing::field::Empty,
     );
 
-    let _enter = span.enter();
-    info!("Starting tool execution");
+    increment_tool_executions();
 
-    match f().await {
-        Ok(result) => {
-            let duration = start.elapsed().as_millis() as u64;
-            span.record("duration_ms", duration);
-            span.record("success", true);
-            info!(
-                duration_ms = duration,
-                "Tool execution completed successfully"
-            );
-            Ok(result)
-        }
-        Err(e) => {
-            let duration = start.elapsed().as_millis() as u64;
-            let safe_err = redact_secrets(&sanitize_for_log(&e.to_string()));
-            span.record("duration_ms", duration);
-            span.record("success", false);
-            span.record("error", safe_err.as_str());
-            error!(
-                duration_ms = duration,
-                error = safe_err.as_str(),
-                "Tool execution failed"
-            );
-            Err(e)
+    async {
+        info!("Starting tool execution");
+
+        match f().await {
+            Ok(result) => {
+                let duration = start.elapsed().as_millis() as u64;
+                span.record("duration_ms", duration);
+                span.record("success", true);
+                info!(
+                    duration_ms = duration,
+                    "Tool execution completed successfully"
+                );
+                Ok(result)
+            }
+            Err(e) => {
+                increment_tool_errors();
+                let duration = start.elapsed().as_millis() as u64;
+                let safe_err = redact_secrets(&sanitize_for_log(&e.to_string()));
+                span.record("duration_ms", duration);
+                span.record("success", false);
+                span.record("error", safe_err.as_str());
+                error!(
+                    duration_ms = duration,
+                    error = safe_err.as_str(),
+                    "Tool execution failed"
+                );
+                Err(e)
+            }
         }
     }
+    .instrument(span.clone())
+    .await
 }
 
 /// Helper to record success in current span
