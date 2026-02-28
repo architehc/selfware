@@ -1,5 +1,5 @@
 # Set this to your OpenAI-compatible API endpoint (e.g., local vLLM/sglang server, ngrok tunnel, etc.)
-endpoint = "http://localhost:8080/v1"
+endpoint = "https://crazyshit.ngrok.io/v1"
 model = "Qwen/Qwen3-Coder-Next-FP8"
 max_tokens = 98304
 

@@ -3,7 +3,7 @@ set -euo pipefail
 
 THIS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${THIS_DIR}/../.." && pwd)"
-CONFIG_FILE="${THIS_DIR}/config/local_model.toml"
+CONFIG_FILE="${CONFIG_FILE:-${THIS_DIR}/config/local_model.toml}"
 BIN="${REPO_ROOT}/target/release/selfware"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 OUT_DIR="${THIS_DIR}/reports/${TIMESTAMP}"
@@ -24,13 +24,20 @@ CODING_SCENARIOS=(
 
 mkdir -p "${OUT_DIR}" "${WORK_ROOT}" "${LOG_ROOT}" "${SCREENSHOT_DIR}"
 
-if ! command -v timeout >/dev/null 2>&1; then
-  echo "ERROR: 'timeout' command is required for deterministic e2e runs." >&2
+# Resolve timeout command (GNU coreutils on macOS installs as gtimeout)
+if command -v timeout >/dev/null 2>&1; then
+  TIMEOUT_CMD="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+  TIMEOUT_CMD="gtimeout"
+else
+  echo "ERROR: 'timeout' (or 'gtimeout') command is required. Install coreutils." >&2
   exit 1
 fi
 
-if ! curl -fsS "http://localhost:8000/v1/models" >/dev/null; then
-  echo "ERROR: Local model endpoint is unreachable at http://localhost:8000/v1/models" >&2
+# Extract endpoint from config to verify connectivity
+ENDPOINT="$(grep '^endpoint' "${CONFIG_FILE}" | head -1 | sed 's/.*= *"//;s/".*//')"
+if ! curl -fsS --connect-timeout 10 "${ENDPOINT}/models" >/dev/null; then
+  echo "ERROR: Model endpoint is unreachable at ${ENDPOINT}/models" >&2
   exit 1
 fi
 
@@ -68,7 +75,7 @@ run_coding_scenario() {
 
   echo ""
   echo "──────────────────────────────────────────"
-  echo "  [${difficulty^^}] ${name}"
+  echo "  [$(echo "${difficulty}" | tr '[:lower:]' '[:upper:]')] ${name}"
   echo "──────────────────────────────────────────"
 
   rm -rf "${work_dir}" "${log_dir}"
@@ -89,23 +96,12 @@ run_coding_scenario() {
   local start_ts
   start_ts="$(date +%s)"
   set +e
-  if command -v script >/dev/null 2>&1; then
-    # Capture ANSI terminal output for screenshots
-    script -efq -c "timeout ${timeout_secs} ${BIN} \
-      --config ${CONFIG_FILE} \
-      -C ${work_dir} \
-      -y \
-      -p - < ${THIS_DIR}/prompts/${prompt_file}" \
-      "${SCREENSHOT_DIR}/${name}.typescript" > "${log_dir}/agent.log" 2>&1
-    local agent_status=$?
-  else
-    timeout "${timeout_secs}" "${BIN}" \
-      --config "${CONFIG_FILE}" \
-      -C "${work_dir}" \
-      -y \
-      -p - < "${THIS_DIR}/prompts/${prompt_file}" > "${log_dir}/agent.log" 2>&1
-    local agent_status=$?
-  fi
+  "${TIMEOUT_CMD}" "${timeout_secs}" "${BIN}" \
+    --config "${CONFIG_FILE}" \
+    -C "${work_dir}" \
+    -y \
+    -p - < "${THIS_DIR}/prompts/${prompt_file}" > "${log_dir}/agent.log" 2>&1
+  local agent_status=$?
   set -e
   local end_ts
   end_ts="$(date +%s)"
@@ -177,22 +173,12 @@ run_swarm_scenario() {
   local start_ts
   start_ts="$(date +%s)"
   set +e
-  if command -v script >/dev/null 2>&1; then
-    script -efq -c "timeout 240 ${BIN} \
-      --config ${CONFIG_FILE} \
-      -C ${REPO_ROOT} \
-      -y \
-      multi-chat -n 4 < ${THIS_DIR}/prompts/swarm_session.txt" \
-      "${SCREENSHOT_DIR}/${name}.typescript" > "${log_dir}/agent.log" 2>&1
-    local agent_status=$?
-  else
-    timeout 240 "${BIN}" \
-      --config "${CONFIG_FILE}" \
-      -C "${REPO_ROOT}" \
-      -y \
-      multi-chat -n 4 < "${THIS_DIR}/prompts/swarm_session.txt" > "${log_dir}/agent.log" 2>&1
-    local agent_status=$?
-  fi
+  "${TIMEOUT_CMD}" 240 "${BIN}" \
+    --config "${CONFIG_FILE}" \
+    -C "${REPO_ROOT}" \
+    -y \
+    multi-chat -n 4 < "${THIS_DIR}/prompts/swarm_session.txt" > "${log_dir}/agent.log" 2>&1
+  local agent_status=$?
   set -e
   local end_ts
   end_ts="$(date +%s)"
@@ -261,7 +247,7 @@ ALL_SCENARIOS+=("swarm_session")
   echo "# Selfware Project E2E Report"
   echo
   echo "- Timestamp: ${TIMESTAMP}"
-  echo "- Model endpoint: http://localhost:8000/v1"
+  echo "- Model endpoint: ${ENDPOINT}"
   echo "- Model: Qwen/Qwen3-Coder-Next-FP8"
   echo "- Binary: \`target/release/selfware\` built with \`--all-features\`"
   echo "- Coding scenarios: ${pass_count}/${coding_count} passed"
