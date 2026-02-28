@@ -240,10 +240,7 @@ impl Tool for NpmScripts {
         let package_json_path = Path::new(path).join("package.json");
 
         if !package_json_path.exists() {
-            anyhow::bail!(
-                "package.json not found: {}",
-                package_json_path.display()
-            );
+            anyhow::bail!("package.json not found: {}", package_json_path.display());
         }
 
         let content = tokio::fs::read_to_string(&package_json_path)
@@ -787,9 +784,7 @@ mod tests {
     #[tokio::test]
     async fn test_npm_scripts_no_package_json() {
         let tool = NpmScripts;
-        let result = tool
-            .execute(json!({"path": "/nonexistent/path"}))
-            .await;
+        let result = tool.execute(json!({"path": "/nonexistent/path"})).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }

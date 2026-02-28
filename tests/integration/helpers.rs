@@ -31,6 +31,7 @@ pub fn test_config() -> Config {
             denied_paths: vec![],
             protected_branches: vec!["main".to_string()],
             require_confirmation: vec![],
+            strict_permissions: false,
         },
         agent: AgentConfig {
             max_iterations: 10, // Limit for tests

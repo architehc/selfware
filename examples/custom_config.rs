@@ -126,6 +126,7 @@ fn build_custom_config() -> Config {
                 "shell_exec".to_string(),
                 "container_exec".to_string(),
             ],
+            strict_permissions: false,
         },
 
         // Agent behavior

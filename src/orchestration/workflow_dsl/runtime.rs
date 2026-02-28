@@ -137,8 +137,8 @@ impl Runtime {
                 // Execute each node in its own thread using std::thread::scope,
                 // which allows the threads to borrow `self` data through the
                 // forked child runtimes.
-                let results: Vec<Result<(Value, HashMap<String, Value>), String>> =
-                    std::thread::scope(|scope| {
+                type ParallelResult = Result<(Value, HashMap<String, Value>), String>;
+                let results: Vec<ParallelResult> = std::thread::scope(|scope| {
                         let handles: Vec<_> = body
                             .iter()
                             .map(|node| {
@@ -155,9 +155,8 @@ impl Runtime {
                         handles
                             .into_iter()
                             .map(|h| {
-                                h.join().unwrap_or_else(|_| {
-                                    Err("Parallel step panicked".to_string())
-                                })
+                                h.join()
+                                    .unwrap_or_else(|_| Err("Parallel step panicked".to_string()))
                             })
                             .collect()
                     });
@@ -187,10 +186,7 @@ impl Runtime {
                 if errors.is_empty() {
                     Ok(Value::Array(values))
                 } else {
-                    Err(format!(
-                        "Parallel execution failed: {}",
-                        errors.join("; ")
-                    ))
+                    Err(format!("Parallel execution failed: {}", errors.join("; ")))
                 }
             }
 

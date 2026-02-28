@@ -314,7 +314,6 @@ To call a tool, use this EXACT XML structure:
         })
     }
 
-
     /// Set the TUI event sender for real-time updates
     #[cfg(feature = "tui")]
     pub fn with_event_sender(
@@ -444,7 +443,6 @@ To call a tool, use this EXACT XML structure:
     pub(crate) fn reset_cancellation(&self) {
         self.cancelled.store(false, Ordering::Relaxed);
     }
-
 }
 
 #[cfg(test)]

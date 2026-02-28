@@ -98,10 +98,10 @@ impl GridIntensity {
     /// time of day, season, and specific grid region.
     pub fn grams_co2_per_kwh(&self) -> f64 {
         match self {
-            GridIntensity::VeryLow => 20.0,   // e.g. Iceland, Norway (hydro/geothermal)
-            GridIntensity::Low => 50.0,       // e.g. France, Sweden (nuclear/hydro)
-            GridIntensity::Medium => 250.0,   // e.g. UK, California
-            GridIntensity::High => 400.0,     // e.g. US average
+            GridIntensity::VeryLow => 20.0, // e.g. Iceland, Norway (hydro/geothermal)
+            GridIntensity::Low => 50.0,     // e.g. France, Sweden (nuclear/hydro)
+            GridIntensity::Medium => 250.0, // e.g. UK, California
+            GridIntensity::High => 400.0,   // e.g. US average
             GridIntensity::VeryHigh => 600.0, // e.g. China, India (coal-heavy grids)
             GridIntensity::Custom(v) => *v,
         }

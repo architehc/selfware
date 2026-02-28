@@ -9,12 +9,27 @@ use crate::ui::tui::TuiEvent;
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     Started,
-    Completed { message: String },
-    Error { message: String },
-    Status { message: String },
-    TokenUsage { prompt_tokens: u64, completion_tokens: u64 },
-    ToolStarted { name: String },
-    ToolCompleted { name: String, success: bool, duration_ms: u64 },
+    Completed {
+        message: String,
+    },
+    Error {
+        message: String,
+    },
+    Status {
+        message: String,
+    },
+    TokenUsage {
+        prompt_tokens: u64,
+        completion_tokens: u64,
+    },
+    ToolStarted {
+        name: String,
+    },
+    ToolCompleted {
+        name: String,
+        success: bool,
+        duration_ms: u64,
+    },
 }
 
 /// Trait for emitting real-time events during agent execution.
@@ -52,13 +67,23 @@ impl EventEmitter for TuiEmitter {
             AgentEvent::Completed { message } => TuiEvent::AgentCompleted { message },
             AgentEvent::Error { message } => TuiEvent::AgentError { message },
             AgentEvent::Status { message } => TuiEvent::StatusUpdate { message },
-            AgentEvent::TokenUsage { prompt_tokens, completion_tokens } => {
-                TuiEvent::TokenUsage { prompt_tokens, completion_tokens }
-            }
+            AgentEvent::TokenUsage {
+                prompt_tokens,
+                completion_tokens,
+            } => TuiEvent::TokenUsage {
+                prompt_tokens,
+                completion_tokens,
+            },
             AgentEvent::ToolStarted { name } => TuiEvent::ToolStarted { name },
-            AgentEvent::ToolCompleted { name, success, duration_ms } => {
-                TuiEvent::ToolCompleted { name, success, duration_ms }
-            }
+            AgentEvent::ToolCompleted {
+                name,
+                success,
+                duration_ms,
+            } => TuiEvent::ToolCompleted {
+                name,
+                success,
+                duration_ms,
+            },
         };
         let _ = self.tx.send(tui_event);
     }

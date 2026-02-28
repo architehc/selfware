@@ -657,9 +657,13 @@ mod tests {
             vec!["Rust".to_string(), "Go".to_string()],
         );
         // Add a vote
-        decision
-            .votes
-            .push(Vote::new("agent1", AgentRole::Coder, "Rust", 0.9, "Performance"));
+        decision.votes.push(Vote::new(
+            "agent1",
+            AgentRole::Coder,
+            "Rust",
+            0.9,
+            "Performance",
+        ));
 
         let view = DecisionView::from_decision(&decision);
         assert_eq!(view.id, decision.id);

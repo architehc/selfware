@@ -62,6 +62,7 @@ async fn main() -> Result<()> {
                 "file_delete".to_string(),
                 "shell_exec".to_string(),
             ],
+            strict_permissions: false,
         },
 
         // Agent behavior

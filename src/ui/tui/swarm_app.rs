@@ -510,11 +510,7 @@ mod tests {
 
     #[test]
     fn test_with_config_agent_count() {
-        let roles = vec![
-            AgentRole::Coder,
-            AgentRole::Tester,
-            AgentRole::Architect,
-        ];
+        let roles = vec![AgentRole::Coder, AgentRole::Tester, AgentRole::Architect];
         let app = SwarmApp::with_config(roles);
         // After initial sync in constructor, agents should be populated
         assert_eq!(app.swarm_state.agents.len(), 3);
@@ -783,10 +779,7 @@ mod tests {
         let app = SwarmApp::new();
         // Constructor calls sync and adds an initialization event
         assert!(!app.swarm_state.events.is_empty());
-        assert_eq!(
-            app.swarm_state.events[0].message,
-            "Swarm UI initialized"
-        );
+        assert_eq!(app.swarm_state.events[0].message, "Swarm UI initialized");
         // dev swarm has 4 agents
         assert_eq!(app.swarm_state.agents.len(), 4);
     }

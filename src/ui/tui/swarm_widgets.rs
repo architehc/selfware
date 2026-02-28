@@ -753,8 +753,8 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let tasks = vec![
             make_task("Low", 1, TaskStatus::Pending),    // Green (< 5)
-            make_task("Medium", 5, TaskStatus::Pending),  // Yellow (5..=7)
-            make_task("High", 8, TaskStatus::Pending),    // Red (8..=10)
+            make_task("Medium", 5, TaskStatus::Pending), // Yellow (5..=7)
+            make_task("High", 8, TaskStatus::Pending),   // Red (8..=10)
         ];
 
         terminal

@@ -1060,10 +1060,7 @@ mod tests {
         let tool = KnowledgeClear;
         let result = tool.execute(json!({})).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Must set confirm"));
+        assert!(result.unwrap_err().to_string().contains("Must set confirm"));
     }
 
     // Additional comprehensive tests
