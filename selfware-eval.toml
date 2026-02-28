@@ -1,0 +1,41 @@
+# Evaluation config: 5 long-running tasks (~2h each) against ngrok endpoint
+# Usage: selfware --config selfware-eval.toml -y run "your task"
+
+endpoint = "https://crazyshit.ngrok.io/v1"
+model = "Qwen/Qwen3-Coder-Next-FP8"
+max_tokens = 65536
+temperature = 1.0
+
+[safety]
+allowed_paths = ["./**", "/tmp/**"]
+denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**"]
+protected_branches = ["main", "master"]
+require_confirmation = []
+
+[agent]
+max_iterations = 2000
+step_timeout_secs = 600
+token_budget = 900000
+native_function_calling = false
+streaming = true
+
+[yolo]
+enabled = true
+max_operations = 0
+max_hours = 3.0
+allow_git_push = false
+allow_destructive_shell = false
+audit_log_path = "./eval-audit.log"
+status_interval = 50
+
+[continuous_work]
+enabled = true
+checkpoint_interval_tools = 10
+checkpoint_interval_secs = 300
+auto_recovery = true
+max_recovery_attempts = 5
+
+[retry]
+max_retries = 10
+base_delay_ms = 2000
+max_delay_ms = 120000
