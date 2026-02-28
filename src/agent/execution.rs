@@ -187,6 +187,22 @@ impl Agent {
                 spinner.stop_error(&summary);
             }
 
+            // Store for progressive disclosure via /last
+            {
+                let exit_code = serde_json::from_str::<serde_json::Value>(&result)
+                    .ok()
+                    .and_then(|v| v.get("exit_code").and_then(|c| c.as_i64()))
+                    .map(|c| c as i32);
+                crate::agent::last_tool::store(crate::agent::last_tool::LastToolOutput {
+                    tool_name: name.clone(),
+                    summary: summary.clone(),
+                    full_output: result.clone(),
+                    success,
+                    exit_code,
+                    duration_ms,
+                });
+            }
+
             let tool_outcome = if success {
                 Outcome::Success
             } else {

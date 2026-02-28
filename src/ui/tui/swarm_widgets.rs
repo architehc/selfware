@@ -37,11 +37,23 @@ pub fn render_swarm_status_bar(frame: &mut Frame, area: Rect, stats: &SwarmStats
 }
 
 /// Render agent swarm visualization
-pub fn render_agent_swarm(frame: &mut Frame, area: Rect, agents: &[AgentUiState]) {
+pub fn render_agent_swarm(
+    frame: &mut Frame,
+    area: Rect,
+    agents: &[AgentUiState],
+    selected_agent: usize,
+    focused_agent: Option<&str>,
+) {
+    let title_text = if let Some(name) = focused_agent {
+        format!(" Agent Swarm [focused: {}] ", name)
+    } else {
+        " Agent Swarm ".to_string()
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(TuiPalette::border_style())
-        .title(Span::styled(" 🤖 Agent Swarm ", TuiPalette::title_style()));
+        .title(Span::styled(title_text, TuiPalette::title_style()));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -55,7 +67,8 @@ pub fn render_agent_swarm(frame: &mut Frame, area: Rect, agents: &[AgentUiState]
     // Create list items for each agent
     let items: Vec<ListItem> = agents
         .iter()
-        .map(|agent| {
+        .enumerate()
+        .map(|(i, agent)| {
             let (icon, name) = match agent.role {
                 AgentRole::Architect => ("🏗️", "Architect"),
                 AgentRole::Coder => ("💻", "Coder"),
@@ -106,12 +119,22 @@ pub fn render_agent_swarm(frame: &mut Frame, area: Rect, agents: &[AgentUiState]
                 AgentStatus::Paused => TuiPalette::STONE,
             };
 
+            // Selection marker: > for selected, space otherwise
+            let selector = if i == selected_agent { "> " } else { "  " };
+            let is_focused = focused_agent == Some(agent.name.as_str());
+
+            let name_style = if is_focused {
+                Style::default()
+                    .add_modifier(Modifier::BOLD)
+                    .fg(TuiPalette::AMBER)
+            } else {
+                Style::default().add_modifier(Modifier::BOLD)
+            };
+
             ListItem::new(Line::from(vec![
+                Span::styled(selector, Style::default().fg(TuiPalette::AMBER)),
                 Span::styled(format!("{} ", icon), Style::default().fg(role_color)),
-                Span::styled(
-                    format!("{:12}", agent.name),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(format!("{:12}", agent.name), name_style),
                 Span::raw(" "),
                 Span::styled(format!("[{:10}]", name), Style::default().fg(role_color)),
                 Span::raw(" "),
@@ -352,6 +375,55 @@ pub fn render_swarm_events(frame: &mut Frame, area: Rect, events: &[SwarmEvent])
     frame.render_widget(list, inner);
 }
 
+/// Render swarm event log with pre-filtered events and custom title.
+///
+/// This is used by the agent focus mode to show only events from the focused agent.
+pub fn render_swarm_events_filtered(
+    frame: &mut Frame,
+    area: Rect,
+    events: &[&SwarmEvent],
+    title: &str,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(TuiPalette::border_style())
+        .title(Span::styled(title, TuiPalette::title_style()));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if events.is_empty() {
+        let empty = Paragraph::new("No events yet").style(TuiPalette::muted_style());
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let items: Vec<ListItem> = events
+        .iter()
+        .rev()
+        .take(inner.height as usize)
+        .map(|event| {
+            let style = match event.event_type {
+                EventType::AgentError | EventType::ConflictDetected => TuiPalette::error_style(),
+                EventType::AgentCompleted
+                | EventType::TaskCompleted
+                | EventType::ConsensusReached
+                | EventType::DecisionResolved => TuiPalette::success_style(),
+                _ => Style::default(),
+            };
+
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("[{}] ", event.timestamp), TuiPalette::muted_style()),
+                Span::styled(format!("{} ", event.event_type.icon()), style),
+                Span::styled(&event.message, style),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items);
+    frame.render_widget(list, inner);
+}
+
 /// Render swarm health gauge
 pub fn render_swarm_health(frame: &mut Frame, area: Rect, stats: &SwarmStats) {
     let block = Block::default()
@@ -400,7 +472,7 @@ pub fn render_swarm_health(frame: &mut Frame, area: Rect, stats: &SwarmStats) {
 /// Render swarm help overlay
 pub fn render_swarm_help(frame: &mut Frame, area: Rect) {
     let width = 50.min(area.width - 4);
-    let height = 18.min(area.height - 4);
+    let height = 22.min(area.height - 4);
     let x = (area.width - width) / 2;
     let y = (area.height - height) / 3;
 
@@ -426,6 +498,10 @@ pub fn render_swarm_help(frame: &mut Frame, area: Rect) {
         ("z", "Toggle zoom on focused pane"),
         ("r", "Refresh swarm state"),
         ("Alt+1-6", "Switch layout presets"),
+        ("Up/Down", "Navigate agent list"),
+        ("Enter", "Focus on selected agent"),
+        ("Escape", "Unfocus (show all agents)"),
+        ("1-9", "Quick-focus agent by index"),
         ("c", "Create new decision"),
         ("v", "Vote on current decision"),
         ("t", "Add task to queue"),
@@ -613,7 +689,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                render_agent_swarm(frame, frame.area(), &agents);
+                render_agent_swarm(frame, frame.area(), &agents, 0, None);
             })
             .unwrap();
     }
@@ -626,7 +702,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                render_agent_swarm(frame, frame.area(), &agents);
+                render_agent_swarm(frame, frame.area(), &agents, 0, None);
             })
             .unwrap();
     }
@@ -649,7 +725,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                render_agent_swarm(frame, frame.area(), &agents);
+                render_agent_swarm(frame, frame.area(), &agents, 0, None);
             })
             .unwrap();
     }
@@ -663,7 +739,7 @@ mod tests {
 
         terminal
             .draw(|frame| {
-                render_agent_swarm(frame, frame.area(), &agents);
+                render_agent_swarm(frame, frame.area(), &agents, 0, None);
             })
             .unwrap();
     }
@@ -1030,5 +1106,88 @@ mod tests {
         assert_eq!(check_stage(0.90), "Synchronized");
         assert_eq!(check_stage(0.91), "Thriving");
         assert_eq!(check_stage(1.0), "Thriving");
+    }
+
+    // ── Render tests: agent focus / filtered events ─────────────────
+
+    #[test]
+    fn test_render_agent_swarm_with_selection() {
+        let backend = TestBackend::new(100, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let agents = vec![
+            make_agent("Alice", AgentRole::Coder, AgentStatus::Working),
+            make_agent("Bob", AgentRole::Tester, AgentStatus::Idle),
+        ];
+
+        // Render with second agent selected, no focus
+        terminal
+            .draw(|frame| {
+                render_agent_swarm(frame, frame.area(), &agents, 1, None);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_agent_swarm_with_focus() {
+        let backend = TestBackend::new(100, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let agents = vec![
+            make_agent("Alice", AgentRole::Coder, AgentStatus::Working),
+            make_agent("Bob", AgentRole::Tester, AgentStatus::Idle),
+        ];
+
+        // Render with first agent focused
+        terminal
+            .draw(|frame| {
+                render_agent_swarm(frame, frame.area(), &agents, 0, Some("Alice"));
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_swarm_events_filtered_empty() {
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let events: Vec<&SwarmEvent> = vec![];
+
+        terminal
+            .draw(|frame| {
+                render_swarm_events_filtered(frame, frame.area(), &events, " Events ");
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_swarm_events_filtered_with_events() {
+        let backend = TestBackend::new(80, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let e1 = make_event(EventType::AgentStarted, "Agent started");
+        let e2 = make_event(EventType::AgentCompleted, "Agent done");
+        let events: Vec<&SwarmEvent> = vec![&e1, &e2];
+
+        terminal
+            .draw(|frame| {
+                render_swarm_events_filtered(
+                    frame,
+                    frame.area(),
+                    &events,
+                    " Events [Alice] (Esc to unfocus) ",
+                );
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_swarm_events_filtered_custom_title() {
+        let backend = TestBackend::new(80, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let e1 = make_event(EventType::TaskCreated, "Task created");
+        let events: Vec<&SwarmEvent> = vec![&e1];
+
+        terminal
+            .draw(|frame| {
+                render_swarm_events_filtered(frame, frame.area(), &events, " Custom Title ");
+            })
+            .unwrap();
     }
 }

@@ -1195,7 +1195,7 @@ pub fn run_tui_dashboard_with_events(
                                 // Handle slash commands locally
                                 let parts: Vec<&str> = input.splitn(2, ' ').collect();
                                 let cmd = parts[0];
-                                let _arg = parts.get(1).copied().unwrap_or("");
+                                let arg = parts.get(1).copied().unwrap_or("");
                                 match cmd {
                                     "/clear" => {
                                         app.clear_chat();
@@ -1212,33 +1212,268 @@ pub fn run_tui_dashboard_with_events(
                                     }
                                     "/help" => {
                                         app.add_system_message(
-                                            "Available commands: /clear, /quit, /exit, /help, /mode <mode>\n\
+                                            "Available commands:\n\
+                                             \n\
+                                             Session:\n  \
+                                               /help           -- Show this help\n  \
+                                               /quit, /exit    -- Quit the TUI\n  \
+                                               /clear          -- Clear chat history\n  \
+                                               /status         -- Show agent status\n  \
+                                               /stats          -- Show session statistics\n  \
+                                               /cost           -- Show token cost estimate\n  \
+                                               /ctx            -- Show context usage\n\
+                                             \n\
+                                             Display:\n  \
+                                               /mode [mode]    -- Show or set mode (normal|yolo|auto-edit|daemon)\n  \
+                                               /compact        -- Switch to compact output\n  \
+                                               /verbose        -- Switch to verbose output\n\
+                                             \n\
+                                             Git:\n  \
+                                               /diff           -- Show git diff --stat\n  \
+                                               /git            -- Show git status\n\
+                                             \n\
                                              Keyboard: q (quit), ? (help), Ctrl+D (dashboard), Ctrl+G (garden), Tab (cycle panes)"
                                         );
                                         with_dashboard_state(&shared_state, |state| {
                                             state.log(LogLevel::Info, "Displayed help text");
                                         });
                                     }
+                                    "/status" => {
+                                        let status_msg = with_dashboard_state(
+                                            &shared_state,
+                                            |state| {
+                                                let mode =
+                                                    if app.verbose { "verbose" } else { "compact" };
+                                                let msg_count = app.messages.len();
+                                                let tokens = state.tokens_used;
+                                                let connected = if state.connected {
+                                                    "connected"
+                                                } else {
+                                                    "disconnected"
+                                                };
+                                                format!(
+                                                "Status: {} output, {} messages, {} tokens used, {}",
+                                                mode, msg_count, tokens, connected
+                                            )
+                                            },
+                                        );
+                                        app.add_system_message(&status_msg);
+                                        with_dashboard_state(&shared_state, |state| {
+                                            state.log(LogLevel::Info, "Displayed status");
+                                        });
+                                    }
+                                    "/stats" => {
+                                        let stats_msg =
+                                            with_dashboard_state(&shared_state, |state| {
+                                                let elapsed = state.elapsed_formatted();
+                                                let tokens = state.tokens_used;
+                                                let msg_count = app.messages.len();
+                                                let tool_count = state
+                                                    .logs
+                                                    .iter()
+                                                    .filter(|l| {
+                                                        l.message.contains("completed")
+                                                            || l.message.contains("started")
+                                                    })
+                                                    .count();
+                                                format!(
+                                                    "Session statistics:\n  \
+                                                 Elapsed time:  {}\n  \
+                                                 Messages:      {}\n  \
+                                                 Tokens used:   {}\n  \
+                                                 Tool calls:    {}\n  \
+                                                 Model:         {}",
+                                                    elapsed,
+                                                    msg_count,
+                                                    tokens,
+                                                    tool_count,
+                                                    state.model
+                                                )
+                                            });
+                                        app.add_system_message(&stats_msg);
+                                        with_dashboard_state(&shared_state, |state| {
+                                            state.log(LogLevel::Info, "Displayed session stats");
+                                        });
+                                    }
                                     "/mode" => {
-                                        if _arg.is_empty() {
+                                        if arg.is_empty() {
+                                            let mode =
+                                                if app.verbose { "verbose" } else { "compact" };
                                             app.add_system_message(
-                                                "Usage: /mode <normal|yolo|auto-edit|daemon>",
+                                                &format!("Current output mode: {}. Use /mode <normal|yolo|auto-edit|daemon> to change.", mode),
                                             );
                                         } else {
-                                            app.add_system_message(
-                                                &format!("Mode switching to '{}' is not yet supported from the TUI.", _arg)
-                                            );
+                                            match arg {
+                                                "normal" | "yolo" | "auto-edit" | "daemon" => {
+                                                    app.add_system_message(
+                                                        &format!("Mode switching to '{}' is not yet supported from the TUI. The agent continues in its current mode.", arg)
+                                                    );
+                                                }
+                                                _ => {
+                                                    app.add_system_message(
+                                                        &format!("Unknown mode '{}'. Valid modes: normal, yolo, auto-edit, daemon", arg)
+                                                    );
+                                                }
+                                            }
                                         }
                                         with_dashboard_state(&shared_state, |state| {
                                             state.log(
                                                 LogLevel::Info,
-                                                &format!("Mode command: {}", _arg),
+                                                &format!("Mode command: {}", arg),
+                                            );
+                                        });
+                                    }
+                                    "/compact" => {
+                                        app.verbose = false;
+                                        app.add_system_message("Output mode: compact");
+                                        with_dashboard_state(&shared_state, |state| {
+                                            state.log(LogLevel::Info, "Switched to compact output");
+                                        });
+                                    }
+                                    "/verbose" => {
+                                        app.verbose = true;
+                                        app.add_system_message("Output mode: verbose");
+                                        with_dashboard_state(&shared_state, |state| {
+                                            state.log(LogLevel::Info, "Switched to verbose output");
+                                        });
+                                    }
+                                    "/cost" => {
+                                        let cost_msg = with_dashboard_state(
+                                            &shared_state,
+                                            |state| {
+                                                let tokens = state.tokens_used;
+                                                // Rough cost estimate: ~$0.01 per 1K tokens (blended input/output)
+                                                let estimated_cost = tokens as f64 * 0.00001;
+                                                format!(
+                                                "Cost estimate:\n  \
+                                                 Tokens used:    {}\n  \
+                                                 Est. cost:      ${:.4}\n  \
+                                                 Model:          {}\n  \
+                                                 Note: Estimate is approximate; actual cost depends on model pricing.",
+                                                tokens, estimated_cost, state.model
+                                            )
+                                            },
+                                        );
+                                        app.add_system_message(&cost_msg);
+                                        with_dashboard_state(&shared_state, |state| {
+                                            state.log(LogLevel::Info, "Displayed cost estimate");
+                                        });
+                                    }
+                                    "/ctx" => {
+                                        let ctx_msg =
+                                            with_dashboard_state(&shared_state, |state| {
+                                                let tokens = state.tokens_used;
+                                                // Context window estimate (128K tokens typical)
+                                                let context_limit: u64 = 128_000;
+                                                let usage_pct =
+                                                    (tokens as f64 / context_limit as f64) * 100.0;
+                                                format!(
+                                                    "Context usage:\n  \
+                                                 Tokens used:    {} / {} ({:.1}%)\n  \
+                                                 Remaining:      ~{} tokens\n  \
+                                                 Messages:       {}",
+                                                    tokens,
+                                                    context_limit,
+                                                    usage_pct,
+                                                    context_limit.saturating_sub(tokens),
+                                                    app.messages.len()
+                                                )
+                                            });
+                                        app.add_system_message(&ctx_msg);
+                                        with_dashboard_state(&shared_state, |state| {
+                                            state.log(LogLevel::Info, "Displayed context usage");
+                                        });
+                                    }
+                                    "/diff" => {
+                                        let output = std::process::Command::new("git")
+                                            .args(["diff", "--stat"])
+                                            .output();
+                                        match output {
+                                            Ok(result) => {
+                                                let stdout =
+                                                    String::from_utf8_lossy(&result.stdout);
+                                                let stderr =
+                                                    String::from_utf8_lossy(&result.stderr);
+                                                if stdout.is_empty() && stderr.is_empty() {
+                                                    app.add_system_message(
+                                                        "No changes (working tree clean).",
+                                                    );
+                                                } else if !stdout.is_empty() {
+                                                    app.add_system_message(&format!(
+                                                        "git diff --stat:\n{}",
+                                                        stdout.trim_end()
+                                                    ));
+                                                } else {
+                                                    app.add_system_message(&format!(
+                                                        "git diff error: {}",
+                                                        stderr.trim_end()
+                                                    ));
+                                                }
+                                            }
+                                            Err(e) => {
+                                                app.add_system_message(&format!(
+                                                    "Failed to run git diff: {}",
+                                                    e
+                                                ));
+                                            }
+                                        }
+                                        with_dashboard_state(&shared_state, |state| {
+                                            state.log(LogLevel::Info, "Ran git diff --stat");
+                                        });
+                                    }
+                                    "/git" => {
+                                        let output = std::process::Command::new("git")
+                                            .args(["status", "--short", "--branch"])
+                                            .output();
+                                        match output {
+                                            Ok(result) => {
+                                                let stdout =
+                                                    String::from_utf8_lossy(&result.stdout);
+                                                let stderr =
+                                                    String::from_utf8_lossy(&result.stderr);
+                                                if !stdout.is_empty() {
+                                                    app.add_system_message(&format!(
+                                                        "git status:\n{}",
+                                                        stdout.trim_end()
+                                                    ));
+                                                } else if !stderr.is_empty() {
+                                                    app.add_system_message(&format!(
+                                                        "git error: {}",
+                                                        stderr.trim_end()
+                                                    ));
+                                                } else {
+                                                    app.add_system_message(
+                                                        "git status returned no output.",
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => {
+                                                app.add_system_message(&format!(
+                                                    "Failed to run git status: {}",
+                                                    e
+                                                ));
+                                            }
+                                        }
+                                        with_dashboard_state(&shared_state, |state| {
+                                            state.log(LogLevel::Info, "Ran git status");
+                                        });
+                                    }
+                                    // CLI-only commands that don't apply in TUI
+                                    "/queue" | "/swarm" | "/spawn" | "/delegate" | "/pipe"
+                                    | "/batch" | "/schedule" | "/cron" | "/webhook" => {
+                                        app.add_system_message(
+                                            &format!("{}: This command is only available in CLI interactive mode.", cmd)
+                                        );
+                                        with_dashboard_state(&shared_state, |state| {
+                                            state.log(
+                                                LogLevel::Warning,
+                                                &format!("CLI-only command attempted: {}", cmd),
                                             );
                                         });
                                     }
                                     _ => {
                                         app.add_system_message(&format!(
-                                            "Unknown command: {}",
+                                            "Unknown command: {}. Type /help for available commands.",
                                             cmd
                                         ));
                                         with_dashboard_state(&shared_state, |state| {
@@ -1300,9 +1535,63 @@ pub fn create_event_channel() -> (
     std::sync::mpsc::channel()
 }
 
+/// Build a multi-line `ListItem` that wraps a chat message to fit within `width` columns.
+///
+/// The first line carries the timestamp + role prefix; continuation lines are indented
+/// to align with the message body.  Splits are always placed on character boundaries
+/// so UTF-8 text is never broken mid-codepoint.
+pub(crate) fn wrap_chat_message<'a>(
+    prefix_str: &str,
+    content: &str,
+    style: ratatui::style::Style,
+    width: usize,
+) -> ratatui::widgets::ListItem<'a> {
+    use ratatui::text::{Line, Span, Text};
+    use ratatui::widgets::ListItem;
+
+    // Guard against extremely narrow panes
+    if width == 0 {
+        return ListItem::new(Text::from(Vec::<Line>::new()));
+    }
+
+    let prefix_char_len = prefix_str.chars().count();
+    let first_avail = width.saturating_sub(prefix_char_len);
+
+    if content.chars().count() <= first_avail {
+        // Entire message fits on a single line
+        let full = format!("{}{}", prefix_str, content);
+        return ListItem::new(Line::from(Span::styled(full, style)));
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // First line: prefix + as many characters as fit
+    let first_part: String = content.chars().take(first_avail).collect();
+    lines.push(Line::from(Span::styled(
+        format!("{}{}", prefix_str, first_part),
+        style,
+    )));
+
+    // Continuation lines with indent matching the prefix width
+    let indent: String = " ".repeat(prefix_char_len);
+    let cont_width = width.saturating_sub(prefix_char_len).max(1);
+    let mut remaining: String = content.chars().skip(first_avail).collect();
+    while !remaining.is_empty() {
+        let chunk: String = remaining.chars().take(cont_width).collect();
+        let chunk_char_len = chunk.chars().count();
+        lines.push(Line::from(Span::styled(
+            format!("{}{}", indent, chunk),
+            style,
+        )));
+        remaining = remaining.chars().skip(chunk_char_len).collect();
+    }
+
+    ListItem::new(Text::from(lines))
+}
+
 /// Render a chat pane
 fn render_chat_pane(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
-    use ratatui::text::{Line, Span};
+    use ratatui::text::Span;
     use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
     let border_style = if focused {
@@ -1328,13 +1617,13 @@ fn render_chat_pane(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
         ])
         .split(inner);
 
-    // Render messages
+    // Render messages with line wrapping
+    let msg_width = chunks[0].width as usize;
     let items: Vec<ListItem> = app
         .messages
         .iter()
         .rev()
         .skip(app.scroll)
-        .take(chunks[0].height as usize)
         .map(|msg| {
             let style = match msg.role {
                 MessageRole::User => Style::default().fg(TuiPalette::AMBER),
@@ -1350,8 +1639,8 @@ fn render_chat_pane(frame: &mut Frame, area: Rect, app: &App, focused: bool) {
                 MessageRole::Tool => "🔧",
             };
 
-            let content = format!("{} {} {}", msg.timestamp, prefix, msg.content);
-            ListItem::new(Line::from(Span::styled(content, style)))
+            let prefix_str = format!("{} {} ", msg.timestamp, prefix);
+            wrap_chat_message(&prefix_str, &msg.content, style, msg_width)
         })
         .collect();
 

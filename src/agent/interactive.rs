@@ -688,6 +688,52 @@ impl Agent {
                 continue;
             }
 
+            if input == "/last" {
+                match crate::agent::last_tool::retrieve() {
+                    Some(output) => {
+                        println!();
+                        println!(
+                            "  {} Last Tool: {} ({}ms)",
+                            ">>".bright_cyan(),
+                            output.tool_name.bright_white(),
+                            output.duration_ms.to_string().dimmed()
+                        );
+                        if !output.summary.is_empty() {
+                            println!("  Summary: {}", output.summary);
+                        }
+                        let status = if output.success {
+                            "success".bright_green()
+                        } else {
+                            "failed".bright_red()
+                        };
+                        println!("  Status:  {}", status);
+                        if let Some(code) = output.exit_code {
+                            println!("  Exit:    {}", code);
+                        }
+                        if !output.full_output.is_empty() {
+                            println!("  {}", "Output:".dimmed());
+                            let lines: Vec<&str> = output.full_output.lines().collect();
+                            let show = lines.len().min(50);
+                            for line in &lines[..show] {
+                                println!("    {}", line);
+                            }
+                            if lines.len() > 50 {
+                                println!(
+                                    "    {} ({} more lines)",
+                                    "...".dimmed(),
+                                    lines.len() - 50
+                                );
+                            }
+                        }
+                        println!();
+                    }
+                    None => {
+                        println!("{} No tool output captured yet.", "i".bright_yellow());
+                    }
+                }
+                continue;
+            }
+
             if input == "/config" {
                 println!();
                 println!("  {} Current Configuration", "⚙".bright_cyan());
@@ -1714,6 +1760,7 @@ mod tests {
             "/undo",
             "/cost",
             "/model",
+            "/last",
             "/compact",
             "/verbose",
             "/config",

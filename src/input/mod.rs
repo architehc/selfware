@@ -337,6 +337,7 @@ mod tests {
         assert!(config.commands.contains(&"/model".into()));
         assert!(config.commands.contains(&"/compact".into()));
         assert!(config.commands.contains(&"/verbose".into()));
+        assert!(config.commands.contains(&"/last".into()));
         assert!(config.commands.contains(&"/config".into()));
         assert!(config.commands.contains(&"/garden".into()));
         assert!(config.commands.contains(&"/journal".into()));

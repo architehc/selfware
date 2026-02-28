@@ -31,6 +31,7 @@ pub mod context;
 mod context_management;
 mod execution;
 mod interactive;
+pub mod last_tool;
 mod learning;
 pub mod loop_control;
 pub mod planning;

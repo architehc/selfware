@@ -4,11 +4,11 @@
 
 // Feature-gated module - dead_code lint disabled at crate level
 
-use super::{CommandPalette, TuiPalette};
+use super::{wrap_chat_message, CommandPalette, TuiPalette};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::Style,
-    text::{Line, Span},
+    text::Span,
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame,
 };
@@ -88,6 +88,8 @@ pub struct App {
     pub selected: usize,
     /// Animation speed multiplier (1.0 = normal, 2.0 = faster, 0.5 = slower)
     pub animation_speed: f64,
+    /// Verbose output mode (toggled by /verbose and /compact)
+    pub verbose: bool,
 }
 
 impl App {
@@ -111,6 +113,7 @@ impl App {
             scroll: 0,
             selected: 0,
             animation_speed: ANIMATION_SPEED_DEFAULT,
+            verbose: false,
         }
     }
 
@@ -229,13 +232,13 @@ impl App {
         let inner_area = inner.inner(area);
         frame.render_widget(inner, area);
 
-        // Build message list
+        // Build message list with line wrapping
+        let msg_width = inner_area.width as usize;
         let items: Vec<ListItem> = self
             .messages
             .iter()
             .rev()
             .skip(self.scroll)
-            .take(inner_area.height as usize)
             .map(|msg| {
                 let style = match msg.role {
                     MessageRole::User => Style::default().fg(TuiPalette::AMBER),
@@ -251,8 +254,8 @@ impl App {
                     MessageRole::Tool => "🔧",
                 };
 
-                let content = format!("{} {} {}", msg.timestamp, prefix, msg.content);
-                ListItem::new(Line::from(Span::styled(content, style)))
+                let prefix_str = format!("{} {} ", msg.timestamp, prefix);
+                wrap_chat_message(&prefix_str, &msg.content, style, msg_width)
             })
             .collect();
 

@@ -4,7 +4,7 @@
 
 use crate::orchestration::swarm::{create_dev_swarm, AgentRole, Swarm, SwarmTask};
 use crate::ui::tui::layout::{LayoutEngine, LayoutPreset, PaneType};
-use crate::ui::tui::swarm_state::{EventType, SwarmUiState};
+use crate::ui::tui::swarm_state::{EventType, SwarmEvent, SwarmUiState};
 use crate::ui::tui::swarm_widgets::*;
 use crate::ui::tui::TuiPalette;
 use crossterm::event::{Event, KeyCode, KeyModifiers};
@@ -39,6 +39,10 @@ pub struct SwarmApp {
     pub input_buffer: String,
     /// Tracks the last time 'q' was pressed for double-tap quit
     pub last_q_press: Option<Instant>,
+    /// Currently focused agent role name. None = show all agents, Some(name) = show only this agent.
+    pub focused_agent: Option<String>,
+    /// Index of the currently selected agent in the agent list (for keyboard navigation).
+    pub selected_agent: usize,
 }
 
 impl Default for SwarmApp {
@@ -69,6 +73,8 @@ impl SwarmApp {
             selected_decision: 0,
             input_buffer: String::new(),
             last_q_press: None,
+            focused_agent: None,
+            selected_agent: 0,
         };
 
         // Initial sync
@@ -107,7 +113,13 @@ impl SwarmApp {
                         render_swarm_status_bar(frame, *pane_area, &self.swarm_state.stats);
                     }
                     PaneType::Chat => {
-                        render_agent_swarm(frame, *pane_area, &self.swarm_state.agents);
+                        render_agent_swarm(
+                            frame,
+                            *pane_area,
+                            &self.swarm_state.agents,
+                            self.selected_agent,
+                            self.focused_agent.as_deref(),
+                        );
                     }
                     PaneType::GardenView => {
                         render_shared_memory(frame, *pane_area, &self.swarm_state.memory_entries);
@@ -116,7 +128,22 @@ impl SwarmApp {
                         render_task_queue(frame, *pane_area, &self.swarm_state.tasks);
                     }
                     PaneType::Logs => {
-                        render_swarm_events(frame, *pane_area, &self.swarm_state.events);
+                        let events_to_show: Vec<&SwarmEvent> =
+                            if let Some(ref role) = self.focused_agent {
+                                self.swarm_state
+                                    .events
+                                    .iter()
+                                    .filter(|e| e.agent_id.as_deref() == Some(role.as_str()))
+                                    .collect()
+                            } else {
+                                self.swarm_state.events.iter().collect()
+                            };
+                        let title = if let Some(ref role) = self.focused_agent {
+                            format!(" Events [{}] (Esc to unfocus) ", role)
+                        } else {
+                            " Swarm Events ".to_string()
+                        };
+                        render_swarm_events_filtered(frame, *pane_area, &events_to_show, &title);
                     }
                     PaneType::GardenHealth => {
                         render_swarm_health(frame, *pane_area, &self.swarm_state.stats);
@@ -251,10 +278,67 @@ impl SwarmApp {
                     self.layout_engine.toggle_zoom();
                 }
 
-                // Unzoom
+                // Unzoom or unfocus agent
                 KeyCode::Esc => {
-                    if self.layout_engine.is_zoomed() {
+                    if self.focused_agent.is_some() {
+                        self.focused_agent = None;
+                        self.swarm_state.add_event(
+                            EventType::AgentStarted,
+                            "Unfocused agent (showing all)",
+                            None,
+                        );
+                    } else if self.layout_engine.is_zoomed() {
                         self.layout_engine.toggle_zoom();
+                    }
+                }
+
+                // Focus on selected agent
+                KeyCode::Enter => {
+                    if let Some(agent) = self.swarm_state.agents.get(self.selected_agent) {
+                        let name = agent.name.clone();
+                        self.focused_agent = Some(name.clone());
+                        self.swarm_state.add_event(
+                            EventType::AgentStarted,
+                            format!("Focused on agent: {}", name),
+                            None,
+                        );
+                    }
+                }
+
+                // Navigate agent list
+                KeyCode::Up => {
+                    if !self.swarm_state.agents.is_empty() {
+                        if self.selected_agent > 0 {
+                            self.selected_agent -= 1;
+                        } else {
+                            self.selected_agent = self.swarm_state.agents.len() - 1;
+                        }
+                    }
+                }
+                KeyCode::Down => {
+                    if !self.swarm_state.agents.is_empty() {
+                        if self.selected_agent < self.swarm_state.agents.len() - 1 {
+                            self.selected_agent += 1;
+                        } else {
+                            self.selected_agent = 0;
+                        }
+                    }
+                }
+
+                // Quick-focus agent by index (1-9)
+                KeyCode::Char(c)
+                    if c.is_ascii_digit() && c != '0' && key.modifiers == KeyModifiers::NONE =>
+                {
+                    let idx = (c as usize) - ('1' as usize);
+                    if let Some(agent) = self.swarm_state.agents.get(idx) {
+                        let name = agent.name.clone();
+                        self.selected_agent = idx;
+                        self.focused_agent = Some(name.clone());
+                        self.swarm_state.add_event(
+                            EventType::AgentStarted,
+                            format!("Quick-focused on agent: {}", name),
+                            None,
+                        );
                     }
                 }
 
@@ -817,5 +901,339 @@ mod tests {
         assert_eq!(app.swarm_state.events[0].message, "Swarm UI initialized");
         // dev swarm has 4 agents
         assert_eq!(app.swarm_state.agents.len(), 4);
+    }
+
+    // ── Agent focus/unfocus tests ───────────────────────────────────
+
+    #[test]
+    fn test_focused_agent_initially_none() {
+        let app = SwarmApp::new();
+        assert!(app.focused_agent.is_none());
+        assert_eq!(app.selected_agent, 0);
+    }
+
+    #[test]
+    fn test_enter_focuses_selected_agent() {
+        let mut app = SwarmApp::new();
+        // dev swarm has 4 agents; selected_agent starts at 0
+        assert!(app.focused_agent.is_none());
+
+        let enter = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(enter);
+
+        // Should now be focused on the first agent
+        assert!(app.focused_agent.is_some());
+        let first_agent_name = app.swarm_state.agents[0].name.clone();
+        assert_eq!(
+            app.focused_agent.as_deref(),
+            Some(first_agent_name.as_str())
+        );
+    }
+
+    #[test]
+    fn test_esc_unfocuses_agent() {
+        let mut app = SwarmApp::new();
+
+        // Focus first
+        let enter = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(enter);
+        assert!(app.focused_agent.is_some());
+
+        // Now Esc should unfocus
+        let esc = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(esc);
+        assert!(app.focused_agent.is_none());
+    }
+
+    #[test]
+    fn test_esc_unfocuses_before_unzoom() {
+        let mut app = SwarmApp::new();
+
+        // Zoom first
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('z'),
+            KeyModifiers::NONE,
+        )));
+        assert!(app.layout_engine.is_zoomed());
+
+        // Focus an agent
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.focused_agent.is_some());
+
+        // First Esc should unfocus the agent, NOT unzoom
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.focused_agent.is_none());
+        assert!(app.layout_engine.is_zoomed()); // Still zoomed
+
+        // Second Esc should unzoom
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
+        assert!(!app.layout_engine.is_zoomed());
+    }
+
+    #[test]
+    fn test_quick_focus_with_number_keys() {
+        let mut app = SwarmApp::new();
+        // dev swarm has 4 agents (indices 0-3)
+
+        // Press '2' to quick-focus the second agent
+        let key2 = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('2'),
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(key2);
+
+        assert_eq!(app.selected_agent, 1);
+        let second_agent_name = app.swarm_state.agents[1].name.clone();
+        assert_eq!(
+            app.focused_agent.as_deref(),
+            Some(second_agent_name.as_str())
+        );
+    }
+
+    #[test]
+    fn test_quick_focus_out_of_range_does_nothing() {
+        let mut app = SwarmApp::new();
+        // dev swarm has 4 agents, so '9' is out of range
+
+        let key9 = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('9'),
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(key9);
+
+        assert!(app.focused_agent.is_none());
+        assert_eq!(app.selected_agent, 0);
+    }
+
+    #[test]
+    fn test_quick_focus_zero_does_nothing() {
+        let mut app = SwarmApp::new();
+
+        // '0' should not trigger quick-focus
+        let key0 = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('0'),
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(key0);
+
+        assert!(app.focused_agent.is_none());
+    }
+
+    #[test]
+    fn test_arrow_down_navigates_agent_list() {
+        let mut app = SwarmApp::new();
+        assert_eq!(app.selected_agent, 0);
+
+        let down = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(down);
+        assert_eq!(app.selected_agent, 1);
+
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.selected_agent, 2);
+    }
+
+    #[test]
+    fn test_arrow_up_navigates_agent_list() {
+        let mut app = SwarmApp::new();
+        // Move down first
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )));
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.selected_agent, 2);
+
+        // Now up
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.selected_agent, 1);
+    }
+
+    #[test]
+    fn test_arrow_down_wraps_around() {
+        let mut app = SwarmApp::new();
+        let agent_count = app.swarm_state.agents.len();
+        assert!(agent_count > 0);
+
+        // Move to last agent
+        for _ in 0..agent_count - 1 {
+            app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Down,
+                KeyModifiers::NONE,
+            )));
+        }
+        assert_eq!(app.selected_agent, agent_count - 1);
+
+        // One more down should wrap to 0
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.selected_agent, 0);
+    }
+
+    #[test]
+    fn test_arrow_up_wraps_around() {
+        let mut app = SwarmApp::new();
+        let agent_count = app.swarm_state.agents.len();
+        assert!(agent_count > 0);
+        assert_eq!(app.selected_agent, 0);
+
+        // Up from 0 should wrap to last
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.selected_agent, agent_count - 1);
+    }
+
+    #[test]
+    fn test_focus_then_navigate_then_refocus() {
+        let mut app = SwarmApp::new();
+
+        // Focus agent 0
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        let first_name = app.swarm_state.agents[0].name.clone();
+        assert_eq!(app.focused_agent.as_deref(), Some(first_name.as_str()));
+
+        // Unfocus
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
+        assert!(app.focused_agent.is_none());
+
+        // Navigate to agent 2
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )));
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+        )));
+        assert_eq!(app.selected_agent, 2);
+
+        // Focus agent 2
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+        let third_name = app.swarm_state.agents[2].name.clone();
+        assert_eq!(app.focused_agent.as_deref(), Some(third_name.as_str()));
+    }
+
+    #[test]
+    fn test_focus_adds_event_to_log() {
+        let mut app = SwarmApp::new();
+        let events_before = app.swarm_state.events.len();
+
+        // Focus via Enter
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+
+        assert!(app.swarm_state.events.len() > events_before);
+        let last = app.swarm_state.events.last().unwrap();
+        assert!(last.message.starts_with("Focused on agent:"));
+    }
+
+    #[test]
+    fn test_unfocus_adds_event_to_log() {
+        let mut app = SwarmApp::new();
+
+        // Focus first
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+
+        let events_before = app.swarm_state.events.len();
+
+        // Unfocus
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        )));
+
+        assert!(app.swarm_state.events.len() > events_before);
+        let last = app.swarm_state.events.last().unwrap();
+        assert_eq!(last.message, "Unfocused agent (showing all)");
+    }
+
+    #[test]
+    fn test_quick_focus_adds_event_to_log() {
+        let mut app = SwarmApp::new();
+        let events_before = app.swarm_state.events.len();
+
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('1'),
+            KeyModifiers::NONE,
+        )));
+
+        assert!(app.swarm_state.events.len() > events_before);
+        let last = app.swarm_state.events.last().unwrap();
+        assert!(last.message.starts_with("Quick-focused on agent:"));
+    }
+
+    #[test]
+    fn test_alt_number_keys_still_change_layout() {
+        let mut app = SwarmApp::new();
+        // Alt+1 should still change layout, not focus an agent
+        app.handle_event(Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Char('1'),
+            KeyModifiers::ALT,
+        )));
+        // Should not have focused any agent
+        assert!(app.focused_agent.is_none());
+    }
+
+    #[test]
+    fn test_enter_with_no_agents_does_nothing() {
+        let swarm = crate::orchestration::swarm::Swarm::new();
+        let swarm = Arc::new(RwLock::new(swarm));
+        let mut app = SwarmApp::with_swarm(swarm);
+        // No agents after sync
+        assert!(app.swarm_state.agents.is_empty());
+
+        let enter = Event::Key(crossterm::event::KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ));
+        app.handle_event(enter);
+        assert!(app.focused_agent.is_none());
     }
 }

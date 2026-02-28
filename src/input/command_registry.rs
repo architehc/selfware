@@ -142,6 +142,11 @@ pub static COMMANDS: &[CommandEntry] = &[
     },
     // Tools & Analysis
     CommandEntry {
+        name: "/last",
+        description: "Show details of the last tool execution",
+        category: CommandCategory::Tools,
+    },
+    CommandEntry {
         name: "/tools",
         description: "List available tools",
         category: CommandCategory::Tools,
