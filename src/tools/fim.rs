@@ -132,3 +132,294 @@ impl Tool for FileFimEdit {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use std::io::Write;
+
+    /// Helper: build an ApiClient from a default Config for testing.
+    /// The client is never used for real HTTP calls in these tests --
+    /// all validation tests fail before reaching the API.
+    fn test_client() -> Arc<ApiClient> {
+        let config = Config::default();
+        Arc::new(ApiClient::new(&config).expect("ApiClient::new should succeed with defaults"))
+    }
+
+    // ── Construction ─────────────────────────────────────────────────
+
+    #[test]
+    fn new_creates_instance_without_safety_config() {
+        let client = test_client();
+        let tool = FileFimEdit::new(client);
+        assert!(tool.safety_config.is_none());
+    }
+
+    #[test]
+    fn with_safety_config_stores_config() {
+        let client = test_client();
+        let config = SafetyConfig::default();
+        let tool = FileFimEdit::with_safety_config(client, config);
+        assert!(tool.safety_config.is_some());
+    }
+
+    #[test]
+    fn with_safety_config_preserves_values() {
+        let client = test_client();
+        let config = SafetyConfig {
+            strict_permissions: true,
+            ..Default::default()
+        };
+        let tool = FileFimEdit::with_safety_config(client, config);
+        assert!(tool.safety_config.as_ref().unwrap().strict_permissions);
+    }
+
+    // ── Tool trait: name() and description() ─────────────────────────
+
+    #[test]
+    fn name_returns_file_fim_edit() {
+        let tool = FileFimEdit::new(test_client());
+        assert_eq!(tool.name(), "file_fim_edit");
+    }
+
+    #[test]
+    fn description_is_non_empty() {
+        let tool = FileFimEdit::new(test_client());
+        assert!(
+            !tool.description().is_empty(),
+            "description() must not be empty"
+        );
+    }
+
+    #[test]
+    fn description_mentions_fim() {
+        let tool = FileFimEdit::new(test_client());
+        let desc = tool.description().to_lowercase();
+        assert!(
+            desc.contains("fill-in-the-middle") || desc.contains("fim"),
+            "description should mention FIM: {}",
+            tool.description()
+        );
+    }
+
+    // ── Schema validation ────────────────────────────────────────────
+
+    #[test]
+    fn schema_has_required_fields() {
+        let tool = FileFimEdit::new(test_client());
+        let schema = tool.schema();
+
+        let required = schema["required"]
+            .as_array()
+            .expect("schema should have 'required' array");
+        let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+
+        assert!(
+            required_strs.contains(&"path"),
+            "required should include 'path'"
+        );
+        assert!(
+            required_strs.contains(&"start_line"),
+            "required should include 'start_line'"
+        );
+        assert!(
+            required_strs.contains(&"end_line"),
+            "required should include 'end_line'"
+        );
+        assert!(
+            required_strs.contains(&"instruction"),
+            "required should include 'instruction'"
+        );
+    }
+
+    #[test]
+    fn schema_type_is_object() {
+        let tool = FileFimEdit::new(test_client());
+        let schema = tool.schema();
+        assert_eq!(schema["type"], "object");
+    }
+
+    #[test]
+    fn schema_properties_exist() {
+        let tool = FileFimEdit::new(test_client());
+        let schema = tool.schema();
+        let props = schema["properties"]
+            .as_object()
+            .expect("properties should be an object");
+        assert!(props.contains_key("path"));
+        assert!(props.contains_key("start_line"));
+        assert!(props.contains_key("end_line"));
+        assert!(props.contains_key("instruction"));
+    }
+
+    // ── Line range validation via execute() ──────────────────────────
+    //
+    // These tests create a real temp file and invoke execute() with
+    // invalid line ranges. Validation fails *before* any API call, so
+    // no network access is required.
+
+    /// Create a temp file with known content and return its path as a String.
+    fn temp_file_with_lines(lines: &[&str]) -> (tempfile::NamedTempFile, String) {
+        let mut f = tempfile::NamedTempFile::new().expect("create temp file");
+        for line in lines {
+            writeln!(f, "{}", line).expect("write line");
+        }
+        f.flush().expect("flush");
+        let path = f.path().to_string_lossy().into_owned();
+        (f, path)
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_start_line_zero() {
+        std::env::set_var("SELFWARE_TEST_MODE", "1");
+        let tool = FileFimEdit::new(test_client());
+        let (_tmp, path) = temp_file_with_lines(&["line1", "line2", "line3"]);
+
+        let args = serde_json::json!({
+            "path": path,
+            "start_line": 0,
+            "end_line": 2,
+            "instruction": "test"
+        });
+
+        let result = tool.execute(args).await;
+        assert!(result.is_err(), "start_line=0 should be rejected");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Invalid line range"),
+            "Expected 'Invalid line range', got: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_end_line_before_start_line() {
+        std::env::set_var("SELFWARE_TEST_MODE", "1");
+        let tool = FileFimEdit::new(test_client());
+        let (_tmp, path) = temp_file_with_lines(&["line1", "line2", "line3"]);
+
+        let args = serde_json::json!({
+            "path": path,
+            "start_line": 3,
+            "end_line": 1,
+            "instruction": "test"
+        });
+
+        let result = tool.execute(args).await;
+        assert!(result.is_err(), "end_line < start_line should be rejected");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid line range"),
+            "Expected 'Invalid line range'"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_lines_beyond_file_length() {
+        std::env::set_var("SELFWARE_TEST_MODE", "1");
+        let tool = FileFimEdit::new(test_client());
+        let (_tmp, path) = temp_file_with_lines(&["only_one_line"]);
+
+        let args = serde_json::json!({
+            "path": path,
+            "start_line": 1,
+            "end_line": 5,
+            "instruction": "test"
+        });
+
+        let result = tool.execute(args).await;
+        assert!(
+            result.is_err(),
+            "end_line beyond file length should be rejected"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid line range"),
+            "Expected 'Invalid line range'"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_start_line_beyond_file_length() {
+        std::env::set_var("SELFWARE_TEST_MODE", "1");
+        let tool = FileFimEdit::new(test_client());
+        let (_tmp, path) = temp_file_with_lines(&["a", "b"]);
+
+        let args = serde_json::json!({
+            "path": path,
+            "start_line": 10,
+            "end_line": 12,
+            "instruction": "test"
+        });
+
+        let result = tool.execute(args).await;
+        assert!(
+            result.is_err(),
+            "start_line beyond file length should be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_missing_path() {
+        let tool = FileFimEdit::new(test_client());
+        let args = serde_json::json!({
+            "start_line": 1,
+            "end_line": 2,
+            "instruction": "test"
+        });
+
+        let result = tool.execute(args).await;
+        assert!(result.is_err(), "missing path should be rejected");
+        assert!(
+            result.unwrap_err().to_string().contains("Missing path"),
+            "Expected 'Missing path'"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_missing_start_line() {
+        let tool = FileFimEdit::new(test_client());
+        let args = serde_json::json!({
+            "path": "/tmp/test.txt",
+            "end_line": 2,
+            "instruction": "test"
+        });
+
+        let result = tool.execute(args).await;
+        assert!(result.is_err(), "missing start_line should be rejected");
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_missing_end_line() {
+        let tool = FileFimEdit::new(test_client());
+        let args = serde_json::json!({
+            "path": "/tmp/test.txt",
+            "start_line": 1,
+            "instruction": "test"
+        });
+
+        let result = tool.execute(args).await;
+        assert!(result.is_err(), "missing end_line should be rejected");
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_missing_instruction() {
+        std::env::set_var("SELFWARE_TEST_MODE", "1");
+        let tool = FileFimEdit::new(test_client());
+        let (_tmp, path) = temp_file_with_lines(&["line1", "line2"]);
+
+        let args = serde_json::json!({
+            "path": path,
+            "start_line": 1,
+            "end_line": 2
+        });
+
+        let result = tool.execute(args).await;
+        assert!(result.is_err(), "missing instruction should be rejected");
+    }
+}

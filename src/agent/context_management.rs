@@ -1045,3 +1045,342 @@ impl Agent {
         result_str.to_string()
     }
 }
+
+// =========================================================================
+// Tests
+// =========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::testing::mock_api::MockLlmServer;
+
+    /// Build a minimal Agent backed by a mock LLM server.
+    async fn make_test_agent(server: &MockLlmServer) -> Agent {
+        let config = Config {
+            endpoint: format!("{}/v1", server.url()),
+            model: "mock-model".to_string(),
+            agent: crate::config::AgentConfig {
+                max_iterations: 4,
+                step_timeout_secs: 5,
+                streaming: false,
+                native_function_calling: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        Agent::new(config)
+            .await
+            .expect("failed to create test agent")
+    }
+
+    // =====================================================================
+    // format_file_size  (pure static method -- no Agent needed)
+    // =====================================================================
+
+    #[test]
+    fn test_format_file_size_zero_bytes() {
+        assert_eq!(Agent::format_file_size(0), "0B");
+    }
+
+    #[test]
+    fn test_format_file_size_small_bytes() {
+        assert_eq!(Agent::format_file_size(1), "1B");
+        assert_eq!(Agent::format_file_size(512), "512B");
+        assert_eq!(Agent::format_file_size(1023), "1023B");
+    }
+
+    #[test]
+    fn test_format_file_size_exact_1kb() {
+        // 1024 bytes == 1.0KB
+        assert_eq!(Agent::format_file_size(1024), "1.0KB");
+    }
+
+    #[test]
+    fn test_format_file_size_kilobytes() {
+        // 2048 == 2.0KB
+        assert_eq!(Agent::format_file_size(2048), "2.0KB");
+        // 1536 == 1.5KB
+        assert_eq!(Agent::format_file_size(1536), "1.5KB");
+        // Just under 1MB: 1023 * 1024 = 1,047,552
+        let just_under_mb = 1024 * 1024 - 1;
+        let result = Agent::format_file_size(just_under_mb);
+        assert!(result.ends_with("KB"), "expected KB suffix, got {}", result);
+    }
+
+    #[test]
+    fn test_format_file_size_exact_1mb() {
+        assert_eq!(Agent::format_file_size(1024 * 1024), "1.0MB");
+    }
+
+    #[test]
+    fn test_format_file_size_megabytes() {
+        // 5 MB
+        assert_eq!(Agent::format_file_size(5 * 1024 * 1024), "5.0MB");
+        // 1.5 MB
+        assert_eq!(Agent::format_file_size(3 * 1024 * 512), "1.5MB");
+    }
+
+    #[test]
+    fn test_format_file_size_gigabyte_range() {
+        // The function only distinguishes B / KB / MB, so a GB value
+        // is still formatted as MB.
+        let one_gb = 1024 * 1024 * 1024;
+        assert_eq!(Agent::format_file_size(one_gb), "1024.0MB");
+    }
+
+    // =====================================================================
+    // enhance_cargo_errors  (needs &self for error_analyzer)
+    // =====================================================================
+
+    #[tokio::test]
+    async fn test_enhance_cargo_errors_non_json_passthrough() {
+        let server = MockLlmServer::builder().with_response("ok").build().await;
+        let agent = make_test_agent(&server).await;
+
+        let input = "this is not json at all";
+        let result = agent.enhance_cargo_errors(input);
+        assert_eq!(result, input, "non-JSON input should be returned unchanged");
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_enhance_cargo_errors_json_no_errors_key() {
+        let server = MockLlmServer::builder().with_response("ok").build().await;
+        let agent = make_test_agent(&server).await;
+
+        let input = r#"{"status":"ok","warnings":[]}"#;
+        let result = agent.enhance_cargo_errors(input);
+        assert_eq!(
+            result, input,
+            "JSON without an 'errors' key should pass through"
+        );
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_enhance_cargo_errors_empty_errors_array() {
+        let server = MockLlmServer::builder().with_response("ok").build().await;
+        let agent = make_test_agent(&server).await;
+
+        let input = r#"{"errors":[]}"#;
+        let result = agent.enhance_cargo_errors(input);
+        // With an empty array there are no raw_errors, so no analysis appended.
+        assert_eq!(
+            result, input,
+            "empty errors array should pass through without analysis"
+        );
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_enhance_cargo_errors_with_actual_errors() {
+        let server = MockLlmServer::builder().with_response("ok").build().await;
+        let agent = make_test_agent(&server).await;
+
+        let input = r#"{"errors":[{"code":"E0308","message":"mismatched types","file":"src/main.rs","line":10,"column":5}]}"#;
+        let result = agent.enhance_cargo_errors(input);
+
+        assert!(
+            result.contains("<error_analysis>"),
+            "should contain opening error_analysis tag"
+        );
+        assert!(
+            result.contains("</error_analysis>"),
+            "should contain closing error_analysis tag"
+        );
+        assert!(
+            result.contains("Error Analysis Summary"),
+            "should contain the summary header"
+        );
+        // Original input should still be present at the start
+        assert!(
+            result.starts_with(input),
+            "original input should be preserved at the start"
+        );
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_enhance_cargo_errors_errors_without_message_skipped() {
+        let server = MockLlmServer::builder().with_response("ok").build().await;
+        let agent = make_test_agent(&server).await;
+
+        // Error objects missing the required "message" field should be filtered out
+        let input = r#"{"errors":[{"code":"E0001","file":"a.rs"}]}"#;
+        let result = agent.enhance_cargo_errors(input);
+        // filter_map returns None for entries without "message", so raw_errors
+        // is empty and no analysis is appended.
+        assert_eq!(
+            result, input,
+            "errors missing 'message' should be skipped, resulting in passthrough"
+        );
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_enhance_cargo_errors_multiple_errors() {
+        let server = MockLlmServer::builder().with_response("ok").build().await;
+        let agent = make_test_agent(&server).await;
+
+        let input = r#"{"errors":[
+            {"code":"E0308","message":"mismatched types","file":"a.rs","line":1},
+            {"code":"E0425","message":"cannot find value `x` in this scope","file":"b.rs","line":5},
+            {"message":"unused variable: `y`","file":"c.rs","line":10}
+        ]}"#;
+        let result = agent.enhance_cargo_errors(input);
+
+        assert!(result.contains("<error_analysis>"));
+        assert!(result.contains("Total errors: 3"));
+
+        server.stop().await;
+    }
+
+    // =====================================================================
+    // expand_file_references  (needs &self for regex; uses filesystem)
+    // =====================================================================
+
+    #[tokio::test]
+    async fn test_expand_file_references_no_refs() {
+        let server = MockLlmServer::builder().with_response("ok").build().await;
+        let agent = make_test_agent(&server).await;
+
+        let input = "just a plain message with no file references";
+        let (expanded, files) = agent.expand_file_references(input);
+        assert_eq!(expanded, input, "input without @ refs should pass through");
+        assert!(files.is_empty(), "no files should be reported");
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_expand_file_references_nonexistent_file() {
+        let server = MockLlmServer::builder().with_response("ok").build().await;
+        let agent = make_test_agent(&server).await;
+
+        let input = "check @nonexistent_file_that_does_not_exist.rs please";
+        let (expanded, files) = agent.expand_file_references(input);
+        // The file does not exist and is not a directory, so it stays unchanged.
+        assert_eq!(
+            expanded, input,
+            "reference to a nonexistent file should be left as-is"
+        );
+        assert!(
+            files.is_empty(),
+            "nonexistent file should not appear in the included list"
+        );
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_expand_file_references_existing_file() {
+        let server = MockLlmServer::builder().with_response("ok").build().await;
+        let agent = make_test_agent(&server).await;
+
+        // Create a temporary file with known content
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let file_path = dir.path().join("sample.txt");
+        std::fs::write(&file_path, "hello world\n").expect("failed to write temp file");
+
+        let path_str = file_path.display().to_string();
+        let input = format!("read @{} now", path_str);
+        let (expanded, files) = agent.expand_file_references(&input);
+
+        assert!(
+            expanded.contains("hello world"),
+            "expanded output should contain the file's content"
+        );
+        assert!(
+            expanded.contains(&path_str),
+            "expanded output should reference the file path"
+        );
+        assert_eq!(files.len(), 1, "one file should be reported");
+        assert_eq!(files[0], path_str);
+
+        // The original @path should have been replaced
+        assert!(
+            !expanded.contains(&format!("@{}", path_str)),
+            "the @reference should have been replaced"
+        );
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_expand_file_references_includes_size_label() {
+        let server = MockLlmServer::builder().with_response("ok").build().await;
+        let agent = make_test_agent(&server).await;
+
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let file_path = dir.path().join("tiny.rs");
+        std::fs::write(&file_path, "fn main() {}").expect("write failed");
+
+        let path_str = file_path.display().to_string();
+        let input = format!("look at @{}", path_str);
+        let (expanded, _) = agent.expand_file_references(&input);
+
+        // format_file_size for 12 bytes produces "12B"
+        assert!(
+            expanded.contains("B)") || expanded.contains("KB)") || expanded.contains("MB)"),
+            "expanded block should include a file-size label"
+        );
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_expand_file_references_multiple_refs() {
+        let server = MockLlmServer::builder().with_response("ok").build().await;
+        let agent = make_test_agent(&server).await;
+
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let f1 = dir.path().join("a.txt");
+        let f2 = dir.path().join("b.txt");
+        std::fs::write(&f1, "content A").unwrap();
+        std::fs::write(&f2, "content B").unwrap();
+
+        let input = format!("compare @{} with @{}", f1.display(), f2.display());
+        let (expanded, files) = agent.expand_file_references(&input);
+
+        assert!(expanded.contains("content A"));
+        assert!(expanded.contains("content B"));
+        assert_eq!(files.len(), 2);
+
+        server.stop().await;
+    }
+
+    // =====================================================================
+    // clear_context  (lightweight Agent state test)
+    // =====================================================================
+
+    #[tokio::test]
+    async fn test_clear_context_retains_system_message() {
+        let server = MockLlmServer::builder().with_response("ok").build().await;
+        let mut agent = make_test_agent(&server).await;
+
+        // Inject some user/assistant messages and context files
+        agent.messages.push(Message::user("question"));
+        agent.messages.push(Message::assistant("answer"));
+        agent.context_files.push("some_file.rs".to_string());
+
+        agent.clear_context();
+
+        assert!(
+            agent.messages.iter().all(|m| m.role == "system"),
+            "only system messages should remain after clear"
+        );
+        assert!(
+            agent.context_files.is_empty(),
+            "context_files should be emptied"
+        );
+
+        server.stop().await;
+    }
+}
