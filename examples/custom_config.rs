@@ -136,6 +136,7 @@ fn build_custom_config() -> Config {
             token_budget: 500000,
             native_function_calling: false,
             streaming: true,
+            ..Default::default()
         },
 
         // YOLO mode settings

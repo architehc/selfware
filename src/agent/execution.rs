@@ -51,13 +51,23 @@ impl Agent {
         );
 
         debug!("Total tool calls to execute: {}", tool_calls.len());
-        self.warn_on_unparsed_tool_content(&content, &tool_calls);
+
+        // Detect malformed tool calls and inject correction before treating as completion
+        if self.detect_and_correct_malformed_tools(&content, &tool_calls) {
+            return Ok(false);
+        }
 
         if self.maybe_prompt_for_action(&content, tool_calls.is_empty(), use_last_message) {
             return Ok(false);
         }
 
         if tool_calls.is_empty() {
+            // Check completion gate before accepting task as done
+            if let Some(gate_msg) = self.check_completion_gate() {
+                info!("Completion gate rejected: {}", gate_msg);
+                self.messages.push(Message::user(gate_msg));
+                return Ok(false);
+            }
             output::final_answer(&content);
             self.last_assistant_response = content;
             return Ok(true);
@@ -67,18 +77,86 @@ impl Agent {
         Ok(false)
     }
 
-    fn warn_on_unparsed_tool_content(&self, content: &str, tool_calls: &[CollectedToolCall]) {
-        if tool_calls.is_empty()
-            && (content.contains("<tool")
-                || content.contains("tool_name")
-                || content.contains("function"))
-        {
-            warn!("Content appears to contain tool-related keywords but no valid tool calls were parsed:");
-            warn!(
-                "Content preview: {}",
-                &content.chars().take(500).collect::<String>()
-            );
+    /// Detect malformed tool call attempts and push a correction message.
+    /// Returns `true` if malformed markers were found and a correction was injected.
+    fn detect_and_correct_malformed_tools(
+        &mut self,
+        content: &str,
+        tool_calls: &[CollectedToolCall],
+    ) -> bool {
+        if !tool_calls.is_empty() {
+            return false;
         }
+
+        let markers = ["<tool", "<function", "tool_name", "tool_call", "<name="];
+        let has_markers = markers.iter().any(|m| content.contains(m));
+        if !has_markers {
+            return false;
+        }
+
+        warn!(
+            "Detected malformed tool call attempt, injecting correction. Preview: {}",
+            &content.chars().take(500).collect::<String>()
+        );
+
+        self.cognitive_state.episodic_memory.what_failed(
+            "tool_format",
+            "Malformed tool call detected — model used wrong XML format",
+        );
+
+        self.messages.push(Message::user(
+            "Your tool call was malformed and could not be parsed. You MUST use this EXACT format:\n\n\
+             <tool>\n<name>TOOL_NAME</name>\n<arguments>{\"key\": \"value\"}</arguments>\n</tool>\n\n\
+             Common mistakes to avoid:\n\
+             - Do NOT use <function=name> or <name=name> — use <name>TOOL_NAME</name>\n\
+             - Do NOT use <parameter=key> tags — use a JSON object inside <arguments>\n\
+             - Arguments MUST be valid JSON\n\n\
+             Please retry your intended action using the correct format."
+        ));
+
+        true
+    }
+
+    /// Check whether the agent has done enough work to accept completion.
+    /// Returns `None` to accept, or `Some(message)` to reject with instructions.
+    fn check_completion_gate(&self) -> Option<String> {
+        let step_count = self.loop_control.current_step();
+        let min_steps = self.config.agent.min_completion_steps;
+
+        if step_count < min_steps {
+            return Some(format!(
+                "You are trying to complete the task after only {} step(s), but at least {} are required. \
+                 You have a large budget — do not rush. Continue working: verify your changes compile \
+                 with cargo_check and pass tests with cargo_test.",
+                step_count, min_steps
+            ));
+        }
+
+        if self.config.agent.require_verification_before_completion {
+            let has_verification = self
+                .current_checkpoint
+                .as_ref()
+                .map(|cp| {
+                    cp.tool_calls.iter().any(|tc| {
+                        tc.success
+                            && matches!(
+                                tc.tool_name.as_str(),
+                                "cargo_check" | "cargo_test" | "cargo_clippy"
+                            )
+                    })
+                })
+                .unwrap_or(false);
+
+            if !has_verification {
+                return Some(
+                    "You must run at least one verification tool (cargo_check, cargo_test, or cargo_clippy) \
+                     successfully before completing the task. Please verify your work now."
+                        .to_string(),
+                );
+            }
+        }
+
+        None
     }
 
     fn maybe_prompt_for_action(
@@ -442,7 +520,7 @@ impl Agent {
                     None,
                 );
 
-                let verification_result = self.maybe_verify_edit(name, args).await;
+                let verification_result = self.maybe_verify_file_change(name, args).await;
                 let enhanced_result = self.maybe_enhance_tool_result(name, &result_str);
                 let final_result = match verification_result {
                     Some(ver_msg) => format!("{}{}", enhanced_result, ver_msg),
@@ -488,27 +566,27 @@ impl Agent {
         }
     }
 
-    async fn maybe_verify_edit(&mut self, tool_name: &str, args: &Value) -> Option<String> {
-        if tool_name != "file_edit" {
+    async fn maybe_verify_file_change(&mut self, tool_name: &str, args: &Value) -> Option<String> {
+        if !matches!(tool_name, "file_edit" | "file_write") {
             return None;
         }
 
         let path = args.get("path").and_then(|v| v.as_str())?;
-        info!("Running verification after file_edit on {}", path);
+        info!("Running verification after {} on {}", tool_name, path);
         self.cognitive_state.set_phase(CyclePhase::Verify);
         let spinner = crate::ui::spinner::TerminalSpinner::start("Verifying...");
 
         match self
             .verification_gate
-            .verify_change(&[path.to_string()], &format!("file_edit:{}", path))
+            .verify_change(&[path.to_string()], &format!("{}:{}", tool_name, path))
             .await
         {
             Ok(report) => {
                 if report.overall_passed {
                     spinner.stop_success("Verification passed");
                     self.cognitive_state.episodic_memory.what_worked(
-                        "file_edit",
-                        &format!("Edit to {} passed verification", path),
+                        tool_name,
+                        &format!("{} on {} passed verification", tool_name, path),
                     );
                     if output::is_verbose() {
                         output::verification_report(&format!("{}", report), true);
@@ -517,8 +595,8 @@ impl Agent {
                 } else {
                     spinner.stop_error("Verification failed");
                     self.cognitive_state.episodic_memory.what_failed(
-                        "file_edit",
-                        &format!("Edit to {} failed verification", path),
+                        tool_name,
+                        &format!("{} on {} failed verification", tool_name, path),
                     );
                     output::verification_report(&format!("{}", report), false);
                     Some(format!(

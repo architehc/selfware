@@ -57,6 +57,7 @@ static XML_TOOL_FUNCTION_TAG_REGEX: OnceLock<Regex> = OnceLock::new();
 static QWEN3_TOOL_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
 static QWEN3_PARAMETER_REGEX: OnceLock<Regex> = OnceLock::new();
 static BARE_FUNCTION_REGEX: OnceLock<Regex> = OnceLock::new();
+static OPENAI_FUNCTION_REGEX: OnceLock<Regex> = OnceLock::new();
 
 /// Cached regex for XML element parsing: `<tag>content</tag>`
 /// Previously this was compiled on every call to `parse_xml_arguments`.
@@ -133,6 +134,17 @@ fn bare_function_regex() -> &'static Regex {
     BARE_FUNCTION_REGEX.get_or_init(|| {
         Regex::new(r"(?s)<function=([a-zA-Z_][a-zA-Z0-9_]*)>\s*([\s\S]*?)\s*</function>")
             .expect("Invalid bare function regex")
+    })
+}
+
+/// OpenAI function calling format (without `<tool>` wrapper)
+/// Format: <function=name>{"json":"args"}</function>
+/// This is the format used by OpenAI-compatible endpoints that output function
+/// calls with inline JSON arguments rather than `<parameter>` tags.
+fn openai_function_regex() -> &'static Regex {
+    OPENAI_FUNCTION_REGEX.get_or_init(|| {
+        Regex::new(r#"(?s)<function=([a-zA-Z_][a-zA-Z0-9_]*)>\s*(\{[\s\S]*?\})\s*</function>"#)
+            .expect("Invalid OpenAI function regex")
     })
 }
 
@@ -353,6 +365,34 @@ fn try_parse_xml(content: &str) -> Option<Vec<(Result<ParsedToolCall>, String)>>
                     raw_text: raw.clone(),
                     parse_method: ParseMethod::Xml,
                 });
+
+                (result, raw)
+            })
+            .collect();
+    }
+
+    // If still no matches, try OpenAI function format with inline JSON
+    // Format: <function=name>{"key": "value"}</function>
+    // This MUST come before the bare function regex because both share the
+    // `<function=name>...</function>` structure, but this variant carries
+    // inline JSON while the bare variant uses `<parameter>` tags.
+    if results.is_empty() {
+        let openai_regex = openai_function_regex();
+        results = openai_regex
+            .captures_iter(content)
+            .map(|cap| {
+                let raw = cap[0].to_string();
+                let name = cap[1].trim().to_string();
+                let json_str = cap[2].trim();
+
+                let result = serde_json::from_str::<serde_json::Value>(json_str)
+                    .map(|arguments| ParsedToolCall {
+                        tool_name: name,
+                        arguments,
+                        raw_text: raw.clone(),
+                        parse_method: ParseMethod::Xml,
+                    })
+                    .map_err(|e| anyhow::anyhow!("Invalid JSON in OpenAI function call: {}", e));
 
                 (result, raw)
             })
@@ -1248,5 +1288,57 @@ Finally, I'll commit."#;
             .as_str()
             .unwrap()
             .contains("helpers.rs"));
+    }
+
+    #[test]
+    fn test_openai_function_format() {
+        // OpenAI-style: <function=name>{"json":"args"}</function>
+        let content = r#"<function=file_read>{"path": "./src/main.rs"}</function>"#;
+
+        let result = parse_tool_calls(content);
+
+        assert_eq!(
+            result.tool_calls.len(),
+            1,
+            "Should parse OpenAI function format"
+        );
+        assert_eq!(result.tool_calls[0].tool_name, "file_read");
+        assert_eq!(result.tool_calls[0].arguments["path"], "./src/main.rs");
+    }
+
+    #[test]
+    fn test_openai_function_format_embedded_in_text() {
+        let content = r#"Let me read that file for you.
+
+<function=shell_exec>{"command": "cargo build"}</function>
+
+I'll check the output next."#;
+
+        let result = parse_tool_calls(content);
+
+        assert_eq!(
+            result.tool_calls.len(),
+            1,
+            "Should parse OpenAI function format embedded in text"
+        );
+        assert_eq!(result.tool_calls[0].tool_name, "shell_exec");
+        assert_eq!(result.tool_calls[0].arguments["command"], "cargo build");
+        assert!(result.text_content.contains("Let me read"));
+        assert!(result.text_content.contains("check the output"));
+    }
+
+    #[test]
+    fn test_openai_function_format_multiline_json() {
+        let content = r#"<function=file_write>{
+    "path": "./test.txt",
+    "content": "hello world"
+}</function>"#;
+
+        let result = parse_tool_calls(content);
+
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].tool_name, "file_write");
+        assert_eq!(result.tool_calls[0].arguments["path"], "./test.txt");
+        assert_eq!(result.tool_calls[0].arguments["content"], "hello world");
     }
 }
