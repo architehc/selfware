@@ -204,6 +204,7 @@ mod agent_config_tests {
             token_budget: 8000,
             native_function_calling: true,
             streaming: false,
+            ..Default::default()
         };
 
         let toml = toml::to_string(&config).unwrap();

@@ -60,9 +60,11 @@ impl Agent {
         self.cognitive_state.set_operational_plan(
             learning_session_id.clone(),
             vec![
-                "Plan approach".to_string(),
-                "Execute and verify".to_string(),
-                "Finalize result".to_string(),
+                "Plan approach and identify files to modify".to_string(),
+                "Implement changes".to_string(),
+                "Run cargo_check to verify compilation".to_string(),
+                "Run cargo_test to verify correctness".to_string(),
+                "Review and finalize result".to_string(),
             ],
         );
 
@@ -215,6 +217,10 @@ impl Agent {
                             step + 1,
                             &format!("Execution step {}", step + 1),
                         );
+                    }
+                    // Inject periodic progress/budget-awareness messages
+                    if let Some(progress_msg) = self.build_progress_injection(step) {
+                        self.messages.push(Message::system(progress_msg));
                     }
                     // Update progress based on step
                     let step_progress = ((step + 1) as f64 * 0.1).min(0.9);
@@ -514,6 +520,56 @@ impl Agent {
         Ok(())
     }
 
+    /// Build a progress injection message for periodic budget awareness.
+    /// Returns `Some(message)` every 5 steps to remind the agent of budget and status.
+    fn build_progress_injection(&self, step: usize) -> Option<String> {
+        if step == 0 || !(step + 1).is_multiple_of(5) {
+            return None;
+        }
+
+        let max_steps = self.config.agent.max_iterations;
+        let pct = ((step + 1) as f64 / max_steps as f64 * 100.0).min(100.0);
+
+        let has_verification = self
+            .current_checkpoint
+            .as_ref()
+            .map(|cp| {
+                cp.tool_calls.iter().any(|tc| {
+                    tc.success
+                        && matches!(
+                            tc.tool_name.as_str(),
+                            "cargo_check" | "cargo_test" | "cargo_clippy"
+                        )
+                })
+            })
+            .unwrap_or(false);
+
+        let verification_status = if has_verification {
+            "Verification: PASSED"
+        } else {
+            "Verification: NOT YET RUN (required before completion)"
+        };
+
+        let guidance = if pct < 30.0 {
+            "You have plenty of budget remaining. Be thorough — read relevant code, \
+             implement carefully, and verify each change."
+        } else if pct < 70.0 {
+            "Good progress. Continue implementing and make sure to verify with cargo_check/cargo_test."
+        } else {
+            "You are using most of your budget. Wrap up: ensure all changes compile \
+             and tests pass, then provide your final summary."
+        };
+
+        Some(format!(
+            "[Progress: step {}/{} ({:.0}% budget used) | {}]\n{}",
+            step + 1,
+            max_steps,
+            pct,
+            verification_status,
+            guidance
+        ))
+    }
+
     pub async fn analyze(&mut self, path: &str) -> Result<()> {
         let task = Planner::analyze_prompt(path);
         self.run_task(&task).await
@@ -584,9 +640,11 @@ impl Agent {
             self.cognitive_state.set_operational_plan(
                 learning_session_id.clone(),
                 vec![
-                    "Resume planning".to_string(),
-                    "Resume execution".to_string(),
-                    "Re-verify completion".to_string(),
+                    "Resume planning and identify remaining work".to_string(),
+                    "Resume implementation".to_string(),
+                    "Run cargo_check to verify compilation".to_string(),
+                    "Run cargo_test to verify correctness".to_string(),
+                    "Review and finalize result".to_string(),
                 ],
             );
         }

@@ -39,6 +39,7 @@ pub fn test_config() -> Config {
             token_budget: 50000,
             native_function_calling: false,
             streaming: false, // Disable for tests
+            ..Default::default()
         },
         yolo: YoloFileConfig::default(),
         ui: UiConfig::default(),

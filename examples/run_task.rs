@@ -77,6 +77,7 @@ async fn main() -> Result<()> {
             native_function_calling: false,
             // Enable streaming for real-time output
             streaming: true,
+            ..Default::default()
         },
 
         // Use YOLO mode for this example so verification tools can run

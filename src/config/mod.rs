@@ -398,6 +398,14 @@ pub struct AgentConfig {
     /// When true, LLM responses are displayed as they arrive
     #[serde(default = "default_true")]
     pub streaming: bool,
+    /// Minimum number of execution steps before accepting task completion.
+    /// Prevents early self-termination by requiring the agent to do meaningful work.
+    #[serde(default = "default_min_completion_steps")]
+    pub min_completion_steps: usize,
+    /// Require at least one successful verification (cargo_check/cargo_test/cargo_clippy)
+    /// before accepting task completion.
+    #[serde(default = "default_true")]
+    pub require_verification_before_completion: bool,
 }
 
 impl Default for Config {
@@ -443,6 +451,8 @@ impl Default for AgentConfig {
             token_budget: default_token_budget(),
             native_function_calling: false,
             streaming: true,
+            min_completion_steps: default_min_completion_steps(),
+            require_verification_before_completion: true,
         }
     }
 }
@@ -464,6 +474,9 @@ fn default_max_iterations() -> usize {
 }
 fn default_step_timeout() -> u64 {
     300
+}
+fn default_min_completion_steps() -> usize {
+    3
 }
 fn default_token_budget() -> usize {
     500000
@@ -1288,6 +1301,8 @@ mod tests {
                 token_budget: 100000,
                 native_function_calling: false,
                 streaming: true,
+                min_completion_steps: 3,
+                require_verification_before_completion: true,
             },
             yolo: YoloFileConfig {
                 enabled: true,

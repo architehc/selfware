@@ -33,6 +33,7 @@ fn qwen3_config() -> Config {
             token_budget: 100000,
             native_function_calling: true, // Use native FC with Qwen3
             streaming: true,
+            ..Default::default()
         },
         yolo: YoloFileConfig::default(),
         ui: UiConfig::default(),
