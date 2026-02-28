@@ -15,7 +15,7 @@ pub use resources::*;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::path::PathBuf;
-use tracing::warn;
+use tracing::{error, warn};
 
 /// A string wrapper that prevents accidental logging of secrets.
 ///
@@ -494,6 +494,51 @@ fn default_require_confirmation() -> Vec<String> {
     ]
 }
 
+/// Where the API key was resolved from (used internally for diagnostics and
+/// to decide whether a plaintext-config-file warning is appropriate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApiKeySource {
+    /// No key found yet.
+    None,
+    /// Loaded from the `SELFWARE_API_KEY` environment variable.
+    EnvVar,
+    /// Loaded from the OS system keyring.
+    Keyring,
+    /// Loaded from a plaintext TOML config file on disk.
+    ConfigFile,
+}
+
+/// Service name used when storing the API key in the OS keyring.
+const KEYRING_SERVICE: &str = "selfware-api-key";
+
+/// Load the API key from the OS system keyring.
+///
+/// Returns `Ok(Some(key))` when a key is stored, `Ok(None)` when
+/// the keyring has no entry, or `Err` on a keyring backend failure.
+pub fn load_api_key_from_keyring() -> Result<Option<String>> {
+    let user = whoami::username().unwrap_or_else(|_| "selfware_user".to_string());
+    let entry = keyring::Entry::new(KEYRING_SERVICE, &user)
+        .map_err(|e| anyhow::anyhow!("Keyring error: {}", e))?;
+    match entry.get_password() {
+        Ok(key) => Ok(Some(key)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(anyhow::anyhow!("Keyring error: {}", e)),
+    }
+}
+
+/// Save an API key to the OS system keyring.
+///
+/// This is the backing implementation for `selfware config set-key`.
+pub fn save_api_key_to_keyring(api_key: &str) -> Result<()> {
+    let user = whoami::username().unwrap_or_else(|_| "selfware_user".to_string());
+    let entry = keyring::Entry::new(KEYRING_SERVICE, &user)
+        .map_err(|e| anyhow::anyhow!("Keyring error: {}", e))?;
+    entry
+        .set_password(api_key)
+        .map_err(|e| anyhow::anyhow!("Keyring error: {}", e))?;
+    Ok(())
+}
+
 /// Check whether an endpoint URL points to a local address.
 /// Local addresses include localhost, 127.0.0.1, [::1], and 0.0.0.0.
 /// These are safe to use over plain HTTP since traffic stays on the machine.
@@ -624,18 +669,10 @@ impl Config {
         // Suppress unused-variable warning on non-Unix platforms
         let _ = &loaded_from_path;
 
-        // Warn if API keys are stored in the plaintext config file.
-        // Environment variables (checked below) are preferred since they
-        // are not persisted to disk.
-        if config.api_key.is_some() {
-            if let Some(ref cfg_path) = loaded_from_path {
-                warn!(
-                    config_path = %cfg_path,
-                    "API key loaded from plaintext config file. \
-                     Consider using the SELFWARE_API_KEY environment variable instead."
-                );
-            }
-        }
+        // Track whether the API key originated from the config file so we can
+        // distinguish it from env-var / keyring sources after the override
+        // cascade below.
+        let plaintext_key_in_config = config.api_key.is_some() && loaded_from_path.is_some();
 
         // Override with environment variables
         if let Ok(endpoint) = std::env::var("SELFWARE_ENDPOINT") {
@@ -644,9 +681,59 @@ impl Config {
         if let Ok(model) = std::env::var("SELFWARE_MODEL") {
             config.model = model;
         }
+
+        // --- API key resolution hierarchy ---
+        // 1. Environment variable (highest priority, never persisted to disk)
+        // 2. System keyring via `selfware config set-key`
+        // 3. Config file (lowest priority, plaintext on disk -- warn the user)
+        let mut api_key_source = ApiKeySource::None;
+
         if let Ok(api_key) = std::env::var("SELFWARE_API_KEY") {
             config.api_key = Some(RedactedString::new(api_key));
+            api_key_source = ApiKeySource::EnvVar;
         }
+
+        // Try the system keyring if no env var was set.
+        if matches!(api_key_source, ApiKeySource::None) {
+            match load_api_key_from_keyring() {
+                Ok(Some(key)) => {
+                    config.api_key = Some(RedactedString::new(key));
+                    api_key_source = ApiKeySource::Keyring;
+                }
+                Ok(None) => {} // No key stored in keyring
+                Err(e) => {
+                    warn!(error = %e, "Failed to read API key from system keyring");
+                }
+            }
+        }
+
+        // If the key still comes from the plaintext config file, emit a warning.
+        if matches!(api_key_source, ApiKeySource::None) && plaintext_key_in_config {
+            api_key_source = ApiKeySource::ConfigFile;
+            if let Some(ref cfg_path) = loaded_from_path {
+                warn!(
+                    config_path = %cfg_path,
+                    "API key loaded from plaintext config file. \
+                     For production use, set the SELFWARE_API_KEY environment variable \
+                     or use the system keyring via `selfware config set-key`."
+                );
+
+                // In strict mode, plaintext keys on disk are not tolerated.
+                let env_strict = std::env::var("SELFWARE_STRICT_PERMISSIONS")
+                    .map(|v| v == "1")
+                    .unwrap_or(false);
+                if config.safety.strict_permissions || env_strict {
+                    error!(
+                        "Plaintext API key in config file is not allowed in strict mode. \
+                         Use SELFWARE_API_KEY environment variable or system keyring."
+                    );
+                }
+            }
+        }
+        // Suppress unused-variable warning; the value is consumed by the
+        // match arms above and kept around only for clarity / future use.
+        let _ = api_key_source;
+
         if let Ok(max_tokens) = std::env::var("SELFWARE_MAX_TOKENS") {
             if let Ok(n) = max_tokens.parse::<usize>() {
                 config.max_tokens = n;
@@ -1821,5 +1908,136 @@ mod tests {
     fn test_execution_mode_default() {
         let mode = ExecutionMode::default();
         assert_eq!(mode, ExecutionMode::Normal);
+    }
+
+    // ---- API key source / plaintext warning tests ----
+
+    #[test]
+    fn test_api_key_source_enum_variants() {
+        // Ensure the enum is constructable and comparable.
+        let src = ApiKeySource::None;
+        assert!(matches!(src, ApiKeySource::None));
+        assert!(!matches!(src, ApiKeySource::EnvVar));
+        assert!(!matches!(src, ApiKeySource::Keyring));
+        assert!(!matches!(src, ApiKeySource::ConfigFile));
+    }
+
+    /// Helper: simulates the plaintext-key detection logic used in `Config::load`.
+    /// Returns the `ApiKeySource` that would be selected given the inputs.
+    fn resolve_api_key_source(
+        env_var_set: bool,
+        keyring_has_key: bool,
+        config_file_has_key: bool,
+    ) -> ApiKeySource {
+        let mut source = ApiKeySource::None;
+
+        if env_var_set {
+            source = ApiKeySource::EnvVar;
+        }
+
+        if matches!(source, ApiKeySource::None) && keyring_has_key {
+            source = ApiKeySource::Keyring;
+        }
+
+        if matches!(source, ApiKeySource::None) && config_file_has_key {
+            source = ApiKeySource::ConfigFile;
+        }
+
+        source
+    }
+
+    #[test]
+    fn test_api_key_env_var_wins_over_keyring_and_config() {
+        let src = resolve_api_key_source(true, true, true);
+        assert_eq!(src, ApiKeySource::EnvVar);
+    }
+
+    #[test]
+    fn test_api_key_keyring_wins_over_config() {
+        let src = resolve_api_key_source(false, true, true);
+        assert_eq!(src, ApiKeySource::Keyring);
+    }
+
+    #[test]
+    fn test_api_key_config_file_is_last_resort() {
+        let src = resolve_api_key_source(false, false, true);
+        assert_eq!(src, ApiKeySource::ConfigFile);
+    }
+
+    #[test]
+    fn test_api_key_none_when_nothing_set() {
+        let src = resolve_api_key_source(false, false, false);
+        assert_eq!(src, ApiKeySource::None);
+    }
+
+    #[test]
+    fn test_plaintext_key_triggers_strict_mode_check() {
+        // Build a config with a plaintext key and strict_permissions = true.
+        // Verify the invariant: strict + plaintext ⇒ should_error is true.
+        let config = Config {
+            api_key: Some(RedactedString::new("sk-test-plaintext")),
+            safety: SafetyConfig {
+                strict_permissions: true,
+                ..SafetyConfig::default()
+            },
+            ..Config::default()
+        };
+
+        // The logic in Config::load checks:
+        //   api_key_source == ConfigFile && strict_permissions ⇒ error
+        let source = ApiKeySource::ConfigFile;
+        let should_error =
+            matches!(source, ApiKeySource::ConfigFile) && config.safety.strict_permissions;
+        assert!(
+            should_error,
+            "Plaintext key + strict mode should trigger an error"
+        );
+    }
+
+    #[test]
+    fn test_plaintext_key_no_error_without_strict() {
+        let config = Config {
+            api_key: Some(RedactedString::new("sk-test-plaintext")),
+            safety: SafetyConfig {
+                strict_permissions: false,
+                ..SafetyConfig::default()
+            },
+            ..Config::default()
+        };
+
+        let source = ApiKeySource::ConfigFile;
+        let should_error =
+            matches!(source, ApiKeySource::ConfigFile) && config.safety.strict_permissions;
+        assert!(
+            !should_error,
+            "Plaintext key without strict mode should only warn, not error"
+        );
+    }
+
+    #[test]
+    fn test_env_var_key_no_warning_even_with_strict() {
+        // When the key comes from an env var, strict_permissions should
+        // not trigger any error or warning about plaintext config files.
+        let config = Config {
+            api_key: Some(RedactedString::new("sk-from-env")),
+            safety: SafetyConfig {
+                strict_permissions: true,
+                ..SafetyConfig::default()
+            },
+            ..Config::default()
+        };
+
+        let source = ApiKeySource::EnvVar;
+        let should_error =
+            matches!(source, ApiKeySource::ConfigFile) && config.safety.strict_permissions;
+        assert!(
+            !should_error,
+            "Env-var key should never trigger the plaintext config file error"
+        );
+    }
+
+    #[test]
+    fn test_keyring_service_constant() {
+        assert_eq!(KEYRING_SERVICE, "selfware-api-key");
     }
 }

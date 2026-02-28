@@ -9,10 +9,10 @@
 //! - Shared context and results aggregation
 
 use anyhow::{Context, Result};
-use futures::stream::{FuturesUnordered, StreamExt};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex, RwLock, Semaphore};
+use tokio::task::JoinSet;
 
 use crate::api::types::Message;
 use crate::api::{ApiClient, ThinkingMode};
@@ -247,8 +247,8 @@ impl MultiAgentChat {
         // Shared cancellation state for FailFast policy
         let cancelled = Arc::new(tokio::sync::Notify::new());
 
-        // Spawn concurrent agent tasks
-        let mut futures = FuturesUnordered::new();
+        // Spawn concurrent agent tasks using JoinSet for structured cancellation
+        let mut join_set = JoinSet::new();
 
         for agent_id in 0..agent_count {
             let client = Arc::clone(&self.client);
@@ -262,7 +262,7 @@ impl MultiAgentChat {
             let failure_policy = self.config.failure_policy;
             let cancelled = Arc::clone(&cancelled);
 
-            futures.push(tokio::spawn(async move {
+            join_set.spawn(async move {
                 tokio::select! {
                     _ = cancelled.notified() => {
                         // Aborted by policy
@@ -277,11 +277,11 @@ impl MultiAgentChat {
                         res
                     }
                 }
-            }));
+            });
         }
 
         // Wait for all agents to complete or fail
-        while let Some(result) = futures.next().await {
+        while let Some(result) = join_set.join_next().await {
             match result {
                 Ok(Ok(_)) => {
                     // Task finished
@@ -290,12 +290,28 @@ impl MultiAgentChat {
                     eprintln!("Agent-specific error: {}", e);
                     if self.config.failure_policy == MultiAgentFailurePolicy::FailFast {
                         cancelled.notify_waiters();
+                        // Abort all remaining in-flight tasks
+                        join_set.abort_all();
+                        // Drain remaining tasks to ensure clean shutdown
+                        while join_set.join_next().await.is_some() {}
+                        break;
                     }
                 }
+                Err(e) if e.is_cancelled() => {
+                    // Task was cancelled (e.g., via abort_all), not an error
+                    tracing::debug!("Agent task cancelled: {}", e);
+                }
                 Err(e) => {
+                    // Task panicked
+                    tracing::error!("Agent task panicked: {}", e);
                     eprintln!("Agent task panicked: {}", e);
                     if self.config.failure_policy == MultiAgentFailurePolicy::FailFast {
                         cancelled.notify_waiters();
+                        // Abort all remaining in-flight tasks
+                        join_set.abort_all();
+                        // Drain remaining tasks to ensure clean shutdown
+                        while join_set.join_next().await.is_some() {}
+                        break;
                     }
                 }
             }

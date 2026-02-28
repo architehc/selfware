@@ -25,6 +25,7 @@ pub mod yolo;
 // Re-exports for convenience
 pub use autonomy::{AutonomyContext, AutonomyController, AutonomyLevel};
 pub use checker::SafetyChecker;
+pub(crate) use checker::{is_private_or_internal, PinnedDnsResolver};
 pub use sandbox::{FilesystemPolicy, NetworkPolicy, ResourceLimits};
 pub use scanner::{
     SecretScanner, SecurityCategory, SecurityFinding, SecurityScanner, SecuritySeverity,

@@ -756,6 +756,108 @@ fn split_shell_commands(cmd: &str) -> Vec<&str> {
     parts
 }
 
+/// Check if an IP address is private, loopback, link-local, or otherwise internal.
+///
+/// This is the single source of truth for "is this IP unsafe to connect to?"
+/// Used by both the static URL checker (`check_url_ssrf`) and the runtime DNS
+/// resolver (`PinnedDnsResolver`) so that the same logic is applied at every layer.
+pub(crate) fn is_private_or_internal(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+                // Cloud metadata endpoint (169.254.0.0/16, which includes 169.254.169.254)
+                || (v4.octets()[0] == 169 && v4.octets()[1] == 254)
+                // Documentation ranges (RFC 5737)
+                || (v4.octets()[0] == 192 && v4.octets()[1] == 0 && v4.octets()[2] == 2)
+                || (v4.octets()[0] == 198 && v4.octets()[1] == 51 && v4.octets()[2] == 100)
+                || (v4.octets()[0] == 203 && v4.octets()[1] == 0 && v4.octets()[2] == 113)
+                // Alibaba Cloud metadata (100.100.100.200 falls in 100.64.0.0/10 CGNAT)
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                // Link-local (fe80::/10)
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                // Unique local (fc00::/7)
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                // v4-mapped addresses — check the embedded v4 address
+                || v6.to_ipv4_mapped().is_some_and(|v4| {
+                    v4.is_private()
+                        || v4.is_loopback()
+                        || v4.is_link_local()
+                        || v4.is_broadcast()
+                        || v4.is_unspecified()
+                        || (v4.octets()[0] == 169 && v4.octets()[1] == 254)
+                        || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
+                })
+        }
+    }
+}
+
+/// A DNS resolver that pins resolved IPs and rejects private/internal addresses.
+///
+/// This prevents DNS rebinding attacks where a hostname resolves to a public IP
+/// during validation but to a private IP (e.g., 169.254.169.254) during the actual
+/// HTTP request. By implementing `reqwest::dns::Resolve`, this resolver is used
+/// directly by the HTTP client — the same IPs that pass validation are the ones
+/// used for the connection.
+///
+/// When `allow_private` is true (set via `SELFWARE_ALLOW_PRIVATE_NETWORK=1`),
+/// private IPs are permitted through without filtering.
+#[derive(Clone)]
+pub(crate) struct PinnedDnsResolver {
+    allow_private: bool,
+}
+
+impl PinnedDnsResolver {
+    /// Create a new resolver. When `allow_private` is true, private/internal IPs
+    /// are allowed through (for local development / testing).
+    pub(crate) fn new(allow_private: bool) -> Self {
+        Self { allow_private }
+    }
+}
+
+impl reqwest::dns::Resolve for PinnedDnsResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let allow_private = self.allow_private;
+        Box::pin(async move {
+            let addrs: Vec<std::net::SocketAddr> =
+                tokio::net::lookup_host(format!("{}:0", name.as_str()))
+                    .await
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?
+                    .collect();
+
+            if allow_private {
+                // Return all addresses without filtering
+                let iter: reqwest::dns::Addrs = Box::new(addrs.into_iter());
+                return Ok(iter);
+            }
+
+            // Filter out private/internal IPs
+            let safe_addrs: Vec<std::net::SocketAddr> = addrs
+                .into_iter()
+                .filter(|addr| !is_private_or_internal(addr.ip()))
+                .collect();
+
+            if safe_addrs.is_empty() {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "DNS resolved to private/internal IP address (potential DNS rebinding attack)",
+                ))
+                    as Box<dyn std::error::Error + Send + Sync>);
+            }
+
+            let iter: reqwest::dns::Addrs = Box::new(safe_addrs.into_iter());
+            Ok(iter)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1949,5 +2051,151 @@ mod tests {
             SUSPICIOUS_SUBSTITUTION_PATTERN.is_match("echo ${PATH}"),
             "suspicious substitution pattern should match ${{...}}"
         );
+    }
+
+    // ── is_private_or_internal tests ────────────────────────────────────
+
+    #[test]
+    fn test_private_ipv4_loopback() {
+        let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(is_private_or_internal(ip), "loopback should be private");
+
+        let ip2: std::net::IpAddr = "127.255.255.254".parse().unwrap();
+        assert!(is_private_or_internal(ip2), "127.x.x.x should be private");
+    }
+
+    #[test]
+    fn test_private_ipv4_rfc1918() {
+        for addr in &[
+            "10.0.0.1",
+            "10.255.255.255",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.0.1",
+            "192.168.255.255",
+        ] {
+            let ip: std::net::IpAddr = addr.parse().unwrap();
+            assert!(is_private_or_internal(ip), "{} should be private", addr);
+        }
+    }
+
+    #[test]
+    fn test_private_ipv4_link_local() {
+        let ip: std::net::IpAddr = "169.254.169.254".parse().unwrap();
+        assert!(
+            is_private_or_internal(ip),
+            "cloud metadata IP should be private"
+        );
+
+        let ip2: std::net::IpAddr = "169.254.0.1".parse().unwrap();
+        assert!(is_private_or_internal(ip2), "link-local should be private");
+    }
+
+    #[test]
+    fn test_private_ipv4_cgnat() {
+        // Alibaba Cloud metadata (100.100.100.200) falls in 100.64.0.0/10
+        let ip: std::net::IpAddr = "100.100.100.200".parse().unwrap();
+        assert!(is_private_or_internal(ip), "CGNAT range should be private");
+    }
+
+    #[test]
+    fn test_private_ipv4_special() {
+        let broadcast: std::net::IpAddr = "255.255.255.255".parse().unwrap();
+        assert!(
+            is_private_or_internal(broadcast),
+            "broadcast should be private"
+        );
+
+        let unspecified: std::net::IpAddr = "0.0.0.0".parse().unwrap();
+        assert!(
+            is_private_or_internal(unspecified),
+            "unspecified should be private"
+        );
+    }
+
+    #[test]
+    fn test_public_ipv4_allowed() {
+        for addr in &["8.8.8.8", "1.1.1.1", "93.184.216.34", "203.0.114.1"] {
+            let ip: std::net::IpAddr = addr.parse().unwrap();
+            assert!(
+                !is_private_or_internal(ip),
+                "{} should NOT be private",
+                addr
+            );
+        }
+    }
+
+    #[test]
+    fn test_private_ipv6_loopback() {
+        let ip: std::net::IpAddr = "::1".parse().unwrap();
+        assert!(
+            is_private_or_internal(ip),
+            "IPv6 loopback should be private"
+        );
+    }
+
+    #[test]
+    fn test_private_ipv6_link_local() {
+        let ip: std::net::IpAddr = "fe80::1".parse().unwrap();
+        assert!(
+            is_private_or_internal(ip),
+            "IPv6 link-local should be private"
+        );
+    }
+
+    #[test]
+    fn test_private_ipv6_unique_local() {
+        let ip: std::net::IpAddr = "fd00::1".parse().unwrap();
+        assert!(
+            is_private_or_internal(ip),
+            "IPv6 unique-local should be private"
+        );
+    }
+
+    #[test]
+    fn test_private_ipv6_unspecified() {
+        let ip: std::net::IpAddr = "::".parse().unwrap();
+        assert!(
+            is_private_or_internal(ip),
+            "IPv6 unspecified should be private"
+        );
+    }
+
+    #[test]
+    fn test_public_ipv6_allowed() {
+        let ip: std::net::IpAddr = "2001:4860:4860::8888".parse().unwrap();
+        assert!(
+            !is_private_or_internal(ip),
+            "Google DNS IPv6 should NOT be private"
+        );
+    }
+
+    #[test]
+    fn test_ipv4_mapped_ipv6_private() {
+        // ::ffff:127.0.0.1 is a v4-mapped IPv6 address
+        let ip: std::net::IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        assert!(
+            is_private_or_internal(ip),
+            "v4-mapped loopback should be private"
+        );
+
+        let ip2: std::net::IpAddr = "::ffff:169.254.169.254".parse().unwrap();
+        assert!(
+            is_private_or_internal(ip2),
+            "v4-mapped metadata IP should be private"
+        );
+    }
+
+    #[test]
+    fn test_ipv4_doc_ranges_blocked() {
+        // RFC 5737 documentation ranges
+        for addr in &["192.0.2.1", "198.51.100.1", "203.0.113.1"] {
+            let ip: std::net::IpAddr = addr.parse().unwrap();
+            assert!(
+                is_private_or_internal(ip),
+                "{} (doc range) should be private",
+                addr
+            );
+        }
     }
 }

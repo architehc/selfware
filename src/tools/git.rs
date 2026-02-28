@@ -3,7 +3,9 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use git2::{Repository, StatusOptions};
 use serde_json::Value;
-use tracing::info;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tracing::{info, warn};
 
 /// Validate a git tag name to prevent shell injection.
 ///
@@ -30,6 +32,34 @@ fn validate_tag_name(name: &str) -> Result<()> {
         anyhow::bail!("Tag name must not start with '-'");
     }
     Ok(())
+}
+
+/// Counter for unique temp file names within the same process.
+static COMMIT_MSG_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Write a commit message to a temp file for use with `git commit --file`.
+///
+/// Returns `Some(path)` on success, or `None` if writing fails (caller should
+/// fall back to `-m`).
+fn write_commit_message_file(message: &str) -> Option<PathBuf> {
+    let seq = COMMIT_MSG_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let temp_dir = std::env::temp_dir();
+    let msg_file = temp_dir.join(format!(
+        "selfware_commit_msg_{}_{}.txt",
+        std::process::id(),
+        seq
+    ));
+    match std::fs::write(&msg_file, message) {
+        Ok(()) => Some(msg_file),
+        Err(e) => {
+            warn!(
+                "Failed to write commit message to temp file {}: {}. Falling back to -m.",
+                msg_file.display(),
+                e
+            );
+            None
+        }
+    }
 }
 
 pub struct GitStatus;
@@ -107,11 +137,26 @@ impl Tool for GitCheckpoint {
 
         // Commit with checkpoint marker
         let full_msg = format!("[AGENT CHECKPOINT] {}", msg);
-        let commit_output = tokio::process::Command::new("git")
-            .args(["commit", "-m", &full_msg, "--allow-empty"])
-            .output()
-            .await
-            .context("Failed to create checkpoint commit")?;
+        let msg_file = write_commit_message_file(&full_msg);
+        let commit_output = if let Some(ref path) = msg_file {
+            tokio::process::Command::new("git")
+                .arg("commit")
+                .arg("--file")
+                .arg(path)
+                .arg("--allow-empty")
+                .output()
+                .await
+                .context("Failed to create checkpoint commit")?
+        } else {
+            tokio::process::Command::new("git")
+                .args(["commit", "-m", &full_msg, "--allow-empty"])
+                .output()
+                .await
+                .context("Failed to create checkpoint commit")?
+        };
+        if let Some(path) = msg_file {
+            let _ = std::fs::remove_file(path);
+        }
 
         // Get hash
         let hash_output = tokio::process::Command::new("git")
@@ -317,15 +362,31 @@ impl Tool for GitCommit {
             }
         }
 
-        // Commit
-        let output = tokio::process::Command::new("git")
-            .arg("-C")
-            .arg(repo_path)
-            .arg("commit")
-            .arg("-m")
-            .arg(message)
-            .output()
-            .await?;
+        // Commit — write message to temp file for defense-in-depth against
+        // shell metacharacters, falling back to -m if the write fails.
+        let msg_file = write_commit_message_file(message);
+        let output = if let Some(ref path) = msg_file {
+            tokio::process::Command::new("git")
+                .arg("-C")
+                .arg(repo_path)
+                .arg("commit")
+                .arg("--file")
+                .arg(path)
+                .output()
+                .await?
+        } else {
+            tokio::process::Command::new("git")
+                .arg("-C")
+                .arg(repo_path)
+                .arg("commit")
+                .arg("-m")
+                .arg(message)
+                .output()
+                .await?
+        };
+        if let Some(path) = msg_file {
+            let _ = std::fs::remove_file(path);
+        }
 
         let success = output.status.success();
         let stdout = String::from_utf8_lossy(&output.stdout);

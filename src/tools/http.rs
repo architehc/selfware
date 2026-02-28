@@ -1,6 +1,7 @@
 //! HTTP request tool for web/API interactions
 
 use super::Tool;
+use crate::safety::{is_private_or_internal, PinnedDnsResolver};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use reqwest::Client;
@@ -8,6 +9,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 pub struct HttpRequest;
@@ -96,38 +98,31 @@ impl Tool for HttpRequest {
             anyhow::bail!("Only HTTP and HTTPS URLs are allowed");
         }
 
-        // Block requests to private/internal network addresses (SSRF protection)
-        // and pin DNS resolution to prevent rebinding attacks.
-        let mut builder = Client::builder().timeout(Duration::from_secs(args.timeout_secs));
+        // SSRF protection: use PinnedDnsResolver to resolve DNS once and reject
+        // private/internal IPs at resolution time. This prevents DNS rebinding
+        // attacks where a hostname resolves to a public IP during validation but
+        // to a private IP (e.g., 169.254.169.254) during the actual connection.
+        let allow_private =
+            std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1";
 
+        let builder = Client::builder()
+            .timeout(Duration::from_secs(args.timeout_secs))
+            .dns_resolver(Arc::new(PinnedDnsResolver::new(allow_private)));
+
+        // For IP-literal URLs, also check at parse time (no DNS involved)
         if let Some(host) = url.host_str() {
-            let allow_private =
-                std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1";
-
-            // Resolve the hostname manually to check the actual IP and pin it
-            if host.parse::<std::net::IpAddr>().is_err() {
-                use std::net::ToSocketAddrs;
-                let port = url.port_or_known_default().unwrap_or(80);
-                if let Ok(mut addrs) = (host, port).to_socket_addrs() {
-                    if let Some(addr) = addrs.next() {
-                        let ip_str = addr.ip().to_string();
-                        if is_private_network_host(&ip_str) && !allow_private {
-                            anyhow::bail!(
-                                "DNS rebinding blocked: {} resolves to private IP {}",
-                                host,
-                                ip_str
-                            );
-                        }
-                        // Pin the resolved IP so the HTTP client doesn't re-resolve it
-                        builder = builder.resolve(host, addr);
-                    }
+            if let Ok(ip) = host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+            {
+                if is_private_or_internal(ip) && !allow_private {
+                    anyhow::bail!(
+                        "Blocked request to private/internal network address: {}. \
+                         Set SELFWARE_ALLOW_PRIVATE_NETWORK=1 to allow.",
+                        host
+                    );
                 }
-            } else if is_private_network_host(host) && !allow_private {
-                anyhow::bail!(
-                    "Blocked request to private/internal network address: {}. \
-                     Set SELFWARE_ALLOW_PRIVATE_NETWORK=1 to allow.",
-                    host
-                );
             }
 
             if is_private_network_host(host) && allow_private {
@@ -140,36 +135,17 @@ impl Tool for HttpRequest {
 
         let client = builder
             .redirect(if args.follow_redirects {
-                reqwest::redirect::Policy::custom(|attempt| {
+                reqwest::redirect::Policy::custom(move |attempt| {
                     if attempt.previous().len() > 10 {
                         return attempt.error("Too many redirects");
                     }
+                    // Check redirect targets for known-private hostnames (e.g. "localhost").
+                    // DNS-level protection for redirects is handled by PinnedDnsResolver,
+                    // which will reject any resolution to a private IP.
                     if let Some(host) = attempt.url().host_str().map(|h| h.to_owned()) {
-                        let allow_private = std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK")
-                            .unwrap_or_default()
-                            == "1";
-                        if !allow_private {
-                            // Check hostname string first
-                            if is_private_network_host(&host) {
-                                return attempt
-                                    .error("Blocked redirect to private/internal network address");
-                            }
-                            // Also resolve DNS to catch public hostnames pointing to private IPs
-                            if host.parse::<std::net::IpAddr>().is_err() {
-                                use std::net::ToSocketAddrs;
-                                let port = attempt.url().port_or_known_default().unwrap_or(80);
-                                if let Ok(addrs) = (host.as_str(), port).to_socket_addrs() {
-                                    for addr in addrs {
-                                        if is_private_network_host(&addr.ip().to_string()) {
-                                            return attempt.error(format!(
-                                                "Blocked redirect: {} resolves to private IP {}",
-                                                host,
-                                                addr.ip()
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
+                        if !allow_private && is_private_network_host(&host) {
+                            return attempt
+                                .error("Blocked redirect to private/internal network address");
                         }
                     }
                     attempt.follow()
@@ -263,23 +239,17 @@ impl Tool for HttpRequest {
 }
 
 /// Check whether a hostname or IP belongs to a private/internal network range.
+///
+/// Delegates IP-based checks to `is_private_or_internal` from the safety module
+/// (single source of truth for IP classification). Also handles special hostnames
+/// like "localhost".
 fn is_private_network_host(host: &str) -> bool {
     if host == "localhost" || host.ends_with(".localhost") {
         return true;
     }
     let bare_host = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = bare_host.parse::<IpAddr>() {
-        return match ip {
-            IpAddr::V4(v4) => {
-                v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
-            }
-            IpAddr::V6(v6) => {
-                v6.is_loopback()
-                    || v6.is_unspecified()
-                    || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10
-                    || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7
-            }
-        };
+        return is_private_or_internal(ip);
     }
     false
 }
