@@ -1,0 +1,18 @@
+You are fixing a concurrent task pool implementation in the current directory.
+
+The code has race conditions and correctness bugs. Tests are failing.
+
+Acceptance criteria:
+1. All concurrent operations must be atomic - no TOCTOU races.
+2. Task completion must properly track all counters.
+3. Task failure must properly decrement running count.
+4. Snapshot must return a consistent view of all counters.
+5. All tests must pass, including the concurrent stress test.
+
+Process:
+- Run cargo test first to see failures.
+- Analyze the race conditions carefully.
+- Fix each bug with minimal, correct changes.
+- Run cargo test to verify all pass.
+
+Provide a short summary of what changed.

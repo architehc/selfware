@@ -1,0 +1,18 @@
+You are writing tests for a ring buffer implementation in the current directory.
+
+The RingBuffer<T> implementation is complete and correct but has ZERO tests.
+
+Acceptance criteria:
+1. Write at least 15 test functions in a #[cfg(test)] mod tests block.
+2. Cover: new(), push, pop, peek, len, is_empty, is_full, capacity, clear, iter, drain, extend.
+3. Test edge cases: empty buffer operations, single-element buffer, overflow/wraparound.
+4. Test that push returns the overwritten element when buffer is full.
+5. Test iterator correctness after multiple wraparounds.
+6. All tests must pass.
+
+Process:
+- Read the implementation carefully.
+- Write comprehensive tests.
+- Run cargo test to verify all pass.
+
+Provide a short summary of what changed.

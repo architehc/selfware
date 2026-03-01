@@ -1,0 +1,18 @@
+You are implementing a task management library from type signatures in the current directory.
+
+The types and method signatures are defined. All method bodies are todo!().
+
+Acceptance criteria:
+1. Implement all 12 methods on TaskManager.
+2. add() should assign auto-incrementing IDs starting from 1.
+3. sorted_by_priority() returns Critical first, then High, Medium, Low.
+4. to_json/from_json must roundtrip correctly via serde.
+5. cleanup_completed removes tasks with Status::Completed and created_at < older_than.
+6. All 14 tests must pass.
+
+Process:
+- Read the type definitions and test expectations carefully.
+- Implement each method to satisfy the tests.
+- Run cargo test to verify all pass.
+
+Provide a short summary of what changed.

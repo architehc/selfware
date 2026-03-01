@@ -1,0 +1,18 @@
+You are fixing security vulnerabilities in the current directory.
+
+The crate contains 5 vulnerable functions and empty _secure counterparts.
+
+Acceptance criteria:
+1. Implement read_user_file_secure with path canonicalization and prefix validation.
+2. Implement run_search_secure with input sanitization (no shell metacharacters).
+3. Implement validate_redirect_secure that rejects protocol-relative URLs and external hosts.
+4. Implement render_greeting_secure with proper HTML entity escaping.
+5. Implement handle_error_secure that returns generic error messages without internal paths.
+6. All tests must pass.
+
+Process:
+- Run cargo test first to see which tests fail.
+- Implement each secure function.
+- Run cargo test to verify all pass.
+
+Provide a short summary of what changed.

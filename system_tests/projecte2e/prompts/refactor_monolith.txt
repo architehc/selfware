@@ -1,0 +1,20 @@
+You are refactoring a monolithic key-value store in the current directory.
+
+Everything is currently in a single lib.rs file. Split it into proper modules.
+
+Acceptance criteria:
+1. Create src/entry.rs with the Entry struct and its methods.
+2. Create src/store.rs with the KvStore struct and core CRUD methods.
+3. Create src/query.rs with the query/filter methods (find_by_tag, find_by_prefix, find_newer_than).
+4. Create src/serialization.rs with to_json/from_json methods.
+5. Update src/lib.rs to declare and re-export modules.
+6. All 8 existing tests must remain passing.
+7. Add at least 2 new integration tests that verify cross-module functionality.
+
+Process:
+- Run cargo test first to confirm baseline.
+- Extract modules one at a time.
+- Run cargo test after each extraction to verify nothing breaks.
+- Add new tests last.
+
+Provide a short summary of what changed.
