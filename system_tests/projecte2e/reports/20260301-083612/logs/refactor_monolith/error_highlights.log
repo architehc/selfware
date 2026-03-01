@@ -1,0 +1,22 @@
+117:<arguments>{"content": "use crate::store::KvStore;\n\n// -- Serialization ------------------------------------------------------\n\n/// Serialize the store to a JSON string.\npub fn to_json(store: &KvStore) -> String {\n    serde_json::to_string(store).expect(\"serialization should not fail\")\n}\n\n/// Deserialize a store from a JSON string.\npub fn from_json(json: &str) -> Result<KvStore, serde_json::Error> {\n    serde_json::from_str(json)\n}\n", "path": "./src/serialization.rs"}</arguments>
+150:║ Status: ✗ FAILED                        ║
+166:║   • Fix type errors before proceeding
+181:║ Status: ✗ FAILED                        ║
+195:║   • Fix type errors before proceeding
+217:║ Status: ✗ FAILED                        ║
+231:║   • Fix type errors before proceeding
+246:║ Status: ✗ FAILED                        ║
+257:║   • Fix type errors before proceeding
+279:║ Status: ✗ FAILED                        ║
+288:║   • Fix type errors before proceeding
+308:║ Status: ✗ FAILED                        ║
+317:║   • Fix type errors before proceeding
+332:║ Status: ✗ FAILED                        ║
+341:║   • Fix type errors before proceeding
+356:║ Status: ✗ FAILED                        ║
+365:║   • Fix type errors before proceeding
+380:║ Status: ✗ FAILED                        ║
+389:║   • Fix type errors before proceeding
+393:I need to take a different approach. Let me check the exact error messages by running cargo check:
+418:║ Status: ✗ FAILED                        ║
+427:║   • Fix type errors before proceeding

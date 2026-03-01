@@ -1,0 +1,145 @@
+🌿 Entering garden: /Users/ivo/selfware/system_tests/projecte2e/work/perf_optimization
+
+╭───────────────────────────────────────────────────────────────╮
+│  ⚙️ SELFWARE WORKSHOP [YOLO]                              │
+│  🌿 Tending: perf_optimization
+│  🧭 Remote · 0 tasks completed
+╰───────────────────────────────────────────────────────────────╯
+
+
+⚙️ Headless Mode
+
+🦊 Selfware starting task...
+Task: You are optimizing slow algorithms in the current directory.
+
+The code has correct but extremely slow implementations. Performance tests are timing out.
+
+Acceptance criteria:
+1. two_sum must use O(n) HashMap lookup instead of O(n²) nested loops.
+2. count_unique_words must use HashSet instead of Vec::contains().
+3. longest_common_subsequence must use dynamic programming instead of exponential recursion.
+4. sorted_unique must use sort + dedup instead of nested loop dedup.
+5. char_frequencies must use HashMap instead of per-character iteration.
+6. All correctness and performance tests must pass within time budgets.
+
+Process:
+- Run cargo test first to see timeouts.
+- Rewrite each function with the optimal algorithm.
+- Run cargo test to verify all pass within time limits.
+
+Provide a short summary of what changed.
+📊 [1/2] Planning [░░░░░░░░░░░░░░░░░░░░] 0%
+📊 [2/2] Executing [██████████░░░░░░░░░░] 50% ETA: ~1s
+📝 Step 1 Executing...
+📝 Step 2 Executing...
+<tool>
+<name>file_read</name>
+<arguments>{"path": "./src/lib.rs"}</arguments>
+</tool>
+📝 Step 3 Executing...
+Now let me run the tests to see the current state:
+
+<tool>
+<name>shell_exec</name>
+<arguments>{"command": "cd /testbed && cargo test 2>&1 | head -100"}</arguments>
+</tool>
+📝 Step 4 Executing...
+<tool>
+<name>shell_exec</name>
+<arguments>{"command": "cargo test 2>&1 | head -100"}</arguments>
+</tool>
+📝 Step 5 Executing...
+The tests are timing out as expected due to the inefficient implementations. Let me now implement the optimized versions one by one.
+
+## 1. Optimize two_sum with HashMap (O(n))
+
+<tool>
+<name>file_edit</name>
+<arguments>{"path": "./src/lib.rs", "old_str": "/// O(n²) brute-force two-sum. Should be replaced with O(n) HashMap approach.\npub fn two_sum(nums: &[i32], target: i32) -> Option<(usize, usize)> {\n    for i in 0..nums.len() {\n        for j in (i + 1)..nums.len() {\n            if nums[i] + nums[j] == target {\n                return Some((i, j));\n            }\n        }\n    }\n    None\n}", "new_str": "/// O(n) HashMap-based two-sum.\npub fn two_sum(nums: &[i32], target: i32) -> Option<(usize, usize)> {\n    use std::collections::HashMap;\n    \n    let mut map: HashMap<i32, usize> = HashMap::new();\n    for (i, &num) in nums.iter().enumerate() {\n        let complement = target - num;\n        if let Some(&j) = map.get(&complement) {\n            return Some((j, i));\n        }\n        map.insert(num, i);\n    }\n    None\n}"}</arguments>
+</tool>
+📝 Step 6 Executing...
+## 2. Optimize count_unique_words with HashSet (O(n))
+
+<tool>
+<name>file_edit</name>
+<arguments>{"path": "./src/lib.rs", "old_str": "/// O(n²) unique word count using Vec::contains for dedup. Should use HashSet.\npub fn count_unique_words(text: &str) -> usize {\n    let mut seen: Vec<&str> = Vec::new();\n    for word in text.split_whitespace() {\n        if !seen.contains(&word) {\n            seen.push(word);\n        }\n    }\n    seen.len()\n}", "new_str": "/// O(n) unique word count using HashSet.\npub fn count_unique_words(text: &str) -> usize {\n    use std::collections::HashSet;\n    \n    let mut seen: HashSet<&str> = HashSet::new();\n    for word in text.split_whitespace() {\n        seen.insert(word);\n    }\n    seen.len()\n}"}</arguments>
+</tool>
+📝 Step 7 Executing...
+## 3. Optimize longest_common_subsequence with DP (O(n*m))
+
+<tool>
+<name>file_edit</name>
+<arguments>{"path": "./src/lib.rs", "old_str": "/// Exponential recursive LCS without memoization. Should use DP table.\npub fn longest_common_subsequence(a: &str, b: &str) -> String {\n    let a_chars: Vec<char> = a.chars().collect();\n    let b_chars: Vec<char> = b.chars().collect();\n    lcs_recursive(&a_chars, &b_chars, a_chars.len(), b_chars.len())\n}\n\nfn lcs_recursive(a: &[char], b: &[char], i: usize, j: usize) -> String {\n    if i == 0 || j == 0 {\n        return String::new();\n    }\n    if a[i - 1] == b[j - 1] {\n        let mut result = lcs_recursive(a, b, i - 1, j - 1);\n        result.push(a[i - 1]);\n        result\n    } else {\n        let left = lcs_recursive(a, b, i - 1, j);\n        let up = lcs_recursive(a, b, i, j - 1);\n        if left.len() >= up.len() {\n            left\n        } else {\n            up\n        }\n    }\n}", "new_str": "/// O(n*m) DP-based longest common subsequence.\npub fn longest_common_subsequence(a: &str, b: &str) -> String {\n    let a_chars: Vec<char> = a.chars().collect();\n    let b_chars: Vec<char> = b.chars().collect();\n    let n = a_chars.len();\n    let m = b_chars.len();\n    \n    // Build DP table\n    let mut dp = vec![vec![0; m + 1]; n + 1];\n    \n    for i in 1..=n {\n        for j in 1..=m {\n            if a_chars[i - 1] == b_chars[j - 1] {\n                dp[i][j] = dp[i - 1][j - 1] + 1;\n            } else {\n                dp[i][j] = dp[i - 1][j].max(dp[i][j - 1]);\n            }\n        }\n    }\n    \n    // Reconstruct LCS from DP table\n    let mut result = Vec::new();\n    let mut i = n;\n    let mut j = m;\n    \n    while i > 0 && j > 0 {\n        if a_chars[i - 1] == b_chars[j - 1] {\n            result.push(a_chars[i - 1]);\n            i -= 1;\n            j -= 1;\n        } else if dp[i - 1][j] > dp[i][j - 1] {\n            i -= 1;\n        } else {\n            j -= 1;\n        }\n    }\n    \n    result.reverse();\n    result.iter().collect()\n}"}</arguments>
+</tool>
+📝 Step 8 Executing...
+## 4. Optimize sorted_unique with sort + dedup (O(n log n))
+
+<tool>
+<name>file_edit</name>
+<arguments>{"path": "./src/lib.rs", "old_str": "/// O(n²) sort then nested-loop dedup. Should use sort + dedup() method.\npub fn sorted_unique(data: &mut Vec<i32>) -> Vec<i32> {\n    // Bubble sort (O(n²))\n    let n = data.len();\n    for i in 0..n {\n        for j in 0..n.saturating_sub(i + 1) {\n            if data[j] > data[j + 1] {\n                data.swap(j, j + 1);\n            }\n        }\n    }\n\n    // Nested-loop dedup (O(n²))\n    let mut result: Vec<i32> = Vec::new();\n    for &val in data.iter() {\n        let mut found = false;\n        for &existing in result.iter() {\n            if existing == val {\n                found = true;\n                break;\n            }\n        }\n        if !found {\n            result.push(val);\n        }\n    }\n    result\n}", "new_str": "/// O(n log n) sort + dedup.\npub fn sorted_unique(data: &mut Vec<i32>) -> Vec<i32> {\n    data.sort();\n    data.dedup();\n    data.clone()\n}"}</arguments>
+</tool>
+📝 Step 9 Executing...
+## 5. Optimize char_frequencies with HashMap (O(n))
+
+<tool>
+<name>file_edit</name>
+<arguments>{"path": "./src/lib.rs", "old_str": "/// O(n*k) char frequency count — iterates text once per unique char. Should use HashMap.\npub fn char_frequencies(text: &str) -> Vec<(char, usize)> {\n    let chars: Vec<char> = text.chars().collect();\n\n    // Collect unique chars via linear scan (O(n*k))\n    let mut unique: Vec<char> = Vec::new();\n    for &c in &chars {\n        if !unique.contains(&c) {\n            unique.push(c);\n        }\n    }\n\n    // Count each unique char by scanning the full text again (O(n*k))\n    let mut result: Vec<(char, usize)> = Vec::new();\n    for &u in &unique {\n        let count = chars.iter().filter(|&&c| c == u).count();\n        result.push((u, count));\n    }\n\n    result.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));\n    result\n}", "new_str": "/// O(n) char frequency count using HashMap.\npub fn char_frequencies(text: &str) -> Vec<(char, usize)> {\n    use std::collections::HashMap;\n    \n    let mut freq: HashMap<char, usize> = HashMap::new();\n    for c in text.chars() {\n        *freq.entry(c).or_insert(0) += 1;\n    }\n    \n    let mut result: Vec<(char, usize)> = freq.into_iter().collect();\n    result.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));\n    result\n}"}</arguments>
+</tool>
+📝 Step 10 Executing...
+Now let me verify the changes compile correctly:
+
+<tool>
+<name>cargo_check</name>
+<arguments>{}</arguments>
+</tool>
+📝 Step 11 Executing...
+Great! The code compiles. Now let me run the tests to verify correctness and performance:
+
+<tool>
+<name>shell_exec</name>
+<arguments>{"command": "cargo test 2>&1"}</arguments>
+<arguments>{"timeout_secs":120}</arguments>
+</tool>
+📝 Step 12 Executing...
+<tool>
+<name>shell_exec</name>
+<arguments>{"command": "cargo test 2>&1", "timeout_secs": 120}</arguments>
+</tool>
+📝 Step 13 Executing...
+All 20 tests pass, including the performance tests. Let me verify the final implementation:
+
+<tool>
+<name>file_read</name>
+<arguments>{"path": "./src/lib.rs"}</arguments>
+</tool>
+📝 Step 14 Executing...
+All optimizations complete. Here's a summary of the changes:
+
+## Summary of Optimizations
+
+| Function | Original Complexity | New Complexity | Key Change |
+|----------|---------------------|----------------|------------|
+| `two_sum` | O(n²) nested loops | O(n) HashMap | Use HashMap to store seen numbers and check for complement |
+| `count_unique_words` | O(n²) Vec::contains | O(n) HashSet | Use HashSet for O(1) duplicate checking |
+| `longest_common_subsequence` | O(2^(n+m)) exponential recursion | O(n*m) DP | Build DP table and reconstruct LCS |
+| `sorted_unique` | O(n²) bubble sort + nested dedup | O(n log n) sort + dedup | Use built-in sort() and dedup() methods |
+| `char_frequencies` | O(n*k) per-char iteration | O(n) HashMap | Use HashMap to count frequencies in single pass |
+
+All 20 tests pass, including performance tests with large inputs (100K elements, 500-char strings) within the specified time budgets.
+Final answer: All optimizations complete. Here's a summary of the changes:
+
+## Summary of Optimizations
+
+| Function | Original Complexity | New Complexity | Key Change |
+|----------|---------------------|----------------|------------|
+| `two_sum` | O(n²) nested loops | O(n) HashMap | Use HashMap to store seen numbers and check for complement |
+| `count_unique_words` | O(n²) Vec::contains | O(n) HashSet | Use HashSet for O(1) duplicate checking |
+| `longest_common_subsequence` | O(2^(n+m)) exponential recursion | O(n*m) DP | Build DP table and reconstruct LCS |
+| `sorted_unique` | O(n²) bubble sort + nested dedup | O(n log n) sort + dedup | Use built-in sort() and dedup() methods |
+| `char_frequencies` | O(n*k) per-char iteration | O(n) HashMap | Use HashMap to count frequencies in single pass |
+
+All 20 tests pass, including performance tests with large inputs (100K elements, 500-char strings) within the specified time budgets.
+✅ Task completed successfully!
+
+🌾 Task complete. Your garden has been tended. (7m 31s)
+

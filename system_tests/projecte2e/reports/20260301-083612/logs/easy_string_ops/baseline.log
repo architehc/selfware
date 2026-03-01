@@ -1,0 +1,53 @@
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 4 tests
+word_count_ignores_extra_whitespace --- FAILED
+reverse_handles_ascii_and_unicode --- FAILED
+title_case_capitalizes_all_words --- FAILED
+truncate_respects_max_len_boundary --- FAILED
+
+failures:
+
+---- word_count_ignores_extra_whitespace stdout ----
+
+thread 'word_count_ignores_extra_whitespace' (31867608) panicked at tests/string_tests.rs:31:5:
+assertion `left == right` failed
+  left: 3
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- reverse_handles_ascii_and_unicode stdout ----
+
+thread 'reverse_handles_ascii_and_unicode' (31867605) panicked at tests/string_tests.rs:9:5:
+assertion `left == right` failed
+  left: ""
+ right: "éfac"
+
+---- title_case_capitalizes_all_words stdout ----
+
+thread 'title_case_capitalizes_all_words' (31867606) panicked at tests/string_tests.rs:22:5:
+assertion `left == right` failed
+  left: "Hello world"
+ right: "Hello World"
+
+---- truncate_respects_max_len_boundary stdout ----
+
+thread 'truncate_respects_max_len_boundary' (31867607) panicked at tests/string_tests.rs:15:5:
+assertion `left == right` failed
+  left: "hell..."
+ right: "hello..."
+
+
+failures:
+    reverse_handles_ascii_and_unicode
+    title_case_capitalizes_all_words
+    truncate_respects_max_len_boundary
+    word_count_ignores_extra_whitespace
+
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test string_tests`

@@ -1,0 +1,53 @@
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 6 tests
+. 1/6
+count_ones_tracks_population --- FAILED
+union_combines_both_sets --- FAILED
+iter_ones_returns_all_set_indices --- FAILED
+set_and_get_basic --- FAILED
+clear_removes_bit --- FAILED
+
+failures:
+
+---- count_ones_tracks_population stdout ----
+
+thread 'count_ones_tracks_population' (31867592) panicked at src/lib.rs:28:29:
+attempt to shift left with overflow
+
+---- union_combines_both_sets stdout ----
+
+thread 'union_combines_both_sets' (31867596) panicked at tests/bitset_tests.rs:53:5:
+assertion failed: u.get(5)
+
+---- iter_ones_returns_all_set_indices stdout ----
+
+thread 'iter_ones_returns_all_set_indices' (31867594) panicked at src/lib.rs:28:29:
+attempt to shift left with overflow
+
+---- set_and_get_basic stdout ----
+
+thread 'set_and_get_basic' (31867595) panicked at src/lib.rs:28:29:
+attempt to shift left with overflow
+
+---- clear_removes_bit stdout ----
+
+thread 'clear_removes_bit' (31867591) panicked at tests/bitset_tests.rs:26:5:
+assertion failed: !bs.get(10)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    clear_removes_bit
+    count_ones_tracks_population
+    iter_ones_returns_all_set_indices
+    set_and_get_basic
+    union_combines_both_sets
+
+test result: FAILED. 1 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test bitset_tests`

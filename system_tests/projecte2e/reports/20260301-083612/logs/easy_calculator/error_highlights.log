@@ -1,0 +1,4 @@
+50:2. **`divide`** - panics on division by zero instead of returning `None`
+62:<arguments>{"path": "./src/lib.rs", "old_str": "pub fn divide(a: i64, b: i64) -> Option<i64> {\n    // BUG: division by zero currently panics instead of returning None\n    Some(a / b)\n}", "new_str": "pub fn divide(a: i64, b: i64) -> Option<i64> {\n    if b == 0 {\n        None\n    } else {\n        Some(a / b)\n    }\n}"}</arguments>
+95:2. **`divide`** - Added check for division by zero; now returns `None` when `b == 0` instead of panicking
+109:2. **`divide`** - Added check for division by zero; now returns `None` when `b == 0` instead of panicking

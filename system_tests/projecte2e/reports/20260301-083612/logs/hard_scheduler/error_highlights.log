@@ -1,0 +1,5 @@
+19:4. next_run_at must not panic on overflow (return None instead).
+87:   - Changed `now_epoch + seconds` to `now_epoch.checked_add(seconds)` to prevent overflow panics (returns `None` on overflow)
+93:- ✅ next_run_at returns None on overflow (no panic)
+105:   - Changed `now_epoch + seconds` to `now_epoch.checked_add(seconds)` to prevent overflow panics (returns `None` on overflow)
+111:- ✅ next_run_at returns None on overflow (no panic)

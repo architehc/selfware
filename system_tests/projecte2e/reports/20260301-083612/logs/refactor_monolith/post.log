@@ -1,0 +1,22 @@
+
+running 10 tests
+......... 9/10
+tests::test_cross_module_merge_and_query --- FAILED
+
+failures:
+
+---- tests::test_cross_module_merge_and_query stdout ----
+
+thread 'tests::test_cross_module_merge_and_query' (31888710) panicked at src/lib.rs:267:9:
+assertion `left == right` failed
+  left: Some("value2")
+ right: Some("updated_value2")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::test_cross_module_merge_and_query
+
+test result: FAILED. 9 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--lib`
