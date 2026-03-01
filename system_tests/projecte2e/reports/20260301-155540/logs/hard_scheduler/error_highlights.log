@@ -1,0 +1,2 @@
+20:4. next_run_at must not panic on overflow (return None instead).
+43:The test failures indicate that `next_run_at` is not handling overflow correctly and `parse_duration` is not rejecting zero values as expected. The current implementation of `next_run_at` does not check for overflow before adding `now_epoch + seconds`, which can cause a panic for large values.

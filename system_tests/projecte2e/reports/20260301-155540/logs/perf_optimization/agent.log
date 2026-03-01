@@ -1,0 +1,38 @@
+🌿 Entering garden: /Users/ivo/selfware/system_tests/projecte2e/work/perf_optimization
+WARNING: endpoint 'http://192.168.1.99:1234/v1' uses plain HTTP to a remote host. API keys and data will be transmitted unencrypted. Consider using https:// instead.
+
+╭───────────────────────────────────────────────────────────────╮
+│  ⚙️ SELFWARE WORKSHOP [YOLO]                              │
+│  🌿 Tending: perf_optimization
+│  🧭 Remote · 0 tasks completed
+╰───────────────────────────────────────────────────────────────╯
+
+
+⚙️ Headless Mode
+
+🦊 Selfware starting task...
+Task: You are optimizing slow algorithms in the current directory.
+
+The code has correct but extremely slow implementations. Performance tests are timing out.
+
+Acceptance criteria:
+1. two_sum must use O(n) HashMap lookup instead of O(n²) nested loops.
+2. count_unique_words must use HashSet instead of Vec::contains().
+3. longest_common_subsequence must use dynamic programming instead of exponential recursion.
+4. sorted_unique must use sort + dedup instead of nested loop dedup.
+5. char_frequencies must use HashMap instead of per-character iteration.
+6. All correctness and performance tests must pass within time budgets.
+
+Process:
+- Run cargo test first to see timeouts.
+- Rewrite each function with the optimal algorithm.
+- Run cargo test to verify all pass within time limits.
+
+Provide a short summary of what changed.
+📊 [1/2] Planning [░░░░░░░░░░░░░░░░░░░░] 0%
+📊 [2/2] Executing [██████████░░░░░░░░░░] 50% ETA: ~3m 3s
+📝 Step 1 Executing...
+📝 Step 2 Executing...
+
+Received shutdown signal, exiting gracefully...
+Shutdown grace period expired, forcing exit.

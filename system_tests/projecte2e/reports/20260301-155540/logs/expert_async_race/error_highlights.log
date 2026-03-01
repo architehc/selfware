@@ -1,0 +1,1 @@
+61:3. **Split Lock Bug in `snapshot()`**: The `snapshot()` method reads `running` under one lock, then reads `completed` and `failed` under another. This allows the state to change between the two reads, giving an inconsistent view.

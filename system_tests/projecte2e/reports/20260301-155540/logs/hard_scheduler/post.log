@@ -1,0 +1,45 @@
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 4 tests
+. 1/4
+parse_duration_supports_seconds_minutes_hours_days_and_spaces --- FAILED
+parse_duration_rejects_invalid_or_zero_values --- FAILED
+scheduler_timing_logic_is_correct --- FAILED
+
+failures:
+
+---- parse_duration_supports_seconds_minutes_hours_days_and_spaces stdout ----
+
+thread 'parse_duration_supports_seconds_minutes_hours_days_and_spaces' (32273820) panicked at tests/scheduler_tests.rs:8:5:
+assertion `left == right` failed
+  left: None
+ right: Some(86400)
+
+---- parse_duration_rejects_invalid_or_zero_values stdout ----
+
+thread 'parse_duration_rejects_invalid_or_zero_values' (32273819) panicked at tests/scheduler_tests.rs:17:5:
+assertion `left == right` failed
+  left: Some(0)
+ right: None
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- scheduler_timing_logic_is_correct stdout ----
+
+thread 'scheduler_timing_logic_is_correct' (32273821) panicked at tests/scheduler_tests.rs:29:5:
+assertion `left == right` failed
+  left: None
+ right: Some(1700086400)
+
+
+failures:
+    parse_duration_rejects_invalid_or_zero_values
+    parse_duration_supports_seconds_minutes_hours_days_and_spaces
+    scheduler_timing_logic_is_correct
+
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test scheduler_tests`
