@@ -1947,3 +1947,90 @@ fn test_log_eviction_at_max_entries() {
     // The first entry should be msg 5 (first 5 evicted)
     assert_eq!(ctx.logs[0].message, "msg 5");
 }
+
+// =========================================================================
+// Shell-safe substitution tests
+// =========================================================================
+
+#[test]
+fn test_substitute_shell_safe_quotes_values() {
+    let mut ctx = WorkflowContext::new("/tmp");
+    ctx.set_var("name", "hello world");
+
+    let result = ctx.substitute_shell_safe("echo ${name}");
+    assert_eq!(result, "echo 'hello world'");
+}
+
+#[test]
+fn test_substitute_shell_safe_prevents_semicolon_injection() {
+    let mut ctx = WorkflowContext::new("/tmp");
+    ctx.set_var("user", "foo; rm -rf /");
+
+    let result = ctx.substitute_shell_safe("echo ${user}");
+    assert_eq!(result, "echo 'foo; rm -rf /'");
+}
+
+#[test]
+fn test_substitute_shell_safe_prevents_pipe_injection() {
+    let mut ctx = WorkflowContext::new("/tmp");
+    ctx.set_var("input", "x | cat /etc/passwd");
+
+    let result = ctx.substitute_shell_safe("grep ${input} file.txt");
+    assert_eq!(result, "grep 'x | cat /etc/passwd' file.txt");
+}
+
+#[test]
+fn test_substitute_shell_safe_prevents_command_substitution() {
+    let mut ctx = WorkflowContext::new("/tmp");
+    ctx.set_var("val", "$(whoami)");
+
+    let result = ctx.substitute_shell_safe("echo ${val}");
+    assert_eq!(result, "echo '$(whoami)'");
+}
+
+#[test]
+fn test_substitute_shell_safe_prevents_backtick_injection() {
+    let mut ctx = WorkflowContext::new("/tmp");
+    ctx.set_var("val", "`whoami`");
+
+    let result = ctx.substitute_shell_safe("echo ${val}");
+    assert_eq!(result, "echo '`whoami`'");
+}
+
+#[test]
+fn test_substitute_shell_safe_escapes_single_quotes_in_value() {
+    let mut ctx = WorkflowContext::new("/tmp");
+    ctx.set_var("msg", "it's dangerous");
+
+    let result = ctx.substitute_shell_safe("echo ${msg}");
+    assert_eq!(result, "echo 'it'\\''s dangerous'");
+}
+
+#[test]
+fn test_substitute_shell_safe_dollar_syntax() {
+    let mut ctx = WorkflowContext::new("/tmp");
+    ctx.set_var("x", "a & b");
+
+    let result = ctx.substitute_shell_safe("echo $x");
+    assert_eq!(result, "echo 'a & b'");
+}
+
+#[test]
+fn test_substitute_shell_safe_plain_values_still_quoted() {
+    let mut ctx = WorkflowContext::new("/tmp");
+    ctx.set_var("name", "alice");
+
+    // Even safe values get quoted — consistent behavior
+    let result = ctx.substitute_shell_safe("echo ${name}");
+    assert_eq!(result, "echo 'alice'");
+}
+
+#[test]
+fn test_substitute_unchanged_for_non_shell() {
+    // Regular substitute should remain unquoted for non-shell contexts
+    let mut ctx = WorkflowContext::new("/tmp");
+    ctx.set_var("user", "foo; rm -rf /");
+
+    let result = ctx.substitute("echo ${user}");
+    assert_eq!(result, "echo foo; rm -rf /");
+}

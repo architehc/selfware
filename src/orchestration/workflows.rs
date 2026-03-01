@@ -514,24 +514,59 @@ impl WorkflowContext {
 
     /// Substitute variables in a string
     pub fn substitute(&self, template: &str) -> String {
+        Self::substitute_impl(template, &self.variables, false)
+    }
+
+    /// Substitute variables with shell-safe quoting to prevent injection.
+    ///
+    /// Each value is wrapped in single quotes with internal single quotes
+    /// escaped as `'\''`, which is the standard POSIX shell quoting approach.
+    /// Use this for any string that will be passed to `sh -c`.
+    pub fn substitute_shell_safe(&self, template: &str) -> String {
+        Self::substitute_impl(template, &self.variables, true)
+    }
+
+    fn substitute_impl(
+        template: &str,
+        variables: &HashMap<String, VarValue>,
+        shell_quote: bool,
+    ) -> String {
         let mut result = template.to_string();
 
-        for (name, value) in &self.variables {
+        for (name, value) in variables {
             let placeholder = format!("${{{}}}", name);
             if let Some(s) = value.as_string() {
-                result = result.replace(&placeholder, &s);
+                let safe = if shell_quote {
+                    Self::shell_quote(&s)
+                } else {
+                    s
+                };
+                result = result.replace(&placeholder, &safe);
             }
         }
 
         // Also support $name syntax
-        for (name, value) in &self.variables {
+        for (name, value) in variables {
             let placeholder = format!("${}", name);
             if let Some(s) = value.as_string() {
-                result = result.replace(&placeholder, &s);
+                let safe = if shell_quote {
+                    Self::shell_quote(&s)
+                } else {
+                    s
+                };
+                result = result.replace(&placeholder, &safe);
             }
         }
 
         result
+    }
+
+    /// POSIX shell quoting: wrap in single quotes, escape internal single quotes.
+    fn shell_quote(s: &str) -> String {
+        // Single-quoted strings in POSIX shell treat everything as literal
+        // except single quotes themselves. Escape them by ending the quoted
+        // section, adding an escaped single quote, and reopening.
+        format!("'{}'", s.replace('\'', "'\\''"))
     }
 
     /// Evaluate a simple condition
@@ -1186,7 +1221,7 @@ impl WorkflowExecutor {
                 command,
                 working_dir,
             } => {
-                let resolved_cmd = context.substitute(command);
+                let resolved_cmd = context.substitute_shell_safe(command);
                 let dir = working_dir
                     .as_ref()
                     .map(|d| context.substitute(d))
