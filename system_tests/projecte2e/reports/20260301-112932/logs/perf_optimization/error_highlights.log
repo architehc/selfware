@@ -1,0 +1,3 @@
+58:║ Status: ✗ FAILED                        ║
+63:║   └─ src/lib.rs: failed to resolve: use of u...
+66:║   • Fix type errors before proceeding

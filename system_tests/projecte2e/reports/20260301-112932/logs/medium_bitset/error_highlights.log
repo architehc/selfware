@@ -1,0 +1,3 @@
+14:The implementation has several logic bugs that cause tests to fail or panic.
+68:1. **`set()` bug**: The mask was shifting by `index` instead of `index % 64`, causing overflow panics for bits beyond the first word. Fixed by changing `1u64 << index` to `1u64 << (index % 64)`.
+77:1. **`set()` bug**: The mask was shifting by `index` instead of `index % 64`, causing overflow panics for bits beyond the first word. Fixed by changing `1u64 << index` to `1u64 << (index % 64)`.

@@ -1,0 +1,6 @@
+19:4. next_run_at must not panic on overflow (return None instead).
+54:2. **scheduler.rs**: Overflow panic in `next_run_at`
+101:- Fixed overflow panic in `next_run_at`: Changed `Some(now_epoch + seconds)` to `now_epoch.checked_add(seconds)`
+107:- `next_run_at_handles_large_values_without_panicking` ✓
+120:- Fixed overflow panic in `next_run_at`: Changed `Some(now_epoch + seconds)` to `now_epoch.checked_add(seconds)`
+126:- `next_run_at_handles_large_values_without_panicking` ✓

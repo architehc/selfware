@@ -1,0 +1,42 @@
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+divide_handles_zero_safely --- FAILED
+pow_handles_common_exponents --- FAILED
+basic_arithmetic_works --- FAILED
+
+failures:
+
+---- divide_handles_zero_safely stdout ----
+
+thread 'divide_handles_zero_safely' (32023566) panicked at src/lib.rs:16:10:
+attempt to divide by zero
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- pow_handles_common_exponents stdout ----
+
+thread 'pow_handles_common_exponents' (32023567) panicked at tests/calc_tests.rs:20:5:
+assertion `left == right` failed
+  left: 2
+ right: 1024
+
+---- basic_arithmetic_works stdout ----
+
+thread 'basic_arithmetic_works' (32023565) panicked at tests/calc_tests.rs:7:5:
+assertion `left == right` failed
+  left: 0
+ right: 42
+
+
+failures:
+    basic_arithmetic_works
+    divide_handles_zero_safely
+    pow_handles_common_exponents
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test calc_tests`

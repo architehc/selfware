@@ -1,0 +1,51 @@
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 4 tests
+scheduler_timing_logic_is_correct --- FAILED
+parse_duration_rejects_invalid_or_zero_values --- FAILED
+parse_duration_supports_seconds_minutes_hours_days_and_spaces --- FAILED
+next_run_at_handles_large_values_without_panicking --- FAILED
+
+failures:
+
+---- scheduler_timing_logic_is_correct stdout ----
+
+thread 'scheduler_timing_logic_is_correct' (31992731) panicked at tests/scheduler_tests.rs:29:5:
+assertion `left == right` failed
+  left: None
+ right: Some(1700086400)
+
+---- parse_duration_rejects_invalid_or_zero_values stdout ----
+
+thread 'parse_duration_rejects_invalid_or_zero_values' (31992729) panicked at tests/scheduler_tests.rs:17:5:
+assertion `left == right` failed
+  left: Some(0)
+ right: None
+
+---- parse_duration_supports_seconds_minutes_hours_days_and_spaces stdout ----
+
+thread 'parse_duration_supports_seconds_minutes_hours_days_and_spaces' (31992730) panicked at tests/scheduler_tests.rs:8:5:
+assertion `left == right` failed
+  left: None
+ right: Some(86400)
+
+---- next_run_at_handles_large_values_without_panicking stdout ----
+
+thread 'next_run_at_handles_large_values_without_panicking' (31992728) panicked at src/scheduler.rs:8:10:
+attempt to add with overflow
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    next_run_at_handles_large_values_without_panicking
+    parse_duration_rejects_invalid_or_zero_values
+    parse_duration_supports_seconds_minutes_hours_days_and_spaces
+    scheduler_timing_logic_is_correct
+
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test scheduler_tests`

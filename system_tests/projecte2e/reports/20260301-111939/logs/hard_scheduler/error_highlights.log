@@ -1,0 +1,7 @@
+19:4. next_run_at must not panic on overflow (return None instead).
+65:4. **next_run_at** panics on overflow instead of returning None
+102:The clippy error is unrelated to my changes (it's a command-line parsing issue). Let me run cargo_test one more time to confirm everything works:
+135:4. Fixed overflow panic by using `checked_add()` instead of `+` operator, which returns `None` on overflow
+140:- `next_run_at_handles_large_values_without_panicking` ✓
+154:4. Fixed overflow panic by using `checked_add()` instead of `+` operator, which returns `None` on overflow
+159:- `next_run_at_handles_large_values_without_panicking` ✓

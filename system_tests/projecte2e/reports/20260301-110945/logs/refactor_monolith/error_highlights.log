@@ -1,0 +1,3 @@
+102:<arguments>{"content": "use crate::KvStore;\n\nimpl KvStore {\n    // -- Serialization ------------------------------------------------------\n\n    /// Serialize the store to a JSON string.\n    pub fn to_json(&self) -> String {\n        serde_json::to_string(self).expect(\"serialization should not fail\")\n    }\n\n    /// Deserialize a store from a JSON string.\n    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {\n        serde_json::from_str(json)\n    }\n}\n", "path": "./src/serialization.rs"}</arguments>
+130:║ Status: ✗ FAILED                        ║
+144:║   • Fix type errors before proceeding

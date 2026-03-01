@@ -1,0 +1,31 @@
+
+running 3 tests
+. 1/3
+tests::test_snapshot_consistency --- FAILED
+tests::test_concurrent_race --- FAILED
+
+failures:
+
+---- tests::test_snapshot_consistency stdout ----
+
+thread 'tests::test_snapshot_consistency' (32049303) panicked at src/lib.rs:270:9:
+assertion `left == right` failed: all tasks completed, expected 50 but got 0
+  left: 0
+ right: 50
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::test_concurrent_race stdout ----
+
+thread 'tests::test_concurrent_race' (32049301) panicked at src/lib.rs:191:9:
+assertion `left == right` failed: all tasks finished, running should be 0 but got 10
+  left: 10
+ right: 0
+
+
+failures:
+    tests::test_concurrent_race
+    tests::test_snapshot_consistency
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.00s
+
+error: test failed, to rerun pass `--lib`

@@ -1,0 +1,67 @@
+warning: unused variable: `query`
+  --> src/lib.rs:60:26
+   |
+60 | pub fn run_search_secure(query: &str) -> Result<String, String> {
+   |                          ^^^^^ help: if this is intentional, prefix it with an underscore: `_query`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `url`
+  --> src/lib.rs:75:33
+   |
+75 | pub fn validate_redirect_secure(url: &str) -> bool {
+   |                                 ^^^ help: if this is intentional, prefix it with an underscore: `_url`
+
+warning: unused variable: `name`
+  --> src/lib.rs:90:31
+   |
+90 | pub fn render_greeting_secure(name: &str) -> String {
+   |                               ^^^^ help: if this is intentional, prefix it with an underscore: `_name`
+
+warning: unused variable: `path`
+   --> src/lib.rs:105:28
+    |
+105 | pub fn handle_error_secure(path: &str) -> String {
+    |                            ^^^^ help: if this is intentional, prefix it with an underscore: `_path`
+
+
+running 10 tests
+tests::test_info_leak_blocked --- FAILED
+tests::test_command_injection_blocked --- FAILED
+.. 4/10
+tests::test_open_redirect_blocked --- FAILED
+tests::test_xss_blocked --- FAILED
+....
+failures:
+
+---- tests::test_info_leak_blocked stdout ----
+
+thread 'tests::test_info_leak_blocked' (32018790) panicked at src/lib.rs:106:5:
+not yet implemented: Implement secure version that returns generic error messages without internal paths
+
+---- tests::test_command_injection_blocked stdout ----
+
+thread 'tests::test_command_injection_blocked' (32018788) panicked at src/lib.rs:61:5:
+not yet implemented: Implement secure version with input sanitization (no shell metacharacters)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::test_open_redirect_blocked stdout ----
+
+thread 'tests::test_open_redirect_blocked' (32018792) panicked at src/lib.rs:76:5:
+not yet implemented: Implement secure version that rejects protocol-relative URLs and external hosts
+
+---- tests::test_xss_blocked stdout ----
+
+thread 'tests::test_xss_blocked' (32018796) panicked at src/lib.rs:91:5:
+not yet implemented: Implement secure version with proper HTML entity escaping
+
+
+failures:
+    tests::test_command_injection_blocked
+    tests::test_info_leak_blocked
+    tests::test_open_redirect_blocked
+    tests::test_xss_blocked
+
+test result: FAILED. 6 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `--lib`

@@ -1,0 +1,27 @@
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+.. 2/3
+nested_objects_are_merged_recursively --- FAILED
+
+failures:
+
+---- nested_objects_are_merged_recursively stdout ----
+
+thread 'nested_objects_are_merged_recursively' (32024036) panicked at tests/merge_tests.rs:22:5:
+assertion `left == right` failed
+  left: Null
+ right: "localhost"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    nested_objects_are_merged_recursively
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test merge_tests`

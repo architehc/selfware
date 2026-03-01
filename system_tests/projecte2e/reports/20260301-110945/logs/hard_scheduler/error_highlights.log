@@ -1,0 +1,6 @@
+19:4. next_run_at must not panic on overflow (return None instead).
+69:<arguments>{"content": "use crate::duration::parse_duration;\n\n/// Compute next run timestamp (epoch seconds) from a duration string.\npub fn next_run_at(now_epoch: u64, every: &str) -> Option<u64> {\n    let seconds = parse_duration(every)?;\n    // Use checked_add to avoid overflow panic\n    now_epoch.checked_add(seconds)\n}\n\n/// Return true if enough time has elapsed to run again.\npub fn should_run(last_run_epoch: u64, now_epoch: u64, every: &str) -> bool {\n    match next_run_at(last_run_epoch, every) {\n        Some(next) => now_epoch >= next,\n        None => false,\n    }\n}", "path": "./src/scheduler.rs"}</arguments>
+112:4. **Fixed overflow panic** - Used `checked_add()` instead of `+` operator to return `None` on overflow
+118:- ✅ next_run_at does not panic on overflow (returns None)
+132:4. **Fixed overflow panic** - Used `checked_add()` instead of `+` operator to return `None` on overflow
+138:- ✅ next_run_at does not panic on overflow (returns None)

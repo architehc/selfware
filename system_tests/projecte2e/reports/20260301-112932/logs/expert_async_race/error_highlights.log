@@ -1,0 +1,37 @@
+47:3. **Missing `running` decrement in `fail()`**: Only increments failed
+65:<arguments>{"path": "./src/lib.rs", "old_str": "    /// Mark the current task as failed.\n    ///\n    /// BUG: Increments failed but forgets to decrement running.\n    pub async fn fail(&self) {\n        let mut state = self.state.lock().await;\n        // BUG: missing `state.running -= 1;`\n        state.failed += 1;\n    }", "new_str": "    /// Mark the current task as failed.\n    pub async fn fail(&self) {\n        let mut state = self.state.lock().await;\n        state.running -= 1;\n        state.failed += 1;\n    }"}</arguments>
+66:<arguments>{"path": "./src/lib.rs", "old_str": "    /// Return a snapshot of (running, completed, failed).\n    ///\n    /// BUG: Split lock - reads running under one lock acquisition,\n    /// then reads completed and failed under another. The state can\n    /// change between the two reads, giving an inconsistent view.\n    pub async fn snapshot(&self) -> (u32, u32, u32) {\n        let running = {\n            let state = self.state.lock().await;\n            state.running\n        };\n        // ^^^ Lock dropped. State can mutate here.\n        let (completed, failed) = {\n            let state = self.state.lock().await;\n            (state.completed, state.failed)\n        };\n        (running, completed, failed)\n    }", "new_str": "    /// Return a snapshot of (running, completed, failed).\n    pub async fn snapshot(&self) -> (u32, u32, u32) {\n        let state = self.state.lock().await;\n        (state.running, state.completed, state.failed)\n    }"}</arguments>
+71:<arguments>{"path": "./src/lib.rs", "old_str": "    /// Mark the current task as failed.\n    ///\n    /// BUG: Increments failed but forgets to decrement running.\n    pub async fn fail(&self) {\n        let mut state = self.state.lock().await;\n        // BUG: missing `state.running -= 1;`\n        state.failed += 1;\n    }", "new_str": "    /// Mark the current task as failed.\n    pub async fn fail(&self) {\n        let mut state = self.state.lock().await;\n        state.running -= 1;\n        state.failed += 1;\n    }"}</arguments>
+76:<arguments>{"path": "./src/lib.rs", "old_str": "    /// Return a snapshot of (running, completed, failed).\n    ///\n    /// BUG: Split lock - reads running under one lock acquisition,\n    /// then reads completed and failed under another. The state can\n    /// change between the two reads, giving an inconsistent view.\n    pub async fn snapshot(&self) -> (u32, u32, u32) {\n        let running = {\n            let state = self.state.lock().await;\n            state.running\n        };\n        // ^^^ Lock dropped. State can mutate here.\n        let (completed, failed) = {\n            let state = self.state.lock().await;\n            (state.completed, state.failed)\n        };\n        (running, completed, failed)\n    }", "new_str": "    /// Return a snapshot of (running, completed, failed).\n    pub async fn snapshot(&self) -> (u32, u32, u32) {\n        let state = self.state.lock().await;\n        (state.running, state.completed, state.failed)\n    }"}</arguments>
+104:Let me check the test output more carefully - it says `completed (0) + failed (10) should equal 20`. This means 10 tasks failed (which is correct for odd-numbered tasks), but 0 completed instead of 10. This suggests the `complete()` function isn't being called properly or there's still an issue.
+106:Wait, I think I understand now. The test spawns 20 tasks with indices 0-19. Even indices (0,2,4,...,18) should complete, odd indices (1,3,5,...,19) should fail. That's 10 each. But the test shows 0 completed and 10 failed.
+117:Actually, looking at the error message again: "completed (0) + failed (10) should equal 20" - this means only 10 tasks ran at all, not 20. The workaround code is adding 10 extra running slots that never get released.
+125:Actually, looking at the error "completed (0) + failed (10) should equal 20" - this means only 10 tasks actually ran (5 completed + 5 failed = 10, but we see 0 completed and 10 failed). 
+133:- 10 failed (should be 10)
+160:- After 5 tasks failed, no more slots were available
+170:Wait, I think I understand now. The test output says "completed (0) + failed (10)". This means:
+173:- 5 tasks failed (odd indices 1,3,5,7,9)
+198:The variable `i` is captured by value in the `async move` closure. This should work correctly in Rust. But wait - the test shows that only 10 tasks ran total (5 completed + 5 failed or 0 completed + 10 failed depending on interpretation).
+200:Let me re-read the error message: "assertion `left == right` failed: completed (0) + failed (10) should equal 20"
+202:So completed=0, failed=10, total=10. This means only 10 tasks executed their complete/fail logic, and all 10 were odd (failed).
+214:    // Timed out trying to acquire - this happens because
+269:    state.failed += 1;
+322:Actually, I just realized something. The test shows "completed (0) + failed (10)". This means:
+325:- 10 tasks failed
+329:If 10 tasks hit the timeout, that means only 10 tasks reached the complete/fail logic. And all 10 of those were odd tasks (failed).
+331:This suggests that the first 10 tasks (0-9) hit the timeout, and tasks 10-19 ran and failed.
+349:    // Timed out trying to acquire - this happens because
+365:Looking at the test output: "completed (0) + failed (10) should equal 20"
+370:- 10 tasks failed (odd tasks ran)
+428:- completed=0, failed=10, total=10
+464:    state.failed += 1;
+522:- completed=0, failed=10, total=10
+533:/// - complete() doesn't increment `completed`, so completed + failed != 20
+545:- Tasks 0,2,4 complete (running=5, completed=0), tasks 1,3 fail (running=5, failed=3)
+551:But the test shows that 10 tasks hit the timeout. This means 10 tasks ran and completed/failed, and 10 tasks timed out.
+556:- Tasks 0,2,4 complete (running=2, completed=0), tasks 1,3 fail (running=2, failed=2)
+559:- Tasks 5,7,9 complete (running=4, completed=0), tasks 6,8 fail (running=4, failed=4)
+572:    // Timed out trying to acquire - this happens because
+618:    state.failed += 1;
+624:- `fail()` doesn't decrement `running` but increments `failed`
+629:- Tasks 0,2,4 complete (running=2, completed=0), tasks 1,3 fail (running=2, failed=2)

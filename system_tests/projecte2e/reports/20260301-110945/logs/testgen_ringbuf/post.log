@@ -1,0 +1,22 @@
+
+running 22 tests
+.............. 14/22
+tests::test_multiple_wraparounds --- FAILED
+.......
+failures:
+
+---- tests::test_multiple_wraparounds stdout ----
+
+thread 'tests::test_multiple_wraparounds' (32044415) panicked at src/lib.rs:263:9:
+assertion `left == right` failed
+  left: [8, 9]
+ right: [7, 8, 9]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    tests::test_multiple_wraparounds
+
+test result: FAILED. 21 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

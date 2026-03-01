@@ -1,0 +1,5 @@
+63:║ Status: ✗ FAILED                        ║
+71:║   • Fix type errors before proceeding
+75:Let me check the error more carefully. The issue is that `TaskManager` needs to implement `Serialize` and `Deserialize` for JSON serialization to work. Let me fix this:
+125:12. **`from_json()`** - Deserializes from JSON string with error handling
+148:12. **`from_json()`** - Deserializes from JSON string with error handling

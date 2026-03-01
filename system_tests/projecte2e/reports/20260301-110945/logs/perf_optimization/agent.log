@@ -1,0 +1,143 @@
+🌿 Entering garden: /Users/ivo/selfware/system_tests/projecte2e/work/perf_optimization
+
+╭───────────────────────────────────────────────────────────────╮
+│  ⚙️ SELFWARE WORKSHOP [YOLO]                              │
+│  🌿 Tending: perf_optimization
+│  🧭 Remote · 0 tasks completed
+╰───────────────────────────────────────────────────────────────╯
+
+
+⚙️ Headless Mode
+
+🦊 Selfware starting task...
+Task: You are optimizing slow algorithms in the current directory.
+
+The code has correct but extremely slow implementations. Performance tests are timing out.
+
+Acceptance criteria:
+1. two_sum must use O(n) HashMap lookup instead of O(n²) nested loops.
+2. count_unique_words must use HashSet instead of Vec::contains().
+3. longest_common_subsequence must use dynamic programming instead of exponential recursion.
+4. sorted_unique must use sort + dedup instead of nested loop dedup.
+5. char_frequencies must use HashMap instead of per-character iteration.
+6. All correctness and performance tests must pass within time budgets.
+
+Process:
+- Run cargo test first to see timeouts.
+- Rewrite each function with the optimal algorithm.
+- Run cargo test to verify all pass within time limits.
+
+Provide a short summary of what changed.
+📊 [1/2] Planning [░░░░░░░░░░░░░░░░░░░░] 0%
+📊 [2/2] Executing [██████████░░░░░░░░░░] 50% ETA: ~1s
+📝 Step 1 Executing...
+📝 Step 2 Executing...
+<tool>
+<name>file_read</name>
+<arguments>{"path": "./src/lib.rs"}</arguments>
+</tool>
+📝 Step 3 Executing...
+Now let me run the tests to see the current performance issues:
+
+<tool>
+<name>shell_exec</name>
+<arguments>{"command": "cargo test 2>&1 | head -100"}</arguments>
+</tool>
+📝 Step 4 Executing...
+The tests are timing out as expected. Let me now rewrite the lib.rs file with optimized implementations for all functions:
+
+<tool>
+<name>file_write</name>
+<arguments>{"content": "// Performance Optimization Challenge\n//\n// Each function below is correct but has deliberately bad algorithmic complexity.\n// The goal is to replace each implementation with an optimal algorithm while\n// preserving correctness. Performance tests enforce time budgets that only the\n// optimized versions can meet.\n\nuse std::collections::{HashMap, HashSet};\n\n/// O(n) HashMap-based two-sum lookup.\npub fn two_sum(nums: &[i32], target: i32) -> Option<(usize, usize)> {\n    let mut map: HashMap<i32, usize> = HashMap::new();\n    for (i, &num) in nums.iter().enumerate() {\n        let complement = target - num;\n        if let Some(&j) = map.get(&complement) {\n            return Some((j, i));\n        }\n        map.insert(num, i);\n    }\n    None\n}\n\n/// O(n) unique word count using HashSet.\npub fn count_unique_words(text: &str) -> usize {\n    let mut seen: HashSet<&str> = HashSet::new();\n    for word in text.split_whitespace() {\n        seen.insert(word);\n    }\n    seen.len()\n}\n\n/// O(n*m) dynamic programming LCS using a 2D table.\npub fn longest_common_subsequence(a: &str, b: &str) -> String {\n    let a_chars: Vec<char> = a.chars().collect();\n    let b_chars: Vec<char> = b.chars().collect();\n    let n = a_chars.len();\n    let m = b_chars.len();\n\n    // Build DP table\n    let mut dp = vec![vec![0; m + 1]; n + 1];\n    for i in 1..=n {\n        for j in 1..=m {\n            if a_chars[i - 1] == b_chars[j - 1] {\n                dp[i][j] = dp[i - 1][j - 1] + 1;\n            } else {\n                dp[i][j] = dp[i - 1][j].max(dp[i][j - 1]);\n            }\n        }\n    }\n\n    // Backtrack to build the LCS string\n    let mut result = Vec::new();\n    let mut i = n;\n    let mut j = m;\n    while i > 0 && j > 0 {\n        if a_chars[i - 1] == b_chars[j - 1] {\n            result.push(a_chars[i - 1]);\n            i -= 1;\n            j -= 1;\n        } else if dp[i - 1][j] > dp[i][j - 1] {\n            i -= 1;\n        } else {\n            j -= 1;\n        }\n    }\n    result.reverse();\n    result.iter().collect()\n}\n\n/// O(n log n) sort + O(n) dedup using sort() and dedup_by().\npub fn sorted_unique(data: &mut Vec<i32>) -> Vec<i32> {\n    data.sort();\n    data.dedup();\n    data.clone()\n}\n\n/// O(n) char frequency count using HashMap.\npub fn char_frequencies(text: &str) -> Vec<(char, usize)> {\n    let mut freq: HashMap<char, usize> = HashMap::new();\n    for c in text.chars() {\n        *freq.entry(c).or_insert(0) += 1;\n    }\n\n    let mut result: Vec<(char, usize)> = freq.into_iter().collect();\n    result.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));\n    result\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n    use std::time::Instant;\n\n    // ---------------------------------------------------------------\n    // Correctness tests (small inputs — pass even with slow impls)\n    // ---------------------------------------------------------------\n\n    #[test]\n    fn test_two_sum_basic() {\n        assert_eq!(two_sum(&[2, 7, 11, 15], 9), Some((0, 1)));\n    }\n\n    #[test]\n    fn test_two_sum_no_match() {\n        assert_eq!(two_sum(&[1, 2, 3], 100), None);\n    }\n\n    #[test]\n    fn test_two_sum_negative() {\n        // -3 + 5 = 2 is the only valid pair\n        assert_eq!(two_sum(&[-3, 10, 5, 20], 2), Some((0, 2)));\n    }\n\n    #[test]\n    fn test_unique_words_basic() {\n        assert_eq!(count_unique_words(\"the cat sat on the mat\"), 5);\n    }\n\n    #[test]\n    fn test_unique_words_empty() {\n        assert_eq!(count_unique_words(\"\"), 0);\n    }\n\n    #[test]\n    fn test_unique_words_all_same() {\n        assert_eq!(count_unique_words(\"hello hello hello\"), 1);\n    }\n\n    #[test]\n    fn test_lcs_basic() {\n        let result = longest_common_subsequence(\"abcde\", \"ace\");\n        assert_eq!(result, \"ace\");\n    }\n\n    #[test]\n    fn test_lcs_no_common() {\n        let result = longest_common_subsequence(\"abc\", \"xyz\");\n        assert_eq!(result, \"\");\n    }\n\n    #[test]\n    fn test_lcs_identical() {\n        let result = longest_common_subsequence(\"hello\", \"hello\");\n        assert_eq!(result, \"hello\");\n    }\n\n    #[test]\n    fn test_sorted_unique_basic() {\n        let mut data = vec![3, 1, 2, 1, 3];\n        assert_eq!(sorted_unique(&mut data), vec![1, 2, 3]);\n    }\n\n    #[test]\n    fn test_sorted_unique_empty() {\n        let mut data: Vec<i32> = vec![];\n        assert_eq!(sorted_unique(&mut data), vec![]);\n    }\n\n    #[test]\n    fn test_sorted_unique_single() {\n        let mut data = vec![42];\n        assert_eq!(sorted_unique(&mut data), vec![42]);\n    }\n\n    #[test]\n    fn test_char_freq_basic() {\n        let freqs = char_frequencies(\"aabbc\");\n        // Sorted by descending count, then ascending char\n        assert_eq!(freqs, vec![('a', 2), ('b', 2), ('c', 1)]);\n    }\n\n    #[test]\n    fn test_char_freq_empty() {\n        let freqs = char_frequencies(\"\");\n        assert!(freqs.is_empty());\n    }\n\n    #[test]\n    fn test_char_freq_single() {\n        let freqs = char_frequencies(\"z\");\n        assert_eq!(freqs, vec![('z', 1)]);\n    }\n\n    // ---------------------------------------------------------------\n    // Performance tests (large inputs — only pass with optimal impls)\n    // ---------------------------------------------------------------\n\n    #[test]\n    fn test_two_sum_large() {\n        // 100_000 elements; target is sum of last two elements.\n        let n = 100_000;\n        let nums: Vec<i32> = (0..n).collect();\n        let target = (n - 2) + (n - 1);\n\n        let start = Instant::now();\n        let result = two_sum(&nums, target);\n        let elapsed = start.elapsed();\n\n        assert_eq!(result, Some(((n - 2) as usize, (n - 1) as usize)));\n        assert!(\n            elapsed.as_millis() < 500,\n            \"two_sum took {}ms, budget is 500ms\",\n            elapsed.as_millis()\n        );\n    }\n\n    #[test]\n    fn test_unique_words_large() {\n        // 50_000 words with ~5_000 unique.\n        let vocab: Vec<String> = (0..5_000).map(|i| format!(\"word{}\", i)).collect();\n        let text: String = (0..50_000)\n            .map(|i| vocab[i % vocab.len()].as_str())\n            .collect::<Vec<&str>>()\n            .join(\" \");\n\n        let start = Instant::now();\n        let count = count_unique_words(&text);\n        let elapsed = start.elapsed();\n\n        assert_eq!(count, 5_000);\n        assert!(\n            elapsed.as_millis() < 500,\n            \"count_unique_words took {}ms, budget is 500ms\",\n            elapsed.as_millis()\n        );\n    }\n\n    #[test]\n    fn test_lcs_medium() {\n        // Two 500-char strings. Exponential recursion would never finish.\n        let a: String = (0..500).map(|i| (b'a' + (i % 26) as u8) as char).collect();\n        let b: String = (0..500)\n            .map(|i| (b'a' + ((i + 3) % 26) as u8) as char)\n            .collect();\n\n        let start = Instant::now();\n        let result = longest_common_subsequence(&a, &b);\n        let elapsed = start.elapsed();\n\n        // The LCS should be non-trivial (exact length depends on pattern).\n        assert!(!result.is_empty(), \"LCS should not be empty for overlapping alphabets\");\n        assert!(\n            elapsed.as_millis() < 2_000,\n            \"longest_common_subsequence took {}ms, budget is 2000ms\",\n            elapsed.as_millis()\n        );\n    }\n\n    #[test]\n    fn test_sorted_unique_large() {\n        // 100_000 elements with duplicates.\n        let mut data: Vec<i32> = (0..100_000).map(|i| i % 10_000).collect();\n\n        let start = Instant::now();\n        let result = sorted_unique(&mut data);\n        let elapsed = start.elapsed();\n\n        assert_eq!(result.len(), 10_000);\n        assert_eq!(*result.first().unwrap(), 0);\n        assert_eq!(*result.last().unwrap(), 9_999);\n        // Verify sorted order\n        for window in result.windows(2) {\n            assert!(window[0] < window[1]);\n        }\n        assert!(\n            elapsed.as_millis() < 500,\n            \"sorted_unique took {}ms, budget is 500ms\",\n            elapsed.as_millis()\n        );\n    }\n\n    #[test]\n    fn test_char_freq_large() {\n        // 100_000 chars with moderate alphabet size.\n        let text: String = (0..100_000)\n            .map(|i| (b'a' + (i % 26) as u8) as char)\n            .collect();\n\n        let start = Instant::now();\n        let freqs = char_frequencies(&text);\n        let elapsed = start.elapsed();\n\n        assert_eq!(freqs.len(), 26);\n        let total: usize = freqs.iter().map(|(_, c)| c).sum();\n        assert_eq!(total, 100_000);\n        assert!(\n            elapsed.as_millis() < 500,\n            \"char_frequencies took {}ms, budget is 500ms\",\n            elapsed.as_millis()\n        );\n    }\n}\n", "path": "./src/lib.rs"}</arguments>
+</tool>
+📝 Step 5 Executing...
+Now let me verify the code compiles correctly:
+
+<tool>
+<name>cargo_check</name>
+<arguments>{}</arguments>
+📝 Step 6 Executing...
+<tool>
+<name>cargo_check</name>
+<arguments>{}</arguments>
+</tool>
+📝 Step 7 Executing...
+Code compiles successfully. Now let me run the tests to verify all correctness and performance tests pass:
+
+<tool>
+<name>shell_exec</name>
+<arguments>{"command": "cargo test 2>&1"}</arguments>
+<timeout_secs>60000}</timeout_secs>
+📝 Step 8 Executing...
+<tool>
+<name>shell_exec</name>
+<arguments>{"command": "cargo test 2>&1"}</arguments>
+<arguments>{"timeout_secs":60000}</timeout_secs>}</arguments>
+</tool>
+📝 Step 9 Executing...
+<tool>
+<name>shell_exec</name>
+<arguments>{"command": "cargo test 2>&1", "timeout_secs": 60}</arguments>
+</tool>
+📝 Step 10 Executing...
+All 20 tests pass successfully, including the performance tests. Let me run the tests one more time to confirm consistent performance:
+
+<tool>
+<name>shell_exec</name>
+<arguments>{"command": "cargo test 2>&1", "timeout_secs": 60}</arguments>
+</tool>
+📝 Step 11 Executing...
+All tests pass consistently. Here's a summary of the optimizations made:
+
+## Summary of Changes
+
+### 1. `two_sum`: O(n²) → O(n)
+- **Before**: Nested loops checking all pairs
+- **After**: HashMap lookup - store each number with its index, check for complement
+
+### 2. `count_unique_words`: O(n²) → O(n)
+- **Before**: Vec::contains() for each word (linear search)
+- **After**: HashSet insertion (O(1) average)
+
+### 3. `longest_common_subsequence`: O(2^(n+m)) → O(n*m)
+- **Before**: Exponential recursion without memoization
+- **After**: Dynamic programming table with backtracking
+
+### 4. `sorted_unique`: O(n²) → O(n log n)
+- **Before**: Bubble sort + nested loop dedup
+- **After**: Built-in sort() + dedup_by() method
+
+### 5. `char_frequencies`: O(n*k) → O(n)
+- **Before**: Linear scan for each unique character
+- **After**: HashMap accumulation in single pass
+
+All 20 tests pass, including performance tests with large inputs (100K elements, 500-char strings) within their time budgets.
+Final answer: All tests pass consistently. Here's a summary of the optimizations made:
+
+## Summary of Changes
+
+### 1. `two_sum`: O(n²) → O(n)
+- **Before**: Nested loops checking all pairs
+- **After**: HashMap lookup - store each number with its index, check for complement
+
+### 2. `count_unique_words`: O(n²) → O(n)
+- **Before**: Vec::contains() for each word (linear search)
+- **After**: HashSet insertion (O(1) average)
+
+### 3. `longest_common_subsequence`: O(2^(n+m)) → O(n*m)
+- **Before**: Exponential recursion without memoization
+- **After**: Dynamic programming table with backtracking
+
+### 4. `sorted_unique`: O(n²) → O(n log n)
+- **Before**: Bubble sort + nested loop dedup
+- **After**: Built-in sort() + dedup_by() method
+
+### 5. `char_frequencies`: O(n*k) → O(n)
+- **Before**: Linear scan for each unique character
+- **After**: HashMap accumulation in single pass
+
+All 20 tests pass, including performance tests with large inputs (100K elements, 500-char strings) within their time budgets.
+✅ Task completed successfully!
+
+🌾 Task complete. Your garden has been tended. (2m 43s)
+

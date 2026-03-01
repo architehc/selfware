@@ -1,0 +1,4 @@
+86:2. **`divide`** - panics on division by zero instead of returning `None`
+118:2. **`divide`** - Changed from `Some(a / b)` which panics on division by zero, to checking if `b == 0` first and returning `None` in that case
+131:2. **`divide`** - Changed from `Some(a / b)` which panics on division by zero, to checking if `b == 0` first and returning `None` in that case
+142:2. **`divide`** - Changed from `Some(a / b)` which panics on division by zero, to checking if `b == 0` first and returning `None` in that case

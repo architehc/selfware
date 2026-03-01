@@ -1,0 +1,51 @@
+error[E0616]: field `entries` of struct `KvStore` is private
+ --> src/query.rs:8:14
+  |
+8 |         self.entries
+  |              ^^^^^^^ private field
+
+error[E0616]: field `entries` of struct `KvStore` is private
+  --> src/query.rs:16:14
+   |
+16 |         self.entries
+   |              ^^^^^^^ private field
+
+error[E0616]: field `entries` of struct `KvStore` is private
+  --> src/query.rs:24:14
+   |
+24 |         self.entries
+   |              ^^^^^^^ private field
+
+error[E0616]: field `entries` of struct `KvStore` is private
+  --> src/query.rs:35:35
+   |
+35 |         if let Some(entry) = self.entries.get_mut(key) {
+   |                                   ^^^^^^^ private field
+
+error[E0616]: field `entries` of struct `KvStore` is private
+  --> src/query.rs:49:35
+   |
+49 |         if let Some(entry) = self.entries.get_mut(key) {
+   |                                   ^^^^^^^ private field
+
+error[E0616]: field `entries` of struct `KvStore` is private
+  --> src/serialization.rs:21:42
+   |
+21 |         for (key, other_entry) in &other.entries {
+   |                                          ^^^^^^^ private field
+
+error[E0616]: field `entries` of struct `KvStore` is private
+  --> src/serialization.rs:22:24
+   |
+22 |             match self.entries.get(key) {
+   |                        ^^^^^^^ private field
+
+error[E0616]: field `entries` of struct `KvStore` is private
+  --> src/serialization.rs:27:26
+   |
+27 |                     self.entries.insert(key.clone(), other_entry.clone());
+   |                          ^^^^^^^ private field
+
+For more information about this error, try `rustc --explain E0616`.
+error: could not compile `refactor_monolith` (lib) due to 8 previous errors
+error: could not compile `refactor_monolith` (lib test) due to 8 previous errors

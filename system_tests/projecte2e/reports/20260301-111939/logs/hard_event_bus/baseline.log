@@ -1,0 +1,69 @@
+warning: variable does not need to be mutable
+  --> src/bus.rs:32:27
+   |
+32 |     pub fn publish(&self, mut event: Event) {
+   |                           ----^^^^^
+   |                           |
+   |                           help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 7 tests
+.. 2/7
+subscribers_receive_matching_events --- FAILED
+prefix_filter_matches_subtopics --- FAILED
+event_display_format --- FAILED
+wildcard_subscriber_gets_everything --- FAILED
+subscriber_receives_event_with_correct_seq --- FAILED
+
+failures:
+
+---- subscribers_receive_matching_events stdout ----
+
+thread 'subscribers_receive_matching_events' (32045991) panicked at tests/bus_tests.rs:28:5:
+assertion `left == right` failed
+  left: 0
+ right: 3
+
+---- prefix_filter_matches_subtopics stdout ----
+
+thread 'prefix_filter_matches_subtopics' (32045989) panicked at tests/bus_tests.rs:34:5:
+assertion failed: sub.matches("user.created")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- event_display_format stdout ----
+
+thread 'event_display_format' (32045987) panicked at tests/bus_tests.rs:88:5:
+Display should contain seq: Event { topic: "user.login", data: {}, seq: 7 }
+
+---- wildcard_subscriber_gets_everything stdout ----
+
+thread 'wildcard_subscriber_gets_everything' (32045992) panicked at tests/bus_tests.rs:113:5:
+assertion `left == right` failed
+  left: 0
+ right: 3
+
+---- subscriber_receives_event_with_correct_seq stdout ----
+
+thread 'subscriber_receives_event_with_correct_seq' (32045990) panicked at tests/bus_tests.rs:75:5:
+assertion `left == right` failed
+  left: 0
+ right: 1
+
+
+failures:
+    event_display_format
+    prefix_filter_matches_subtopics
+    subscriber_receives_event_with_correct_seq
+    subscribers_receive_matching_events
+    wildcard_subscriber_gets_everything
+
+test result: FAILED. 2 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test bus_tests`

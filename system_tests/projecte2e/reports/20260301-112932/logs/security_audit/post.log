@@ -1,0 +1,9 @@
+error[E0762]: unterminated character literal
+   --> src/lib.rs:121:18
+    |
+121 |         .replace('&
+    |                  ^^
+
+For more information about this error, try `rustc --explain E0762`.
+error: could not compile `security_audit` (lib test) due to 1 previous error
+error: could not compile `security_audit` (lib) due to 1 previous error
