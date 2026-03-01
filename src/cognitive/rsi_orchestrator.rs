@@ -2,10 +2,24 @@ use crate::cognitive::compilation_manager::CompilationSandbox;
 use crate::cognitive::metrics::MetricsStore;
 use crate::cognitive::self_edit::SelfEditOrchestrator;
 use crate::errors::{Result, SelfwareError};
-use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
+
+/// Serializable snapshot of RSI loop state for persistence across restarts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RSIState {
+    /// Total iterations completed so far (across restarts).
+    pub total_iterations: usize,
+    /// Consecutive failures at the time of save.
+    pub consecutive_failures: usize,
+    /// Max iterations limit.
+    pub max_iterations: usize,
+    /// Circuit-breaker threshold.
+    pub max_consecutive_failures: usize,
+}
 
 /// The outer loop for Recursive Self-Improvement
 pub struct RSIOrchestrator {
@@ -15,23 +29,67 @@ pub struct RSIOrchestrator {
     is_running: bool,
     /// Hard upper bound on the number of improvement iterations before the loop terminates.
     max_iterations: usize,
+    /// Total iterations completed (persisted across restarts).
+    total_iterations: usize,
     /// Tracks how many improvement cycles have failed in a row without a single success.
     consecutive_failures: usize,
     /// Circuit-breaker threshold: if this many consecutive failures occur, the loop aborts.
     max_consecutive_failures: usize,
+    /// Path to the persisted RSI state file.
+    state_path: PathBuf,
 }
 
 impl RSIOrchestrator {
     pub fn new(project_root: PathBuf) -> Self {
-        Self {
+        let state_path = Self::default_state_path(&project_root);
+        let mut orch = Self {
             edit_orchestrator: SelfEditOrchestrator::new(project_root.clone()),
             _metrics: MetricsStore::new(),
             project_root,
             is_running: false,
             max_iterations: 100,
+            total_iterations: 0,
             consecutive_failures: 0,
             max_consecutive_failures: 5,
+            state_path,
+        };
+        // Restore previous state if available.
+        if let Ok(state) = orch.load_state() {
+            info!(
+                "Restored RSI state: {} iterations completed, {} consecutive failures",
+                state.total_iterations, state.consecutive_failures
+            );
+            orch.total_iterations = state.total_iterations;
+            orch.consecutive_failures = state.consecutive_failures;
         }
+        orch
+    }
+
+    fn default_state_path(project_root: &Path) -> PathBuf {
+        project_root.join(".selfware").join("rsi_state.json")
+    }
+
+    /// Save the current loop state to disk so it can be resumed.
+    pub fn save_state(&self) -> std::result::Result<(), std::io::Error> {
+        let state = RSIState {
+            total_iterations: self.total_iterations,
+            consecutive_failures: self.consecutive_failures,
+            max_iterations: self.max_iterations,
+            max_consecutive_failures: self.max_consecutive_failures,
+        };
+        if let Some(parent) = self.state_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(&state)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        std::fs::write(&self.state_path, json)
+    }
+
+    /// Load previously persisted state.
+    fn load_state(&self) -> std::result::Result<RSIState, std::io::Error> {
+        let data = std::fs::read_to_string(&self.state_path)?;
+        serde_json::from_str(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
     /// Run the RSI outer loop with safety guardrails.
@@ -42,20 +100,22 @@ impl RSIOrchestrator {
     /// - `stop()` is called externally.
     pub async fn run_loop(&mut self) -> Result<()> {
         self.is_running = true;
-        self.consecutive_failures = 0;
+        // Don't reset consecutive_failures — the restored value from disk
+        // carries over so the circuit breaker state survives restarts.
         let mut iteration: usize = 0;
 
         info!(
-            "Starting outer RSI loop (max_iterations={}, max_consecutive_failures={})...",
-            self.max_iterations, self.max_consecutive_failures
+            "Starting outer RSI loop (max_iterations={}, total_completed={}, max_consecutive_failures={})...",
+            self.max_iterations, self.total_iterations, self.max_consecutive_failures
         );
 
-        while self.is_running && iteration < self.max_iterations {
+        while self.is_running && (self.total_iterations + iteration) < self.max_iterations {
             iteration += 1;
-            info!("RSI iteration {}/{}", iteration, self.max_iterations);
+            let global_iter = self.total_iterations + iteration;
+            info!("RSI iteration {}/{}", global_iter, self.max_iterations);
 
             // Warn when approaching the iteration limit
-            let remaining = self.max_iterations - iteration;
+            let remaining = self.max_iterations - global_iter;
             if remaining <= 10 && remaining > 0 {
                 warn!(
                     "Approaching iteration limit: {} iterations remaining",
@@ -70,8 +130,6 @@ impl RSIOrchestrator {
                 }
                 Ok(false) => {
                     info!("Improvement cycle did not yield a better fitness score. Changes discarded.");
-                    // A cycle that completes without error but produces no improvement is not
-                    // counted as a failure for circuit-breaker purposes.
                     self.consecutive_failures = 0;
                 }
                 Err(e) => {
@@ -81,13 +139,17 @@ impl RSIOrchestrator {
                         self.consecutive_failures, e
                     );
 
-                    // Warn when approaching the circuit-breaker threshold
                     if self.consecutive_failures >= self.max_consecutive_failures {
                         error!(
                             "Circuit breaker tripped: {} consecutive failures reached the limit of {}. \
                              Aborting RSI loop to prevent runaway damage.",
                             self.consecutive_failures, self.max_consecutive_failures
                         );
+                        // Persist state before aborting so it survives the restart.
+                        self.total_iterations += iteration;
+                        if let Err(save_err) = self.save_state() {
+                            warn!("Failed to save RSI state on circuit-breaker abort: {}", save_err);
+                        }
                         return Err(SelfwareError::Internal(format!(
                             "RSI loop aborted: {} consecutive failures (limit: {})",
                             self.consecutive_failures, self.max_consecutive_failures
@@ -119,11 +181,18 @@ impl RSIOrchestrator {
             tokio::time::sleep(Duration::from_secs(60)).await;
         }
 
-        if iteration >= self.max_iterations {
+        self.total_iterations += iteration;
+
+        if self.total_iterations >= self.max_iterations {
             warn!(
                 "RSI loop terminated: reached maximum iteration limit of {}",
                 self.max_iterations
             );
+        }
+
+        // Persist state on clean exit so it survives process restarts.
+        if let Err(e) = self.save_state() {
+            warn!("Failed to save RSI state on exit: {}", e);
         }
 
         Ok(())
@@ -131,6 +200,10 @@ impl RSIOrchestrator {
 
     pub fn stop(&mut self) {
         self.is_running = false;
+        // Save state when explicitly stopped (e.g. Ctrl+C handler).
+        if let Err(e) = self.save_state() {
+            warn!("Failed to save RSI state on stop: {}", e);
+        }
     }
 
     /// Executes a single plan -> act -> verify -> reflect cycle
@@ -444,6 +517,41 @@ mod tests {
             "Should trip at {} failures",
             failures
         );
+    }
+
+    #[test]
+    fn test_rsi_state_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_root = dir.path().to_path_buf();
+        let mut orch = RSIOrchestrator::new(project_root);
+        orch.total_iterations = 42;
+        orch.consecutive_failures = 3;
+        orch.save_state().unwrap();
+
+        // Load into a fresh orchestrator
+        let orch2 = RSIOrchestrator::new(dir.path().to_path_buf());
+        assert_eq!(orch2.total_iterations, 42);
+        assert_eq!(orch2.consecutive_failures, 3);
+    }
+
+    #[test]
+    fn test_rsi_state_missing_file_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let orch = RSIOrchestrator::new(dir.path().to_path_buf());
+        // Should start from defaults when no state file exists
+        assert_eq!(orch.total_iterations, 0);
+        assert_eq!(orch.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn test_rsi_stop_saves_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut orch = RSIOrchestrator::new(dir.path().to_path_buf());
+        orch.total_iterations = 10;
+        orch.stop();
+        // Verify state was persisted
+        let state_path = RSIOrchestrator::default_state_path(dir.path());
+        assert!(state_path.exists());
     }
 
     /// Helper: replicates the TSV score-parsing logic from run_benchmark_and_get_score.

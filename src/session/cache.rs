@@ -586,10 +586,14 @@ impl LlmCache {
             poisoned.into_inner()
         });
 
+        // Normalize query once; stored embeddings are already normalized.
+        let mut normed_query = embedding.to_vec();
+        l2_normalize(&mut normed_query);
+
         // Find best matching entry by semantic similarity
         let mut best_match: Option<(&str, f32)> = None;
         for (id, entry_embedding) in embeddings.iter() {
-            let similarity = cosine_similarity(embedding, entry_embedding);
+            let similarity = cosine_similarity(&normed_query, entry_embedding);
             if similarity >= self.config.similarity_threshold
                 && (best_match.is_none() || similarity > best_match.unwrap().1)
             {
@@ -627,11 +631,21 @@ impl LlmCache {
             self.invalidator.register_path(&entry_id, path);
         }
 
-        // Store embedding for similarity search
+        // Store L2-normalized embedding for similarity search so lookup
+        // can use a simple dot product instead of full cosine formula.
         if let Ok(mut embeddings) = self.embeddings.write() {
             // Replace existing embedding for the same entry ID to avoid orphan growth.
             embeddings.retain(|(id, _)| id != &entry_id);
-            embeddings.push((entry_id.clone(), entry.embedding.clone()));
+
+            // Hard cap: if embeddings grew beyond max_entries (e.g. due to
+            // lock contention with eviction), trim the oldest.
+            while embeddings.len() >= self.config.max_entries {
+                embeddings.remove(0);
+            }
+
+            let mut normed = entry.embedding.clone();
+            l2_normalize(&mut normed);
+            embeddings.push((entry_id.clone(), normed));
         }
 
         // Store the entry
@@ -743,21 +757,26 @@ impl Default for LlmCache {
 // Semantic Similarity Matching
 // ============================================================================
 
-/// Calculate cosine similarity between two vectors
+/// L2-normalize a vector in place.  Zero vectors are left unchanged.
+fn l2_normalize(v: &mut [f32]) {
+    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for x in v.iter_mut() {
+            *x /= norm;
+        }
+    }
+}
+
+/// Calculate cosine similarity between two vectors.
+///
+/// When both inputs are already L2-normalized (as stored embeddings are),
+/// this reduces to a simple dot product without any sqrt.
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
 
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-
-    if norm_a == 0.0 || norm_b == 0.0 {
-        return 0.0;
-    }
-
-    dot / (norm_a * norm_b)
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
 /// Semantic matcher for prompt similarity

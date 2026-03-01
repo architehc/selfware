@@ -761,8 +761,11 @@ impl VectorIndex {
         }
     }
 
-    /// Add embedding to index
-    pub fn add(&mut self, chunk_id: String, embedding: Vec<f32>) -> Result<()> {
+    /// Add embedding to index.
+    ///
+    /// The embedding is L2-normalized at insert time so that cosine similarity
+    /// reduces to a simple dot product during search.
+    pub fn add(&mut self, chunk_id: String, mut embedding: Vec<f32>) -> Result<()> {
         if embedding.len() != self.dimension {
             return Err(anyhow!(
                 "Embedding dimension mismatch: expected {}, got {}",
@@ -771,6 +774,7 @@ impl VectorIndex {
             ));
         }
 
+        Self::l2_normalize(&mut embedding);
         self.embeddings.push(embedding);
         self.chunk_ids.push(chunk_id);
         Ok(())
@@ -790,10 +794,17 @@ impl VectorIndex {
     /// Uses a min-heap to efficiently track the top-k results without
     /// sorting the entire result set. Also applies early termination
     /// when all top-k results have similarity > 0.95.
+    ///
+    /// Because all stored embeddings are L2-normalized at insert time,
+    /// cosine similarity is just the dot product (no per-query sqrt needed).
     pub fn search(&self, query: &[f32], k: usize) -> Vec<(String, f32)> {
         if query.len() != self.dimension || k == 0 {
             return Vec::new();
         }
+
+        // Normalize the query vector so dot product == cosine similarity.
+        let mut normed_query = query.to_vec();
+        Self::l2_normalize(&mut normed_query);
 
         // Min-heap: stores (OrderedFloat(score), index) so the smallest
         // score is at the top, letting us efficiently evict the worst
@@ -806,7 +817,8 @@ impl VectorIndex {
         const EARLY_TERM_THRESHOLD: f32 = 0.95;
 
         for (i, emb) in self.embeddings.iter().enumerate() {
-            let score = Self::cosine_similarity(query, emb);
+            // Both vectors are unit-length, so dot product == cosine similarity.
+            let score = Self::dot_product(&normed_query, emb);
 
             if heap.len() < k {
                 heap.push(std::cmp::Reverse((OrdF32(score), i)));
@@ -839,17 +851,33 @@ impl VectorIndex {
         results
     }
 
-    /// Cosine similarity between two vectors
-    fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-        let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-        let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-        let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    /// Dot product between two vectors.
+    #[inline]
+    fn dot_product(a: &[f32], b: &[f32]) -> f32 {
+        a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+    }
 
-        if norm_a > 0.0 && norm_b > 0.0 {
-            dot / (norm_a * norm_b)
-        } else {
-            0.0
+    /// L2-normalize a vector in place.  Zero vectors are left unchanged.
+    fn l2_normalize(v: &mut [f32]) {
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            for x in v.iter_mut() {
+                *x /= norm;
+            }
         }
+    }
+
+    /// Cosine similarity between two arbitrary vectors.
+    ///
+    /// Normalizes both inputs before computing the dot product.
+    /// Kept for external callers and tests; the hot search path uses
+    /// `dot_product` on pre-normalized vectors instead.
+    fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+        let mut na = a.to_vec();
+        let mut nb = b.to_vec();
+        Self::l2_normalize(&mut na);
+        Self::l2_normalize(&mut nb);
+        Self::dot_product(&na, &nb)
     }
 
     /// Get index size
@@ -2477,12 +2505,16 @@ pub fn calculate_product(a: i32, b: i32) -> i32 {
     #[test]
     fn test_verify_index_integrity_inf() {
         let mut index = VectorIndex::new(3);
+        // After L2 normalization at insert time, [1.0, INF, 0.0] becomes
+        // [0.0, NaN, 0.0] because INF/INF = NaN. The integrity check should
+        // still detect the bad embedding.
         index
             .add("a".to_string(), vec![1.0, f32::INFINITY, 0.0])
             .unwrap();
 
         let issues = index.verify_index_integrity();
-        assert!(issues.iter().any(|i| i.contains("Inf")));
+        assert!(!issues.is_empty());
+        assert!(issues.iter().any(|i| i.contains("NaN") || i.contains("Inf")));
     }
 
     #[test]

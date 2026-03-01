@@ -401,10 +401,41 @@ impl SelfEditOrchestrator {
         prompt
     }
 
-    /// Check if a target is in the deny list
+    /// Check if a target is in the deny list.
+    ///
+    /// Uses path canonicalization to catch symlink-based bypasses: the
+    /// target file is resolved relative to `project_root` so that
+    /// `../../safety/checker.rs` or a symlink pointing there is still
+    /// caught.  Falls back to plain substring matching when
+    /// canonicalization is not possible (e.g. the file doesn't exist yet).
     fn is_denied(&self, target: &ImprovementTarget) -> bool {
         if let Some(ref file) = target.file {
+            // Attempt to canonicalize the target path so symlinks and
+            // traversals (../.. etc.) resolve to the real location.
+            let resolved = self
+                .project_root
+                .join(file)
+                .canonicalize()
+                .unwrap_or_else(|_| self.project_root.join(file));
+            let resolved_str = resolved.to_string_lossy();
+
             for denied in DENY_LIST {
+                // Canonicalize the denied path against project_root too.
+                let denied_resolved = self
+                    .project_root
+                    .join(denied)
+                    .canonicalize()
+                    .unwrap_or_else(|_| self.project_root.join(denied));
+                let denied_str = denied_resolved.to_string_lossy();
+
+                // Check if the resolved path starts with (is inside) a denied
+                // directory, or equals a denied file exactly.
+                if resolved_str.starts_with(denied_str.as_ref()) {
+                    return true;
+                }
+
+                // Fallback: plain substring check covers cases where
+                // canonicalization isn't possible (non-existent paths in tests).
                 if file.contains(denied) {
                     return true;
                 }
