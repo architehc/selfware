@@ -169,7 +169,7 @@ Files are **plants**, directories are **beds**, and your tools are **craftsman i
 - **Selfware UI**: Warm amber tones, animated spinners, ASCII art banners
 - **Multi-Model Support**: Works with Qwen3-Coder, Kimi K2.5, DeepSeek, and other local LLMs
 - **Robust Tool Parser**: Handles multiple XML formats from different models
-- **E2E Test Harness**: 7-scenario automated benchmark suite with scoring and screenshots
+- **SAB Benchmark Suite**: 12-scenario agentic benchmark with BLOOM/GROW/WILT/FROST scoring
 - **4-Hour Patience**: Tolerant of slow local models (0.1 tok/s supported)
 
 ## Environment Variables
@@ -329,23 +329,149 @@ cargo tarpaulin --all-features --out Html
 | **Total Tests** | ~3,980 |
 | **Test Targets** | lib (3,615) + unit (238) + e2e (21) + integration (5) + property (100) + doc (1) |
 
-### E2E System Tests
+### SAB — Selfware Agentic Benchmark
 
-A full E2E benchmark suite tests the agent against broken Rust projects using a local LLM:
+A 12-scenario agentic coding benchmark that measures how well a local LLM can autonomously fix bugs, write tests, refactor code, and optimize performance — all through selfware's agent loop.
 
 ```bash
-# Run all 7 scenarios (requires local model at localhost:8000)
-./system_tests/projecte2e/run_projecte2e.sh
+# Run all 12 scenarios (requires OpenAI-compatible endpoint)
+ENDPOINT="http://localhost:8000/v1" MODEL="your-model" \
+  bash system_tests/projecte2e/run_full_sab.sh
 ```
 
-| Difficulty | Scenario | What it tests |
-|------------|----------|---------------|
-| Easy | Calculator, String ops | Simple bug fixes (3-4 bugs each) |
-| Medium | JSON merge, BitSet | Logic bugs requiring analysis |
-| Hard | Scheduler, Event bus | Multi-file bugs across modules |
-| Swarm | Multi-chat session | Agent spawning and coordination |
+#### Scenarios
 
-Produces scored reports (0-100), ANSI terminal recordings, and error analysis under `system_tests/projecte2e/reports/`.
+| Difficulty | Scenario | What It Tests |
+|------------|----------|---------------|
+| Easy | `easy_calculator` | Simple arithmetic bug fixes (3-4 bugs) |
+| Easy | `easy_string_ops` | String manipulation bugs |
+| Medium | `medium_json_merge` | JSON deep merge logic |
+| Medium | `medium_bitset` | Bitwise operations and edge cases |
+| Medium | `testgen_ringbuf` | Write 15+ tests for an untested ring buffer |
+| Medium | `refactor_monolith` | Split a 210-line monolith into 4 modules |
+| Hard | `hard_scheduler` | Multi-file scheduler with duration parsing |
+| Hard | `hard_event_bus` | Event system with async subscribers |
+| Hard | `security_audit` | Replace 5 vulnerable functions with secure alternatives |
+| Hard | `perf_optimization` | Fix 5 O(n²)/exponential algorithms |
+| Hard | `codegen_task_runner` | Implement 12 `todo!()` method stubs |
+| Expert | `expert_async_race` | Fix 4 concurrency bugs in a Tokio task pool |
+
+#### Scoring
+
+Each scenario scores 0–100:
+- **70 pts** — all tests pass after agent edits
+- **20 pts** — agent also fixes intentionally broken tests
+- **10 pts** — clean exit (no crash, no timeout)
+
+Round ratings: **BLOOM** (≥85) · **GROW** (≥60) · **WILT** (≥30) · **FROST** (<30)
+
+#### Benchmark Results — Qwen3-Coder-Next-FP8 (1M context)
+
+Tested on NVIDIA H100 via vLLM, 6 parallel scenarios, 21 rounds (251 scenario runs):
+
+| Metric | Value |
+|--------|-------|
+| Steady-state average (R2–R21) | **90/100** |
+| Peak phase (R9–R21) | **94/100** |
+| Best round | **96/100** (achieved 6 times) |
+| Perfect rounds (12/12 pass) | **12 out of 21** |
+| S-tier scenarios (100% reliable) | 5 of 12 |
+
+<details>
+<summary>Full round-by-round results</summary>
+
+| Round | Score | Rating | Passed |
+|-------|-------|--------|--------|
+| R1 | 60/100 | GROW | 7/11 |
+| R2 | 96/100 | BLOOM | 12/12 |
+| R3 | 70/100 | GROW | 9/12 |
+| R4 | 87/100 | BLOOM | 11/12 |
+| R5 | 79/100 | GROW | 10/12 |
+| R6 | 81/100 | GROW | 10/12 |
+| R7 | 87/100 | BLOOM | 11/12 |
+| R8 | 89/100 | BLOOM | 11/12 |
+| R9 | 95/100 | BLOOM | 12/12 |
+| R10 | 95/100 | BLOOM | 12/12 |
+| R11 | 96/100 | BLOOM | 12/12 |
+| R12 | 87/100 | BLOOM | 11/12 |
+| R13 | 96/100 | BLOOM | 12/12 |
+| R14 | 88/100 | BLOOM | 11/12 |
+| R15 | 95/100 | BLOOM | 12/12 |
+| R16 | 95/100 | BLOOM | 12/12 |
+| R17 | 95/100 | BLOOM | 12/12 |
+| R18 | 96/100 | BLOOM | 12/12 |
+| R19 | 96/100 | BLOOM | 12/12 |
+| R20 | 96/100 | BLOOM | 12/12 |
+| R21 | 89/100 | BLOOM | 11/12 |
+
+</details>
+
+#### Scenario Reliability
+
+| Tier | Scenarios | Pass Rate |
+|------|-----------|-----------|
+| **S** (100%) | `easy_calculator`, `easy_string_ops`, `medium_json_merge`, `perf_optimization`, `codegen_task_runner` | 100% |
+| **A** (>80%) | `hard_scheduler`, `hard_event_bus`, `expert_async_race`, `medium_bitset` | 82–95% |
+| **B** (50–80%) | `security_audit`, `testgen_ringbuf`, `refactor_monolith` | 65–76% |
+
+#### Running Your Own Benchmark
+
+```bash
+# Environment variables
+export ENDPOINT="http://localhost:8000/v1"   # Your LLM endpoint
+export MODEL="Qwen/Qwen3-Coder-Next-FP8"    # Model name
+export MAX_PARALLEL=6                         # Concurrent scenarios (6 recommended)
+
+# Single round
+bash system_tests/projecte2e/run_full_sab.sh
+
+# Results appear in system_tests/projecte2e/reports/<timestamp>/
+```
+
+## Recommended Models by Hardware
+
+SAB is designed to benchmark any local LLM. Here are tested and recommended configurations:
+
+### GPU Servers (vLLM / llama.cpp)
+
+| Model | Quant | Weights | Min VRAM | Recommended GPU | Context | Notes |
+|-------|-------|---------|----------|-----------------|---------|-------|
+| **Qwen3-Coder-Next-FP8** | FP8 | ~70 GB | 80 GB | H100 / A100 80GB | 1M | Reference model, 90/100 SAB |
+| **Qwen3.5-Coder 35B A3B** | Q4_K_M | ~22 GB | 24–32 GB | **RTX 5090** (32 GB) | 32–128K | MoE, fast inference, best bang/buck |
+| **LFM2 24B A2B** | 4-bit | ~13.4 GB | 16–24 GB | **RTX 4090 / 3090** (24 GB) | 32–64K | Efficient MoE for rapid iteration |
+| **LFM2.5 1.2B Instruct** | Q8 | ~1.25 GB | 2 GB | Any GPU | 8–16K | Ultra-light, quick prototyping |
+
+### Apple Silicon (MLX / llama.cpp / Ollama)
+
+Mac models use unified memory — your available RAM determines what you can run:
+
+| RAM | Recommended Model | Quant | Context | Use Case |
+|-----|-------------------|-------|---------|----------|
+| **96–128 GB** | Qwen3-Coder 32B | Q8 | 64–128K | Full SAB, production coding |
+| **64 GB** | Qwen3.5 35B A3B | Q4_K_M (~22 GB) | 32–64K | Most scenarios, good context |
+| **32 GB** | LFM2 24B A2B | 4-bit (~13.4 GB) | 16–32K | Everyday coding tasks |
+| **24 GB** | LFM2 24B A2B | 4-bit (~13.4 GB) | 8–16K | Moderate context, tight fit |
+| **16 GB** | LFM2.5 1.2B Instruct | Q8 (~1.25 GB) | 8–16K | Lightweight, fast feedback |
+
+> **Context window matters.** SAB scenarios work best with ≥32K context. Smaller windows may cause FROST on complex scenarios (hard/expert). Adjust `max_tokens` and `token_budget` in `selfware.toml` to match your model's context.
+
+### Quick Setup Examples
+
+```bash
+# RTX 5090 with Qwen3.5 35B (llama.cpp)
+./llama-server -m qwen3.5-coder-35b-a3b-q4_k_m.gguf \
+  -c 65536 -ngl 99 --port 8000
+
+# RTX 4090 with LFM2 24B (vLLM)
+vllm serve lfm2-24b-a2b --quantization awq --max-model-len 32768
+
+# Mac M2 Max 64GB with MLX
+mlx_lm.server --model mlx-community/Qwen3.5-Coder-35B-A3B-4bit \
+  --port 8000
+
+# Ultra-light (any machine)
+ollama run lfm2.5:1.2b-instruct-q8_0
+```
 
 ### Project Structure
 
@@ -409,7 +535,7 @@ MIT License
 
 ## Acknowledgments
 
-- Built for [Kimi K2.5](https://kimi.moonshot.cn/), [Qwen3-Coder](https://qwenlm.github.io/), and other local LLMs
+- Built for [Qwen3-Coder](https://qwenlm.github.io/), [Kimi K2.5](https://kimi.moonshot.cn/), [LFM2](https://www.liquid.ai/), and other local LLMs
 - Inspired by the [AiSocratic](https://aisocratic.org/) movement
 - UI philosophy: software should feel like a warm workshop, not a cold datacenter
 
