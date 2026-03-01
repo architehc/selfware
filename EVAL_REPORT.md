@@ -6,6 +6,56 @@
 
 ---
 
+## Eval Round 5 — Post-Loop Detection (2026-02-28)
+
+**Config:** `system_tests/projecte2e/config/crazyshit_model.toml` — YOLO mode, 500 max iterations, streaming
+**Harness:** `system_tests/projecte2e/run_projecte2e.sh` — 6 coding scenarios + 1 swarm scenario
+**Binary:** `target/release/selfware` built with `--all-features`
+
+### Results: 5/6 Coding Pass, 85.7/100, Rating: Excellent
+
+| Scenario | Type | Difficulty | Baseline | Post | Agent Exit | Timeout | Duration (s) | Score | Notes |
+|---|---|---|---:|---:|---:|---:|---:|---:|---|
+| `easy_calculator` | coding | easy | 101 | 0 | 0 | 0 | 27 | 100 | |
+| `easy_string_ops` | coding | easy | 101 | 0 | 0 | 0 | 51 | 100 | |
+| `medium_json_merge` | coding | medium | 101 | 0 | 0 | 0 | 74 | 100 | |
+| `medium_bitset` | coding | medium | 101 | 0 | 0 | 0 | 37 | 100 | |
+| `hard_scheduler` | coding | hard | 101 | 0 | 0 | 0 | 26 | 100 | |
+| `hard_event_bus` | coding | hard | 101 | 101 | 124 | 1 | 420 | 0 | no-op write loop (model-level) |
+| `swarm_session` | swarm | n/a | n/a | n/a | 0 | 0 | 6 | 100 | spawned=3 |
+
+### What Changed Since Round 2
+
+Three framework improvements were applied after observing stuck loops in Rounds 3–4:
+
+1. **No-op `file_edit` detection** — Rejects edits where `old_str == new_str` with an error message telling the agent to provide a different `new_str`
+2. **No-op `file_write` detection** — Rejects writes where file content already matches, preventing idempotent write loops
+3. **General repetition detector** — Tracks recent tool calls by `(name, args_hash)` in a sliding window of 10. After 3 identical calls, injects a correction message with tool-specific guidance (re-read file, check test expectations, try a different strategy)
+
+### Analysis
+
+**5 scenarios at 100/100** (all except hard_event_bus): All passed with clean exits and fast durations (26–74s). The repetition detector specifically rescued `medium_bitset` (stale old_str loop in Round 4) and `hard_scheduler` (repeated file_read loop in Round 4).
+
+**hard_event_bus at 0/100**: The model consistently generates the wrong Display format string (`seq: {}` instead of `seq={}`) and cannot self-correct. The no-op `file_write` detection fires correctly, and the repetition detector injects correction messages, but the model cycles: 3 identical writes → correction → "let me try a different approach" → 3 more identical writes. This is a model capability gap, not a framework issue.
+
+### Round Progression
+
+| Round | Pass | Score | Rating | Key Changes |
+|---|---|---|---|---|
+| 1 | 0/5 | N/A | N/A | Baseline — early termination, no verification, tool format confusion |
+| 2 | 6/6 | 97.1 | Excellent | +completion gate, +verification prompt, +malformed tool re-prompt |
+| 3 | 5/6 | 85.7 | Excellent | No framework changes; hard_event_bus no-op edit loop |
+| 4 | 3/6 | 57.1 | Fair | No framework changes; 3 stuck loops exposed |
+| **5** | **5/6** | **85.7** | **Excellent** | +no-op detection, +repetition detector; rescued bitset+scheduler |
+
+### Key Observations
+
+- **Variance is model-level**: The same scenario can score 100 or 0 across runs depending on whether the model generates the right fix on the first attempt. Framework guards reduce but cannot eliminate this variance.
+- **Repetition detector works**: Rounds 4→5 show it rescuing two scenarios that were previously stuck. The detector fires, clears the window, and the model recovers with a different approach.
+- **hard_event_bus is the ceiling**: The Display format bug requires the model to understand test assertions and generate the exact expected format. Qwen3-Coder consistently misreads `seq=N` as `seq: N` — a subtle but fatal error that the framework cannot fix.
+
+---
+
 ## Eval Round 2 — Post-Framework Improvements (2026-02-28)
 
 **Config:** `system_tests/projecte2e/config/crazyshit_model.toml` — YOLO mode, 500 max iterations, streaming
