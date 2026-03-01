@@ -34,6 +34,33 @@ impl AgentLoop {
         Some(self.state.clone())
     }
 
+    /// Returns a warning message when the loop is approaching the iteration
+    /// limit.  Intended to be injected as a system message so the LLM can
+    /// wrap up gracefully instead of being cut off abruptly.
+    ///
+    /// Returns `Some` at 80% and 90%+ of `max_iterations`, `None` otherwise.
+    pub fn approaching_limit_warning(&self) -> Option<String> {
+        if self.max_iterations == 0 {
+            return None;
+        }
+        let remaining = self.max_iterations.saturating_sub(self.iteration);
+        let pct_used = (self.iteration * 100) / self.max_iterations;
+
+        if pct_used >= 90 {
+            Some(format!(
+                "[SYSTEM] Only {} iteration(s) remaining out of {}. Wrap up your current work and provide a final answer now.",
+                remaining, self.max_iterations
+            ))
+        } else if pct_used >= 80 {
+            Some(format!(
+                "[SYSTEM] Approaching iteration limit: {} of {} iterations used ({} remaining). Start wrapping up.",
+                self.iteration, self.max_iterations, remaining
+            ))
+        } else {
+            None
+        }
+    }
+
     pub fn set_state(&mut self, state: AgentState) {
         self.state = state;
     }
@@ -215,5 +242,43 @@ mod tests {
         assert_eq!(loop_ctrl.current_step(), 3);
         assert_eq!(loop_ctrl.current_iteration(), 7);
         assert!(matches!(loop_ctrl.state, AgentState::Executing { step: 3 }));
+    }
+
+    #[test]
+    fn test_approaching_limit_warning_none_early() {
+        let mut loop_ctrl = AgentLoop::new(100);
+        // Advance to 50% — no warning
+        for _ in 0..50 {
+            loop_ctrl.next_state();
+        }
+        assert!(loop_ctrl.approaching_limit_warning().is_none());
+    }
+
+    #[test]
+    fn test_approaching_limit_warning_at_80_pct() {
+        let mut loop_ctrl = AgentLoop::new(100);
+        for _ in 0..80 {
+            loop_ctrl.next_state();
+        }
+        let warning = loop_ctrl.approaching_limit_warning();
+        assert!(warning.is_some());
+        assert!(warning.unwrap().contains("wrapping up"));
+    }
+
+    #[test]
+    fn test_approaching_limit_warning_at_90_pct() {
+        let mut loop_ctrl = AgentLoop::new(100);
+        for _ in 0..90 {
+            loop_ctrl.next_state();
+        }
+        let warning = loop_ctrl.approaching_limit_warning();
+        assert!(warning.is_some());
+        assert!(warning.unwrap().contains("final answer"));
+    }
+
+    #[test]
+    fn test_approaching_limit_warning_zero_max() {
+        let loop_ctrl = AgentLoop::new(0);
+        assert!(loop_ctrl.approaching_limit_warning().is_none());
     }
 }

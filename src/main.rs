@@ -10,6 +10,8 @@ async fn main() -> ExitCode {
         }
     };
 
+    selfware::observability::telemetry::shutdown_tracing();
+
     match result {
         Ok(_) => ExitCode::SUCCESS,
         Err(e) => {

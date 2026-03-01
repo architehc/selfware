@@ -80,6 +80,12 @@ impl Agent {
         progress.start_phase();
 
         while let Some(state) = self.loop_control.next_state() {
+            // Inject a system warning when approaching the iteration limit so
+            // the LLM can wrap up gracefully instead of being cut off.
+            if let Some(warning) = self.loop_control.approaching_limit_warning() {
+                self.messages.push(Message::system(warning));
+            }
+
             // Trim message history before each iteration to stay within
             // the token budget.
             self.trim_message_history();
@@ -655,6 +661,12 @@ impl Agent {
         let mut recovery_attempts = 0u32;
 
         while let Some(state) = self.loop_control.next_state() {
+            // Inject a system warning when approaching the iteration limit so
+            // the LLM can wrap up gracefully instead of being cut off.
+            if let Some(warning) = self.loop_control.approaching_limit_warning() {
+                self.messages.push(Message::system(warning));
+            }
+
             // Trim message history before each iteration to stay within
             // the token budget.
             self.trim_message_history();

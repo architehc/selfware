@@ -64,6 +64,7 @@ use ratatui::{
 use std::io::{self, Stdout};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+use tracing::warn;
 
 /// Global flag indicating a termination signal has been received.
 /// Shared between the signal handler and the TUI event loops.
@@ -640,7 +641,8 @@ pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
     loop {
         // Only redraw if enough time has passed and something changed
         if needs_redraw && last_draw.elapsed() >= min_draw_interval {
-            // Render the dashboard
+            // Render the dashboard with watchdog timing
+            let draw_start = Instant::now();
             terminal.terminal().draw(|frame| {
                 let area = frame.area();
 
@@ -707,6 +709,13 @@ pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
                     render_pause_indicator(frame, area);
                 }
             })?;
+            let draw_elapsed = draw_start.elapsed();
+            if draw_elapsed > Duration::from_millis(500) {
+                warn!(
+                    elapsed_ms = draw_elapsed.as_millis() as u64,
+                    "TUI draw frame exceeded 500ms watchdog threshold"
+                );
+            }
             last_draw = Instant::now();
             needs_redraw = false;
         } // end redraw throttle
