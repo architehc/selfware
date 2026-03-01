@@ -264,29 +264,63 @@ static METRICS: Metrics = Metrics {
 
 pub fn increment_api_requests() {
     METRICS.api_requests.fetch_add(1, Ordering::Relaxed);
+    metrics::increment_counter!("selfware_api_requests_total");
 }
 pub fn increment_api_errors() {
     METRICS.api_errors.fetch_add(1, Ordering::Relaxed);
+    metrics::increment_counter!("selfware_api_errors_total");
 }
 pub fn increment_tool_executions() {
     METRICS.tool_executions.fetch_add(1, Ordering::Relaxed);
+    metrics::increment_counter!("selfware_tool_executions_total");
 }
 pub fn increment_tool_errors() {
     METRICS.tool_errors.fetch_add(1, Ordering::Relaxed);
+    metrics::increment_counter!("selfware_tool_errors_total");
 }
 pub fn add_tokens_processed(count: u64) {
     METRICS.tokens_processed.fetch_add(count, Ordering::Relaxed);
+    metrics::counter!("selfware_tokens_processed_total", count);
 }
 pub fn get_metrics() -> &'static Metrics {
     &METRICS
 }
 
-/// Start Prometheus Metrics Exporter (if in daemon mode)
+/// Start Prometheus Metrics Exporter (if in daemon mode).
+///
+/// Installs the `metrics-exporter-prometheus` global recorder and binds an
+/// HTTP endpoint at `bind_addr` that serves metrics in Prometheus text format.
+/// After installation, every call to `increment_api_requests()` etc. is
+/// automatically captured and exported.
 pub fn start_prometheus_exporter(bind_addr: std::net::SocketAddr) -> anyhow::Result<()> {
     PrometheusBuilder::new()
         .with_http_listener(bind_addr)
         .install()
-        .map_err(|e| anyhow::anyhow!("Failed to start Prometheus exporter: {}", e))
+        .map_err(|e| anyhow::anyhow!("Failed to start Prometheus exporter: {}", e))?;
+
+    // Register metric descriptions so Prometheus shows HELP text.
+    metrics::describe_counter!(
+        "selfware_api_requests_total",
+        "Total number of LLM API requests made"
+    );
+    metrics::describe_counter!(
+        "selfware_api_errors_total",
+        "Total number of LLM API errors"
+    );
+    metrics::describe_counter!(
+        "selfware_tool_executions_total",
+        "Total number of tool executions"
+    );
+    metrics::describe_counter!(
+        "selfware_tool_errors_total",
+        "Total number of tool execution errors"
+    );
+    metrics::describe_counter!(
+        "selfware_tokens_processed_total",
+        "Total number of tokens processed"
+    );
+
+    Ok(())
 }
 
 /// Create a span for tracking tool execution with automatic duration and outcome logging
@@ -928,5 +962,43 @@ mod tests {
     #[test]
     fn test_max_log_entries_constant() {
         assert_eq!(MAX_LOG_ENTRIES, 100_000);
+    }
+
+    #[test]
+    fn test_increment_functions_update_metrics() {
+        let before_api = METRICS.api_requests.load(Ordering::Relaxed);
+        increment_api_requests();
+        assert_eq!(
+            METRICS.api_requests.load(Ordering::Relaxed),
+            before_api + 1
+        );
+
+        let before_errors = METRICS.api_errors.load(Ordering::Relaxed);
+        increment_api_errors();
+        assert_eq!(
+            METRICS.api_errors.load(Ordering::Relaxed),
+            before_errors + 1
+        );
+
+        let before_tool = METRICS.tool_executions.load(Ordering::Relaxed);
+        increment_tool_executions();
+        assert_eq!(
+            METRICS.tool_executions.load(Ordering::Relaxed),
+            before_tool + 1
+        );
+
+        let before_tool_err = METRICS.tool_errors.load(Ordering::Relaxed);
+        increment_tool_errors();
+        assert_eq!(
+            METRICS.tool_errors.load(Ordering::Relaxed),
+            before_tool_err + 1
+        );
+
+        let before_tokens = METRICS.tokens_processed.load(Ordering::Relaxed);
+        add_tokens_processed(42);
+        assert_eq!(
+            METRICS.tokens_processed.load(Ordering::Relaxed),
+            before_tokens + 42
+        );
     }
 }

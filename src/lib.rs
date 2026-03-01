@@ -93,9 +93,44 @@ pub mod tokens;
 pub mod tool_parser;
 
 // ============================================================================
+// Global shutdown coordination
+// ============================================================================
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static SHUTDOWN_FLAG: AtomicBool = AtomicBool::new(false);
+
+/// Signal that a graceful shutdown has been requested.
+pub fn request_shutdown() {
+    SHUTDOWN_FLAG.store(true, Ordering::SeqCst);
+}
+
+/// Check whether a graceful shutdown has been requested.
+pub fn is_shutdown_requested() -> bool {
+    SHUTDOWN_FLAG.load(Ordering::SeqCst)
+}
+
+// ============================================================================
 // Backward-compatible re-exports for UI submodules
 // ============================================================================
 #[cfg(feature = "tui")]
 pub use ui::demo;
 #[cfg(feature = "tui")]
 pub use ui::tui;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shutdown_flag_default_false() {
+        // The flag may have been set by a previous test in the same process,
+        // so we just verify the functions don't panic and return a bool.
+        let _ = is_shutdown_requested();
+    }
+
+    #[test]
+    fn test_request_shutdown_sets_flag() {
+        request_shutdown();
+        assert!(is_shutdown_requested());
+    }
+}

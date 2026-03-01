@@ -70,6 +70,12 @@ impl Agent {
         let mut last_ctrl_c: Option<Instant> = None;
 
         loop {
+            // Check global shutdown flag (e.g. from SIGTERM)
+            if crate::is_shutdown_requested() {
+                println!("\n{}", "Shutdown requested, exiting...".bright_yellow());
+                break;
+            }
+
             // Auto-refresh stale files before prompting
             let refreshed = self.refresh_stale_context_files().await;
             if refreshed > 0 {

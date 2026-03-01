@@ -1,14 +1,29 @@
 use std::process::ExitCode;
 
+/// Grace period after shutdown signal before force-exiting (seconds).
+const SHUTDOWN_GRACE_SECS: u64 = 10;
+
 #[tokio::main]
 async fn main() -> ExitCode {
-    let result = tokio::select! {
-        result = selfware::cli::run() => result,
-        _ = shutdown_signal() => {
-            eprintln!("\nReceived shutdown signal, exiting gracefully...");
-            Ok(())
-        }
-    };
+    // Spawn a signal handler that sets the global shutdown flag.
+    // Components (task runner, REPL, TUI) already check for ctrl_c or
+    // can poll `selfware::is_shutdown_requested()` to wind down.
+    // After the grace period, force-exit to avoid hanging on stuck I/O.
+    tokio::spawn(async {
+        shutdown_signal().await;
+        selfware::request_shutdown();
+        eprintln!("\nReceived shutdown signal, exiting gracefully...");
+
+        tokio::time::sleep(std::time::Duration::from_secs(SHUTDOWN_GRACE_SECS)).await;
+        eprintln!("Shutdown grace period expired, forcing exit.");
+        std::process::exit(1);
+    });
+
+    // Let cli::run() complete naturally.  The task runner, interactive
+    // REPL, and TUI all have their own signal handling and will wind
+    // down when a signal arrives — we no longer race them with
+    // tokio::select! which would drop the future mid-flight.
+    let result = selfware::cli::run().await;
 
     selfware::observability::telemetry::shutdown_tracing();
 
