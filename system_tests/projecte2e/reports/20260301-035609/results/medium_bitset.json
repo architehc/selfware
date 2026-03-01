@@ -1,0 +1,14 @@
+{
+  "name": "medium_bitset",
+  "difficulty": "medium",
+  "baseline_status": 101,
+  "post_status": 0,
+  "agent_status": 124,
+  "timed_out": 1,
+  "duration_secs": 310,
+  "score": 90,
+  "rating": "BLOOM",
+  "changed_files": 0,
+  "error_hits": 1,
+  "completed_at": "2026-03-01T09:01:23Z"
+}

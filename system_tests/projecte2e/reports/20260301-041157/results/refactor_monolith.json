@@ -1,0 +1,14 @@
+{
+  "name": "refactor_monolith",
+  "difficulty": "medium",
+  "baseline_status": 0,
+  "post_status": 0,
+  "agent_status": 0,
+  "timed_out": 0,
+  "duration_secs": 236,
+  "score": 80,
+  "rating": "GROW",
+  "changed_files": 0,
+  "error_hits": 3,
+  "completed_at": "2026-03-01T09:19:30Z"
+}

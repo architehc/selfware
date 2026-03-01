@@ -1,0 +1,14 @@
+{
+  "name": "easy_string_ops",
+  "difficulty": "easy",
+  "baseline_status": 101,
+  "post_status": 0,
+  "agent_status": 0,
+  "timed_out": 0,
+  "duration_secs": 221,
+  "score": 100,
+  "rating": "BLOOM",
+  "changed_files": 0,
+  "error_hits": 3,
+  "completed_at": "2026-03-01T09:15:43Z"
+}
