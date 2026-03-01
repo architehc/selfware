@@ -1,0 +1,39 @@
+# Selfware E2E Configuration for LFM2.5 1.2B (LM Studio)
+
+endpoint = "http://192.168.1.99:1234/v1"
+model = "liquid/lfm2.5-1.2b"
+max_tokens = 4096
+temperature = 0.2
+
+[safety]
+allowed_paths = ["./**", "/tmp/selfware/**"]
+denied_paths = ["**/.git/**"]
+require_confirmation = []
+
+[agent]
+max_iterations = 500
+step_timeout_secs = 300
+token_budget = 128000
+native_function_calling = false
+streaming = true
+
+[yolo]
+enabled = true
+max_operations = 500
+max_hours = 8.0
+allow_git_push = false
+allow_destructive_shell = false
+audit_log_path = "./e2e-audit.log"
+status_interval = 25
+
+[continuous_work]
+enabled = true
+checkpoint_interval_tools = 10
+checkpoint_interval_secs = 300
+auto_recovery = true
+max_recovery_attempts = 5
+
+[retry]
+max_retries = 8
+base_delay_ms = 1000
+max_delay_ms = 30000

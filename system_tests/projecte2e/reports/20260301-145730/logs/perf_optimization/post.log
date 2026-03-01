@@ -1,0 +1,7 @@
+
+running 20 tests
+................ 16/20
+tests::test_unique_words_large --- FAILED
+tests::test_two_sum_large --- FAILED
+test tests::test_lcs_medium has been running for over 60 seconds
+test tests::test_sorted_unique_large has been running for over 60 seconds

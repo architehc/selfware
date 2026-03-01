@@ -78,6 +78,7 @@ mkdir -p "${OUT_DIR}" "${WORK_ROOT}" "${LOG_ROOT}" "${RESULTS_DIR}" "${PID_DIR}"
 
 # ── Connectivity check ──────────────────────────────────────────────
 ENDPOINT="$(grep '^endpoint' "${CONFIG_FILE}" | head -1 | sed 's/.*= *"//;s/".*//')"
+MODEL_NAME="$(grep '^model' "${CONFIG_FILE}" | head -1 | sed 's/.*= *"//;s/".*//')"
 echo "Checking endpoint: ${ENDPOINT}/models"
 if ! curl -fsS --connect-timeout 15 "${ENDPOINT}/models" >/dev/null 2>&1; then
   echo "ERROR: Endpoint unreachable at ${ENDPOINT}/models" >&2
@@ -91,7 +92,7 @@ echo "============================================================"
 echo "  SELFWARE AGENTIC BENCHMARK SUITE (SAB)"
 echo "  $(date)"
 echo "  Endpoint: ${ENDPOINT}"
-echo "  Model: Qwen/Qwen3-Coder-Next-FP8"
+echo "  Model: ${MODEL_NAME}"
 echo "  Scenarios: ${#ALL_SCENARIOS[@]}"
 echo "  Max parallel: ${MAX_PARALLEL}"
 echo "  Poll interval: ${POLL_INTERVAL}s"
@@ -323,6 +324,8 @@ results_dir = '${RESULTS_DIR}'
 log_root = '${LOG_ROOT}'
 timestamp = '${TIMESTAMP}'
 endpoint = '${ENDPOINT}'
+model_name = '${MODEL_NAME}'
+token_budget = int('$(grep "^token_budget" "${CONFIG_FILE}" | head -1 | sed "s/[^0-9]//g")' or '0')
 total_elapsed = ${TOTAL_ELAPSED}
 all_scenarios = '''$(printf '%s\n' "${ALL_SCENARIOS[@]}")'''.strip().split('\n')
 
@@ -357,9 +360,9 @@ lines.append('')
 lines.append('| Metric | Value |')
 lines.append('|--------|-------|')
 lines.append(f'| Date | {timestamp} |')
-lines.append(f'| Model | Qwen/Qwen3-Coder-Next-FP8 |')
+lines.append(f'| Model | {model_name} |')
 lines.append(f'| Endpoint | {endpoint} |')
-lines.append(f'| Max Context | 1,010,000 tokens |')
+lines.append(f'| Max Context | {token_budget:,} tokens |')
 lines.append(f'| Total Scenarios | {total} |')
 lines.append(f'| Completed | {completed} |')
 lines.append(f'| Passed (tests green) | {passed}/{completed} |')

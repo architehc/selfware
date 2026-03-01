@@ -1,0 +1,14 @@
+{
+  "name": "easy_calculator",
+  "difficulty": "easy",
+  "baseline_status": 101,
+  "post_status": 101,
+  "agent_status": 124,
+  "timed_out": 1,
+  "duration_secs": 250,
+  "score": 0,
+  "rating": "FROST",
+  "changed_files": 0,
+  "error_hits": 0,
+  "completed_at": "2026-03-01T20:01:42Z"
+}
