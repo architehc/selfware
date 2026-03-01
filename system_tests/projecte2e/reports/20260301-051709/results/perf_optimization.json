@@ -1,0 +1,14 @@
+{
+  "name": "perf_optimization",
+  "difficulty": "hard",
+  "baseline_status": 124,
+  "post_status": 0,
+  "agent_status": 0,
+  "timed_out": 0,
+  "duration_secs": 239,
+  "score": 100,
+  "rating": "BLOOM",
+  "changed_files": 0,
+  "error_hits": 1,
+  "completed_at": "2026-03-01T10:23:59Z"
+}
