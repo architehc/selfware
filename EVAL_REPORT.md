@@ -46,10 +46,16 @@ Three framework improvements were applied after observing stuck loops in Rounds 
 | 2 | 6/6 | 97.1 | Excellent | +completion gate, +verification prompt, +malformed tool re-prompt |
 | 3 | 5/6 | 85.7 | Excellent | No framework changes; hard_event_bus no-op edit loop |
 | 4 | 3/6 | 57.1 | Fair | No framework changes; 3 stuck loops exposed |
-| **5** | **5/6** | **85.7** | **Excellent** | +no-op detection, +repetition detector; rescued bitset+scheduler |
+| 5 | 5/6 | 85.7 | Excellent | +no-op detection, +repetition detector; rescued bitset+scheduler |
+| **6** | **5/6** | **85.7** | **Excellent** | No framework changes; confirms stable floor |
+
+### Round 6 Confirmation Run
+
+Round 6 reproduced Round 5 results exactly: 5/6 pass at 85.7/100. Durations were consistent (27–70s for passing scenarios). `hard_event_bus` failed identically — the model generates `seq: {}` instead of `seq={}` and loops on no-op `file_write` until timeout. This confirms the 85.7/100 score is the stable floor with the current framework + Qwen3-Coder combination.
 
 ### Key Observations
 
+- **Results are stable**: Rounds 5 and 6 produced identical pass/fail patterns. The framework guards (repetition detector, no-op detection, completion gate) reliably prevent regressions on 5/6 scenarios.
 - **Variance is model-level**: The same scenario can score 100 or 0 across runs depending on whether the model generates the right fix on the first attempt. Framework guards reduce but cannot eliminate this variance.
 - **Repetition detector works**: Rounds 4→5 show it rescuing two scenarios that were previously stuck. The detector fires, clears the window, and the model recovers with a different approach.
 - **hard_event_bus is the ceiling**: The Display format bug requires the model to understand test assertions and generate the exact expected format. Qwen3-Coder consistently misreads `seq=N` as `seq: N` — a subtle but fatal error that the framework cannot fix.
