@@ -794,7 +794,7 @@ pub struct HealthPredictor {
 }
 
 /// Health data point for trending
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthDataPoint {
     pub timestamp: u64,
     pub healthy: bool,
@@ -996,6 +996,142 @@ impl HealthPredictor {
 impl Default for HealthPredictor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ============================================================================
+// Persistence
+// ============================================================================
+
+/// Serializable snapshot of `PredictorStats` (which uses `AtomicU64`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PredictorStatsSnapshot {
+    pub predictions_made: u64,
+    pub correct_predictions: u64,
+}
+
+impl PredictorStats {
+    /// Create a serializable snapshot.
+    pub fn snapshot(&self) -> PredictorStatsSnapshot {
+        PredictorStatsSnapshot {
+            predictions_made: self.predictions_made.load(Ordering::Relaxed),
+            correct_predictions: self.correct_predictions.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Restore from a snapshot.
+    pub fn restore(&self, snap: &PredictorStatsSnapshot) {
+        self.predictions_made
+            .store(snap.predictions_made, Ordering::Relaxed);
+        self.correct_predictions
+            .store(snap.correct_predictions, Ordering::Relaxed);
+    }
+}
+
+/// Serializable state of `HealthPredictor`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthPredictorState {
+    pub history: HashMap<String, Vec<HealthDataPoint>>,
+    pub stats: PredictorStatsSnapshot,
+}
+
+impl HealthPredictor {
+    /// Save history and stats to a JSON file.
+    pub fn save_history(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let history = self
+            .history
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let state = HealthPredictorState {
+            history,
+            stats: self.stats.snapshot(),
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(&state)?;
+        std::fs::write(path, json)?;
+        Ok(())
+    }
+
+    /// Load history and stats from a JSON file.
+    pub fn load_history(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let data = std::fs::read_to_string(path)?;
+        let state: HealthPredictorState = serde_json::from_str(&data)?;
+        *self.history.write().unwrap_or_else(|e| e.into_inner()) = state.history;
+        self.stats.restore(&state.stats);
+        Ok(())
+    }
+}
+
+/// Serializable state of `ErrorLearner`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorLearnerState {
+    pub patterns: HashMap<String, ErrorPattern>,
+    pub recovery_history: HashMap<String, Vec<RecoveryResult>>,
+}
+
+impl ErrorLearner {
+    /// Save patterns and recovery history to a JSON file.
+    pub fn save_patterns(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let patterns = self
+            .patterns
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let recovery_history = self
+            .recovery_history
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let state = ErrorLearnerState {
+            patterns,
+            recovery_history,
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(&state)?;
+        std::fs::write(path, json)?;
+        Ok(())
+    }
+
+    /// Load patterns and recovery history from a JSON file.
+    pub fn load_patterns(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        let data = std::fs::read_to_string(path)?;
+        let state: ErrorLearnerState = serde_json::from_str(&data)?;
+        *self.patterns.write().unwrap_or_else(|e| e.into_inner()) = state.patterns;
+        *self
+            .recovery_history
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = state.recovery_history;
+        Ok(())
+    }
+}
+
+impl SelfHealingEngine {
+    /// Save all persistent state to a directory.
+    pub fn save_state(&self, dir: &std::path::Path) -> anyhow::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        self.predictor
+            .save_history(&dir.join("health_predictor.json"))?;
+        self.learner
+            .save_patterns(&dir.join("error_learner.json"))?;
+        Ok(())
+    }
+
+    /// Load persistent state from a directory. Missing files are skipped gracefully.
+    pub fn load_state(&self, dir: &std::path::Path) -> anyhow::Result<()> {
+        let predictor_path = dir.join("health_predictor.json");
+        if predictor_path.exists() {
+            self.predictor.load_history(&predictor_path)?;
+        }
+        let learner_path = dir.join("error_learner.json");
+        if learner_path.exists() {
+            self.learner.load_patterns(&learner_path)?;
+        }
+        Ok(())
     }
 }
 
@@ -2384,5 +2520,84 @@ mod tests {
         // uuid v4 format: 8-4-4-4-12 hex chars with dashes
         assert_eq!(id.len(), 36);
         assert_eq!(id.chars().filter(|c| *c == '-').count(), 4);
+    }
+
+    // ---- Persistence tests ----
+
+    #[test]
+    fn test_health_predictor_save_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("predictor.json");
+
+        let predictor = HealthPredictor::new();
+        for i in 0..10 {
+            predictor.record("svc_a", i % 3 != 0, Some(100 + i * 10), 0);
+        }
+        predictor.save_history(&path).unwrap();
+
+        let predictor2 = HealthPredictor::new();
+        predictor2.load_history(&path).unwrap();
+
+        let h1 = predictor
+            .history
+            .read()
+            .unwrap();
+        let h2 = predictor2
+            .history
+            .read()
+            .unwrap();
+        assert_eq!(h1.get("svc_a").map(|v| v.len()), h2.get("svc_a").map(|v| v.len()));
+    }
+
+    #[test]
+    fn test_error_learner_save_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("learner.json");
+
+        let config = SelfHealingConfig {
+            pattern_threshold: 2,
+            ..Default::default()
+        };
+        let learner = ErrorLearner::new(config);
+        // Record enough errors to create a pattern
+        for _ in 0..3 {
+            learner.record(ErrorOccurrence::new("net", "timeout", "api"));
+        }
+        learner.record_recovery("net:api", "retry", true);
+
+        learner.save_patterns(&path).unwrap();
+
+        let learner2 = ErrorLearner::default();
+        learner2.load_patterns(&path).unwrap();
+
+        let p1 = learner.patterns.read().unwrap();
+        let p2 = learner2.patterns.read().unwrap();
+        assert_eq!(p1.len(), p2.len());
+    }
+
+    #[test]
+    fn test_engine_save_load_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_dir = dir.path().join("state");
+
+        let engine = SelfHealingEngine::default();
+        for i in 0..10 {
+            engine.record_health("comp_a", i % 2 == 0, Some(50), 0);
+        }
+
+        engine.save_state(&state_dir).unwrap();
+        assert!(state_dir.join("health_predictor.json").exists());
+        assert!(state_dir.join("error_learner.json").exists());
+
+        let engine2 = SelfHealingEngine::default();
+        engine2.load_state(&state_dir).unwrap();
+    }
+
+    #[test]
+    fn test_engine_load_state_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = SelfHealingEngine::default();
+        // Should succeed even with no files present
+        engine.load_state(dir.path()).unwrap();
     }
 }

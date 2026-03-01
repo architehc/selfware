@@ -1,5 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -36,6 +37,39 @@ use package::{NpmInstall, NpmRun, NpmScripts, PipFreeze, PipInstall, PipList, Ya
 use process::{PortCheck, ProcessList, ProcessLogs, ProcessRestart, ProcessStart, ProcessStop};
 use search::{GlobFind, GrepSearch, SymbolSearch};
 use shell::ShellExec;
+
+/// Pagination metadata for truncated tool output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaginationInfo {
+    /// Character offset from which this page starts.
+    pub offset: usize,
+    /// Maximum characters returned in this page.
+    pub limit: usize,
+    /// Total character count of the full output.
+    pub total_chars: usize,
+    /// Whether more data is available beyond this page.
+    pub has_more: bool,
+}
+
+/// Truncate `output` at character boundaries, returning the page and pagination metadata.
+///
+/// Uses `chars().skip(offset).take(limit)` for Unicode safety.
+pub fn truncate_with_pagination(
+    output: &str,
+    offset: usize,
+    limit: usize,
+) -> (String, PaginationInfo) {
+    let total_chars = output.chars().count();
+    let page: String = output.chars().skip(offset).take(limit).collect();
+    let consumed = offset + page.chars().count();
+    let info = PaginationInfo {
+        offset,
+        limit,
+        total_chars,
+        has_more: consumed < total_chars,
+    };
+    (page, info)
+}
 
 /// A tool that can be executed by the agent. Each tool has a name, description,
 /// JSON schema for its arguments, and an async `execute` method. Tools are
@@ -369,5 +403,55 @@ mod tests {
         assert!(registry.get("knowledge_clear").is_some());
         assert!(registry.get("knowledge_remove").is_some());
         assert!(registry.get("knowledge_export").is_some());
+    }
+
+    // ---- Pagination tests ----
+
+    #[test]
+    fn test_truncate_with_pagination_full() {
+        let (page, info) = truncate_with_pagination("hello", 0, 100);
+        assert_eq!(page, "hello");
+        assert_eq!(info.total_chars, 5);
+        assert!(!info.has_more);
+        assert_eq!(info.offset, 0);
+    }
+
+    #[test]
+    fn test_truncate_with_pagination_truncated() {
+        let (page, info) = truncate_with_pagination("hello world", 0, 5);
+        assert_eq!(page, "hello");
+        assert!(info.has_more);
+        assert_eq!(info.total_chars, 11);
+    }
+
+    #[test]
+    fn test_truncate_with_pagination_offset() {
+        let (page, info) = truncate_with_pagination("hello world", 6, 100);
+        assert_eq!(page, "world");
+        assert!(!info.has_more);
+        assert_eq!(info.offset, 6);
+    }
+
+    #[test]
+    fn test_truncate_with_pagination_unicode() {
+        let input = "héllo wörld";
+        let (page, info) = truncate_with_pagination(input, 0, 5);
+        assert_eq!(page, "héllo");
+        assert!(info.has_more);
+    }
+
+    #[test]
+    fn test_truncate_with_pagination_empty() {
+        let (page, info) = truncate_with_pagination("", 0, 100);
+        assert_eq!(page, "");
+        assert_eq!(info.total_chars, 0);
+        assert!(!info.has_more);
+    }
+
+    #[test]
+    fn test_truncate_with_pagination_offset_beyond() {
+        let (page, info) = truncate_with_pagination("hello", 100, 10);
+        assert_eq!(page, "");
+        assert!(!info.has_more);
     }
 }

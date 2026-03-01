@@ -140,6 +140,11 @@ impl Tool for GrepSearch {
                     "default": 100,
                     "description": "Maximum matches to return"
                 },
+                "offset": {
+                    "type": "integer",
+                    "default": 0,
+                    "description": "Number of matches to skip (for pagination)"
+                },
                 "include": {
                     "type": "string",
                     "description": "Only search files matching this glob pattern (e.g., *.rs)"
@@ -181,6 +186,10 @@ impl Tool for GrepSearch {
                 .get("max_matches")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(100) as usize;
+            let skip_offset = args
+                .get("offset")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
             let include_pattern = args.get("include").and_then(|v| v.as_str());
             let exclude_pattern = args.get("exclude").and_then(|v| v.as_str());
 
@@ -271,6 +280,11 @@ impl Tool for GrepSearch {
                     if let Some(m) = regex.find(line) {
                         total_matches += 1;
 
+                        // Skip matches before the offset
+                        if total_matches <= skip_offset {
+                            continue;
+                        }
+
                         // Get context
                         let start = line_num.saturating_sub(context_lines);
                         let end = (line_num + context_lines + 1).min(lines.len());
@@ -301,14 +315,20 @@ impl Tool for GrepSearch {
                 }
             }
 
-            // We're truncated if we stopped early (matches reached max_matches while there might be more)
             let truncated = matches.len() >= max_matches;
+            let has_more = truncated || (total_matches > skip_offset + matches.len());
 
             Ok(serde_json::json!({
                 "matches": matches,
                 "count": matches.len(),
                 "total_matches": total_matches,
-                "truncated": truncated
+                "truncated": truncated,
+                "pagination": {
+                    "offset": skip_offset,
+                    "limit": max_matches,
+                    "total_matches": total_matches,
+                    "has_more": has_more
+                }
             }))
         })
         .await??;

@@ -690,7 +690,7 @@ impl CorrelationResult {
 }
 
 /// Churn analyzer
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChurnAnalyzer {
     /// File statistics
     pub files: HashMap<PathBuf, FileStats>,
@@ -863,7 +863,7 @@ pub struct ChurnReport {
 // ============================================================================
 
 /// Main debt tracker
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DebtTracker {
     /// All debt items
     pub items: Vec<DebtItem>,
@@ -931,6 +931,28 @@ impl DebtTracker {
             .iter()
             .filter(|i| i.debt_type == debt_type)
             .collect()
+    }
+
+    /// Save tracker state to a JSON file.
+    pub fn save(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, json)?;
+        Ok(())
+    }
+
+    /// Load tracker state from a JSON file.
+    pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
+        let data = std::fs::read_to_string(path)?;
+        let tracker: Self = serde_json::from_str(&data)?;
+        Ok(tracker)
+    }
+
+    /// Default persistence path under a project root.
+    pub fn default_path(project_root: &std::path::Path) -> PathBuf {
+        project_root.join(".selfware").join("tech_debt.json")
     }
 }
 
@@ -1392,5 +1414,68 @@ mod tests {
         let total = item.total_cost();
         let base = item.fix_cost();
         assert!(total > base); // Should have accrued interest
+    }
+
+    // ---- Persistence tests ----
+
+    #[test]
+    fn test_debt_tracker_save_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("debt.json");
+
+        let mut tracker = DebtTracker::new();
+        tracker.add_debt(
+            DebtItem::new(DebtType::Security, "XSS fix")
+                .with_severity(DebtSeverity::Critical)
+                .with_estimate(4.0),
+        );
+        tracker.add_debt(
+            DebtItem::new(DebtType::Complexity, "Simplify")
+                .with_severity(DebtSeverity::Medium)
+                .with_estimate(8.0),
+        );
+
+        tracker.save(&path).unwrap();
+        let loaded = DebtTracker::load(&path).unwrap();
+
+        assert_eq!(loaded.items.len(), 2);
+        assert_eq!(loaded.items[0].debt_type, DebtType::Security);
+        assert_eq!(loaded.items[1].debt_type, DebtType::Complexity);
+    }
+
+    #[test]
+    fn test_debt_tracker_empty_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.json");
+
+        let tracker = DebtTracker::new();
+        tracker.save(&path).unwrap();
+        let loaded = DebtTracker::load(&path).unwrap();
+
+        assert!(loaded.items.is_empty());
+        assert!(loaded.roadmaps.is_empty());
+    }
+
+    #[test]
+    fn test_debt_tracker_load_missing_file() {
+        let result = DebtTracker::load(std::path::Path::new("/nonexistent/path.json"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_debt_tracker_save_creates_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("deep").join("debt.json");
+
+        let tracker = DebtTracker::new();
+        tracker.save(&path).unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn test_debt_tracker_default_path() {
+        let root = std::path::Path::new("/my/project");
+        let path = DebtTracker::default_path(root);
+        assert_eq!(path, root.join(".selfware").join("tech_debt.json"));
     }
 }

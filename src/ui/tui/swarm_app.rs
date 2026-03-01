@@ -388,7 +388,14 @@ impl SwarmApp {
             let task = SwarmTask::new("Sample task from UI")
                 .with_role(AgentRole::Coder)
                 .with_priority(5);
-            swarm.queue_task(task);
+            if let Err(e) = swarm.queue_task(task) {
+                self.swarm_state.add_event(
+                    EventType::TaskCreated,
+                    format!("Failed to queue task: {}", e),
+                    None,
+                );
+                return;
+            }
 
             self.swarm_state
                 .add_event(EventType::TaskCreated, "New task added to queue", None);

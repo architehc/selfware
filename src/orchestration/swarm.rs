@@ -645,6 +645,10 @@ pub struct Swarm {
     consensus_threshold: f32,
     /// Task queue
     task_queue: Vec<SwarmTask>,
+    /// Timeout for pending decisions (seconds)
+    decision_timeout_secs: u64,
+    /// Optional shared resource pressure for task gating
+    resource_pressure: Option<Arc<std::sync::RwLock<crate::resource::ResourcePressure>>>,
 }
 
 /// A task for the swarm
@@ -719,6 +723,8 @@ impl Swarm {
             conflict_strategy: ConflictStrategy::default(),
             consensus_threshold: 0.6,
             task_queue: Vec::new(),
+            decision_timeout_secs: 300,
+            resource_pressure: None,
         }
     }
 
@@ -732,6 +738,44 @@ impl Swarm {
     pub fn with_consensus_threshold(mut self, threshold: f32) -> Self {
         self.consensus_threshold = threshold.clamp(0.0, 1.0);
         self
+    }
+
+    /// Set decision timeout in seconds
+    pub fn with_decision_timeout(mut self, secs: u64) -> Self {
+        self.decision_timeout_secs = secs;
+        self
+    }
+
+    /// Set shared resource pressure handle for task gating
+    pub fn set_resource_pressure(
+        &mut self,
+        pressure: Arc<std::sync::RwLock<crate::resource::ResourcePressure>>,
+    ) {
+        self.resource_pressure = Some(pressure);
+    }
+
+    /// Sweep pending decisions that have exceeded the timeout, marking them
+    /// as `TimedOut`. Returns the IDs of timed-out decisions.
+    pub fn sweep_timed_out_decisions(&mut self) -> Vec<String> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let timeout = self.decision_timeout_secs;
+        let mut timed_out = Vec::new();
+
+        for (id, decision) in &mut self.decisions {
+            if decision.status == DecisionStatus::Pending
+                && now.saturating_sub(decision.created_at) >= timeout
+            {
+                decision.status = DecisionStatus::TimedOut;
+                decision.resolved_at = Some(now);
+                timed_out.push(id.clone());
+            }
+        }
+
+        timed_out
     }
 
     /// Add agent to swarm
@@ -905,11 +949,27 @@ impl Swarm {
         }
     }
 
-    /// Queue a task
-    pub fn queue_task(&mut self, task: SwarmTask) {
+    /// Queue a task. Returns an error if resource pressure is `High` or `Critical`.
+    pub fn queue_task(&mut self, task: SwarmTask) -> Result<()> {
+        if let Some(ref pressure_lock) = self.resource_pressure {
+            let pressure = pressure_lock
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            if matches!(
+                *pressure,
+                crate::resource::ResourcePressure::High
+                    | crate::resource::ResourcePressure::Critical
+            ) {
+                return Err(anyhow!(
+                    "Cannot queue task: resource pressure is {:?}",
+                    *pressure
+                ));
+            }
+        }
         self.task_queue.push(task);
         // Keep ascending order so `pop()` returns the highest numeric priority.
         self.task_queue.sort_unstable_by_key(|task| task.priority);
+        Ok(())
     }
 
     /// Get next task (highest priority)
@@ -1308,8 +1368,8 @@ mod tests {
     fn test_swarm_queue_task() {
         let mut swarm = Swarm::new();
 
-        swarm.queue_task(SwarmTask::new("Task 1").with_priority(5));
-        swarm.queue_task(SwarmTask::new("Task 2").with_priority(8));
+        swarm.queue_task(SwarmTask::new("Task 1").with_priority(5)).unwrap();
+        swarm.queue_task(SwarmTask::new("Task 2").with_priority(8)).unwrap();
 
         // Higher priority should come first
         let task = swarm.next_task().unwrap();
@@ -1532,8 +1592,8 @@ mod tests {
             .with_role(AgentRole::Security)
             .with_priority(7);
 
-        swarm.queue_task(impl_task);
-        swarm.queue_task(review_task);
+        swarm.queue_task(impl_task).unwrap();
+        swarm.queue_task(review_task).unwrap();
 
         // Get highest priority task
         let task = swarm.next_task().unwrap();
@@ -1847,5 +1907,93 @@ mod tests {
         let agent = swarm.get_agent(&agent_id).unwrap();
         let rate = agent.success_rate();
         assert!(rate > 0.5); // 6 successes, 1 failure
+    }
+
+    // ---- Decision timeout tests ----
+
+    #[test]
+    fn test_sweep_no_timeouts() {
+        let mut swarm = Swarm::new();
+        swarm.create_decision("Fresh?", vec!["A".into(), "B".into()]);
+
+        let timed_out = swarm.sweep_timed_out_decisions();
+        assert!(timed_out.is_empty());
+    }
+
+    #[test]
+    fn test_sweep_marks_old_pending() {
+        let mut swarm = Swarm::new().with_decision_timeout(0); // instant timeout
+        let id = swarm.create_decision("Old?", vec!["A".into(), "B".into()]);
+
+        let timed_out = swarm.sweep_timed_out_decisions();
+        assert_eq!(timed_out, vec![id.clone()]);
+
+        let d = swarm.get_decision(&id).unwrap();
+        assert_eq!(d.status, DecisionStatus::TimedOut);
+        assert!(d.resolved_at.is_some());
+    }
+
+    #[test]
+    fn test_sweep_skips_resolved() {
+        let mut swarm = Swarm::new().with_decision_timeout(0);
+        let a1 = swarm.add_agent(Agent::new("A1", AgentRole::Coder));
+        let id = swarm.create_decision("Resolved?", vec!["X".into()]);
+        swarm.vote(&id, &a1, "X", 0.9, "r").unwrap();
+        swarm.resolve_decision(&id).unwrap();
+
+        let timed_out = swarm.sweep_timed_out_decisions();
+        assert!(timed_out.is_empty());
+    }
+
+    #[test]
+    fn test_custom_decision_timeout() {
+        let swarm = Swarm::new().with_decision_timeout(600);
+        assert_eq!(swarm.decision_timeout_secs, 600);
+    }
+
+    // ---- Resource gating tests ----
+
+    #[test]
+    fn test_queue_task_no_pressure() {
+        let mut swarm = Swarm::new();
+        let result = swarm.queue_task(SwarmTask::new("Test task"));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_queue_task_high_pressure_rejected() {
+        use crate::resource::ResourcePressure;
+
+        let pressure = Arc::new(std::sync::RwLock::new(ResourcePressure::High));
+        let mut swarm = Swarm::new();
+        swarm.set_resource_pressure(Arc::clone(&pressure));
+
+        let result = swarm.queue_task(SwarmTask::new("Blocked task"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("resource pressure"));
+    }
+
+    #[test]
+    fn test_queue_task_critical_pressure_rejected() {
+        use crate::resource::ResourcePressure;
+
+        let pressure = Arc::new(std::sync::RwLock::new(ResourcePressure::Critical));
+        let mut swarm = Swarm::new();
+        swarm.set_resource_pressure(Arc::clone(&pressure));
+
+        let result = swarm.queue_task(SwarmTask::new("Blocked task"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_queue_task_low_pressure_allowed() {
+        use crate::resource::ResourcePressure;
+
+        let pressure = Arc::new(std::sync::RwLock::new(ResourcePressure::Low));
+        let mut swarm = Swarm::new();
+        swarm.set_resource_pressure(Arc::clone(&pressure));
+
+        let result = swarm.queue_task(SwarmTask::new("Allowed task"));
+        assert!(result.is_ok());
     }
 }

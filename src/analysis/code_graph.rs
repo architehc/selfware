@@ -11,6 +11,7 @@
 //! - Multiple output formats (DOT, Mermaid, ASCII)
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::{self, Write as IoWrite};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NODE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -642,25 +643,38 @@ impl GraphRenderer {
         self
     }
 
-    /// Render graph to specified format
+    /// Render graph to specified format as a `String`.
     pub fn render(&self, graph: &CodeGraph, format: OutputFormat) -> String {
+        let mut buf = Vec::new();
+        self.render_to(graph, format, &mut buf)
+            .expect("writing to Vec<u8> should not fail");
+        String::from_utf8(buf).expect("render output is valid UTF-8")
+    }
+
+    /// Render graph to the specified format, streaming into `w`.
+    pub fn render_to(
+        &self,
+        graph: &CodeGraph,
+        format: OutputFormat,
+        w: &mut dyn IoWrite,
+    ) -> io::Result<()> {
         match format {
-            OutputFormat::Dot => self.to_dot(graph),
-            OutputFormat::Mermaid => self.to_mermaid(graph),
-            OutputFormat::Ascii => self.to_ascii(graph),
-            OutputFormat::Json => self.to_json(graph),
-            OutputFormat::PlantUml => self.to_plantuml(graph),
+            OutputFormat::Dot => self.write_dot(graph, w),
+            OutputFormat::Mermaid => self.write_mermaid(graph, w),
+            OutputFormat::Ascii => self.write_ascii(graph, w),
+            OutputFormat::Json => self.write_json(graph, w),
+            OutputFormat::PlantUml => self.write_plantuml(graph, w),
         }
     }
 
-    /// Render to DOT format
-    fn to_dot(&self, graph: &CodeGraph) -> String {
-        let mut out = format!("digraph {} {{\n", sanitize_id(&graph.name));
-        out.push_str(&format!("  rankdir={};\n", self.direction));
-        out.push_str("  node [fontname=\"Arial\"];\n");
-        out.push_str("  edge [fontname=\"Arial\", fontsize=10];\n\n");
+    /// Write DOT format to `w`.
+    fn write_dot(&self, graph: &CodeGraph, w: &mut dyn IoWrite) -> io::Result<()> {
+        writeln!(w, "digraph {} {{", sanitize_id(&graph.name))?;
+        writeln!(w, "  rankdir={};", self.direction)?;
+        writeln!(w, "  node [fontname=\"Arial\"];")?;
+        writeln!(w, "  edge [fontname=\"Arial\", fontsize=10];")?;
+        writeln!(w)?;
 
-        // Group nodes by file if clustering
         if self.cluster_by_file {
             let mut by_file: HashMap<String, Vec<&GraphNode>> = HashMap::new();
             for node in graph.nodes.values() {
@@ -672,28 +686,28 @@ impl GraphRenderer {
             }
 
             for (file, nodes) in by_file {
-                out.push_str(&format!("  subgraph cluster_{} {{\n", sanitize_id(&file)));
-                out.push_str(&format!("    label=\"{}\";\n", file));
+                writeln!(w, "  subgraph cluster_{} {{", sanitize_id(&file))?;
+                writeln!(w, "    label=\"{}\";", file)?;
                 for node in nodes {
-                    out.push_str(&format!("    {};\n", self.node_to_dot(node)));
+                    writeln!(w, "    {};", self.node_to_dot(node))?;
                 }
-                out.push_str("  }\n\n");
+                writeln!(w, "  }}")?;
+                writeln!(w)?;
             }
         } else {
             for node in graph.nodes.values() {
-                out.push_str(&format!("  {};\n", self.node_to_dot(node)));
+                writeln!(w, "  {};", self.node_to_dot(node))?;
             }
         }
 
-        out.push('\n');
+        writeln!(w)?;
 
-        // Edges
         for edge in &graph.edges {
-            out.push_str(&format!("  {};\n", self.edge_to_dot(edge)));
+            writeln!(w, "  {};", self.edge_to_dot(edge))?;
         }
 
-        out.push_str("}\n");
-        out
+        writeln!(w, "}}")?;
+        Ok(())
     }
 
     fn node_to_dot(&self, node: &GraphNode) -> String {
@@ -731,11 +745,10 @@ impl GraphRenderer {
         )
     }
 
-    /// Render to Mermaid format
-    fn to_mermaid(&self, graph: &CodeGraph) -> String {
-        let mut out = format!("graph {}\n", self.direction);
+    /// Write Mermaid format to `w`.
+    fn write_mermaid(&self, graph: &CodeGraph, w: &mut dyn IoWrite) -> io::Result<()> {
+        writeln!(w, "graph {}", self.direction)?;
 
-        // Nodes
         for node in graph.nodes.values() {
             let shape = match node.node_type {
                 NodeType::Function => format!("{}(({}))", sanitize_mermaid(&node.id), node.name),
@@ -748,45 +761,43 @@ impl GraphRenderer {
                 }
                 _ => format!("{}[{}]", sanitize_mermaid(&node.id), node.name),
             };
-            out.push_str(&format!("    {}\n", shape));
+            writeln!(w, "    {}", shape)?;
         }
 
-        out.push('\n');
+        writeln!(w)?;
 
-        // Edges
         for edge in &graph.edges {
             let label = if let (true, Some(lbl)) = (self.include_edge_labels, edge.label.as_ref()) {
                 format!("|{}|", lbl)
             } else {
                 String::new()
             };
-            out.push_str(&format!(
-                "    {}{}{}{}\n",
+            writeln!(
+                w,
+                "    {}{}{}{}",
                 sanitize_mermaid(&edge.source),
                 edge.edge_type.mermaid_arrow(),
                 label,
                 sanitize_mermaid(&edge.target)
-            ));
+            )?;
         }
 
-        out
+        Ok(())
     }
 
-    /// Render to ASCII art
-    fn to_ascii(&self, graph: &CodeGraph) -> String {
-        let mut out = String::new();
-        out.push_str(&format!("=== {} ===\n\n", graph.name));
+    /// Write ASCII art to `w`.
+    fn write_ascii(&self, graph: &CodeGraph, w: &mut dyn IoWrite) -> io::Result<()> {
+        writeln!(w, "=== {} ===\n", graph.name)?;
+        writeln!(w, "Nodes: {}", graph.node_count())?;
+        writeln!(w, "Edges: {}\n", graph.edge_count())?;
 
-        out.push_str(&format!("Nodes: {}\n", graph.node_count()));
-        out.push_str(&format!("Edges: {}\n\n", graph.edge_count()));
-
-        // List nodes with their connections
         for node in graph.nodes.values() {
             let deps = graph.dependencies(&node.id);
             let depnts = graph.dependents(&node.id);
 
-            out.push_str(&format!(
-                "[{}] {} ({})\n",
+            writeln!(
+                w,
+                "[{}] {} ({})",
                 node.node_type.as_str(),
                 node.name,
                 if let Some(ref path) = node.file_path {
@@ -794,43 +805,44 @@ impl GraphRenderer {
                 } else {
                     "?"
                 }
-            ));
+            )?;
 
             if !deps.is_empty() {
-                out.push_str("  -> depends on: ");
-                out.push_str(
-                    &deps
-                        .iter()
+                write!(w, "  -> depends on: ")?;
+                writeln!(
+                    w,
+                    "{}",
+                    deps.iter()
                         .map(|n| n.name.as_str())
                         .collect::<Vec<_>>()
-                        .join(", "),
-                );
-                out.push('\n');
+                        .join(", ")
+                )?;
             }
 
             if !depnts.is_empty() {
-                out.push_str("  <- used by: ");
-                out.push_str(
-                    &depnts
+                write!(w, "  <- used by: ")?;
+                writeln!(
+                    w,
+                    "{}",
+                    depnts
                         .iter()
                         .map(|n| n.name.as_str())
                         .collect::<Vec<_>>()
-                        .join(", "),
-                );
-                out.push('\n');
+                        .join(", ")
+                )?;
             }
 
-            out.push('\n');
+            writeln!(w)?;
         }
 
-        out
+        Ok(())
     }
 
-    /// Render to JSON
-    fn to_json(&self, graph: &CodeGraph) -> String {
-        let mut out = String::from("{\n");
-        out.push_str(&format!("  \"name\": \"{}\",\n", graph.name));
-        out.push_str("  \"nodes\": [\n");
+    /// Write JSON to `w`.
+    fn write_json(&self, graph: &CodeGraph, w: &mut dyn IoWrite) -> io::Result<()> {
+        writeln!(w, "{{")?;
+        writeln!(w, "  \"name\": \"{}\",", graph.name)?;
+        writeln!(w, "  \"nodes\": [")?;
 
         let nodes: Vec<String> = graph
             .nodes
@@ -848,9 +860,10 @@ impl GraphRenderer {
                 )
             })
             .collect();
-        out.push_str(&nodes.join(",\n"));
+        write!(w, "{}", nodes.join(",\n"))?;
 
-        out.push_str("\n  ],\n  \"edges\": [\n");
+        writeln!(w, "\n  ],")?;
+        writeln!(w, "  \"edges\": [")?;
 
         let edges: Vec<String> = graph
             .edges
@@ -864,17 +877,17 @@ impl GraphRenderer {
                 )
             })
             .collect();
-        out.push_str(&edges.join(",\n"));
+        write!(w, "{}", edges.join(",\n"))?;
 
-        out.push_str("\n  ]\n}\n");
-        out
+        writeln!(w, "\n  ]")?;
+        writeln!(w, "}}")?;
+        Ok(())
     }
 
-    /// Render to PlantUML
-    fn to_plantuml(&self, graph: &CodeGraph) -> String {
-        let mut out = String::from("@startuml\n\n");
+    /// Write PlantUML to `w`.
+    fn write_plantuml(&self, graph: &CodeGraph, w: &mut dyn IoWrite) -> io::Result<()> {
+        writeln!(w, "@startuml\n")?;
 
-        // Nodes
         for node in graph.nodes.values() {
             let uml_type = match node.node_type {
                 NodeType::Package => "package",
@@ -884,16 +897,11 @@ impl GraphRenderer {
                 NodeType::Enum => "enum",
                 _ => "class",
             };
-            out.push_str(&format!(
-                "{} {} {{\n}}\n",
-                uml_type,
-                sanitize_id(&node.name)
-            ));
+            writeln!(w, "{} {} {{\n}}", uml_type, sanitize_id(&node.name))?;
         }
 
-        out.push('\n');
+        writeln!(w)?;
 
-        // Edges
         for edge in &graph.edges {
             let source = sanitize_id(
                 &graph
@@ -918,11 +926,11 @@ impl GraphRenderer {
                 _ => "-->",
             };
 
-            out.push_str(&format!("{} {} {}\n", source, arrow, target));
+            writeln!(w, "{} {} {}", source, arrow, target)?;
         }
 
-        out.push_str("\n@enduml\n");
-        out
+        writeln!(w, "\n@enduml")?;
+        Ok(())
     }
 }
 
@@ -1747,5 +1755,65 @@ mod tests {
         builder.add_struct("Data", None);
         let final_graph = builder.build();
         assert_eq!(final_graph.node_count(), 2);
+    }
+
+    // ---- Streaming render tests ----
+
+    fn sample_graph() -> CodeGraph {
+        let mut graph = CodeGraph::new("streaming_test");
+        graph.add_node(GraphNode::new("main", NodeType::Function).in_file("src/main.rs"));
+        graph.add_node(GraphNode::new("Config", NodeType::Struct).in_file("src/config.rs"));
+        graph.connect("main", "Config", EdgeType::Uses);
+        graph
+    }
+
+    #[test]
+    fn test_render_to_matches_render_dot() {
+        let graph = sample_graph();
+        let renderer = GraphRenderer::new();
+        let rendered = renderer.render(&graph, OutputFormat::Dot);
+        let mut buf = Vec::new();
+        renderer.render_to(&graph, OutputFormat::Dot, &mut buf).unwrap();
+        assert_eq!(rendered, String::from_utf8(buf).unwrap());
+    }
+
+    #[test]
+    fn test_render_to_matches_render_mermaid() {
+        let graph = sample_graph();
+        let renderer = GraphRenderer::new();
+        let rendered = renderer.render(&graph, OutputFormat::Mermaid);
+        let mut buf = Vec::new();
+        renderer.render_to(&graph, OutputFormat::Mermaid, &mut buf).unwrap();
+        assert_eq!(rendered, String::from_utf8(buf).unwrap());
+    }
+
+    #[test]
+    fn test_render_to_matches_render_ascii() {
+        let graph = sample_graph();
+        let renderer = GraphRenderer::new();
+        let rendered = renderer.render(&graph, OutputFormat::Ascii);
+        let mut buf = Vec::new();
+        renderer.render_to(&graph, OutputFormat::Ascii, &mut buf).unwrap();
+        assert_eq!(rendered, String::from_utf8(buf).unwrap());
+    }
+
+    #[test]
+    fn test_render_to_matches_render_json() {
+        let graph = sample_graph();
+        let renderer = GraphRenderer::new();
+        let rendered = renderer.render(&graph, OutputFormat::Json);
+        let mut buf = Vec::new();
+        renderer.render_to(&graph, OutputFormat::Json, &mut buf).unwrap();
+        assert_eq!(rendered, String::from_utf8(buf).unwrap());
+    }
+
+    #[test]
+    fn test_render_to_matches_render_plantuml() {
+        let graph = sample_graph();
+        let renderer = GraphRenderer::new();
+        let rendered = renderer.render(&graph, OutputFormat::PlantUml);
+        let mut buf = Vec::new();
+        renderer.render_to(&graph, OutputFormat::PlantUml, &mut buf).unwrap();
+        assert_eq!(rendered, String::from_utf8(buf).unwrap());
     }
 }

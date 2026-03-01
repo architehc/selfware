@@ -429,7 +429,9 @@ impl Agent {
             let sub_task = SwarmTask::new(format!("{}: {}", phase_desc, task))
                 .with_role(*role)
                 .with_priority(*priority);
-            swarm.queue_task(sub_task);
+            if let Err(e) = swarm.queue_task(sub_task) {
+                tracing::warn!("Failed to queue swarm task: {}", e);
+            }
         }
 
         println!(

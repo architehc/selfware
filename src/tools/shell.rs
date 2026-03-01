@@ -37,7 +37,9 @@ impl Tool for ShellExec {
                 "command": {"type": "string", "description": "Command to execute"},
                 "cwd": {"type": "string", "description": "Working directory"},
                 "timeout_secs": {"type": "integer", "default": 60, "description": "Timeout in seconds"},
-                "env": {"type": "object", "additionalProperties": {"type": "string"}}
+                "env": {"type": "object", "additionalProperties": {"type": "string"}},
+                "output_offset": {"type": "integer", "default": 0, "description": "Character offset for paginated output"},
+                "output_limit": {"type": "integer", "default": 10000, "description": "Maximum characters per output page"}
             },
             "required": ["command"]
         })
@@ -52,10 +54,18 @@ impl Tool for ShellExec {
             timeout_secs: u64,
             #[serde(default)]
             env: HashMap<String, String>,
+            #[serde(default)]
+            output_offset: usize,
+            #[serde(default = "default_output_limit")]
+            output_limit: usize,
         }
 
         fn default_timeout() -> u64 {
             60
+        }
+
+        fn default_output_limit() -> usize {
+            10000
         }
 
         let args: Args = serde_json::from_value(args)?;
@@ -145,10 +155,17 @@ impl Tool for ShellExec {
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
+        let (stdout_page, stdout_pagination) =
+            super::truncate_with_pagination(&stdout, args.output_offset, args.output_limit);
+        let (stderr_page, stderr_pagination) =
+            super::truncate_with_pagination(&stderr, args.output_offset, args.output_limit);
+
         Ok(serde_json::json!({
             "exit_code": exit_code,
-            "stdout": stdout.chars().take(10000).collect::<String>(),
-            "stderr": stderr.chars().take(10000).collect::<String>(),
+            "stdout": stdout_page,
+            "stderr": stderr_page,
+            "stdout_pagination": stdout_pagination,
+            "stderr_pagination": stderr_pagination,
             "duration_ms": duration_ms,
             "timed_out": timed_out
         }))

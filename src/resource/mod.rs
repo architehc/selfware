@@ -25,6 +25,7 @@ pub struct ResourceManager {
     disk: Arc<DiskManager>,
     quotas: Arc<RwLock<AdaptiveQuotas>>,
     usage: Arc<RwLock<ResourceUsage>>,
+    shared_pressure: Arc<std::sync::RwLock<ResourcePressure>>,
 }
 
 /// Current resource usage
@@ -80,6 +81,7 @@ impl ResourceManager {
             disk,
             quotas,
             usage,
+            shared_pressure: Arc::new(std::sync::RwLock::new(ResourcePressure::None)),
         })
     }
 
@@ -95,6 +97,12 @@ impl ResourceManager {
 
             // Check resource pressure
             let pressure = self.get_resource_pressure().await;
+
+            // Publish to shared handle so other subsystems (e.g. Swarm) can read it.
+            *self
+                .shared_pressure
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = pressure;
 
             if pressure.requires_action() {
                 warn!(pressure = ?pressure, "Resource pressure detected");
@@ -186,6 +194,12 @@ impl ResourceManager {
             }
             _ => {}
         }
+    }
+
+    /// Get a shared handle to the current resource pressure, suitable for
+    /// passing to other subsystems (e.g. `Swarm::set_resource_pressure`).
+    pub fn shared_pressure(&self) -> Arc<std::sync::RwLock<ResourcePressure>> {
+        Arc::clone(&self.shared_pressure)
     }
 
     /// Get current resource usage
