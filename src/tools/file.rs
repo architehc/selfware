@@ -269,6 +269,15 @@ impl Tool for FileWrite {
             );
         }
 
+        // Detect no-op writes (content identical to existing file)
+        if path.exists() {
+            if let Ok(existing) = fs::read_to_string(path) {
+                if existing == args.content {
+                    anyhow::bail!("file_write is a no-op — the file already has this exact content. You need to change the content to make an actual modification.");
+                }
+            }
+        }
+
         // Create backup if exists
         if args.backup && path.exists() {
             let backup_path = format!("{}.bak", args.path);

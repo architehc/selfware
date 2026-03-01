@@ -103,6 +103,8 @@ pub struct Agent {
     /// Self-healing engine for automatic recovery attempts
     #[cfg(feature = "resilience")]
     self_healing: SelfHealingEngine,
+    /// Recent tool call signatures for repetition detection (name, args_hash)
+    recent_tool_calls: VecDeque<(String, u64)>,
 }
 
 impl Agent {
@@ -332,6 +334,7 @@ To call a tool, use this EXACT XML structure:
             max_context_tokens: 100_000,
             #[cfg(feature = "resilience")]
             self_healing,
+            recent_tool_calls: VecDeque::new(),
         })
     }
 

@@ -1,3 +1,5 @@
+use std::hash::{Hash, Hasher};
+
 use anyhow::{Context, Result};
 use chrono::Utc;
 use colored::*;
@@ -71,6 +73,13 @@ impl Agent {
             output::final_answer(&content);
             self.last_assistant_response = content;
             return Ok(true);
+        }
+
+        // Detect repetition loops before executing
+        if let Some(loop_msg) = self.detect_repetition(&tool_calls) {
+            info!("Repetition loop detected, injecting correction");
+            self.messages.push(Message::user(loop_msg));
+            return Ok(false);
         }
 
         self.execute_tool_batch(tool_calls).await?;
@@ -156,6 +165,53 @@ impl Agent {
             }
         }
 
+        None
+    }
+
+    /// Track tool calls and detect repetition loops.
+    /// Returns `Some(message)` if the same tool+args has been called too many times recently.
+    fn detect_repetition(&mut self, tool_calls: &[CollectedToolCall]) -> Option<String> {
+        const MAX_REPEATS: usize = 3;
+        const WINDOW_SIZE: usize = 10;
+
+        for (name, args_str, _) in tool_calls {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            args_str.hash(&mut hasher);
+            let args_hash = hasher.finish();
+            let sig = (name.clone(), args_hash);
+
+            self.recent_tool_calls.push_back(sig.clone());
+            if self.recent_tool_calls.len() > WINDOW_SIZE {
+                self.recent_tool_calls.pop_front();
+            }
+
+            let repeat_count = self
+                .recent_tool_calls
+                .iter()
+                .filter(|s| **s == sig)
+                .count();
+
+            if repeat_count >= MAX_REPEATS {
+                warn!(
+                    "Repetition loop detected: {} called {} times in last {} calls",
+                    name, repeat_count, WINDOW_SIZE
+                );
+                self.cognitive_state.episodic_memory.what_failed(
+                    "repetition_loop",
+                    &format!("Stuck in loop: {} called {} times with identical args", name, repeat_count),
+                );
+                self.recent_tool_calls.clear();
+                return Some(format!(
+                    "STUCK LOOP DETECTED: You have called `{}` {} times with the exact same arguments. \
+                     This is not making progress. STOP and try a DIFFERENT approach:\n\
+                     - If file_edit fails with 'old_str not found', re-read the file first to see current content\n\
+                     - If file_write keeps writing the same content, your output is wrong — re-read the test expectations\n\
+                     - If file_read keeps reading the same file, you already have the content — make your edit now\n\
+                     - Consider using a completely different tool or strategy",
+                    name, repeat_count
+                ));
+            }
+        }
         None
     }
 
