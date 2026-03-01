@@ -4,6 +4,8 @@ set -euo pipefail
 THIS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${THIS_DIR}/../.." && pwd)"
 CONFIG_FILE="${CONFIG_FILE:-${THIS_DIR}/config/local_model.toml}"
+# Resolve to absolute path so it works after cd into work dirs
+CONFIG_FILE="$(cd "$(dirname "${CONFIG_FILE}")" && pwd)/$(basename "${CONFIG_FILE}")"
 BIN="${REPO_ROOT}/target/release/selfware"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 OUT_DIR="${THIS_DIR}/reports/${TIMESTAMP}"

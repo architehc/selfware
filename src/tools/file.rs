@@ -327,6 +327,9 @@ impl Tool for FileEdit {
         if matches > 1 {
             anyhow::bail!("old_str matches {} times, expected exactly 1", matches);
         }
+        if args.old_str == args.new_str {
+            anyhow::bail!("old_str and new_str are identical — this is a no-op edit. You must provide a different new_str to make an actual change.");
+        }
 
         let new_content = content.replace(&args.old_str, &args.new_str);
         write_atomic(Path::new(&args.path), &new_content)?;
@@ -939,6 +942,25 @@ mod tests {
 
         let result = tool.execute(args).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_file_edit_noop_rejected() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("noop.txt");
+        fs::write(&file_path, "Hello, World!").unwrap();
+
+        let tool = FileEdit::new();
+        let args = serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "old_str": "Hello",
+            "new_str": "Hello"
+        });
+
+        let result = tool.execute(args).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("no-op"), "Expected no-op error, got: {err_msg}");
     }
 
     #[tokio::test]
