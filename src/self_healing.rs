@@ -2582,7 +2582,7 @@ mod tests {
 
         let engine = SelfHealingEngine::default();
         for i in 0..10 {
-            engine.record_health("comp_a", i % 2 == 0, Some(50), 0);
+            engine.record_health("comp_a", i % 2 == 0, Some(50));
         }
 
         engine.save_state(&state_dir).unwrap();
