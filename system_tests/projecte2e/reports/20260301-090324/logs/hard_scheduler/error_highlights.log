@@ -1,0 +1,6 @@
+19:4. next_run_at must not panic on overflow (return None instead).
+57:2. **scheduler.rs**: Overflow in addition can panic
+87:All tests pass and the code compiles without errors.
+97:   - Use `checked_add()` instead of raw `+` to prevent overflow panics, returning `None` on overflow
+98:Final answer: All tests pass and the code compiles without errors.
+108:   - Use `checked_add()` instead of raw `+` to prevent overflow panics, returning `None` on overflow

@@ -1,0 +1,95 @@
+warning: unused import: `std::path::Path`
+ --> src/lib.rs:2:5
+  |
+2 | use std::path::Path;
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `base_dir`
+  --> src/lib.rs:17:30
+   |
+17 | pub fn read_user_file_secure(base_dir: &str, filename: &str) -> Result<String, String> {
+   |                              ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_base_dir`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `filename`
+  --> src/lib.rs:17:46
+   |
+17 | pub fn read_user_file_secure(base_dir: &str, filename: &str) -> Result<String, String> {
+   |                                              ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_filename`
+
+warning: unused variable: `query`
+  --> src/lib.rs:39:26
+   |
+39 | pub fn run_search_secure(query: &str) -> Result<String, String> {
+   |                          ^^^^^ help: if this is intentional, prefix it with an underscore: `_query`
+
+warning: unused variable: `url`
+  --> src/lib.rs:54:33
+   |
+54 | pub fn validate_redirect_secure(url: &str) -> bool {
+   |                                 ^^^ help: if this is intentional, prefix it with an underscore: `_url`
+
+warning: unused variable: `name`
+  --> src/lib.rs:69:31
+   |
+69 | pub fn render_greeting_secure(name: &str) -> String {
+   |                               ^^^^ help: if this is intentional, prefix it with an underscore: `_name`
+
+warning: unused variable: `path`
+  --> src/lib.rs:84:28
+   |
+84 | pub fn handle_error_secure(path: &str) -> String {
+   |                            ^^^^ help: if this is intentional, prefix it with an underscore: `_path`
+
+
+running 10 tests
+.. 2/10
+tests::test_info_leak_blocked --- FAILED
+tests::test_open_redirect_blocked --- FAILED
+tests::test_xss_blocked --- FAILED
+. 6/10
+tests::test_command_injection_blocked --- FAILED
+tests::test_path_traversal_blocked --- FAILED
+..
+failures:
+
+---- tests::test_info_leak_blocked stdout ----
+
+thread 'tests::test_info_leak_blocked' (31893641) panicked at src/lib.rs:85:5:
+not yet implemented: Implement secure version that returns generic error messages without internal paths
+
+---- tests::test_open_redirect_blocked stdout ----
+
+thread 'tests::test_open_redirect_blocked' (31893643) panicked at src/lib.rs:55:5:
+not yet implemented: Implement secure version that rejects protocol-relative URLs and external hosts
+
+---- tests::test_xss_blocked stdout ----
+
+thread 'tests::test_xss_blocked' (31893653) panicked at src/lib.rs:70:5:
+not yet implemented: Implement secure version with proper HTML entity escaping
+
+---- tests::test_command_injection_blocked stdout ----
+
+thread 'tests::test_command_injection_blocked' (31893639) panicked at src/lib.rs:40:5:
+not yet implemented: Implement secure version with input sanitization (no shell metacharacters)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::test_path_traversal_blocked stdout ----
+
+thread 'tests::test_path_traversal_blocked' (31893645) panicked at src/lib.rs:18:5:
+not yet implemented: Implement secure version with path canonicalization and prefix validation
+
+
+failures:
+    tests::test_command_injection_blocked
+    tests::test_info_leak_blocked
+    tests::test_open_redirect_blocked
+    tests::test_path_traversal_blocked
+    tests::test_xss_blocked
+
+test result: FAILED. 5 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--lib`

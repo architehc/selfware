@@ -1,0 +1,3 @@
+47:**Bug 2: `truncate`** - off-by-one error using `saturating_sub(1)` instead of `max_len`
+105:2. **`truncate`** - Fixed off-by-one error by changing `max_len.saturating_sub(1)` to `max_len` so truncation respects the exact maximum length.
+116:2. **`truncate`** - Fixed off-by-one error by changing `max_len.saturating_sub(1)` to `max_len` so truncation respects the exact maximum length.
