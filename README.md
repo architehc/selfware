@@ -367,14 +367,15 @@ Round ratings: **BLOOM** (≥85) · **GROW** (≥60) · **WILT** (≥30) · **FR
 
 #### Benchmark Results — Qwen3-Coder-Next-FP8 (1M context)
 
-Tested on NVIDIA H100 via vLLM, 6 parallel scenarios, 21 rounds (251 scenario runs):
+Tested on NVIDIA H100 via vLLM, 6 parallel scenarios, 27 rounds (323 scenario runs):
 
 | Metric | Value |
 |--------|-------|
-| Steady-state average (R2–R21) | **90/100** |
-| Peak phase (R9–R21) | **94/100** |
-| Best round | **96/100** (achieved 6 times) |
-| Perfect rounds (12/12 pass) | **12 out of 21** |
+| Steady-state average (R2–R27) | **90/100** |
+| Peak phase (R9–R27) | **91/100** |
+| Best round | **96/100** (achieved 8 times) |
+| Perfect rounds (12/12 pass) | **16 out of 27** |
+| BLOOM rounds (≥85) | **22 out of 27** |
 | S-tier scenarios (100% reliable) | 5 of 12 |
 
 <details>
@@ -403,6 +404,12 @@ Tested on NVIDIA H100 via vLLM, 6 parallel scenarios, 21 rounds (251 scenario ru
 | R19 | 96/100 | BLOOM | 12/12 |
 | R20 | 96/100 | BLOOM | 12/12 |
 | R21 | 89/100 | BLOOM | 11/12 |
+| R22 | 87/100 | BLOOM | 11/12 |
+| R23 | 96/100 | BLOOM | 12/12 |
+| R24 | 87/100 | BLOOM | 11/12 |
+| R25 | 90/100 | BLOOM | 11/12 |
+| R26 | 95/100 | BLOOM | 12/12 |
+| R27 | 73/100 | GROW | 9/12 |
 
 </details>
 
@@ -411,8 +418,8 @@ Tested on NVIDIA H100 via vLLM, 6 parallel scenarios, 21 rounds (251 scenario ru
 | Tier | Scenarios | Pass Rate |
 |------|-----------|-----------|
 | **S** (100%) | `easy_calculator`, `easy_string_ops`, `medium_json_merge`, `perf_optimization`, `codegen_task_runner` | 100% |
-| **A** (>80%) | `hard_scheduler`, `hard_event_bus`, `expert_async_race`, `medium_bitset` | 82–95% |
-| **B** (50–80%) | `security_audit`, `testgen_ringbuf`, `refactor_monolith` | 65–76% |
+| **A** (>80%) | `hard_scheduler`, `hard_event_bus`, `expert_async_race`, `medium_bitset` | 89–96% |
+| **B** (50–80%) | `security_audit`, `testgen_ringbuf`, `refactor_monolith` | 70–74% |
 
 #### Running Your Own Benchmark
 
@@ -436,7 +443,7 @@ SAB is designed to benchmark any local LLM. Here are tested and recommended conf
 
 | Model | Quant | Weights | Min VRAM | Recommended GPU | Context | Notes |
 |-------|-------|---------|----------|-----------------|---------|-------|
-| **Qwen3-Coder-Next-FP8** | FP8 | ~70 GB | 80 GB | H100 / A100 80GB | 1M | Reference model, 90/100 SAB |
+| **Qwen3-Coder-Next-FP8** | FP8 | ~70 GB | 80 GB | H100 / A100 80GB | 1M | Reference model, 90/100 SAB (27 rounds) |
 | **Qwen3.5-Coder 35B A3B** | Q4_K_M | ~22 GB | 24–32 GB | **RTX 5090** (32 GB) | 32–128K | MoE, fast inference, best bang/buck |
 | **LFM2 24B A2B** | 4-bit | ~13.4 GB | 16–24 GB | **RTX 4090 / 3090** (24 GB) | 32–64K | Efficient MoE for rapid iteration |
 | **LFM2.5 1.2B Instruct** | Q8 | ~1.25 GB | 2 GB | Any GPU | 8–16K | Ultra-light, quick prototyping |
