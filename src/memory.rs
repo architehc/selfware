@@ -12,6 +12,7 @@ use crate::config::Config;
 use crate::token_count::estimate_tokens_with_overhead;
 use anyhow::Result;
 use chrono::Utc;
+use std::collections::VecDeque;
 
 /// Maximum number of memory entries before eviction kicks in.
 const MAX_MEMORY_ENTRIES: usize = 10_000;
@@ -23,7 +24,7 @@ const MAX_MEMORY_TOKENS: usize = 500_000;
 
 pub struct AgentMemory {
     context_window: usize,
-    entries: Vec<MemoryEntry>,
+    entries: VecDeque<MemoryEntry>,
 }
 
 pub struct MemoryEntry {
@@ -53,7 +54,7 @@ impl AgentMemory {
     pub fn new(config: &Config) -> Result<Self> {
         Ok(Self {
             context_window: config.agent.token_budget,
-            entries: Vec::new(),
+            entries: VecDeque::new(),
         })
     }
 
@@ -75,14 +76,16 @@ impl AgentMemory {
         let new_entry = MemoryEntry::from_message(msg);
 
         // Token budget eviction -- evict oldest entries while over budget.
+        // Uses VecDeque::pop_front() for O(1) removal instead of Vec::remove(0)
+        // which was O(N) per eviction.
         let new_tokens = new_entry.token_estimate;
         while self.total_estimated_tokens() + new_tokens > MAX_MEMORY_TOKENS
             && !self.entries.is_empty()
         {
-            self.entries.remove(0);
+            self.entries.pop_front();
         }
 
-        self.entries.push(new_entry);
+        self.entries.push_back(new_entry);
     }
 
     /// Estimate total token usage across all memory entries.

@@ -30,10 +30,7 @@ impl CompilationSandbox {
             std::fs::remove_dir_all(&work_dir)?;
         }
 
-        // Use git to clone the current state to ensure we get a clean working tree
-        // without copying untracked files or build artifacts, but including staged/unstaged changes
-
-        // First clone the repo
+        // Clone the repo to get a clean working tree without build artifacts.
         let status = Command::new("git")
             .arg("clone")
             .arg("--no-hardlinks")
@@ -43,6 +40,31 @@ impl CompilationSandbox {
 
         if !status.success() {
             return Err(anyhow!("Failed to clone repository into sandbox"));
+        }
+
+        // Carry over uncommitted changes (staged + unstaged) so the sandbox
+        // reflects the actual working tree, not just the last commit.
+        let diff_output = Command::new("git")
+            .args(["diff", "HEAD"])
+            .current_dir(&original_dir)
+            .output()?;
+
+        if diff_output.status.success() && !diff_output.stdout.is_empty() {
+            let mut apply = Command::new("git")
+                .args(["apply", "--allow-empty"])
+                .current_dir(&work_dir)
+                .stdin(std::process::Stdio::piped())
+                .spawn()?;
+
+            if let Some(ref mut stdin) = apply.stdin {
+                use std::io::Write;
+                stdin.write_all(&diff_output.stdout)?;
+            }
+
+            let apply_status = apply.wait()?;
+            if !apply_status.success() {
+                info!("Some uncommitted changes could not be applied to sandbox (merge conflict); proceeding with committed state");
+            }
         }
 
         Ok(Self {

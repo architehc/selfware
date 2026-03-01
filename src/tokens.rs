@@ -45,6 +45,24 @@ pub struct TokenTracker {
     step_usage: RwLock<Vec<StepUsage>>,
     /// Session start time
     start_time: RwLock<Option<Instant>>,
+    /// Drift tracking: cumulative (estimated - actual) for prompt tokens
+    drift: RwLock<DriftStats>,
+}
+
+/// Tracks cumulative drift between estimated and actual token counts.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DriftStats {
+    /// Number of comparison samples recorded
+    pub samples: u64,
+    /// Sum of (estimated - actual) across all samples.  Positive means
+    /// the estimator is over-counting; negative means under-counting.
+    pub cumulative_drift: i64,
+    /// Sum of |estimated - actual| for mean absolute error.
+    pub cumulative_abs_drift: u64,
+    /// Largest single over-estimate seen
+    pub max_over: i64,
+    /// Largest single under-estimate seen (stored as negative)
+    pub max_under: i64,
 }
 
 /// Token usage for a single step
@@ -66,6 +84,7 @@ impl TokenTracker {
             api_calls: AtomicUsize::new(0),
             step_usage: RwLock::new(Vec::new()),
             start_time: RwLock::new(Some(Instant::now())),
+            drift: RwLock::new(DriftStats::default()),
         }
     }
 
@@ -143,6 +162,7 @@ impl TokenTracker {
             api_calls: self.api_call_count(),
             estimated_cost: self.estimate_cost(),
             duration: self.session_duration(),
+            drift: self.drift_stats(),
         }
     }
 
@@ -161,6 +181,44 @@ impl TokenTracker {
             + (completion / 1_000_000.0 * completion_cost_per_1m)
     }
 
+    /// Record the difference between an estimated token count and the actual
+    /// count reported by the API.  Call this after each API response that
+    /// includes a `usage` block so drift can be tracked over the session.
+    pub fn record_drift(&self, estimated: usize, actual: usize) {
+        if let Ok(mut drift) = self.drift.write() {
+            let diff = estimated as i64 - actual as i64;
+            drift.samples += 1;
+            drift.cumulative_drift += diff;
+            drift.cumulative_abs_drift += diff.unsigned_abs();
+            if diff > drift.max_over {
+                drift.max_over = diff;
+            }
+            if diff < drift.max_under {
+                drift.max_under = diff;
+            }
+            // Log a warning when drift exceeds 15% on a single sample
+            if actual > 0 {
+                let pct = (diff.unsigned_abs() as f64 / actual as f64) * 100.0;
+                if pct > 15.0 {
+                    tracing::warn!(
+                        estimated,
+                        actual,
+                        drift_pct = format!("{:.1}%", pct),
+                        "Token estimation drift exceeds 15%"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Return a snapshot of the current drift statistics.
+    pub fn drift_stats(&self) -> DriftStats {
+        self.drift
+            .read()
+            .map(|d| d.clone())
+            .unwrap_or_default()
+    }
+
     /// Reset the tracker
     pub fn reset(&self) {
         self.prompt_tokens.store(0, Ordering::SeqCst);
@@ -171,6 +229,9 @@ impl TokenTracker {
         }
         if let Ok(mut start) = self.start_time.write() {
             *start = Some(Instant::now());
+        }
+        if let Ok(mut drift) = self.drift.write() {
+            *drift = DriftStats::default();
         }
     }
 }
@@ -184,6 +245,7 @@ pub struct TokenSummary {
     pub api_calls: usize,
     pub estimated_cost: f64,
     pub duration: Option<std::time::Duration>,
+    pub drift: DriftStats,
 }
 
 impl std::fmt::Display for TokenSummary {
@@ -200,6 +262,17 @@ impl std::fmt::Display for TokenSummary {
 
         if let Some(duration) = self.duration {
             write!(f, " | Duration: {:.1}s", duration.as_secs_f64())?;
+        }
+
+        if self.drift.samples > 0 {
+            let mae = self.drift.cumulative_abs_drift as f64 / self.drift.samples as f64;
+            write!(
+                f,
+                " | Drift: avg={:+.0}, MAE={:.0} ({} samples)",
+                self.drift.cumulative_drift as f64 / self.drift.samples as f64,
+                mae,
+                self.drift.samples
+            )?;
         }
 
         Ok(())
@@ -1368,6 +1441,77 @@ fn main() {
         let messages: Vec<crate::api::types::Message> = vec![];
         let estimate = estimate_messages_tokens(&messages);
         assert_eq!(estimate, 0);
+    }
+
+    // ---- Drift tracking tests ----
+
+    #[test]
+    fn test_drift_stats_default() {
+        let tracker = TokenTracker::new();
+        let drift = tracker.drift_stats();
+        assert_eq!(drift.samples, 0);
+        assert_eq!(drift.cumulative_drift, 0);
+    }
+
+    #[test]
+    fn test_drift_over_estimate() {
+        let tracker = TokenTracker::new();
+        // Estimated 120, actual 100 → over-estimate by 20
+        tracker.record_drift(120, 100);
+        let drift = tracker.drift_stats();
+        assert_eq!(drift.samples, 1);
+        assert_eq!(drift.cumulative_drift, 20);
+        assert_eq!(drift.cumulative_abs_drift, 20);
+        assert_eq!(drift.max_over, 20);
+        assert_eq!(drift.max_under, 0);
+    }
+
+    #[test]
+    fn test_drift_under_estimate() {
+        let tracker = TokenTracker::new();
+        // Estimated 80, actual 100 → under-estimate by 20
+        tracker.record_drift(80, 100);
+        let drift = tracker.drift_stats();
+        assert_eq!(drift.samples, 1);
+        assert_eq!(drift.cumulative_drift, -20);
+        assert_eq!(drift.cumulative_abs_drift, 20);
+        assert_eq!(drift.max_over, 0);
+        assert_eq!(drift.max_under, -20);
+    }
+
+    #[test]
+    fn test_drift_accumulation() {
+        let tracker = TokenTracker::new();
+        tracker.record_drift(110, 100); // +10
+        tracker.record_drift(90, 100); // -10
+        tracker.record_drift(130, 100); // +30
+        let drift = tracker.drift_stats();
+        assert_eq!(drift.samples, 3);
+        assert_eq!(drift.cumulative_drift, 30); // 10 + (-10) + 30
+        assert_eq!(drift.cumulative_abs_drift, 50); // 10 + 10 + 30
+        assert_eq!(drift.max_over, 30);
+        assert_eq!(drift.max_under, -10);
+    }
+
+    #[test]
+    fn test_drift_reset() {
+        let tracker = TokenTracker::new();
+        tracker.record_drift(150, 100);
+        tracker.reset();
+        let drift = tracker.drift_stats();
+        assert_eq!(drift.samples, 0);
+        assert_eq!(drift.cumulative_drift, 0);
+    }
+
+    #[test]
+    fn test_drift_in_summary() {
+        let tracker = TokenTracker::new();
+        tracker.record_usage(1000, 500);
+        tracker.record_drift(1100, 1000);
+        let summary = tracker.summary();
+        assert_eq!(summary.drift.samples, 1);
+        let display = format!("{}", summary);
+        assert!(display.contains("Drift"));
     }
 }
 

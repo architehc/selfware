@@ -754,6 +754,11 @@ impl Agent {
             });
         }
 
+        // Hard-truncate message history to stay within context window before
+        // any API call.  This prevents exceeding the model's context limit when
+        // compression is skipped or fails.
+        self.trim_message_history();
+
         if self.compressor.should_compress(&self.messages) {
             info!("Context compression triggered");
             match self.compressor.compress(&self.client, &self.messages).await {
@@ -1006,6 +1011,7 @@ impl Agent {
     pub(super) async fn plan(&mut self) -> Result<bool> {
         // Tools are embedded in system prompt - see WORKAROUND comment in Agent::new()
         debug!("Sending planning request to model...");
+        self.trim_message_history();
         let mut request_messages = self.messages.clone();
         if let Some(learning_hint) = self.build_learning_hint(self.learning_context()) {
             request_messages.push(Message::system(learning_hint));
