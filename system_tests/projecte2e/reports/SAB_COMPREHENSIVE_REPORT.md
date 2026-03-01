@@ -1,20 +1,20 @@
-# SAB Comprehensive Report: 21 Rounds, 251 Scenario Runs
+# SAB Comprehensive Report: 27 Rounds, 323 Scenario Runs
 
 ## Executive Summary
 
-**251 scenario runs across 21 rounds** testing Qwen/Qwen3-Coder-Next-FP8 (1M context) on 12 coding scenarios.
+**323 scenario runs across 27 rounds** testing Qwen/Qwen3-Coder-Next-FP8 (1M context) on 12 coding scenarios.
 
 | Metric | Value |
 |--------|-------|
 | Model | **Qwen/Qwen3-Coder-Next-FP8** |
 | Max Context | 1,010,000 tokens |
-| Total Rounds | 21 |
-| Total Runs | 251 |
+| Total Rounds | 27 |
+| Total Runs | 323 |
 | Grand Average | **89/100** |
-| Steady-State (R2-R21) | **90/100** |
-| Peak (R9-R21) | **94/100** |
-| BLOOM Rounds | 17/21 |
-| Zero-FROST Rounds | 11/21 |
+| Steady-State (R2-R27) | **90/100** |
+| Peak (R9-R27) | **91/100** |
+| BLOOM Rounds | 22/27 |
+| Zero-FROST Rounds | 14/27 |
 
 ## Round Results
 
@@ -41,6 +41,12 @@
 | R19 | 96/100 | 🌸 BLOOM | 10 | 2 | 0 | 12/12 |
 | R20 | 96/100 | 🌸 BLOOM | 10 | 2 | 0 | 12/12 |
 | R21 | 89/100 | 🌸 BLOOM | 10 | 1 | 1 | 11/12 |
+| R22 | 87/100 | 🌸 BLOOM | 9 | 2 | 1 | 11/12 |
+| R23 | 96/100 | 🌸 BLOOM | 10 | 2 | 0 | 12/12 |
+| R24 | 87/100 | 🌸 BLOOM | 9 | 2 | 1 | 11/12 |
+| R25 | 90/100 | 🌸 BLOOM | 10 | 1 | 1 | 11/12 |
+| R26 | 95/100 | 🌸 BLOOM | 10 | 2 | 0 | 12/12 |
+| R27 | 73/100 | 🌿 GROW | 8 | 1 | 3 | 9/12 |
 
 ## Scenario Reliability
 
@@ -49,21 +55,22 @@
 | `easy_calculator` | easy | 100 | 100 | 100 | 100% | S |
 | `easy_string_ops` | easy | 99 | 90 | 100 | 100% | S |
 | `medium_json_merge` | medium | 100 | 100 | 100 | 100% | S |
-| `medium_bitset` | medium | 89 | 0 | 100 | 90% | A |
-| `hard_scheduler` | hard | 95 | 0 | 100 | 95% | A |
-| `hard_event_bus` | hard | 84 | 0 | 100 | 86% | A |
-| `expert_async_race` | expert | 90 | 0 | 100 | 90% | A |
-| `security_audit` | hard | 72 | 0 | 100 | 76% | B |
+| `medium_bitset` | medium | 90 | 0 | 100 | 93% | A |
+| `hard_scheduler` | hard | 96 | 0 | 100 | 96% | A |
+| `hard_event_bus` | hard | 86 | 0 | 100 | 89% | A |
+| `expert_async_race` | expert | 88 | 0 | 100 | 89% | A |
+| `security_audit` | hard | 70 | 0 | 100 | 74% | B |
 | `perf_optimization` | hard | 100 | 100 | 100 | 100% | S |
 | `codegen_task_runner` | hard | 99 | 90 | 100 | 100% | S |
-| `testgen_ringbuf` | medium | 76 | 70 | 80 | 71% | B |
-| `refactor_monolith` | medium | 61 | 0 | 80 | 71% | B |
+| `testgen_ringbuf` | medium | 72 | 0 | 80 | 74% | B |
+| `refactor_monolith` | medium | 63 | 0 | 80 | 74% | B |
 
 ## Conclusions
 
-1. **90/100 steady-state** demonstrates strong agentic coding capability
+1. **90/100 steady-state** across 26 valid rounds demonstrates strong agentic coding capability
 2. **5 S-tier scenarios** at 100% reliability: easy_calculator, easy_string_ops, medium_json_merge, perf_optimization, codegen_task_runner
-3. **Peak performance phase (R9-R21)** averaging 94/100 with 8 zero-FROST rounds in 13
+3. **22 of 27 rounds rated BLOOM** (≥85/100)
 4. **Concurrency is critical**: 6 parallel optimal, 12 parallel degrades performance
 5. **Repetition loops** are the primary failure mode, not coding ability
-6. **Late-phase consistency**: R15-R20 achieved 6 consecutive perfect 95-96/100 rounds
+6. **Late-phase consistency**: R15-R20 achieved 6 consecutive 95-96/100 rounds
+7. **security_audit and testgen_ringbuf** remain the most unreliable scenarios (B-tier)
