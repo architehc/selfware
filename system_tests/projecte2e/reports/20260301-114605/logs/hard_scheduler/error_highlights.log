@@ -1,0 +1,6 @@
+19:4. next_run_at must not panic on overflow (return None instead).
+77:- Replaced unchecked addition `now_epoch + seconds` with `checked_add()` to return `None` on overflow instead of panicking
+97:- Replaced unchecked addition `now_epoch + seconds` with `checked_add()` to return `None` on overflow instead of panicking
+112:- Replaced unchecked addition `now_epoch + seconds` with `checked_add()` to return `None` on overflow instead of panicking
+132:- Replaced unchecked addition `now_epoch + seconds` with `checked_add()` to return `None` on overflow instead of panicking
+141:- Replaced unchecked addition `now_epoch + seconds` with `checked_add()` to return `None` on overflow instead of panicking

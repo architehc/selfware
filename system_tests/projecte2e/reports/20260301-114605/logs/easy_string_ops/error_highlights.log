@@ -1,0 +1,5 @@
+41:**Bug 2: `truncate`** - off-by-one error, truncates at max_len-1 instead of max_len
+81:All tests pass and cargo check shows no errors. Here's a summary of the fixes:
+89:2. **`truncate`** - Fixed off-by-one error: changed `max_len.saturating_sub(1)` to `max_len` so truncation happens at the correct boundary
+113:2. **`truncate`** - Fixed off-by-one error: changed `max_len.saturating_sub(1)` to `max_len` so truncation happens at the correct boundary
+126:2. **`truncate`** - Fixed off-by-one error: changed `max_len.saturating_sub(1)` to `max_len` so truncation happens at the correct boundary

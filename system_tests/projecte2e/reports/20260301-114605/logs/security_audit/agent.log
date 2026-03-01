@@ -1,0 +1,154 @@
+🌿 Entering garden: /Users/ivo/selfware/system_tests/projecte2e/work/security_audit
+
+╭───────────────────────────────────────────────────────────────╮
+│  ⚙️ SELFWARE WORKSHOP [YOLO]                              │
+│  🌿 Tending: security_audit
+│  🧭 Remote · 0 tasks completed
+╰───────────────────────────────────────────────────────────────╯
+
+
+⚙️ Headless Mode
+
+🦊 Selfware starting task...
+Task: You are fixing security vulnerabilities in the current directory.
+
+The crate contains 5 vulnerable functions and empty _secure counterparts.
+
+Acceptance criteria:
+1. Implement read_user_file_secure with path canonicalization and prefix validation.
+2. Implement run_search_secure with input sanitization (no shell metacharacters).
+3. Implement validate_redirect_secure that rejects protocol-relative URLs and external hosts.
+4. Implement render_greeting_secure with proper HTML entity escaping.
+5. Implement handle_error_secure that returns generic error messages without internal paths.
+6. All tests must pass.
+
+Process:
+- Run cargo test first to see which tests fail.
+- Implement each secure function.
+- Run cargo test to verify all pass.
+
+Provide a short summary of what changed.
+📊 [1/2] Planning [░░░░░░░░░░░░░░░░░░░░] 0%
+📊 [2/2] Executing [██████████░░░░░░░░░░] 50% ETA: ~4s
+📝 Step 1 Executing...
+📝 Step 2 Executing...
+Now let me read the source file to understand the current implementation and the tests:
+
+<tool>
+<name>file_read</name>
+<arguments>{"path": "./src/lib.rs"}</arguments>
+</tool>
+📝 Step 3 Executing...
+Now I understand the requirements. Let me implement each secure function:
+
+1. **read_user_file_secure**: Path canonicalization and prefix validation
+2. **run_search_secure**: Input sanitization (no shell metacharacters)
+3. **validate_redirect_secure**: Reject protocol-relative URLs and external hosts
+4. **render_greeting_secure**: HTML entity escaping
+5. **handle_error_secure**: Generic error messages without internal paths
+
+<tool>
+<name>file_write</name>
+<arguments>{"content": "use std::fs;\nuse std::path::Path;\nuse std::process::Command;\n\n// ---------------------------------------------------------------------------\n// 1. Path Traversal\n// ---------------------------------------------------------------------------\n\n/// VULNERABLE: Naively joins base_dir and filename without canonicalization.\n/// An attacker can supply \"../../../etc/passwd\" to escape the base directory.\npub fn read_user_file(base_dir: &str, filename: &str) -> Result<String, String> {\n    let path = format!(\"{}/{}\", base_dir, filename);\n    fs::read_to_string(&path).map_err(|e| e.to_string())\n}\n\n/// SECURE: Must canonicalize the resolved path and verify it stays within base_dir.\npub fn read_user_file_secure(base_dir: &str, filename: &str) -> Result<String, String> {\n    let base_path = Path::new(base_dir);\n    let requested_path = base_path.join(filename);\n    \n    // Canonicalize the resolved path\n    let canonical_requested = requested_path\n        .canonicalize()\n        .map_err(|e| format!(\"Failed to resolve path: {}\", e))?;\n    \n    // Canonicalize the base directory\n    let canonical_base = base_path\n        .canonicalize()\n        .map_err(|e| format!(\"Invalid base directory: {}\", e))?;\n    \n    // Check that the resolved path is within the base directory\n    if !canonical_requested.starts_with(&canonical_base) {\n        return Err(\"Access denied: path traversal attempt detected\".to_string());\n    }\n    \n    // Read the file\n    fs::read_to_string(&canonical_requested).map_err(|e| e.to_string())\n}\n\n// ---------------------------------------------------------------------------\n// 2. Command Injection\n// ---------------------------------------------------------------------------\n\n/// VULNERABLE: Interpolates `query` directly into a shell command string.\n/// An attacker can supply `\"; echo INJECTED\"` to execute arbitrary commands.\npub fn run_search(query: &str) -> Result<String, String> {\n    let cmd = format!(\"grep {} file.txt\", query);\n    let output = Command::new(\"sh\")\n        .arg(\"-c\")\n        .arg(&cmd)\n        .output()\n        .map_err(|e| e.to_string())?;\n    Ok(String::from_utf8_lossy(&output.stdout).to_string()\n        + &String::from_utf8_lossy(&output.stderr))\n}\n\n/// SECURE: Must sanitize input so shell metacharacters cannot break out.\npub fn run_search_secure(query: &str) -> Result<String, String> {\n    // Check for shell metacharacters that could enable command injection\n    let dangerous_chars = [';', '|', '&', '$', '`', '>', '<', '*', '?', '(', ')', '{', '}', '\\n', '\\t'];\n    \n    for c in query.chars() {\n        if dangerous_chars.contains(&c) {\n            return Err(\"Invalid input: shell metacharacters are not allowed\".to_string());\n        }\n    }\n    \n    // Use safe argument passing instead of shell interpolation\n    let output = Command::new(\"grep\")\n        .arg(query)\n        .arg(\"file.txt\")\n        .output()\n        .map_err(|e| e.to_string())?;\n    \n    Ok(String::from_utf8_lossy(&output.stdout).to_string()\n        + &String::from_utf8_lossy(&output.stderr))\n}\n\n// ---------------------------------------------------------------------------\n// 3. Open Redirect\n// ---------------------------------------------------------------------------\n\n/// VULNERABLE: Only checks that the URL starts with \"/\", which is bypassed\n/// by protocol-relative URLs like \"//evil.com\".\npub fn validate_redirect(url: &str) -> bool {\n    url.starts_with(\"/\")\n}\n\n/// SECURE: Must reject protocol-relative URLs and external hosts.\npub fn validate_redirect_secure(url: &str) -> bool {\n    // Reject empty URLs\n    if url.is_empty() {\n        return false;\n    }\n    \n    // Reject protocol-relative URLs (starting with //)\n    if url.starts_with(\"//\") {\n        return false;\n    }\n    \n    // Reject absolute URLs with protocols (http://, https://, etc.)\n    if url.contains(\"://\") {\n        return false;\n    }\n    \n    // Only allow relative paths starting with /\n    url.starts_with(\"/\")\n}\n\n// ---------------------------------------------------------------------------\n// 4. XSS (Cross-Site Scripting)\n// ---------------------------------------------------------------------------\n\n/// VULNERABLE: Interpolates `name` directly into HTML without escaping.\n/// An attacker can supply `<script>alert(1)</script>` to inject scripts.\npub fn render_greeting(name: &str) -> String {\n    format!(\"<h1>Hello, {}</h1>\", name)\n}\n\n/// SECURE: Must escape HTML entities in `name` before embedding in markup.\npub fn render_greeting_secure(name: &str) -> String {\n    let mut escaped = String::new();\n    \n    for c in name.chars() {\n        match c {\n            '<' => escaped.push_str(\"&lt;\"),\n            '>' => escaped.push_str(\"&gt;\"),\n            '&' => escaped.push_str(\"&amp;\"),\n            '\"' => escaped.push_str(\"&quot;\"),\n            '\\' => escaped.push_str(\"&#x27;\"),\n            '`' => escaped.push_str(\"&#x60;\"),\n            _ => escaped.push(c),\n        }\n    }\n    \n    format!(\"<h1>Hello, {}</h1>\", escaped)\n}\n\n// ---------------------------------------------------------------------------\n// 5. Information Leak\n// ---------------------------------------------------------------------------\n\n/// VULNERABLE: Returns the full internal file path in error messages,\n/// exposing server directory structure to the caller.\npub fn handle_error(path: &str) -> String {\n    format!(\"Error: file not found at {}\", path)\n}\n\n/// SECURE: Must return a generic error message without revealing internal paths.\npub fn handle_error_secure(path: &str) -> String {\n    // Use a generic message that doesn't reveal the path\n    \"Error: file not found\".to_string()\n}\n\n// ===========================================================================\n// Tests\n// ===========================================================================\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n    use std::fs;\n    use std::path::PathBuf;\n\n    /// Helper: create a temp directory with a known file inside it.\n    fn setup_temp_dir() -> (tempfile::TempDir, PathBuf) {\n        let dir = tempfile::tempdir().expect(\"failed to create temp dir\");\n        let file_path = dir.path().join(\"allowed.txt\");\n        fs::write(&file_path, \"safe content\").expect(\"failed to write test file\");\n        let canonical = dir.path().canonicalize().unwrap();\n        (dir, canonical)\n    }\n\n    // -----------------------------------------------------------------------\n    // Path Traversal\n    // -----------------------------------------------------------------------\n\n    #[test]\n    fn test_path_traversal_is_vulnerable() {\n        // The insecure version happily accepts traversal sequences.\n        // It will try to read the path; we just verify it doesn't reject the input.\n        let (_dir, base) = setup_temp_dir();\n        let base_str = base.to_str().unwrap();\n        // The insecure function builds the path without checking traversal.\n        // It may fail with a file-not-found error, but it does NOT reject the\n        // traversal attempt — it simply forwards the raw path to the filesystem.\n        let result = read_user_file(base_str, \"../../../etc/passwd\");\n        // The key point: the function attempted the traversal rather than blocking it.\n        // It either succeeded (on systems with /etc/passwd) or returned a normal\n        // IO error — it never returned an \"invalid path\" / \"traversal blocked\" error.\n        match result {\n            Ok(_) => {} // read succeeded — clearly vulnerable\n            Err(e) => {\n                assert!(\n                    !e.to_lowercase().contains(\"traversal\")\n                        && !e.to_lowercase().contains(\"outside\"),\n                    \"Insecure version should not have traversal protection, but got: {}\",\n                    e\n                );\n            }\n        }\n    }\n\n    #[test]\n    fn test_path_traversal_blocked() {\n        let (_dir, base) = setup_temp_dir();\n        let base_str = base.to_str().unwrap();\n        let result = read_user_file_secure(base_str, \"../../../etc/passwd\");\n        assert!(\n            result.is_err(),\n            \"Secure read_user_file must reject path traversal attempts\"\n        );\n\n        // A legitimate file inside the base dir should still work.\n        let ok = read_user_file_secure(base_str, \"allowed.txt\");\n        assert!(\n            ok.is_ok(),\n            \"Secure read_user_file must allow legitimate files inside base_dir\"\n        );\n        assert_eq!(ok.unwrap(), \"safe content\");\n    }\n\n    // -----------------------------------------------------------------------\n    // Command Injection\n    // -----------------------------------------------------------------------\n\n    #[test]\n    fn test_command_injection_is_vulnerable() {\n        // The insecure version passes the query straight to sh -c.\n        let result = run_search(\"; echo INJECTED\").unwrap_or_default();\n        assert!(\n            result.contains(\"INJECTED\"),\n            \"Insecure run_search should allow injection, got: {}\",\n            result\n        );\n    }\n\n    #[test]\n    fn test_command_injection_blocked() {\n        let result = run_search_secure(\"; echo INJECTED\");\n        match result {\n            Ok(output) => {\n                assert!(\n                    !output.contains(\"INJECTED\"),\n                    \"Secure run_search must not execute injected commands, got: {}\",\n                    output\n                );\n            }\n            Err(_) => {\n                // Returning an error for dangerous input is also acceptable.\n            }\n        }\n    }\n\n    // -----------------------------------------------------------------------\n    // Open Redirect\n    // -----------------------------------------------------------------------\n\n    #[test]\n    fn test_open_redirect_is_vulnerable() {\n        // Protocol-relative URL bypasses the naive starts_with(\"/\") check.\n        assert!(\n            validate_redirect(\"//evil.com\"),\n            \"Insecure validate_redirect should accept //evil.com\"\n        );\n    }\n\n    #[test]\n    fn test_open_redirect_blocked() {\n        assert!(\n            !validate_redirect_secure(\"//evil.com\"),\n            \"Secure validate_redirect must reject protocol-relative URLs\"\n        );\n        assert!(\n            !validate_redirect_secure(\"https://evil.com\"),\n            \"Secure validate_redirect must reject absolute external URLs\"\n        );\n        assert!(\n            validate_redirect_secure(\"/dashboard\"),\n            \"Secure validate_redirect must accept safe relative paths\"\n        );\n        assert!(\n            validate_redirect_secure(\"/settings/profile\"),\n            \"Secure validate_redirect must accept safe relative paths with segments\"\n        );\n    }\n\n    // -----------------------------------------------------------------------\n    // XSS\n    // -----------------------------------------------------------------------\n\n    #[test]\n    fn test_xss_is_vulnerable() {\n        let output = render_greeting(\"<script>alert(1)</script>\");\n        assert!(\n            output.contains(\"<script>\"),\n            \"Insecure render_greeting should contain raw script tags, got: {}\",\n            output\n        );\n    }\n\n    #[test]\n    fn test_xss_blocked() {\n        let output = render_greeting_secure(\"<script>alert(1)</script>\");\n        assert!(\n            !output.contains(\"<script>\"),\n            \"Secure render_greeting must escape HTML, got: {}\",\n            output\n        );\n        assert!(\n            output.contains(\"&lt;\") || output.contains(\"&#\"),\n            \"Secure render_greeting must use HTML entities for angle brackets, got: {}\",\n            output\n        );\n    }\n\n    // -----------------------------------------------------------------------\n    // Information Leak\n    // -----------------------------------------------------------------------\n\n    #[test]\n    fn test_info_leak_is_vulnerable() {\n        let msg = handle_error(\"/var/app/secret/data.db\");\n        assert!(\n            msg.contains(\"/var/app/secret/data.db\"),\n            \"Insecure handle_error should leak the full path, got: {}\",\n            msg\n        );\n    }\n\n    #[test]\n    fn test_info_leak_blocked() {\n        let msg = handle_error_secure(\"/var/app/secret/data.db\");\n        assert!(\n            !msg.contains(\"/var/app\"),\n            \"Secure handle_error must not reveal internal paths, got: {}\",\n            msg\n        );\n        assert!(\n            !msg.contains(\"secret\"),\n            \"Secure handle_error must not reveal directory names, got: {}\",\n            msg\n        );\n        // It should still indicate an error occurred.\n        let lower = msg.to_lowercase();\n        assert!(\n            lower.contains(\"error\") || lower.contains(\"not found\"),\n            \"Secure handle_error should still indicate an error, got: {}\",\n            msg\n        );\n    }\n}\n", "path": "./src/lib.rs"}</arguments>
+</tool>
+
+╔══════════════════════════════════════════╗
+║         VERIFICATION REPORT              ║
+╠══════════════════════════════════════════╣
+║ Trigger: file_write:./src/lib.rs        ║
+║ Status: ✗ FAILED                        ║
+║ Duration: 103ms                         ║
+╠══════════════════════════════════════════╣
+║ ✗ type_check: 103ms
+║   └─ src/lib.rs: unterminated character literal
+╠══════════════════════════════════════════╣
+║ Suggested next steps:                    ║
+║   • Fix type errors before proceeding
+╚══════════════════════════════════════════╝
+
+📝 Step 4 Executing...
+I need to fix the unterminated character literal in the code. Let me check and fix the issue:
+
+<tool>
+<name>file_read</name>
+<arguments>{"line_range": [100, 115], "path": "./src/lib.rs"}</arguments>
+</tool>
+📝 Step 5 Executing...
+Let me check the render_greeting_secure function where the character literal issue likely is:
+
+<tool>
+<name>file_read</name>
+<arguments>{"line_range": [115, 145], "path": "./src/lib.rs"}</arguments>
+</tool>
+📝 Step 6 Executing...
+I see the issue - the single quote character `'` in the match statement needs to be escaped properly. Let me fix this:
+
+<tool>
+<name>file_edit</name>
+<arguments>{"new_str": "/// SECURE: Must escape HTML entities in `name` before embedding in markup.\npub fn render_greeting_secure(name: &str) -> String {\n    let mut escaped = String::new();\n    \n    for c in name.chars() {\n        match c {\n            '<' => escaped.push_str(\"&lt;\"),\n            '>' => escaped.push_str(\"&gt;\"),\n            '&' => escaped.push_str(\"&amp;\"),\n            '\"' => escaped.push_str(\"&quot;\"),\n            '\\'' => escaped.push_str(\"&#x27;\"),\n            '`' => escaped.push_str(\"&#x60;\"),\n            _ => escaped.push(c),\n        }\n    }\n    \n    format!(\"<h1>Hello, {}</h1>\", escaped)\n}", "old_str": "/// SECURE: Must escape HTML entities in `name` before embedding in markup.\npub fn render_greeting_secure(name: &str) -> String {\n    let mut escaped = String::new();\n    \n    for c in name.chars() {\n        match c {\n            '<' => escaped.push_str(\"&lt;\"),\n            '>' => escaped.push_str(\"&gt;\"),\n            '&' => escaped.push_str(\"&amp;\"),\n            '\"' => escaped.push_str(\"&quot;\"),\n            '\\' => escaped.push_str(\"&#x27;\"),\n            '`' => escaped.push_str(\"&#x60;\"),\n            _ => escaped.push(c),\n        }\n    }\n    \n    format!(\"<h1>Hello, {}</h1>\", escaped)\n}", "path": "./src/lib.rs"}</arguments>
+</tool>
+📝 Step 7 Executing...
+Now let me run the tests to verify the implementation:
+
+<tool>
+<name>shell_exec</name>
+<arguments>{"command": "cargo test 2>&1"}</arguments>
+</tool>
+📝 Step 8 Executing...
+All 10 tests pass. Let me fix the warning about the unused variable in `handle_error_secure`:
+
+<tool>
+<name>file_edit</name>
+<arguments>{"new_str": "/// SECURE: Must return a generic error message without revealing internal paths.\npub fn handle_error_secure(_path: &str) -> String {\n    // Use a generic message that doesn't reveal the path\n    \"Error: file not found\".to_string()\n}", "old_str": "/// SECURE: Must return a generic error message without revealing internal paths.\npub fn handle_error_secure(path: &str) -> String {\n    // Use a generic message that doesn't reveal the path\n    \"Error: file not found\".to_string()\n}", "path": "./src/lib.rs"}</arguments>
+</tool>
+📝 Step 9 Executing...
+Now let me run the tests one final time to confirm everything passes:
+
+<tool>
+<name>shell_exec</name>
+<arguments>{"command": "cargo test 2>&1"}</arguments>
+</tool>
+📝 Step 10 Executing...
+<tool>
+<name>cargo_test</name>
+<arguments>{}</arguments>
+</tool>
+📝 Step 11 Executing...
+All 10 tests pass. Here's a summary of the changes:
+
+## Summary
+
+Implemented 5 secure functions to fix security vulnerabilities:
+
+1. **read_user_file_secure**: Added path canonicalization using `Path::canonicalize()` and prefix validation to prevent path traversal attacks. The resolved path is checked to ensure it stays within the base directory.
+
+2. **run_search_secure**: Implemented input sanitization by rejecting shell metacharacters (`;|&$`><*?(){}`\n\t`) and using direct argument passing to `grep` instead of shell interpolation to prevent command injection.
+
+3. **validate_redirect_secure**: Added checks to reject protocol-relative URLs (starting with `//`) and absolute URLs with protocols (`://`). Only relative paths starting with `/` are allowed.
+
+4. **render_greeting_secure**: Implemented HTML entity escaping for special characters (`<`, `>`, `&`, `"`, `'`, `` ` ``) to prevent XSS attacks.
+
+5. **handle_error_secure**: Returns a generic error message without revealing internal file paths.
+
+All 10 tests now pass.
+Final answer: All 10 tests pass. Here's a summary of the changes:
+
+## Summary
+
+Implemented 5 secure functions to fix security vulnerabilities:
+
+1. **read_user_file_secure**: Added path canonicalization using `Path::canonicalize()` and prefix validation to prevent path traversal attacks. The resolved path is checked to ensure it stays within the base directory.
+
+2. **run_search_secure**: Implemented input sanitization by rejecting shell metacharacters (`;|&$`><*?(){}`\n\t`) and using direct argument passing to `grep` instead of shell interpolation to prevent command injection.
+
+3. **validate_redirect_secure**: Added checks to reject protocol-relative URLs (starting with `//`) and absolute URLs with protocols (`://`). Only relative paths starting with `/` are allowed.
+
+4. **render_greeting_secure**: Implemented HTML entity escaping for special characters (`<`, `>`, `&`, `"`, `'`, `` ` ``) to prevent XSS attacks.
+
+5. **handle_error_secure**: Returns a generic error message without revealing internal file paths.
+
+All 10 tests now pass.
+✅ Task completed successfully!
+
+🌾 Task complete. Your garden has been tended. (1m 52s)
+
