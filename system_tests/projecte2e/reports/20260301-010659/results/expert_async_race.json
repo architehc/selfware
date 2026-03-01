@@ -1,0 +1,14 @@
+{
+  "name": "expert_async_race",
+  "difficulty": "expert",
+  "baseline_status": 101,
+  "post_status": 101,
+  "agent_status": 124,
+  "timed_out": 1,
+  "duration_secs": 610,
+  "score": 0,
+  "rating": "FROST",
+  "changed_files": 0,
+  "error_hits": 65,
+  "completed_at": "2026-03-01T06:17:26Z"
+}

@@ -1,0 +1,12 @@
+[02:00:04] medium_json_merge: score=100/100 rating=BLOOM duration=42s
+[02:00:06] easy_string_ops: score=100/100 rating=BLOOM duration=45s
+[02:00:10] easy_calculator: score=100/100 rating=BLOOM duration=50s
+[02:00:14] hard_scheduler: score=100/100 rating=BLOOM duration=53s
+[02:01:23] expert_async_race: score=100/100 rating=BLOOM duration=63s
+[02:04:08] testgen_ringbuf: score=80/100 rating=GROW duration=159s
+[02:04:31] medium_bitset: score=0/100 rating=FROST duration=310s
+[02:09:41] refactor_monolith: score=80/100 rating=GROW duration=328s
+[02:09:59] perf_optimization: score=100/100 rating=BLOOM duration=461s
+[02:10:22] security_audit: score=0/100 rating=FROST duration=610s
+[02:10:33] codegen_task_runner: score=90/100 rating=BLOOM duration=611s
+[02:14:32] hard_event_bus: score=0/100 rating=FROST duration=910s

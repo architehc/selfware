@@ -1,0 +1,18 @@
+You are optimizing slow algorithms in the current directory.
+
+The code has correct but extremely slow implementations. Performance tests are timing out.
+
+Acceptance criteria:
+1. two_sum must use O(n) HashMap lookup instead of O(n²) nested loops.
+2. count_unique_words must use HashSet instead of Vec::contains().
+3. longest_common_subsequence must use dynamic programming instead of exponential recursion.
+4. sorted_unique must use sort + dedup instead of nested loop dedup.
+5. char_frequencies must use HashMap instead of per-character iteration.
+6. All correctness and performance tests must pass within time budgets.
+
+Process:
+- Run cargo test first to see timeouts.
+- Rewrite each function with the optimal algorithm.
+- Run cargo test to verify all pass within time limits.
+
+Provide a short summary of what changed.
