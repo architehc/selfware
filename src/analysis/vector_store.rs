@@ -872,7 +872,7 @@ impl VectorIndex {
     /// Normalizes both inputs before computing the dot product.
     /// Kept for external callers and tests; the hot search path uses
     /// `dot_product` on pre-normalized vectors instead.
-    fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         let mut na = a.to_vec();
         let mut nb = b.to_vec();
         Self::l2_normalize(&mut na);

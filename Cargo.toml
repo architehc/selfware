@@ -9,6 +9,33 @@ homepage = "https://selfware.me"
 repository = "https://github.com/architehc/selfware"
 keywords = ["ai", "agent", "local-first", "cli", "automation"]
 categories = ["command-line-utilities", "development-tools"]
+readme = "README.md"
+rust-version = "1.85"
+documentation = "https://docs.rs/selfware"
+exclude = [
+    "system_tests/",
+    "experiments/",
+    "k8s/",
+    "docs/",
+    "selfware.toml",
+    "selfware-eval.toml",
+    "selfware-extended-test.toml",
+    "selfware-longrun.toml",
+    "*.zip",
+    "*.profraw",
+    "*.html",
+    "*.info",
+    "COMPREHENSIVE_PRODUCTION_READINESS_REVIEW.md",
+    "PRODUCTION_READINESS_REVIEW.md",
+    "SECOND_OPINION_REVIEW.md",
+    "EVAL_REPORT.md",
+    "Dockerfile",
+    ".dockerignore",
+    ".tarpaulin.toml",
+    "deny.toml",
+    ".pre-commit-config.yaml",
+    ".github/",
+]
 
 [dependencies]
 tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "process", "signal"] }
