@@ -106,7 +106,7 @@ opentelemetry_sdk = { version = "0.21.0", features = ["rt-tokio"] }
 opentelemetry-otlp = "0.14.0"
 tracing-opentelemetry = "0.22.0"
 metrics = "0.21.0"
-metrics-exporter-prometheus = "0.12.1"
+metrics-exporter-prometheus = "0.18.1"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30", features = ["signal"] }
