@@ -38,17 +38,17 @@ pub mod ui;
 // ============================================================================
 // Domain modules
 // ============================================================================
-// Note: These modules are now pub(crate) because test coupling has been resolved.
-// Tests and examples have been updated to use re-exports or direct crate imports.
+// Public for external tests and downstream use. Submodule items are selectively
+// re-exported below for convenience; the full paths remain available.
 // ============================================================================
-pub(crate) mod analysis;
-pub(crate) mod cognitive;
+pub mod analysis;
+pub mod cognitive;
 pub(crate) mod devops;
 pub(crate) mod observability;
 pub(crate) mod orchestration;
-pub(crate) mod resource;
+pub mod resource;
 pub(crate) mod session;
-pub(crate) mod supervision;
+pub mod supervision;
 pub(crate) mod testing;
 
 // Backward-compatible re-exports for safety module

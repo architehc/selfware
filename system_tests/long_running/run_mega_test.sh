@@ -364,7 +364,9 @@ monitor_session() {
         local minutes=$(((elapsed % 3600) / 60))
         
         # Count checkpoints
-        local checkpoints=$(find "$session_dir/checkpoints" -name "checkpoint_*.json" 2>/dev/null | wc -l)
+        local checkpoints=$(find "$session_dir/checkpoints" -name "checkpoint_*.json" 2>/dev/null | wc -l || echo 0)
+        checkpoints="${checkpoints// /}"
+        checkpoints="${checkpoints:-0}"
         
         # Log status
         log "Status: ${hours}h ${minutes}m elapsed | Checkpoints: $checkpoints"
@@ -441,8 +443,13 @@ fi
 log "Generating final report..."
 
 # Count results
-CHECKPOINT_COUNT=$(find "$SESSION_DIR/checkpoints" -name "checkpoint_*.json" 2>/dev/null | wc -l)
-METRIC_COUNT=$(find "$SESSION_DIR/metrics" -name "metrics_*.json" 2>/dev/null | wc -l)
+CHECKPOINT_COUNT=$(find "$SESSION_DIR/checkpoints" -name "checkpoint_*.json" 2>/dev/null | wc -l || echo 0)
+METRIC_COUNT=$(find "$SESSION_DIR/metrics" -name "metrics_*.json" 2>/dev/null | wc -l || echo 0)
+# Trim whitespace from wc output (macOS wc adds leading spaces)
+CHECKPOINT_COUNT="${CHECKPOINT_COUNT// /}"
+METRIC_COUNT="${METRIC_COUNT// /}"
+CHECKPOINT_COUNT="${CHECKPOINT_COUNT:-0}"
+METRIC_COUNT="${METRIC_COUNT:-0}"
 
 # Calculate duration
 END_TIME=$(date +%s)
