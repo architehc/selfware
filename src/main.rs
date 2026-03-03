@@ -25,7 +25,7 @@ async fn main() -> ExitCode {
     // tokio::select! which would drop the future mid-flight.
     let result = selfware::cli::run().await;
 
-    selfware::observability::telemetry::shutdown_tracing();
+    selfware::shutdown_tracing();
 
     match result {
         Ok(_) => ExitCode::SUCCESS,

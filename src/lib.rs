@@ -53,6 +53,9 @@ pub(crate) mod testing;
 
 // Backward-compatible re-exports for safety module
 pub use safety::redact;
+
+// Re-export shutdown_tracing for main.rs
+pub use observability::telemetry::shutdown_tracing;
 pub use safety::sandbox;
 pub use safety::threat_modeling;
 
@@ -89,6 +92,7 @@ pub mod output;
 pub mod self_healing;
 pub mod token_count;
 #[cfg(feature = "tokens")]
+pub mod kv_store;
 pub mod tokens;
 pub mod tool_parser;
 

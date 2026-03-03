@@ -7,6 +7,9 @@ CONFIG_FILE="${CONFIG_FILE:-${THIS_DIR}/config/local_model.toml}"
 # Resolve to absolute path so it works after cd into work dirs
 CONFIG_FILE="$(cd "$(dirname "${CONFIG_FILE}")" && pwd)/$(basename "${CONFIG_FILE}")"
 BIN="${REPO_ROOT}/target/release/selfware"
+# Timeout multiplier for slower inference backends (e.g., local CPU/GPU inference)
+# Usage: TIMEOUT_MULTIPLIER=4 CONFIG_FILE=... ./run_projecte2e.sh
+TIMEOUT_MULTIPLIER="${TIMEOUT_MULTIPLIER:-1}"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 OUT_DIR="${THIS_DIR}/reports/${TIMESTAMP}"
 WORK_ROOT="${THIS_DIR}/work"
@@ -36,8 +39,9 @@ else
   exit 1
 fi
 
-# Extract endpoint from config to verify connectivity
+# Extract endpoint and model from config to verify connectivity
 ENDPOINT="$(grep '^endpoint' "${CONFIG_FILE}" | head -1 | sed 's/.*= *"//;s/".*//')"
+MODEL_NAME="$(grep '^model' "${CONFIG_FILE}" | head -1 | sed 's/.*= *"//;s/".*//')"
 if ! curl -fsS --connect-timeout 10 "${ENDPOINT}/models" >/dev/null; then
   echo "ERROR: Model endpoint is unreachable at ${ENDPOINT}/models" >&2
   exit 1
@@ -46,7 +50,9 @@ fi
 echo "=============================================="
 echo "  Selfware E2E Test Suite"
 echo "  $(date)"
-echo "  Model: Qwen/Qwen3-Coder-Next-FP8"
+echo "  Model: ${MODEL_NAME}"
+echo "  Endpoint: ${ENDPOINT}"
+echo "  Timeout multiplier: ${TIMEOUT_MULTIPLIER}x"
 echo "=============================================="
 echo ""
 
@@ -98,7 +104,8 @@ run_coding_scenario() {
   local start_ts
   start_ts="$(date +%s)"
   set +e
-  "${TIMEOUT_CMD}" "${timeout_secs}" "${BIN}" \
+  local effective_timeout=$((timeout_secs * TIMEOUT_MULTIPLIER))
+  "${TIMEOUT_CMD}" "${effective_timeout}" "${BIN}" \
     --config "${CONFIG_FILE}" \
     -C "${work_dir}" \
     -y \
@@ -175,7 +182,8 @@ run_swarm_scenario() {
   local start_ts
   start_ts="$(date +%s)"
   set +e
-  "${TIMEOUT_CMD}" 240 "${BIN}" \
+  local swarm_timeout=$((240 * TIMEOUT_MULTIPLIER))
+  "${TIMEOUT_CMD}" "${swarm_timeout}" "${BIN}" \
     --config "${CONFIG_FILE}" \
     -C "${REPO_ROOT}" \
     -y \
@@ -250,7 +258,7 @@ ALL_SCENARIOS+=("swarm_session")
   echo
   echo "- Timestamp: ${TIMESTAMP}"
   echo "- Model endpoint: ${ENDPOINT}"
-  echo "- Model: Qwen/Qwen3-Coder-Next-FP8"
+  echo "- Model: ${MODEL_NAME}"
   echo "- Binary: \`target/release/selfware\` built with \`--all-features\`"
   echo "- Coding scenarios: ${pass_count}/${coding_count} passed"
   echo "- Total scenarios: ${scenario_count}"
