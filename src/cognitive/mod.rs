@@ -32,15 +32,10 @@ pub mod self_reference;
 pub mod token_budget;
 
 // Re-exports for backward compatibility (cognitive.rs used to export these directly)
-pub use state::{
-    ApproachAttempt, ApproachOutcome, CognitiveState, CognitiveStateBuilder, CyclePhase,
-    EpisodicMemory, Lesson, LessonCategory, Pattern, PlanStep, StepStatus, WorkingMemory,
-};
+pub use state::{CognitiveState, CyclePhase, EpisodicMemory, Lesson, LessonCategory, PlanStep, StepStatus};
 
 // Re-export key types for new memory architecture
-pub use cognitive_system::{CognitiveSystem, ContextBuildOptions, LlmContext};
-pub use memory_hierarchy::{
-    Episode, EpisodeType, HierarchicalMemory, Importance, TokenBudget, TOTAL_CONTEXT_TOKENS,
-};
-pub use self_reference::{SelfImprovementContext, SelfModel, SelfReferenceSystem};
-pub use token_budget::{TaskType, TokenBudgetAllocator};
+pub use cognitive_system::CognitiveSystem;
+pub use memory_hierarchy::HierarchicalMemory;
+pub use self_reference::SelfReferenceSystem;
+pub use token_budget::TokenBudgetAllocator;

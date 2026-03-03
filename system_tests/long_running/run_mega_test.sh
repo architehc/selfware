@@ -24,6 +24,7 @@ PROJECT_TYPE="${1:-task_queue}"
 DURATION_HOURS="${2:-6}"
 AGENT_COUNT="${3:-6}"
 CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-10}"
+CONFIG_FILE="${CONFIG_FILE:-}"
 
 # Session ID
 SESSION_ID="mega-$(date +%Y%m%d-%H%M%S)-$(uuidgen | cut -d'-' -f1)"
@@ -142,48 +143,123 @@ fi
 
 log_info "All prerequisites met"
 
+# Resolve timeout command (GNU coreutils on macOS installs as gtimeout)
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="gtimeout"
+else
+    log_error "'timeout' (or 'gtimeout') command is required. Install coreutils."
+    exit 1
+fi
+
 # Build Selfware in release mode for testing
 log "Building Selfware (release mode)..."
 cd "$PROJECT_ROOT"
-if ! cargo build --release --features tui 2>&1 | tee -a "$LOG_FILE"; then
+if ! cargo build --release --all-features 2>&1 | tee -a "$LOG_FILE"; then
     log_error "Build failed"
     exit 1
 fi
 log_info "Build complete"
 
 # Create test configuration
-cat > "$SESSION_DIR/selfware.toml" << EOF
-# Mega Test Session Configuration
-session_id = "$SESSION_ID"
+# If CONFIG_FILE is provided, extract endpoint/model settings from it
+ENDPOINT_LINE=""
+MODEL_LINE=""
+MAX_TOKENS_LINE=""
+TEMPERATURE_LINE=""
+SAFETY_BLOCK=""
+YOLO_BLOCK=""
+RETRY_BLOCK=""
+RESOURCES_BLOCK=""
+if [ -n "${CONFIG_FILE}" ] && [ -f "${CONFIG_FILE}" ]; then
+    log_info "Merging settings from CONFIG_FILE: ${CONFIG_FILE}"
+    _ep=$(grep '^endpoint' "${CONFIG_FILE}" | head -1 || true)
+    _mo=$(grep '^model' "${CONFIG_FILE}" | head -1 || true)
+    _mt=$(grep '^max_tokens' "${CONFIG_FILE}" | head -1 || true)
+    _te=$(grep '^temperature' "${CONFIG_FILE}" | head -1 || true)
+    [ -n "$_ep" ] && ENDPOINT_LINE="$_ep"
+    [ -n "$_mo" ] && MODEL_LINE="$_mo"
+    [ -n "$_mt" ] && MAX_TOKENS_LINE="$_mt"
+    [ -n "$_te" ] && TEMPERATURE_LINE="$_te"
+    # Extract step_timeout_secs if present
+    _st=$(grep 'step_timeout_secs' "${CONFIG_FILE}" | head -1 | sed 's/.*= *//' || true)
+    STEP_TIMEOUT="${_st:-1200}"
+    # Extract native_function_calling and streaming
+    _nfc=$(grep 'native_function_calling' "${CONFIG_FILE}" | head -1 || true)
+    _str=$(grep '^streaming' "${CONFIG_FILE}" | head -1 || true)
+else
+    STEP_TIMEOUT="600"
+    _nfc=""
+    _str=""
+fi
 
-[agent]
-max_iterations = 10000
-step_timeout_secs = 600
-concurrent_agents = $AGENT_COUNT
-
-[checkpoint]
-enabled = true
-interval_minutes = $CHECKPOINT_INTERVAL
-interval_tools = 100
-interval_tokens = 500000
-auto_recovery = true
-max_recovery_attempts = 5
-
-[monitoring]
-metrics_enabled = true
-health_check_interval = 30
-log_level = "info"
-
-[limits]
-total_token_budget = 5000000
-max_tool_calls_per_hour = 500
-disk_space_limit_gb = 2
-
-[recovery]
-retry_strategy = "exponential_backoff"
-max_retry_attempts = 3
-enable_circuit_breaker = true
-EOF
+{
+    echo "# Mega Test Session Configuration"
+    echo "# Auto-generated at $(date -Iseconds)"
+    [ -n "${ENDPOINT_LINE}" ] && echo "${ENDPOINT_LINE}"
+    [ -n "${MODEL_LINE}" ] && echo "${MODEL_LINE}"
+    [ -n "${MAX_TOKENS_LINE}" ] && echo "${MAX_TOKENS_LINE}"
+    [ -n "${TEMPERATURE_LINE}" ] && echo "${TEMPERATURE_LINE}"
+    echo ""
+    echo "[safety]"
+    echo 'allowed_paths = ["./**", "/tmp/selfware/**"]'
+    echo 'denied_paths = ["**/.git/**"]'
+    echo 'require_confirmation = []'
+    echo ""
+    echo "[agent]"
+    echo "max_iterations = 10000"
+    echo "step_timeout_secs = ${STEP_TIMEOUT}"
+    echo "token_budget = 240000"
+    [ -n "$_nfc" ] && echo "$_nfc"
+    [ -n "$_str" ] && echo "$_str"
+    echo ""
+    echo "[yolo]"
+    echo "enabled = true"
+    echo "max_operations = 500"
+    echo "max_hours = 8.0"
+    echo "allow_git_push = false"
+    echo "allow_destructive_shell = false"
+    echo 'audit_log_path = "./mega-audit.log"'
+    echo "status_interval = 25"
+    echo ""
+    echo "[continuous_work]"
+    echo "enabled = true"
+    echo "checkpoint_interval_tools = 10"
+    echo "checkpoint_interval_secs = 300"
+    echo "auto_recovery = true"
+    echo "max_recovery_attempts = 5"
+    echo ""
+    echo "[retry]"
+    echo "max_retries = 8"
+    echo "base_delay_ms = 1000"
+    echo "max_delay_ms = 30000"
+    echo ""
+    echo "[resources]"
+    echo "[resources.gpu]"
+    echo "monitor_interval_seconds = 10"
+    echo "temperature_threshold = 90"
+    echo "memory_utilization_threshold = 0.95"
+    echo "throttle_on_overheat = true"
+    echo ""
+    echo "[resources.memory]"
+    echo "warning_threshold = 0.8"
+    echo "critical_threshold = 0.9"
+    echo "emergency_threshold = 0.95"
+    echo "monitor_interval_seconds = 10"
+    echo ""
+    echo "[resources.disk]"
+    echo "max_usage_percent = 0.9"
+    echo "maintenance_interval_seconds = 3600"
+    echo "compress_after_days = 1"
+    echo ""
+    echo "[resources.quotas]"
+    echo "max_gpu_memory_per_model = 96_000_000_000"
+    echo "max_concurrent_requests = 4"
+    echo "max_context_tokens = 262144"
+    echo "max_queued_tasks = 1000"
+    echo "max_checkpoint_size = 2_000_000_000"
+} > "$SESSION_DIR/selfware.toml"
 
 log_info "Configuration created"
 
@@ -283,7 +359,7 @@ monitor_session() {
         fi
         
         # Collect metrics
-        local elapsed=$(($(date +%s) - $(stat -c %Y "$session_dir/config.json")))
+        local elapsed=$(($(date +%s) - $(stat -f %m "$session_dir/config.json" 2>/dev/null || gstat -c %Y "$session_dir/config.json" 2>/dev/null || date +%s)))
         local hours=$((elapsed / 3600))
         local minutes=$(((elapsed % 3600) / 60))
         
@@ -333,7 +409,7 @@ cd "$PROJECT_ROOT"
 echo "running" > "$SESSION_DIR/status"
 
 # Execute the test
-if timeout "${DURATION_HOURS}h" ./target/release/selfware \
+if "${TIMEOUT_CMD}" "${DURATION_HOURS}h" ./target/release/selfware \
     -c "$SESSION_DIR/selfware.toml" \
     -C "$SESSION_DIR" \
     -y \
@@ -370,7 +446,7 @@ METRIC_COUNT=$(find "$SESSION_DIR/metrics" -name "metrics_*.json" 2>/dev/null | 
 
 # Calculate duration
 END_TIME=$(date +%s)
-START_TIME=$(stat -c %Y "$SESSION_DIR/config.json")
+START_TIME=$(stat -f %m "$SESSION_DIR/config.json" 2>/dev/null || gstat -c %Y "$SESSION_DIR/config.json" 2>/dev/null || date +%s)
 DURATION=$((END_TIME - START_TIME))
 DURATION_H=$((DURATION / 3600))
 DURATION_M=$(((DURATION % 3600) / 60))
@@ -380,7 +456,7 @@ cat > "$SESSION_DIR/final_report.json" << EOF
 {
   "session_id": "$SESSION_ID",
   "status": "$(cat $SESSION_DIR/status)",
-  "started_at": "$(stat -c %y $SESSION_DIR/config.json | cut -d' ' -f1,2 | cut -d'.' -f1)",
+  "started_at": "$(date -Iseconds -r $(stat -f %m "$SESSION_DIR/config.json" 2>/dev/null || gstat -c %Y "$SESSION_DIR/config.json" 2>/dev/null || echo 0))",
   "completed_at": "$(date -Iseconds)",
   "duration_seconds": $DURATION,
   "duration_formatted": "${DURATION_H}h ${DURATION_M}m",

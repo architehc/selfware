@@ -192,8 +192,8 @@ start_phase "Unit Tests (cargo test --lib)"
 
 phase1_log="${SESSION_DIR}/phases/01_unit_tests.log"
 if cargo test --lib --manifest-path="${REPO_ROOT}/Cargo.toml" 2>&1 | tee "${phase1_log}" | tail -1; then
-    passed=$(grep -oP '\d+ passed' "${phase1_log}" | head -1 | grep -oP '\d+')
-    failed=$(grep -oP '\d+ failed' "${phase1_log}" | head -1 | grep -oP '\d+' || echo 0)
+    passed=$(grep -oE '[0-9]+ passed' "${phase1_log}" | head -1 | grep -oE '[0-9]+')
+    failed=$(grep -oE '[0-9]+ failed' "${phase1_log}" | head -1 | grep -oE '[0-9]+' || echo 0)
     TESTS_PASSED=$((TESTS_PASSED + ${passed:-0}))
     TESTS_FAILED=$((TESTS_FAILED + ${failed:-0}))
     TESTS_TOTAL=$((TESTS_TOTAL + ${passed:-0} + ${failed:-0}))
@@ -210,8 +210,8 @@ start_phase "External Unit Tests (cargo test --test unit)"
 
 phase2_log="${SESSION_DIR}/phases/02_ext_unit_tests.log"
 if cargo test --test unit --manifest-path="${REPO_ROOT}/Cargo.toml" 2>&1 | tee "${phase2_log}" | tail -1; then
-    passed=$(grep -oP '\d+ passed' "${phase2_log}" | head -1 | grep -oP '\d+')
-    failed=$(grep -oP '\d+ failed' "${phase2_log}" | head -1 | grep -oP '\d+' || echo 0)
+    passed=$(grep -oE '[0-9]+ passed' "${phase2_log}" | head -1 | grep -oE '[0-9]+')
+    failed=$(grep -oE '[0-9]+ failed' "${phase2_log}" | head -1 | grep -oE '[0-9]+' || echo 0)
     TESTS_PASSED=$((TESTS_PASSED + ${passed:-0}))
     TESTS_FAILED=$((TESTS_FAILED + ${failed:-0}))
     TESTS_TOTAL=$((TESTS_TOTAL + ${passed:-0} + ${failed:-0}))
@@ -233,9 +233,9 @@ cargo test --test integration --features integration --manifest-path="${REPO_ROO
 phase3_exit=$?
 set -e
 
-passed=$(grep -oP '\d+ passed' "${phase3_log}" | head -1 | grep -oP '\d+' || echo 0)
-failed=$(grep -oP '\d+ failed' "${phase3_log}" | head -1 | grep -oP '\d+' || echo 0)
-ignored=$(grep -oP '\d+ ignored' "${phase3_log}" | head -1 | grep -oP '\d+' || echo 0)
+passed=$(grep -oE '[0-9]+ passed' "${phase3_log}" | head -1 | grep -oE '[0-9]+' || echo 0)
+failed=$(grep -oE '[0-9]+ failed' "${phase3_log}" | head -1 | grep -oE '[0-9]+' || echo 0)
+ignored=$(grep -oE '[0-9]+ ignored' "${phase3_log}" | head -1 | grep -oE '[0-9]+' || echo 0)
 TESTS_PASSED=$((TESTS_PASSED + ${passed:-0}))
 TESTS_FAILED=$((TESTS_FAILED + ${failed:-0}))
 TESTS_TOTAL=$((TESTS_TOTAL + ${passed:-0} + ${failed:-0}))
@@ -288,7 +288,7 @@ start_phase "Mega Project Test (task_queue, 2h duration)"
 
 phase5_log="${SESSION_DIR}/phases/05_mega_test.log"
 set +e
-CHECKPOINT_INTERVAL=5 bash "${SCRIPT_DIR}/long_running/run_mega_test.sh" task_queue 2 2 2>&1 | tee "${phase5_log}"
+CHECKPOINT_INTERVAL=5 CONFIG_FILE="${CONFIG_FILE:-}" bash "${SCRIPT_DIR}/long_running/run_mega_test.sh" task_queue 2 2 2>&1 | tee "${phase5_log}"
 phase5_exit=$?
 set -e
 

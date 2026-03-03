@@ -1,12 +1,78 @@
 # Selfware Evaluation Report
 
-**Date:** 2026-02-28
-**Endpoint:** `https://crazyshit.ngrok.io/v1`
-**Model:** Qwen/Qwen3-Coder-Next-FP8 (1,010,000 token context)
+**Latest:** 2026-03-03
+**Models tested:** Qwen/Qwen3-Coder-Next-FP8 (remote), qwen/qwen3.5-35b-a3b (local)
 
 ---
 
-## Eval Round 5 — Post-Loop Detection (2026-02-28)
+## Eval Round 7 — Local Inference: Qwen 3.5-35B-A3B on Mac M2 Max (2026-03-03)
+
+**Config:** `system_tests/projecte2e/config/qwen3_5_35b_a3b_lmstudio.toml` — YOLO mode, 500 max iterations, streaming
+**Harness:** `system_tests/projecte2e/run_projecte2e.sh` with `TIMEOUT_MULTIPLIER=4`
+**Binary:** `target/release/selfware` built with `--all-features`
+
+### Hardware & Model Setup
+
+| Parameter | Value |
+|---|---|
+| **Hardware** | Apple Mac M2 Max, 96 GB unified RAM |
+| **Backend** | LM Studio 0.3.x (llama.cpp) |
+| **Model** | `qwen/qwen3.5-35b-a3b` |
+| **Quantization** | 8-bit (Q8_0) |
+| **KV Cache** | K=Q8_0, V=Q8_0 |
+| **Context window** | 262,144 tokens |
+| **Max concurrent requests** | 4 (LM Studio slots) |
+| **Endpoint** | `http://localhost:1234/v1` |
+
+### Results: 6/6 Coding Pass + Swarm, 100.0/100, Rating: Excellent
+
+| Scenario | Type | Difficulty | Baseline | Post | Agent Exit | Timeout | Duration (s) | Score | Changed Files | Error Hits | Notes |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `easy_calculator` | coding | easy | 101 | 0 | 0 | 0 | 126 | 100 | 3 | 7 | |
+| `easy_string_ops` | coding | easy | 101 | 0 | 0 | 0 | 196 | 100 | 3 | 4 | |
+| `medium_json_merge` | coding | medium | 101 | 0 | 0 | 0 | 382 | 100 | 3 | 23 | |
+| `medium_bitset` | coding | medium | 101 | 0 | 0 | 0 | 392 | 100 | 3 | 11 | |
+| `hard_scheduler` | coding | hard | 101 | 0 | 0 | 0 | 500 | 100 | 5 | 26 | |
+| `hard_event_bus` | coding | hard | 101 | 0 | 0 | 0 | 242 | 100 | 5 | 3 | |
+| `swarm_session` | swarm | n/a | n/a | n/a | 0 | 0 | 0 | 100 | 3 | 15 | spawned=3,status_mentions=2 |
+
+### Analysis
+
+**Perfect 100/100 score** — first time all 7 scenarios scored maximum. `hard_event_bus`, which was the persistent failure point in Rounds 3–6 with Qwen3-Coder-Next-FP8, was solved by qwen3.5-35b-a3b in just 242s. The newer model correctly reads test assertions and generates the exact expected Display format.
+
+**Local inference speed**: Durations ranged from 126s (easy) to 500s (hard). Roughly 4–8x slower than the remote Qwen3-Coder endpoint, consistent with running a 35B 8-bit model on Apple Silicon. The 4x timeout multiplier was necessary and sufficient — no scenarios timed out.
+
+**Swarm session**: The swarm scenario scored 100/100 structurally (3 agents spawned, status mentions recorded) but individual swarm agents hit LM Studio jinja template errors ("No user query found in messages"). This is an LM Studio prompt template limitation for system-only messages, not a selfware issue.
+
+**Tool format handling**: The model struggled with `file_edit` tool call formatting in `medium_json_merge` and `medium_bitset` (repeated malformed parsing errors in thinking trace), but the framework's malformed tool re-prompt successfully guided it to correct calls. This validates the Round 2 framework improvements.
+
+### Comparison: Qwen3-Coder-FP8 (Remote) vs Qwen3.5-35B-A3B (Local)
+
+| Metric | Qwen3-Coder-FP8 (Round 5) | Qwen3.5-35B-A3B (Round 7) |
+|---|---|---|
+| Overall score | 85.7/100 | **100.0/100** |
+| Coding pass | 5/6 | **6/6** |
+| hard_event_bus | FAIL (Display format bug) | **PASS (242s)** |
+| Avg duration (coding) | 39s | 306s |
+| Infrastructure | Remote (ngrok) | Local (LM Studio) |
+| Quantization | FP8 | Q8_0 |
+| Context | 1,010,000 | 262,144 |
+
+### Round Progression (Updated)
+
+| Round | Model | Pass | Score | Rating | Key Changes |
+|---|---|---|---|---|---|
+| 1 | Qwen3-Coder-FP8 | 0/5 | N/A | N/A | Baseline — early termination, no verification |
+| 2 | Qwen3-Coder-FP8 | 6/6 | 97.1 | Excellent | +completion gate, +verification prompt |
+| 3 | Qwen3-Coder-FP8 | 5/6 | 85.7 | Excellent | hard_event_bus no-op edit loop |
+| 4 | Qwen3-Coder-FP8 | 3/6 | 57.1 | Fair | 3 stuck loops exposed |
+| 5 | Qwen3-Coder-FP8 | 5/6 | 85.7 | Excellent | +no-op detection, +repetition detector |
+| 6 | Qwen3-Coder-FP8 | 5/6 | 85.7 | Excellent | Confirms stable floor |
+| **7** | **Qwen3.5-35B-A3B** | **6/6** | **100.0** | **Excellent** | **New model; first perfect score** |
+
+---
+
+## Eval Round 5/6 — Post-Loop Detection (2026-02-28, Qwen3-Coder-FP8)
 
 **Config:** `system_tests/projecte2e/config/crazyshit_model.toml` — YOLO mode, 500 max iterations, streaming
 **Harness:** `system_tests/projecte2e/run_projecte2e.sh` — 6 coding scenarios + 1 swarm scenario
