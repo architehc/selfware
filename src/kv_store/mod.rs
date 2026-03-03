@@ -7,6 +7,7 @@
 //! - Tag-based queries
 //! - Metadata filtering
 //! - Key pattern matching
+//! - Serialization utilities
 //!
 //! # Example
 //!
@@ -26,12 +27,20 @@
 //!     .with_tags(vec!["important".to_string()]);
 //! store.upsert("key3", entry).unwrap();
 //! let important = store.by_tag("important");
+//!
+//! // Serialize store
+//! let store_data: HashMap<String, Entry> = store.entries()
+//!     .map(|e| (e.key.clone(), e.clone()))
+//!     .collect();
+//! let json = store_data.serialize_to_json().unwrap();
 //! ```
 
 mod entry;
 mod query;
+mod serialization;
 mod store;
 
 // Re-export the main types for convenience
 pub use entry::Entry;
+pub use serialization::{StoreSerializer, SerializedEntry};
 pub use store::{KvStore, KvStoreError, Result};
