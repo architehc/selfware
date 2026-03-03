@@ -675,7 +675,11 @@ fn truncate_output(output: &str, max_len: usize) -> String {
     if output.len() <= max_len {
         output.to_string()
     } else {
-        let end = output.floor_char_boundary(max_len);
+        // Find a valid UTF-8 character boundary
+        let mut end = max_len;
+        while end > 0 && !output.is_char_boundary(end) {
+            end -= 1;
+        }
         format!(
             "{}... [truncated, {} total chars]",
             &output[..end],

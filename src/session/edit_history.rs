@@ -442,7 +442,11 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        let end = s.floor_char_boundary(max.saturating_sub(3));
+        // Find a valid UTF-8 character boundary
+        let mut end = max.saturating_sub(3);
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
         format!("{}...", &s[..end])
     }
 }

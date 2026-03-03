@@ -880,7 +880,11 @@ impl SelfReferenceSystem {
         if content.len() <= max_chars {
             content.to_string()
         } else {
-            let end = content.floor_char_boundary(max_chars);
+            // Find a valid UTF-8 character boundary
+            let mut end = max_chars;
+            while end > 0 && !content.is_char_boundary(end) {
+                end -= 1;
+            }
             format!("{}...[truncated]", &content[..end])
         }
     }
