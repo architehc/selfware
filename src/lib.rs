@@ -37,19 +37,19 @@ pub mod ui;
 
 // ============================================================================
 // Domain modules
-//
-// TODO: Restrict to pub(crate) once test coupling is resolved.
-// Currently pub because integration tests and examples import them directly.
 // ============================================================================
-pub mod analysis;
-pub mod cognitive;
-pub mod devops;
-pub mod observability;
-pub mod orchestration;
-pub mod resource;
-pub mod session;
-pub mod supervision;
-pub mod testing;
+// Note: These modules are now pub(crate) because test coupling has been resolved.
+// Tests and examples have been updated to use re-exports or direct crate imports.
+// ============================================================================
+pub(crate) mod analysis;
+pub(crate) mod cognitive;
+pub(crate) mod devops;
+pub(crate) mod observability;
+pub(crate) mod orchestration;
+pub(crate) mod resource;
+pub(crate) mod session;
+pub(crate) mod supervision;
+pub(crate) mod testing;
 
 // Backward-compatible re-exports for safety module
 pub use safety::redact;
