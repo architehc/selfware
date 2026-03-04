@@ -42,5 +42,5 @@ mod store;
 
 // Re-export the main types for convenience
 pub use entry::Entry;
-pub use serialization::{StoreSerializer, SerializedEntry};
+pub use serialization::{SerializedEntry, StoreSerializer};
 pub use store::{KvStore, KvStoreError, Result};

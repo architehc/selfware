@@ -213,10 +213,7 @@ impl TokenTracker {
 
     /// Return a snapshot of the current drift statistics.
     pub fn drift_stats(&self) -> DriftStats {
-        self.drift
-            .read()
-            .map(|d| d.clone())
-            .unwrap_or_default()
+        self.drift.read().map(|d| d.clone()).unwrap_or_default()
     }
 
     /// Reset the tracker

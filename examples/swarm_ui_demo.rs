@@ -8,7 +8,7 @@
 //! ```
 
 #[cfg(feature = "tui")]
-use selfware::orchestration::swarm::{Agent, AgentRole, Swarm};
+use selfware::swarm::{Agent, AgentRole, Swarm};
 #[cfg(feature = "tui")]
 use selfware::ui::tui::{run_tui_swarm, run_tui_swarm_with_roles};
 

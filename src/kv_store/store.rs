@@ -48,7 +48,7 @@ impl KvStore {
     /// Create a new key-value store with persistence to the given path
     pub fn with_path<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path_str = path.as_ref().to_string_lossy().to_string();
-        
+
         // Try to load existing data
         if path.as_ref().exists() {
             match Self::load(path.as_ref()) {
@@ -75,14 +75,14 @@ impl KvStore {
     /// Insert a key-value entry
     pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) -> Result<()> {
         let key = key.into();
-        
+
         if self.data.contains_key(&key) {
             return Err(KvStoreError::KeyAlreadyExists(key));
         }
 
         let entry = Entry::new(key.clone(), value);
         self.data.insert(key.clone(), entry);
-        
+
         if let Some(ref path) = self.path {
             self.save()?;
         }
@@ -95,7 +95,7 @@ impl KvStore {
         let key = key.into();
         let entry = Entry::new(key.clone(), value);
         self.data.insert(key.clone(), entry);
-        
+
         if let Some(ref path) = self.path {
             self.save()?;
         }
@@ -107,7 +107,7 @@ impl KvStore {
     pub fn upsert_entry(&mut self, key: impl Into<String>, entry: Entry) -> Result<()> {
         let key = key.into();
         self.data.insert(key.clone(), entry);
-        
+
         if let Some(ref path) = self.path {
             self.save()?;
         }
@@ -173,11 +173,12 @@ impl KvStore {
     pub fn save(&self) -> Result<()> {
         if let Some(ref path) = self.path {
             // Create a serializable representation
-            let serializable_data: HashMap<String, String> = self.data
+            let serializable_data: HashMap<String, String> = self
+                .data
                 .iter()
                 .map(|(k, v)| (k.clone(), v.value.clone()))
                 .collect();
-            
+
             match serde_json::to_string_pretty(&serializable_data) {
                 Ok(json) => {
                     if let Err(e) = fs::write(path, &json) {
@@ -203,25 +204,23 @@ impl KvStore {
     /// Load the store from disk
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         match fs::read_to_string(path.as_ref()) {
-            Ok(json) => {
-                match serde_json::from_str::<HashMap<String, String>>(&json) {
-                    Ok(data) => {
-                        let store_data: HashMap<String, Entry> = data
-                            .into_iter()
-                            .map(|(k, v)| (k.clone(), Entry::new(k.clone(), v)))
-                            .collect();
-                        
-                        Ok(Self {
-                            data: store_data,
-                            path: Some(path.as_ref().to_string_lossy().to_string()),
-                        })
-                    }
-                    Err(e) => Err(KvStoreError::SerializationError(format!(
-                        "Failed to deserialize store: {}",
-                        e
-                    ))),
+            Ok(json) => match serde_json::from_str::<HashMap<String, String>>(&json) {
+                Ok(data) => {
+                    let store_data: HashMap<String, Entry> = data
+                        .into_iter()
+                        .map(|(k, v)| (k.clone(), Entry::new(k.clone(), v)))
+                        .collect();
+
+                    Ok(Self {
+                        data: store_data,
+                        path: Some(path.as_ref().to_string_lossy().to_string()),
+                    })
                 }
-            }
+                Err(e) => Err(KvStoreError::SerializationError(format!(
+                    "Failed to deserialize store: {}",
+                    e
+                ))),
+            },
             Err(e) => Err(KvStoreError::StorageError(format!(
                 "Failed to read from {}: {}",
                 path.as_ref().display(),
@@ -269,7 +268,7 @@ mod tests {
     fn test_insert_and_get() {
         let mut store = KvStore::new();
         store.insert("key1", "value1").unwrap();
-        
+
         assert_eq!(store.get("key1").unwrap(), "value1");
         assert_eq!(store.len(), 1);
     }
@@ -278,7 +277,7 @@ mod tests {
     fn test_insert_duplicate_key() {
         let mut store = KvStore::new();
         store.insert("key1", "value1").unwrap();
-        
+
         // Inserting the same key should fail
         assert!(store.insert("key1", "value2").is_err());
         assert_eq!(store.get("key1").unwrap(), "value1");
@@ -288,7 +287,7 @@ mod tests {
     fn test_upsert() {
         let mut store = KvStore::new();
         store.insert("key1", "value1").unwrap();
-        
+
         // Upsert should update the value
         store.upsert("key1", "value2").unwrap();
         assert_eq!(store.get("key1").unwrap(), "value2");
@@ -298,7 +297,7 @@ mod tests {
     fn test_remove() {
         let mut store = KvStore::new();
         store.insert("key1", "value1").unwrap();
-        
+
         assert_eq!(store.remove("key1").unwrap(), "value1");
         assert!(store.get("key1").is_err());
         assert_eq!(store.len(), 0);
@@ -308,7 +307,7 @@ mod tests {
     fn test_contains_key() {
         let mut store = KvStore::new();
         store.insert("key1", "value1").unwrap();
-        
+
         assert!(store.contains_key("key1"));
         assert!(!store.contains_key("key2"));
     }
@@ -316,14 +315,14 @@ mod tests {
     #[test]
     fn test_get_nonexistent_key() {
         let store = KvStore::new();
-        
+
         assert!(store.get("nonexistent").is_err());
     }
 
     #[test]
     fn test_remove_nonexistent_key() {
         let mut store = KvStore::new();
-        
+
         assert!(store.remove("nonexistent").is_err());
     }
 
@@ -332,7 +331,7 @@ mod tests {
         let mut store = KvStore::new();
         store.insert("key1", "value1").unwrap();
         store.insert("key2", "value2").unwrap();
-        
+
         store.clear().unwrap();
         assert!(store.is_empty());
         assert_eq!(store.len(), 0);
@@ -342,11 +341,11 @@ mod tests {
     fn test_persistence() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("store.json");
-        
+
         let mut store = KvStore::with_path(&path).unwrap();
         store.insert("key1", "value1").unwrap();
         store.insert("key2", "value2").unwrap();
-        
+
         // Create a new store from the same path
         let store2 = KvStore::with_path(&path).unwrap();
         assert_eq!(store2.get("key1").unwrap(), "value1");
@@ -358,7 +357,7 @@ mod tests {
         let mut store = KvStore::new();
         store.insert("key1", "value1").unwrap();
         store.insert("key2", "value2").unwrap();
-        
+
         let keys = store.keys();
         assert!(keys.contains(&"key1".to_string()));
         assert!(keys.contains(&"key2".to_string()));
@@ -369,7 +368,7 @@ mod tests {
         let mut store = KvStore::new();
         store.insert("key1", "value1").unwrap();
         store.insert("key2", "value2").unwrap();
-        
+
         let entries = store.entries();
         assert_eq!(entries.len(), 2);
     }

@@ -63,7 +63,8 @@ mod tests {
 
     #[test]
     fn test_entry_with_tags() {
-        let entry = Entry::new("key1", "value1").with_tags(vec!["tag1".to_string(), "tag2".to_string()]);
+        let entry =
+            Entry::new("key1", "value1").with_tags(vec!["tag1".to_string(), "tag2".to_string()]);
         assert_eq!(entry.tags.len(), 2);
         assert!(entry.has_tag("tag1"));
         assert!(entry.has_tag("tag2"));
@@ -82,7 +83,7 @@ mod tests {
         let mut entry = Entry::new("key1", "value1");
         entry.add_tag("new_tag");
         assert!(entry.has_tag("new_tag"));
-        
+
         entry.add_metadata("key", "value");
         assert_eq!(entry.get_metadata("key"), Some(&"value".to_string()));
     }

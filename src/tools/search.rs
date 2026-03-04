@@ -186,10 +186,7 @@ impl Tool for GrepSearch {
                 .get("max_matches")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(100) as usize;
-            let skip_offset = args
-                .get("offset")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
+            let skip_offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let include_pattern = args.get("include").and_then(|v| v.as_str());
             let exclude_pattern = args.get("exclude").and_then(|v| v.as_str());
 

@@ -18,24 +18,41 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 // Pre-compiled regexes for Rust symbol indexing (compiled once, reused across calls)
-static FN_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\s*(pub(\(.*?\))?\s+)?(async\s+)?fn\s+(\w+)").unwrap_or_else(|e| panic!("Invalid regex pattern: {e}")));
-static STRUCT_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\s*(pub(\(.*?\))?\s+)?struct\s+(\w+)").unwrap_or_else(|e| panic!("Invalid regex pattern: {e}")));
-static ENUM_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\s*(pub(\(.*?\))?\s+)?enum\s+(\w+)").unwrap_or_else(|e| panic!("Invalid regex pattern: {e}")));
-static TRAIT_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\s*(pub(\(.*?\))?\s+)?trait\s+(\w+)").unwrap_or_else(|e| panic!("Invalid regex pattern: {e}")));
-static IMPL_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\s*impl(<.*?>)?\s+(\w+)").unwrap_or_else(|e| panic!("Invalid regex pattern: {e}")));
-static CONST_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\s*(pub(\(.*?\))?\s+)?const\s+(\w+)").unwrap_or_else(|e| panic!("Invalid regex pattern: {e}")));
-static TYPE_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\s*(pub(\(.*?\))?\s+)?type\s+(\w+)").unwrap_or_else(|e| panic!("Invalid regex pattern: {e}")));
-static MACRO_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\s*(pub(\(.*?\))?\s+)?macro_rules!\s+(\w+)").unwrap_or_else(|e| panic!("Invalid regex pattern: {e}")));
-static MOD_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\s*(pub(\(.*?\))?\s+)?mod\s+(\w+)").unwrap_or_else(|e| panic!("Invalid regex pattern: {e}")));
+static FN_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^\s*(pub(\(.*?\))?\s+)?(async\s+)?fn\s+(\w+)")
+        .unwrap_or_else(|e| panic!("Invalid regex pattern: {e}"))
+});
+static STRUCT_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^\s*(pub(\(.*?\))?\s+)?struct\s+(\w+)")
+        .unwrap_or_else(|e| panic!("Invalid regex pattern: {e}"))
+});
+static ENUM_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^\s*(pub(\(.*?\))?\s+)?enum\s+(\w+)")
+        .unwrap_or_else(|e| panic!("Invalid regex pattern: {e}"))
+});
+static TRAIT_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^\s*(pub(\(.*?\))?\s+)?trait\s+(\w+)")
+        .unwrap_or_else(|e| panic!("Invalid regex pattern: {e}"))
+});
+static IMPL_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^\s*impl(<.*?>)?\s+(\w+)").unwrap_or_else(|e| panic!("Invalid regex pattern: {e}"))
+});
+static CONST_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^\s*(pub(\(.*?\))?\s+)?const\s+(\w+)")
+        .unwrap_or_else(|e| panic!("Invalid regex pattern: {e}"))
+});
+static TYPE_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^\s*(pub(\(.*?\))?\s+)?type\s+(\w+)")
+        .unwrap_or_else(|e| panic!("Invalid regex pattern: {e}"))
+});
+static MACRO_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^\s*(pub(\(.*?\))?\s+)?macro_rules!\s+(\w+)")
+        .unwrap_or_else(|e| panic!("Invalid regex pattern: {e}"))
+});
+static MOD_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^\s*(pub(\(.*?\))?\s+)?mod\s+(\w+)")
+        .unwrap_or_else(|e| panic!("Invalid regex pattern: {e}"))
+});
 
 // TODO: Consider migrating to tokio::sync::RwLock if ProjectIntelligence methods become async.
 // Currently all methods are synchronous, so std::sync::RwLock is correct and avoids

@@ -1,3 +1,7 @@
+// Crate is under active development — many types/functions are defined ahead
+// of use across modules.  Suppress dead-code noise so clippy -D warnings passes.
+#![allow(dead_code, unused_imports, unused_variables)]
+
 //! Selfware Workshop - Your Personal AI Companion
 //!
 //! A sophisticated agent framework for autonomous coding tasks, built on the
@@ -86,13 +90,13 @@ pub use testing::verification;
 // ============================================================================
 // Utility modules
 // ============================================================================
+#[cfg(feature = "tokens")]
+pub mod kv_store;
 pub mod memory;
 pub mod output;
 #[cfg(feature = "resilience")]
 pub mod self_healing;
 pub mod token_count;
-#[cfg(feature = "tokens")]
-pub mod kv_store;
 pub mod tokens;
 pub mod tool_parser;
 

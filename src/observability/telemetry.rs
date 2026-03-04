@@ -968,10 +968,7 @@ mod tests {
     fn test_increment_functions_update_metrics() {
         let before_api = METRICS.api_requests.load(Ordering::Relaxed);
         increment_api_requests();
-        assert_eq!(
-            METRICS.api_requests.load(Ordering::Relaxed),
-            before_api + 1
-        );
+        assert_eq!(METRICS.api_requests.load(Ordering::Relaxed), before_api + 1);
 
         let before_errors = METRICS.api_errors.load(Ordering::Relaxed);
         increment_api_errors();

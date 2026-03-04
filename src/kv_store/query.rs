@@ -21,10 +21,7 @@ impl KvStore {
     }
 
     /// Get all entries matching multiple metadata conditions
-    pub fn by_metadata_multi(
-        &self,
-        conditions: &[(&str, &str)],
-    ) -> Vec<&Entry> {
+    pub fn by_metadata_multi(&self, conditions: &[(&str, &str)]) -> Vec<&Entry> {
         self.data
             .values()
             .filter(|entry| {
@@ -45,7 +42,8 @@ impl KvStore {
         self.data
             .values()
             .filter(|entry| {
-                entry.has_tag(tag) && entry.get_metadata(metadata_key).map(|v| v.as_str()) == Some(metadata_value)
+                entry.has_tag(tag)
+                    && entry.get_metadata(metadata_key).map(|v| v.as_str()) == Some(metadata_value)
             })
             .collect()
     }
@@ -154,25 +152,25 @@ mod tests {
     #[test]
     fn test_by_tag() {
         let mut store = KvStore::new();
-        
+
         let mut entry1_metadata = HashMap::new();
         entry1_metadata.insert("type".to_string(), "file".to_string());
         let entry1 = Entry::new("key1", "value1")
             .with_tags(vec!["important".to_string(), "config".to_string()])
             .with_metadata(entry1_metadata.clone());
-        
+
         let mut entry2_metadata = HashMap::new();
         entry2_metadata.insert("type".to_string(), "cache".to_string());
         let entry2 = Entry::new("key2", "value2")
             .with_tags(vec!["temp".to_string()])
             .with_metadata(entry2_metadata);
-        
+
         store.upsert_entry("key1", entry1).unwrap();
         store.upsert_entry("key2", entry2).unwrap();
 
         let important_entries = store.by_tag("important");
         assert_eq!(important_entries.len(), 1);
-        
+
         let config_entries = store.by_tag("config");
         assert_eq!(config_entries.len(), 1);
     }
@@ -180,21 +178,21 @@ mod tests {
     #[test]
     fn test_by_metadata() {
         let mut store = KvStore::new();
-        
+
         let mut metadata1 = HashMap::new();
         metadata1.insert("author".to_string(), "alice".to_string());
         let entry1 = Entry::new("key1", "value1").with_metadata(metadata1);
-        
+
         let mut metadata2 = HashMap::new();
         metadata2.insert("author".to_string(), "bob".to_string());
         let entry2 = Entry::new("key2", "value2").with_metadata(metadata2);
-        
+
         store.upsert_entry("key1", entry1).unwrap();
         store.upsert_entry("key2", entry2).unwrap();
 
         let alice_entries = store.by_metadata("author", "alice");
         assert_eq!(alice_entries.len(), 1);
-        
+
         let bob_entries = store.by_metadata("author", "bob");
         assert_eq!(bob_entries.len(), 1);
     }
@@ -202,17 +200,17 @@ mod tests {
     #[test]
     fn test_by_metadata_multi() {
         let mut store = KvStore::new();
-        
+
         let mut metadata1 = HashMap::new();
         metadata1.insert("author".to_string(), "alice".to_string());
         metadata1.insert("type".to_string(), "config".to_string());
         let entry1 = Entry::new("key1", "value1").with_metadata(metadata1);
-        
+
         let mut metadata2 = HashMap::new();
         metadata2.insert("author".to_string(), "alice".to_string());
         metadata2.insert("type".to_string(), "cache".to_string());
         let entry2 = Entry::new("key2", "value2").with_metadata(metadata2);
-        
+
         store.upsert_entry("key1", entry1).unwrap();
         store.upsert_entry("key2", entry2).unwrap();
 
