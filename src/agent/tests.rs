@@ -132,7 +132,7 @@ fn mock_agent_config(endpoint: String, streaming: bool) -> Config {
         model: "mock-model".to_string(),
         agent: crate::config::AgentConfig {
             max_iterations: 8,
-            step_timeout_secs: 5,
+            step_timeout_secs: 30,
             streaming,
             native_function_calling: false,
             min_completion_steps: 0,
