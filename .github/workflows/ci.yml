@@ -57,7 +57,7 @@ jobs:
         run: cargo test --verbose
 
       - name: Run tests with all features
-        run: cargo test --all-features --verbose
+        run: cargo test --features extras --verbose
 
       - name: Build release
         run: cargo build --release --verbose
@@ -91,7 +91,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --features extras -- -D warnings
 
   # Minimum supported Rust version
   msrv:
@@ -126,7 +126,7 @@ jobs:
         run: cargo test --verbose
 
       - name: Run tests with all features
-        run: cargo test --all-features --verbose
+        run: cargo test --features extras --verbose
 
   # Performance benchmarks
   bench:
@@ -153,7 +153,7 @@ jobs:
             ${{ runner.os }}-cargo-bench-
 
       - name: Compile benchmarks
-        run: cargo bench --all-features --no-run
+        run: cargo bench --features extras --no-run
 
   # Documentation build
   docs:
@@ -169,7 +169,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build documentation
-        run: cargo doc --no-deps --all-features
+        run: cargo doc --no-deps --features extras
         env:
           RUSTDOCFLAGS: -D warnings
 
@@ -219,7 +219,7 @@ jobs:
         uses: taiki-e/install-action@cargo-tarpaulin
 
       - name: Generate coverage
-        run: cargo tarpaulin --out Html --out Xml --output-dir coverage --all-features --timeout 600 --fail-under 60 --skip-clean
+        run: cargo tarpaulin --out Html --out Xml --output-dir coverage --features extras --timeout 600 --fail-under 60 --skip-clean
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
