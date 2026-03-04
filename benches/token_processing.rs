@@ -2,7 +2,8 @@
 //!
 //! Measures performance of token counting and streaming operations.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::hint::black_box;
 
 /// Simulate token counting for a string
 fn count_tokens(text: &str) -> usize {
