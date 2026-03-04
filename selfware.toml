@@ -27,3 +27,50 @@ max_recovery_attempts = 3
 max_retries = 5
 base_delay_ms = 1000
 max_delay_ms = 60000
+
+[evolution]
+# Source files the evolution daemon is allowed to mutate
+
+# Prompt construction logic
+prompt_logic = [
+    "src/agent/planning.rs",
+    "src/agent/loop_control.rs",
+    "src/agent/learning.rs",
+    "src/orchestration/planning.rs",
+    "src/orchestration/swarm.rs",
+    "src/orchestration/multiagent.rs",
+    "src/agent/context.rs",
+]
+
+# Tool implementations
+tool_code = [
+    "src/tools/file.rs",
+    "src/tools/search.rs",
+    "src/tools/analyzer.rs",
+    "src/tools/shell.rs",
+    "src/tools/git.rs",
+    "src/tools/cargo.rs",
+    "src/tools/knowledge.rs",
+    "src/tools/fim.rs",
+    "src/tool_parser.rs",
+]
+
+# Cognitive architecture
+cognitive = [
+    "src/agent/execution.rs",
+    "src/agent/task_runner.rs",
+    "src/agent/context_management.rs",
+    "src/cognitive/memory_hierarchy.rs",
+    "src/cognitive/episodic.rs",
+    "src/cognitive/self_improvement.rs",
+    "src/cognitive/self_reference.rs",
+    "src/cognitive/intelligence.rs",
+    "src/cognitive/cognitive_system.rs",
+    "src/cognitive/state.rs",
+    "src/cognitive/rag.rs",
+    "src/cognitive/token_budget.rs",
+    "src/memory.rs",
+]
+
+# Config keys the agent may tune
+config_keys = ["temperature", "max_tokens", "token_budget"]

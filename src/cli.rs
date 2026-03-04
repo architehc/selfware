@@ -981,10 +981,25 @@ async fn handle_command(
                 checkpoint_interval: 5,
                 fitness_weights: FitnessWeights::default(),
                 mutation_targets: MutationTargets {
-                    config_keys: vec![],
-                    prompt_logic: vec![],
-                    tool_code: vec![],
-                    cognitive: vec![],
+                    config_keys: config.evolution.config_keys.clone(),
+                    prompt_logic: config
+                        .evolution
+                        .prompt_logic
+                        .iter()
+                        .map(std::path::PathBuf::from)
+                        .collect(),
+                    tool_code: config
+                        .evolution
+                        .tool_code
+                        .iter()
+                        .map(std::path::PathBuf::from)
+                        .collect(),
+                    cognitive: config
+                        .evolution
+                        .cognitive
+                        .iter()
+                        .map(std::path::PathBuf::from)
+                        .collect(),
                 },
                 safety: SafetyConfig::default(),
                 llm: LlmConfig {

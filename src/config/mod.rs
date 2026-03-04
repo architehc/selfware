@@ -155,6 +155,9 @@ pub struct Config {
     #[serde(default)]
     pub resources: ResourcesConfig,
 
+    #[serde(default)]
+    pub evolution: EvolutionTomlConfig,
+
     /// Runtime execution mode (set via CLI, not persisted)
     #[serde(skip)]
     pub execution_mode: ExecutionMode,
@@ -189,6 +192,7 @@ impl std::fmt::Debug for Config {
             .field("continuous_work", &self.continuous_work)
             .field("retry", &self.retry)
             .field("resources", &self.resources)
+            .field("evolution", &self.evolution)
             .field("execution_mode", &self.execution_mode)
             .field("compact_mode", &self.compact_mode)
             .field("verbose_mode", &self.verbose_mode)
@@ -423,6 +427,7 @@ impl Default for Config {
             continuous_work: ContinuousWorkConfig::default(),
             retry: RetrySettings::default(),
             resources: ResourcesConfig::default(),
+            evolution: EvolutionTomlConfig::default(),
             execution_mode: ExecutionMode::default(),
             compact_mode: false,
             verbose_mode: false,
@@ -505,6 +510,23 @@ fn default_require_confirmation() -> Vec<String> {
         "file_delete".to_string(),
         "shell_exec".to_string(),
     ]
+}
+
+/// Evolution daemon configuration (loaded from `[evolution]` in selfware.toml)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EvolutionTomlConfig {
+    /// Source files containing prompt construction logic
+    #[serde(default)]
+    pub prompt_logic: Vec<String>,
+    /// Source files containing tool implementations
+    #[serde(default)]
+    pub tool_code: Vec<String>,
+    /// Source files containing cognitive architecture
+    #[serde(default)]
+    pub cognitive: Vec<String>,
+    /// Config keys the agent can modify
+    #[serde(default)]
+    pub config_keys: Vec<String>,
 }
 
 /// Where the API key was resolved from (used internally for diagnostics and
