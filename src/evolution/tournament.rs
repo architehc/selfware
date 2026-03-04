@@ -334,11 +334,7 @@ mod tests {
         }
 
         let max = *max_concurrent.lock().unwrap();
-        assert!(
-            max <= 3,
-            "Max concurrent should be <= 3, got {}",
-            max
-        );
+        assert!(max <= 3, "Max concurrent should be <= 3, got {}", max);
     }
 
     #[test]

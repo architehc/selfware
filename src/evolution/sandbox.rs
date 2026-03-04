@@ -363,8 +363,7 @@ mod tests {
 
     #[test]
     fn test_parse_test_counts_with_ignored() {
-        let output =
-            "test result: ok. 80 passed; 0 failed; 20 ignored; 0 measured; 0 filtered out";
+        let output = "test result: ok. 80 passed; 0 failed; 20 ignored; 0 measured; 0 filtered out";
         let (passed, total) = parse_test_counts(output);
         assert_eq!(passed, 80);
         assert_eq!(total, 100); // 80 + 0 + 20
@@ -410,11 +409,10 @@ test result: ok. 100 passed; 2 failed; 3 ignored; 0 measured; 0 filtered out";
 
     #[test]
     fn test_sandbox_error_display() {
-        assert!(format!("{}", SandboxError::DockerFailed("no docker".into()))
-            .contains("no docker"));
         assert!(
-            format!("{}", SandboxError::ExecFailed("cmd failed".into())).contains("cmd failed")
+            format!("{}", SandboxError::DockerFailed("no docker".into())).contains("no docker")
         );
+        assert!(format!("{}", SandboxError::ExecFailed("cmd failed".into())).contains("cmd failed"));
         assert!(format!("{}", SandboxError::IoError("disk full".into())).contains("disk full"));
         assert!(format!("{}", SandboxError::Timeout).contains("timed out"));
     }

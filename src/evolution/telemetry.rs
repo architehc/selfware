@@ -434,11 +434,7 @@ mod tests {
     #[test]
     fn test_parse_folded_stacks_basic() {
         let tmp = std::env::temp_dir().join("selfware-test-folded-basic.folded");
-        std::fs::write(
-            &tmp,
-            "main;foo;bar 100\nmain;foo;baz 50\nmain;qux 25\n",
-        )
-        .unwrap();
+        std::fs::write(&tmp, "main;foo;bar 100\nmain;foo;baz 50\nmain;qux 25\n").unwrap();
         let hotspots = parse_folded_stacks(&tmp).unwrap();
         let _ = std::fs::remove_file(&tmp);
 

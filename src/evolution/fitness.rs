@@ -382,29 +382,25 @@ expert_async_race: 30/100 FROST";
     #[test]
     fn test_rating_boundary_84_is_grow() {
         // 84 is in the Grow range (60..=84)
-        let result =
-            parse_sab_output("test_scenario: 84/100 OK", Duration::from_secs(10)).unwrap();
+        let result = parse_sab_output("test_scenario: 84/100 OK", Duration::from_secs(10)).unwrap();
         assert_eq!(result.rating, GenerationRating::Grow);
     }
 
     #[test]
     fn test_rating_boundary_85_is_bloom() {
-        let result =
-            parse_sab_output("test_scenario: 85/100 OK", Duration::from_secs(10)).unwrap();
+        let result = parse_sab_output("test_scenario: 85/100 OK", Duration::from_secs(10)).unwrap();
         assert_eq!(result.rating, GenerationRating::Bloom);
     }
 
     #[test]
     fn test_rating_boundary_59_is_wilt() {
-        let result =
-            parse_sab_output("test_scenario: 59/100 OK", Duration::from_secs(10)).unwrap();
+        let result = parse_sab_output("test_scenario: 59/100 OK", Duration::from_secs(10)).unwrap();
         assert_eq!(result.rating, GenerationRating::Wilt);
     }
 
     #[test]
     fn test_rating_boundary_29_is_frost() {
-        let result =
-            parse_sab_output("test_scenario: 29/100 OK", Duration::from_secs(10)).unwrap();
+        let result = parse_sab_output("test_scenario: 29/100 OK", Duration::from_secs(10)).unwrap();
         assert_eq!(result.rating, GenerationRating::Frost);
     }
 
@@ -485,11 +481,7 @@ expert_async_race: 30/100 FROST";
     #[test]
     fn test_sab_config_default() {
         let cfg = SabConfig::default();
-        assert!(cfg
-            .runner_script
-            .to_str()
-            .unwrap()
-            .contains("run_full_sab"));
+        assert!(cfg.runner_script.to_str().unwrap().contains("run_full_sab"));
         assert_eq!(cfg.model, "Qwen/Qwen3-Coder-Next-FP8");
         assert_eq!(cfg.max_parallel, 6);
         assert_eq!(cfg.scenario_timeout, Duration::from_secs(3600));

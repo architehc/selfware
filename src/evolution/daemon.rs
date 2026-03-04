@@ -501,7 +501,7 @@ mod tests {
         // Should contain gen 15 (most recent) but not gen 1 (oldest, beyond top 10)
         assert!(history.contains("Gen 15"));
         assert!(history.contains("Gen 6")); // 15..=6 is the top 10 reversed
-        // Gen 5 should NOT appear (it's the 11th from the end)
+                                            // Gen 5 should NOT appear (it's the 11th from the end)
         assert!(!history.contains("Gen 5"));
     }
 
