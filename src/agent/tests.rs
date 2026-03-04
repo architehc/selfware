@@ -167,7 +167,11 @@ async fn test_agent_run_task_e2e_tool_workflow_with_mock_api() {
     let mut agent = Agent::new(config).await.unwrap();
 
     let result = agent.run_task("Read Cargo.toml and finish").await;
-    assert!(result.is_ok(), "run_task should succeed with mock API");
+    assert!(
+        result.is_ok(),
+        "run_task should succeed with mock API: {:?}",
+        result.err()
+    );
     assert!(
         agent
             .messages
@@ -202,7 +206,8 @@ async fn test_agent_run_task_streaming_fallback_to_non_streaming() {
     let result = agent.run_task("Respond with a short completion").await;
     assert!(
         result.is_ok(),
-        "run_task should recover by falling back to non-streaming chat"
+        "run_task should recover by falling back to non-streaming chat: {:?}",
+        result.err()
     );
     assert!(agent.last_assistant_response.contains("Fallback completed"));
 
