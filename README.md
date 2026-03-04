@@ -304,7 +304,7 @@ The agent thinks in cycles:
 ### Run Tests
 
 ```bash
-# All tests (~3,980 tests, ~2 min)
+# All tests (~5,200 tests, ~4 min)
 cargo test --all-features
 
 # With resilience features (self-healing, recovery)
@@ -314,20 +314,22 @@ cargo test --features resilience
 cargo test --features integration
 
 # Specific test modules
-cargo test --test unit            # 238 unit tests
-cargo test --test e2e_tools_test  # 21 E2E tool tests
+cargo test --lib --all-features     # 4,784 unit tests
+cargo test --test '*' --all-features  # 254 external unit tests
+cargo test --test integration         # 124 integration tests
 ```
 
 ### Test Coverage
 
 ```bash
-cargo tarpaulin --all-features --out Html
+cargo llvm-cov --lib --all-features --summary-only
 ```
 
 | Metric | Value |
 |--------|-------|
-| **Total Tests** | ~3,980 |
-| **Test Targets** | lib (3,615) + unit (238) + e2e (21) + integration (5) + property (100) + doc (1) |
+| **Total Tests** | ~5,200 |
+| **Line Coverage** | ~82% |
+| **Test Targets** | lib (4,784) + external (254) + integration (124) + doc (1) + property (5) |
 
 ### SAB — Selfware Agentic Benchmark
 

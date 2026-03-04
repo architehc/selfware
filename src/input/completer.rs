@@ -55,6 +55,7 @@ impl SelfwareCompleter {
                             span: Span::new(span_start, span_end),
                             append_whitespace: true,
                             match_indices: None,
+                            display_override: None,
                         },
                     )
                 })
@@ -93,6 +94,7 @@ impl SelfwareCompleter {
                             span: Span::new(span_start, span_end),
                             append_whitespace: true,
                             match_indices: None,
+                            display_override: None,
                         },
                     )
                 })
@@ -171,6 +173,7 @@ impl SelfwareCompleter {
                             span: Span::new(span_start, span_end),
                             append_whitespace: !is_dir,
                             match_indices: None,
+                            display_override: None,
                         },
                     ));
                 }
