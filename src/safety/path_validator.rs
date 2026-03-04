@@ -223,28 +223,31 @@ impl PathValidator {
                 .to_string_lossy(),
         );
 
+        // Normalize to forward slashes for glob matching on all platforms.
+        // The `glob` crate treats backslash as an escape character, so
+        // Windows paths like `C:\foo\bar` must be converted to `C:/foo/bar`.
+        let canonical_normalized = canonical_str.replace('\\', "/");
+        let working_dir_normalized = working_dir_canonical.replace('\\', "/");
+
         for pattern in &self.config.allowed_paths {
             // For relative patterns, expand using the working directory
             let expanded_pattern = if pattern.starts_with("./") || pattern == "." {
                 let suffix = pattern.strip_prefix("./").unwrap_or("");
-                if cfg!(target_os = "windows") {
-                    // On Windows, use backslash separator for glob matching
-                    format!("{}\\{}", working_dir_canonical, suffix)
-                } else {
-                    format!("{}/{}", working_dir_canonical, suffix)
-                }
+                format!("{}/{}", working_dir_normalized, suffix)
             } else {
-                pattern.clone()
+                pattern.replace('\\', "/")
             };
 
-            if glob::Pattern::new(&expanded_pattern)?.matches(canonical_str)
-                || glob::Pattern::new(pattern)?.matches(canonical_str)
+            let pattern_normalized = pattern.replace('\\', "/");
+
+            if glob::Pattern::new(&expanded_pattern)?.matches(&canonical_normalized)
+                || glob::Pattern::new(&pattern_normalized)?.matches(&canonical_normalized)
             {
                 return Ok(true);
             }
 
             // Fallback: for "./**" pattern, do a simple prefix check
-            if pattern == "./**" && canonical_str.starts_with(&working_dir_canonical) {
+            if pattern == "./**" && canonical_normalized.starts_with(&working_dir_normalized) {
                 return Ok(true);
             }
         }
