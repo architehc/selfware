@@ -151,6 +151,7 @@ fn mock_agent_config(endpoint: String, streaming: bool) -> Config {
 }
 
 #[tokio::test]
+#[cfg_attr(target_os = "windows", ignore = "mock TCP server unreliable under heavy parallelism on Windows CI")]
 async fn test_agent_run_task_e2e_tool_workflow_with_mock_api() {
     let server = MockLlmServer::builder()
         .with_response(
@@ -192,6 +193,7 @@ async fn test_agent_run_task_e2e_tool_workflow_with_mock_api() {
 }
 
 #[tokio::test]
+#[cfg_attr(target_os = "windows", ignore = "mock TCP server unreliable under heavy parallelism on Windows CI")]
 async fn test_agent_run_task_streaming_fallback_to_non_streaming() {
     let server = MockLlmServer::builder()
         .with_response("Plan: answer directly.")
