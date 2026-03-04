@@ -1006,7 +1006,7 @@ async fn handle_command(
                     endpoint: config.endpoint.clone(),
                     model: config.model.clone(),
                     api_key: config.api_key.as_ref().map(|k| k.expose().to_string()),
-                    max_tokens: 16384,
+                    max_tokens: config.max_tokens,
                     temperature: config.temperature,
                 },
             };

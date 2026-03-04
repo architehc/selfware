@@ -98,6 +98,8 @@ async fn main() -> Result<()> {
         // API retry settings
         retry: Default::default(),
 
+        evolution: Default::default(),
+
         // CLI-only flags (not persisted in config)
         compact_mode: false,
         verbose_mode: false,

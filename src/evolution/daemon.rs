@@ -196,9 +196,12 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
                 }
             };
 
-            // Apply patch
+            // Apply edits (search-and-replace or unified diff)
             if !apply_patch_to_worktree(&worktree, &hypothesis.patch) {
                 log_frost(generation, &format!("Patch failed: {}", hypothesis.id));
+                // Log the first 500 chars of the edit data for debugging
+                let preview = &hypothesis.patch[..hypothesis.patch.len().min(500)];
+                log_warning(&format!("  Edit preview:\n{}", preview));
                 let _ = ast_tools::cleanup_worktree(repo_root, &worktree);
                 continue;
             }
@@ -463,21 +466,43 @@ fn generate_hypotheses(
     }
 }
 
-/// Max characters per file to include in the LLM prompt
-const MAX_FILE_CHARS: usize = 8_000;
 /// Max total source context characters
-const MAX_CONTEXT_CHARS: usize = 100_000;
+const MAX_CONTEXT_CHARS: usize = 120_000;
 
 fn read_mutation_targets(targets: &super::MutationTargets, repo_root: &Path) -> String {
-    let mut context = String::new();
-    let all_files = targets
+    // Collect all files with their sizes, then sort smallest-first so we
+    // maximise the number of files sent in full within the context budget.
+    let all_paths: Vec<&PathBuf> = targets
         .prompt_logic
         .iter()
         .chain(targets.tool_code.iter())
-        .chain(targets.cognitive.iter());
+        .chain(targets.cognitive.iter())
+        .collect();
 
-    for file in all_files {
-        if context.len() >= MAX_CONTEXT_CHARS {
+    let mut file_entries: Vec<(&PathBuf, String, usize)> = Vec::new();
+    for file in &all_paths {
+        let full_path = repo_root.join(file);
+        match std::fs::read_to_string(&full_path) {
+            Ok(contents) => {
+                let len = contents.len();
+                file_entries.push((file, contents, len));
+            }
+            Err(e) => {
+                log_warning(&format!("Could not read {}: {}", file.display(), e));
+            }
+        }
+    }
+
+    // Sort by size ascending — small files go in full, big files get truncated
+    file_entries.sort_by_key(|(_, _, len)| *len);
+
+    let mut context = String::new();
+    let mut files_full = 0usize;
+    let mut files_truncated = 0usize;
+
+    for (file, contents, _len) in &file_entries {
+        let remaining = MAX_CONTEXT_CHARS.saturating_sub(context.len());
+        if remaining < 500 {
             log_warning(&format!(
                 "Context limit reached ({} chars), skipping remaining files",
                 context.len()
@@ -485,57 +510,110 @@ fn read_mutation_targets(targets: &super::MutationTargets, repo_root: &Path) -> 
             break;
         }
 
-        let full_path = repo_root.join(file);
-        match std::fs::read_to_string(&full_path) {
-            Ok(contents) => {
-                let truncated = if contents.len() > MAX_FILE_CHARS {
-                    format!(
-                        "{}...\n// [truncated, {} total chars]",
-                        &contents[..MAX_FILE_CHARS],
-                        contents.len()
-                    )
-                } else {
-                    contents
-                };
-                context.push_str(&format!(
-                    "\n### {}\n```rust\n{}\n```\n",
-                    file.display(),
-                    truncated
-                ));
-            }
-            Err(e) => {
-                log_warning(&format!("Could not read {}: {}", file.display(), e));
-            }
+        // Add line numbers to source — helps the LLM generate accurate @@ hunk headers
+        let numbered = add_line_numbers(contents);
+
+        // Budget for this file: overhead for the header + fences (~100 chars)
+        let overhead = 100 + file.display().to_string().len();
+        let budget = remaining.saturating_sub(overhead);
+
+        let (display_content, was_truncated) = if numbered.len() <= budget {
+            (numbered, false)
+        } else {
+            // Truncate to budget on a line boundary
+            let truncated = truncate_to_line_boundary(&numbered, budget);
+            let total_lines = contents.lines().count();
+            let shown_lines = truncated.lines().count();
+            (
+                format!(
+                    "{}\n// ... [truncated at line {}/{}, {} total chars]",
+                    truncated, shown_lines, total_lines, contents.len()
+                ),
+                true,
+            )
+        };
+
+        if was_truncated {
+            files_truncated += 1;
+        } else {
+            files_full += 1;
         }
+
+        context.push_str(&format!(
+            "\n### {}\n```rust\n{}\n```\n",
+            file.display(),
+            display_content
+        ));
     }
     log_phase(&format!(
-        "Source context: {} chars from {} files",
+        "Source context: {} chars from {} files ({} full, {} truncated)",
         context.len(),
-        targets.prompt_logic.len() + targets.tool_code.len() + targets.cognitive.len()
+        files_full + files_truncated,
+        files_full,
+        files_truncated,
     ));
     context
+}
+
+/// Add line numbers to source code (e.g. "  1| fn main() {")
+fn add_line_numbers(source: &str) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    let width = format!("{}", lines.len()).len();
+    let mut out = String::with_capacity(source.len() + lines.len() * (width + 2));
+    for (i, line) in lines.iter().enumerate() {
+        out.push_str(&format!("{:>width$}| {}\n", i + 1, line, width = width));
+    }
+    out
+}
+
+/// Truncate a string to at most `max_chars` on a line boundary
+fn truncate_to_line_boundary(s: &str, max_chars: usize) -> &str {
+    if s.len() <= max_chars {
+        return s;
+    }
+    // Find the last newline before max_chars
+    match s[..max_chars].rfind('\n') {
+        Some(pos) => &s[..pos],
+        None => &s[..max_chars],
+    }
 }
 
 fn build_system_prompt(population_size: usize) -> String {
     format!(
         r#"You are an evolution engine that generates code mutation hypotheses for a Rust project called selfware.
 
-Your task is to propose exactly {n} mutation hypotheses as improvements. Each hypothesis must be a concrete code change expressed as a unified diff patch.
+Your task is to propose exactly {n} mutation hypotheses as improvements. Each hypothesis uses search-and-replace edits.
+
+SOURCE CODE FORMAT:
+- Each file is shown with line numbers like "  42| fn foo() {{"
+- Line numbers are for your reference only — do NOT include them in search/replace strings
+- Some files are truncated — only modify code you can see in full
+
+EDIT FORMAT (critical — edits that can't be found are discarded):
+- Each hypothesis has an "edits" array of search-and-replace operations
+- "search" must be an EXACT substring of the target file (copy-paste accuracy)
+- "replace" is what replaces that exact substring
+- Keep edits small and focused — change the minimum necessary code
+- The search string must be unique in the file (not ambiguous)
+- Use \n for newlines inside strings (JSON escaped)
+- Do NOT include line number prefixes (like "42| ") in search/replace strings
 
 RULES:
 1. Each hypothesis must target files from the provided source code
-2. Patches must be valid unified diff format (--- a/path, +++ b/path, @@ hunks)
-3. Never modify files under src/evolution/, src/safety/, system_tests/, or benches/sab_
-4. Focus on performance, correctness, readability, or efficiency improvements
-5. Each hypothesis should be independent — do not assume other hypotheses are applied
+2. Never modify files under src/evolution/, src/safety/, system_tests/, or benches/sab_
+3. Focus on: bug fixes, performance improvements, correctness, reducing allocations
+4. Each hypothesis must be independent — do not assume other hypotheses are applied
+5. Only modify code you can fully see — never guess at truncated content
 
-Respond with a JSON array of exactly {n} objects. Each object has:
-- "description": string — what the mutation does and why
-- "patch": string — unified diff patch
-- "target_files": string array — relative file paths affected
-- "property_test": string or null — optional property test code
+Respond with a JSON array of exactly {n} objects:
+- "description": string — what the change does and why
+- "edits": array of {{"file": "relative/path.rs", "search": "exact old text", "replace": "new text"}}
+- "target_files": string array — relative paths of files changed
+- "property_test": string or null — optional property test
 
-Respond ONLY with the JSON array. No markdown fences, no explanatory text."#,
+Return ONLY the JSON array. No markdown, no commentary, no thinking.
+
+/no_think"#,
         n = population_size
     )
 }
@@ -584,6 +662,8 @@ fn call_llm(llm: &LlmConfig, system_prompt: &str, user_prompt: &str) -> Result<S
         ],
         "max_tokens": llm.max_tokens,
         "temperature": llm.temperature,
+        // Disable Qwen3's thinking mode to maximize output tokens for JSON
+        "chat_template_kwargs": {"enable_thinking": false},
     });
 
     let client = reqwest::blocking::Client::builder()
@@ -637,13 +717,27 @@ fn parse_hypotheses_response(response: &str) -> Vec<Hypothesis> {
         .enumerate()
         .filter_map(|(i, v)| {
             let description = v["description"].as_str()?.to_string();
-            let patch = v["patch"].as_str()?.to_string();
             let target_files: Vec<PathBuf> = v["target_files"]
                 .as_array()?
                 .iter()
                 .filter_map(|f| f.as_str().map(PathBuf::from))
                 .collect();
             let property_test = v["property_test"].as_str().map(|s| s.to_string());
+
+            // Support both formats:
+            // 1. New: "edits" array of {file, search, replace}
+            // 2. Legacy: "patch" string (unified diff)
+            let patch = if let Some(edits) = v["edits"].as_array() {
+                // Serialize edits as JSON for the patch field
+                serde_json::to_string(edits).ok()?
+            } else {
+                // Fallback to legacy unified diff format
+                v["patch"].as_str()?.to_string()
+            };
+
+            if patch.is_empty() {
+                return None;
+            }
 
             Some(Hypothesis {
                 id: format!("hyp-{}", i),
@@ -735,30 +829,312 @@ fn build_metrics(sab: &SabResult, config: &EvolutionConfig) -> FitnessMetrics {
     }
 }
 
-fn apply_patch_to_worktree(worktree: &Path, patch: &str) -> bool {
-    let patch_file = worktree.join(".evolution-patch");
+/// Strip line-number prefixes the LLM may have left in the patch.
+/// Matches patterns like "  42| " at the start of context/add/delete lines.
+fn sanitize_patch(patch: &str) -> String {
+    let mut out = String::with_capacity(patch.len());
+    for line in patch.lines() {
+        // Hunk headers, file headers — pass through unchanged
+        if line.starts_with("@@")
+            || line.starts_with("---")
+            || line.starts_with("+++")
+            || line.starts_with("diff ")
+        {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+
+        // Context/add/delete lines: strip line-number prefix if present
+        // Patterns:  " 123| code", "+  45| code", "- 789| code"
+        let (prefix, rest) = if let Some(r) = line.strip_prefix('+').or_else(|| line.strip_prefix('-')) {
+            (&line[..1], r)
+        } else if let Some(r) = line.strip_prefix(' ') {
+            (" ", r)
+        } else {
+            // Unrecognized line — pass through
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        };
+
+        // Check if `rest` looks like "  NNN| actual_code"
+        let stripped = rest.trim_start();
+        if let Some(pipe_pos) = stripped.find('|') {
+            let before_pipe = &stripped[..pipe_pos];
+            if !before_pipe.is_empty() && before_pipe.chars().all(|c| c.is_ascii_digit()) {
+                // It's a line-number prefix — strip "NNN| " and keep the rest
+                let after_pipe = &stripped[pipe_pos + 1..];
+                // The format is "NNN| code" — there's exactly one space after |
+                let code = after_pipe.strip_prefix(' ').unwrap_or(after_pipe);
+                out.push_str(prefix);
+                out.push_str(code);
+                out.push('\n');
+                continue;
+            }
+        }
+
+        // No line-number prefix — pass through unchanged
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Apply edits to a directory. The `patch` field may be:
+/// 1. A JSON array of {file, search, replace} edits (new format)
+/// 2. A unified diff string (legacy format)
+fn apply_edits(dir: &Path, patch: &str) -> bool {
+    // Try search-and-replace format first
+    if let Ok(edits) = serde_json::from_str::<Vec<serde_json::Value>>(patch) {
+        if !edits.is_empty() && edits[0].get("search").is_some() {
+            return apply_search_replace(dir, &edits);
+        }
+    }
+
+    // Fall back to unified diff with progressive strategies
+    apply_unified_diff(dir, patch)
+}
+
+/// Apply search-and-replace edits: for each edit, find the `search` string
+/// in the file and replace it with `replace`. Supports fuzzy whitespace matching.
+fn apply_search_replace(dir: &Path, edits: &[serde_json::Value]) -> bool {
+    // Collect all edits per file, then apply them all at once
+    let mut file_edits: std::collections::HashMap<String, Vec<(&str, &str)>> =
+        std::collections::HashMap::new();
+
+    for edit in edits {
+        let file = match edit["file"].as_str() {
+            Some(f) => f,
+            None => return false,
+        };
+        let search = match edit["search"].as_str() {
+            Some(s) => s,
+            None => return false,
+        };
+        let replace = match edit["replace"].as_str() {
+            Some(r) => r,
+            None => return false,
+        };
+        file_edits
+            .entry(file.to_string())
+            .or_default()
+            .push((search, replace));
+    }
+
+    for (file, edits) in &file_edits {
+        let path = dir.join(file);
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+
+        let mut modified = content.clone();
+        for (search, replace) in edits {
+            // Try exact match first
+            if modified.contains(search) {
+                let count = modified.matches(search).count();
+                if count > 1 {
+                    log_warning(&format!(
+                        "  Ambiguous search string in {} ({} matches): {:?}...",
+                        file,
+                        count,
+                        &search[..search.len().min(80)]
+                    ));
+                    return false;
+                }
+                modified = modified.replacen(search, replace, 1);
+                continue;
+            }
+
+            // Fuzzy match: try matching by trimmed line content (ignores whitespace diffs)
+            match fuzzy_find_and_replace(&modified, search, replace) {
+                Some(new_content) => {
+                    modified = new_content;
+                    continue;
+                }
+                None => {
+                    log_warning(&format!(
+                        "  Search string not found in {}: {:?}...",
+                        file,
+                        &search[..search.len().min(80)]
+                    ));
+                    return false;
+                }
+            }
+        }
+
+        if modified == content {
+            log_warning(&format!("  No changes made to {}", file));
+            return false;
+        }
+
+        if std::fs::write(&path, &modified).is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Find `search` in `content` with fuzzy whitespace matching, then replace
+/// with `replace` (adjusted to match the file's original indentation).
+/// Returns the modified content, or None if no match found.
+fn fuzzy_find_and_replace(content: &str, search: &str, replace: &str) -> Option<String> {
+    let search_lines: Vec<&str> = search.lines().collect();
+    if search_lines.is_empty() {
+        return None;
+    }
+
+    let content_lines: Vec<&str> = content.lines().collect();
+    let first_trimmed = search_lines[0].trim();
+    if first_trimmed.is_empty() {
+        return None;
+    }
+
+    // Scan content lines for a match
+    for start_idx in 0..content_lines.len() {
+        let content_trimmed = content_lines[start_idx].trim();
+        if content_trimmed != first_trimmed {
+            continue;
+        }
+
+        // Check if all subsequent search lines match (trimmed)
+        if start_idx + search_lines.len() > content_lines.len() {
+            continue;
+        }
+
+        let mut all_match = true;
+        for (j, search_line) in search_lines.iter().enumerate() {
+            let cl = content_lines[start_idx + j].trim();
+            let sl = search_line.trim();
+            if cl != sl {
+                all_match = false;
+                break;
+            }
+        }
+
+        if !all_match {
+            continue;
+        }
+
+        // Found a match! Now compute the indentation offset.
+        // The file's indentation for the first matched line vs the search's indentation.
+        let file_indent = leading_whitespace(content_lines[start_idx]);
+        let search_indent = leading_whitespace(search_lines[0]);
+
+        // Build the replacement with adjusted indentation
+        let replace_lines: Vec<&str> = replace.lines().collect();
+        let mut adjusted_replace = String::new();
+        for (k, rline) in replace_lines.iter().enumerate() {
+            let rline_trimmed_start = rline.trim_start();
+            if rline_trimmed_start.is_empty() {
+                adjusted_replace.push('\n');
+                continue;
+            }
+            let replace_indent = leading_whitespace(rline);
+            // If the replace line has the search indent as a base, rebase to file indent
+            let new_indent = if let Some(extra) = replace_indent.strip_prefix(search_indent) {
+                format!("{}{}", file_indent, extra)
+            } else {
+                // Can't rebase — use file_indent for first line, original for rest
+                if k == 0 {
+                    file_indent.to_string()
+                } else {
+                    replace_indent.to_string()
+                }
+            };
+            adjusted_replace.push_str(&new_indent);
+            adjusted_replace.push_str(rline_trimmed_start);
+            adjusted_replace.push('\n');
+        }
+
+        // Remove trailing newline if the search didn't end with one
+        if !search.ends_with('\n') && adjusted_replace.ends_with('\n') {
+            adjusted_replace.pop();
+        }
+
+        // Build the result: lines before + adjusted replace + lines after
+        let mut result = String::new();
+        for line in &content_lines[..start_idx] {
+            result.push_str(line);
+            result.push('\n');
+        }
+        result.push_str(&adjusted_replace);
+        let end_idx = start_idx + search_lines.len();
+        if end_idx < content_lines.len() {
+            if !result.ends_with('\n') {
+                result.push('\n');
+            }
+            for (k, line) in content_lines[end_idx..].iter().enumerate() {
+                result.push_str(line);
+                if end_idx + k + 1 < content_lines.len() {
+                    result.push('\n');
+                }
+            }
+        }
+
+        // Preserve trailing newline if original had one
+        if content.ends_with('\n') && !result.ends_with('\n') {
+            result.push('\n');
+        }
+
+        return Some(result);
+    }
+
+    None
+}
+
+/// Extract the leading whitespace of a line
+fn leading_whitespace(line: &str) -> &str {
+    let trimmed = line.trim_start();
+    &line[..line.len() - trimmed.len()]
+}
+
+/// Apply a unified diff with progressive fallback strategies:
+/// 1. `git apply` (strict)
+/// 2. `git apply --ignore-whitespace -C1`
+/// 3. `patch -p1 -F3` (fuzz factor 3)
+fn apply_unified_diff(dir: &Path, patch: &str) -> bool {
+    let patch_file = dir.join(".evolution-patch");
     if std::fs::write(&patch_file, patch).is_err() {
         return false;
     }
-    let result = Command::new("git")
+
+    // Strategy 1: strict git apply
+    let strict = Command::new("git")
         .args(["apply", ".evolution-patch"])
-        .current_dir(worktree)
+        .current_dir(dir)
+        .output();
+    if strict.map(|o| o.status.success()).unwrap_or(false) {
+        let _ = std::fs::remove_file(&patch_file);
+        return true;
+    }
+
+    // Strategy 2: git apply with relaxed whitespace and reduced context
+    let relaxed = Command::new("git")
+        .args(["apply", "--ignore-whitespace", "-C1", ".evolution-patch"])
+        .current_dir(dir)
+        .output();
+    if relaxed.map(|o| o.status.success()).unwrap_or(false) {
+        let _ = std::fs::remove_file(&patch_file);
+        return true;
+    }
+
+    // Strategy 3: patch -p1 with fuzz factor 3
+    let fuzz = Command::new("patch")
+        .args(["-p1", "-F3", "--batch", "--silent", "-i", ".evolution-patch"])
+        .current_dir(dir)
         .output();
     let _ = std::fs::remove_file(&patch_file);
-    result.map(|o| o.status.success()).unwrap_or(false)
+    fuzz.map(|o| o.status.success()).unwrap_or(false)
+}
+
+fn apply_patch_to_worktree(worktree: &Path, patch: &str) -> bool {
+    apply_edits(worktree, patch)
 }
 
 fn apply_patch_to_repo(repo_root: &Path, patch: &str) -> bool {
-    let patch_file = repo_root.join(".evolution-patch");
-    if std::fs::write(&patch_file, patch).is_err() {
-        return false;
-    }
-    let result = Command::new("git")
-        .args(["apply", ".evolution-patch"])
-        .current_dir(repo_root)
-        .output();
-    let _ = std::fs::remove_file(&patch_file);
-    result.map(|o| o.status.success()).unwrap_or(false)
+    apply_edits(repo_root, patch)
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1113,5 +1489,188 @@ These changes should improve performance."#;
     #[test]
     fn test_extract_json_array_none() {
         assert!(extract_json_array("no array here").is_none());
+    }
+
+    #[test]
+    fn test_add_line_numbers() {
+        let src = "fn main() {\n    println!(\"hello\");\n}\n";
+        let numbered = add_line_numbers(src);
+        assert!(numbered.contains("1| fn main() {"));
+        assert!(numbered.contains("2|     println!(\"hello\");"));
+        assert!(numbered.contains("3| }"));
+    }
+
+    #[test]
+    fn test_add_line_numbers_width() {
+        // 100+ lines should get 3-digit width
+        let src: String = (1..=150).map(|i| format!("line {}\n", i)).collect();
+        let numbered = add_line_numbers(&src);
+        assert!(numbered.contains("  1| line 1"));
+        assert!(numbered.contains("150| line 150"));
+    }
+
+    #[test]
+    fn test_truncate_to_line_boundary() {
+        let text = "line one\nline two\nline three\nline four\n";
+        let trunc = truncate_to_line_boundary(text, 20);
+        assert_eq!(trunc, "line one\nline two");
+    }
+
+    #[test]
+    fn test_truncate_to_line_boundary_fits() {
+        let text = "short";
+        assert_eq!(truncate_to_line_boundary(text, 100), "short");
+    }
+
+    #[test]
+    fn test_parse_hypotheses_edits_format() {
+        let json = r#"[
+            {
+                "description": "Optimize token counting",
+                "edits": [
+                    {"file": "src/token.rs", "search": "old_code()", "replace": "new_code()"}
+                ],
+                "target_files": ["src/token.rs"],
+                "property_test": null
+            }
+        ]"#;
+        let hypotheses = parse_hypotheses_response(json);
+        assert_eq!(hypotheses.len(), 1);
+        assert_eq!(hypotheses[0].description, "Optimize token counting");
+        // patch should contain the serialized edits JSON
+        assert!(hypotheses[0].patch.contains("old_code()"));
+        assert!(hypotheses[0].patch.contains("new_code()"));
+    }
+
+    #[test]
+    fn test_apply_search_replace_basic() {
+        let tmp = std::env::temp_dir().join("selfware-test-sr");
+        let _ = std::fs::create_dir_all(&tmp);
+        let test_file = tmp.join("test.rs");
+        std::fs::write(&test_file, "fn old_func() {\n    println!(\"hello\");\n}\n").unwrap();
+
+        let edits = vec![serde_json::json!({
+            "file": "test.rs",
+            "search": "fn old_func()",
+            "replace": "fn new_func()"
+        })];
+
+        let result = apply_search_replace(&tmp, &edits);
+        assert!(result);
+
+        let content = std::fs::read_to_string(&test_file).unwrap();
+        assert!(content.contains("fn new_func()"));
+        assert!(!content.contains("fn old_func()"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_apply_search_replace_not_found() {
+        let tmp = std::env::temp_dir().join("selfware-test-sr-notfound");
+        let _ = std::fs::create_dir_all(&tmp);
+        let test_file = tmp.join("test.rs");
+        std::fs::write(&test_file, "fn foo() {}\n").unwrap();
+
+        let edits = vec![serde_json::json!({
+            "file": "test.rs",
+            "search": "fn nonexistent()",
+            "replace": "fn bar()"
+        })];
+
+        let result = apply_search_replace(&tmp, &edits);
+        assert!(!result);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_fuzzy_find_and_replace_exact() {
+        let content = "fn foo() {\n    old_code();\n}\n";
+        let result = fuzzy_find_and_replace(content, "    old_code();", "    new_code();");
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("new_code()"));
+    }
+
+    #[test]
+    fn test_fuzzy_find_and_replace_indent_mismatch() {
+        // File has 8-space indent, search has 4-space indent
+        let content = "fn foo() {\n        old_code();\n}\n";
+        let result = fuzzy_find_and_replace(content, "    old_code();", "    new_code();");
+        assert!(result.is_some());
+        let r = result.unwrap();
+        // Should preserve the file's 8-space indent
+        assert!(r.contains("        new_code();"), "got: {}", r);
+    }
+
+    #[test]
+    fn test_fuzzy_find_and_replace_multiline() {
+        let content = "    fn foo() {\n        let x = 1;\n        let y = 2;\n    }\n";
+        let search = "let x = 1;\n  let y = 2;";
+        let replace = "let x = 10;\n  let y = 20;";
+        let result = fuzzy_find_and_replace(content, search, replace);
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(r.contains("let x = 10;"), "got: {}", r);
+        assert!(r.contains("let y = 20;"), "got: {}", r);
+    }
+
+    #[test]
+    fn test_build_system_prompt_mentions_line_numbers() {
+        let prompt = build_system_prompt(4);
+        assert!(prompt.contains("line numbers"));
+        assert!(prompt.contains("exactly 4"));
+        assert!(prompt.contains("search"));
+        assert!(prompt.contains("replace"));
+    }
+
+    #[test]
+    fn test_sanitize_patch_strips_line_numbers() {
+        let patch = "\
+--- a/src/foo.rs
++++ b/src/foo.rs
+@@ -10,3 +10,3 @@
+  10| fn foo() {
+- 11|     old_code();
++ 11|     new_code();
+  12| }
+";
+        let clean = sanitize_patch(patch);
+        assert!(clean.contains(" fn foo() {\n"));
+        assert!(clean.contains("-    old_code();\n"));
+        assert!(clean.contains("+    new_code();\n"));
+        assert!(clean.contains(" }\n"));
+        assert!(!clean.contains("10|"));
+    }
+
+    #[test]
+    fn test_sanitize_patch_preserves_clean_patch() {
+        let patch = "\
+--- a/src/foo.rs
++++ b/src/foo.rs
+@@ -10,3 +10,3 @@
+ fn foo() {
+-    old_code();
++    new_code();
+ }
+";
+        let clean = sanitize_patch(patch);
+        assert_eq!(clean, patch);
+    }
+
+    #[test]
+    fn test_sanitize_patch_handles_pipes_in_code() {
+        // Pipe in code (e.g. match arms, closures) should NOT be stripped
+        let patch = "\
+--- a/src/foo.rs
++++ b/src/foo.rs
+@@ -1,3 +1,3 @@
+ match x {
+-    Some(v) | None => {}
++    Some(v) | None => { v }
+ }
+";
+        let clean = sanitize_patch(patch);
+        assert!(clean.contains("    Some(v) | None => {}"));
     }
 }
