@@ -246,6 +246,19 @@ impl PathValidator {
                 return Ok(true);
             }
 
+            // On Windows, absolute Unix-style patterns like "/**" won't match
+            // drive-letter paths like "C:/Users/...". Try prepending the drive letter.
+            if cfg!(target_os = "windows") && pattern_normalized.starts_with('/') {
+                if let Some(drive_prefix) = canonical_normalized.get(..2) {
+                    if drive_prefix.ends_with(':') {
+                        let win_pattern = format!("{}{}", drive_prefix, pattern_normalized);
+                        if glob::Pattern::new(&win_pattern)?.matches(&canonical_normalized) {
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+
             // Fallback: for "./**" pattern, do a simple prefix check
             if pattern == "./**" && canonical_normalized.starts_with(&working_dir_normalized) {
                 return Ok(true);
