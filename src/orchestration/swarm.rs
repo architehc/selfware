@@ -952,9 +952,7 @@ impl Swarm {
     /// Queue a task. Returns an error if resource pressure is `High` or `Critical`.
     pub fn queue_task(&mut self, task: SwarmTask) -> Result<()> {
         if let Some(ref pressure_lock) = self.resource_pressure {
-            let pressure = pressure_lock
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
+            let pressure = pressure_lock.read().unwrap_or_else(|e| e.into_inner());
             if matches!(
                 *pressure,
                 crate::resource::ResourcePressure::High
@@ -1368,8 +1366,12 @@ mod tests {
     fn test_swarm_queue_task() {
         let mut swarm = Swarm::new();
 
-        swarm.queue_task(SwarmTask::new("Task 1").with_priority(5)).unwrap();
-        swarm.queue_task(SwarmTask::new("Task 2").with_priority(8)).unwrap();
+        swarm
+            .queue_task(SwarmTask::new("Task 1").with_priority(5))
+            .unwrap();
+        swarm
+            .queue_task(SwarmTask::new("Task 2").with_priority(8))
+            .unwrap();
 
         // Higher priority should come first
         let task = swarm.next_task().unwrap();
@@ -1970,7 +1972,10 @@ mod tests {
 
         let result = swarm.queue_task(SwarmTask::new("Blocked task"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("resource pressure"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("resource pressure"));
     }
 
     #[test]

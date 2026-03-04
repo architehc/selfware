@@ -2538,15 +2538,12 @@ mod tests {
         let predictor2 = HealthPredictor::new();
         predictor2.load_history(&path).unwrap();
 
-        let h1 = predictor
-            .history
-            .read()
-            .unwrap();
-        let h2 = predictor2
-            .history
-            .read()
-            .unwrap();
-        assert_eq!(h1.get("svc_a").map(|v| v.len()), h2.get("svc_a").map(|v| v.len()));
+        let h1 = predictor.history.read().unwrap();
+        let h2 = predictor2.history.read().unwrap();
+        assert_eq!(
+            h1.get("svc_a").map(|v| v.len()),
+            h2.get("svc_a").map(|v| v.len())
+        );
     }
 
     #[test]

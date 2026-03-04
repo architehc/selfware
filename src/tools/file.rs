@@ -969,7 +969,10 @@ mod tests {
         let result = tool.execute(args).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("no-op"), "Expected no-op error, got: {err_msg}");
+        assert!(
+            err_msg.contains("no-op"),
+            "Expected no-op error, got: {err_msg}"
+        );
     }
 
     #[tokio::test]

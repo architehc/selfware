@@ -2514,7 +2514,9 @@ pub fn calculate_product(a: i32, b: i32) -> i32 {
 
         let issues = index.verify_index_integrity();
         assert!(!issues.is_empty());
-        assert!(issues.iter().any(|i| i.contains("NaN") || i.contains("Inf")));
+        assert!(issues
+            .iter()
+            .any(|i| i.contains("NaN") || i.contains("Inf")));
     }
 
     #[test]

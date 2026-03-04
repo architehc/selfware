@@ -185,11 +185,7 @@ impl Agent {
                 self.recent_tool_calls.pop_front();
             }
 
-            let repeat_count = self
-                .recent_tool_calls
-                .iter()
-                .filter(|s| **s == sig)
-                .count();
+            let repeat_count = self.recent_tool_calls.iter().filter(|s| **s == sig).count();
 
             if repeat_count >= MAX_REPEATS {
                 warn!(
@@ -198,7 +194,10 @@ impl Agent {
                 );
                 self.cognitive_state.episodic_memory.what_failed(
                     "repetition_loop",
-                    &format!("Stuck in loop: {} called {} times with identical args", name, repeat_count),
+                    &format!(
+                        "Stuck in loop: {} called {} times with identical args",
+                        name, repeat_count
+                    ),
                 );
                 self.recent_tool_calls.clear();
                 return Some(format!(

@@ -2265,7 +2265,7 @@ pub fn run_tui_swarm() -> Result<()> {
 ///
 /// ```rust,no_run
 /// use selfware::ui::tui::run_tui_swarm_with_roles;
-/// use selfware::orchestration::swarm::AgentRole;
+/// use selfware::swarm::AgentRole;
 ///
 /// let roles = vec![
 ///     AgentRole::Architect,

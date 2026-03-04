@@ -95,7 +95,7 @@ jobs:
 
   # Minimum supported Rust version
   msrv:
-    name: MSRV (1.88.0)
+    name: MSRV (1.91.0)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 
@@ -103,10 +103,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust 1.88.0
+      - name: Install Rust 1.91.0
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.88.0
+          toolchain: 1.91.0
 
       - name: Cache cargo registry
         uses: actions/cache@v4

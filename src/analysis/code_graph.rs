@@ -1773,7 +1773,9 @@ mod tests {
         let renderer = GraphRenderer::new();
         let rendered = renderer.render(&graph, OutputFormat::Dot);
         let mut buf = Vec::new();
-        renderer.render_to(&graph, OutputFormat::Dot, &mut buf).unwrap();
+        renderer
+            .render_to(&graph, OutputFormat::Dot, &mut buf)
+            .unwrap();
         assert_eq!(rendered, String::from_utf8(buf).unwrap());
     }
 
@@ -1783,7 +1785,9 @@ mod tests {
         let renderer = GraphRenderer::new();
         let rendered = renderer.render(&graph, OutputFormat::Mermaid);
         let mut buf = Vec::new();
-        renderer.render_to(&graph, OutputFormat::Mermaid, &mut buf).unwrap();
+        renderer
+            .render_to(&graph, OutputFormat::Mermaid, &mut buf)
+            .unwrap();
         assert_eq!(rendered, String::from_utf8(buf).unwrap());
     }
 
@@ -1793,7 +1797,9 @@ mod tests {
         let renderer = GraphRenderer::new();
         let rendered = renderer.render(&graph, OutputFormat::Ascii);
         let mut buf = Vec::new();
-        renderer.render_to(&graph, OutputFormat::Ascii, &mut buf).unwrap();
+        renderer
+            .render_to(&graph, OutputFormat::Ascii, &mut buf)
+            .unwrap();
         assert_eq!(rendered, String::from_utf8(buf).unwrap());
     }
 
@@ -1803,7 +1809,9 @@ mod tests {
         let renderer = GraphRenderer::new();
         let rendered = renderer.render(&graph, OutputFormat::Json);
         let mut buf = Vec::new();
-        renderer.render_to(&graph, OutputFormat::Json, &mut buf).unwrap();
+        renderer
+            .render_to(&graph, OutputFormat::Json, &mut buf)
+            .unwrap();
         assert_eq!(rendered, String::from_utf8(buf).unwrap());
     }
 
@@ -1813,7 +1821,9 @@ mod tests {
         let renderer = GraphRenderer::new();
         let rendered = renderer.render(&graph, OutputFormat::PlantUml);
         let mut buf = Vec::new();
-        renderer.render_to(&graph, OutputFormat::PlantUml, &mut buf).unwrap();
+        renderer
+            .render_to(&graph, OutputFormat::PlantUml, &mut buf)
+            .unwrap();
         assert_eq!(rendered, String::from_utf8(buf).unwrap());
     }
 }

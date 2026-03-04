@@ -80,8 +80,7 @@ impl RSIOrchestrator {
         if let Some(parent) = self.state_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let json = serde_json::to_string_pretty(&state)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let json = serde_json::to_string_pretty(&state).map_err(std::io::Error::other)?;
         std::fs::write(&self.state_path, json)
     }
 
@@ -148,7 +147,10 @@ impl RSIOrchestrator {
                         // Persist state before aborting so it survives the restart.
                         self.total_iterations += iteration;
                         if let Err(save_err) = self.save_state() {
-                            warn!("Failed to save RSI state on circuit-breaker abort: {}", save_err);
+                            warn!(
+                                "Failed to save RSI state on circuit-breaker abort: {}",
+                                save_err
+                            );
                         }
                         return Err(SelfwareError::Internal(format!(
                             "RSI loop aborted: {} consecutive failures (limit: {})",

@@ -32,7 +32,10 @@ pub mod self_reference;
 pub mod token_budget;
 
 // Re-exports for backward compatibility (cognitive.rs used to export these directly)
-pub use state::{CognitiveState, CognitiveStateBuilder, CyclePhase, EpisodicMemory, Lesson, LessonCategory, PlanStep, StepStatus, WorkingMemory};
+pub use state::{
+    CognitiveState, CognitiveStateBuilder, CyclePhase, EpisodicMemory, Lesson, LessonCategory,
+    PlanStep, StepStatus, WorkingMemory,
+};
 
 // Re-export key types for new memory architecture
 pub use cognitive_system::CognitiveSystem;
