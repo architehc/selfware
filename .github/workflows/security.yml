@@ -45,6 +45,9 @@ jobs:
   dependency-audit:
     name: Dependency Audit
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write  # Required for rustsec/audit-check to create check runs
     steps:
       - name: Checkout
         uses: actions/checkout@v6

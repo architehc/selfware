@@ -8,7 +8,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Builder
 # -----------------------------------------------------------------------------
-FROM rust:1.91-bookworm AS builder
+FROM rust:bookworm AS builder
 
 # Install build dependencies
 # - libssl-dev: Required for reqwest/native-tls
