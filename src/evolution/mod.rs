@@ -54,7 +54,7 @@ pub const PROTECTED_PATHS: &[&str] = &[
 /// LLM endpoint configuration for hypothesis generation
 #[derive(Debug, Clone)]
 pub struct LlmConfig {
-    /// API endpoint (e.g. "https://api.example.com/v1")
+    /// API endpoint (e.g. `"https://api.example.com/v1"`)
     pub endpoint: String,
     /// Model identifier (e.g. "Qwen/Qwen3-Coder-Next-FP8")
     pub model: String,

@@ -251,6 +251,46 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
                 continue;
             }
 
+            // Format check — prevent committing code that violates `cargo fmt`
+            let fmt_check = Command::new("cargo")
+                .args(["fmt", "--", "--check"])
+                .current_dir(&worktree)
+                .output();
+
+            if fmt_check.map(|o| !o.status.success()).unwrap_or(true) {
+                log_warning(&format!(
+                    "  {} failed fmt check — auto-formatting",
+                    hypothesis.id
+                ));
+                // Auto-fix: run cargo fmt to correct formatting
+                let _ = Command::new("cargo")
+                    .args(["fmt"])
+                    .current_dir(&worktree)
+                    .output();
+            }
+
+            // Clippy lint gate — reject code with clippy warnings
+            let clippy = Command::new("cargo")
+                .args([
+                    "clippy",
+                    "--features",
+                    "self-improvement",
+                    "--",
+                    "-D",
+                    "warnings",
+                ])
+                .current_dir(&worktree)
+                .output();
+
+            if clippy.map(|o| !o.status.success()).unwrap_or(true) {
+                log_frost(
+                    generation,
+                    &format!("Clippy failed: {}", hypothesis.id),
+                );
+                let _ = ast_tools::cleanup_worktree(repo_root, &worktree);
+                continue;
+            }
+
             // If SAB is available, run it; otherwise use synthetic score
             let winner_sab = if sab_available {
                 let build = Command::new("cargo")

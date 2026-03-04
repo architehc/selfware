@@ -5,7 +5,7 @@
 
 #![cfg(feature = "self-improvement")]
 
-use selfware::evolution::daemon::{self, EvolutionResult};
+use selfware::evolution::daemon;
 use selfware::evolution::fitness::{self, SabConfig, SabResult};
 use selfware::evolution::sandbox::SandboxConfig;
 use selfware::evolution::tournament::{Hypothesis, TournamentConfig};
@@ -132,11 +132,7 @@ fn test_fitness_pipeline_end_to_end() {
     let composite = weights.composite(&metrics);
 
     // Verify composite is in valid range
-    assert!(
-        composite >= 0.0 && composite <= 1.0,
-        "Composite: {}",
-        composite
-    );
+    assert!((0.0..=1.0).contains(&composite), "Composite: {}", composite);
 
     // Create a "better" candidate and verify delta is positive
     let better_sab = SabResult {
@@ -308,7 +304,7 @@ fn setup_test_repo(name: &str) -> PathBuf {
 
     std::fs::write(
         tmp.join("src/medium.rs"),
-        &format!(
+        format!(
             "pub fn process(data: &[u8]) -> Vec<u8> {{\n    let mut result = Vec::new();\n    for &byte in data {{\n        result.push(byte.wrapping_add(1));\n    }}\n    result\n}}\n\n{}\n",
             (1..50).map(|i| format!("// padding line {}\n", i)).collect::<String>()
         ),

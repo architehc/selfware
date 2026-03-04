@@ -5,7 +5,7 @@ impl Planner {
     /// Create a planning prompt with task and context
     pub fn create_plan(task: &str, context: &str) -> String {
         format!(
-                    r#"
+            r#"
          <task>
         {}
          </task>
@@ -16,9 +16,8 @@ impl Planner {
 
          Create a step-by-step plan to accomplish this task. Analyze the codebase first if needed, then determine the specific files to modify and changes to make.
          "#,
-                     task,
-                     context
-                 )
+            task, context
+        )
     }
 
     /// Create a prompt for analyzing codebase structure

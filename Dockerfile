@@ -27,17 +27,23 @@ WORKDIR /app
 # Copy manifests first for better layer caching
 COPY Cargo.toml Cargo.lock ./
 
-# Create dummy source files to build dependencies
+# Create dummy source files and directories to build dependencies
 RUN mkdir -p src && \
     echo "fn main() {}" > src/main.rs && \
-    echo "// dummy lib" > src/lib.rs
+    echo "// dummy lib" > src/lib.rs && \
+    mkdir -p benches && \
+    echo "fn main() {}" > benches/token_processing.rs && \
+    mkdir -p tests/unit && echo "" > tests/unit/mod.rs && \
+    mkdir -p tests/integration && echo "" > tests/integration/mod.rs
 
 # Build dependencies only (this layer will be cached)
-RUN cargo build --release && rm -rf src
+RUN cargo build --release && rm -rf src benches tests
 
 # Copy the actual source code
 COPY src ./src
 COPY tests ./tests
+COPY benches ./benches
+COPY examples ./examples
 
 # Touch main.rs to ensure it rebuilds with actual code
 RUN touch src/main.rs
