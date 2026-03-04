@@ -109,7 +109,7 @@ metrics = "0.21.0"
 metrics-exporter-prometheus = "0.12.1"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.30", features = ["signal"] }
+nix = { version = "0.31", features = ["signal"] }
 
 [features]
 default = []

@@ -3941,7 +3941,7 @@ dependencies = [
  "lru",
  "metrics",
  "metrics-exporter-prometheus",
- "nix 0.30.1",
+ "nix 0.31.2",
  "nu-ansi-term",
  "nucleo",
  "nvml-wrapper",
