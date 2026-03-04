@@ -1356,6 +1356,7 @@ mod tests {
                 max_delay_ms: 20000,
             },
             resources: crate::config::ResourcesConfig::default(),
+            evolution: EvolutionTomlConfig::default(),
             execution_mode: ExecutionMode::default(),
             compact_mode: false,
             verbose_mode: false,
