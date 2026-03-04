@@ -469,7 +469,7 @@ fn generate_hypotheses(
 /// Max total source context characters
 const MAX_CONTEXT_CHARS: usize = 120_000;
 
-fn read_mutation_targets(targets: &super::MutationTargets, repo_root: &Path) -> String {
+pub fn read_mutation_targets(targets: &super::MutationTargets, repo_root: &Path) -> String {
     // Collect all files with their sizes, then sort smallest-first so we
     // maximise the number of files sent in full within the context budget.
     let all_paths: Vec<&PathBuf> = targets
@@ -527,7 +527,10 @@ fn read_mutation_targets(targets: &super::MutationTargets, repo_root: &Path) -> 
             (
                 format!(
                     "{}\n// ... [truncated at line {}/{}, {} total chars]",
-                    truncated, shown_lines, total_lines, contents.len()
+                    truncated,
+                    shown_lines,
+                    total_lines,
+                    contents.len()
                 ),
                 true,
             )
@@ -578,7 +581,7 @@ fn truncate_to_line_boundary(s: &str, max_chars: usize) -> &str {
     }
 }
 
-fn build_system_prompt(population_size: usize) -> String {
+pub fn build_system_prompt(population_size: usize) -> String {
     format!(
         r#"You are an evolution engine that generates code mutation hypotheses for a Rust project called selfware.
 
@@ -618,7 +621,7 @@ Return ONLY the JSON array. No markdown, no commentary, no thinking.
     )
 }
 
-fn build_user_prompt(telemetry: &str, history: &str, source_context: &str) -> String {
+pub fn build_user_prompt(telemetry: &str, history: &str, source_context: &str) -> String {
     let mut prompt = String::new();
 
     if !telemetry.is_empty() {
@@ -694,7 +697,7 @@ fn call_llm(llm: &LlmConfig, system_prompt: &str, user_prompt: &str) -> Result<S
         .ok_or_else(|| "No content in LLM response".to_string())
 }
 
-fn parse_hypotheses_response(response: &str) -> Vec<Hypothesis> {
+pub fn parse_hypotheses_response(response: &str) -> Vec<Hypothesis> {
     // Find JSON array in the response — handles markdown fences, thinking, preamble
     let json_str = match extract_json_array(response) {
         Some(s) => s,
@@ -799,7 +802,7 @@ fn extract_json_array(text: &str) -> Option<String> {
     end.map(|e| stripped[start..e].to_string())
 }
 
-fn format_evolution_history(hall_of_fame: &[GenerationWinner]) -> String {
+pub fn format_evolution_history(hall_of_fame: &[GenerationWinner]) -> String {
     if hall_of_fame.is_empty() {
         return String::from("No evolution history yet. This is generation 1.");
     }
@@ -847,16 +850,17 @@ fn sanitize_patch(patch: &str) -> String {
 
         // Context/add/delete lines: strip line-number prefix if present
         // Patterns:  " 123| code", "+  45| code", "- 789| code"
-        let (prefix, rest) = if let Some(r) = line.strip_prefix('+').or_else(|| line.strip_prefix('-')) {
-            (&line[..1], r)
-        } else if let Some(r) = line.strip_prefix(' ') {
-            (" ", r)
-        } else {
-            // Unrecognized line — pass through
-            out.push_str(line);
-            out.push('\n');
-            continue;
-        };
+        let (prefix, rest) =
+            if let Some(r) = line.strip_prefix('+').or_else(|| line.strip_prefix('-')) {
+                (&line[..1], r)
+            } else if let Some(r) = line.strip_prefix(' ') {
+                (" ", r)
+            } else {
+                // Unrecognized line — pass through
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            };
 
         // Check if `rest` looks like "  NNN| actual_code"
         let stripped = rest.trim_start();
@@ -884,7 +888,7 @@ fn sanitize_patch(patch: &str) -> String {
 /// Apply edits to a directory. The `patch` field may be:
 /// 1. A JSON array of {file, search, replace} edits (new format)
 /// 2. A unified diff string (legacy format)
-fn apply_edits(dir: &Path, patch: &str) -> bool {
+pub fn apply_edits(dir: &Path, patch: &str) -> bool {
     // Try search-and-replace format first
     if let Ok(edits) = serde_json::from_str::<Vec<serde_json::Value>>(patch) {
         if !edits.is_empty() && edits[0].get("search").is_some() {
@@ -1122,7 +1126,14 @@ fn apply_unified_diff(dir: &Path, patch: &str) -> bool {
 
     // Strategy 3: patch -p1 with fuzz factor 3
     let fuzz = Command::new("patch")
-        .args(["-p1", "-F3", "--batch", "--silent", "-i", ".evolution-patch"])
+        .args([
+            "-p1",
+            "-F3",
+            "--batch",
+            "--silent",
+            "-i",
+            ".evolution-patch",
+        ])
         .current_dir(dir)
         .output();
     let _ = std::fs::remove_file(&patch_file);
@@ -1672,5 +1683,471 @@ These changes should improve performance."#;
 ";
         let clean = sanitize_patch(patch);
         assert!(clean.contains("    Some(v) | None => {}"));
+    }
+
+    // ── leading_whitespace tests ──
+
+    #[test]
+    fn test_leading_whitespace_spaces() {
+        assert_eq!(leading_whitespace("    code"), "    ");
+    }
+
+    #[test]
+    fn test_leading_whitespace_tabs() {
+        assert_eq!(leading_whitespace("\t\tcode"), "\t\t");
+    }
+
+    #[test]
+    fn test_leading_whitespace_none() {
+        assert_eq!(leading_whitespace("code"), "");
+    }
+
+    #[test]
+    fn test_leading_whitespace_all_spaces() {
+        assert_eq!(leading_whitespace("    "), "    ");
+    }
+
+    // ── apply_edits dispatch tests ──
+
+    #[test]
+    fn test_apply_edits_dispatches_to_search_replace() {
+        let tmp = std::env::temp_dir().join("selfware-test-dispatch-sr");
+        let _ = std::fs::create_dir_all(&tmp);
+        // Init git repo for the function
+        let _ = Command::new("git")
+            .args(["init"])
+            .current_dir(&tmp)
+            .output();
+        let test_file = tmp.join("test.rs");
+        std::fs::write(&test_file, "fn old() {}\n").unwrap();
+        let _ = Command::new("git")
+            .args(["add", "."])
+            .current_dir(&tmp)
+            .output();
+        let _ = Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&tmp)
+            .output();
+
+        // JSON array with search/replace → should dispatch to apply_search_replace
+        let edits_json = serde_json::json!([
+            {"file": "test.rs", "search": "fn old() {}", "replace": "fn new() {}"}
+        ]);
+        let patch = serde_json::to_string(&edits_json).unwrap();
+        assert!(apply_edits(&tmp, &patch));
+
+        let content = std::fs::read_to_string(&test_file).unwrap();
+        assert!(content.contains("fn new()"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_apply_edits_dispatches_to_unified_diff() {
+        let tmp = std::env::temp_dir().join("selfware-test-dispatch-ud");
+        let _ = std::fs::create_dir_all(&tmp);
+        let _ = Command::new("git")
+            .args(["init"])
+            .current_dir(&tmp)
+            .output();
+        let test_file = tmp.join("test.rs");
+        std::fs::write(&test_file, "fn old() {}\n").unwrap();
+        let _ = Command::new("git")
+            .args(["add", "."])
+            .current_dir(&tmp)
+            .output();
+        let _ = Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&tmp)
+            .output();
+
+        // A plain unified diff string → should dispatch to apply_unified_diff
+        let patch = "--- a/test.rs\n+++ b/test.rs\n@@ -1 +1 @@\n-fn old() {}\n+fn new() {}\n";
+        assert!(apply_edits(&tmp, patch));
+
+        let content = std::fs::read_to_string(&test_file).unwrap();
+        assert!(content.contains("fn new()"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_apply_edits_bad_json_falls_to_diff() {
+        // Not valid JSON → falls through to unified diff (which will also fail for gibberish)
+        let tmp = std::env::temp_dir().join("selfware-test-dispatch-bad");
+        let _ = std::fs::create_dir_all(&tmp);
+        let _ = Command::new("git")
+            .args(["init"])
+            .current_dir(&tmp)
+            .output();
+        std::fs::write(tmp.join("x.rs"), "code\n").unwrap();
+        let _ = Command::new("git")
+            .args(["add", "."])
+            .current_dir(&tmp)
+            .output();
+        let _ = Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&tmp)
+            .output();
+
+        assert!(!apply_edits(&tmp, "not json and not a patch"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── apply_search_replace edge cases ──
+
+    #[test]
+    fn test_apply_search_replace_ambiguous() {
+        let tmp = std::env::temp_dir().join("selfware-test-sr-ambig");
+        let _ = std::fs::create_dir_all(&tmp);
+        // File with duplicate pattern
+        std::fs::write(tmp.join("dup.rs"), "fn foo() {}\nfn foo() {}\n").unwrap();
+
+        let edits = vec![serde_json::json!({
+            "file": "dup.rs",
+            "search": "fn foo() {}",
+            "replace": "fn bar() {}"
+        })];
+        // Should reject because search is ambiguous (2 matches)
+        assert!(!apply_search_replace(&tmp, &edits));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_apply_search_replace_multiple_edits_same_file() {
+        let tmp = std::env::temp_dir().join("selfware-test-sr-multi");
+        let _ = std::fs::create_dir_all(&tmp);
+        std::fs::write(
+            tmp.join("multi.rs"),
+            "fn alpha() {}\nfn beta() {}\nfn gamma() {}\n",
+        )
+        .unwrap();
+
+        let edits = vec![
+            serde_json::json!({"file": "multi.rs", "search": "fn alpha() {}", "replace": "fn alpha_v2() {}"}),
+            serde_json::json!({"file": "multi.rs", "search": "fn gamma() {}", "replace": "fn gamma_v2() {}"}),
+        ];
+        assert!(apply_search_replace(&tmp, &edits));
+
+        let content = std::fs::read_to_string(tmp.join("multi.rs")).unwrap();
+        assert!(content.contains("fn alpha_v2()"));
+        assert!(content.contains("fn beta()")); // unchanged
+        assert!(content.contains("fn gamma_v2()"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_apply_search_replace_missing_file() {
+        let tmp = std::env::temp_dir().join("selfware-test-sr-nofile");
+        let _ = std::fs::create_dir_all(&tmp);
+
+        let edits = vec![serde_json::json!({
+            "file": "nonexistent.rs",
+            "search": "a",
+            "replace": "b"
+        })];
+        assert!(!apply_search_replace(&tmp, &edits));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_apply_search_replace_noop_rejected() {
+        let tmp = std::env::temp_dir().join("selfware-test-sr-noop");
+        let _ = std::fs::create_dir_all(&tmp);
+        std::fs::write(tmp.join("noop.rs"), "fn foo() {}\n").unwrap();
+
+        // search == replace → no change → should be rejected
+        let edits = vec![serde_json::json!({
+            "file": "noop.rs",
+            "search": "fn foo() {}",
+            "replace": "fn foo() {}"
+        })];
+        assert!(!apply_search_replace(&tmp, &edits));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── fuzzy_find_and_replace edge cases ──
+
+    #[test]
+    fn test_fuzzy_find_and_replace_no_match() {
+        let content = "fn foo() {\n    code();\n}\n";
+        let result = fuzzy_find_and_replace(content, "fn bar() {", "fn baz() {");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_fuzzy_find_and_replace_empty_search() {
+        let content = "fn foo() {}\n";
+        let result = fuzzy_find_and_replace(content, "", "something");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_fuzzy_find_and_replace_preserves_trailing_newline() {
+        let content = "fn foo() {\n    old();\n}\n";
+        let result = fuzzy_find_and_replace(content, "    old();", "    new();");
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(
+            r.ends_with('\n'),
+            "Should preserve trailing newline: {:?}",
+            r
+        );
+    }
+
+    #[test]
+    fn test_fuzzy_find_and_replace_at_end_of_file() {
+        let content = "line1\nline2\ntarget_line\n";
+        let result = fuzzy_find_and_replace(content, "target_line", "replaced_line");
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(r.contains("replaced_line"));
+        assert!(r.contains("line1"));
+        assert!(r.contains("line2"));
+    }
+
+    #[test]
+    fn test_fuzzy_find_and_replace_at_start_of_file() {
+        let content = "target_line\nline2\nline3\n";
+        let result = fuzzy_find_and_replace(content, "target_line", "replaced_line");
+        assert!(result.is_some());
+        let r = result.unwrap();
+        assert!(r.starts_with("replaced_line"));
+    }
+
+    // ── read_mutation_targets tests ──
+
+    #[test]
+    fn test_read_mutation_targets_sorts_by_size() {
+        let tmp = std::env::temp_dir().join("selfware-test-rmt");
+        let _ = std::fs::create_dir_all(tmp.join("src"));
+        // Create files of different sizes
+        std::fs::write(tmp.join("src/big.rs"), "x".repeat(5000)).unwrap();
+        std::fs::write(tmp.join("src/small.rs"), "y".repeat(100)).unwrap();
+        std::fs::write(tmp.join("src/medium.rs"), "z".repeat(1000)).unwrap();
+
+        let targets = super::super::MutationTargets {
+            prompt_logic: vec![
+                PathBuf::from("src/big.rs"),
+                PathBuf::from("src/small.rs"),
+                PathBuf::from("src/medium.rs"),
+            ],
+            tool_code: vec![],
+            cognitive: vec![],
+            config_keys: vec![],
+        };
+
+        let context = read_mutation_targets(&targets, &tmp);
+        // small.rs should appear before big.rs (sorted by size ascending)
+        let small_pos = context.find("src/small.rs").unwrap();
+        let medium_pos = context.find("src/medium.rs").unwrap();
+        let big_pos = context.find("src/big.rs").unwrap();
+        assert!(small_pos < medium_pos, "small should come before medium");
+        assert!(medium_pos < big_pos, "medium should come before big");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_read_mutation_targets_includes_line_numbers() {
+        let tmp = std::env::temp_dir().join("selfware-test-rmt-ln");
+        let _ = std::fs::create_dir_all(tmp.join("src"));
+        std::fs::write(
+            tmp.join("src/test.rs"),
+            "fn main() {\n    println!(\"hi\");\n}\n",
+        )
+        .unwrap();
+
+        let targets = super::super::MutationTargets {
+            prompt_logic: vec![PathBuf::from("src/test.rs")],
+            tool_code: vec![],
+            cognitive: vec![],
+            config_keys: vec![],
+        };
+
+        let context = read_mutation_targets(&targets, &tmp);
+        assert!(
+            context.contains("1| fn main()"),
+            "Should contain line numbers: {}",
+            &context[..context.len().min(200)]
+        );
+        assert!(context.contains("2|     println!"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_read_mutation_targets_empty() {
+        let tmp = std::env::temp_dir().join("selfware-test-rmt-empty");
+        let _ = std::fs::create_dir_all(&tmp);
+
+        let targets = super::super::MutationTargets {
+            prompt_logic: vec![],
+            tool_code: vec![],
+            cognitive: vec![],
+            config_keys: vec![],
+        };
+
+        let context = read_mutation_targets(&targets, &tmp);
+        assert!(context.is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_read_mutation_targets_missing_file() {
+        let tmp = std::env::temp_dir().join("selfware-test-rmt-missing");
+        let _ = std::fs::create_dir_all(&tmp);
+
+        let targets = super::super::MutationTargets {
+            prompt_logic: vec![PathBuf::from("nonexistent.rs")],
+            tool_code: vec![],
+            cognitive: vec![],
+            config_keys: vec![],
+        };
+
+        let context = read_mutation_targets(&targets, &tmp);
+        // Should gracefully skip missing files
+        assert!(context.is_empty() || !context.contains("```rust"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── log_event tests ──
+
+    #[test]
+    fn test_log_event_writes_jsonl() {
+        let tmp = std::env::temp_dir().join("selfware-test-logevent");
+        let _ = std::fs::create_dir_all(&tmp);
+
+        let event = serde_json::json!({"event": "test", "value": 42});
+        log_event(&tmp, &event);
+        log_event(&tmp, &serde_json::json!({"event": "second"}));
+
+        let log_path = tmp.join(".evolution-log.jsonl");
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2);
+
+        let parsed: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(parsed["event"], "test");
+        assert_eq!(parsed["value"], 42);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── apply_unified_diff tests ──
+
+    #[test]
+    fn test_apply_unified_diff_valid_patch() {
+        let tmp = std::env::temp_dir().join("selfware-test-ud-valid");
+        let _ = std::fs::create_dir_all(&tmp);
+        let _ = Command::new("git")
+            .args(["init"])
+            .current_dir(&tmp)
+            .output();
+        std::fs::write(tmp.join("file.rs"), "fn old() {}\n").unwrap();
+        let _ = Command::new("git")
+            .args(["add", "."])
+            .current_dir(&tmp)
+            .output();
+        let _ = Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&tmp)
+            .output();
+
+        let patch = "--- a/file.rs\n+++ b/file.rs\n@@ -1 +1 @@\n-fn old() {}\n+fn new() {}\n";
+        assert!(apply_unified_diff(&tmp, patch));
+
+        let content = std::fs::read_to_string(tmp.join("file.rs")).unwrap();
+        assert!(content.contains("fn new()"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_apply_unified_diff_invalid_patch() {
+        let tmp = std::env::temp_dir().join("selfware-test-ud-invalid");
+        let _ = std::fs::create_dir_all(&tmp);
+        let _ = Command::new("git")
+            .args(["init"])
+            .current_dir(&tmp)
+            .output();
+        std::fs::write(tmp.join("file.rs"), "fn foo() {}\n").unwrap();
+        let _ = Command::new("git")
+            .args(["add", "."])
+            .current_dir(&tmp)
+            .output();
+        let _ = Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&tmp)
+            .output();
+
+        assert!(!apply_unified_diff(&tmp, "garbage patch content"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── parse_hypotheses edge cases ──
+
+    #[test]
+    fn test_parse_hypotheses_mixed_formats() {
+        // One with edits, one with patch (legacy), one missing both → 2 parsed
+        let json = r#"[
+            {
+                "description": "Edit format",
+                "edits": [{"file": "a.rs", "search": "old", "replace": "new"}],
+                "target_files": ["a.rs"],
+                "property_test": null
+            },
+            {
+                "description": "Patch format",
+                "patch": "--- a/b.rs\n+++ b/b.rs",
+                "target_files": ["b.rs"],
+                "property_test": null
+            },
+            {
+                "description": "Missing both",
+                "target_files": ["c.rs"],
+                "property_test": null
+            }
+        ]"#;
+        let hypotheses = parse_hypotheses_response(json);
+        assert_eq!(hypotheses.len(), 2);
+        assert_eq!(hypotheses[0].description, "Edit format");
+        assert!(hypotheses[0].patch.contains("old")); // serialized edits JSON
+        assert_eq!(hypotheses[1].description, "Patch format");
+    }
+
+    #[test]
+    fn test_parse_hypotheses_empty_edits_rejected() {
+        let json = r#"[{
+            "description": "Empty edits",
+            "edits": [],
+            "target_files": ["a.rs"],
+            "property_test": null
+        }]"#;
+        let hypotheses = parse_hypotheses_response(json);
+        // Empty edits serializes to "[]" which is not empty string, but apply_edits
+        // would reject it. parse should still create the hypothesis.
+        assert_eq!(hypotheses.len(), 1);
+    }
+
+    // ── chrono_now test ──
+
+    #[test]
+    fn test_chrono_now_format() {
+        let ts = chrono_now();
+        // Should be "seconds.milliseconds" format
+        assert!(ts.contains('.'), "Timestamp should contain '.': {}", ts);
+        let parts: Vec<&str> = ts.split('.').collect();
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].parse::<u64>().is_ok());
+        assert!(parts[1].parse::<u64>().is_ok());
     }
 }
