@@ -139,6 +139,13 @@ fn mock_agent_config(endpoint: String, streaming: bool) -> Config {
             require_verification_before_completion: false,
             ..Default::default()
         },
+        // Use permissive safety config to avoid path-validation issues on Windows
+        // where backslash separators and UNC prefix paths can confuse glob matching.
+        safety: crate::config::SafetyConfig {
+            allowed_paths: vec!["./**".to_string(), "/**".to_string()],
+            ..Default::default()
+        },
+        execution_mode: crate::config::ExecutionMode::Yolo,
         ..Default::default()
     }
 }

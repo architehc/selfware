@@ -239,8 +239,14 @@ mod tests {
     #[tokio::test]
     async fn test_shell_exec_with_env() {
         let tool = ShellExec;
+        // Use platform-appropriate syntax for echoing env vars
+        let command = if cfg!(target_os = "windows") {
+            "echo %MY_VAR%"
+        } else {
+            "echo $MY_VAR"
+        };
         let args = serde_json::json!({
-            "command": "echo $MY_VAR",
+            "command": command,
             "timeout_secs": 5,
             "env": {
                 "MY_VAR": "custom_value"
@@ -447,9 +453,15 @@ mod tests {
     #[tokio::test]
     async fn test_cwd_parent_traversal_rejected() {
         let tool = ShellExec;
+        // Use platform-appropriate absolute paths containing parent traversal
+        let cwd = if cfg!(target_os = "windows") {
+            r"C:\tmp\..\etc\passwd"
+        } else {
+            "/tmp/../etc/passwd"
+        };
         let args = serde_json::json!({
             "command": "echo test",
-            "cwd": "/tmp/../etc/passwd",
+            "cwd": cwd,
             "timeout_secs": 5
         });
         let result = tool.execute(args).await;
@@ -461,9 +473,15 @@ mod tests {
     #[tokio::test]
     async fn test_cwd_parent_traversal_mid_path_rejected() {
         let tool = ShellExec;
+        // Use platform-appropriate absolute paths containing parent traversal
+        let cwd = if cfg!(target_os = "windows") {
+            r"C:\Users\user\..\root"
+        } else {
+            "/home/user/../root"
+        };
         let args = serde_json::json!({
             "command": "echo test",
-            "cwd": "/home/user/../root",
+            "cwd": cwd,
             "timeout_secs": 5
         });
         let result = tool.execute(args).await;

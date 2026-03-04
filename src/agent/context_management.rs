@@ -766,7 +766,8 @@ impl Agent {
         use std::sync::LazyLock;
 
         static FILE_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"@([a-zA-Z0-9_./\-]+(?:\.[a-zA-Z0-9]+)?/?)")
+            // Allow backslash, colon, and tilde so Windows paths like C:\Users\...\file.txt are matched
+            Regex::new(r"@([a-zA-Z0-9_./\\\:\~\-]+(?:\.[a-zA-Z0-9]+)?/?)")
                 .expect("Invalid file reference regex")
         });
 
@@ -794,8 +795,11 @@ impl Agent {
                     let entry_path = entry.path();
                     let display = entry_path.display().to_string();
                     if display.contains("/target/")
+                        || display.contains("\\target\\")
                         || display.contains("/.git/")
+                        || display.contains("\\.git\\")
                         || display.contains("/node_modules/")
+                        || display.contains("\\node_modules\\")
                     {
                         continue;
                     }

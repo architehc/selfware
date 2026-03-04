@@ -1895,6 +1895,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))] // On Windows, set_readonly on directories doesn't prevent file creation inside them
     fn test_save_with_retry_fails_on_readonly_dir() {
         // Create a directory and make it read-only so saves fail
         let dir = tempdir().unwrap();
@@ -1923,5 +1924,30 @@ mod tests {
             perms.set_readonly(false);
         }
         std::fs::set_permissions(&readonly_dir, perms).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_save_with_retry_fails_on_readonly_dir() {
+        // On Windows, directory readonly attributes don't prevent file creation.
+        // Instead, we create a CheckpointManager whose base_dir is under a
+        // regular file (an impossible path), so saves physically cannot succeed.
+        let dir = tempdir().unwrap();
+        let blocker_file = dir.path().join("blocker");
+        std::fs::write(&blocker_file, "not a directory").unwrap();
+
+        // Manually construct a manager pointing to a path that can never work:
+        // "blocker" is a file, so "blocker/checkpoints" can't be a directory.
+        let impossible_dir = blocker_file.join("checkpoints");
+        let manager = CheckpointManager {
+            checkpoints_dir: impossible_dir,
+        };
+
+        let checkpoint = TaskCheckpoint::new(
+            "retry_fail".to_string(),
+            "Should fail all retries".to_string(),
+        );
+        let result = manager.save_with_retry(&checkpoint);
+        assert!(result.is_err());
     }
 }
