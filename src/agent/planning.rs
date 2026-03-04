@@ -5,19 +5,20 @@ impl Planner {
     /// Create a planning prompt with task and context
     pub fn create_plan(task: &str, context: &str) -> String {
         format!(
-            r#"
-<task>
-{}
-</task>
+                    r#"
+         <task>
+        {}
+         </task>
 
-<context>
-{}
-</context>
+         <context>
+        {}
+         </context>
 
-Create a step-by-step plan to accomplish this task. Analyze the codebase first if needed, then determine the specific files to modify and changes to make.
-"#,
-            task, context
-        )
+         Create a step-by-step plan to accomplish this task. Analyze the codebase first if needed, then determine the specific files to modify and changes to make.
+         "#,
+                     if task.is_empty() { String::new() } else { format!(" {}", task) },
+                     if context.is_empty() { String::new() } else { format!(" {}", context) }
+                 )
     }
 
     /// Create a prompt for analyzing codebase structure
