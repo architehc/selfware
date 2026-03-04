@@ -23,7 +23,7 @@ jobs:
       security-events: write  # Required for uploading SARIF results
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Build Docker image
         run: docker build -t selfware:scan .
@@ -47,7 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Run cargo-audit via rustsec
         uses: rustsec/audit-check@v2
