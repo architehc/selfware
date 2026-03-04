@@ -55,6 +55,10 @@ pub(crate) mod session;
 pub mod supervision;
 pub(crate) mod testing;
 
+// Evolution engine — recursive self-improvement via evolutionary mutation
+#[cfg(feature = "self-improvement")]
+pub mod evolution;
+
 // Backward-compatible re-exports for safety module
 pub use safety::redact;
 

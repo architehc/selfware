@@ -242,6 +242,26 @@ enum Commands {
         max_cycles: usize,
     },
 
+    /// Evolve: run the evolutionary self-improvement daemon
+    #[cfg(feature = "self-improvement")]
+    Evolve {
+        /// Number of generations (0 = infinite)
+        #[arg(short, long, default_value = "10")]
+        generations: usize,
+
+        /// Population size per generation
+        #[arg(short, long, default_value = "4")]
+        population: usize,
+
+        /// Maximum parallel sandbox evaluations
+        #[arg(long, default_value = "2")]
+        parallel: usize,
+
+        /// Dry run: show config and exit
+        #[arg(long)]
+        dry_run: bool,
+    },
+
     /// Execute a workflow from a YAML file
     #[command(alias = "w")]
     Workflow {
@@ -930,6 +950,69 @@ async fn handle_command(
                     }
                 }
             }
+        }
+
+        #[cfg(feature = "self-improvement")]
+        Commands::Evolve {
+            generations,
+            population,
+            parallel,
+            dry_run,
+        } => {
+            use crate::evolution::daemon;
+            use crate::evolution::{
+                EvolutionConfig, FitnessWeights, MutationTargets, SafetyConfig,
+            };
+
+            if !quiet {
+                println!("{}", render_header(ctx));
+                println!(
+                    "\n{} {}\n",
+                    Glyphs::gear(),
+                    "Evolution Daemon".workshop_title()
+                );
+            }
+
+            let repo_root = std::env::current_dir()?;
+            let config = EvolutionConfig {
+                generations,
+                population_size: population,
+                parallel_eval: parallel,
+                checkpoint_interval: 5,
+                fitness_weights: FitnessWeights::default(),
+                mutation_targets: MutationTargets {
+                    config_keys: vec![],
+                    prompt_logic: vec![],
+                    tool_code: vec![],
+                    cognitive: vec![],
+                },
+                safety: SafetyConfig::default(),
+            };
+
+            if dry_run {
+                println!("   Evolution config: {:?}", config);
+                println!(
+                    "\n   {} Dry-run mode: no evolution started.",
+                    Glyphs::leaf()
+                );
+                return Ok(());
+            }
+
+            let result = daemon::evolve(config, &repo_root);
+
+            println!(
+                "\n   {} Evolution complete: {} generations, {} improvements",
+                Glyphs::bloom(),
+                result.generations_run,
+                result.improvements.len()
+            );
+            println!(
+                "   SAB: {:.0} → {:.0} ({:+.1})",
+                result.initial_sab_score,
+                result.final_sab_score,
+                result.final_sab_score - result.initial_sab_score
+            );
+            println!("   Duration: {:.0}s", result.total_duration.as_secs_f64());
         }
 
         Commands::Workflow {
