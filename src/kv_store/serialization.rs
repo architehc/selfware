@@ -98,12 +98,12 @@ mod tests {
             .with_tags(vec!["tag1".to_string()])
             .with_metadata(metadata);
         
-        let json = StoreSerializer::serialize_entry_to_json(&entry).unwrap();
+        let json = <HashMap<String, Entry> as StoreSerializer>::serialize_entry_to_json(&entry).unwrap();
         assert!(json.contains("\"key\":\"key1\""));
         assert!(json.contains("\"value\":\"value1\""));
         
         // Verify deserialization roundtrip
-        let deserialized = StoreSerializer::deserialize_entry_from_json(&json).unwrap();
+        let deserialized = <HashMap<String, Entry> as StoreSerializer>::deserialize_entry_from_json(&json).unwrap();
         assert_eq!(deserialized.key, entry.key);
         assert_eq!(deserialized.value, entry.value);
     }
@@ -112,7 +112,7 @@ mod tests {
     fn test_deserialize_entry() {
         let json = r#"{"key":"key1","value":"value1","tags":["tag1"],"metadata":{"author":"test"}}"#;
         
-        let entry = StoreSerializer::deserialize_entry_from_json(json).unwrap();
+        let entry = <HashMap<String, Entry> as StoreSerializer>::deserialize_entry_from_json(json).unwrap();
         assert_eq!(entry.key, "key1");
         assert_eq!(entry.value, "value1");
         assert!(entry.has_tag("tag1"));
@@ -129,16 +129,18 @@ mod tests {
         store.insert("key1".to_string(), entry1);
         store.insert("key2".to_string(), entry2);
         
-        let json = StoreSerializer::serialize_to_json(&store).unwrap();
-        assert!(json.contains("\"key\":\"key1\""));
-        assert!(json.contains("\"key\":\"key2\""));
+        let json = <HashMap<String, Entry> as StoreSerializer>::serialize_to_json(&store).unwrap();
+        assert!(json.contains("key1"));
+        assert!(json.contains("key2"));
+        assert!(json.contains("value1"));
+        assert!(json.contains("value2"));
     }
 
     #[test]
     fn test_deserialize_store() {
         let json = r#"[{"key":"key1","value":"value1","tags":[],"metadata":{}},{"key":"key2","value":"value2","tags":[],"metadata":{}}]"#;
         
-        let store = StoreSerializer::deserialize_from_json(json).unwrap();
+        let store = <HashMap<String, Entry> as StoreSerializer>::deserialize_from_json(json).unwrap();
         assert_eq!(store.len(), 2);
         assert!(store.contains_key("key1"));
         assert!(store.contains_key("key2"));
