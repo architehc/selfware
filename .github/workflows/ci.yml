@@ -193,7 +193,7 @@ jobs:
   coverage:
     name: Code Coverage
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -219,7 +219,7 @@ jobs:
         uses: taiki-e/install-action@cargo-tarpaulin
 
       - name: Generate coverage
-        run: cargo tarpaulin --out Html --out Xml --output-dir coverage --features extras --timeout 600 --fail-under 60 --skip-clean
+        run: cargo tarpaulin --out Html --out Xml --output-dir coverage --features extras --timeout 600 --fail-under 60 --skip-clean -- --test-threads 1
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
