@@ -85,14 +85,8 @@ impl Tool for FileFimEdit {
             return Err(anyhow!("Invalid line range"));
         }
 
-        let prefix = lines[..start_line - 1].join(
-            "
-",
-        );
-        let suffix = lines[end_line..].join(
-            "
-",
-        );
+        let prefix = lines[..start_line - 1].join("\n");
+        let suffix = lines[end_line..].join("\n");
 
         // Format prompt using Qwen's specific FIM tokens (or standard FIM)
         // Qwen 2.5 Coder uses <|fim_prefix|>, <|fim_suffix|>, <|fim_middle|>
