@@ -283,10 +283,7 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
                 .output();
 
             if clippy.map(|o| !o.status.success()).unwrap_or(true) {
-                log_frost(
-                    generation,
-                    &format!("Clippy failed: {}", hypothesis.id),
-                );
+                log_frost(generation, &format!("Clippy failed: {}", hypothesis.id));
                 let _ = ast_tools::cleanup_worktree(repo_root, &worktree);
                 continue;
             }
