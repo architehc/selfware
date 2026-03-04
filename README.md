@@ -482,6 +482,37 @@ mlx_lm.server --model mlx-community/Qwen3.5-Coder-35B-A3B-4bit \
 ollama run lfm2.5:1.2b-instruct-q8_0
 ```
 
+### Evolution Engine (Recursive Self-Improvement)
+
+Selfware includes an experimental evolution engine (`--features self-improvement`) that enables the agent to improve itself through evolutionary mutation, compilation-gated verification, and fitness-driven selection.
+
+```
+Mutate → Compile-gate → Sandbox → Fitness → Select/Rollback
+```
+
+**Architecture:**
+- **AST Tools** — Manipulates Rust code at the AST level via `syn`, gated by `cargo check`
+- **Sandbox** — Isolated Docker containers with CPU/memory limits and no network access
+- **Fitness** — Meta-SAB scoring: wraps the SAB benchmark as a fitness function (protected from self-modification)
+- **Tournament** — Parallel hypothesis evaluation with semaphore-based concurrency
+- **Telemetry** — CPU profiling, memory allocation, and benchmark deltas as gradient signals for the LLM
+- **Daemon** — The main evolutionary loop tying it all together
+
+**Safety invariants:**
+1. The evolution engine CANNOT modify its own fitness function
+2. The evolution engine CANNOT modify the SAB benchmark suite
+3. The evolution engine CANNOT modify the safety module
+4. All mutations must pass `cargo check` before evaluation
+5. Protected paths: `src/evolution/`, `src/safety/`, `system_tests/`, `benches/sab_`
+
+**Rating system:** BLOOM (>=85) · GROW (>=60) · WILT (>=30) · FROST (<30)
+
+```bash
+# Run evolution tests (95 tests)
+cargo test --features self-improvement evolution::
+cargo test --features self-improvement --test evolution_integration_test
+```
+
 ### Project Structure
 
 ```
@@ -494,6 +525,7 @@ src/
 ├── cognitive/      # PDVR cycle, working/episodic memory
 ├── config/         # Configuration management
 ├── devops/         # Container support, process manager
+├── evolution/      # Recursive self-improvement engine (feature-gated)
 ├── observability/  # Telemetry and tracing
 ├── orchestration/  # Multi-agent swarm, planning, workflows
 ├── safety/         # Path validation, sandboxing, threat modeling
