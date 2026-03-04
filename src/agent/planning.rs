@@ -16,8 +16,8 @@ impl Planner {
 
          Create a step-by-step plan to accomplish this task. Analyze the codebase first if needed, then determine the specific files to modify and changes to make.
          "#,
-                     if task.is_empty() { String::new() } else { format!(" {}", task) },
-                     if context.is_empty() { String::new() } else { format!(" {}", context) }
+                     task,
+                     context
                  )
     }
 
