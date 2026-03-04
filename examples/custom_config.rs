@@ -172,6 +172,7 @@ fn build_custom_config() -> Config {
         execution_mode: ExecutionMode::Normal,
 
         evolution: Default::default(),
+        models: Default::default(),
 
         // CLI-only flags (not persisted in config)
         compact_mode: false,

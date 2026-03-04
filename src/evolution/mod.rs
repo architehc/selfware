@@ -111,6 +111,9 @@ pub struct FitnessWeights {
     pub test_coverage: f64,
     /// Weight for preventing binary bloat
     pub binary_size: f64,
+    /// Weight for visual quality (Visual-SAB scenarios).
+    /// Default 0.0 — set > 0 once visual scenarios are active.
+    pub visual_quality: f64,
 }
 
 impl FitnessWeights {
@@ -122,11 +125,14 @@ impl FitnessWeights {
         let normalized_coverage = metrics.test_coverage_pct / 100.0;
         let normalized_size = 1.0 - (metrics.binary_size_mb / metrics.max_binary_size_mb).min(1.0);
 
+        let normalized_visual = metrics.visual_score / 100.0;
+
         self.sab_score * (metrics.sab_score / 100.0)
             + self.token_efficiency * normalized_tokens
             + self.latency * normalized_latency
             + self.test_coverage * normalized_coverage
             + self.binary_size * normalized_size
+            + self.visual_quality * normalized_visual
     }
 }
 
@@ -138,6 +144,9 @@ impl Default for FitnessWeights {
             latency: 0.15,
             test_coverage: 0.05,
             binary_size: 0.05,
+            // Default 0.0 — visual quality is opt-in until visual
+            // scenarios exist. Weights still sum to 1.0.
+            visual_quality: 0.0,
         }
     }
 }
@@ -154,6 +163,8 @@ pub struct FitnessMetrics {
     pub max_binary_size_mb: f64,
     pub tests_passed: usize,
     pub tests_total: usize,
+    /// Average visual quality score from Visual-SAB scenarios (0–100).
+    pub visual_score: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -244,7 +255,12 @@ mod tests {
     #[test]
     fn test_fitness_weights_default() {
         let w = FitnessWeights::default();
-        let total = w.sab_score + w.token_efficiency + w.latency + w.test_coverage + w.binary_size;
+        let total = w.sab_score
+            + w.token_efficiency
+            + w.latency
+            + w.test_coverage
+            + w.binary_size
+            + w.visual_quality;
         assert!(
             (total - 1.0).abs() < f64::EPSILON,
             "Weights must sum to 1.0"
@@ -265,6 +281,7 @@ mod tests {
             max_binary_size_mb: 50.0,
             tests_passed: 5200,
             tests_total: 5200,
+            visual_score: 0.0,
         };
         let score = w.composite(&metrics);
         assert!(
@@ -287,6 +304,7 @@ mod tests {
             max_binary_size_mb: 50.0,
             tests_passed: 5200,
             tests_total: 5200,
+            visual_score: 0.0,
         };
         let bad = FitnessMetrics {
             sab_score: 60.0,
@@ -299,6 +317,7 @@ mod tests {
             max_binary_size_mb: 50.0,
             tests_passed: 4000,
             tests_total: 5200,
+            visual_score: 0.0,
         };
         assert!(w.composite(&good) > w.composite(&bad));
     }
@@ -323,6 +342,7 @@ mod tests {
             max_binary_size_mb: 50.0,
             tests_passed: 100,
             tests_total: 100,
+            visual_score: 0.0,
         };
         let score = w.composite(&metrics);
         // token ratio clamps to 1.0, so normalized_tokens = 0.0
@@ -338,6 +358,7 @@ mod tests {
             latency: 0.0,
             test_coverage: 0.0,
             binary_size: 0.0,
+            visual_quality: 0.0,
         };
         let metrics = FitnessMetrics {
             sab_score: 75.0,
@@ -350,6 +371,7 @@ mod tests {
             max_binary_size_mb: 1.0,
             tests_passed: 0,
             tests_total: 100,
+            visual_score: 0.0,
         };
         // Only sab_score matters: 1.0 * (75/100) = 0.75
         let score = w.composite(&metrics);
@@ -414,6 +436,7 @@ mod tests {
             max_binary_size_mb: 50.0,
             tests_passed: 0,
             tests_total: 5000,
+            visual_score: 0.0,
         };
         let score = w.composite(&metrics);
         assert!(

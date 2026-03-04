@@ -296,7 +296,7 @@ pub fn estimate_messages_tokens(messages: &[crate::api::types::Message]) -> usiz
         // Role overhead
         total += 4;
         // Content
-        total += estimate_tokens(&msg.content);
+        total += estimate_tokens(msg.content.text());
         // Tool calls if present
         if let Some(ref tool_calls) = msg.tool_calls {
             for call in tool_calls {
@@ -525,7 +525,7 @@ impl ContextPruner {
             if current_tokens >= self.config.target_tokens {
                 break;
             }
-            let msg_tokens = estimate_tokens(&msg.content);
+            let msg_tokens = estimate_tokens(msg.content.text());
             if current_tokens + msg_tokens <= self.config.target_tokens {
                 result.insert(if self.config.keep_system { 1 } else { 0 }, msg.clone());
                 current_tokens += msg_tokens;

@@ -45,7 +45,7 @@ impl ContextCompressor {
     pub fn estimate_tokens(&self, messages: &[Message]) -> usize {
         messages
             .iter()
-            .map(|m| estimate_tokens_with_overhead(&m.content, 50))
+            .map(|m| estimate_tokens_with_overhead(m.content.text(), 50))
             .sum()
     }
 
@@ -73,7 +73,7 @@ impl ContextCompressor {
                 let content = if m.content.chars().count() > 500 {
                     format!("{}...[truncated]", m.content.chars().take(500).collect::<String>())
                 } else {
-                    m.content.clone()
+                    m.content.text().to_string()
                 };
                 format!("[{}] {}: {}", i, m.role, content)
             }).collect::<Vec<_>>().join("\n\n")
@@ -94,7 +94,7 @@ impl ContextCompressor {
         let summary = response
             .choices
             .first()
-            .map(|c| c.message.content.clone())
+            .map(|c| c.message.content.text().to_string())
             .unwrap_or_else(|| "[Context compression failed: empty API response]".to_string());
         info!("Generated summary: {} chars", summary.len());
 

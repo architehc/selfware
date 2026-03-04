@@ -747,7 +747,7 @@ fn test_outcome_quality_mapping() {
 fn trim_messages(messages: &mut Vec<Message>, max_tokens: usize) {
     let total: usize = messages
         .iter()
-        .map(|m| crate::token_count::estimate_tokens_with_overhead(&m.content, 4))
+        .map(|m| crate::token_count::estimate_tokens_with_overhead(m.content.text(), 4))
         .sum();
     if total <= max_tokens {
         return;
@@ -755,7 +755,7 @@ fn trim_messages(messages: &mut Vec<Message>, max_tokens: usize) {
 
     let token_counts: Vec<usize> = messages
         .iter()
-        .map(|m| crate::token_count::estimate_tokens_with_overhead(&m.content, 4))
+        .map(|m| crate::token_count::estimate_tokens_with_overhead(m.content.text(), 4))
         .collect();
 
     let mut remaining = total;

@@ -5,6 +5,7 @@
 //! daemon cannot modify it, preventing reward hacking.
 
 use super::{FitnessMetrics, FitnessWeights, GenerationRating};
+use crate::orchestration::visual_loop::CaptureMethod;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -67,6 +68,61 @@ pub enum Difficulty {
     Medium,
     Hard,
     Expert,
+}
+
+/// A visual scenario for the Visual-SAB benchmark track.
+///
+/// Each scenario describes a visual design task, an optional golden reference
+/// image, and a quality threshold.  During SAB evaluation the agent generates
+/// visual output, a screenshot is captured, and the VLM critic scores it.
+#[derive(Debug, Clone)]
+pub struct VisualScenario {
+    /// Human-readable scenario name (e.g. `"visual_landing_page"`).
+    pub name: String,
+    /// Description / prompt given to the agent.
+    pub description: String,
+    /// Optional golden reference image for comparison.
+    pub reference_image: Option<PathBuf>,
+    /// Minimum overall score (0.0–1.0) to pass.
+    pub quality_threshold: f64,
+    /// How to capture the agent's visual output.
+    pub capture_method: CaptureMethod,
+}
+
+/// Built-in visual SAB scenario stubs.
+///
+/// These are placeholders — the actual prompt files and reference images live
+/// in `system_tests/projecte2e/`.
+pub fn visual_sab_scenarios() -> Vec<VisualScenario> {
+    vec![
+        VisualScenario {
+            name: "visual_landing_page".into(),
+            description: "Generate a responsive landing page with hero section, \
+                          feature cards, and a call-to-action. Score visual quality."
+                .into(),
+            reference_image: None,
+            quality_threshold: 0.7,
+            capture_method: CaptureMethod::BrowserUrl("http://localhost:3000".into()),
+        },
+        VisualScenario {
+            name: "visual_dashboard".into(),
+            description: "Create a data dashboard with a chart, a stats bar, \
+                          and a table. Score layout and readability."
+                .into(),
+            reference_image: None,
+            quality_threshold: 0.7,
+            capture_method: CaptureMethod::BrowserUrl("http://localhost:3000".into()),
+        },
+        VisualScenario {
+            name: "visual_game_ui".into(),
+            description: "Build a simple game HUD with health bar, score counter, \
+                          mini-map, and inventory slots. Score composition and hierarchy."
+                .into(),
+            reference_image: None,
+            quality_threshold: 0.65,
+            capture_method: CaptureMethod::Screen,
+        },
+    ]
 }
 
 /// Run the full SAB benchmark and return structured results
@@ -246,6 +302,7 @@ pub fn build_fitness_metrics(
         max_binary_size_mb: max_binary_mb,
         tests_passed: test_count,
         tests_total: total_tests,
+        visual_score: 0.0,
     }
 }
 
@@ -326,6 +383,7 @@ mod tests {
             max_binary_size_mb: 50.0,
             tests_passed: 5200,
             tests_total: 5200,
+            visual_score: 0.0,
         };
         let better = FitnessMetrics {
             sab_score: 95.0,
@@ -418,6 +476,7 @@ expert_async_race: 30/100 FROST";
             max_binary_size_mb: 50.0,
             tests_passed: 5200,
             tests_total: 5200,
+            visual_score: 0.0,
         };
         let worse = FitnessMetrics {
             sab_score: 60.0,
@@ -445,6 +504,7 @@ expert_async_race: 30/100 FROST";
             max_binary_size_mb: 50.0,
             tests_passed: 5200,
             tests_total: 5200,
+            visual_score: 0.0,
         };
         let delta = fitness_delta(&metrics, &metrics, &weights);
         assert!(

@@ -866,6 +866,7 @@ fn build_metrics(sab: &SabResult, config: &EvolutionConfig) -> FitnessMetrics {
         max_binary_size_mb: config.safety.max_binary_size_mb,
         tests_passed: 5200,
         tests_total: 5200,
+        visual_score: 0.0,
     }
 }
 

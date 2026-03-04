@@ -747,7 +747,7 @@ impl Agent {
                 native_tool_calls = last_msg.tool_calls.clone();
             }
             return Ok(AssistantStepResponse {
-                content: last_msg.content.clone(),
+                content: last_msg.content.text().to_string(),
                 reasoning_content: last_msg.reasoning_content.clone(),
                 native_tool_calls,
             });
@@ -819,7 +819,7 @@ impl Agent {
                         .context("No response from model")?;
 
                     let message = choice.message;
-                    let content = message.content.clone();
+                    let content = message.content.text().to_string();
                     let reasoning = message.reasoning_content.clone();
 
                     if self.config.agent.native_function_calling && message.tool_calls.is_some() {
@@ -859,7 +859,7 @@ impl Agent {
                 .context("No response from model")?;
 
             let message = choice.message;
-            let content = message.content.clone();
+            let content = message.content.text().to_string();
             let reasoning = message.reasoning_content.clone();
 
             if self.config.agent.native_function_calling && message.tool_calls.is_some() {
@@ -896,7 +896,7 @@ impl Agent {
 
         self.messages.push(Message {
             role: "assistant".to_string(),
-            content: content.clone(),
+            content: content.clone().into(),
             reasoning_content: reasoning.clone(),
             tool_calls: native_tool_calls.clone(),
             tool_call_id: None,
@@ -1037,7 +1037,7 @@ impl Agent {
         );
 
         // Verbose logging when SELFWARE_DEBUG is set or verbose mode
-        output::debug_output("Planning Response", content);
+        output::debug_output("Planning Response", content.text());
 
         if content.is_empty() {
             warn!("Model returned empty planning content!");
@@ -1065,7 +1065,7 @@ impl Agent {
             );
             (!tool_calls.is_empty(), assistant_msg.tool_calls.clone())
         } else {
-            let parsed = !parse_tool_calls(content).tool_calls.is_empty();
+            let parsed = !parse_tool_calls(content.text()).tool_calls.is_empty();
             debug!("Planning response has tool calls (parsed): {}", parsed);
             (parsed, None)
         };

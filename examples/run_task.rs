@@ -99,6 +99,7 @@ async fn main() -> Result<()> {
         retry: Default::default(),
 
         evolution: Default::default(),
+        models: Default::default(),
 
         // CLI-only flags (not persisted in config)
         compact_mode: false,

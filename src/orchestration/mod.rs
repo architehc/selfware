@@ -11,6 +11,7 @@
 pub mod multiagent;
 pub mod planning;
 pub mod swarm;
+pub mod visual_loop;
 pub mod workflows;
 
 #[cfg(feature = "workflows")]

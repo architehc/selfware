@@ -36,11 +36,11 @@ pub struct MemoryEntry {
 
 impl MemoryEntry {
     pub fn from_message(msg: &Message) -> Self {
-        let token_estimate = estimate_tokens(&msg.content);
+        let token_estimate = estimate_tokens(msg.content.text());
         Self {
             timestamp: Utc::now().to_rfc3339(),
             role: msg.role.clone(),
-            content: msg.content.clone(),
+            content: msg.content.text().to_string(),
             token_estimate,
         }
     }

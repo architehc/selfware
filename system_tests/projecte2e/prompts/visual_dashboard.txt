@@ -1,0 +1,18 @@
+You are building a data dashboard page from scratch.
+
+Task:
+1. Create an index.html with a stats bar (4 KPI cards), a chart area, and a data table.
+2. Use inline SVG or CSS for the chart (bar chart or line chart with sample data).
+3. Style with inline CSS. Use a clean, professional dashboard aesthetic.
+4. Start a local dev server on port 3000 to serve the page.
+5. No external dependencies (no CDN scripts, no frameworks).
+
+Visual quality criteria:
+- Clear layout with logical content grouping
+- KPI cards with readable numbers and labels
+- Chart with axis labels and legend
+- Table with alternating row colors and proper alignment
+- Consistent color palette throughout
+- Readable at both 1920x1080 and 1366x768 viewports
+
+When done, confirm the dev server is running on http://localhost:3000.

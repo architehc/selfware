@@ -200,7 +200,7 @@ impl StreamingResponse {
                 index: 0,
                 message: Message {
                     role: "assistant".to_string(),
-                    content,
+                    content: content.into(),
                     reasoning_content: if reasoning.is_empty() {
                         None
                     } else {

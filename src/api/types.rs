@@ -1,9 +1,161 @@
 use serde::{Deserialize, Serialize};
 
+/// Message content that can be either plain text or a sequence of multimodal
+/// blocks (text + images).  Serializes as a plain JSON string for `Text` and
+/// as a JSON array for `Blocks`, matching the OpenAI vision API format.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    /// Plain text content (backward-compatible default).
+    Text(String),
+    /// Array of content blocks (text + image_url) for multimodal messages.
+    Blocks(Vec<ContentBlock>),
+}
+
+impl MessageContent {
+    /// Create a plain-text content value.
+    pub fn from_text(s: impl Into<String>) -> Self {
+        Self::Text(s.into())
+    }
+
+    /// Extract the text portion of the content.  For `Text`, returns the
+    /// string directly.  For `Blocks`, returns the text of the first `Text`
+    /// block, or `""` if none exists.
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Text(s) => s,
+            Self::Blocks(blocks) => blocks
+                .iter()
+                .find_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .unwrap_or(""),
+        }
+    }
+
+    /// Returns `true` if any block contains an image.
+    pub fn has_images(&self) -> bool {
+        match self {
+            Self::Text(_) => false,
+            Self::Blocks(blocks) => blocks
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ImageUrl { .. })),
+        }
+    }
+
+    /// Length of the text portion (for token estimation, truncation, etc.).
+    pub fn len(&self) -> usize {
+        self.text().len()
+    }
+
+    /// Returns `true` if the text portion is empty.
+    pub fn is_empty(&self) -> bool {
+        self.text().is_empty()
+    }
+
+    /// Check if the text portion contains a substring.
+    pub fn contains(&self, pat: &str) -> bool {
+        self.text().contains(pat)
+    }
+
+    /// Iterator over the characters of the text portion.
+    pub fn chars(&self) -> std::str::Chars<'_> {
+        self.text().chars()
+    }
+
+    /// Convert to `Blocks` (if not already) and append an image.
+    pub fn with_image(self, base64_png: &str) -> Self {
+        let mut blocks = match self {
+            Self::Text(s) => vec![ContentBlock::Text { text: s }],
+            Self::Blocks(b) => b,
+        };
+        blocks.push(ContentBlock::ImageUrl {
+            image_url: ImageUrl {
+                url: format!("data:image/png;base64,{}", base64_png),
+                detail: None,
+            },
+        });
+        Self::Blocks(blocks)
+    }
+}
+
+impl Default for MessageContent {
+    fn default() -> Self {
+        Self::Text(String::new())
+    }
+}
+
+impl PartialEq for MessageContent {
+    fn eq(&self, other: &Self) -> bool {
+        self.text() == other.text()
+    }
+}
+
+impl Eq for MessageContent {}
+
+impl std::fmt::Display for MessageContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.text())
+    }
+}
+
+impl From<String> for MessageContent {
+    fn from(s: String) -> Self {
+        Self::Text(s)
+    }
+}
+
+impl From<&str> for MessageContent {
+    fn from(s: &str) -> Self {
+        Self::Text(s.to_string())
+    }
+}
+
+impl PartialEq<str> for MessageContent {
+    fn eq(&self, other: &str) -> bool {
+        self.text() == other
+    }
+}
+
+impl PartialEq<&str> for MessageContent {
+    fn eq(&self, other: &&str) -> bool {
+        self.text() == *other
+    }
+}
+
+impl PartialEq<String> for MessageContent {
+    fn eq(&self, other: &String) -> bool {
+        self.text() == other
+    }
+}
+
+/// A single content block within a multimodal message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ContentBlock {
+    /// Plain text block.
+    #[serde(rename = "text")]
+    Text { text: String },
+    /// Image reference (base64 data URI or URL).
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrl },
+}
+
+/// Image URL payload for the `image_url` content block type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUrl {
+    /// `"data:image/png;base64,..."` or a remote URL.
+    pub url: String,
+    /// Resolution hint: `"low"`, `"high"`, or `"auto"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
-    pub content: String,
+    pub content: MessageContent,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -18,7 +170,7 @@ impl Message {
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: "system".to_string(),
-            content: content.into(),
+            content: MessageContent::Text(content.into()),
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
@@ -29,7 +181,7 @@ impl Message {
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: "user".to_string(),
-            content: content.into(),
+            content: MessageContent::Text(content.into()),
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
@@ -40,7 +192,7 @@ impl Message {
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
             role: "assistant".to_string(),
-            content: content.into(),
+            content: MessageContent::Text(content.into()),
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
@@ -54,7 +206,7 @@ impl Message {
     ) -> Self {
         Self {
             role: "assistant".to_string(),
-            content: content.into(),
+            content: MessageContent::Text(content.into()),
             reasoning_content: Some(reasoning.into()),
             tool_calls: None,
             tool_call_id: None,
@@ -65,10 +217,22 @@ impl Message {
     pub fn tool(content: impl Into<String>, tool_call_id: impl Into<String>) -> Self {
         Self {
             role: "tool".to_string(),
-            content: content.into(),
+            content: MessageContent::Text(content.into()),
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
+            name: None,
+        }
+    }
+
+    /// Create a user message with multimodal content (text + images).
+    pub fn user_multimodal(content: MessageContent) -> Self {
+        Self {
+            role: "user".to_string(),
+            content,
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
             name: None,
         }
     }
@@ -429,6 +593,62 @@ mod tests {
         let debug_str = format!("{:?}", msg);
         assert!(debug_str.contains("user"));
         assert!(debug_str.contains("Debug test"));
+    }
+
+    #[test]
+    fn test_message_content_text_serde_roundtrip() {
+        // Text content serializes as a plain JSON string
+        let msg = Message::user("Hello world");
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"content\":\"Hello world\""));
+        let parsed: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.content.text(), "Hello world");
+        assert!(!parsed.content.has_images());
+    }
+
+    #[test]
+    fn test_message_content_blocks_serde_roundtrip() {
+        // Blocks content serializes as a JSON array
+        let content = MessageContent::from_text("Describe this image").with_image("iVBORw0KGgo=");
+        let msg = Message::user_multimodal(content);
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"text\""));
+        assert!(json.contains("\"type\":\"image_url\""));
+        let parsed: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.content.text(), "Describe this image");
+        assert!(parsed.content.has_images());
+    }
+
+    #[test]
+    fn test_message_content_backward_compat_deserialization() {
+        // Plain string JSON deserializes as Text variant
+        let json = r#"{"role": "user", "content": "Hello"}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.content.text(), "Hello");
+        assert!(!msg.content.has_images());
+    }
+
+    #[test]
+    fn test_message_content_blocks_deserialization() {
+        // Array JSON deserializes as Blocks variant
+        let json = r#"{"role": "user", "content": [
+            {"type": "text", "text": "What is this?"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc="}}
+        ]}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.content.text(), "What is this?");
+        assert!(msg.content.has_images());
+    }
+
+    #[test]
+    fn test_message_content_helpers() {
+        let mc = MessageContent::from_text("hello");
+        assert_eq!(mc.len(), 5);
+        assert!(!mc.is_empty());
+        assert!(mc.contains("ell"));
+        assert!(!mc.contains("xyz"));
+        assert_eq!(mc.chars().count(), 5);
+        assert_eq!(format!("{}", mc), "hello");
     }
 }
 

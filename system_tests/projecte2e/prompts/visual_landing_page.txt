@@ -1,0 +1,17 @@
+You are building a responsive landing page from scratch.
+
+Task:
+1. Create an index.html with a hero section, feature cards (3), and a call-to-action button.
+2. Style it with inline CSS or a style tag. Make it responsive (mobile-friendly).
+3. Use a modern, clean design with good visual hierarchy.
+4. Start a local dev server on port 3000 to serve the page.
+5. The page should look professional without any external dependencies.
+
+Visual quality criteria:
+- Clear visual hierarchy (hero > features > CTA)
+- Consistent spacing and alignment
+- Readable typography (contrast, font sizes)
+- Responsive layout that works on desktop and mobile viewports
+- Accessible color contrast ratios (WCAG AA minimum)
+
+When done, confirm the dev server is running on http://localhost:3000.

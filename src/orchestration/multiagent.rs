@@ -387,7 +387,7 @@ impl MultiAgentChat {
                 let content = response
                     .choices
                     .first()
-                    .map(|c| c.message.content.clone())
+                    .map(|c| c.message.content.text().to_string())
                     .unwrap_or_default();
 
                 // Parse any tool calls

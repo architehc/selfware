@@ -16,7 +16,7 @@ impl Agent {
         let total: usize = self
             .messages
             .iter()
-            .map(|m| crate::token_count::estimate_tokens_with_overhead(&m.content, 4))
+            .map(|m| crate::token_count::estimate_tokens_with_overhead(m.content.text(), 4))
             .sum();
         if total <= self.max_context_tokens {
             return;
@@ -27,7 +27,7 @@ impl Agent {
         let token_counts: Vec<usize> = self
             .messages
             .iter()
-            .map(|m| crate::token_count::estimate_tokens_with_overhead(&m.content, 4))
+            .map(|m| crate::token_count::estimate_tokens_with_overhead(m.content.text(), 4))
             .collect();
 
         // Walk non-system messages oldest-first and mark them for removal until
@@ -57,7 +57,7 @@ impl Agent {
     pub(super) fn estimate_messages_tokens(&self) -> usize {
         self.messages
             .iter()
-            .map(|m| crate::token_count::estimate_tokens_with_overhead(&m.content, 4))
+            .map(|m| crate::token_count::estimate_tokens_with_overhead(m.content.text(), 4))
             .sum()
     }
 
@@ -397,7 +397,7 @@ impl Agent {
                     .find(|m| {
                         m.role == "user" && m.content.contains(&format!("// FILE: {}", path_str))
                     })
-                    .map(|m| crate::token_count::estimate_tokens_with_overhead(&m.content, 4))
+                    .map(|m| crate::token_count::estimate_tokens_with_overhead(m.content.text(), 4))
                     .unwrap_or(0);
                 total_file_tokens += file_tokens;
                 let is_stale = self.stale_files.contains(path_str);
@@ -469,7 +469,7 @@ impl Agent {
                     .iter_mut()
                     .find(|m| m.role == "user" && m.content.contains(&file_marker))
                 {
-                    msg.content = new_content;
+                    msg.content = crate::api::types::MessageContent::Text(new_content);
                     refreshed += 1;
                 }
             }

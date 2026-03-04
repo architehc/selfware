@@ -1,0 +1,19 @@
+You are building a game HUD (heads-up display) overlay from scratch.
+
+Task:
+1. Create an index.html with a full-screen game HUD layout.
+2. Include: health bar (top-left), score counter (top-center), mini-map placeholder (top-right), and inventory slots (bottom-center, 6 slots).
+3. Use a dark/translucent theme appropriate for a game overlay.
+4. Style with inline CSS. Use CSS grid or flexbox for layout.
+5. Start a local dev server on port 3000 to serve the page.
+6. No external dependencies.
+
+Visual quality criteria:
+- Clear composition with elements placed at screen edges/corners
+- Strong visual hierarchy (health/score most prominent)
+- Consistent styling (borders, colors, opacity)
+- Readable text on semi-transparent backgrounds
+- Proper spacing between HUD elements
+- Game-appropriate aesthetic (not corporate/website-like)
+
+When done, confirm the dev server is running on http://localhost:3000.

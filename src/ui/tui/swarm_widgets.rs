@@ -78,6 +78,7 @@ pub fn render_agent_swarm(
                 AgentRole::DevOps => ("🚀", "DevOps"),
                 AgentRole::Security => ("🔒", "Security"),
                 AgentRole::Performance => ("⚡", "Performance"),
+                AgentRole::VisualCritic => ("👁", "Visual Critic"),
                 AgentRole::General => ("🤖", "General"),
             };
 

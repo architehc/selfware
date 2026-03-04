@@ -14,6 +14,7 @@ pub use resources::*;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{error, warn};
 
@@ -90,6 +91,40 @@ impl From<&str> for RedactedString {
     }
 }
 
+/// A named model profile, allowing multiple LLM backends (e.g. a text coder
+/// and a vision critic) to coexist in a single selfware config.
+///
+/// Profiles are defined under `[models.<name>]` in selfware.toml.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelProfile {
+    /// API endpoint (e.g. `"http://192.168.1.170:1234/v1"`)
+    pub endpoint: String,
+    /// Model identifier
+    pub model: String,
+    /// Optional API key for this specific model
+    pub api_key: Option<RedactedString>,
+    /// Max response tokens
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: usize,
+    /// Sampling temperature
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    /// Supported modalities: `["text"]` or `["text", "vision"]`
+    #[serde(default = "default_modalities")]
+    pub modalities: Vec<String>,
+    /// Context window length in tokens
+    #[serde(default = "default_context_length")]
+    pub context_length: usize,
+}
+
+fn default_modalities() -> Vec<String> {
+    vec!["text".to_string()]
+}
+
+fn default_context_length() -> usize {
+    131072
+}
+
 /// Execution mode for tool approval
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
@@ -158,6 +193,13 @@ pub struct Config {
     #[serde(default)]
     pub evolution: EvolutionTomlConfig,
 
+    /// Named model profiles, keyed by ID (e.g. "coder", "vision").
+    /// Populated from `[models.*]` TOML sections.  A `"default"` entry is
+    /// auto-generated from the top-level endpoint/model/api_key fields if
+    /// not explicitly provided.
+    #[serde(default)]
+    pub models: HashMap<String, ModelProfile>,
+
     /// Runtime execution mode (set via CLI, not persisted)
     #[serde(skip)]
     pub execution_mode: ExecutionMode,
@@ -193,6 +235,7 @@ impl std::fmt::Debug for Config {
             .field("retry", &self.retry)
             .field("resources", &self.resources)
             .field("evolution", &self.evolution)
+            .field("models", &self.models)
             .field("execution_mode", &self.execution_mode)
             .field("compact_mode", &self.compact_mode)
             .field("verbose_mode", &self.verbose_mode)
@@ -428,6 +471,7 @@ impl Default for Config {
             retry: RetrySettings::default(),
             resources: ResourcesConfig::default(),
             evolution: EvolutionTomlConfig::default(),
+            models: HashMap::new(),
             execution_mode: ExecutionMode::default(),
             compact_mode: false,
             verbose_mode: false,
@@ -827,10 +871,35 @@ impl Config {
         config.verbose_mode = config.ui.verbose_mode;
         config.show_tokens = config.ui.show_tokens;
 
+        // Ensure a "default" model profile exists, synthesized from the
+        // top-level endpoint/model/api_key fields so that existing configs
+        // without explicit [models.*] sections keep working.
+        if !config.models.contains_key("default") {
+            config.models.insert(
+                "default".to_string(),
+                ModelProfile {
+                    endpoint: config.endpoint.clone(),
+                    model: config.model.clone(),
+                    api_key: config.api_key.clone(),
+                    max_tokens: config.max_tokens,
+                    temperature: config.temperature,
+                    modalities: default_modalities(),
+                    context_length: default_context_length(),
+                },
+            );
+        }
+
         // Validate the loaded configuration
         config.validate()?;
 
         Ok(config)
+    }
+
+    /// Resolve a model profile by ID. Falls back to `"default"` if `model_id`
+    /// is `None` or the requested ID is not found.
+    pub fn resolve_model(&self, model_id: Option<&str>) -> Option<&ModelProfile> {
+        let key = model_id.unwrap_or("default");
+        self.models.get(key).or_else(|| self.models.get("default"))
     }
 
     /// Validate configuration values, returning an error for truly invalid
@@ -1357,6 +1426,7 @@ mod tests {
             },
             resources: crate::config::ResourcesConfig::default(),
             evolution: EvolutionTomlConfig::default(),
+            models: HashMap::new(),
             execution_mode: ExecutionMode::default(),
             compact_mode: false,
             verbose_mode: false,

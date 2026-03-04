@@ -36,6 +36,8 @@ pub enum AgentRole {
     Security,
     /// Performance optimizer
     Performance,
+    /// Visual design critic (requires vision model)
+    VisualCritic,
     /// General purpose
     #[default]
     General,
@@ -53,6 +55,7 @@ impl AgentRole {
             Self::DevOps => "DevOps",
             Self::Security => "Security",
             Self::Performance => "Performance",
+            Self::VisualCritic => "VisualCritic",
             Self::General => "General",
         }
     }
@@ -100,6 +103,14 @@ impl AgentRole {
                  usage, and efficiency. Profile code, identify bottlenecks, and suggest \
                  optimizations."
             }
+            Self::VisualCritic => {
+                "You are a visual design critic with expertise in UI/UX, composition, \
+                 color theory, typography, and accessibility. You evaluate screenshots \
+                 and provide structured JSON scores with improvement suggestions. \
+                 Rate each dimension 0-100: composition, hierarchy, readability, \
+                 consistency, accessibility. Include an overall weighted average and \
+                 a list of concrete improvement suggestions."
+            }
             Self::General => {
                 "You are a general-purpose assistant. Help with various coding tasks \
                  while maintaining high quality and best practices."
@@ -110,15 +121,16 @@ impl AgentRole {
     /// Get priority for this role in consensus
     pub fn priority(&self) -> u8 {
         match self {
-            Self::Security => 10,   // Security concerns are highest priority
-            Self::Architect => 8,   // Architecture decisions are important
-            Self::Reviewer => 7,    // Reviews should be respected
-            Self::Tester => 6,      // Testing insights matter
-            Self::Performance => 5, // Performance is important
-            Self::Coder => 4,       // Coders know implementation details
-            Self::DevOps => 4,      // DevOps understands operations
-            Self::Documenter => 3,  // Documentation is supportive
-            Self::General => 2,     // General is lowest priority
+            Self::Security => 10,    // Security concerns are highest priority
+            Self::Architect => 8,    // Architecture decisions are important
+            Self::Reviewer => 7,     // Reviews should be respected
+            Self::Tester => 6,       // Testing insights matter
+            Self::Performance => 5,  // Performance is important
+            Self::Coder => 4,        // Coders know implementation details
+            Self::DevOps => 4,       // DevOps understands operations
+            Self::VisualCritic => 6, // Visual evaluation matters for design tasks
+            Self::Documenter => 3,   // Documentation is supportive
+            Self::General => 2,      // General is lowest priority
         }
     }
 }
@@ -166,6 +178,9 @@ pub struct Agent {
     pub created_at: u64,
     /// Last active timestamp
     pub last_active: u64,
+    /// Key into `Config.models` for model selection (None = use default)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
 }
 
 impl Agent {
@@ -188,6 +203,7 @@ impl Agent {
             tasks_failed: 0,
             created_at: now,
             last_active: now,
+            model_id: None,
         }
     }
 
@@ -200,6 +216,12 @@ impl Agent {
     /// Add expertise
     pub fn with_expertise(mut self, expertise: impl Into<String>) -> Self {
         self.expertise.push(expertise.into());
+        self
+    }
+
+    /// Select a model profile by key (must exist in `Config.models`)
+    pub fn with_model(mut self, model_id: &str) -> Self {
+        self.model_id = Some(model_id.to_string());
         self
     }
 

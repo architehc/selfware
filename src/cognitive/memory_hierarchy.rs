@@ -404,7 +404,7 @@ impl WorkingMemory {
     }
 
     pub fn add_message(&mut self, message: Message, importance: f32) {
-        let tokens = estimate_tokens_with_overhead(&message.content, 50);
+        let tokens = estimate_tokens_with_overhead(message.content.text(), 50);
 
         let entry = WorkingMemoryEntry {
             message: message.clone(),
@@ -1002,7 +1002,7 @@ mod tests {
     fn make_message(role: &str, content: &str) -> Message {
         Message {
             role: role.to_string(),
-            content: content.to_string(),
+            content: content.to_string().into(),
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,

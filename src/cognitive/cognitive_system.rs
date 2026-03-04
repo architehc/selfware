@@ -421,7 +421,7 @@ impl CognitiveSystem {
         let working_tokens: usize = working
             .messages
             .iter()
-            .map(|m| estimate_tokens_with_overhead(&m.content, 50))
+            .map(|m| estimate_tokens_with_overhead(m.content.text(), 50))
             .sum();
 
         let episodic_tokens: usize = episodic.iter().map(|e| e.token_count).sum();
@@ -576,7 +576,7 @@ mod tests {
     fn make_message(role: &str, content: &str) -> Message {
         Message {
             role: role.to_string(),
-            content: content.to_string(),
+            content: content.to_string().into(),
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,

@@ -17,6 +17,7 @@ pub mod http;
 pub mod knowledge;
 pub mod package;
 pub mod process;
+pub mod screen_capture;
 pub mod search;
 pub mod shell;
 
@@ -35,6 +36,7 @@ use knowledge::{
 };
 use package::{NpmInstall, NpmRun, NpmScripts, PipFreeze, PipInstall, PipList, YarnInstall};
 use process::{PortCheck, ProcessList, ProcessLogs, ProcessRestart, ProcessStart, ProcessStop};
+use screen_capture::ScreenCapture;
 use search::{GlobFind, GrepSearch, SymbolSearch};
 use shell::ShellExec;
 
@@ -155,6 +157,9 @@ impl ToolRegistry {
         registry.register(ContainerRemove);
         registry.register(ComposeUp);
         registry.register(ComposeDown);
+
+        // Screen capture
+        registry.register(ScreenCapture);
 
         // Browser automation
         registry.register(BrowserFetch);
