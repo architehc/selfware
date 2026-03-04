@@ -140,7 +140,7 @@ extras = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-ana
 
 [dev-dependencies]
 tokio-test = "0.4"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 proptest = "1.5"
 assert_cmd = "2.1.2"
 predicates = "3.1.4"
