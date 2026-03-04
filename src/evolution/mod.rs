@@ -51,6 +51,33 @@ pub const PROTECTED_PATHS: &[&str] = &[
     "benches/sab_",
 ];
 
+/// LLM endpoint configuration for hypothesis generation
+#[derive(Debug, Clone)]
+pub struct LlmConfig {
+    /// API endpoint (e.g. "https://api.example.com/v1")
+    pub endpoint: String,
+    /// Model identifier (e.g. "Qwen/Qwen3-Coder-Next-FP8")
+    pub model: String,
+    /// API key for authentication
+    pub api_key: Option<String>,
+    /// Max response tokens (default 16384)
+    pub max_tokens: usize,
+    /// Sampling temperature (default 0.7)
+    pub temperature: f32,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: String::from("http://localhost:8080/v1"),
+            model: String::from("default"),
+            api_key: None,
+            max_tokens: 16384,
+            temperature: 0.7,
+        }
+    }
+}
+
 /// Configuration for the evolution daemon, typically loaded from selfware.toml
 #[derive(Debug, Clone)]
 pub struct EvolutionConfig {
@@ -68,6 +95,8 @@ pub struct EvolutionConfig {
     pub mutation_targets: MutationTargets,
     /// Safety constraints
     pub safety: SafetyConfig,
+    /// LLM configuration for hypothesis generation
+    pub llm: LlmConfig,
 }
 
 #[derive(Debug, Clone)]

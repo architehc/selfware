@@ -9,8 +9,8 @@ use selfware::evolution::fitness::{self, SabConfig, SabResult};
 use selfware::evolution::sandbox::SandboxConfig;
 use selfware::evolution::tournament::{Hypothesis, TournamentConfig};
 use selfware::evolution::{
-    is_protected, EvolutionConfig, FitnessWeights, GenerationRating, MutationTargets, SafetyConfig,
-    PROTECTED_PATHS,
+    is_protected, EvolutionConfig, FitnessWeights, GenerationRating, LlmConfig, MutationTargets,
+    SafetyConfig, PROTECTED_PATHS,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -29,6 +29,7 @@ fn test_config(generations: usize) -> EvolutionConfig {
             cognitive: vec![],
         },
         safety: SafetyConfig::default(),
+        llm: LlmConfig::default(),
     }
 }
 

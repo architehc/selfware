@@ -10,7 +10,9 @@ use super::fitness::{self, SabConfig, SabResult};
 use super::sandbox::SandboxConfig;
 use super::telemetry;
 use super::tournament::{self, Hypothesis, HypothesisResult, TournamentConfig};
-use super::{is_protected, EvolutionConfig, FitnessMetrics, FitnessWeights, GenerationRating};
+use super::{
+    is_protected, EvolutionConfig, FitnessMetrics, FitnessWeights, GenerationRating, LlmConfig,
+};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -284,23 +286,242 @@ pub fn evolve(config: EvolutionConfig, repo_root: &Path) -> EvolutionResult {
 // ═══════════════════════════════════════════════════════
 
 fn generate_hypotheses(
-    _config: &EvolutionConfig,
-    _telemetry_prompt: &str,
-    _history_prompt: &str,
-    _repo_root: &Path,
+    config: &EvolutionConfig,
+    telemetry_prompt: &str,
+    history_prompt: &str,
+    repo_root: &Path,
 ) -> Vec<Hypothesis> {
-    // TODO: This is where the LLM agent generates mutation proposals.
-    // For now, return empty — the integration with the agent swarm
-    // will wire this to the existing multi-agent system.
-    //
-    // The agent receives:
-    // 1. Current telemetry (CPU/memory hotspots)
-    // 2. Evolution history (what worked, what didn't)
-    // 3. Allowed mutation targets from config
-    // 4. Current source code of target files
-    //
-    // The agent returns N hypotheses as unified diffs.
-    vec![]
+    let source_context = read_mutation_targets(&config.mutation_targets, repo_root);
+    if source_context.is_empty() {
+        log_warning("No mutation target files found or readable");
+        return vec![];
+    }
+
+    let system_prompt = build_system_prompt(config.population_size);
+    let user_prompt = build_user_prompt(telemetry_prompt, history_prompt, &source_context);
+
+    match call_llm(&config.llm, &system_prompt, &user_prompt) {
+        Ok(response) => parse_hypotheses_response(&response),
+        Err(e) => {
+            log_warning(&format!("LLM call failed: {}", e));
+            vec![]
+        }
+    }
+}
+
+fn read_mutation_targets(targets: &super::MutationTargets, repo_root: &Path) -> String {
+    let mut context = String::new();
+    let all_files = targets
+        .prompt_logic
+        .iter()
+        .chain(targets.tool_code.iter())
+        .chain(targets.cognitive.iter());
+
+    for file in all_files {
+        let full_path = repo_root.join(file);
+        match std::fs::read_to_string(&full_path) {
+            Ok(contents) => {
+                context.push_str(&format!(
+                    "\n### {}\n```rust\n{}\n```\n",
+                    file.display(),
+                    contents
+                ));
+            }
+            Err(e) => {
+                log_warning(&format!("Could not read {}: {}", file.display(), e));
+            }
+        }
+    }
+    context
+}
+
+fn build_system_prompt(population_size: usize) -> String {
+    format!(
+        r#"You are an evolution engine that generates code mutation hypotheses for a Rust project called selfware.
+
+Your task is to propose exactly {n} mutation hypotheses as improvements. Each hypothesis must be a concrete code change expressed as a unified diff patch.
+
+RULES:
+1. Each hypothesis must target files from the provided source code
+2. Patches must be valid unified diff format (--- a/path, +++ b/path, @@ hunks)
+3. Never modify files under src/evolution/, src/safety/, system_tests/, or benches/sab_
+4. Focus on performance, correctness, readability, or efficiency improvements
+5. Each hypothesis should be independent — do not assume other hypotheses are applied
+
+Respond with a JSON array of exactly {n} objects. Each object has:
+- "description": string — what the mutation does and why
+- "patch": string — unified diff patch
+- "target_files": string array — relative file paths affected
+- "property_test": string or null — optional property test code
+
+Respond ONLY with the JSON array. No markdown fences, no explanatory text."#,
+        n = population_size
+    )
+}
+
+fn build_user_prompt(telemetry: &str, history: &str, source_context: &str) -> String {
+    let mut prompt = String::new();
+
+    if !telemetry.is_empty() {
+        prompt.push_str("## Current Telemetry\n\n");
+        prompt.push_str(telemetry);
+        prompt.push_str("\n\n");
+    }
+
+    if !history.is_empty() {
+        prompt.push_str(history);
+        prompt.push_str("\n\n");
+    }
+
+    prompt.push_str("## Source Code (mutation targets)\n");
+    prompt.push_str(source_context);
+
+    prompt
+}
+
+fn call_llm(llm: &LlmConfig, system_prompt: &str, user_prompt: &str) -> Result<String, String> {
+    let url = format!("{}/chat/completions", llm.endpoint.trim_end_matches('/'));
+
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::CONTENT_TYPE,
+        reqwest::header::HeaderValue::from_static("application/json"),
+    );
+    if let Some(ref key) = llm.api_key {
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_str(&format!("Bearer {}", key))
+                .map_err(|e| format!("Invalid API key header: {}", e))?,
+        );
+    }
+
+    let body = serde_json::json!({
+        "model": llm.model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "max_tokens": llm.max_tokens,
+        "temperature": llm.temperature,
+    });
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let resp = client
+        .post(&url)
+        .headers(headers)
+        .json(&body)
+        .send()
+        .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().unwrap_or_default();
+        return Err(format!("LLM API returned {}: {}", status, body));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .map_err(|e| format!("Failed to parse LLM response JSON: {}", e))?;
+
+    json["choices"][0]["message"]["content"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "No content in LLM response".to_string())
+}
+
+fn parse_hypotheses_response(response: &str) -> Vec<Hypothesis> {
+    // Find JSON array in the response — handles markdown fences, thinking, preamble
+    let json_str = match extract_json_array(response) {
+        Some(s) => s,
+        None => {
+            log_warning("Could not find JSON array in LLM response");
+            return vec![];
+        }
+    };
+
+    let parsed: Vec<serde_json::Value> = match serde_json::from_str(&json_str) {
+        Ok(v) => v,
+        Err(e) => {
+            log_warning(&format!("Failed to parse hypotheses JSON: {}", e));
+            return vec![];
+        }
+    };
+
+    parsed
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, v)| {
+            let description = v["description"].as_str()?.to_string();
+            let patch = v["patch"].as_str()?.to_string();
+            let target_files: Vec<PathBuf> = v["target_files"]
+                .as_array()?
+                .iter()
+                .filter_map(|f| f.as_str().map(PathBuf::from))
+                .collect();
+            let property_test = v["property_test"].as_str().map(|s| s.to_string());
+
+            Some(Hypothesis {
+                id: format!("hyp-{}", i),
+                description,
+                patch,
+                target_files,
+                property_test,
+            })
+        })
+        .collect()
+}
+
+fn extract_json_array(text: &str) -> Option<String> {
+    // Try to find a JSON array, handling markdown fences
+    let text = text.trim();
+
+    // Strip markdown code fences if present
+    let stripped = if text.contains("```") {
+        let mut inside_fence = false;
+        let mut content = String::new();
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("```") {
+                inside_fence = !inside_fence;
+                continue;
+            }
+            if inside_fence {
+                content.push_str(line);
+                content.push('\n');
+            }
+        }
+        if content.is_empty() {
+            text.to_string()
+        } else {
+            content
+        }
+    } else {
+        text.to_string()
+    };
+
+    // Find the first '[' and its matching ']'
+    let start = stripped.find('[')?;
+    let mut depth = 0;
+    let mut end = None;
+    for (i, ch) in stripped[start..].char_indices() {
+        match ch {
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(start + i + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    end.map(|e| stripped[start..e].to_string())
 }
 
 fn format_evolution_history(hall_of_fame: &[GenerationWinner]) -> String {
@@ -475,6 +696,7 @@ mod tests {
                 cognitive: vec![],
             },
             safety: super::super::SafetyConfig::default(),
+            llm: LlmConfig::default(),
         };
         let metrics = build_metrics(&sab, &config);
         assert_eq!(metrics.sab_score, 88.5);
@@ -553,5 +775,142 @@ mod tests {
         };
         assert_eq!(result.generations_run, 0);
         assert!(result.improvements.is_empty());
+    }
+
+    #[test]
+    fn test_parse_hypotheses_valid_json() {
+        let json = r#"[
+            {
+                "description": "Cache token count lookups",
+                "patch": "--- a/src/token.rs\n+++ b/src/token.rs\n@@ -1,3 +1,4 @@\n+use std::collections::HashMap;\n fn count() {}",
+                "target_files": ["src/token.rs"],
+                "property_test": null
+            },
+            {
+                "description": "Optimize string allocation",
+                "patch": "--- a/src/alloc.rs\n+++ b/src/alloc.rs\n@@ -1 +1 @@\n-let s = String::new();\n+let s = String::with_capacity(64);",
+                "target_files": ["src/alloc.rs"],
+                "property_test": "assert!(true)"
+            }
+        ]"#;
+        let hypotheses = parse_hypotheses_response(json);
+        assert_eq!(hypotheses.len(), 2);
+        assert_eq!(hypotheses[0].description, "Cache token count lookups");
+        assert_eq!(hypotheses[0].id, "hyp-0");
+        assert_eq!(
+            hypotheses[0].target_files,
+            vec![PathBuf::from("src/token.rs")]
+        );
+        assert!(hypotheses[0].property_test.is_none());
+        assert_eq!(hypotheses[1].description, "Optimize string allocation");
+        assert_eq!(hypotheses[1].id, "hyp-1");
+        assert_eq!(
+            hypotheses[1].property_test.as_deref(),
+            Some("assert!(true)")
+        );
+    }
+
+    #[test]
+    fn test_parse_hypotheses_markdown_fences() {
+        let response = r#"Here are my suggestions:
+
+```json
+[
+    {
+        "description": "Use Vec::with_capacity",
+        "patch": "--- a/src/lib.rs\n+++ b/src/lib.rs",
+        "target_files": ["src/lib.rs"],
+        "property_test": null
+    }
+]
+```
+
+These changes should improve performance."#;
+        let hypotheses = parse_hypotheses_response(response);
+        assert_eq!(hypotheses.len(), 1);
+        assert_eq!(hypotheses[0].description, "Use Vec::with_capacity");
+    }
+
+    #[test]
+    fn test_parse_hypotheses_malformed() {
+        let malformed = "This is not JSON at all, just some text.";
+        let hypotheses = parse_hypotheses_response(malformed);
+        assert!(hypotheses.is_empty());
+    }
+
+    #[test]
+    fn test_parse_hypotheses_partial_objects() {
+        // Missing required fields — should be filtered out
+        let json = r#"[
+            {"description": "Good one", "patch": "diff", "target_files": ["a.rs"], "property_test": null},
+            {"description": "Missing patch"},
+            {"patch": "diff but no desc"}
+        ]"#;
+        let hypotheses = parse_hypotheses_response(json);
+        assert_eq!(hypotheses.len(), 1);
+        assert_eq!(hypotheses[0].description, "Good one");
+    }
+
+    #[test]
+    fn test_build_system_prompt_contains_population() {
+        let prompt = build_system_prompt(5);
+        assert!(prompt.contains("exactly 5"));
+    }
+
+    #[test]
+    fn test_build_user_prompt_shape() {
+        let prompt = build_user_prompt(
+            "cpu: 80%",
+            "Gen 1: improved X",
+            "```rust\nfn main() {}\n```",
+        );
+        assert!(prompt.contains("## Current Telemetry"));
+        assert!(prompt.contains("cpu: 80%"));
+        assert!(prompt.contains("Gen 1: improved X"));
+        assert!(prompt.contains("## Source Code"));
+        assert!(prompt.contains("fn main()"));
+    }
+
+    #[test]
+    fn test_build_user_prompt_empty_telemetry() {
+        let prompt = build_user_prompt("", "some history", "source");
+        assert!(!prompt.contains("## Current Telemetry"));
+        assert!(prompt.contains("some history"));
+    }
+
+    #[test]
+    fn test_llm_config_default() {
+        let cfg = LlmConfig::default();
+        assert_eq!(cfg.max_tokens, 16384);
+        assert!((cfg.temperature - 0.7).abs() < f32::EPSILON);
+        assert!(cfg.api_key.is_none());
+        assert!(!cfg.endpoint.is_empty());
+        assert!(!cfg.model.is_empty());
+    }
+
+    #[test]
+    fn test_extract_json_array_plain() {
+        let input = r#"[{"a": 1}]"#;
+        let result = extract_json_array(input);
+        assert_eq!(result.unwrap(), r#"[{"a": 1}]"#);
+    }
+
+    #[test]
+    fn test_extract_json_array_with_preamble() {
+        let input = "Here is the result:\n[{\"x\": 1}]";
+        let result = extract_json_array(input);
+        assert_eq!(result.unwrap(), r#"[{"x": 1}]"#);
+    }
+
+    #[test]
+    fn test_extract_json_array_nested() {
+        let input = r#"[{"a": [1, 2]}, {"b": 3}]"#;
+        let result = extract_json_array(input);
+        assert_eq!(result.unwrap(), input);
+    }
+
+    #[test]
+    fn test_extract_json_array_none() {
+        assert!(extract_json_array("no array here").is_none());
     }
 }

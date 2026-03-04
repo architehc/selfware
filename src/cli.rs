@@ -961,7 +961,7 @@ async fn handle_command(
         } => {
             use crate::evolution::daemon;
             use crate::evolution::{
-                EvolutionConfig, FitnessWeights, MutationTargets, SafetyConfig,
+                EvolutionConfig, FitnessWeights, LlmConfig, MutationTargets, SafetyConfig,
             };
 
             if !quiet {
@@ -974,7 +974,7 @@ async fn handle_command(
             }
 
             let repo_root = std::env::current_dir()?;
-            let config = EvolutionConfig {
+            let evo_config = EvolutionConfig {
                 generations,
                 population_size: population,
                 parallel_eval: parallel,
@@ -987,10 +987,17 @@ async fn handle_command(
                     cognitive: vec![],
                 },
                 safety: SafetyConfig::default(),
+                llm: LlmConfig {
+                    endpoint: config.endpoint.clone(),
+                    model: config.model.clone(),
+                    api_key: config.api_key.as_ref().map(|k| k.expose().to_string()),
+                    max_tokens: 16384,
+                    temperature: config.temperature,
+                },
             };
 
             if dry_run {
-                println!("   Evolution config: {:?}", config);
+                println!("   Evolution config: {:?}", evo_config);
                 println!(
                     "\n   {} Dry-run mode: no evolution started.",
                     Glyphs::leaf()
@@ -998,7 +1005,7 @@ async fn handle_command(
                 return Ok(());
             }
 
-            let result = daemon::evolve(config, &repo_root);
+            let result = daemon::evolve(evo_config, &repo_root);
 
             println!(
                 "\n   {} Evolution complete: {} generations, {} improvements",
