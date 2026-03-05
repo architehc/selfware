@@ -1546,8 +1546,9 @@ mod tests {
         // Corrupt the primary file
         std::fs::write(&primary, "corrupted!!!").unwrap();
 
-        // Remove any delta log so recovery doesn't fail applying deltas
-        let delta_path = dir.path().join("backup-test.json.delta");
+        // Remove any delta log so recovery doesn't fail applying deltas.
+        // The delta file uses the pattern "{task_id}.delta.jsonl", not ".json.delta".
+        let delta_path = dir.path().join("backup-test.delta.jsonl");
         let _ = std::fs::remove_file(&delta_path);
 
         // Load should recover from .json.bak (which has step 5)

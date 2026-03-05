@@ -1725,6 +1725,7 @@ mod tests {
 
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
+            drain_http_request(&mut socket).await;
             let sse_event = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_timeout","type":"function","function":{"name":"git_status","arguments":"{}"}}]}}]}
 
 "#;
@@ -2619,6 +2620,26 @@ mod tests {
     // Streaming Tests (with real TCP server)
     // ============================================
 
+    /// Drain the HTTP request headers from the socket before sending a response.
+    /// On Windows, writing a response without reading the request causes
+    /// ConnectionAborted (OS error 10053).
+    async fn drain_http_request(socket: &mut tokio::net::TcpStream) {
+        use tokio::io::AsyncReadExt;
+        let mut buf = [0u8; 1024];
+        let mut total = Vec::new();
+        loop {
+            let n = socket.read(&mut buf).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            total.extend_from_slice(&buf[..n]);
+            // End of HTTP headers is marked by \r\n\r\n
+            if total.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+    }
+
     #[tokio::test]
     async fn test_streaming_response_collect() {
         use tokio::io::AsyncWriteExt;
@@ -2629,6 +2650,7 @@ mod tests {
 
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
+            drain_http_request(&mut socket).await;
             let events = vec![
                 r#"data: {"choices":[{"delta":{"content":"Hello"}}]}"#,
                 r#"data: {"choices":[{"delta":{"content":" world"}}]}"#,
@@ -2673,6 +2695,7 @@ mod tests {
 
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
+            drain_http_request(&mut socket).await;
             let events = vec![
                 r#"data: {"choices":[{"delta":{"reasoning_content":"Let me think"}}]}"#,
                 r#"data: {"choices":[{"delta":{"content":"The answer"}}]}"#,
@@ -2718,6 +2741,7 @@ mod tests {
 
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
+            drain_http_request(&mut socket).await;
             let events = vec![
                 r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_collect","type":"function","function":{"name":"file_read","arguments":"{\"path\":\"/test\"}"}}]}}]}"#,
                 "data: [DONE]",
@@ -2761,6 +2785,7 @@ mod tests {
 
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
+            drain_http_request(&mut socket).await;
             // Just send DONE immediately
             let events = "data: [DONE]\n\n";
             let chunk = format!("{:X}\r\n{}\r\n", events.len(), events);
@@ -2794,6 +2819,7 @@ mod tests {
 
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
+            drain_http_request(&mut socket).await;
             let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
             socket.write_all(response.as_bytes()).await.unwrap();
         });
@@ -2818,6 +2844,7 @@ mod tests {
 
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
+            drain_http_request(&mut socket).await;
             // Send data without trailing \n\n so it goes into the trailing buffer
             let events = r#"data: {"choices":[{"delta":{"content":"trailing"}}]}"#;
             let chunk = format!("{:X}\r\n{}\r\n", events.len(), events);

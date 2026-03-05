@@ -2115,8 +2115,9 @@ mod tests {
 
     #[test]
     fn test_constraint_path_exists_ok() {
+        let tmp = std::env::temp_dir();
         assert!(Constraint::PathExists
-            .validate("f", &ConfigValue::path("/tmp"))
+            .validate("f", &ConfigValue::path(tmp.to_str().unwrap()))
             .is_ok());
     }
 
@@ -2161,8 +2162,9 @@ mod tests {
 
     #[test]
     fn test_constraint_is_directory_ok() {
+        let tmp = std::env::temp_dir();
         assert!(Constraint::IsDirectory
-            .validate("f", &ConfigValue::path("/tmp"))
+            .validate("f", &ConfigValue::path(tmp.to_str().unwrap()))
             .is_ok());
     }
 
