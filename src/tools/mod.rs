@@ -20,6 +20,7 @@ pub mod process;
 pub mod screen_capture;
 pub mod search;
 pub mod shell;
+pub mod vision;
 
 use browser::{BrowserEval, BrowserFetch, BrowserLinks, BrowserPdf, BrowserScreenshot};
 use cargo::{CargoCheck, CargoClippy, CargoFmt, CargoTest};
@@ -39,6 +40,7 @@ use process::{PortCheck, ProcessList, ProcessLogs, ProcessRestart, ProcessStart,
 use screen_capture::ScreenCapture;
 use search::{GlobFind, GrepSearch, SymbolSearch};
 use shell::ShellExec;
+use vision::{VisionAnalyze, VisionCompare};
 
 /// Pagination metadata for truncated tool output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +162,10 @@ impl ToolRegistry {
 
         // Screen capture
         registry.register(ScreenCapture);
+
+        // Vision tools
+        registry.register(VisionAnalyze);
+        registry.register(VisionCompare);
 
         // Browser automation
         registry.register(BrowserFetch);

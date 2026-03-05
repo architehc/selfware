@@ -281,6 +281,63 @@ pub fn estimate_tokens(text: &str) -> usize {
     crate::token_count::estimate_content_tokens(text).max(1)
 }
 
+/// Estimate vision token cost for an image based on dimensions and detail level.
+///
+/// Uses the OpenAI-compatible tiling formula:
+/// - `"low"` detail: fixed 85 tokens regardless of size.
+/// - `"high"` detail: image is scaled so the longest side ≤ 2048, then the
+///   shortest side ≤ 768. The result is tiled into 512×512 tiles, each
+///   costing 170 tokens, plus a base cost of 85.
+/// - `"auto"` / anything else: uses high-detail for images > 512×512, low
+///   otherwise.
+pub fn estimate_image_tokens(width: u32, height: u32, detail: &str) -> usize {
+    const LOW_COST: usize = 85;
+    const TILE_COST: usize = 170;
+    const BASE_COST: usize = 85;
+    const TILE_SIZE: u32 = 512;
+
+    let effective_detail = match detail {
+        "low" => "low",
+        "high" => "high",
+        _ => {
+            // "auto": high for large images, low for small
+            if width > TILE_SIZE && height > TILE_SIZE {
+                "high"
+            } else {
+                "low"
+            }
+        }
+    };
+
+    if effective_detail == "low" {
+        return LOW_COST;
+    }
+
+    // High detail: scale longest side ≤ 2048
+    let (mut w, mut h) = (width as f64, height as f64);
+    let max_side = w.max(h);
+    if max_side > 2048.0 {
+        let scale = 2048.0 / max_side;
+        w *= scale;
+        h *= scale;
+    }
+
+    // Scale shortest side ≤ 768
+    let min_side = w.min(h);
+    if min_side > 768.0 {
+        let scale = 768.0 / min_side;
+        w *= scale;
+        h *= scale;
+    }
+
+    // Count 512×512 tiles
+    let tiles_w = (w / TILE_SIZE as f64).ceil() as usize;
+    let tiles_h = (h / TILE_SIZE as f64).ceil() as usize;
+    let num_tiles = tiles_w * tiles_h;
+
+    num_tiles * TILE_COST + BASE_COST
+}
+
 /// Estimate tokens for a JSON value
 pub fn estimate_json_tokens(value: &serde_json::Value) -> usize {
     let json_str = serde_json::to_string(value).unwrap_or_default();
@@ -1746,5 +1803,50 @@ mod cost_optimizer_tests {
     fn test_optimization_priority() {
         assert_eq!(OptimizationPriority::Low, OptimizationPriority::Low);
         assert_ne!(OptimizationPriority::Low, OptimizationPriority::High);
+    }
+
+    // ── estimate_image_tokens tests ──
+
+    #[test]
+    fn test_image_tokens_low_detail() {
+        // Low detail always returns 85 regardless of size
+        assert_eq!(estimate_image_tokens(4096, 4096, "low"), 85);
+        assert_eq!(estimate_image_tokens(1, 1, "low"), 85);
+        assert_eq!(estimate_image_tokens(1920, 1080, "low"), 85);
+    }
+
+    #[test]
+    fn test_image_tokens_high_detail_small() {
+        // 512×512: fits in 1 tile → 170 + 85 = 255
+        assert_eq!(estimate_image_tokens(512, 512, "high"), 170 + 85);
+    }
+
+    #[test]
+    fn test_image_tokens_high_detail_1024x1024() {
+        // 1024×1024: shortest side > 768, scaled to 768×768
+        // tiles: ceil(768/512) × ceil(768/512) = 2 × 2 = 4
+        // cost: 4 × 170 + 85 = 765
+        assert_eq!(estimate_image_tokens(1024, 1024, "high"), 765);
+    }
+
+    #[test]
+    fn test_image_tokens_high_detail_1920x1080() {
+        // 1920×1080: shortest=1080 > 768, scale by 768/1080 ≈ 0.7111
+        // → 1365.3 × 768
+        // tiles: ceil(1365.3/512) × ceil(768/512) = 3 × 2 = 6
+        // cost: 6 × 170 + 85 = 1105
+        assert_eq!(estimate_image_tokens(1920, 1080, "high"), 1105);
+    }
+
+    #[test]
+    fn test_image_tokens_auto_small_uses_low() {
+        // 256×256: both sides ≤ 512, auto chooses low
+        assert_eq!(estimate_image_tokens(256, 256, "auto"), 85);
+    }
+
+    #[test]
+    fn test_image_tokens_auto_large_uses_high() {
+        // 1024×1024: both sides > 512, auto chooses high
+        assert_eq!(estimate_image_tokens(1024, 1024, "auto"), 765);
     }
 }
