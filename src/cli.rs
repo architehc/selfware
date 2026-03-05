@@ -1059,14 +1059,14 @@ async fn handle_command(
                     Glyphs::gear(),
                     "Workflow Execution".workshop_title()
                 );
-                WorkflowExecutor::new_dry_run()
+                WorkflowExecutor::new_dry_run_with_config(&config.safety)
             } else {
                 println!(
                     "\n{} {}\n",
                     Glyphs::gear(),
                     "Workflow Execution".workshop_title()
                 );
-                WorkflowExecutor::new()
+                WorkflowExecutor::new_with_config(&config.safety)
             };
 
             executor.load_file(path)?;

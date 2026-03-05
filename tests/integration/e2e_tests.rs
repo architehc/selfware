@@ -62,7 +62,7 @@ async fn test_simple_question_no_tools() {
     assert!(
         has_digit,
         "Response to a math question should contain at least one digit, got: {}",
-        &content[..content.len().min(200)]
+        &content.text()[..content.len().min(200)]
     );
 }
 
@@ -93,12 +93,12 @@ async fn test_agent_file_read_task() {
 
     // The model should either call the tool or reference the package
     let has_tool_call = content.contains("<tool>") || content.contains("file_read");
-    let mentions_package = content.to_lowercase().contains("selfware");
+    let mentions_package = content.text().to_lowercase().contains("selfware");
 
     assert!(
         has_tool_call || mentions_package,
         "Response should contain tool call or package info: {}",
-        &content[..content.len().min(500)]
+        &content.text()[..content.len().min(500)]
     );
 }
 
@@ -132,12 +132,12 @@ async fn test_agent_shell_exec_task() {
 
     // The model should either call the tool or give the answer
     let has_tool_call = content.contains("<tool>") || content.contains("shell_exec");
-    let has_hello = content.to_lowercase().contains("hello");
+    let has_hello = content.text().to_lowercase().contains("hello");
 
     assert!(
         has_tool_call || has_hello,
         "Response should contain tool call or 'hello': {}",
-        &content[..content.len().min(500)]
+        &content.text()[..content.len().min(500)]
     );
 }
 

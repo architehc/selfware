@@ -693,6 +693,25 @@ impl WorkflowExecutor {
         }
     }
 
+    /// Create new executor in live mode using the provided safety config.
+    pub fn new_with_config(safety_config: &crate::config::SafetyConfig) -> Self {
+        Self {
+            workflows: HashMap::new(),
+            tool_handler: None,
+            llm_handler: None,
+            dry_run: false,
+            safety_checker: crate::safety::SafetyChecker::new(safety_config),
+        }
+    }
+
+    /// Create new executor in dry-run mode using the provided safety config.
+    pub fn new_dry_run_with_config(safety_config: &crate::config::SafetyConfig) -> Self {
+        Self {
+            dry_run: true,
+            ..Self::new_with_config(safety_config)
+        }
+    }
+
     /// Set tool handler for executing tool steps
     pub fn with_tool_handler(mut self, handler: ToolHandler) -> Self {
         self.tool_handler = Some(handler);
