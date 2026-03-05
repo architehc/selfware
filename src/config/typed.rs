@@ -1742,4 +1742,1313 @@ mod tests {
         let all = store.all();
         assert_eq!(all.len(), 2);
     }
+
+    // ---- Additional coverage tests ----
+
+    #[test]
+    fn test_display_float() {
+        assert_eq!(ConfigValue::float(3.14).display(), "3.14");
+    }
+
+    #[test]
+    fn test_display_boolean_true_false() {
+        assert_eq!(ConfigValue::bool(true).display(), "true");
+        assert_eq!(ConfigValue::bool(false).display(), "false");
+    }
+
+    #[test]
+    fn test_display_array_items() {
+        let v = ConfigValue::Array(vec![ConfigValue::int(1), ConfigValue::int(2)]);
+        assert_eq!(v.display(), "[2 items]");
+        assert_eq!(ConfigValue::Array(vec![]).display(), "[0 items]");
+    }
+
+    #[test]
+    fn test_display_map_keys() {
+        let mut m = HashMap::new();
+        m.insert("a".to_string(), ConfigValue::int(1));
+        m.insert("b".to_string(), ConfigValue::int(2));
+        assert_eq!(ConfigValue::Map(m).display(), "{2 keys}");
+    }
+
+    #[test]
+    fn test_display_duration_secs() {
+        assert_eq!(ConfigValue::duration(120).display(), "120s");
+    }
+
+    #[test]
+    fn test_display_path_value() {
+        assert_eq!(ConfigValue::path("/home/user").display(), "/home/user");
+    }
+
+    #[test]
+    fn test_display_null_value() {
+        assert_eq!(ConfigValue::Null.display(), "null");
+    }
+
+    #[test]
+    fn test_type_name_remaining_variants() {
+        assert_eq!(ConfigValue::Array(vec![]).type_name(), "array");
+        assert_eq!(ConfigValue::Map(HashMap::new()).type_name(), "map");
+        assert_eq!(ConfigValue::duration(1).type_name(), "duration");
+        assert_eq!(ConfigValue::path("/x").type_name(), "path");
+        assert_eq!(ConfigValue::secret("s").type_name(), "secret");
+    }
+
+    #[test]
+    fn test_as_str_returns_secret_content() {
+        assert_eq!(ConfigValue::secret("tok").as_str(), Some("tok"));
+    }
+
+    #[test]
+    fn test_as_str_returns_none_for_non_strings() {
+        assert_eq!(ConfigValue::int(1).as_str(), None);
+        assert_eq!(ConfigValue::bool(true).as_str(), None);
+        assert_eq!(ConfigValue::Null.as_str(), None);
+    }
+
+    #[test]
+    fn test_as_int_returns_none_for_non_int() {
+        assert_eq!(ConfigValue::float(1.0).as_int(), None);
+        assert_eq!(ConfigValue::string("1").as_int(), None);
+    }
+
+    #[test]
+    fn test_as_float_from_float_variant() {
+        assert_eq!(ConfigValue::float(2.718).as_float(), Some(2.718));
+    }
+
+    #[test]
+    fn test_as_float_returns_none_for_non_numeric() {
+        assert_eq!(ConfigValue::string("x").as_float(), None);
+        assert_eq!(ConfigValue::bool(true).as_float(), None);
+    }
+
+    #[test]
+    fn test_as_bool_returns_none_for_non_bool() {
+        assert_eq!(ConfigValue::int(1).as_bool(), None);
+        assert_eq!(ConfigValue::string("true").as_bool(), None);
+    }
+
+    #[test]
+    fn test_as_path_from_string_variant() {
+        let v = ConfigValue::string("/usr/local/bin");
+        assert_eq!(v.as_path(), Some(Path::new("/usr/local/bin")));
+    }
+
+    #[test]
+    fn test_as_path_returns_none_for_non_path() {
+        assert_eq!(ConfigValue::int(42).as_path(), None);
+        assert_eq!(ConfigValue::bool(true).as_path(), None);
+    }
+
+    #[test]
+    fn test_as_duration_from_positive_int() {
+        assert_eq!(
+            ConfigValue::int(30).as_duration(),
+            Some(std::time::Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn test_as_duration_from_zero_int() {
+        assert_eq!(
+            ConfigValue::int(0).as_duration(),
+            Some(std::time::Duration::from_secs(0))
+        );
+    }
+
+    #[test]
+    fn test_as_duration_from_negative_int_returns_none() {
+        assert_eq!(ConfigValue::int(-5).as_duration(), None);
+    }
+
+    #[test]
+    fn test_as_duration_returns_none_for_non_duration() {
+        assert_eq!(ConfigValue::string("60").as_duration(), None);
+        assert_eq!(ConfigValue::bool(true).as_duration(), None);
+    }
+
+    #[test]
+    fn test_from_owned_string() {
+        let v: ConfigValue = String::from("owned").into();
+        assert_eq!(v.as_str(), Some("owned"));
+    }
+
+    #[test]
+    fn test_from_i32() {
+        let v: ConfigValue = 42i32.into();
+        assert_eq!(v.as_int(), Some(42));
+    }
+
+    #[test]
+    fn test_from_f64() {
+        let v: ConfigValue = 3.14f64.into();
+        assert_eq!(v.as_float(), Some(3.14));
+    }
+
+    #[test]
+    fn test_from_pathbuf() {
+        let v: ConfigValue = PathBuf::from("/tmp/test").into();
+        assert_eq!(v.as_path(), Some(Path::new("/tmp/test")));
+    }
+
+    #[test]
+    fn test_serde_roundtrip_all_variants() {
+        let values = vec![
+            ConfigValue::string("hello"),
+            ConfigValue::int(42),
+            ConfigValue::float(3.14),
+            ConfigValue::bool(true),
+            ConfigValue::Null,
+            ConfigValue::path("/tmp"),
+            ConfigValue::secret("s3cr3t"),
+            ConfigValue::duration(60),
+            ConfigValue::Array(vec![ConfigValue::int(1), ConfigValue::int(2)]),
+        ];
+        for original in &values {
+            let json = serde_json::to_string(original).unwrap();
+            let back: ConfigValue = serde_json::from_str(&json).unwrap();
+            assert_eq!(original, &back);
+        }
+    }
+
+    #[test]
+    fn test_serde_roundtrip_map_variant() {
+        let mut m = HashMap::new();
+        m.insert("key".to_string(), ConfigValue::string("val"));
+        let original = ConfigValue::Map(m);
+        let json = serde_json::to_string(&original).unwrap();
+        let back: ConfigValue = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, back);
+    }
+
+    #[test]
+    fn test_vt_matches_float_with_float() {
+        assert!(ValueType::Float.matches(&ConfigValue::float(1.5)));
+    }
+
+    #[test]
+    fn test_vt_matches_boolean_mismatch() {
+        assert!(ValueType::Boolean.matches(&ConfigValue::bool(false)));
+        assert!(!ValueType::Boolean.matches(&ConfigValue::int(0)));
+    }
+
+    #[test]
+    fn test_vt_matches_array_inner() {
+        let at = ValueType::Array(Box::new(ValueType::Integer));
+        assert!(at.matches(&ConfigValue::Array(vec![ConfigValue::int(1)])));
+        assert!(!at.matches(&ConfigValue::Array(vec![ConfigValue::string("x")])));
+        assert!(at.matches(&ConfigValue::Array(vec![]))); // empty ok
+    }
+
+    #[test]
+    fn test_vt_matches_map_variant() {
+        assert!(ValueType::Map.matches(&ConfigValue::Map(HashMap::new())));
+        assert!(!ValueType::Map.matches(&ConfigValue::int(1)));
+    }
+
+    #[test]
+    fn test_vt_matches_duration_variants() {
+        assert!(ValueType::Duration.matches(&ConfigValue::duration(5)));
+        assert!(ValueType::Duration.matches(&ConfigValue::int(10)));
+        assert!(!ValueType::Duration.matches(&ConfigValue::int(-1)));
+        assert!(!ValueType::Duration.matches(&ConfigValue::string("5")));
+    }
+
+    #[test]
+    fn test_vt_matches_path_with_string() {
+        assert!(ValueType::Path.matches(&ConfigValue::path("/x")));
+        assert!(ValueType::Path.matches(&ConfigValue::string("/x")));
+    }
+
+    #[test]
+    fn test_vt_matches_secret_variants() {
+        assert!(ValueType::Secret.matches(&ConfigValue::secret("k")));
+        assert!(ValueType::Secret.matches(&ConfigValue::string("k")));
+    }
+
+    #[test]
+    fn test_vt_matches_any_all() {
+        assert!(ValueType::Any.matches(&ConfigValue::int(42)));
+        assert!(ValueType::Any.matches(&ConfigValue::bool(true)));
+        assert!(ValueType::Any.matches(&ConfigValue::Null));
+        assert!(ValueType::Any.matches(&ConfigValue::Array(vec![])));
+    }
+
+    #[test]
+    fn test_vt_null_valid_for_all_types() {
+        for vt in &[
+            ValueType::String,
+            ValueType::Integer,
+            ValueType::Float,
+            ValueType::Boolean,
+            ValueType::Duration,
+            ValueType::Path,
+            ValueType::Secret,
+            ValueType::Map,
+        ] {
+            assert!(
+                vt.matches(&ConfigValue::Null),
+                "{:?} should accept Null",
+                vt
+            );
+        }
+    }
+
+    #[test]
+    fn test_vt_mismatches() {
+        assert!(!ValueType::String.matches(&ConfigValue::int(42)));
+        assert!(!ValueType::Integer.matches(&ConfigValue::string("x")));
+        assert!(!ValueType::Integer.matches(&ConfigValue::bool(true)));
+        assert!(!ValueType::Boolean.matches(&ConfigValue::string("true")));
+        assert!(!ValueType::Secret.matches(&ConfigValue::int(1)));
+        assert!(!ValueType::Path.matches(&ConfigValue::int(1)));
+    }
+
+    #[test]
+    fn test_vt_display_remaining() {
+        assert_eq!(format!("{}", ValueType::Float), "float");
+        assert_eq!(format!("{}", ValueType::Boolean), "boolean");
+        assert_eq!(format!("{}", ValueType::Map), "map");
+        assert_eq!(format!("{}", ValueType::Duration), "duration");
+        assert_eq!(format!("{}", ValueType::Path), "path");
+        assert_eq!(format!("{}", ValueType::Secret), "secret");
+        assert_eq!(format!("{}", ValueType::Any), "any");
+    }
+
+    #[test]
+    fn test_vt_display_nested_array() {
+        let nested = ValueType::Array(Box::new(ValueType::Array(Box::new(ValueType::Integer))));
+        assert_eq!(format!("{}", nested), "array<array<integer>>");
+    }
+
+    #[test]
+    fn test_constraint_min_float_boundary() {
+        let c = Constraint::Min(1.5);
+        assert!(c.validate("f", &ConfigValue::float(2.0)).is_ok());
+        assert!(c.validate("f", &ConfigValue::float(1.5)).is_ok());
+        assert!(c.validate("f", &ConfigValue::float(1.0)).is_err());
+    }
+
+    #[test]
+    fn test_constraint_max_float_boundary() {
+        let c = Constraint::Max(10.5);
+        assert!(c.validate("f", &ConfigValue::float(10.5)).is_ok());
+        assert!(c.validate("f", &ConfigValue::float(11.0)).is_err());
+    }
+
+    #[test]
+    fn test_constraint_min_max_non_numeric_passes() {
+        assert!(Constraint::Min(0.0)
+            .validate("f", &ConfigValue::string("abc"))
+            .is_ok());
+        assert!(Constraint::Min(0.0)
+            .validate("f", &ConfigValue::bool(true))
+            .is_ok());
+        assert!(Constraint::Max(100.0)
+            .validate("f", &ConfigValue::string("abc"))
+            .is_ok());
+    }
+
+    #[test]
+    fn test_constraint_min_length_array() {
+        let c = Constraint::MinLength(2);
+        let ok = ConfigValue::Array(vec![
+            ConfigValue::int(1),
+            ConfigValue::int(2),
+            ConfigValue::int(3),
+        ]);
+        assert!(c.validate("f", &ok).is_ok());
+        let fail = ConfigValue::Array(vec![ConfigValue::int(1)]);
+        assert!(c.validate("f", &fail).is_err());
+    }
+
+    #[test]
+    fn test_constraint_max_length_array() {
+        let c = Constraint::MaxLength(2);
+        let ok = ConfigValue::Array(vec![ConfigValue::int(1), ConfigValue::int(2)]);
+        assert!(c.validate("f", &ok).is_ok());
+        let fail = ConfigValue::Array(vec![
+            ConfigValue::int(1),
+            ConfigValue::int(2),
+            ConfigValue::int(3),
+        ]);
+        assert!(c.validate("f", &fail).is_err());
+    }
+
+    #[test]
+    fn test_constraint_length_non_applicable_types() {
+        assert!(Constraint::MinLength(1)
+            .validate("f", &ConfigValue::int(42))
+            .is_ok());
+        assert!(Constraint::MaxLength(5)
+            .validate("f", &ConfigValue::bool(true))
+            .is_ok());
+    }
+
+    #[test]
+    fn test_constraint_pattern_on_non_string_passes() {
+        let c = Constraint::Pattern(r"^\d+$".to_string());
+        assert!(c.validate("f", &ConfigValue::int(42)).is_ok());
+    }
+
+    #[test]
+    fn test_constraint_pattern_on_secret() {
+        let c = Constraint::Pattern(r"^sk-".to_string());
+        assert!(c.validate("f", &ConfigValue::secret("sk-abc")).is_ok());
+        assert!(c.validate("f", &ConfigValue::secret("wrong")).is_err());
+    }
+
+    #[test]
+    fn test_constraint_pattern_invalid_regex() {
+        let c = Constraint::Pattern(r"[invalid".to_string());
+        assert!(c.validate("f", &ConfigValue::string("test")).is_err());
+    }
+
+    #[test]
+    fn test_constraint_one_of_integers() {
+        let c = Constraint::OneOf(vec![ConfigValue::int(1), ConfigValue::int(2)]);
+        assert!(c.validate("f", &ConfigValue::int(2)).is_ok());
+        assert!(c.validate("f", &ConfigValue::int(5)).is_err());
+    }
+
+    #[test]
+    fn test_constraint_path_exists_ok() {
+        assert!(Constraint::PathExists
+            .validate("f", &ConfigValue::path("/tmp"))
+            .is_ok());
+    }
+
+    #[test]
+    fn test_constraint_path_exists_fail() {
+        assert!(Constraint::PathExists
+            .validate("f", &ConfigValue::path("/nonexistent/path/xyz"))
+            .is_err());
+    }
+
+    #[test]
+    fn test_constraint_path_exists_non_path_passes() {
+        assert!(Constraint::PathExists
+            .validate("f", &ConfigValue::int(42))
+            .is_ok());
+    }
+
+    #[test]
+    fn test_constraint_is_file_ok() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+        let mut tmp = NamedTempFile::new().unwrap();
+        writeln!(tmp, "data").unwrap();
+        assert!(Constraint::IsFile
+            .validate("f", &ConfigValue::path(tmp.path()))
+            .is_ok());
+    }
+
+    #[test]
+    fn test_constraint_is_file_on_directory_fails() {
+        assert!(Constraint::IsFile
+            .validate("f", &ConfigValue::path("/tmp"))
+            .is_err());
+    }
+
+    #[test]
+    fn test_constraint_is_file_non_path_passes() {
+        assert!(Constraint::IsFile
+            .validate("f", &ConfigValue::int(42))
+            .is_ok());
+    }
+
+    #[test]
+    fn test_constraint_is_directory_ok() {
+        assert!(Constraint::IsDirectory
+            .validate("f", &ConfigValue::path("/tmp"))
+            .is_ok());
+    }
+
+    #[test]
+    fn test_constraint_is_directory_on_file_fails() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+        let mut tmp = NamedTempFile::new().unwrap();
+        writeln!(tmp, "data").unwrap();
+        assert!(Constraint::IsDirectory
+            .validate("f", &ConfigValue::path(tmp.path()))
+            .is_err());
+    }
+
+    #[test]
+    fn test_constraint_is_directory_non_path_passes() {
+        assert!(Constraint::IsDirectory
+            .validate("f", &ConfigValue::int(42))
+            .is_ok());
+    }
+
+    #[test]
+    fn test_constraint_custom_passes() {
+        let c = Constraint::Custom("must be valid".to_string());
+        assert!(c.validate("f", &ConfigValue::string("x")).is_ok());
+        assert!(c.validate("f", &ConfigValue::int(42)).is_ok());
+    }
+
+    #[test]
+    fn test_constraint_description_remaining() {
+        assert!(Constraint::MinLength(3)
+            .description()
+            .contains("min length"));
+        assert!(Constraint::MaxLength(10)
+            .description()
+            .contains("max length"));
+        assert!(Constraint::Pattern(r"\d+".to_string())
+            .description()
+            .contains("pattern"));
+        assert!(Constraint::IsFile.description().contains("file"));
+        assert!(Constraint::IsDirectory.description().contains("directory"));
+        assert!(Constraint::Custom("rule".to_string())
+            .description()
+            .contains("rule"));
+        assert!(Constraint::OneOf(vec![ConfigValue::string("a")])
+            .description()
+            .contains("one of"));
+    }
+
+    #[test]
+    fn test_field_validate_type_mismatch_message() {
+        let f = FieldSchema::new("name", "Name", ValueType::String);
+        let err = f.validate(&ConfigValue::int(42)).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("name"));
+        assert!(msg.contains("string"));
+        assert!(msg.contains("integer"));
+    }
+
+    #[test]
+    fn test_field_validate_null_ok() {
+        let f = FieldSchema::new("x", "X", ValueType::String);
+        assert!(f.validate(&ConfigValue::Null).is_ok());
+    }
+
+    #[test]
+    fn test_field_validate_multiple_constraints() {
+        let f = FieldSchema::new("port", "Port", ValueType::Integer)
+            .constrain(Constraint::Min(1.0))
+            .constrain(Constraint::Max(65535.0));
+        assert!(f.validate(&ConfigValue::int(8080)).is_ok());
+        assert!(f.validate(&ConfigValue::int(0)).is_err());
+        assert!(f.validate(&ConfigValue::int(70000)).is_err());
+    }
+
+    #[test]
+    fn test_cli_help_no_flags_generates_from_name() {
+        let f = FieldSchema::new("some_option", "An option", ValueType::String);
+        let help = f.cli_help();
+        assert!(help.contains("--some-option"));
+        assert!(help.contains("An option"));
+    }
+
+    #[test]
+    fn test_cli_help_only_short_flag() {
+        let f = FieldSchema::new("verbose", "Verbose", ValueType::Boolean).short('v');
+        let help = f.cli_help();
+        assert!(help.contains("-v"));
+    }
+
+    #[test]
+    fn test_cli_help_with_env_display() {
+        let f = FieldSchema::new("t", "Timeout", ValueType::Integer)
+            .cli("--timeout")
+            .env("TIMEOUT");
+        assert!(f.cli_help().contains("Env: TIMEOUT"));
+    }
+
+    #[test]
+    fn test_cli_help_deprecated_display() {
+        let f = FieldSchema::new("old", "Old", ValueType::String)
+            .cli("--old")
+            .deprecated("Use --new instead");
+        let help = f.cli_help();
+        assert!(help.contains("DEPRECATED"));
+        assert!(help.contains("Use --new instead"));
+    }
+
+    #[test]
+    fn test_schema_get_group_valid() {
+        let s = ConfigSchema::new("t", "1.0")
+            .field(FieldSchema::new("h", "Host", ValueType::String))
+            .field(FieldSchema::new("p", "Port", ValueType::Integer))
+            .group("net", vec!["h", "p"]);
+        let grp = s.get_group("net");
+        assert_eq!(grp.len(), 2);
+    }
+
+    #[test]
+    fn test_schema_get_group_nonexistent() {
+        let s = ConfigSchema::new("t", "1.0");
+        assert!(s.get_group("missing").is_empty());
+    }
+
+    #[test]
+    fn test_schema_get_group_filters_missing_fields() {
+        let s = ConfigSchema::new("t", "1.0")
+            .field(FieldSchema::new("h", "Host", ValueType::String))
+            .group("net", vec!["h", "missing"]);
+        assert_eq!(s.get_group("net").len(), 1);
+    }
+
+    #[test]
+    fn test_schema_get_field_nonexistent() {
+        assert!(ConfigSchema::new("t", "1.0").get_field("x").is_none());
+    }
+
+    #[test]
+    fn test_schema_validate_deprecated_field_warning() {
+        let s = ConfigSchema::new("t", "1.0")
+            .field(FieldSchema::new("old", "Old", ValueType::String).deprecated("Use new"));
+        let mut c = HashMap::new();
+        c.insert("old".to_string(), ConfigValue::string("v"));
+        let errs = s.validate(&c).unwrap();
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].severity, ErrorSeverity::Warning);
+        assert!(errs[0].message.contains("deprecated"));
+    }
+
+    #[test]
+    fn test_schema_validate_type_mismatch_error() {
+        let s = ConfigSchema::new("t", "1.0").field(FieldSchema::new(
+            "port",
+            "Port",
+            ValueType::Integer,
+        ));
+        let mut c = HashMap::new();
+        c.insert("port".to_string(), ConfigValue::string("nan"));
+        let errs = s.validate(&c).unwrap();
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].severity, ErrorSeverity::Error);
+    }
+
+    #[test]
+    fn test_schema_validate_required_null_counts_as_missing() {
+        let s = ConfigSchema::new("t", "1.0")
+            .field(FieldSchema::new("n", "Name", ValueType::String).required());
+        let mut c = HashMap::new();
+        c.insert("n".to_string(), ConfigValue::Null);
+        let errs = s.validate(&c).unwrap();
+        assert!(errs.iter().any(|e| e.message.contains("required")));
+    }
+
+    #[test]
+    fn test_schema_validate_constraint_failure_in_config() {
+        let s = ConfigSchema::new("t", "1.0").field(
+            FieldSchema::new("c", "Count", ValueType::Integer).constrain(Constraint::Min(0.0)),
+        );
+        let mut cfg = HashMap::new();
+        cfg.insert("c".to_string(), ConfigValue::int(-5));
+        let errs = s.validate(&cfg).unwrap();
+        assert!(!errs.is_empty());
+        assert_eq!(errs[0].severity, ErrorSeverity::Error);
+    }
+
+    #[test]
+    fn test_schema_toml_template_with_groups() {
+        let s = ConfigSchema::new("MyApp", "2.0")
+            .field(
+                FieldSchema::new("host", "Server hostname", ValueType::String)
+                    .with_default(ConfigValue::string("localhost")),
+            )
+            .field(FieldSchema::new("port", "Port number", ValueType::Integer))
+            .field(
+                FieldSchema::new("debug", "Debug mode", ValueType::Boolean)
+                    .with_default(ConfigValue::bool(false)),
+            )
+            .group("server", vec!["host", "port"]);
+        let tmpl = s.toml_template();
+        assert!(tmpl.contains("MyApp Configuration"));
+        assert!(tmpl.contains("Version: 2.0"));
+        assert!(tmpl.contains("[server]"));
+        assert!(tmpl.contains("Server hostname"));
+        assert!(tmpl.contains("Port number"));
+        assert!(tmpl.contains("Debug mode"));
+    }
+
+    #[test]
+    fn test_schema_toml_template_field_no_default() {
+        let s = ConfigSchema::new("App", "1.0").field(FieldSchema::new(
+            "key",
+            "API Key",
+            ValueType::String,
+        ));
+        assert!(s.toml_template().contains("# key = \n"));
+    }
+
+    #[test]
+    fn test_schema_cli_help_excludes_non_cli_fields() {
+        let s = ConfigSchema::new("t", "1.0").field(FieldSchema::new(
+            "internal",
+            "Internal",
+            ValueType::String,
+        ));
+        let help = s.cli_help();
+        assert!(!help.contains("internal"));
+        assert!(help.contains("t v1.0"));
+    }
+
+    #[test]
+    fn test_validation_error_display_warning_severity() {
+        let e = ValidationError {
+            field: "old_field".to_string(),
+            message: "field is deprecated".to_string(),
+            severity: ErrorSeverity::Warning,
+        };
+        let d = format!("{}", e);
+        assert!(d.contains("warning"));
+        assert!(d.contains("old_field"));
+    }
+
+    #[test]
+    fn test_value_source_display_runtime() {
+        assert_eq!(format!("{}", ValueSource::Runtime), "runtime");
+    }
+
+    #[test]
+    fn test_value_source_display_file() {
+        assert_eq!(
+            format!("{}", ValueSource::File(PathBuf::from("/etc/app/c.toml"))),
+            "file:/etc/app/c.toml"
+        );
+    }
+
+    #[test]
+    fn test_value_source_display_env() {
+        assert_eq!(
+            format!("{}", ValueSource::Environment("MY_VAR".to_string())),
+            "env:MY_VAR"
+        );
+    }
+
+    #[test]
+    fn test_value_source_eq() {
+        assert_eq!(ValueSource::Default, ValueSource::Default);
+        assert_eq!(ValueSource::CliArg, ValueSource::CliArg);
+        assert_eq!(ValueSource::Runtime, ValueSource::Runtime);
+        assert_ne!(ValueSource::Default, ValueSource::Runtime);
+        assert_eq!(
+            ValueSource::File(PathBuf::from("/a")),
+            ValueSource::File(PathBuf::from("/a"))
+        );
+        assert_ne!(
+            ValueSource::File(PathBuf::from("/a")),
+            ValueSource::File(PathBuf::from("/b"))
+        );
+    }
+
+    #[test]
+    fn test_store_set_validates_type_with_schema() {
+        let schema = ConfigSchema::new("t", "1.0").field(FieldSchema::new(
+            "port",
+            "Port",
+            ValueType::Integer,
+        ));
+        let mut store = ConfigStore::new().with_schema(schema);
+        assert!(store
+            .set("port", ConfigValue::string("nan"), ValueSource::Runtime)
+            .is_err());
+    }
+
+    #[test]
+    fn test_store_set_unknown_field_accepted() {
+        let schema =
+            ConfigSchema::new("t", "1.0").field(FieldSchema::new("known", "K", ValueType::String));
+        let mut store = ConfigStore::new().with_schema(schema);
+        assert!(store
+            .set("unknown", ConfigValue::string("v"), ValueSource::Runtime)
+            .is_ok());
+    }
+
+    #[test]
+    fn test_store_with_schema_applies_defaults() {
+        let schema = ConfigSchema::new("t", "1.0")
+            .field(
+                FieldSchema::new("a", "A", ValueType::Integer).with_default(ConfigValue::int(10)),
+            )
+            .field(
+                FieldSchema::new("b", "B", ValueType::String)
+                    .with_default(ConfigValue::string("hi")),
+            )
+            .field(FieldSchema::new("c", "C", ValueType::Boolean));
+        let store = ConfigStore::new().with_schema(schema);
+        assert_eq!(store.get_int("a"), Some(10));
+        assert_eq!(store.get_string("b"), Some("hi"));
+        assert!(store.get("c").is_none());
+    }
+
+    #[test]
+    fn test_store_with_schema_keeps_existing_values() {
+        let schema = ConfigSchema::new("t", "1.0").field(
+            FieldSchema::new("k", "K", ValueType::Integer).with_default(ConfigValue::int(99)),
+        );
+        let mut store = ConfigStore::new();
+        store
+            .set("k", ConfigValue::int(42), ValueSource::Runtime)
+            .unwrap();
+        let store = store.with_schema(schema);
+        assert_eq!(store.get_int("k"), Some(42));
+    }
+
+    #[test]
+    fn test_store_validate_without_schema_empty() {
+        assert!(ConfigStore::new().validate().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_store_remove_returns_value() {
+        let mut store = ConfigStore::new();
+        store
+            .set("k", ConfigValue::int(42), ValueSource::Runtime)
+            .unwrap();
+        assert_eq!(store.remove("k"), Some(ConfigValue::int(42)));
+        assert!(store.source("k").is_none());
+    }
+
+    #[test]
+    fn test_store_remove_nonexistent_returns_none() {
+        assert!(ConfigStore::new().remove("x").is_none());
+    }
+
+    #[test]
+    fn test_store_clear_removes_sources() {
+        let mut store = ConfigStore::new();
+        store
+            .set("a", ConfigValue::int(1), ValueSource::Runtime)
+            .unwrap();
+        store
+            .set("b", ConfigValue::int(2), ValueSource::CliArg)
+            .unwrap();
+        store.clear();
+        assert!(store.is_empty());
+        assert!(store.source("a").is_none());
+        assert!(store.source("b").is_none());
+    }
+
+    #[test]
+    fn test_store_typed_getters_return_none_when_missing() {
+        let store = ConfigStore::new();
+        assert_eq!(store.get_string("x"), None);
+        assert_eq!(store.get_int("x"), None);
+        assert_eq!(store.get_float("x"), None);
+        assert_eq!(store.get_bool("x"), None);
+        assert!(store.get_path("x").is_none());
+        assert!(store.get_duration("x").is_none());
+    }
+
+    #[test]
+    fn test_parse_env_value_string() {
+        let s = ConfigStore::new();
+        assert_eq!(
+            s.parse_env_value("hello", &ValueType::String)
+                .unwrap()
+                .as_str(),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn test_parse_env_value_integer_ok() {
+        let s = ConfigStore::new();
+        assert_eq!(
+            s.parse_env_value("42", &ValueType::Integer)
+                .unwrap()
+                .as_int(),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn test_parse_env_value_integer_err() {
+        assert!(ConfigStore::new()
+            .parse_env_value("abc", &ValueType::Integer)
+            .is_err());
+    }
+
+    #[test]
+    fn test_parse_env_value_float_ok() {
+        let s = ConfigStore::new();
+        assert_eq!(
+            s.parse_env_value("3.14", &ValueType::Float)
+                .unwrap()
+                .as_float(),
+            Some(3.14)
+        );
+    }
+
+    #[test]
+    fn test_parse_env_value_float_err() {
+        assert!(ConfigStore::new()
+            .parse_env_value("xyz", &ValueType::Float)
+            .is_err());
+    }
+
+    #[test]
+    fn test_parse_env_value_boolean_all_cases() {
+        let s = ConfigStore::new();
+        for (input, expected) in &[
+            ("true", true),
+            ("1", true),
+            ("yes", true),
+            ("on", true),
+            ("TRUE", true),
+            ("Yes", true),
+            ("ON", true),
+            ("false", false),
+            ("0", false),
+            ("no", false),
+            ("off", false),
+            ("other", false),
+        ] {
+            let v = s.parse_env_value(input, &ValueType::Boolean).unwrap();
+            assert_eq!(v.as_bool(), Some(*expected), "input={}", input);
+        }
+    }
+
+    #[test]
+    fn test_parse_env_value_path() {
+        let s = ConfigStore::new();
+        assert_eq!(
+            s.parse_env_value("/usr/bin", &ValueType::Path)
+                .unwrap()
+                .as_path(),
+            Some(Path::new("/usr/bin"))
+        );
+    }
+
+    #[test]
+    fn test_parse_env_value_secret() {
+        let s = ConfigStore::new();
+        let v = s.parse_env_value("tok", &ValueType::Secret).unwrap();
+        assert!(matches!(v, ConfigValue::Secret(_)));
+        assert_eq!(v.as_str(), Some("tok"));
+    }
+
+    #[test]
+    fn test_parse_env_value_duration_ok() {
+        let s = ConfigStore::new();
+        assert_eq!(
+            s.parse_env_value("30", &ValueType::Duration)
+                .unwrap()
+                .as_duration(),
+            Some(std::time::Duration::from_secs(30))
+        );
+    }
+
+    #[test]
+    fn test_parse_env_value_duration_err() {
+        assert!(ConfigStore::new()
+            .parse_env_value("abc", &ValueType::Duration)
+            .is_err());
+    }
+
+    #[test]
+    fn test_parse_env_value_fallback_types() {
+        let s = ConfigStore::new();
+        // Array, Map, Any types all fall back to String
+        for vt in &[
+            ValueType::Array(Box::new(ValueType::String)),
+            ValueType::Map,
+            ValueType::Any,
+        ] {
+            assert_eq!(s.parse_env_value("val", vt).unwrap().as_str(), Some("val"));
+        }
+    }
+
+    #[test]
+    fn test_store_load_env_sets_value() {
+        let var = "SELFWARE_TYPED_TEST_LOAD_ENV_PORT_42";
+        std::env::set_var(var, "42");
+        let schema = ConfigSchema::new("t", "1.0")
+            .field(FieldSchema::new("port", "Port", ValueType::Integer).env(var));
+        let mut store = ConfigStore::new().with_schema(schema);
+        store.load_env().unwrap();
+        assert_eq!(store.get_int("port"), Some(42));
+        assert!(matches!(
+            store.source("port"),
+            Some(ValueSource::Environment(_))
+        ));
+        std::env::remove_var(var);
+    }
+
+    #[test]
+    fn test_store_load_env_missing_var_no_effect() {
+        let schema = ConfigSchema::new("t", "1.0")
+            .field(FieldSchema::new("p", "P", ValueType::Integer).env("SELFWARE_NOT_SET_XYZ"));
+        let mut store = ConfigStore::new().with_schema(schema);
+        store.load_env().unwrap();
+        assert!(store.get("p").is_none());
+    }
+
+    #[test]
+    fn test_store_load_env_no_schema_noop() {
+        let mut store = ConfigStore::new();
+        store.load_env().unwrap();
+        assert!(store.is_empty());
+    }
+
+    #[derive(Debug)]
+    struct CoverageWatcher {
+        log: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    }
+
+    impl ConfigWatcher for CoverageWatcher {
+        fn on_change(&self, field: &str, _old: Option<&ConfigValue>, new: &ConfigValue) {
+            self.log
+                .lock()
+                .unwrap()
+                .push((field.to_string(), new.display()));
+        }
+    }
+
+    #[test]
+    fn test_store_watcher_on_set() {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let w = CoverageWatcher { log: log.clone() };
+        let mut store = ConfigStore::new();
+        store.watch(Box::new(w));
+        store
+            .set("k", ConfigValue::string("v"), ValueSource::Runtime)
+            .unwrap();
+        assert_eq!(log.lock().unwrap().len(), 1);
+        assert_eq!(log.lock().unwrap()[0].0, "k");
+    }
+
+    #[test]
+    fn test_store_watcher_on_multiple_sets() {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let w = CoverageWatcher { log: log.clone() };
+        let mut store = ConfigStore::new();
+        store.watch(Box::new(w));
+        store
+            .set("k", ConfigValue::int(1), ValueSource::Runtime)
+            .unwrap();
+        store
+            .set("k", ConfigValue::int(2), ValueSource::Runtime)
+            .unwrap();
+        assert_eq!(log.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_wizard_current_step_returns_field() {
+        let schema = ConfigSchema::new("t", "1.0")
+            .field(FieldSchema::new("n", "Name", ValueType::String).required())
+            .field(FieldSchema::new("a", "Age", ValueType::Integer).required());
+        let wiz = ConfigWizard::new().with_schema(schema);
+        assert_eq!(wiz.current_step().unwrap().name, "n");
+    }
+
+    #[test]
+    fn test_wizard_current_step_none_no_schema() {
+        assert!(ConfigWizard::new().current_step().is_none());
+    }
+
+    #[test]
+    fn test_wizard_progress_empty_is_100() {
+        assert_eq!(ConfigWizard::new().progress(), 100.0);
+    }
+
+    #[test]
+    fn test_wizard_set_current_validates() {
+        let schema = ConfigSchema::new("t", "1.0").field(
+            FieldSchema::new("c", "Count", ValueType::Integer)
+                .required()
+                .constrain(Constraint::Min(0.0)),
+        );
+        let mut wiz = ConfigWizard::new().with_schema(schema);
+        assert!(wiz.set_current(ConfigValue::int(-1)).is_err());
+        assert_eq!(wiz.step_index(), 0);
+    }
+
+    #[test]
+    fn test_wizard_set_current_no_steps() {
+        let mut wiz = ConfigWizard::new().with_schema(ConfigSchema::new("t", "1.0"));
+        assert!(wiz.set_current(ConfigValue::string("x")).unwrap());
+    }
+
+    #[test]
+    fn test_wizard_skip_optional_no_default_ok() {
+        let schema =
+            ConfigSchema::new("t", "1.0").field(FieldSchema::new("opt", "Opt", ValueType::String));
+        let mut wiz = ConfigWizard::new().with_schema(schema);
+        assert!(wiz.skip().unwrap());
+    }
+
+    #[test]
+    fn test_wizard_skip_required_fails() {
+        let schema = ConfigSchema::new("t", "1.0")
+            .field(FieldSchema::new("r", "R", ValueType::String).required());
+        let mut wiz = ConfigWizard::new().with_schema(schema);
+        assert!(wiz.skip().is_err());
+    }
+
+    #[test]
+    fn test_wizard_skip_no_step_returns_true() {
+        assert!(ConfigWizard::new().skip().unwrap());
+    }
+
+    #[test]
+    fn test_wizard_full_flow_with_apply() {
+        let schema = ConfigSchema::new("t", "1.0")
+            .field(FieldSchema::new("name", "N", ValueType::String).required())
+            .field(FieldSchema::new("port", "P", ValueType::Integer).required())
+            .field(FieldSchema::new("dbg", "D", ValueType::Boolean));
+
+        let mut wiz = ConfigWizard::new().with_schema(schema.clone());
+        assert_eq!(wiz.total_steps(), 3);
+        assert!(!wiz.is_complete());
+
+        assert!(!wiz.set_current(ConfigValue::string("app")).unwrap());
+        assert!(!wiz.set_current(ConfigValue::int(8080)).unwrap());
+        assert!(wiz.set_current(ConfigValue::bool(true)).unwrap());
+        assert!(wiz.is_complete());
+
+        let mut store = ConfigStore::new().with_schema(schema);
+        wiz.apply_to(&mut store).unwrap();
+        assert_eq!(store.get_string("name"), Some("app"));
+        assert_eq!(store.get_int("port"), Some(8080));
+        assert_eq!(store.get_bool("dbg"), Some(true));
+    }
+
+    #[test]
+    fn test_hot_reload_nonexistent_file() {
+        let mut h = HotReloadHandler::new(PathBuf::from("/nonexistent/file.toml"));
+        assert!(!h.has_changed());
+    }
+
+    #[test]
+    fn test_hot_reload_default_interval_5s() {
+        let h = HotReloadHandler::new(PathBuf::from("/tmp/c.toml"));
+        assert_eq!(h.interval(), std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_hot_reload_detects_then_no_change() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+        let mut tmp = NamedTempFile::new().unwrap();
+        writeln!(tmp, "init").unwrap();
+        let mut h = HotReloadHandler::new(tmp.path().to_path_buf());
+        assert!(h.has_changed());
+        assert!(!h.has_changed());
+    }
+
+    #[test]
+    fn test_wizard_step_filtering() {
+        let schema = ConfigSchema::new("t", "1.0")
+            .field(FieldSchema::new("req", "Req", ValueType::String).required())
+            .field(FieldSchema::new("nodef", "NoDef", ValueType::String))
+            .field(
+                FieldSchema::new("hasdef", "HasDef", ValueType::String)
+                    .with_default(ConfigValue::string("d")),
+            );
+        let wiz = ConfigWizard::new().with_schema(schema);
+        assert_eq!(wiz.total_steps(), 2); // req + nodef
+    }
+
+    #[test]
+    fn test_config_value_clone_eq() {
+        let vals = vec![
+            ConfigValue::string("t"),
+            ConfigValue::int(1),
+            ConfigValue::float(1.0),
+            ConfigValue::bool(true),
+            ConfigValue::Null,
+            ConfigValue::path("/x"),
+            ConfigValue::secret("s"),
+            ConfigValue::duration(1),
+            ConfigValue::Array(vec![ConfigValue::int(1)]),
+        ];
+        for v in &vals {
+            assert_eq!(v, &v.clone());
+        }
+    }
+
+    #[test]
+    fn test_config_value_ne() {
+        assert_ne!(ConfigValue::int(1), ConfigValue::int(2));
+        assert_ne!(ConfigValue::string("a"), ConfigValue::string("b"));
+        assert_ne!(ConfigValue::string("42"), ConfigValue::int(42));
+    }
+
+    #[test]
+    fn test_field_schema_serde() {
+        let f = FieldSchema::new("t", "Timeout", ValueType::Integer)
+            .with_default(ConfigValue::int(30))
+            .required()
+            .env("T")
+            .cli("--t")
+            .short('t')
+            .constrain(Constraint::Min(1.0))
+            .constrain(Constraint::Max(3600.0))
+            .secret()
+            .deprecated("Use new_t");
+        let json = serde_json::to_string(&f).unwrap();
+        let d: FieldSchema = serde_json::from_str(&json).unwrap();
+        assert_eq!(d.name, "t");
+        assert!(d.required);
+        assert!(d.secret);
+        assert_eq!(d.env_var, Some("T".to_string()));
+        assert_eq!(d.cli_flag, Some("--t".to_string()));
+        assert_eq!(d.cli_short, Some('t'));
+        assert_eq!(d.constraints.len(), 2);
+        assert!(d.deprecated.is_some());
+    }
+
+    #[test]
+    fn test_config_schema_serde() {
+        let s = ConfigSchema::new("app", "1.0")
+            .field(FieldSchema::new("h", "H", ValueType::String))
+            .field(FieldSchema::new("p", "P", ValueType::Integer))
+            .group("srv", vec!["h", "p"]);
+        let json = serde_json::to_string(&s).unwrap();
+        let d: ConfigSchema = serde_json::from_str(&json).unwrap();
+        assert_eq!(d.name, "app");
+        assert_eq!(d.version, "1.0");
+        assert_eq!(d.fields.len(), 2);
+        assert!(d.groups.contains_key("srv"));
+    }
+
+    #[test]
+    fn test_error_severity_eq_clone() {
+        assert_eq!(ErrorSeverity::Error, ErrorSeverity::Error);
+        assert_eq!(ErrorSeverity::Warning, ErrorSeverity::Warning);
+        assert_ne!(ErrorSeverity::Error, ErrorSeverity::Warning);
+        let s = ErrorSeverity::Error;
+        let c = s;
+        assert_eq!(s, c);
+    }
+
+    #[test]
+    fn test_config_schema_default_empty() {
+        let s = ConfigSchema::default();
+        assert!(s.name.is_empty());
+        assert!(s.version.is_empty());
+        assert!(s.fields.is_empty());
+        assert!(s.groups.is_empty());
+    }
+
+    #[test]
+    fn test_value_type_serde() {
+        let types = vec![
+            ValueType::String,
+            ValueType::Integer,
+            ValueType::Float,
+            ValueType::Boolean,
+            ValueType::Map,
+            ValueType::Duration,
+            ValueType::Path,
+            ValueType::Secret,
+            ValueType::Any,
+            ValueType::Array(Box::new(ValueType::Integer)),
+            ValueType::Array(Box::new(ValueType::Array(Box::new(ValueType::String)))),
+        ];
+        for vt in &types {
+            let json = serde_json::to_string(vt).unwrap();
+            let d: ValueType = serde_json::from_str(&json).unwrap();
+            assert_eq!(vt, &d);
+        }
+    }
+
+    #[test]
+    fn test_constraint_serde() {
+        let cs = vec![
+            Constraint::Min(0.0),
+            Constraint::Max(100.0),
+            Constraint::MinLength(1),
+            Constraint::MaxLength(255),
+            Constraint::Pattern(r"^\w+$".to_string()),
+            Constraint::OneOf(vec![ConfigValue::string("a"), ConfigValue::int(1)]),
+            Constraint::PathExists,
+            Constraint::IsFile,
+            Constraint::IsDirectory,
+            Constraint::Custom("rule".to_string()),
+        ];
+        for c in &cs {
+            let json = serde_json::to_string(c).unwrap();
+            let _d: Constraint = serde_json::from_str(&json).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_validation_error_serde() {
+        let e = ValidationError {
+            field: "p".to_string(),
+            message: "bad".to_string(),
+            severity: ErrorSeverity::Error,
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        let d: ValidationError = serde_json::from_str(&json).unwrap();
+        assert_eq!(d.field, "p");
+        assert_eq!(d.message, "bad");
+        assert_eq!(d.severity, ErrorSeverity::Error);
+    }
+
+    #[test]
+    fn test_as_path_from_path_variant() {
+        assert_eq!(
+            ConfigValue::path("/usr/local").as_path(),
+            Some(Path::new("/usr/local"))
+        );
+    }
+
+    #[test]
+    fn test_complex_schema_validation() {
+        let s = ConfigSchema::new("cx", "1.0")
+            .field(
+                FieldSchema::new("name", "N", ValueType::String)
+                    .required()
+                    .constrain(Constraint::MinLength(1))
+                    .constrain(Constraint::MaxLength(50))
+                    .constrain(Constraint::Pattern(r"^[a-zA-Z]".to_string())),
+            )
+            .field(
+                FieldSchema::new("port", "P", ValueType::Integer)
+                    .required()
+                    .constrain(Constraint::Min(1.0))
+                    .constrain(Constraint::Max(65535.0)),
+            )
+            .field(
+                FieldSchema::new("mode", "M", ValueType::String).constrain(Constraint::OneOf(
+                    vec![ConfigValue::string("dev"), ConfigValue::string("prod")],
+                )),
+            );
+
+        let mut ok = HashMap::new();
+        ok.insert("name".to_string(), ConfigValue::string("myapp"));
+        ok.insert("port".to_string(), ConfigValue::int(8080));
+        ok.insert("mode".to_string(), ConfigValue::string("dev"));
+        assert!(s.validate(&ok).unwrap().is_empty());
+
+        let mut bad = HashMap::new();
+        bad.insert("mode".to_string(), ConfigValue::string("staging"));
+        let errs = s.validate(&bad).unwrap();
+        assert!(errs.len() >= 3);
+    }
+
+    #[test]
+    fn test_store_set_overwrites_source() {
+        let mut store = ConfigStore::new();
+        store
+            .set("k", ConfigValue::int(1), ValueSource::Default)
+            .unwrap();
+        assert_eq!(store.source("k"), Some(&ValueSource::Default));
+        store
+            .set("k", ConfigValue::int(2), ValueSource::CliArg)
+            .unwrap();
+        assert_eq!(store.source("k"), Some(&ValueSource::CliArg));
+        assert_eq!(store.get_int("k"), Some(2));
+    }
+
+    #[test]
+    fn test_config_value_debug_format() {
+        let v = ConfigValue::string("test");
+        let d = format!("{:?}", v);
+        assert!(d.contains("String"));
+        assert!(d.contains("test"));
+    }
 }

@@ -1547,4 +1547,1408 @@ mod tests {
         assert!(Importance::Normal < Importance::High);
         assert!(Importance::High < Importance::Critical);
     }
+
+    // ========================================================================
+    // Importance equality and serialization tests
+    // ========================================================================
+
+    #[test]
+    fn test_importance_equality() {
+        assert_eq!(Importance::Critical, Importance::Critical);
+        assert_eq!(Importance::High, Importance::High);
+        assert_eq!(Importance::Normal, Importance::Normal);
+        assert_eq!(Importance::Low, Importance::Low);
+        assert_eq!(Importance::Transient, Importance::Transient);
+        assert_ne!(Importance::Critical, Importance::Low);
+    }
+
+    #[test]
+    fn test_importance_serialization_roundtrip() {
+        let original = Importance::High;
+        let serialized = serde_json::to_string(&original).unwrap();
+        let deserialized: Importance = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn test_episode_type_equality() {
+        assert_eq!(EpisodeType::Conversation, EpisodeType::Conversation);
+        assert_eq!(EpisodeType::Error, EpisodeType::Error);
+        assert_ne!(EpisodeType::Conversation, EpisodeType::Error);
+    }
+
+    #[test]
+    fn test_episode_type_serialization_roundtrip() {
+        let original = EpisodeType::CodeChange;
+        let serialized = serde_json::to_string(&original).unwrap();
+        let deserialized: EpisodeType = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    // ========================================================================
+    // TaskContext tests
+    // ========================================================================
+
+    #[test]
+    fn test_task_context_default() {
+        let tc = TaskContext::default();
+        assert!(tc.description.is_empty());
+        assert!(tc.goal.is_empty());
+        assert!(tc.progress.is_empty());
+        assert!(tc.next_steps.is_empty());
+        assert!(tc.relevant_files.is_empty());
+    }
+
+    // ========================================================================
+    // MemoryMetrics tests
+    // ========================================================================
+
+    #[test]
+    fn test_memory_metrics_default() {
+        let m = MemoryMetrics::default();
+        assert_eq!(m.cache_hits, 0);
+        assert_eq!(m.cache_misses, 0);
+        assert_eq!(m.evictions, 0);
+        assert_eq!(m.compressions, 0);
+        assert_eq!(m.avg_retrieval_time_ms, 0.0);
+        assert_eq!(m.last_updated, 0);
+    }
+
+    #[test]
+    fn test_memory_metrics_clone() {
+        let mut m = MemoryMetrics::default();
+        m.cache_hits = 5;
+        m.compressions = 3;
+        let cloned = m.clone();
+        assert_eq!(cloned.cache_hits, 5);
+        assert_eq!(cloned.compressions, 3);
+    }
+
+    // ========================================================================
+    // CodeContent enum tests
+    // ========================================================================
+
+    #[test]
+    fn test_code_content_full_variant() {
+        let content = CodeContent::Full("fn main() {}".to_string());
+        match content {
+            CodeContent::Full(s) => assert_eq!(s, "fn main() {}"),
+            _ => panic!("Expected Full variant"),
+        }
+    }
+
+    #[test]
+    fn test_code_content_summary_variant() {
+        let content = CodeContent::Summary {
+            overview: "A helper module".to_string(),
+            key_functions: vec!["foo".to_string(), "bar".to_string()],
+        };
+        match content {
+            CodeContent::Summary {
+                overview,
+                key_functions,
+            } => {
+                assert_eq!(overview, "A helper module");
+                assert_eq!(key_functions.len(), 2);
+            }
+            _ => panic!("Expected Summary variant"),
+        }
+    }
+
+    #[test]
+    fn test_code_content_reference_variant() {
+        let content = CodeContent::Reference {
+            path: "/src/large.rs".to_string(),
+            summary: "Large file".to_string(),
+        };
+        match content {
+            CodeContent::Reference { path, summary } => {
+                assert_eq!(path, "/src/large.rs");
+                assert_eq!(summary, "Large file");
+            }
+            _ => panic!("Expected Reference variant"),
+        }
+    }
+
+    // ========================================================================
+    // CodeEdit tests
+    // ========================================================================
+
+    #[test]
+    fn test_code_edit_construction() {
+        let edit = CodeEdit {
+            timestamp: 12345,
+            description: "Refactored foo".to_string(),
+            lines_changed: (10, 20),
+        };
+        assert_eq!(edit.timestamp, 12345);
+        assert_eq!(edit.description, "Refactored foo");
+        assert_eq!(edit.lines_changed, (10, 20));
+    }
+
+    // ========================================================================
+    // ActiveCodeContext tests
+    // ========================================================================
+
+    #[test]
+    fn test_active_code_context_construction() {
+        let ctx = ActiveCodeContext {
+            path: "src/lib.rs".to_string(),
+            content: CodeContent::Full("code".to_string()),
+            last_accessed: 1000,
+            edit_history: vec![CodeEdit {
+                timestamp: 999,
+                description: "Initial".to_string(),
+                lines_changed: (0, 10),
+            }],
+        };
+        assert_eq!(ctx.path, "src/lib.rs");
+        assert_eq!(ctx.last_accessed, 1000);
+        assert_eq!(ctx.edit_history.len(), 1);
+    }
+
+    // ========================================================================
+    // WorkingMemoryEntry tests
+    // ========================================================================
+
+    #[test]
+    fn test_working_memory_entry_fields() {
+        let entry = WorkingMemoryEntry {
+            message: make_message("user", "hello"),
+            token_count: 42,
+            importance: 0.8,
+            timestamp: 5000,
+            compressible: true,
+        };
+        assert_eq!(entry.token_count, 42);
+        assert_eq!(entry.importance, 0.8);
+        assert_eq!(entry.timestamp, 5000);
+        assert!(entry.compressible);
+    }
+
+    #[test]
+    fn test_working_memory_entry_system_not_compressible() {
+        let msg = make_message("system", "system prompt");
+        let compressible = msg.role != "system";
+        assert!(!compressible);
+    }
+
+    // ========================================================================
+    // WorkingContext tests
+    // ========================================================================
+
+    #[test]
+    fn test_working_context_empty() {
+        let ctx = WorkingContext {
+            messages: Vec::new(),
+            active_code: Vec::new(),
+            current_task: None,
+        };
+        assert!(ctx.messages.is_empty());
+        assert!(ctx.active_code.is_empty());
+        assert!(ctx.current_task.is_none());
+    }
+
+    // ========================================================================
+    // Episode construction and serialization tests
+    // ========================================================================
+
+    #[test]
+    fn test_episode_construction() {
+        let ep = Episode {
+            id: "ep-1".to_string(),
+            episode_type: EpisodeType::Decision,
+            content: "Chose approach A".to_string(),
+            token_count: 100,
+            importance: Importance::High,
+            timestamp: 9999,
+            embedding_id: "embed-1".to_string(),
+            related_episodes: vec!["ep-0".to_string()],
+            insights: vec!["Good choice".to_string()],
+            is_summarized: false,
+            original_id: None,
+        };
+        assert_eq!(ep.id, "ep-1");
+        assert_eq!(ep.episode_type, EpisodeType::Decision);
+        assert_eq!(ep.importance, Importance::High);
+        assert!(!ep.is_summarized);
+        assert!(ep.original_id.is_none());
+    }
+
+    #[test]
+    fn test_episode_serialization_roundtrip() {
+        let ep = make_episode("ep-ser", Importance::Normal, "test content");
+        let json = serde_json::to_string(&ep).unwrap();
+        let deserialized: Episode = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.id, "ep-ser");
+        assert_eq!(deserialized.importance, Importance::Normal);
+        assert_eq!(deserialized.content, "test content");
+    }
+
+    // ========================================================================
+    // SemanticMemory tests (synchronous)
+    // ========================================================================
+
+    #[test]
+    fn test_semantic_memory_new() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let sm = SemanticMemory::new(700_000, embedding);
+        assert_eq!(sm.total_tokens(), 0);
+        assert_eq!(sm.file_count(), 0);
+    }
+
+    #[test]
+    fn test_semantic_memory_get_file_empty() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let sm = SemanticMemory::new(700_000, embedding);
+        assert!(sm.get_file("nonexistent.rs").is_none());
+    }
+
+    #[test]
+    fn test_semantic_memory_is_source_file() {
+        use std::path::Path;
+        assert!(SemanticMemory::is_source_file(Path::new("main.rs")));
+        assert!(SemanticMemory::is_source_file(Path::new("script.py")));
+        assert!(SemanticMemory::is_source_file(Path::new("app.js")));
+        assert!(SemanticMemory::is_source_file(Path::new("index.ts")));
+        assert!(SemanticMemory::is_source_file(Path::new("main.go")));
+        assert!(SemanticMemory::is_source_file(Path::new("App.java")));
+
+        assert!(!SemanticMemory::is_source_file(Path::new("readme.md")));
+        assert!(!SemanticMemory::is_source_file(Path::new("data.json")));
+        assert!(!SemanticMemory::is_source_file(Path::new("config.toml")));
+        assert!(!SemanticMemory::is_source_file(Path::new("image.png")));
+        assert!(!SemanticMemory::is_source_file(Path::new("noext")));
+    }
+
+    #[test]
+    fn test_semantic_memory_chunk_content() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let sm = SemanticMemory::new(700_000, embedding);
+
+        let lines: Vec<String> = (0..250).map(|i| format!("line {}", i)).collect();
+        let content = lines.join("\n");
+
+        let chunks = sm.chunk_content(&content);
+        assert_eq!(chunks.len(), 3);
+
+        assert_eq!(chunks[0].index, 0);
+        assert_eq!(chunks[0].start_line, 0);
+        assert_eq!(chunks[0].end_line, 100);
+        assert!(chunks[0].token_count > 0);
+
+        assert_eq!(chunks[1].index, 1);
+        assert_eq!(chunks[1].start_line, 100);
+        assert_eq!(chunks[1].end_line, 200);
+
+        assert_eq!(chunks[2].index, 2);
+        assert_eq!(chunks[2].start_line, 200);
+        assert_eq!(chunks[2].end_line, 300);
+    }
+
+    #[test]
+    fn test_semantic_memory_chunk_content_single_chunk() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let sm = SemanticMemory::new(700_000, embedding);
+
+        let content = "line 1\nline 2\nline 3";
+        let chunks = sm.chunk_content(content);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].index, 0);
+        assert_eq!(chunks[0].start_line, 0);
+        assert_eq!(chunks[0].end_line, 100);
+        assert_eq!(chunks[0].content, content);
+    }
+
+    #[test]
+    fn test_semantic_memory_chunk_content_empty() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let sm = SemanticMemory::new(700_000, embedding);
+        let chunks = sm.chunk_content("");
+        // Empty string has 0 lines, so 0 chunks
+        assert_eq!(chunks.len(), 0);
+    }
+
+    #[test]
+    fn test_semantic_memory_retrieve_code_context_empty() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let sm = SemanticMemory::new(700_000, embedding);
+
+        let ctx = sm.retrieve_code_context("anything", 10000, false).unwrap();
+        assert!(ctx.files.is_empty());
+        assert_eq!(ctx.total_tokens, 0);
+    }
+
+    #[test]
+    fn test_semantic_memory_retrieve_code_context_with_files() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut sm = SemanticMemory::new(700_000, embedding);
+
+        sm.files.insert(
+            "src/memory.rs".to_string(),
+            IndexedFile {
+                path: "src/memory.rs".to_string(),
+                content: FileContent::Full("fn memory() {}".to_string()),
+                token_count: 50,
+                last_modified: 0,
+            },
+        );
+        sm.files.insert(
+            "src/utils.rs".to_string(),
+            IndexedFile {
+                path: "src/utils.rs".to_string(),
+                content: FileContent::Full("fn utils() {}".to_string()),
+                token_count: 40,
+                last_modified: 0,
+            },
+        );
+        sm.files.insert(
+            "src/unrelated.rs".to_string(),
+            IndexedFile {
+                path: "src/unrelated.rs".to_string(),
+                content: FileContent::Full("fn other() {}".to_string()),
+                token_count: 30,
+                last_modified: 0,
+            },
+        );
+
+        let ctx = sm.retrieve_code_context("memory", 100_000, false).unwrap();
+        assert_eq!(ctx.files.len(), 1);
+        assert_eq!(ctx.files[0].path, "src/memory.rs");
+        assert!(ctx.files[0].relevance_score > 0.0);
+        assert_eq!(ctx.total_tokens, 50);
+    }
+
+    #[test]
+    fn test_semantic_memory_retrieve_code_context_respects_max_tokens() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut sm = SemanticMemory::new(700_000, embedding);
+
+        sm.files.insert(
+            "src/memory_big.rs".to_string(),
+            IndexedFile {
+                path: "src/memory_big.rs".to_string(),
+                content: FileContent::Full("fn big() {}".to_string()),
+                token_count: 5000,
+                last_modified: 0,
+            },
+        );
+        sm.files.insert(
+            "src/memory_small.rs".to_string(),
+            IndexedFile {
+                path: "src/memory_small.rs".to_string(),
+                content: FileContent::Full("fn small() {}".to_string()),
+                token_count: 100,
+                last_modified: 0,
+            },
+        );
+
+        let ctx = sm.retrieve_code_context("memory", 200, false).unwrap();
+        assert!(ctx.total_tokens <= 200);
+    }
+
+    #[test]
+    fn test_semantic_memory_retrieve_code_context_chunked_file() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut sm = SemanticMemory::new(700_000, embedding);
+
+        let chunks = vec![
+            ContentChunk {
+                index: 0,
+                content: "chunk 0 content".to_string(),
+                token_count: 20,
+                start_line: 0,
+                end_line: 100,
+            },
+            ContentChunk {
+                index: 1,
+                content: "chunk 1 content".to_string(),
+                token_count: 20,
+                start_line: 100,
+                end_line: 200,
+            },
+        ];
+
+        sm.files.insert(
+            "src/chunked_module.rs".to_string(),
+            IndexedFile {
+                path: "src/chunked_module.rs".to_string(),
+                content: FileContent::Chunked(chunks),
+                token_count: 40,
+                last_modified: 0,
+            },
+        );
+
+        let ctx = sm.retrieve_code_context("chunked", 100_000, false).unwrap();
+        assert_eq!(ctx.files.len(), 1);
+        assert!(ctx.files[0].content.contains("chunk 0 content"));
+        assert!(ctx.files[0].content.contains("chunk 1 content"));
+    }
+
+    #[test]
+    fn test_semantic_memory_retrieve_code_context_summary_file() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut sm = SemanticMemory::new(700_000, embedding);
+
+        sm.files.insert(
+            "src/summarized_helper.rs".to_string(),
+            IndexedFile {
+                path: "src/summarized_helper.rs".to_string(),
+                content: FileContent::Summary("This is a summary of a large file".to_string()),
+                token_count: 30,
+                last_modified: 0,
+            },
+        );
+
+        let ctx = sm
+            .retrieve_code_context("summarized", 100_000, true)
+            .unwrap();
+        assert_eq!(ctx.files.len(), 1);
+        assert_eq!(ctx.files[0].content, "This is a summary of a large file");
+    }
+
+    #[test]
+    fn test_semantic_memory_retrieve_code_context_no_match() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut sm = SemanticMemory::new(700_000, embedding);
+
+        sm.files.insert(
+            "src/alpha.rs".to_string(),
+            IndexedFile {
+                path: "src/alpha.rs".to_string(),
+                content: FileContent::Full("fn alpha() {}".to_string()),
+                token_count: 20,
+                last_modified: 0,
+            },
+        );
+
+        let ctx = sm
+            .retrieve_code_context("zzz_nonexistent", 100_000, false)
+            .unwrap();
+        assert!(ctx.files.is_empty());
+        assert_eq!(ctx.total_tokens, 0);
+    }
+
+    #[test]
+    fn test_semantic_memory_retrieve_code_context_multiple_keywords() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut sm = SemanticMemory::new(700_000, embedding);
+
+        sm.files.insert(
+            "src/memory_utils.rs".to_string(),
+            IndexedFile {
+                path: "src/memory_utils.rs".to_string(),
+                content: FileContent::Full("fn mem_util() {}".to_string()),
+                token_count: 20,
+                last_modified: 0,
+            },
+        );
+        sm.files.insert(
+            "src/memory.rs".to_string(),
+            IndexedFile {
+                path: "src/memory.rs".to_string(),
+                content: FileContent::Full("fn mem() {}".to_string()),
+                token_count: 20,
+                last_modified: 0,
+            },
+        );
+
+        let ctx = sm
+            .retrieve_code_context("memory utils", 100_000, false)
+            .unwrap();
+        assert_eq!(ctx.files.len(), 2);
+        assert_eq!(ctx.files[0].path, "src/memory_utils.rs");
+        assert!(ctx.files[0].relevance_score > ctx.files[1].relevance_score);
+    }
+
+    // ========================================================================
+    // SemanticMemory async tests (index_codebase, index_file)
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_semantic_memory_index_codebase() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src_dir = tmp.path().join("src");
+        tokio::fs::create_dir_all(&src_dir).await.unwrap();
+
+        tokio::fs::write(
+            src_dir.join("main.rs"),
+            "fn main() { println!(\"hello\"); }",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(src_dir.join("lib.rs"), "pub mod utils;")
+            .await
+            .unwrap();
+        tokio::fs::write(src_dir.join("readme.md"), "# README")
+            .await
+            .unwrap();
+
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut sm = SemanticMemory::new(700_000, embedding);
+        sm.index_codebase(tmp.path()).await.unwrap();
+
+        assert!(sm.file_count() >= 2);
+        assert!(sm.total_tokens() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_semantic_memory_index_directory_skips_hidden_and_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Create a subdirectory that index_directory will process
+        let src_dir = tmp.path().join("src");
+        tokio::fs::create_dir_all(&src_dir).await.unwrap();
+
+        // Create a hidden directory inside src (should be skipped by index_directory)
+        let hidden_dir = src_dir.join(".hidden");
+        tokio::fs::create_dir_all(&hidden_dir).await.unwrap();
+        tokio::fs::write(hidden_dir.join("secret.rs"), "fn secret() {}")
+            .await
+            .unwrap();
+
+        // Create a target directory inside src (should be skipped by index_directory)
+        let target_dir = src_dir.join("target");
+        tokio::fs::create_dir_all(&target_dir).await.unwrap();
+        tokio::fs::write(target_dir.join("build.rs"), "fn build() {}")
+            .await
+            .unwrap();
+
+        // Create a valid source file inside src
+        tokio::fs::write(src_dir.join("main.rs"), "fn main() {}")
+            .await
+            .unwrap();
+
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut sm = SemanticMemory::new(700_000, embedding);
+        // Use index_codebase on the temp root; it will call index_directory for src/
+        sm.index_codebase(tmp.path()).await.unwrap();
+
+        // Only src/main.rs should be indexed; .hidden/ and target/ subdirs are skipped
+        assert_eq!(sm.file_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_semantic_memory_index_file_content_strategy() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let small_content = "fn small() { 1 + 1 }";
+        tokio::fs::write(tmp.path().join("small.rs"), small_content)
+            .await
+            .unwrap();
+
+        let large_content = "fn x() { let val = 1; }\n".repeat(10000);
+        tokio::fs::write(tmp.path().join("large.rs"), &large_content)
+            .await
+            .unwrap();
+
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut sm = SemanticMemory::new(700_000, embedding);
+        sm.index_codebase(tmp.path()).await.unwrap();
+
+        let small_path = tmp.path().join("small.rs").to_string_lossy().to_string();
+        if let Some(f) = sm.get_file(&small_path) {
+            match &f.content {
+                FileContent::Full(_) => {}
+                _ => panic!("Small file should use Full content strategy"),
+            }
+        }
+
+        let large_path = tmp.path().join("large.rs").to_string_lossy().to_string();
+        if let Some(f) = sm.get_file(&large_path) {
+            match &f.content {
+                FileContent::Full(_) => panic!("Large file should not use Full content strategy"),
+                FileContent::Chunked(_) | FileContent::Summary(_) => {}
+            }
+        }
+    }
+
+    // ========================================================================
+    // EpisodicMemory async tests
+    // ========================================================================
+
+    /// Create a mock embedding backend that matches the VectorIndex dimension (1536)
+    /// used by EpisodicMemory::new
+    fn mock_embedding_1536() -> Arc<EmbeddingBackend> {
+        Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::new(1536)))
+    }
+
+    #[tokio::test]
+    async fn test_episodic_memory_record() {
+        let embedding = mock_embedding_1536();
+        let mut em = EpisodicMemory::new(100_000, embedding);
+
+        let episode = make_episode("rec-1", Importance::Normal, "Recorded event");
+        em.record(episode).await.unwrap();
+
+        assert_eq!(em.len(), 1);
+        assert!(em.total_tokens() > 0);
+        assert!(!em.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_episodic_memory_record_updates_embedding_id() {
+        let embedding = mock_embedding_1536();
+        let mut em = EpisodicMemory::new(100_000, embedding);
+
+        let episode = make_episode("rec-embed", Importance::High, "Test embedding");
+        em.record(episode).await.unwrap();
+
+        let found = em.find_episode("rec-embed").unwrap();
+        assert_eq!(found.embedding_id, "rec-embed");
+    }
+
+    #[tokio::test]
+    async fn test_episodic_memory_record_recalculates_tokens() {
+        let embedding = mock_embedding_1536();
+        let mut em = EpisodicMemory::new(100_000, embedding);
+
+        let mut episode = make_episode("rec-tok", Importance::Normal, "Some content");
+        episode.token_count = 999999;
+        em.record(episode).await.unwrap();
+
+        let found = em.find_episode("rec-tok").unwrap();
+        assert!(found.token_count < 999999);
+    }
+
+    #[tokio::test]
+    async fn test_episodic_memory_maintain_budget_evicts_low_first() {
+        let embedding = mock_embedding_1536();
+        let mut em = EpisodicMemory::new(300, embedding);
+
+        em.record(make_episode(
+            "low-1",
+            Importance::Low,
+            "low priority stuff here",
+        ))
+        .await
+        .unwrap();
+        em.record(make_episode(
+            "high-1",
+            Importance::High,
+            "high priority stuff here",
+        ))
+        .await
+        .unwrap();
+        em.record(make_episode(
+            "critical-1",
+            Importance::Critical,
+            "critical priority stuff here",
+        ))
+        .await
+        .unwrap();
+
+        assert!(em.total_tokens() <= 300 || em.tiers.low.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_episodic_memory_retrieve_relevant() {
+        let embedding = mock_embedding_1536();
+        let mut em = EpisodicMemory::new(100_000, embedding);
+
+        em.record(make_episode(
+            "rel-1",
+            Importance::Normal,
+            "memory management",
+        ))
+        .await
+        .unwrap();
+        em.record(make_episode("rel-2", Importance::High, "file indexing"))
+            .await
+            .unwrap();
+        em.record(make_episode("rel-3", Importance::Low, "logging setup"))
+            .await
+            .unwrap();
+
+        let results = em
+            .retrieve_relevant("memory", 10, Importance::Normal)
+            .await
+            .unwrap();
+        for r in &results {
+            assert!(
+                r.importance >= Importance::Normal,
+                "Should only return episodes with importance >= Normal"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_episodic_memory_retrieve_relevant_respects_limit() {
+        let embedding = mock_embedding_1536();
+        let mut em = EpisodicMemory::new(100_000, embedding);
+
+        for i in 0..20 {
+            em.record(make_episode(
+                &format!("ep-{}", i),
+                Importance::Normal,
+                &format!("episode content number {}", i),
+            ))
+            .await
+            .unwrap();
+        }
+
+        let results = em
+            .retrieve_relevant("episode", 5, Importance::Transient)
+            .await
+            .unwrap();
+        assert!(results.len() <= 5, "Should respect the limit parameter");
+    }
+
+    #[tokio::test]
+    async fn test_episodic_memory_retrieve_relevant_empty() {
+        let embedding = mock_embedding_1536();
+        let em = EpisodicMemory::new(100_000, embedding);
+
+        let results = em
+            .retrieve_relevant("anything", 10, Importance::Transient)
+            .await
+            .unwrap();
+        assert!(results.is_empty());
+    }
+
+    // ========================================================================
+    // HierarchicalMemory tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_hierarchical_memory_new() {
+        let embedding = mock_embedding_1536();
+        let budget = TokenBudget::default();
+        let hm = HierarchicalMemory::new(budget.clone(), embedding)
+            .await
+            .unwrap();
+
+        assert_eq!(hm.budget.working_memory, DEFAULT_WORKING_TOKENS);
+        assert_eq!(hm.budget.episodic_memory, DEFAULT_EPISODIC_TOKENS);
+        assert_eq!(hm.budget.semantic_memory, DEFAULT_SEMANTIC_TOKENS);
+        assert_eq!(hm.usage.total(), 0);
+        assert!(hm.working.is_empty());
+        assert!(hm.episodic.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_hierarchical_memory_add_message() {
+        let embedding = mock_embedding_1536();
+        let budget = TokenBudget::default();
+        let mut hm = HierarchicalMemory::new(budget, embedding).await.unwrap();
+
+        hm.add_message(make_message("user", "Hello, world!"), 1.0);
+        assert_eq!(hm.working.len(), 1);
+        assert!(hm.usage.working_tokens > 0);
+    }
+
+    #[tokio::test]
+    async fn test_hierarchical_memory_add_multiple_messages() {
+        let embedding = mock_embedding_1536();
+        let budget = TokenBudget::default();
+        let mut hm = HierarchicalMemory::new(budget, embedding).await.unwrap();
+
+        hm.add_message(make_message("user", "First"), 1.0);
+        hm.add_message(make_message("assistant", "Second"), 1.0);
+        hm.add_message(make_message("user", "Third"), 0.5);
+
+        assert_eq!(hm.working.len(), 3);
+        assert!(hm.usage.working_tokens > 0);
+    }
+
+    #[tokio::test]
+    async fn test_hierarchical_memory_record_episode() {
+        let embedding = mock_embedding_1536();
+        let budget = TokenBudget::default();
+        let mut hm = HierarchicalMemory::new(budget, embedding).await.unwrap();
+
+        let episode = make_episode("hm-ep-1", Importance::Normal, "An important event");
+        hm.record_episode(episode).await.unwrap();
+
+        assert_eq!(hm.episodic.len(), 1);
+        assert!(hm.usage.episodic_tokens > 0);
+    }
+
+    #[tokio::test]
+    async fn test_hierarchical_memory_is_within_budget() {
+        let embedding = mock_embedding_1536();
+        let budget = TokenBudget::default();
+        let hm = HierarchicalMemory::new(budget, embedding).await.unwrap();
+
+        assert!(hm.is_within_budget());
+    }
+
+    #[tokio::test]
+    async fn test_hierarchical_memory_is_within_budget_after_messages() {
+        let embedding = mock_embedding_1536();
+        let budget = TokenBudget::default();
+        let mut hm = HierarchicalMemory::new(budget, embedding).await.unwrap();
+
+        hm.add_message(make_message("user", "Hello"), 1.0);
+        assert!(hm.is_within_budget());
+    }
+
+    #[tokio::test]
+    async fn test_hierarchical_memory_is_within_budget_over_budget() {
+        let embedding = mock_embedding_1536();
+        let budget = TokenBudget::default();
+        let mut hm = HierarchicalMemory::new(budget, embedding).await.unwrap();
+
+        hm.usage.working_tokens = DEFAULT_WORKING_TOKENS + 1;
+        assert!(!hm.is_within_budget());
+    }
+
+    #[tokio::test]
+    async fn test_hierarchical_memory_get_stats() {
+        let embedding = mock_embedding_1536();
+        let budget = TokenBudget::default();
+        let mut hm = HierarchicalMemory::new(budget, embedding).await.unwrap();
+
+        hm.add_message(make_message("user", "Test message"), 1.0);
+
+        let stats = hm.get_stats().await;
+        assert_eq!(stats.working_entries, 1);
+        assert_eq!(stats.episodic_entries, 0);
+        assert_eq!(stats.semantic_files, 0);
+        assert!(stats.usage.working_tokens > 0);
+        assert_eq!(stats.budget.working_memory, DEFAULT_WORKING_TOKENS);
+    }
+
+    #[tokio::test]
+    async fn test_hierarchical_memory_compress_if_needed_not_needed() {
+        let embedding = mock_embedding_1536();
+        let budget = TokenBudget::default();
+        let mut hm = HierarchicalMemory::new(budget, embedding).await.unwrap();
+
+        let compressed = hm.compress_if_needed().await.unwrap();
+        assert!(!compressed);
+        assert_eq!(hm.metrics.compressions, 0);
+    }
+
+    #[tokio::test]
+    async fn test_hierarchical_memory_compress_if_needed_over_budget() {
+        let embedding = mock_embedding_1536();
+        let budget = TokenBudget {
+            working_memory: DEFAULT_WORKING_TOKENS,
+            episodic_memory: 1, // Tiny budget
+            semantic_memory: DEFAULT_SEMANTIC_TOKENS,
+            response_reserve: DEFAULT_RESERVE_TOKENS,
+        };
+        let mut hm = HierarchicalMemory::new(budget, embedding).await.unwrap();
+
+        // Directly add to episodic tiers to bypass maintain_budget in record()
+        let episode = make_episode("compress-ep", Importance::Normal, "Some episodic content");
+        hm.episodic.add_to_tier(episode);
+        hm.usage.episodic_tokens = hm.episodic.total_tokens();
+
+        // Now episodic usage exceeds the tiny budget of 1
+        assert!(hm.usage.episodic_tokens > 1);
+
+        let compressed = hm.compress_if_needed().await.unwrap();
+        assert!(compressed);
+        assert_eq!(hm.metrics.compressions, 1);
+    }
+
+    #[tokio::test]
+    async fn test_hierarchical_memory_retrieve_context_working() {
+        let embedding = mock_embedding_1536();
+        let budget = TokenBudget::default();
+        let mut hm = HierarchicalMemory::new(budget, embedding).await.unwrap();
+
+        hm.add_message(make_message("user", "Hello from working memory"), 1.0);
+
+        let ctx = hm
+            .retrieve_context("test", ContextType::Working)
+            .await
+            .unwrap();
+        match ctx {
+            RetrievedContext::Working(wc) => {
+                assert_eq!(wc.messages.len(), 1);
+                assert_eq!(wc.messages[0].content, "Hello from working memory");
+            }
+            _ => panic!("Expected Working context"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_hierarchical_memory_retrieve_context_episodic() {
+        let embedding = mock_embedding_1536();
+        let budget = TokenBudget::default();
+        let mut hm = HierarchicalMemory::new(budget, embedding).await.unwrap();
+
+        hm.record_episode(make_episode("ep-ctx", Importance::Normal, "episodic event"))
+            .await
+            .unwrap();
+
+        let ctx = hm
+            .retrieve_context(
+                "episodic",
+                ContextType::Episodic {
+                    limit: 10,
+                    min_importance: Importance::Transient,
+                },
+            )
+            .await
+            .unwrap();
+        match ctx {
+            RetrievedContext::Episodic(episodes) => {
+                assert!(episodes.len() <= 10);
+            }
+            _ => panic!("Expected Episodic context"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_hierarchical_memory_retrieve_context_semantic() {
+        let embedding = mock_embedding_1536();
+        let budget = TokenBudget::default();
+        let hm = HierarchicalMemory::new(budget, embedding).await.unwrap();
+
+        let ctx = hm
+            .retrieve_context(
+                "some query",
+                ContextType::Semantic {
+                    max_tokens: 50_000,
+                    include_related: false,
+                },
+            )
+            .await
+            .unwrap();
+        match ctx {
+            RetrievedContext::Semantic(code_ctx) => {
+                assert!(code_ctx.files.is_empty());
+            }
+            _ => panic!("Expected Semantic context"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_hierarchical_memory_retrieve_context_complete() {
+        let embedding = mock_embedding_1536();
+        let budget = TokenBudget::default();
+        let mut hm = HierarchicalMemory::new(budget, embedding).await.unwrap();
+
+        hm.add_message(make_message("user", "Complete context test"), 1.0);
+
+        let ctx = hm
+            .retrieve_context("test", ContextType::Complete)
+            .await
+            .unwrap();
+        match ctx {
+            RetrievedContext::Complete {
+                working,
+                episodic,
+                semantic,
+            } => {
+                assert_eq!(working.messages.len(), 1);
+                assert!(episodic.is_empty());
+                assert!(semantic.files.is_empty());
+            }
+            _ => panic!("Expected Complete context"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_hierarchical_memory_initialize_selfware_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        tokio::fs::write(tmp.path().join("test.rs"), "fn test() {}")
+            .await
+            .unwrap();
+
+        let embedding = mock_embedding_1536();
+        let budget = TokenBudget::default();
+        let mut hm = HierarchicalMemory::new(budget, embedding).await.unwrap();
+
+        hm.initialize_selfware_index(tmp.path()).await.unwrap();
+        assert!(hm.usage.semantic_tokens > 0);
+
+        let stats = hm.get_stats().await;
+        assert!(stats.semantic_files >= 1);
+    }
+
+    // ========================================================================
+    // ContextType enum construction tests
+    // ========================================================================
+
+    #[test]
+    fn test_context_type_working_variant() {
+        let ct = ContextType::Working;
+        match ct {
+            ContextType::Working => {}
+            _ => panic!("Expected Working variant"),
+        }
+    }
+
+    #[test]
+    fn test_context_type_episodic_variant() {
+        let ct = ContextType::Episodic {
+            limit: 5,
+            min_importance: Importance::High,
+        };
+        match ct {
+            ContextType::Episodic {
+                limit,
+                min_importance,
+            } => {
+                assert_eq!(limit, 5);
+                assert_eq!(min_importance, Importance::High);
+            }
+            _ => panic!("Expected Episodic variant"),
+        }
+    }
+
+    #[test]
+    fn test_context_type_semantic_variant() {
+        let ct = ContextType::Semantic {
+            max_tokens: 50_000,
+            include_related: true,
+        };
+        match ct {
+            ContextType::Semantic {
+                max_tokens,
+                include_related,
+            } => {
+                assert_eq!(max_tokens, 50_000);
+                assert!(include_related);
+            }
+            _ => panic!("Expected Semantic variant"),
+        }
+    }
+
+    #[test]
+    fn test_context_type_complete_variant() {
+        let ct = ContextType::Complete;
+        match ct {
+            ContextType::Complete => {}
+            _ => panic!("Expected Complete variant"),
+        }
+    }
+
+    // ========================================================================
+    // RetrievedContext enum tests
+    // ========================================================================
+
+    #[test]
+    fn test_retrieved_context_working_variant() {
+        let wc = WorkingContext {
+            messages: vec![make_message("user", "hi")],
+            active_code: Vec::new(),
+            current_task: None,
+        };
+        let rc = RetrievedContext::Working(wc);
+        match rc {
+            RetrievedContext::Working(ctx) => assert_eq!(ctx.messages.len(), 1),
+            _ => panic!("Expected Working variant"),
+        }
+    }
+
+    #[test]
+    fn test_retrieved_context_episodic_variant() {
+        let ep = make_episode("rc-ep", Importance::Normal, "test");
+        let rc = RetrievedContext::Episodic(vec![ep]);
+        match rc {
+            RetrievedContext::Episodic(eps) => assert_eq!(eps.len(), 1),
+            _ => panic!("Expected Episodic variant"),
+        }
+    }
+
+    #[test]
+    fn test_retrieved_context_semantic_variant() {
+        let cc = CodeContext {
+            files: Vec::new(),
+            total_tokens: 0,
+        };
+        let rc = RetrievedContext::Semantic(cc);
+        match rc {
+            RetrievedContext::Semantic(ctx) => assert!(ctx.files.is_empty()),
+            _ => panic!("Expected Semantic variant"),
+        }
+    }
+
+    #[test]
+    fn test_retrieved_context_complete_variant() {
+        let rc = RetrievedContext::Complete {
+            working: WorkingContext {
+                messages: Vec::new(),
+                active_code: Vec::new(),
+                current_task: None,
+            },
+            episodic: Vec::new(),
+            semantic: CodeContext {
+                files: Vec::new(),
+                total_tokens: 0,
+            },
+        };
+        match rc {
+            RetrievedContext::Complete {
+                working,
+                episodic,
+                semantic,
+            } => {
+                assert!(working.messages.is_empty());
+                assert!(episodic.is_empty());
+                assert!(semantic.files.is_empty());
+            }
+            _ => panic!("Expected Complete variant"),
+        }
+    }
+
+    // ========================================================================
+    // MemoryStats tests
+    // ========================================================================
+
+    #[test]
+    fn test_memory_stats_construction() {
+        let stats = MemoryStats {
+            budget: TokenBudget::default(),
+            usage: MemoryUsage::default(),
+            metrics: MemoryMetrics::default(),
+            working_entries: 5,
+            episodic_entries: 10,
+            semantic_files: 20,
+        };
+        assert_eq!(stats.working_entries, 5);
+        assert_eq!(stats.episodic_entries, 10);
+        assert_eq!(stats.semantic_files, 20);
+    }
+
+    #[test]
+    fn test_memory_stats_serialization_roundtrip() {
+        let stats = MemoryStats {
+            budget: TokenBudget::default(),
+            usage: MemoryUsage {
+                working_tokens: 100,
+                episodic_tokens: 200,
+                semantic_tokens: 300,
+            },
+            metrics: MemoryMetrics::default(),
+            working_entries: 1,
+            episodic_entries: 2,
+            semantic_files: 3,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let deserialized: MemoryStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.working_entries, 1);
+        assert_eq!(deserialized.usage.working_tokens, 100);
+    }
+
+    // ========================================================================
+    // CodeContext and FileContextEntry tests
+    // ========================================================================
+
+    #[test]
+    fn test_code_context_construction() {
+        let ctx = CodeContext {
+            files: vec![FileContextEntry {
+                path: "src/main.rs".to_string(),
+                content: "fn main() {}".to_string(),
+                relevance_score: 0.95,
+            }],
+            total_tokens: 42,
+        };
+        assert_eq!(ctx.files.len(), 1);
+        assert_eq!(ctx.total_tokens, 42);
+        assert_eq!(ctx.files[0].relevance_score, 0.95);
+    }
+
+    #[test]
+    fn test_file_context_entry_serialization() {
+        let entry = FileContextEntry {
+            path: "test.rs".to_string(),
+            content: "code".to_string(),
+            relevance_score: 0.75,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let deserialized: FileContextEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.path, "test.rs");
+        assert_eq!(deserialized.relevance_score, 0.75);
+    }
+
+    // ========================================================================
+    // TokenBudget serialization tests
+    // ========================================================================
+
+    #[test]
+    fn test_token_budget_serialization_roundtrip() {
+        let budget = TokenBudget::for_codebase_analysis();
+        let json = serde_json::to_string(&budget).unwrap();
+        let deserialized: TokenBudget = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.working_memory, 50_000);
+        assert_eq!(deserialized.semantic_memory, 850_000);
+    }
+
+    // ========================================================================
+    // MemoryUsage serialization tests
+    // ========================================================================
+
+    #[test]
+    fn test_memory_usage_serialization_roundtrip() {
+        let usage = MemoryUsage {
+            working_tokens: 111,
+            episodic_tokens: 222,
+            semantic_tokens: 333,
+        };
+        let json = serde_json::to_string(&usage).unwrap();
+        let deserialized: MemoryUsage = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.working_tokens, 111);
+        assert_eq!(deserialized.episodic_tokens, 222);
+        assert_eq!(deserialized.semantic_tokens, 333);
+        assert_eq!(deserialized.total(), 666);
+    }
+
+    // ========================================================================
+    // Edge case: evict_least_important with only system messages
+    // ========================================================================
+
+    #[test]
+    fn test_working_memory_eviction_all_system_messages_cannot_evict() {
+        let mut wm = WorkingMemory::new(100);
+        wm.add_message(
+            make_message("system", "System prompt that is long enough"),
+            1.0,
+        );
+        wm.add_message(
+            make_message("system", "Another system prompt that is also long"),
+            1.0,
+        );
+        assert_eq!(wm.len(), 2);
+    }
+
+    // ========================================================================
+    // Edge case: empty working memory get_context
+    // ========================================================================
+
+    #[test]
+    fn test_working_memory_get_context_empty() {
+        let wm = WorkingMemory::new(10_000);
+        let ctx = wm.get_context();
+        assert!(ctx.messages.is_empty());
+        assert!(ctx.active_code.is_empty());
+        assert!(ctx.current_task.is_none());
+    }
+
+    // ========================================================================
+    // Episodic memory: find_episode for Transient importance
+    // ========================================================================
+
+    #[test]
+    fn test_episodic_memory_find_episode_transient() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut em = EpisodicMemory::new(100_000, embedding);
+
+        em.add_to_tier(make_episode("ep-trans", Importance::Transient, "transient"));
+        let found = em.find_episode("ep-trans");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().importance, Importance::Transient);
+    }
+
+    // ========================================================================
+    // Constants tests
+    // ========================================================================
+
+    #[test]
+    fn test_constants_consistency() {
+        assert_eq!(TOTAL_CONTEXT_TOKENS, 1_000_000);
+        assert_eq!(DEFAULT_WORKING_TOKENS, 100_000);
+        assert_eq!(DEFAULT_EPISODIC_TOKENS, 200_000);
+        assert_eq!(DEFAULT_SEMANTIC_TOKENS, 700_000);
+        assert_eq!(DEFAULT_RESERVE_TOKENS, 100_000);
+
+        assert_eq!(
+            DEFAULT_WORKING_TOKENS + DEFAULT_EPISODIC_TOKENS + DEFAULT_SEMANTIC_TOKENS,
+            TOTAL_CONTEXT_TOKENS
+        );
+    }
+
+    // ========================================================================
+    // current_timestamp_secs utility test
+    // ========================================================================
+
+    #[test]
+    fn test_current_timestamp_secs_returns_positive() {
+        let ts = current_timestamp_secs();
+        assert!(ts > 0, "Timestamp should be positive (after Unix epoch)");
+    }
+
+    // ========================================================================
+    // EpisodicMemory: compress with no normal episodes
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_episodic_memory_compress_oldest_no_normal_episodes() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut em = EpisodicMemory::new(100_000, embedding);
+
+        em.add_to_tier(make_episode("crit-1", Importance::Critical, "critical"));
+        em.add_to_tier(make_episode("high-1", Importance::High, "high"));
+
+        let tokens_before = em.total_tokens();
+        em.compress_oldest().await.unwrap();
+        assert_eq!(em.total_tokens(), tokens_before);
+        assert_eq!(em.tiers.low.len(), 0);
+    }
+
+    // ========================================================================
+    // EpisodicMemory: multiple evictions drain all tiers
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_episodic_memory_try_evict_lowest_returns_false_when_empty() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut em = EpisodicMemory::new(100_000, embedding);
+
+        let result = em.try_evict_lowest().await.unwrap();
+        assert!(!result);
+    }
+
+    // ========================================================================
+    // HierarchicalMemory: budget checks for each dimension
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_hierarchical_memory_over_episodic_budget() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let budget = TokenBudget::default();
+        let mut hm = HierarchicalMemory::new(budget, embedding).await.unwrap();
+
+        hm.usage.episodic_tokens = DEFAULT_EPISODIC_TOKENS + 1;
+        assert!(!hm.is_within_budget());
+    }
+
+    #[tokio::test]
+    async fn test_hierarchical_memory_over_semantic_budget() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let budget = TokenBudget::default();
+        let mut hm = HierarchicalMemory::new(budget, embedding).await.unwrap();
+
+        hm.usage.semantic_tokens = DEFAULT_SEMANTIC_TOKENS + 1;
+        assert!(!hm.is_within_budget());
+    }
+
+    // ========================================================================
+    // IndexedFile and FileContent tests
+    // ========================================================================
+
+    #[test]
+    fn test_indexed_file_construction() {
+        let f = IndexedFile {
+            path: "src/test.rs".to_string(),
+            content: FileContent::Full("fn test() {}".to_string()),
+            token_count: 25,
+            last_modified: 1234567890,
+        };
+        assert_eq!(f.path, "src/test.rs");
+        assert_eq!(f.token_count, 25);
+        assert_eq!(f.last_modified, 1234567890);
+    }
+
+    #[test]
+    fn test_content_chunk_construction() {
+        let chunk = ContentChunk {
+            index: 0,
+            content: "line 1\nline 2".to_string(),
+            token_count: 10,
+            start_line: 0,
+            end_line: 2,
+        };
+        assert_eq!(chunk.index, 0);
+        assert_eq!(chunk.token_count, 10);
+        assert_eq!(chunk.start_line, 0);
+        assert_eq!(chunk.end_line, 2);
+        assert!(chunk.content.contains("line 1"));
+    }
 }

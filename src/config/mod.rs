@@ -2148,4 +2148,1626 @@ mod tests {
     fn test_keyring_service_constant() {
         assert_eq!(KEYRING_SERVICE, "selfware-api-key");
     }
+
+    /// Helper to clear all SELFWARE_* env vars that Config::load reads.
+    /// This prevents env var leakage between parallel tests.
+    fn clear_selfware_env_vars() {
+        for var in &[
+            "SELFWARE_CONFIG",
+            "SELFWARE_ENDPOINT",
+            "SELFWARE_MODEL",
+            "SELFWARE_API_KEY",
+            "SELFWARE_MAX_TOKENS",
+            "SELFWARE_TEMPERATURE",
+            "SELFWARE_TIMEOUT",
+            "SELFWARE_THEME",
+            "SELFWARE_LOG_LEVEL",
+            "SELFWARE_MODE",
+            "SELFWARE_STRICT_PERMISSIONS",
+        ] {
+            std::env::remove_var(var);
+        }
+    }
+
+    // ---- RedactedString comprehensive tests ----
+
+    #[test]
+    fn test_redacted_string_new_and_expose() {
+        let rs = RedactedString::new("my-secret");
+        assert_eq!(rs.expose(), "my-secret");
+    }
+
+    #[test]
+    fn test_redacted_string_new_from_string() {
+        let rs = RedactedString::new(String::from("owned-secret"));
+        assert_eq!(rs.expose(), "owned-secret");
+    }
+
+    #[test]
+    fn test_redacted_string_display_is_redacted() {
+        let rs = RedactedString::new("super-secret-key");
+        let display = format!("{}", rs);
+        assert_eq!(display, "[REDACTED]");
+        assert!(!display.contains("super-secret-key"));
+    }
+
+    #[test]
+    fn test_redacted_string_debug_is_redacted() {
+        let rs = RedactedString::new("super-secret-key");
+        let debug = format!("{:?}", rs);
+        assert_eq!(debug, "[REDACTED]");
+        assert!(!debug.contains("super-secret-key"));
+    }
+
+    #[test]
+    fn test_redacted_string_partial_eq_same() {
+        let a = RedactedString::new("same");
+        let b = RedactedString::new("same");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_redacted_string_partial_eq_different() {
+        let a = RedactedString::new("one");
+        let b = RedactedString::new("two");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_redacted_string_eq_with_str() {
+        let rs = RedactedString::new("hello");
+        assert!(rs == *"hello");
+        assert!(!(rs == *"world"));
+    }
+
+    #[test]
+    fn test_redacted_string_clone() {
+        let original = RedactedString::new("clone-me");
+        let cloned = original.clone();
+        assert_eq!(original, cloned);
+        assert_eq!(cloned.expose(), "clone-me");
+    }
+
+    #[test]
+    fn test_redacted_string_from_string() {
+        let rs: RedactedString = String::from("from-string").into();
+        assert_eq!(rs.expose(), "from-string");
+    }
+
+    #[test]
+    fn test_redacted_string_from_str_ref() {
+        let rs: RedactedString = "from-str-ref".into();
+        assert_eq!(rs.expose(), "from-str-ref");
+    }
+
+    #[test]
+    fn test_redacted_string_serialize_json() {
+        let rs = RedactedString::new("secret-value");
+        let json = serde_json::to_string(&rs).unwrap();
+        assert_eq!(json, r#""secret-value""#);
+    }
+
+    #[test]
+    fn test_redacted_string_deserialize_json() {
+        let rs: RedactedString = serde_json::from_str(r#""deserialized-secret""#).unwrap();
+        assert_eq!(rs.expose(), "deserialized-secret");
+    }
+
+    #[test]
+    fn test_redacted_string_serialize_toml() {
+        #[derive(Serialize, Deserialize)]
+        struct Wrapper {
+            key: RedactedString,
+        }
+        let w = Wrapper {
+            key: RedactedString::new("toml-secret"),
+        };
+        let toml_str = toml::to_string(&w).unwrap();
+        assert!(toml_str.contains("toml-secret"));
+    }
+
+    #[test]
+    fn test_redacted_string_deserialize_toml() {
+        #[derive(Serialize, Deserialize)]
+        struct Wrapper {
+            key: RedactedString,
+        }
+        let toml_str = r#"key = "toml-deserialized""#;
+        let w: Wrapper = toml::from_str(toml_str).unwrap();
+        assert_eq!(w.key.expose(), "toml-deserialized");
+    }
+
+    #[test]
+    fn test_redacted_string_empty() {
+        let rs = RedactedString::new("");
+        assert_eq!(rs.expose(), "");
+        assert_eq!(format!("{}", rs), "[REDACTED]");
+        assert_eq!(format!("{:?}", rs), "[REDACTED]");
+    }
+
+    #[test]
+    fn test_redacted_string_roundtrip_toml() {
+        #[derive(Serialize, Deserialize)]
+        struct Wrapper {
+            key: RedactedString,
+        }
+        let original = Wrapper {
+            key: RedactedString::new("roundtrip-value"),
+        };
+        let toml_str = toml::to_string(&original).unwrap();
+        let parsed: Wrapper = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.key.expose(), "roundtrip-value");
+    }
+
+    // ---- ModelProfile tests ----
+
+    #[test]
+    fn test_model_profile_full_deserialization() {
+        let toml_str = r#"
+            endpoint = "http://192.168.1.170:1234/v1"
+            model = "my-model"
+            api_key = "sk-model-key"
+            max_tokens = 8192
+            temperature = 0.8
+            modalities = ["text", "vision"]
+            context_length = 32768
+        "#;
+        let profile: ModelProfile = toml::from_str(toml_str).unwrap();
+        assert_eq!(profile.endpoint, "http://192.168.1.170:1234/v1");
+        assert_eq!(profile.model, "my-model");
+        assert_eq!(profile.api_key.as_ref().unwrap().expose(), "sk-model-key");
+        assert_eq!(profile.max_tokens, 8192);
+        assert!((profile.temperature - 0.8).abs() < f32::EPSILON);
+        assert_eq!(profile.modalities, vec!["text", "vision"]);
+        assert_eq!(profile.context_length, 32768);
+    }
+
+    #[test]
+    fn test_model_profile_defaults() {
+        let toml_str = r#"
+            endpoint = "http://localhost:8000/v1"
+            model = "default-model"
+        "#;
+        let profile: ModelProfile = toml::from_str(toml_str).unwrap();
+        assert!(profile.api_key.is_none());
+        assert_eq!(profile.max_tokens, 65536);
+        assert!((profile.temperature - 1.0).abs() < f32::EPSILON);
+        assert_eq!(profile.modalities, vec!["text"]);
+        assert_eq!(profile.context_length, 131072);
+    }
+
+    #[test]
+    fn test_model_profile_clone() {
+        let profile = ModelProfile {
+            endpoint: "http://localhost/v1".to_string(),
+            model: "test".to_string(),
+            api_key: Some(RedactedString::new("key")),
+            max_tokens: 100,
+            temperature: 0.5,
+            modalities: vec!["text".to_string()],
+            context_length: 4096,
+        };
+        let cloned = profile.clone();
+        assert_eq!(cloned.endpoint, profile.endpoint);
+        assert_eq!(cloned.model, profile.model);
+        assert_eq!(cloned.max_tokens, profile.max_tokens);
+        assert_eq!(cloned.context_length, profile.context_length);
+    }
+
+    #[test]
+    fn test_model_profile_serialize_roundtrip() {
+        let profile = ModelProfile {
+            endpoint: "http://localhost:8000/v1".to_string(),
+            model: "roundtrip-model".to_string(),
+            api_key: Some(RedactedString::new("rk-123")),
+            max_tokens: 4096,
+            temperature: 0.9,
+            modalities: vec!["text".to_string(), "vision".to_string()],
+            context_length: 16384,
+        };
+        let toml_str = toml::to_string(&profile).unwrap();
+        let parsed: ModelProfile = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.endpoint, profile.endpoint);
+        assert_eq!(parsed.model, profile.model);
+        assert_eq!(parsed.api_key.unwrap().expose(), "rk-123");
+        assert_eq!(parsed.modalities, profile.modalities);
+        assert_eq!(parsed.context_length, profile.context_length);
+    }
+
+    #[test]
+    fn test_model_profile_debug_format() {
+        let profile = ModelProfile {
+            endpoint: "http://localhost/v1".to_string(),
+            model: "debug-test".to_string(),
+            api_key: Some(RedactedString::new("secret")),
+            max_tokens: 100,
+            temperature: 0.5,
+            modalities: vec!["text".to_string()],
+            context_length: 4096,
+        };
+        let debug = format!("{:?}", profile);
+        assert!(debug.contains("ModelProfile"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("secret"));
+    }
+
+    #[test]
+    fn test_default_modalities_fn() {
+        let m = default_modalities();
+        assert_eq!(m, vec!["text".to_string()]);
+    }
+
+    #[test]
+    fn test_default_context_length_fn() {
+        assert_eq!(default_context_length(), 131072);
+    }
+
+    // ---- ExecutionMode tests ----
+
+    #[test]
+    fn test_execution_mode_serialize_deserialize_json() {
+        let modes = vec![
+            (ExecutionMode::Normal, r#""normal""#),
+            (ExecutionMode::AutoEdit, r#""autoedit""#),
+            (ExecutionMode::Yolo, r#""yolo""#),
+            (ExecutionMode::Daemon, r#""daemon""#),
+        ];
+        for (mode, expected_json) in &modes {
+            let json = serde_json::to_string(mode).unwrap();
+            assert_eq!(
+                &json, expected_json,
+                "Serialization mismatch for {:?}",
+                mode
+            );
+            let parsed: ExecutionMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(&parsed, mode, "Deserialization mismatch for {:?}", mode);
+        }
+    }
+
+    #[test]
+    fn test_execution_mode_debug_all() {
+        assert_eq!(format!("{:?}", ExecutionMode::Normal), "Normal");
+        assert_eq!(format!("{:?}", ExecutionMode::AutoEdit), "AutoEdit");
+        assert_eq!(format!("{:?}", ExecutionMode::Yolo), "Yolo");
+        assert_eq!(format!("{:?}", ExecutionMode::Daemon), "Daemon");
+    }
+
+    #[test]
+    fn test_execution_mode_clone_and_copy() {
+        let mode = ExecutionMode::Yolo;
+        let cloned = mode.clone();
+        let copied = mode;
+        assert_eq!(mode, cloned);
+        assert_eq!(mode, copied);
+    }
+
+    #[test]
+    fn test_execution_mode_eq() {
+        assert_eq!(ExecutionMode::Normal, ExecutionMode::Normal);
+        assert_ne!(ExecutionMode::Normal, ExecutionMode::Yolo);
+    }
+
+    // ---- Config resolve_model tests ----
+
+    #[test]
+    fn test_resolve_model_default() {
+        let mut config = Config::default();
+        config.models.insert(
+            "default".to_string(),
+            ModelProfile {
+                endpoint: "http://localhost:8000/v1".to_string(),
+                model: "default-model".to_string(),
+                api_key: None,
+                max_tokens: 65536,
+                temperature: 1.0,
+                modalities: vec!["text".to_string()],
+                context_length: 131072,
+            },
+        );
+        let profile = config.resolve_model(None);
+        assert!(profile.is_some());
+        assert_eq!(profile.unwrap().model, "default-model");
+    }
+
+    #[test]
+    fn test_resolve_model_by_name() {
+        let mut config = Config::default();
+        config.models.insert(
+            "vision".to_string(),
+            ModelProfile {
+                endpoint: "http://localhost:9000/v1".to_string(),
+                model: "vision-model".to_string(),
+                api_key: None,
+                max_tokens: 4096,
+                temperature: 0.5,
+                modalities: vec!["text".to_string(), "vision".to_string()],
+                context_length: 8192,
+            },
+        );
+        let profile = config.resolve_model(Some("vision"));
+        assert!(profile.is_some());
+        assert_eq!(profile.unwrap().model, "vision-model");
+    }
+
+    #[test]
+    fn test_resolve_model_fallback_to_default() {
+        let mut config = Config::default();
+        config.models.insert(
+            "default".to_string(),
+            ModelProfile {
+                endpoint: "http://localhost:8000/v1".to_string(),
+                model: "fallback-model".to_string(),
+                api_key: None,
+                max_tokens: 65536,
+                temperature: 1.0,
+                modalities: vec!["text".to_string()],
+                context_length: 131072,
+            },
+        );
+        let profile = config.resolve_model(Some("nonexistent"));
+        assert!(profile.is_some());
+        assert_eq!(profile.unwrap().model, "fallback-model");
+    }
+
+    #[test]
+    fn test_resolve_model_no_profiles() {
+        let config = Config::default();
+        let profile = config.resolve_model(Some("missing"));
+        assert!(profile.is_none());
+    }
+
+    #[test]
+    fn test_resolve_model_none_with_no_default() {
+        let mut config = Config::default();
+        config.models.insert(
+            "coder".to_string(),
+            ModelProfile {
+                endpoint: "http://localhost:8000/v1".to_string(),
+                model: "coder-model".to_string(),
+                api_key: None,
+                max_tokens: 65536,
+                temperature: 1.0,
+                modalities: vec!["text".to_string()],
+                context_length: 131072,
+            },
+        );
+        let profile = config.resolve_model(None);
+        assert!(profile.is_none());
+    }
+
+    #[test]
+    fn test_config_with_models_section_toml() {
+        let toml_str = r#"
+            endpoint = "http://localhost:8000/v1"
+            model = "top-level-model"
+
+            [models.coder]
+            endpoint = "http://coder-host:1234/v1"
+            model = "coder-model"
+            max_tokens = 8192
+
+            [models.vision]
+            endpoint = "http://vision-host:5678/v1"
+            model = "vision-model"
+            modalities = ["text", "vision"]
+            context_length = 32768
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.models.len(), 2);
+        assert!(config.models.contains_key("coder"));
+        assert!(config.models.contains_key("vision"));
+        let coder = &config.models["coder"];
+        assert_eq!(coder.model, "coder-model");
+        assert_eq!(coder.max_tokens, 8192);
+        let vision = &config.models["vision"];
+        assert_eq!(vision.modalities, vec!["text", "vision"]);
+        assert_eq!(vision.context_length, 32768);
+    }
+
+    #[test]
+    fn test_config_with_default_model_profile_toml() {
+        let toml_str = r#"
+            endpoint = "http://localhost:8000/v1"
+            model = "top-level"
+
+            [models.default]
+            endpoint = "http://override-host:9999/v1"
+            model = "explicit-default"
+            max_tokens = 2048
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let default_profile = config.resolve_model(None);
+        assert!(default_profile.is_some());
+        assert_eq!(default_profile.unwrap().model, "explicit-default");
+        assert_eq!(default_profile.unwrap().max_tokens, 2048);
+    }
+
+    // ---- Config::load with temp file ----
+
+    #[test]
+    fn test_config_load_from_file() {
+        clear_selfware_env_vars();
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("test_config.toml");
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        write!(
+            file,
+            r#"
+endpoint = "http://localhost:9999/v1"
+model = "loaded-model"
+max_tokens = 2048
+temperature = 0.3
+"#
+        )
+        .unwrap();
+
+        let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+        assert_eq!(config.endpoint, "http://localhost:9999/v1");
+        assert_eq!(config.model, "loaded-model");
+        assert_eq!(config.max_tokens, 2048);
+        assert!((config.temperature - 0.3).abs() < f32::EPSILON);
+        assert!(config.models.contains_key("default"));
+        let default_prof = &config.models["default"];
+        assert_eq!(default_prof.endpoint, "http://localhost:9999/v1");
+        assert_eq!(default_prof.model, "loaded-model");
+    }
+
+    #[test]
+    fn test_config_load_with_all_sections() {
+        clear_selfware_env_vars();
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("full_config.toml");
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        write!(
+            file,
+            r#"
+endpoint = "http://localhost:8000/v1"
+model = "full-model"
+max_tokens = 4096
+temperature = 0.7
+
+[safety]
+allowed_paths = ["./**"]
+denied_paths = ["**/.env"]
+protected_branches = ["main"]
+require_confirmation = ["git_push"]
+
+[agent]
+max_iterations = 50
+step_timeout_secs = 120
+token_budget = 200000
+native_function_calling = true
+streaming = false
+min_completion_steps = 5
+
+[yolo]
+enabled = true
+max_operations = 100
+max_hours = 2.0
+
+[ui]
+theme = "ocean"
+animations = false
+compact_mode = true
+verbose_mode = true
+show_tokens = true
+animation_speed = 2.0
+
+[continuous_work]
+enabled = false
+checkpoint_interval_tools = 5
+checkpoint_interval_secs = 60
+
+[retry]
+max_retries = 3
+base_delay_ms = 500
+max_delay_ms = 10000
+
+[models.coder]
+endpoint = "http://coder:1234/v1"
+model = "coder-v1"
+"#
+        )
+        .unwrap();
+
+        let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+        assert_eq!(config.model, "full-model");
+        assert_eq!(config.safety.protected_branches, vec!["main"]);
+        assert_eq!(config.agent.max_iterations, 50);
+        assert!(config.agent.native_function_calling);
+        assert!(!config.agent.streaming);
+        assert_eq!(config.agent.min_completion_steps, 5);
+        assert!(config.yolo.enabled);
+        assert_eq!(config.ui.theme, "ocean");
+        assert!(!config.ui.animations);
+        assert!(!config.continuous_work.enabled);
+        assert_eq!(config.retry.max_retries, 3);
+        assert!(config.compact_mode);
+        assert!(config.verbose_mode);
+        assert!(config.show_tokens);
+        assert!(config.models.contains_key("default"));
+        assert!(config.models.contains_key("coder"));
+    }
+
+    #[test]
+    fn test_config_load_empty_file() {
+        clear_selfware_env_vars();
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("empty_config.toml");
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        write!(file, "").unwrap();
+
+        let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+        assert_eq!(config.endpoint, "http://localhost:8000/v1");
+        assert_eq!(config.model, "Qwen/Qwen3-Coder-Next-FP8");
+        assert_eq!(config.max_tokens, 65536);
+        assert!(config.models.contains_key("default"));
+    }
+
+    #[test]
+    fn test_config_load_invalid_toml_file() {
+        clear_selfware_env_vars();
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("bad_config.toml");
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        write!(file, "this {{ is not }} valid toml!!!").unwrap();
+
+        let result = Config::load(Some(config_path.to_str().unwrap()));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to parse config"));
+    }
+
+    #[test]
+    fn test_config_load_validates() {
+        clear_selfware_env_vars();
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("invalid_config.toml");
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        write!(
+            file,
+            r#"
+endpoint = "ftp://bad-scheme.example.com"
+model = "test"
+"#
+        )
+        .unwrap();
+
+        let result = Config::load(Some(config_path.to_str().unwrap()));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("http:// or https://"));
+    }
+
+    #[test]
+    fn test_config_load_synthesizes_default_model_profile() {
+        clear_selfware_env_vars();
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("synth_config.toml");
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        write!(
+            file,
+            r#"
+endpoint = "http://localhost:8000/v1"
+model = "synth-model"
+max_tokens = 1024
+temperature = 0.5
+api_key = "sk-synth-key"
+"#
+        )
+        .unwrap();
+
+        let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+        let default_prof = config
+            .models
+            .get("default")
+            .expect("default profile must exist");
+        assert_eq!(default_prof.endpoint, config.endpoint);
+        assert_eq!(default_prof.model, config.model);
+        assert_eq!(default_prof.max_tokens, config.max_tokens);
+        assert!((default_prof.temperature - config.temperature).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_config_load_does_not_overwrite_explicit_default_profile() {
+        clear_selfware_env_vars();
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("explicit_default.toml");
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        write!(
+            file,
+            r#"
+endpoint = "http://localhost:8000/v1"
+model = "top-level"
+
+[models.default]
+endpoint = "http://explicit-default:1234/v1"
+model = "explicit-default-model"
+"#
+        )
+        .unwrap();
+
+        let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+        let default_prof = config.models.get("default").unwrap();
+        assert_eq!(default_prof.model, "explicit-default-model");
+        assert_eq!(default_prof.endpoint, "http://explicit-default:1234/v1");
+    }
+
+    // ---- Config::validate edge cases ----
+
+    #[test]
+    fn test_validate_high_temperature_still_valid() {
+        let config = Config {
+            temperature: 15.0,
+            ..Config::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_boundary_temperature() {
+        let config = Config {
+            temperature: 10.0,
+            ..Config::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_excessive_token_budget() {
+        let mut config = Config::default();
+        config.agent.token_budget = 100_000_000;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("token_budget"));
+        assert!(err.to_string().contains("exceeds maximum allowed"));
+    }
+
+    #[test]
+    fn test_validate_high_step_timeout_still_valid() {
+        let mut config = Config::default();
+        config.agent.step_timeout_secs = 7200;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_empty_api_key_still_valid() {
+        let config = Config {
+            api_key: Some(RedactedString::new("")),
+            ..Config::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_negative_animation_speed() {
+        let mut config = Config::default();
+        config.ui.animation_speed = -1.0;
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("animation_speed must be positive"));
+    }
+
+    #[test]
+    fn test_validate_excessive_animation_speed_still_valid() {
+        let mut config = Config::default();
+        config.ui.animation_speed = 200.0;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_endpoint_http_slash_only() {
+        let config = Config {
+            endpoint: "http:///path".to_string(),
+            ..Config::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("no host"));
+    }
+
+    #[test]
+    fn test_validate_endpoint_https_slash_only() {
+        let config = Config {
+            endpoint: "https://".to_string(),
+            ..Config::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("no host"));
+    }
+
+    #[test]
+    fn test_validate_max_tokens_at_limit() {
+        let config = Config {
+            max_tokens: 10_000_000,
+            ..Config::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_max_tokens_over_limit() {
+        let config = Config {
+            max_tokens: 10_000_001,
+            ..Config::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("exceeds maximum allowed"));
+    }
+
+    #[test]
+    fn test_validate_retry_equal_delays() {
+        let mut config = Config::default();
+        config.retry.base_delay_ms = 5000;
+        config.retry.max_delay_ms = 5000;
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_remote_http_endpoint_still_valid() {
+        let config = Config {
+            endpoint: "http://remote-server.example.com:8080/v1".to_string(),
+            ..Config::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    // ---- is_local_endpoint additional edge cases ----
+
+    #[test]
+    fn test_is_local_endpoint_localhost_no_port() {
+        assert!(is_local_endpoint("http://localhost/v1"));
+        assert!(is_local_endpoint("https://localhost"));
+    }
+
+    #[test]
+    fn test_is_local_endpoint_127_no_port() {
+        assert!(is_local_endpoint("http://127.0.0.1/path"));
+    }
+
+    #[test]
+    fn test_is_local_endpoint_ipv6_no_port() {
+        assert!(is_local_endpoint("http://[::1]/v1"));
+    }
+
+    #[test]
+    fn test_is_local_endpoint_ipv6_with_port() {
+        assert!(is_local_endpoint("http://[::1]:8000/v1"));
+    }
+
+    #[test]
+    fn test_is_local_endpoint_ipv6_non_loopback() {
+        assert!(!is_local_endpoint("http://[::2]:8000/v1"));
+    }
+
+    #[test]
+    fn test_is_local_endpoint_private_network() {
+        assert!(!is_local_endpoint("http://192.168.1.1:8000/v1"));
+        assert!(!is_local_endpoint("http://10.0.0.1:8000/v1"));
+        assert!(!is_local_endpoint("http://172.16.0.1:8000/v1"));
+    }
+
+    #[test]
+    fn test_is_local_endpoint_empty_string() {
+        assert!(!is_local_endpoint(""));
+    }
+
+    #[test]
+    fn test_is_local_endpoint_no_scheme_bare() {
+        assert!(!is_local_endpoint("localhost:8000"));
+    }
+
+    #[test]
+    fn test_is_local_endpoint_malformed_ipv6() {
+        assert!(!is_local_endpoint("http://[::1:8000/v1"));
+    }
+
+    // ---- EvolutionTomlConfig tests ----
+
+    #[test]
+    fn test_evolution_config_default() {
+        let config = EvolutionTomlConfig::default();
+        assert!(config.prompt_logic.is_empty());
+        assert!(config.tool_code.is_empty());
+        assert!(config.cognitive.is_empty());
+        assert!(config.config_keys.is_empty());
+    }
+
+    #[test]
+    fn test_evolution_config_deserialization() {
+        let toml_str = r#"
+            prompt_logic = ["src/prompt.rs"]
+            tool_code = ["src/tools/mod.rs", "src/tools/shell.rs"]
+            cognitive = ["src/agent/think.rs"]
+            config_keys = ["temperature", "max_tokens"]
+        "#;
+        let config: EvolutionTomlConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.prompt_logic, vec!["src/prompt.rs"]);
+        assert_eq!(config.tool_code.len(), 2);
+        assert_eq!(config.cognitive, vec!["src/agent/think.rs"]);
+        assert_eq!(config.config_keys.len(), 2);
+    }
+
+    #[test]
+    fn test_evolution_config_serialize_roundtrip() {
+        let config = EvolutionTomlConfig {
+            prompt_logic: vec!["a.rs".to_string()],
+            tool_code: vec!["b.rs".to_string()],
+            cognitive: vec!["c.rs".to_string()],
+            config_keys: vec!["key1".to_string()],
+        };
+        let toml_str = toml::to_string(&config).unwrap();
+        let parsed: EvolutionTomlConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.prompt_logic, config.prompt_logic);
+        assert_eq!(parsed.tool_code, config.tool_code);
+    }
+
+    #[test]
+    fn test_config_with_evolution_section() {
+        let toml_str = r#"
+            endpoint = "http://localhost:8000/v1"
+
+            [evolution]
+            prompt_logic = ["src/prompt.rs"]
+            tool_code = ["src/tools.rs"]
+            config_keys = ["temperature"]
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.evolution.prompt_logic, vec!["src/prompt.rs"]);
+        assert_eq!(config.evolution.tool_code, vec!["src/tools.rs"]);
+        assert_eq!(config.evolution.config_keys, vec!["temperature"]);
+    }
+
+    // ---- ContinuousWorkConfig additional tests ----
+
+    #[test]
+    fn test_continuous_work_config_serialize_roundtrip() {
+        let config = ContinuousWorkConfig {
+            enabled: false,
+            checkpoint_interval_tools: 20,
+            checkpoint_interval_secs: 600,
+            auto_recovery: false,
+            max_recovery_attempts: 10,
+        };
+        let toml_str = toml::to_string(&config).unwrap();
+        let parsed: ContinuousWorkConfig = toml::from_str(&toml_str).unwrap();
+        assert!(!parsed.enabled);
+        assert_eq!(parsed.checkpoint_interval_tools, 20);
+        assert_eq!(parsed.checkpoint_interval_secs, 600);
+        assert!(!parsed.auto_recovery);
+        assert_eq!(parsed.max_recovery_attempts, 10);
+    }
+
+    #[test]
+    fn test_continuous_work_config_partial_toml() {
+        let toml_str = r#"
+            enabled = false
+        "#;
+        let config: ContinuousWorkConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.enabled);
+        assert_eq!(config.checkpoint_interval_tools, 10);
+        assert_eq!(config.checkpoint_interval_secs, 300);
+        assert!(config.auto_recovery);
+        assert_eq!(config.max_recovery_attempts, 3);
+    }
+
+    // ---- RetrySettings additional tests ----
+
+    #[test]
+    fn test_retry_settings_serialize_roundtrip() {
+        let config = RetrySettings {
+            max_retries: 10,
+            base_delay_ms: 200,
+            max_delay_ms: 30000,
+        };
+        let toml_str = toml::to_string(&config).unwrap();
+        let parsed: RetrySettings = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.max_retries, 10);
+        assert_eq!(parsed.base_delay_ms, 200);
+        assert_eq!(parsed.max_delay_ms, 30000);
+    }
+
+    #[test]
+    fn test_retry_settings_partial_toml() {
+        let toml_str = r#"
+            max_retries = 2
+        "#;
+        let config: RetrySettings = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.max_retries, 2);
+        assert_eq!(config.base_delay_ms, 1000);
+        assert_eq!(config.max_delay_ms, 60000);
+    }
+
+    // ---- UiConfig additional tests ----
+
+    #[test]
+    fn test_ui_config_verbose_mode_toml() {
+        let toml_str = r#"
+            endpoint = "http://localhost:8000/v1"
+
+            [ui]
+            verbose_mode = true
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.ui.verbose_mode);
+        assert_eq!(config.ui.theme, "amber");
+        assert!(config.ui.animations);
+    }
+
+    #[test]
+    fn test_ui_config_all_themes() {
+        for theme in &["amber", "ocean", "minimal", "high-contrast"] {
+            let toml_str = format!(
+                r#"
+                endpoint = "http://localhost:8000/v1"
+                [ui]
+                theme = "{}"
+                "#,
+                theme
+            );
+            let config: Config = toml::from_str(&toml_str).unwrap();
+            assert_eq!(config.ui.theme, *theme);
+        }
+    }
+
+    // ---- YoloFileConfig additional tests ----
+
+    #[test]
+    fn test_yolo_file_config_serialize_roundtrip() {
+        let config = YoloFileConfig {
+            enabled: true,
+            max_operations: 200,
+            max_hours: 6.5,
+            allow_git_push: false,
+            allow_destructive_shell: true,
+            audit_log_path: Some(PathBuf::from("/var/log/audit.log")),
+            status_interval: 75,
+        };
+        let toml_str = toml::to_string(&config).unwrap();
+        let parsed: YoloFileConfig = toml::from_str(&toml_str).unwrap();
+        assert!(parsed.enabled);
+        assert_eq!(parsed.max_operations, 200);
+        assert!((parsed.max_hours - 6.5).abs() < f64::EPSILON);
+        assert!(!parsed.allow_git_push);
+        assert!(parsed.allow_destructive_shell);
+        assert_eq!(
+            parsed.audit_log_path,
+            Some(PathBuf::from("/var/log/audit.log"))
+        );
+        assert_eq!(parsed.status_interval, 75);
+    }
+
+    #[test]
+    fn test_yolo_file_config_no_audit_log() {
+        let toml_str = r#"
+            enabled = true
+        "#;
+        let config: YoloFileConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.audit_log_path.is_none());
+        assert!(config.allow_git_push);
+        assert!(!config.allow_destructive_shell);
+        assert_eq!(config.status_interval, 100);
+    }
+
+    // ---- SafetyConfig additional tests ----
+
+    #[test]
+    fn test_safety_config_strict_permissions_toml() {
+        let toml_str = r#"
+            endpoint = "http://localhost:8000/v1"
+
+            [safety]
+            strict_permissions = true
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.safety.strict_permissions);
+    }
+
+    #[test]
+    fn test_safety_config_serialize_roundtrip() {
+        let config = SafetyConfig {
+            allowed_paths: vec!["/a/**".to_string(), "/b/**".to_string()],
+            denied_paths: vec!["**/.secret".to_string()],
+            protected_branches: vec!["main".to_string(), "release".to_string()],
+            require_confirmation: vec!["deploy".to_string()],
+            strict_permissions: true,
+        };
+        let toml_str = toml::to_string(&config).unwrap();
+        let parsed: SafetyConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.allowed_paths, config.allowed_paths);
+        assert_eq!(parsed.denied_paths, config.denied_paths);
+        assert_eq!(parsed.protected_branches, config.protected_branches);
+        assert_eq!(parsed.require_confirmation, config.require_confirmation);
+        assert!(parsed.strict_permissions);
+    }
+
+    // ---- AgentConfig additional tests ----
+
+    #[test]
+    fn test_agent_config_native_function_calling() {
+        let toml_str = r#"
+            endpoint = "http://localhost:8000/v1"
+
+            [agent]
+            native_function_calling = true
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.agent.native_function_calling);
+    }
+
+    #[test]
+    fn test_agent_config_streaming_disabled() {
+        let toml_str = r#"
+            endpoint = "http://localhost:8000/v1"
+
+            [agent]
+            streaming = false
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(!config.agent.streaming);
+    }
+
+    #[test]
+    fn test_agent_config_min_completion_steps_toml() {
+        let toml_str = r#"
+            endpoint = "http://localhost:8000/v1"
+
+            [agent]
+            min_completion_steps = 10
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.agent.min_completion_steps, 10);
+    }
+
+    #[test]
+    fn test_agent_config_require_verification_toml() {
+        let toml_str = r#"
+            endpoint = "http://localhost:8000/v1"
+
+            [agent]
+            require_verification_before_completion = false
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(!config.agent.require_verification_before_completion);
+    }
+
+    #[test]
+    fn test_agent_config_serialize_roundtrip() {
+        let config = AgentConfig {
+            max_iterations: 25,
+            step_timeout_secs: 60,
+            token_budget: 100000,
+            native_function_calling: true,
+            streaming: false,
+            min_completion_steps: 7,
+            require_verification_before_completion: false,
+        };
+        let toml_str = toml::to_string(&config).unwrap();
+        let parsed: AgentConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.max_iterations, 25);
+        assert_eq!(parsed.step_timeout_secs, 60);
+        assert_eq!(parsed.token_budget, 100000);
+        assert!(parsed.native_function_calling);
+        assert!(!parsed.streaming);
+        assert_eq!(parsed.min_completion_steps, 7);
+        assert!(!parsed.require_verification_before_completion);
+    }
+
+    // ---- Default function coverage ----
+
+    #[test]
+    fn test_default_theme_fn() {
+        assert_eq!(default_theme(), "amber");
+    }
+
+    #[test]
+    fn test_default_animation_speed_fn() {
+        assert!((default_animation_speed() - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_default_checkpoint_interval_tools_fn() {
+        assert_eq!(default_checkpoint_interval_tools(), 10);
+    }
+
+    #[test]
+    fn test_default_checkpoint_interval_secs_fn() {
+        assert_eq!(default_checkpoint_interval_secs(), 300);
+    }
+
+    #[test]
+    fn test_default_max_recovery_attempts_fn() {
+        assert_eq!(default_max_recovery_attempts(), 3);
+    }
+
+    #[test]
+    fn test_default_retry_max_retries_fn() {
+        assert_eq!(default_retry_max_retries(), 5);
+    }
+
+    #[test]
+    fn test_default_retry_base_delay_ms_fn() {
+        assert_eq!(default_retry_base_delay_ms(), 1000);
+    }
+
+    #[test]
+    fn test_default_retry_max_delay_ms_fn() {
+        assert_eq!(default_retry_max_delay_ms(), 60000);
+    }
+
+    #[test]
+    fn test_default_min_completion_steps_fn() {
+        assert_eq!(default_min_completion_steps(), 3);
+    }
+
+    #[test]
+    fn test_default_denied_paths_fn() {
+        let paths = default_denied_paths();
+        assert_eq!(paths.len(), 4);
+        assert!(paths.contains(&"**/.env".to_string()));
+        assert!(paths.contains(&"**/.env.local".to_string()));
+        assert!(paths.contains(&"**/.ssh/**".to_string()));
+        assert!(paths.contains(&"**/secrets/**".to_string()));
+    }
+
+    // ---- Config::Debug output completeness ----
+
+    #[test]
+    fn test_config_debug_contains_all_fields() {
+        let config = Config::default();
+        let debug = format!("{:?}", config);
+        assert!(debug.contains("endpoint"));
+        assert!(debug.contains("model"));
+        assert!(debug.contains("max_tokens"));
+        assert!(debug.contains("temperature"));
+        assert!(debug.contains("api_key"));
+        assert!(debug.contains("safety"));
+        assert!(debug.contains("agent"));
+        assert!(debug.contains("yolo"));
+        assert!(debug.contains("ui"));
+        assert!(debug.contains("continuous_work"));
+        assert!(debug.contains("retry"));
+        assert!(debug.contains("resources"));
+        assert!(debug.contains("evolution"));
+        assert!(debug.contains("models"));
+        assert!(debug.contains("execution_mode"));
+        assert!(debug.contains("compact_mode"));
+        assert!(debug.contains("verbose_mode"));
+        assert!(debug.contains("show_tokens"));
+    }
+
+    // ---- Config serde skip fields ----
+
+    #[test]
+    fn test_config_serde_skip_fields_not_serialized() {
+        let config = Config {
+            execution_mode: ExecutionMode::Yolo,
+            compact_mode: true,
+            verbose_mode: true,
+            show_tokens: true,
+            ..Config::default()
+        };
+        let toml_str = toml::to_string(&config).unwrap();
+        assert!(!toml_str.contains("execution_mode"));
+    }
+
+    #[test]
+    fn test_config_serde_skip_fields_deserialized_as_default() {
+        let toml_str = r#"
+            endpoint = "http://localhost:8000/v1"
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.execution_mode, ExecutionMode::Normal);
+        assert!(!config.compact_mode);
+        assert!(!config.verbose_mode);
+        assert!(!config.show_tokens);
+    }
+
+    // ---- Config with API key in model profiles ----
+
+    #[test]
+    fn test_model_profile_with_and_without_api_key() {
+        let toml_str = r#"
+            endpoint = "http://localhost:8000/v1"
+            model = "base"
+
+            [models.with_key]
+            endpoint = "http://host1/v1"
+            model = "model-with-key"
+            api_key = "sk-profile-key-123"
+
+            [models.without_key]
+            endpoint = "http://host2/v1"
+            model = "model-without-key"
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let with_key = &config.models["with_key"];
+        assert_eq!(
+            with_key.api_key.as_ref().unwrap().expose(),
+            "sk-profile-key-123"
+        );
+        let without_key = &config.models["without_key"];
+        assert!(without_key.api_key.is_none());
+    }
+
+    // ---- Full config roundtrip with models ----
+
+    #[test]
+    fn test_config_full_roundtrip_with_models() {
+        let mut models = HashMap::new();
+        models.insert(
+            "coder".to_string(),
+            ModelProfile {
+                endpoint: "http://coder:1234/v1".to_string(),
+                model: "coder-v1".to_string(),
+                api_key: Some(RedactedString::new("ck-123")),
+                max_tokens: 8192,
+                temperature: 0.7,
+                modalities: vec!["text".to_string()],
+                context_length: 32768,
+            },
+        );
+        models.insert(
+            "vision".to_string(),
+            ModelProfile {
+                endpoint: "http://vision:5678/v1".to_string(),
+                model: "vision-v1".to_string(),
+                api_key: None,
+                max_tokens: 4096,
+                temperature: 0.5,
+                modalities: vec!["text".to_string(), "vision".to_string()],
+                context_length: 16384,
+            },
+        );
+
+        let config = Config {
+            models,
+            ..Config::default()
+        };
+
+        let toml_str = toml::to_string(&config).unwrap();
+        let parsed: Config = toml::from_str(&toml_str).unwrap();
+
+        assert_eq!(parsed.models.len(), 2);
+        assert_eq!(parsed.models["coder"].model, "coder-v1");
+        assert_eq!(
+            parsed.models["coder"].api_key.as_ref().unwrap().expose(),
+            "ck-123"
+        );
+        assert_eq!(parsed.models["vision"].modalities, vec!["text", "vision"]);
+    }
+
+    // ---- Edge case: all empty collections ----
+
+    #[test]
+    fn test_config_all_empty_collections() {
+        let toml_str = r#"
+            endpoint = "http://localhost:8000/v1"
+
+            [safety]
+            allowed_paths = []
+            denied_paths = []
+            protected_branches = []
+            require_confirmation = []
+
+            [evolution]
+            prompt_logic = []
+            tool_code = []
+            cognitive = []
+            config_keys = []
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.safety.allowed_paths.is_empty());
+        assert!(config.safety.denied_paths.is_empty());
+        assert!(config.safety.protected_branches.is_empty());
+        assert!(config.safety.require_confirmation.is_empty());
+        assert!(config.evolution.prompt_logic.is_empty());
+        assert!(config.evolution.tool_code.is_empty());
+        assert!(config.evolution.cognitive.is_empty());
+        assert!(config.evolution.config_keys.is_empty());
+    }
+
+    // ---- ApiKeySource coverage ----
+
+    #[test]
+    fn test_api_key_source_debug_and_clone() {
+        let src = ApiKeySource::EnvVar;
+        let debug = format!("{:?}", src);
+        assert_eq!(debug, "EnvVar");
+
+        let cloned = src.clone();
+        assert_eq!(src, cloned);
+    }
+
+    #[test]
+    fn test_api_key_source_all_variants_debug() {
+        assert_eq!(format!("{:?}", ApiKeySource::None), "None");
+        assert_eq!(format!("{:?}", ApiKeySource::EnvVar), "EnvVar");
+        assert_eq!(format!("{:?}", ApiKeySource::Keyring), "Keyring");
+        assert_eq!(format!("{:?}", ApiKeySource::ConfigFile), "ConfigFile");
+    }
+
+    #[test]
+    fn test_api_key_source_copy() {
+        let src = ApiKeySource::Keyring;
+        let copied = src;
+        assert_eq!(src, copied);
+    }
+
+    // ---- ResourcesConfig in Config ----
+
+    #[test]
+    fn test_config_with_resources_section() {
+        let toml_str = r#"
+            endpoint = "http://localhost:8000/v1"
+
+            [resources.gpu]
+            monitor_interval_seconds = 10
+            temperature_threshold = 90
+            memory_utilization_threshold = 0.8
+            throttle_on_overheat = false
+
+            [resources.memory]
+            warning_threshold = 0.6
+            critical_threshold = 0.8
+            emergency_threshold = 0.9
+            monitor_interval_seconds = 5
+
+            [resources.disk]
+            max_usage_percent = 0.9
+            maintenance_interval_seconds = 7200
+            compress_after_days = 3
+
+            [resources.quotas]
+            max_gpu_memory_per_model = 8589934592
+            max_concurrent_requests = 4
+            max_context_tokens = 65536
+            max_queued_tasks = 50
+            max_checkpoint_size = 1073741824
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.resources.gpu.monitor_interval_seconds, 10);
+        assert_eq!(config.resources.gpu.temperature_threshold, 90);
+        assert!(!config.resources.gpu.throttle_on_overheat);
+        assert!((config.resources.memory.warning_threshold - 0.6).abs() < f32::EPSILON);
+        assert_eq!(config.resources.disk.compress_after_days, 3);
+        assert_eq!(config.resources.quotas.max_concurrent_requests, 4);
+    }
+
+    // ---- ModelProfile modalities variations ----
+
+    #[test]
+    fn test_model_profile_empty_modalities() {
+        let toml_str = r#"
+            endpoint = "http://localhost/v1"
+            model = "test"
+            modalities = []
+        "#;
+        let profile: ModelProfile = toml::from_str(toml_str).unwrap();
+        assert!(profile.modalities.is_empty());
+    }
+
+    #[test]
+    fn test_model_profile_multiple_modalities() {
+        let toml_str = r#"
+            endpoint = "http://localhost/v1"
+            model = "test"
+            modalities = ["text", "vision", "audio"]
+        "#;
+        let profile: ModelProfile = toml::from_str(toml_str).unwrap();
+        assert_eq!(profile.modalities.len(), 3);
+        assert_eq!(profile.modalities[2], "audio");
+    }
+
+    // ---- Config load with validation failure on load ----
+
+    #[test]
+    fn test_config_load_fails_on_zero_max_tokens() {
+        clear_selfware_env_vars();
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("zero_tokens.toml");
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        write!(
+            file,
+            r#"
+endpoint = "http://localhost:8000/v1"
+max_tokens = 0
+"#
+        )
+        .unwrap();
+
+        let result = Config::load(Some(config_path.to_str().unwrap()));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("max_tokens must be greater than 0"));
+    }
+
+    #[test]
+    fn test_config_load_fails_on_empty_model() {
+        clear_selfware_env_vars();
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("empty_model.toml");
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        write!(
+            file,
+            r#"
+endpoint = "http://localhost:8000/v1"
+model = "   "
+"#
+        )
+        .unwrap();
+
+        let result = Config::load(Some(config_path.to_str().unwrap()));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("model name must not be empty"));
+    }
+
+    #[test]
+    fn test_config_load_fails_on_empty_endpoint() {
+        clear_selfware_env_vars();
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("empty_ep.toml");
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        write!(
+            file,
+            r#"
+endpoint = ""
+"#
+        )
+        .unwrap();
+
+        let result = Config::load(Some(config_path.to_str().unwrap()));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("endpoint must not be empty"));
+    }
+
+    // ---- Config load: UI settings applied to top-level flags ----
+
+    #[test]
+    fn test_config_load_applies_ui_to_top_level() {
+        clear_selfware_env_vars();
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("ui_apply.toml");
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        write!(
+            file,
+            r#"
+endpoint = "http://localhost:8000/v1"
+
+[ui]
+compact_mode = true
+verbose_mode = true
+show_tokens = true
+"#
+        )
+        .unwrap();
+
+        let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+        assert!(config.compact_mode);
+        assert!(config.verbose_mode);
+        assert!(config.show_tokens);
+    }
+
+    // ---- Config::load with nonexistent path ----
+
+    #[test]
+    fn test_config_load_nonexistent_path_error_message() {
+        let result = Config::load(Some("/absolutely/does/not/exist/config.toml"));
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Failed to read config") || err_msg.contains("No such file"),
+            "Error message was: {}",
+            err_msg
+        );
+    }
+
+    // ---- Permissions check on Unix ----
+
+    #[cfg(unix)]
+    #[test]
+    fn test_config_load_strict_permissions_error() {
+        clear_selfware_env_vars();
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("permissive.toml");
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        write!(
+            file,
+            r#"
+endpoint = "http://localhost:8000/v1"
+
+[safety]
+strict_permissions = true
+"#
+        )
+        .unwrap();
+
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let result = Config::load(Some(config_path.to_str().unwrap()));
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("insecure permissions"),
+            "Error message was: {}",
+            err_msg
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_config_load_strict_permissions_ok_when_600() {
+        clear_selfware_env_vars();
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("secure.toml");
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        write!(
+            file,
+            r#"
+endpoint = "http://localhost:8000/v1"
+
+[safety]
+strict_permissions = true
+"#
+        )
+        .unwrap();
+
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let result = Config::load(Some(config_path.to_str().unwrap()));
+        assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_config_load_permissive_without_strict_is_ok() {
+        clear_selfware_env_vars();
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("permissive_no_strict.toml");
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        write!(
+            file,
+            r#"
+endpoint = "http://localhost:8000/v1"
+
+[safety]
+strict_permissions = false
+"#
+        )
+        .unwrap();
+
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let result = Config::load(Some(config_path.to_str().unwrap()));
+        assert!(result.is_ok());
+    }
 }

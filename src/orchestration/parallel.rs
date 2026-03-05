@@ -1649,3 +1649,1493 @@ mod execution_stats_tests {
         assert_eq!(stats.parallel(), 0);
     }
 }
+
+// ============================================================================
+// Additional comprehensive tests for uncovered lines
+// ============================================================================
+
+#[cfg(test)]
+mod extract_path_tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_path_with_directory_key() {
+        let args = serde_json::json!({"directory": "/home/user/project"});
+        assert_eq!(extract_path(&args), Some("/home/user/project".to_string()));
+    }
+
+    #[test]
+    fn test_extract_path_prefers_path_over_file() {
+        let args = serde_json::json!({"path": "/a.txt", "file": "/b.txt"});
+        assert_eq!(extract_path(&args), Some("/a.txt".to_string()));
+    }
+
+    #[test]
+    fn test_extract_path_falls_back_to_file() {
+        let args = serde_json::json!({"file": "/b.txt"});
+        assert_eq!(extract_path(&args), Some("/b.txt".to_string()));
+    }
+
+    #[test]
+    fn test_extract_path_falls_back_to_directory() {
+        let args = serde_json::json!({"directory": "/c"});
+        assert_eq!(extract_path(&args), Some("/c".to_string()));
+    }
+
+    #[test]
+    fn test_extract_path_non_string_value() {
+        let args = serde_json::json!({"path": 42});
+        assert_eq!(extract_path(&args), None);
+    }
+
+    #[test]
+    fn test_extract_path_empty_object() {
+        let args = serde_json::json!({});
+        assert_eq!(extract_path(&args), None);
+    }
+
+    #[test]
+    fn test_extract_path_null_value() {
+        let args = serde_json::json!({"path": null});
+        assert_eq!(extract_path(&args), None);
+    }
+}
+
+#[cfg(test)]
+mod node_status_tests {
+    use super::*;
+
+    #[test]
+    fn test_node_status_variants_equality() {
+        assert_eq!(NodeStatus::Pending, NodeStatus::Pending);
+        assert_eq!(NodeStatus::Ready, NodeStatus::Ready);
+        assert_eq!(NodeStatus::Running, NodeStatus::Running);
+        assert_eq!(NodeStatus::Completed, NodeStatus::Completed);
+        assert_eq!(NodeStatus::Failed, NodeStatus::Failed);
+    }
+
+    #[test]
+    fn test_node_status_inequality() {
+        assert_ne!(NodeStatus::Pending, NodeStatus::Ready);
+        assert_ne!(NodeStatus::Running, NodeStatus::Completed);
+        assert_ne!(NodeStatus::Completed, NodeStatus::Failed);
+    }
+
+    #[test]
+    fn test_node_status_clone() {
+        let status = NodeStatus::Running;
+        let cloned = status;
+        assert_eq!(status, cloned);
+    }
+
+    #[test]
+    fn test_node_status_debug() {
+        let debug_str = format!("{:?}", NodeStatus::Pending);
+        assert_eq!(debug_str, "Pending");
+        assert_eq!(format!("{:?}", NodeStatus::Ready), "Ready");
+        assert_eq!(format!("{:?}", NodeStatus::Running), "Running");
+        assert_eq!(format!("{:?}", NodeStatus::Completed), "Completed");
+        assert_eq!(format!("{:?}", NodeStatus::Failed), "Failed");
+    }
+}
+
+#[cfg(test)]
+mod dependency_graph_extended_tests {
+    use super::*;
+
+    #[test]
+    fn test_dependency_graph_default() {
+        let graph = DependencyGraph::default();
+        assert!(graph.is_empty());
+        assert_eq!(graph.len(), 0);
+        assert!(graph.levels().is_empty());
+    }
+
+    #[test]
+    fn test_add_dependency_duplicate_is_idempotent() {
+        let mut graph = DependencyGraph::new();
+        graph.add_node("a", "file_read", serde_json::json!({}));
+        graph.add_node("b", "file_write", serde_json::json!({}));
+
+        graph.add_dependency("a", "b");
+        graph.add_dependency("a", "b"); // duplicate
+
+        let node_b = graph.get_node("b").unwrap();
+        // Should only contain "a" once
+        assert_eq!(node_b.depends_on.iter().filter(|d| *d == "a").count(), 1);
+
+        let node_a = graph.get_node("a").unwrap();
+        // Should only contain "b" once
+        assert_eq!(node_a.dependents.iter().filter(|d| *d == "b").count(), 1);
+    }
+
+    #[test]
+    fn test_add_dependency_nonexistent_from_node() {
+        let mut graph = DependencyGraph::new();
+        graph.add_node("b", "file_write", serde_json::json!({}));
+        // "a" does not exist
+        graph.add_dependency("a", "b");
+
+        let node_b = graph.get_node("b").unwrap();
+        assert!(node_b.depends_on.contains(&"a".to_string()));
+    }
+
+    #[test]
+    fn test_add_dependency_nonexistent_to_node() {
+        let mut graph = DependencyGraph::new();
+        graph.add_node("a", "file_read", serde_json::json!({}));
+        // "b" does not exist
+        graph.add_dependency("a", "b");
+
+        let node_a = graph.get_node("a").unwrap();
+        // "b" should NOT be in dependents because "b" node doesn't exist
+        // Actually the code still modifies "a" since it does `get_mut(from)`
+        assert!(node_a.dependents.contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn test_compute_levels_circular_dependency() {
+        let mut graph = DependencyGraph::new();
+        graph.add_node("a", "tool1", serde_json::json!({}));
+        graph.add_node("b", "tool2", serde_json::json!({}));
+        graph.add_dependency("a", "b");
+        graph.add_dependency("b", "a");
+
+        let result = graph.compute_levels();
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Circular dependency"));
+    }
+
+    #[test]
+    fn test_compute_levels_three_level_chain() {
+        let mut graph = DependencyGraph::new();
+        graph.add_node("a", "tool1", serde_json::json!({}));
+        graph.add_node("b", "tool2", serde_json::json!({}));
+        graph.add_node("c", "tool3", serde_json::json!({}));
+        graph.add_dependency("a", "b");
+        graph.add_dependency("b", "c");
+
+        graph.compute_levels().unwrap();
+        let levels = graph.levels();
+        assert_eq!(levels.len(), 3);
+        assert!(levels[0].contains(&"a".to_string()));
+        assert!(levels[1].contains(&"b".to_string()));
+        assert!(levels[2].contains(&"c".to_string()));
+    }
+
+    #[test]
+    fn test_compute_levels_priority_sorting() {
+        let mut graph = DependencyGraph::new();
+        graph.add_node("a", "tool1", serde_json::json!({}));
+        graph.add_node("b", "tool2", serde_json::json!({}));
+        graph.add_node("c", "tool3", serde_json::json!({}));
+        // No dependencies -- all at level 0
+        graph.set_priority("a", 1);
+        graph.set_priority("b", 10);
+        graph.set_priority("c", 5);
+
+        graph.compute_levels().unwrap();
+        let levels = graph.levels();
+        assert_eq!(levels.len(), 1);
+        // Level should be sorted by priority descending: b(10), c(5), a(1)
+        assert_eq!(levels[0][0], "b");
+        assert_eq!(levels[0][1], "c");
+        assert_eq!(levels[0][2], "a");
+    }
+
+    #[test]
+    fn test_compute_levels_empty_graph() {
+        let mut graph = DependencyGraph::new();
+        graph.compute_levels().unwrap();
+        assert!(graph.levels().is_empty());
+    }
+
+    #[test]
+    fn test_set_priority_nonexistent_node() {
+        let mut graph = DependencyGraph::new();
+        // Should not panic
+        graph.set_priority("nonexistent", 42);
+    }
+
+    #[test]
+    fn test_set_status_nonexistent_node() {
+        let mut graph = DependencyGraph::new();
+        // Should not panic
+        graph.set_status("nonexistent", NodeStatus::Failed);
+    }
+
+    #[test]
+    fn test_set_status_transitions() {
+        let mut graph = DependencyGraph::new();
+        graph.add_node("n1", "tool", serde_json::json!({}));
+
+        assert_eq!(graph.get_node("n1").unwrap().status, NodeStatus::Pending);
+
+        graph.set_status("n1", NodeStatus::Ready);
+        assert_eq!(graph.get_node("n1").unwrap().status, NodeStatus::Ready);
+
+        graph.set_status("n1", NodeStatus::Running);
+        assert_eq!(graph.get_node("n1").unwrap().status, NodeStatus::Running);
+
+        graph.set_status("n1", NodeStatus::Completed);
+        assert_eq!(graph.get_node("n1").unwrap().status, NodeStatus::Completed);
+
+        graph.set_status("n1", NodeStatus::Failed);
+        assert_eq!(graph.get_node("n1").unwrap().status, NodeStatus::Failed);
+    }
+
+    #[test]
+    fn test_get_node_nonexistent() {
+        let graph = DependencyGraph::new();
+        assert!(graph.get_node("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_nodes_returns_all() {
+        let mut graph = DependencyGraph::new();
+        graph.add_node("a", "t1", serde_json::json!({}));
+        graph.add_node("b", "t2", serde_json::json!({}));
+
+        let nodes = graph.nodes();
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes.contains_key("a"));
+        assert!(nodes.contains_key("b"));
+    }
+
+    #[test]
+    fn test_dependency_node_debug_clone() {
+        let node = DependencyNode {
+            id: "test".to_string(),
+            tool_name: "file_read".to_string(),
+            arguments: serde_json::json!({"path": "a.txt"}),
+            depends_on: vec!["dep1".to_string()],
+            dependents: vec!["dep2".to_string()],
+            priority: 5,
+            status: NodeStatus::Pending,
+        };
+
+        let debug_str = format!("{:?}", node);
+        assert!(debug_str.contains("test"));
+        assert!(debug_str.contains("file_read"));
+
+        let cloned = node.clone();
+        assert_eq!(cloned.id, "test");
+        assert_eq!(cloned.priority, 5);
+        assert_eq!(cloned.status, NodeStatus::Pending);
+    }
+
+    #[test]
+    fn test_compute_levels_diamond_dependency() {
+        // A -> B, A -> C, B -> D, C -> D
+        let mut graph = DependencyGraph::new();
+        graph.add_node("a", "t1", serde_json::json!({}));
+        graph.add_node("b", "t2", serde_json::json!({}));
+        graph.add_node("c", "t3", serde_json::json!({}));
+        graph.add_node("d", "t4", serde_json::json!({}));
+        graph.add_dependency("a", "b");
+        graph.add_dependency("a", "c");
+        graph.add_dependency("b", "d");
+        graph.add_dependency("c", "d");
+
+        graph.compute_levels().unwrap();
+        let levels = graph.levels();
+        assert_eq!(levels.len(), 3);
+        assert!(levels[0].contains(&"a".to_string()));
+        assert!(levels[1].contains(&"b".to_string()));
+        assert!(levels[1].contains(&"c".to_string()));
+        assert!(levels[2].contains(&"d".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod dependency_analyzer_extended_tests {
+    use super::*;
+    use crate::tool_parser::ParseMethod;
+
+    fn make_call(name: &str, args: serde_json::Value) -> ParsedToolCall {
+        let raw_text = format!("{}:{}", name, args);
+        ParsedToolCall {
+            tool_name: name.to_string(),
+            arguments: args,
+            raw_text,
+            parse_method: ParseMethod::Xml,
+        }
+    }
+
+    #[test]
+    fn test_analyzer_default() {
+        let analyzer = DependencyAnalyzer::default();
+        assert!(analyzer.is_read_only("file_read"));
+        assert!(analyzer.is_write("file_write"));
+    }
+
+    #[test]
+    fn test_analyzer_read_only_tools_comprehensive() {
+        let analyzer = DependencyAnalyzer::new();
+        assert!(analyzer.is_read_only("file_read"));
+        assert!(analyzer.is_read_only("directory_tree"));
+        assert!(analyzer.is_read_only("grep_search"));
+        assert!(analyzer.is_read_only("glob_find"));
+        assert!(analyzer.is_read_only("symbol_search"));
+        assert!(analyzer.is_read_only("git_status"));
+        assert!(analyzer.is_read_only("git_diff"));
+        assert!(!analyzer.is_read_only("unknown_tool"));
+    }
+
+    #[test]
+    fn test_analyzer_write_tools_comprehensive() {
+        let analyzer = DependencyAnalyzer::new();
+        assert!(analyzer.is_write("file_write"));
+        assert!(analyzer.is_write("file_edit"));
+        assert!(analyzer.is_write("git_commit"));
+        assert!(analyzer.is_write("git_push"));
+        assert!(analyzer.is_write("shell_exec"));
+        assert!(analyzer.is_write("cargo_test"));
+        assert!(analyzer.is_write("cargo_check"));
+        assert!(analyzer.is_write("cargo_clippy"));
+        assert!(!analyzer.is_write("unknown_tool"));
+    }
+
+    #[test]
+    fn test_has_dependency_write_before_read_same_path() {
+        let analyzer = DependencyAnalyzer::new();
+        let call1 = make_call("file_write", serde_json::json!({"path": "/a.txt"}));
+        let call2 = make_call("file_read", serde_json::json!({"path": "/a.txt"}));
+        assert!(analyzer.has_dependency(&call1, &call2));
+    }
+
+    #[test]
+    fn test_has_dependency_write_parent_path() {
+        let analyzer = DependencyAnalyzer::new();
+        let call1 = make_call("file_write", serde_json::json!({"path": "/home"}));
+        let call2 = make_call("file_read", serde_json::json!({"path": "/home/file.txt"}));
+        assert!(analyzer.has_dependency(&call1, &call2));
+    }
+
+    #[test]
+    fn test_has_dependency_write_child_path() {
+        let analyzer = DependencyAnalyzer::new();
+        let call1 = make_call("file_edit", serde_json::json!({"path": "/home/file.txt"}));
+        let call2 = make_call("file_read", serde_json::json!({"path": "/home"}));
+        assert!(analyzer.has_dependency(&call1, &call2));
+    }
+
+    #[test]
+    fn test_has_dependency_write_different_paths() {
+        let analyzer = DependencyAnalyzer::new();
+        let call1 = make_call("file_write", serde_json::json!({"path": "/a.txt"}));
+        let call2 = make_call("file_read", serde_json::json!({"path": "/b.txt"}));
+        assert!(!analyzer.has_dependency(&call1, &call2));
+    }
+
+    #[test]
+    fn test_has_dependency_shell_exec_before_write() {
+        let analyzer = DependencyAnalyzer::new();
+        let call1 = make_call("shell_exec", serde_json::json!({"command": "rm -rf"}));
+        let call2 = make_call("file_write", serde_json::json!({"path": "/a.txt"}));
+        assert!(analyzer.has_dependency(&call1, &call2));
+    }
+
+    #[test]
+    fn test_has_dependency_shell_exec_before_read() {
+        let analyzer = DependencyAnalyzer::new();
+        let call1 = make_call("shell_exec", serde_json::json!({"command": "ls"}));
+        let call2 = make_call("file_read", serde_json::json!({"path": "/a.txt"}));
+        // shell_exec before a non-write tool should not be a dependency
+        assert!(!analyzer.has_dependency(&call1, &call2));
+    }
+
+    #[test]
+    fn test_has_dependency_git_write_operations() {
+        let analyzer = DependencyAnalyzer::new();
+        // git_commit (write) before git_push (write)
+        let call1 = make_call("git_commit", serde_json::json!({"message": "test"}));
+        let call2 = make_call("git_push", serde_json::json!({}));
+        assert!(analyzer.has_dependency(&call1, &call2));
+    }
+
+    #[test]
+    fn test_has_dependency_git_read_then_write() {
+        let analyzer = DependencyAnalyzer::new();
+        // git_status (read) before git_commit (write) -- at least one is not read-only
+        let call1 = make_call("git_status", serde_json::json!({}));
+        let call2 = make_call("git_commit", serde_json::json!({"message": "test"}));
+        assert!(analyzer.has_dependency(&call1, &call2));
+    }
+
+    #[test]
+    fn test_has_dependency_git_read_only_both() {
+        let analyzer = DependencyAnalyzer::new();
+        // git_status (read) and git_diff (read) -- both read-only
+        let call1 = make_call("git_status", serde_json::json!({}));
+        let call2 = make_call("git_diff", serde_json::json!({}));
+        assert!(!analyzer.has_dependency(&call1, &call2));
+    }
+
+    #[test]
+    fn test_has_dependency_read_read_no_dependency() {
+        let analyzer = DependencyAnalyzer::new();
+        let call1 = make_call("file_read", serde_json::json!({"path": "/a.txt"}));
+        let call2 = make_call("file_read", serde_json::json!({"path": "/a.txt"}));
+        assert!(!analyzer.has_dependency(&call1, &call2));
+    }
+
+    #[test]
+    fn test_has_dependency_write_no_paths() {
+        let analyzer = DependencyAnalyzer::new();
+        let call1 = make_call("file_write", serde_json::json!({"content": "hello"}));
+        let call2 = make_call("file_read", serde_json::json!({"content": "world"}));
+        // write tool but no extractable paths -- no path-based dependency
+        assert!(!analyzer.has_dependency(&call1, &call2));
+    }
+
+    #[test]
+    fn test_analyze_sets_priorities() {
+        let analyzer = DependencyAnalyzer::new();
+        let calls = vec![
+            (
+                "c1".to_string(),
+                make_call("file_write", serde_json::json!({"path": "/a.txt"})),
+            ),
+            (
+                "c2".to_string(),
+                make_call("file_read", serde_json::json!({"path": "/a.txt"})),
+            ),
+            (
+                "c3".to_string(),
+                make_call("file_read", serde_json::json!({"path": "/a.txt"})),
+            ),
+        ];
+
+        let graph = analyzer.analyze(&calls);
+        // c1 (write) should have dependents c2 and c3
+        let node_c1 = graph.get_node("c1").unwrap();
+        // Priority should reflect the number of dependents
+        assert!(node_c1.priority > 0);
+    }
+
+    #[test]
+    fn test_analyze_computes_levels() {
+        let analyzer = DependencyAnalyzer::new();
+        let calls = vec![
+            (
+                "c1".to_string(),
+                make_call("file_write", serde_json::json!({"path": "/a.txt"})),
+            ),
+            (
+                "c2".to_string(),
+                make_call("file_read", serde_json::json!({"path": "/a.txt"})),
+            ),
+        ];
+
+        let graph = analyzer.analyze(&calls);
+        let levels = graph.levels();
+        assert_eq!(levels.len(), 2);
+    }
+
+    #[test]
+    fn test_analyze_all_independent() {
+        let analyzer = DependencyAnalyzer::new();
+        let calls = vec![
+            (
+                "c1".to_string(),
+                make_call("file_read", serde_json::json!({"path": "/a.txt"})),
+            ),
+            (
+                "c2".to_string(),
+                make_call("grep_search", serde_json::json!({"pattern": "foo"})),
+            ),
+            (
+                "c3".to_string(),
+                make_call("directory_tree", serde_json::json!({"path": "/other"})),
+            ),
+        ];
+
+        let graph = analyzer.analyze(&calls);
+        let levels = graph.levels();
+        // All independent -- single level
+        assert_eq!(levels.len(), 1);
+        assert_eq!(levels[0].len(), 3);
+    }
+
+    #[test]
+    fn test_analyze_empty_calls() {
+        let analyzer = DependencyAnalyzer::new();
+        let calls: Vec<(String, ParsedToolCall)> = vec![];
+
+        let graph = analyzer.analyze(&calls);
+        assert!(graph.is_empty());
+        assert_eq!(graph.len(), 0);
+    }
+}
+
+#[cfg(test)]
+mod resource_pool_extended_tests {
+    use super::*;
+
+    #[test]
+    fn test_http_connection_default() {
+        let conn = HttpConnection::default();
+        assert!(conn.is_healthy());
+    }
+
+    #[test]
+    fn test_http_connection_created_at() {
+        let conn = HttpConnection::new();
+        // created_at should be recent (within last few seconds)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        assert!(conn.created_at <= now);
+        assert!(now - conn.created_at < 5);
+    }
+
+    #[test]
+    fn test_http_connection_unhealthy_flag() {
+        let mut conn = HttpConnection::new();
+        assert!(conn.is_healthy());
+        conn.healthy = false;
+        assert!(!conn.is_healthy());
+    }
+
+    #[test]
+    fn test_http_connection_old_is_unhealthy() {
+        let mut conn = HttpConnection::new();
+        // Simulate an old connection (older than 5 minutes)
+        conn.created_at = 0; // epoch time
+        assert!(!conn.is_healthy());
+    }
+
+    #[test]
+    fn test_file_handle_new_read_write() {
+        let handle = FileHandle::new("/tmp/rw.txt", false);
+        assert_eq!(handle.path(), "/tmp/rw.txt");
+        assert!(!handle.is_read_only());
+        assert!(handle.is_healthy());
+    }
+
+    #[test]
+    fn test_file_handle_reset() {
+        let mut handle = FileHandle::new("/tmp/test.txt", true);
+        handle.reset(); // Should not panic
+        assert!(handle.is_healthy());
+    }
+
+    #[test]
+    fn test_file_handle_unhealthy() {
+        let mut handle = FileHandle::new("/tmp/test.txt", true);
+        handle.healthy = false;
+        assert!(!handle.is_healthy());
+    }
+
+    #[test]
+    fn test_pool_stats_initial() {
+        let pool: ResourcePool<HttpConnection> = ResourcePool::new(10);
+        let stats = pool.stats();
+        assert_eq!(stats.max_size, 10);
+        assert_eq!(stats.available, 0);
+        assert_eq!(stats.in_use, 0);
+        assert_eq!(stats.total_created, 0);
+    }
+
+    #[test]
+    fn test_pool_stats_debug() {
+        let stats = PoolStats {
+            max_size: 5,
+            available: 2,
+            in_use: 1,
+            total_created: 3,
+        };
+        let debug_str = format!("{:?}", stats);
+        assert!(debug_str.contains("max_size"));
+        assert!(debug_str.contains("5"));
+        assert!(debug_str.contains("available"));
+        assert!(debug_str.contains("2"));
+    }
+
+    #[test]
+    fn test_pool_stats_clone() {
+        let stats = PoolStats {
+            max_size: 5,
+            available: 2,
+            in_use: 1,
+            total_created: 3,
+        };
+        let cloned = stats.clone();
+        assert_eq!(cloned.max_size, 5);
+        assert_eq!(cloned.available, 2);
+        assert_eq!(cloned.in_use, 1);
+        assert_eq!(cloned.total_created, 3);
+    }
+
+    #[test]
+    fn test_pool_stats_serialize_deserialize() {
+        let stats = PoolStats {
+            max_size: 5,
+            available: 2,
+            in_use: 1,
+            total_created: 3,
+        };
+        let json = serde_json::to_string(&stats).unwrap();
+        let deserialized: PoolStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.max_size, 5);
+        assert_eq!(deserialized.available, 2);
+    }
+
+    #[tokio::test]
+    async fn test_pool_add_beyond_max_size() {
+        let pool: ResourcePool<HttpConnection> = ResourcePool::new(1);
+        pool.add(HttpConnection::new()).await;
+        pool.add(HttpConnection::new()).await; // Should be silently dropped
+
+        let stats = pool.stats();
+        assert_eq!(stats.total_created, 2);
+        assert_eq!(stats.available, 1); // Only 1 fits
+    }
+
+    #[tokio::test]
+    async fn test_pool_release_beyond_max_size() {
+        let pool: ResourcePool<HttpConnection> = ResourcePool::new(1);
+        pool.add(HttpConnection::new()).await;
+
+        // Acquire the one available
+        let conn1 = pool.acquire().await.unwrap();
+        // Now add a second manually
+        pool.add(HttpConnection::new()).await;
+
+        // Release conn1 -- pool already has 1 available, so this should be dropped
+        pool.release(conn1).await;
+        let stats = pool.stats();
+        assert_eq!(stats.available, 1);
+    }
+
+    #[tokio::test]
+    async fn test_pool_acquire_skips_unhealthy() {
+        let pool: ResourcePool<HttpConnection> = ResourcePool::new(5);
+        // Add an unhealthy connection
+        let mut old_conn = HttpConnection::new();
+        old_conn.created_at = 0; // Very old -- unhealthy
+        pool.add(old_conn).await;
+
+        // Acquire should return None because the only connection is unhealthy
+        let result = pool.acquire().await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_pool_acquire_finds_healthy_after_unhealthy() {
+        let pool: ResourcePool<FileHandle> = ResourcePool::new(5);
+        // Add an unhealthy handle
+        let mut bad_handle = FileHandle::new("/bad", true);
+        bad_handle.healthy = false;
+        pool.add(bad_handle).await;
+        // Add a healthy handle
+        pool.add(FileHandle::new("/good", true)).await;
+
+        let result = pool.acquire().await;
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().path(), "/good");
+    }
+
+    #[tokio::test]
+    async fn test_pool_full_lifecycle() {
+        let pool: ResourcePool<FileHandle> = ResourcePool::new(3);
+        // Add resources
+        pool.add(FileHandle::new("/a", true)).await;
+        pool.add(FileHandle::new("/b", false)).await;
+
+        assert_eq!(pool.stats().available, 2);
+        assert_eq!(pool.stats().total_created, 2);
+
+        // Acquire one
+        let handle = pool.acquire().await.unwrap();
+        assert_eq!(pool.stats().available, 1);
+        assert_eq!(pool.stats().in_use, 1);
+
+        // Release it
+        pool.release(handle).await;
+        assert_eq!(pool.stats().available, 2);
+        assert_eq!(pool.stats().in_use, 0);
+    }
+}
+
+#[cfg(test)]
+mod batch_extended_tests {
+    use super::*;
+
+    #[test]
+    fn test_batch_config_debug() {
+        let config = BatchConfig::default();
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("max_batch_size"));
+        assert!(debug_str.contains("10"));
+    }
+
+    #[test]
+    fn test_batch_config_clone() {
+        let config = BatchConfig {
+            max_batch_size: 20,
+            max_wait_ms: 500,
+            min_batch_trigger: 8,
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.max_batch_size, 20);
+        assert_eq!(cloned.max_wait_ms, 500);
+        assert_eq!(cloned.min_batch_trigger, 8);
+    }
+
+    #[test]
+    fn test_batch_config_serialize_deserialize() {
+        let config = BatchConfig {
+            max_batch_size: 15,
+            max_wait_ms: 200,
+            min_batch_trigger: 3,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: BatchConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.max_batch_size, 15);
+        assert_eq!(deserialized.max_wait_ms, 200);
+        assert_eq!(deserialized.min_batch_trigger, 3);
+    }
+
+    #[test]
+    fn test_tool_batch_debug() {
+        let batch = ToolBatch::new("test_tool");
+        let debug_str = format!("{:?}", batch);
+        assert!(debug_str.contains("test_tool"));
+    }
+
+    #[test]
+    fn test_tool_batch_is_ready_below_min_trigger() {
+        let config = BatchConfig {
+            max_batch_size: 10,
+            max_wait_ms: 100,
+            min_batch_trigger: 5,
+        };
+        let mut batch = ToolBatch::new("tool");
+        batch.add("c1", serde_json::json!({}));
+        batch.add("c2", serde_json::json!({}));
+        // Only 2 items, below min_batch_trigger of 5
+        assert!(!batch.is_ready(&config));
+    }
+
+    #[test]
+    fn test_tool_batch_is_ready_at_max_batch_size() {
+        let config = BatchConfig {
+            max_batch_size: 3,
+            max_wait_ms: 100000,
+            min_batch_trigger: 10,
+        };
+        let mut batch = ToolBatch::new("tool");
+        batch.add("c1", serde_json::json!({}));
+        batch.add("c2", serde_json::json!({}));
+        batch.add("c3", serde_json::json!({}));
+        // Reached max_batch_size of 3
+        assert!(batch.is_ready(&config));
+    }
+
+    #[test]
+    fn test_tool_batch_is_ready_min_trigger_recent() {
+        // Batch at min_batch_trigger but created very recently
+        let config = BatchConfig {
+            max_batch_size: 100,
+            max_wait_ms: 999999999, // Very long wait
+            min_batch_trigger: 2,
+        };
+        let mut batch = ToolBatch::new("tool");
+        batch.add("c1", serde_json::json!({}));
+        batch.add("c2", serde_json::json!({}));
+        // At min_batch_trigger but hasn't waited long enough
+        // created_at is in seconds, max_wait_ms is very large
+        assert!(!batch.is_ready(&config));
+    }
+
+    #[test]
+    fn test_tool_batch_is_ready_min_trigger_old() {
+        // Batch at min_batch_trigger and very old
+        let config = BatchConfig {
+            max_batch_size: 100,
+            max_wait_ms: 0, // Zero wait time -- always ready if at trigger
+            min_batch_trigger: 2,
+        };
+        let mut batch = ToolBatch::new("tool");
+        batch.add("c1", serde_json::json!({}));
+        batch.add("c2", serde_json::json!({}));
+        // The time check: (now_ms - created_at * 1000) >= max_wait_ms (0)
+        // Since now >= created_at, this should be true
+        assert!(batch.is_ready(&config));
+    }
+
+    #[tokio::test]
+    async fn test_batch_coordinator_multiple_tools() {
+        let coordinator = BatchCoordinator::default();
+        coordinator
+            .add("file_read", "c1", serde_json::json!({"path": "a"}))
+            .await;
+        coordinator
+            .add("grep_search", "c2", serde_json::json!({"pattern": "x"}))
+            .await;
+        coordinator
+            .add("file_read", "c3", serde_json::json!({"path": "b"}))
+            .await;
+
+        let batches = coordinator.flush().await;
+        assert_eq!(batches.len(), 2); // Two different tool names
+    }
+
+    #[tokio::test]
+    async fn test_batch_coordinator_get_ready_batches_none_ready() {
+        let config = BatchConfig {
+            max_batch_size: 100,
+            max_wait_ms: 999999999,
+            min_batch_trigger: 100,
+        };
+        let coordinator = BatchCoordinator::new(config);
+        coordinator
+            .add("file_read", "c1", serde_json::json!({}))
+            .await;
+
+        let ready = coordinator.get_ready_batches().await;
+        assert!(ready.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_batch_coordinator_get_ready_batches_max_size() {
+        let config = BatchConfig {
+            max_batch_size: 2,
+            max_wait_ms: 999999999,
+            min_batch_trigger: 100,
+        };
+        let coordinator = BatchCoordinator::new(config);
+        coordinator
+            .add("file_read", "c1", serde_json::json!({}))
+            .await;
+        coordinator
+            .add("file_read", "c2", serde_json::json!({}))
+            .await;
+
+        let ready = coordinator.get_ready_batches().await;
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_batch_coordinator_stats_empty() {
+        let coordinator = BatchCoordinator::default();
+        let stats = coordinator.stats();
+        assert_eq!(stats.total_batches, 0);
+        assert_eq!(stats.total_calls, 0);
+        assert_eq!(stats.average_batch_size, 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_batch_coordinator_stats_after_flush() {
+        let coordinator = BatchCoordinator::default();
+        coordinator.add("tool_a", "c1", serde_json::json!({})).await;
+        coordinator.add("tool_a", "c2", serde_json::json!({})).await;
+        coordinator.add("tool_b", "c3", serde_json::json!({})).await;
+
+        coordinator.flush().await;
+
+        let stats = coordinator.stats();
+        assert_eq!(stats.total_batches, 2);
+        assert_eq!(stats.total_calls, 3);
+        assert!((stats.average_batch_size - 1.5).abs() < 0.01);
+    }
+
+    #[tokio::test]
+    async fn test_batch_coordinator_get_ready_updates_stats() {
+        let config = BatchConfig {
+            max_batch_size: 1, // Each item is immediately ready
+            max_wait_ms: 0,
+            min_batch_trigger: 1,
+        };
+        let coordinator = BatchCoordinator::new(config);
+        coordinator
+            .add("file_read", "c1", serde_json::json!({}))
+            .await;
+
+        let ready = coordinator.get_ready_batches().await;
+        assert_eq!(ready.len(), 1);
+
+        let stats = coordinator.stats();
+        assert_eq!(stats.total_batches, 1);
+        assert_eq!(stats.total_calls, 1);
+    }
+
+    #[test]
+    fn test_batch_stats_summary_debug() {
+        let summary = BatchStatsSummary {
+            total_batches: 5,
+            total_calls: 20,
+            average_batch_size: 4.0,
+        };
+        let debug_str = format!("{:?}", summary);
+        assert!(debug_str.contains("total_batches"));
+        assert!(debug_str.contains("5"));
+    }
+
+    #[test]
+    fn test_batch_stats_summary_clone() {
+        let summary = BatchStatsSummary {
+            total_batches: 5,
+            total_calls: 20,
+            average_batch_size: 4.0,
+        };
+        let cloned = summary.clone();
+        assert_eq!(cloned.total_batches, 5);
+        assert_eq!(cloned.total_calls, 20);
+        assert_eq!(cloned.average_batch_size, 4.0);
+    }
+
+    #[test]
+    fn test_batch_stats_summary_serialize_deserialize() {
+        let summary = BatchStatsSummary {
+            total_batches: 3,
+            total_calls: 9,
+            average_batch_size: 3.0,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: BatchStatsSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.total_batches, 3);
+        assert_eq!(deserialized.total_calls, 9);
+    }
+}
+
+#[cfg(test)]
+mod execution_stats_extended_tests {
+    use super::*;
+
+    #[test]
+    fn test_execution_stats_default() {
+        let stats = ExecutionStats::default();
+        assert_eq!(stats.total(), 0);
+        assert_eq!(stats.parallel(), 0);
+        assert_eq!(stats.sequential(), 0);
+        assert_eq!(stats.time_saved_ms(), 0);
+    }
+
+    #[test]
+    fn test_execution_stats_parallelization_ratio_zero() {
+        let stats = ExecutionStats::new();
+        assert_eq!(stats.parallelization_ratio(), 0.0);
+    }
+
+    #[test]
+    fn test_execution_stats_parallelization_ratio_all_parallel() {
+        let stats = ExecutionStats::new();
+        stats.record(ExecutionRecord {
+            timestamp: 0,
+            tool_count: 5,
+            parallel_count: 5,
+            sequential_count: 0,
+            total_duration_ms: 50,
+            estimated_sequential_ms: 100,
+            time_saved_ms: 50,
+        });
+        assert_eq!(stats.parallelization_ratio(), 1.0);
+    }
+
+    #[test]
+    fn test_execution_stats_parallelization_ratio_all_sequential() {
+        let stats = ExecutionStats::new();
+        stats.record(ExecutionRecord {
+            timestamp: 0,
+            tool_count: 5,
+            parallel_count: 0,
+            sequential_count: 5,
+            total_duration_ms: 100,
+            estimated_sequential_ms: 100,
+            time_saved_ms: 0,
+        });
+        assert_eq!(stats.parallelization_ratio(), 0.0);
+    }
+
+    #[test]
+    fn test_execution_stats_history() {
+        let stats = ExecutionStats::new();
+        stats.record(ExecutionRecord {
+            timestamp: 100,
+            tool_count: 2,
+            parallel_count: 1,
+            sequential_count: 1,
+            total_duration_ms: 50,
+            estimated_sequential_ms: 80,
+            time_saved_ms: 30,
+        });
+        stats.record(ExecutionRecord {
+            timestamp: 200,
+            tool_count: 3,
+            parallel_count: 2,
+            sequential_count: 1,
+            total_duration_ms: 60,
+            estimated_sequential_ms: 100,
+            time_saved_ms: 40,
+        });
+
+        let history = stats.history();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].timestamp, 100);
+        assert_eq!(history[1].timestamp, 200);
+    }
+
+    #[test]
+    fn test_execution_stats_history_overflow() {
+        let stats = ExecutionStats::new();
+        // Record 105 entries -- should cap at 100
+        for i in 0..105 {
+            stats.record(ExecutionRecord {
+                timestamp: i as u64,
+                tool_count: 1,
+                parallel_count: 1,
+                sequential_count: 0,
+                total_duration_ms: 10,
+                estimated_sequential_ms: 10,
+                time_saved_ms: 0,
+            });
+        }
+
+        let history = stats.history();
+        assert_eq!(history.len(), 100);
+        // Oldest entries should have been removed (0..4 removed, 5..104 remain)
+        assert_eq!(history[0].timestamp, 5);
+        assert_eq!(history[99].timestamp, 104);
+    }
+
+    #[test]
+    fn test_execution_stats_summary_fields() {
+        let stats = ExecutionStats::new();
+        stats.record(ExecutionRecord {
+            timestamp: 0,
+            tool_count: 10,
+            parallel_count: 7,
+            sequential_count: 3,
+            total_duration_ms: 100,
+            estimated_sequential_ms: 200,
+            time_saved_ms: 100,
+        });
+
+        let summary = stats.summary();
+        assert_eq!(summary.total_executions, 1);
+        assert_eq!(summary.parallel_calls, 7);
+        assert_eq!(summary.sequential_calls, 3);
+        assert_eq!(summary.time_saved_ms, 100);
+        assert!((summary.parallelization_ratio - 0.7).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_execution_stats_multiple_records() {
+        let stats = ExecutionStats::new();
+        stats.record(ExecutionRecord {
+            timestamp: 0,
+            tool_count: 5,
+            parallel_count: 3,
+            sequential_count: 2,
+            total_duration_ms: 50,
+            estimated_sequential_ms: 100,
+            time_saved_ms: 50,
+        });
+        stats.record(ExecutionRecord {
+            timestamp: 1,
+            tool_count: 4,
+            parallel_count: 2,
+            sequential_count: 2,
+            total_duration_ms: 40,
+            estimated_sequential_ms: 80,
+            time_saved_ms: 40,
+        });
+
+        assert_eq!(stats.total(), 2);
+        assert_eq!(stats.parallel(), 5); // 3 + 2
+        assert_eq!(stats.sequential(), 4); // 2 + 2
+        assert_eq!(stats.time_saved_ms(), 90); // 50 + 40
+    }
+
+    #[test]
+    fn test_execution_stats_reset_clears_history() {
+        let stats = ExecutionStats::new();
+        stats.record(ExecutionRecord {
+            timestamp: 0,
+            tool_count: 1,
+            parallel_count: 1,
+            sequential_count: 0,
+            total_duration_ms: 10,
+            estimated_sequential_ms: 10,
+            time_saved_ms: 0,
+        });
+
+        stats.reset();
+        assert_eq!(stats.total(), 0);
+        assert_eq!(stats.parallel(), 0);
+        assert_eq!(stats.sequential(), 0);
+        assert_eq!(stats.time_saved_ms(), 0);
+        assert!(stats.history().is_empty());
+    }
+
+    #[test]
+    fn test_execution_record_debug() {
+        let record = ExecutionRecord {
+            timestamp: 12345,
+            tool_count: 3,
+            parallel_count: 2,
+            sequential_count: 1,
+            total_duration_ms: 100,
+            estimated_sequential_ms: 150,
+            time_saved_ms: 50,
+        };
+        let debug_str = format!("{:?}", record);
+        assert!(debug_str.contains("12345"));
+        assert!(debug_str.contains("tool_count"));
+    }
+
+    #[test]
+    fn test_execution_record_clone() {
+        let record = ExecutionRecord {
+            timestamp: 12345,
+            tool_count: 3,
+            parallel_count: 2,
+            sequential_count: 1,
+            total_duration_ms: 100,
+            estimated_sequential_ms: 150,
+            time_saved_ms: 50,
+        };
+        let cloned = record.clone();
+        assert_eq!(cloned.timestamp, 12345);
+        assert_eq!(cloned.tool_count, 3);
+        assert_eq!(cloned.time_saved_ms, 50);
+    }
+
+    #[test]
+    fn test_execution_record_serialize_deserialize() {
+        let record = ExecutionRecord {
+            timestamp: 1000,
+            tool_count: 5,
+            parallel_count: 3,
+            sequential_count: 2,
+            total_duration_ms: 200,
+            estimated_sequential_ms: 400,
+            time_saved_ms: 200,
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        let deserialized: ExecutionRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.timestamp, 1000);
+        assert_eq!(deserialized.time_saved_ms, 200);
+    }
+
+    #[test]
+    fn test_execution_stats_summary_debug() {
+        let summary = ExecutionStatsSummary {
+            total_executions: 10,
+            parallel_calls: 30,
+            sequential_calls: 5,
+            time_saved_ms: 500,
+            parallelization_ratio: 0.857,
+        };
+        let debug_str = format!("{:?}", summary);
+        assert!(debug_str.contains("total_executions"));
+        assert!(debug_str.contains("10"));
+    }
+
+    #[test]
+    fn test_execution_stats_summary_serialize_deserialize() {
+        let summary = ExecutionStatsSummary {
+            total_executions: 10,
+            parallel_calls: 30,
+            sequential_calls: 5,
+            time_saved_ms: 500,
+            parallelization_ratio: 0.857,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: ExecutionStatsSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.total_executions, 10);
+        assert_eq!(deserialized.parallel_calls, 30);
+    }
+}
+
+#[cfg(test)]
+mod are_independent_extended_tests {
+    use super::*;
+    use crate::tool_parser::ParseMethod;
+
+    fn make_call(name: &str, args: serde_json::Value) -> ParsedToolCall {
+        let raw_text = format!("{}:{}", name, args);
+        ParsedToolCall {
+            tool_name: name.to_string(),
+            arguments: args,
+            raw_text,
+            parse_method: ParseMethod::Xml,
+        }
+    }
+
+    #[test]
+    fn test_independent_different_paths_both_write() {
+        let call1 = make_call("file_write", serde_json::json!({"path": "/a.txt"}));
+        let call2 = make_call("file_write", serde_json::json!({"path": "/b.txt"}));
+        // Different paths, even though both are writes
+        assert!(are_independent(&call1, &call2));
+    }
+
+    #[test]
+    fn test_not_independent_same_path_write_write() {
+        let call1 = make_call("file_write", serde_json::json!({"path": "/a.txt"}));
+        let call2 = make_call("file_write", serde_json::json!({"path": "/a.txt"}));
+        assert!(!are_independent(&call1, &call2));
+    }
+
+    #[test]
+    fn test_not_independent_parent_child_paths_with_write() {
+        let call1 = make_call("file_write", serde_json::json!({"path": "/home"}));
+        let call2 = make_call("file_read", serde_json::json!({"path": "/home/file.txt"}));
+        // Parent-child path with at least one write
+        assert!(!are_independent(&call1, &call2));
+    }
+
+    #[test]
+    fn test_not_independent_child_parent_paths_with_write() {
+        let call1 = make_call("file_read", serde_json::json!({"path": "/home/file.txt"}));
+        let call2 = make_call("file_write", serde_json::json!({"path": "/home"}));
+        assert!(!are_independent(&call1, &call2));
+    }
+
+    #[test]
+    fn test_not_independent_no_paths_non_read_only() {
+        // tool1 is not read-only, tool2 is not read-only, no paths
+        let call1 = make_call("shell_exec", serde_json::json!({"command": "ls"}));
+        let call2 = make_call("cargo_test", serde_json::json!({"args": "--all"}));
+        // No paths, both non-read-only => conservative: returns tool1_read_only && tool2_read_only = false
+        assert!(!are_independent(&call1, &call2));
+    }
+
+    #[test]
+    fn test_not_independent_no_paths_one_read_only() {
+        let call1 = make_call("file_read", serde_json::json!({"pattern": "foo"}));
+        let call2 = make_call("shell_exec", serde_json::json!({"command": "ls"}));
+        // No extractable paths, one read-only and one not => false
+        assert!(!are_independent(&call1, &call2));
+    }
+
+    #[test]
+    fn test_independent_no_paths_both_read_only() {
+        let call1 = make_call("git_status", serde_json::json!({}));
+        let call2 = make_call("git_diff", serde_json::json!({}));
+        // Both read-only => true (early return)
+        assert!(are_independent(&call1, &call2));
+    }
+
+    #[test]
+    fn test_independent_different_paths_read_write() {
+        let call1 = make_call("file_read", serde_json::json!({"path": "/x.txt"}));
+        let call2 = make_call("file_write", serde_json::json!({"path": "/y.txt"}));
+        // Different paths, even with one write
+        assert!(are_independent(&call1, &call2));
+    }
+
+    #[test]
+    fn test_independent_one_has_path_other_does_not() {
+        let call1 = make_call("file_read", serde_json::json!({"path": "/a.txt"}));
+        let call2 = make_call("shell_exec", serde_json::json!({"command": "echo hello"}));
+        // call1 has path, call2 does not -> (Some, None) arm
+        // This goes to the _ arm: returns tool1_read_only && tool2_read_only
+        // tool1 is read_only, tool2 is NOT read_only => false
+        assert!(!are_independent(&call1, &call2));
+    }
+
+    #[test]
+    fn test_not_independent_same_path_read_write_reversed() {
+        let call1 = make_call("file_write", serde_json::json!({"path": "/a.txt"}));
+        let call2 = make_call("file_read", serde_json::json!({"path": "/a.txt"}));
+        assert!(!are_independent(&call1, &call2));
+    }
+
+    #[test]
+    fn test_independent_both_read_only_same_path() {
+        let call1 = make_call("file_read", serde_json::json!({"path": "/a.txt"}));
+        let call2 = make_call("file_read", serde_json::json!({"path": "/a.txt"}));
+        // Both read-only -- early return true
+        assert!(are_independent(&call1, &call2));
+    }
+
+    #[test]
+    fn test_independent_directory_key_extraction() {
+        let call1 = make_call("directory_tree", serde_json::json!({"directory": "/home"}));
+        let call2 = make_call("directory_tree", serde_json::json!({"directory": "/var"}));
+        // Both read-only, both have directory paths -- independent
+        assert!(are_independent(&call1, &call2));
+    }
+}
+
+#[cfg(test)]
+mod parallel_config_extended_tests {
+    use super::*;
+
+    #[test]
+    fn test_parallel_config_debug() {
+        let config = ParallelConfig::default();
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("max_concurrency"));
+        assert!(debug_str.contains("4"));
+        assert!(debug_str.contains("enabled"));
+        assert!(debug_str.contains("true"));
+    }
+
+    #[test]
+    fn test_parallel_config_clone() {
+        let config = ParallelConfig::default();
+        let cloned = config.clone();
+        assert_eq!(cloned.max_concurrency, config.max_concurrency);
+        assert_eq!(cloned.enabled, config.enabled);
+        assert_eq!(cloned.sequential_only.len(), config.sequential_only.len());
+    }
+
+    #[test]
+    fn test_parallel_config_default_sequential_tools() {
+        let config = ParallelConfig::default();
+        assert!(config.sequential_only.contains("file_write"));
+        assert!(config.sequential_only.contains("file_edit"));
+        assert!(config.sequential_only.contains("git_commit"));
+        assert!(config.sequential_only.contains("git_push"));
+        assert!(config.sequential_only.contains("shell_exec"));
+        assert_eq!(config.sequential_only.len(), 5);
+    }
+
+    #[test]
+    fn test_parallel_config_custom() {
+        let mut sequential = HashSet::new();
+        sequential.insert("custom_tool".to_string());
+        let config = ParallelConfig {
+            max_concurrency: 8,
+            enabled: false,
+            sequential_only: sequential,
+        };
+        assert_eq!(config.max_concurrency, 8);
+        assert!(!config.enabled);
+        assert!(config.sequential_only.contains("custom_tool"));
+    }
+}
+
+#[cfg(test)]
+mod parallel_executor_extended_tests {
+    use super::*;
+    use crate::tool_parser::ParseMethod;
+
+    fn make_call(name: &str, args: serde_json::Value) -> ParsedToolCall {
+        let raw_text = format!("{}:{}", name, args);
+        ParsedToolCall {
+            tool_name: name.to_string(),
+            arguments: args,
+            raw_text,
+            parse_method: ParseMethod::Xml,
+        }
+    }
+
+    #[test]
+    fn test_analyze_calls_all_sequential() {
+        let executor = ParallelExecutor::new(ParallelConfig::default());
+        let calls = [
+            make_call("file_write", serde_json::json!({"path": "a.txt"})),
+            make_call("file_edit", serde_json::json!({"path": "b.txt"})),
+            make_call("shell_exec", serde_json::json!({"command": "ls"})),
+        ];
+
+        let (parallel, sequential) = executor.analyze_calls(&calls.iter().collect::<Vec<_>>());
+        assert!(parallel.is_empty());
+        assert_eq!(sequential.len(), 3);
+    }
+
+    #[test]
+    fn test_analyze_calls_all_parallel() {
+        let executor = ParallelExecutor::new(ParallelConfig::default());
+        let calls = [
+            make_call("file_read", serde_json::json!({"path": "a.txt"})),
+            make_call("grep_search", serde_json::json!({"pattern": "test"})),
+            make_call("directory_tree", serde_json::json!({"path": "/other"})),
+        ];
+
+        let (parallel, sequential) = executor.analyze_calls(&calls.iter().collect::<Vec<_>>());
+        assert_eq!(parallel.len(), 3);
+        assert!(sequential.is_empty());
+    }
+
+    #[test]
+    fn test_analyze_calls_empty() {
+        let executor = ParallelExecutor::new(ParallelConfig::default());
+        let calls: Vec<ParsedToolCall> = vec![];
+        let (parallel, sequential) = executor.analyze_calls(&calls.iter().collect::<Vec<_>>());
+        assert!(parallel.is_empty());
+        assert!(sequential.is_empty());
+    }
+
+    #[test]
+    fn test_analyze_calls_path_conflict_moves_to_sequential() {
+        let executor = ParallelExecutor::new(ParallelConfig::default());
+        let calls = [
+            make_call("file_read", serde_json::json!({"path": "same.txt"})),
+            make_call("grep_search", serde_json::json!({"path": "same.txt"})),
+        ];
+
+        let (parallel, sequential) = executor.analyze_calls(&calls.iter().collect::<Vec<_>>());
+        // First keeps same.txt, second conflicts and goes to sequential
+        assert_eq!(parallel.len(), 1);
+        assert_eq!(sequential.len(), 1);
+    }
+
+    #[test]
+    fn test_resolve_path_conflicts_no_paths() {
+        let executor = ParallelExecutor::new(ParallelConfig::default());
+        let call1 = make_call("grep_search", serde_json::json!({"pattern": "foo"}));
+        let call2 = make_call("grep_search", serde_json::json!({"pattern": "bar"}));
+
+        let calls = vec![&call1, &call2];
+        let resolved = executor.resolve_path_conflicts(calls);
+        // No paths to conflict on
+        assert_eq!(resolved.len(), 2);
+    }
+
+    #[test]
+    fn test_resolve_path_conflicts_mixed_paths_and_no_paths() {
+        let executor = ParallelExecutor::new(ParallelConfig::default());
+        let call1 = make_call("file_read", serde_json::json!({"path": "a.txt"}));
+        let call2 = make_call("grep_search", serde_json::json!({"pattern": "foo"}));
+        let call3 = make_call("file_read", serde_json::json!({"path": "a.txt"}));
+
+        let calls = vec![&call1, &call2, &call3];
+        let resolved = executor.resolve_path_conflicts(calls);
+        // call1 kept (path a.txt), call2 kept (no path), call3 dropped (path a.txt conflict)
+        assert_eq!(resolved.len(), 2);
+    }
+
+    #[test]
+    fn test_can_parallelize_custom_tool() {
+        let executor = ParallelExecutor::new(ParallelConfig::default());
+        // Custom tool not in sequential_only
+        assert!(executor.can_parallelize("my_custom_tool"));
+    }
+
+    #[test]
+    fn test_parallel_result_with_error() {
+        let result = ParallelResult {
+            tool_name: "failing_tool".to_string(),
+            tool_call_id: "call_err".to_string(),
+            result: Err(anyhow::anyhow!("Something went wrong")),
+            duration_ms: 0,
+        };
+        assert!(result.result.is_err());
+        let debug_str = format!("{:?}", result);
+        assert!(debug_str.contains("failing_tool"));
+    }
+}
+
+#[cfg(test)]
+mod batch_stats_tests {
+    use super::*;
+
+    #[test]
+    fn test_batch_stats_default() {
+        let stats = BatchStats::default();
+        assert_eq!(stats.total_batches.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.total_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.avg_batch_size.load(Ordering::Relaxed), 0);
+    }
+}

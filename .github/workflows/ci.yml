@@ -34,6 +34,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-composite0-dev
+
       - name: Install Rust ${{ matrix.rust }}
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -71,6 +75,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-composite0-dev
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -102,6 +109,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-composite0-dev
 
       - name: Install Rust 1.91.0
         uses: dtolnay/rust-toolchain@stable
@@ -138,6 +148,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-composite0-dev
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
@@ -164,6 +177,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-composite0-dev
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -201,6 +217,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-composite0-dev
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
@@ -219,7 +238,7 @@ jobs:
         uses: taiki-e/install-action@cargo-tarpaulin
 
       - name: Generate coverage
-        run: cargo tarpaulin --out Html --out Xml --output-dir coverage --features extras --timeout 600 --fail-under 60 --skip-clean -- --test-threads 1
+        run: cargo tarpaulin --out Html --out Xml --output-dir coverage --features extras --timeout 600 --fail-under 80 --skip-clean -- --test-threads 1
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4

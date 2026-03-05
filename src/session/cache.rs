@@ -1990,3 +1990,1635 @@ mod cache_manager_tests {
         assert!((stats.cost_summary.total_savings - 0.01).abs() < 0.0001);
     }
 }
+
+// ============================================================================
+// Comprehensive Additional Tests for Coverage
+// ============================================================================
+
+#[cfg(test)]
+mod cache_entry_tests {
+    use super::*;
+
+    #[test]
+    fn test_cache_entry_is_expired_true() {
+        let entry = CacheEntry {
+            value: serde_json::json!(null),
+            created_at: Instant::now() - Duration::from_secs(10),
+            ttl: Duration::from_secs(5),
+            file_mtime: None,
+        };
+        assert!(entry.is_expired());
+    }
+
+    #[test]
+    fn test_cache_entry_is_expired_false() {
+        let entry = CacheEntry {
+            value: serde_json::json!(null),
+            created_at: Instant::now(),
+            ttl: Duration::from_secs(300),
+            file_mtime: None,
+        };
+        assert!(!entry.is_expired());
+    }
+
+    #[test]
+    fn test_cache_entry_is_file_stale_both_some_equal() {
+        let mtime = SystemTime::now();
+        let entry = CacheEntry {
+            value: serde_json::json!(null),
+            created_at: Instant::now(),
+            ttl: Duration::from_secs(300),
+            file_mtime: Some(mtime),
+        };
+        assert!(!entry.is_file_stale(Some(mtime)));
+    }
+
+    #[test]
+    fn test_cache_entry_is_file_stale_both_some_different() {
+        let cached_mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(1000);
+        let current_mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(2000);
+        let entry = CacheEntry {
+            value: serde_json::json!(null),
+            created_at: Instant::now(),
+            ttl: Duration::from_secs(300),
+            file_mtime: Some(cached_mtime),
+        };
+        assert!(entry.is_file_stale(Some(current_mtime)));
+    }
+
+    #[test]
+    fn test_cache_entry_is_file_stale_none_some() {
+        let entry = CacheEntry {
+            value: serde_json::json!(null),
+            created_at: Instant::now(),
+            ttl: Duration::from_secs(300),
+            file_mtime: None,
+        };
+        assert!(entry.is_file_stale(Some(SystemTime::now())));
+    }
+
+    #[test]
+    fn test_cache_entry_is_file_stale_some_none() {
+        let entry = CacheEntry {
+            value: serde_json::json!(null),
+            created_at: Instant::now(),
+            ttl: Duration::from_secs(300),
+            file_mtime: Some(SystemTime::now()),
+        };
+        assert!(entry.is_file_stale(None));
+    }
+
+    #[test]
+    fn test_cache_entry_is_file_stale_both_none() {
+        let entry = CacheEntry {
+            value: serde_json::json!(null),
+            created_at: Instant::now(),
+            ttl: Duration::from_secs(300),
+            file_mtime: None,
+        };
+        assert!(!entry.is_file_stale(None));
+    }
+}
+
+#[cfg(test)]
+mod tool_cache_extended_tests {
+    use super::*;
+
+    #[test]
+    fn test_tool_cache_default_trait() {
+        let cache = ToolCache::default();
+        let stats = cache.stats();
+        assert_eq!(stats.default_ttl_secs, 300);
+        assert_eq!(stats.max_entries, 1000);
+        assert_eq!(stats.entries, 0);
+    }
+
+    #[test]
+    fn test_tool_cache_invalidate_specific_entry() {
+        let cache = ToolCache::new();
+        let args1 = serde_json::json!({"path": "a.txt"});
+        let args2 = serde_json::json!({"path": "b.txt"});
+
+        cache.set("file_read", &args1, serde_json::json!("content_a"));
+        cache.set("file_read", &args2, serde_json::json!("content_b"));
+
+        cache.invalidate("file_read", &args1);
+
+        assert!(cache.get("file_read", &args1).is_none());
+        assert!(cache.get("file_read", &args2).is_some());
+    }
+
+    #[test]
+    fn test_tool_cache_invalidate_tool() {
+        let cache = ToolCache::new();
+
+        cache.set(
+            "file_read",
+            &serde_json::json!({"path": "a.txt"}),
+            serde_json::json!("a"),
+        );
+        cache.set(
+            "file_read",
+            &serde_json::json!({"path": "b.txt"}),
+            serde_json::json!("b"),
+        );
+        cache.set(
+            "git_status",
+            &serde_json::json!({}),
+            serde_json::json!("status"),
+        );
+
+        cache.invalidate_tool("file_read");
+
+        assert!(cache
+            .get("file_read", &serde_json::json!({"path": "a.txt"}))
+            .is_none());
+        assert!(cache
+            .get("file_read", &serde_json::json!({"path": "b.txt"}))
+            .is_none());
+        assert!(cache.get("git_status", &serde_json::json!({})).is_some());
+    }
+
+    #[test]
+    fn test_tool_cache_eviction_with_expired_entries() {
+        let cache = ToolCache {
+            entries: RwLock::new(HashMap::new()),
+            default_ttl: Duration::from_millis(1),
+            max_entries: 3,
+        };
+
+        for i in 0..3 {
+            cache.set("tool", &serde_json::json!({"id": i}), serde_json::json!(i));
+        }
+
+        std::thread::sleep(Duration::from_millis(10));
+
+        cache.set_with_ttl(
+            "tool",
+            &serde_json::json!({"id": "new"}),
+            serde_json::json!("new"),
+            Duration::from_secs(300),
+        );
+
+        assert_eq!(cache.stats().entries, 1);
+    }
+
+    #[test]
+    fn test_tool_cache_eviction_oldest_when_none_expired() {
+        let cache = ToolCache {
+            entries: RwLock::new(HashMap::new()),
+            default_ttl: Duration::from_secs(300),
+            max_entries: 10,
+        };
+
+        for i in 0..10 {
+            cache.set("tool", &serde_json::json!({"id": i}), serde_json::json!(i));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        assert_eq!(cache.stats().entries, 10);
+
+        cache.set(
+            "tool",
+            &serde_json::json!({"id": "extra"}),
+            serde_json::json!("extra"),
+        );
+
+        assert_eq!(cache.stats().entries, 10);
+    }
+
+    #[test]
+    fn test_tool_cache_cache_key_with_null_args() {
+        let key = ToolCache::cache_key("test_tool", &serde_json::json!(null));
+        assert!(key.starts_with("test_tool:"));
+    }
+
+    #[test]
+    fn test_tool_cache_cache_key_with_nested_args() {
+        let args = serde_json::json!({"outer": {"inner": "value"}});
+        let key = ToolCache::cache_key("test_tool", &args);
+        assert!(key.starts_with("test_tool:"));
+        assert!(key.contains("inner"));
+    }
+
+    #[test]
+    fn test_tool_cache_overwrite_existing_entry() {
+        let cache = ToolCache::new();
+        let args = serde_json::json!({"path": "test.txt"});
+
+        cache.set("file_read", &args, serde_json::json!("first"));
+        cache.set("file_read", &args, serde_json::json!("second"));
+
+        let result = cache.get("file_read", &args);
+        assert_eq!(result.unwrap(), serde_json::json!("second"));
+        assert_eq!(cache.stats().entries, 1);
+    }
+
+    #[test]
+    fn test_tool_cache_get_without_path_arg() {
+        let cache = ToolCache::new();
+        let args = serde_json::json!({"pattern": "test"});
+        let value = serde_json::json!({"results": []});
+
+        cache.set("grep_search", &args, value.clone());
+        let result = cache.get("grep_search", &args);
+        assert_eq!(result.unwrap(), value);
+    }
+
+    #[test]
+    fn test_tool_cache_set_with_ttl_custom() {
+        let cache = ToolCache::new();
+        let args = serde_json::json!({"key": "val"});
+
+        cache.set_with_ttl(
+            "test",
+            &args,
+            serde_json::json!("data"),
+            Duration::from_millis(5),
+        );
+
+        assert!(cache.get("test", &args).is_some());
+
+        std::thread::sleep(Duration::from_millis(15));
+        assert!(cache.get("test", &args).is_none());
+    }
+
+    #[test]
+    fn test_tool_cache_invalidate_path_no_match() {
+        let cache = ToolCache::new();
+        cache.set(
+            "file_read",
+            &serde_json::json!({"path": "a.txt"}),
+            serde_json::json!("a"),
+        );
+
+        cache.invalidate_path("nonexistent.txt");
+        assert!(cache
+            .get("file_read", &serde_json::json!({"path": "a.txt"}))
+            .is_some());
+    }
+
+    #[test]
+    fn test_tool_cache_invalidate_tool_no_match() {
+        let cache = ToolCache::new();
+        cache.set(
+            "file_read",
+            &serde_json::json!({"path": "a.txt"}),
+            serde_json::json!("a"),
+        );
+
+        cache.invalidate_tool("nonexistent_tool");
+        assert!(cache
+            .get("file_read", &serde_json::json!({"path": "a.txt"}))
+            .is_some());
+    }
+
+    #[test]
+    fn test_tool_cache_stats_after_operations() {
+        let cache = ToolCache::new();
+        assert_eq!(cache.stats().entries, 0);
+
+        cache.set("a", &serde_json::json!({}), serde_json::json!(1));
+        cache.set("b", &serde_json::json!({}), serde_json::json!(2));
+        assert_eq!(cache.stats().entries, 2);
+
+        cache.invalidate("a", &serde_json::json!({}));
+        assert_eq!(cache.stats().entries, 1);
+
+        cache.clear();
+        assert_eq!(cache.stats().entries, 0);
+    }
+}
+
+#[cfg(test)]
+mod llm_cache_extended_tests {
+    use super::*;
+
+    fn make_entry(id: &str, embedding: Vec<f32>, context_hash: u64) -> LlmCacheEntry {
+        LlmCacheEntry {
+            id: id.into(),
+            prompt: format!("Prompt for {}", id),
+            embedding,
+            response: format!("Response for {}", id),
+            model: "test-model".into(),
+            input_tokens: 100,
+            output_tokens: 50,
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            hit_count: 0,
+            context_hash,
+            file_paths: vec![],
+        }
+    }
+
+    fn make_entry_with_paths(
+        id: &str,
+        embedding: Vec<f32>,
+        file_paths: Vec<String>,
+    ) -> LlmCacheEntry {
+        LlmCacheEntry {
+            id: id.into(),
+            prompt: format!("Prompt for {}", id),
+            embedding,
+            response: format!("Response for {}", id),
+            model: "test-model".into(),
+            input_tokens: 100,
+            output_tokens: 50,
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            hit_count: 0,
+            context_hash: 0,
+            file_paths,
+        }
+    }
+
+    #[test]
+    fn test_llm_cache_default() {
+        let cache = LlmCache::default();
+        assert_eq!(cache.size(), 0);
+    }
+
+    #[test]
+    fn test_llm_cache_store_and_size() {
+        let cache = LlmCache::default();
+        let entry = make_entry("e1", vec![1.0, 0.0, 0.0], 0);
+        cache.store(entry);
+        assert_eq!(cache.size(), 1);
+    }
+
+    #[test]
+    fn test_llm_cache_store_replaces_embedding_for_same_id() {
+        let cache = LlmCache::default();
+
+        let entry1 = make_entry("e1", vec![1.0, 0.0, 0.0], 0);
+        cache.store(entry1);
+
+        let entry2 = make_entry("e1", vec![0.0, 1.0, 0.0], 0);
+        cache.store(entry2);
+
+        assert_eq!(cache.size(), 1);
+        let emb_count = cache.embeddings.read().unwrap().len();
+        assert_eq!(emb_count, 1);
+    }
+
+    #[test]
+    fn test_llm_cache_evict_oldest_at_capacity() {
+        let config = LlmCacheConfig {
+            max_entries: 5,
+            ttl_secs: 3600,
+            ..LlmCacheConfig::default()
+        };
+        let cache = LlmCache::new(config);
+
+        for i in 0..5 {
+            let entry = LlmCacheEntry {
+                id: format!("e{}", i),
+                prompt: format!("Prompt {}", i),
+                embedding: vec![i as f32, 0.0, 0.0],
+                response: format!("Response {}", i),
+                model: "test".into(),
+                input_tokens: 100,
+                output_tokens: 50,
+                created_at: i as u64,
+                hit_count: 0,
+                context_hash: 0,
+                file_paths: vec![],
+            };
+            cache.store(entry);
+        }
+
+        assert_eq!(cache.size(), 5);
+
+        let new_entry = LlmCacheEntry {
+            id: "e_new".into(),
+            prompt: "New prompt".into(),
+            embedding: vec![99.0, 0.0, 0.0],
+            response: "New response".into(),
+            model: "test".into(),
+            input_tokens: 100,
+            output_tokens: 50,
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            hit_count: 0,
+            context_hash: 0,
+            file_paths: vec![],
+        };
+        cache.store(new_entry);
+
+        assert_eq!(cache.size(), 5);
+    }
+
+    #[test]
+    fn test_llm_cache_lookup_expired_entry() {
+        let config = LlmCacheConfig {
+            ttl_secs: 0,
+            ..LlmCacheConfig::default()
+        };
+        let cache = LlmCache::new(config);
+
+        let embedding = vec![0.5, 0.5, 0.5, 0.5];
+        let entry = LlmCacheEntry {
+            id: "e1".into(),
+            prompt: "test".into(),
+            embedding: embedding.clone(),
+            response: "response".into(),
+            model: "test".into(),
+            input_tokens: 10,
+            output_tokens: 20,
+            created_at: 0,
+            hit_count: 0,
+            context_hash: 0,
+            file_paths: vec![],
+        };
+
+        cache.store(entry);
+
+        let result = cache.lookup("test", &embedding, 0);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_llm_cache_lookup_records_miss_on_no_match() {
+        let cache = LlmCache::default();
+
+        let embedding = vec![1.0, 0.0, 0.0];
+        let result = cache.lookup("test", &embedding, 0);
+        assert!(result.is_none());
+
+        assert_eq!(cache.analytics().misses(), 1);
+        assert_eq!(cache.analytics().total_requests(), 1);
+    }
+
+    #[test]
+    fn test_llm_cache_lookup_records_hit_on_match() {
+        let cache = LlmCache::default();
+
+        let embedding = vec![0.5, 0.5, 0.5, 0.5];
+        let entry = make_entry("e1", embedding.clone(), 0);
+        cache.store(entry);
+
+        let result = cache.lookup("test", &embedding, 0);
+        assert!(result.is_some());
+
+        assert_eq!(cache.analytics().hits(), 1);
+        assert_eq!(cache.analytics().total_requests(), 1);
+    }
+
+    #[test]
+    fn test_llm_cache_lookup_invalidated_context_returns_none() {
+        let cache = LlmCache::default();
+
+        let embedding = vec![0.5, 0.5, 0.5, 0.5];
+        let entry = make_entry("e1", embedding.clone(), 42);
+        cache.store(entry);
+
+        cache.invalidate_context(42);
+
+        let result = cache.lookup("test", &embedding, 42);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_llm_cache_invalidate_path_removes_entries_and_embeddings() {
+        let cache = LlmCache::default();
+
+        let entry =
+            make_entry_with_paths("e1", vec![1.0, 0.0, 0.0], vec!["/tmp/file.rs".to_string()]);
+        cache.store(entry);
+
+        let entry2 = make_entry_with_paths("e2", vec![0.0, 1.0, 0.0], vec![]);
+        cache.store(entry2);
+
+        assert_eq!(cache.size(), 2);
+
+        cache.invalidate_path("/tmp/file.rs");
+
+        assert_eq!(cache.size(), 1);
+        let emb_count = cache.embeddings.read().unwrap().len();
+        assert_eq!(emb_count, 1);
+    }
+
+    #[test]
+    fn test_llm_cache_clear() {
+        let cache = LlmCache::default();
+
+        cache.store(make_entry("e1", vec![1.0, 0.0], 0));
+        cache.store(make_entry("e2", vec![0.0, 1.0], 0));
+        assert_eq!(cache.size(), 2);
+
+        cache.clear();
+
+        assert_eq!(cache.size(), 0);
+        let emb_count = cache.embeddings.read().unwrap().len();
+        assert_eq!(emb_count, 0);
+    }
+
+    #[test]
+    fn test_llm_cache_cost_tracker_accessor() {
+        let cache = LlmCache::default();
+        let tracker = cache.cost_tracker();
+        tracker.record_savings(0.05);
+        assert!((tracker.total_savings() - 0.05).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_llm_cache_analytics_accessor() {
+        let cache = LlmCache::default();
+        let analytics = cache.analytics();
+        analytics.record_request();
+        assert_eq!(analytics.total_requests(), 1);
+    }
+
+    #[test]
+    fn test_llm_cache_store_records_analytics() {
+        let cache = LlmCache::default();
+        let entry = make_entry("e1", vec![1.0, 0.0], 0);
+        cache.store(entry);
+        assert_eq!(cache.analytics().stores(), 1);
+    }
+
+    #[test]
+    fn test_llm_cache_lookup_cost_savings_on_hit() {
+        let config = LlmCacheConfig {
+            input_cost_per_1k: 0.01,
+            output_cost_per_1k: 0.03,
+            ..LlmCacheConfig::default()
+        };
+        let cache = LlmCache::new(config);
+
+        let embedding = vec![0.5, 0.5, 0.5, 0.5];
+        let entry = LlmCacheEntry {
+            id: "e1".into(),
+            prompt: "test".into(),
+            embedding: embedding.clone(),
+            response: "response".into(),
+            model: "test".into(),
+            input_tokens: 1000,
+            output_tokens: 500,
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            hit_count: 0,
+            context_hash: 0,
+            file_paths: vec![],
+        };
+        cache.store(entry);
+
+        let _result = cache.lookup("test", &embedding, 0);
+
+        let savings = cache.cost_tracker().total_savings();
+        assert!((savings - 0.025).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_llm_cache_entry_is_expired_false() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let entry = LlmCacheEntry {
+            id: "e1".into(),
+            prompt: "test".into(),
+            embedding: vec![],
+            response: "response".into(),
+            model: "test".into(),
+            input_tokens: 0,
+            output_tokens: 0,
+            created_at: now,
+            hit_count: 0,
+            context_hash: 0,
+            file_paths: vec![],
+        };
+        assert!(!entry.is_expired(3600));
+    }
+
+    #[test]
+    fn test_llm_cache_entry_is_expired_true() {
+        let entry = LlmCacheEntry {
+            id: "e1".into(),
+            prompt: "test".into(),
+            embedding: vec![],
+            response: "response".into(),
+            model: "test".into(),
+            input_tokens: 0,
+            output_tokens: 0,
+            created_at: 0,
+            hit_count: 0,
+            context_hash: 0,
+            file_paths: vec![],
+        };
+        assert!(entry.is_expired(3600));
+    }
+
+    #[test]
+    fn test_llm_cache_entry_estimated_cost_zero_tokens() {
+        let config = LlmCacheConfig::default();
+        let entry = LlmCacheEntry {
+            id: "e1".into(),
+            prompt: "".into(),
+            embedding: vec![],
+            response: "".into(),
+            model: "test".into(),
+            input_tokens: 0,
+            output_tokens: 0,
+            created_at: 0,
+            hit_count: 0,
+            context_hash: 0,
+            file_paths: vec![],
+        };
+        assert_eq!(entry.estimated_cost(&config), 0.0);
+    }
+
+    #[test]
+    fn test_llm_cache_embedding_hard_cap_trimming() {
+        let config = LlmCacheConfig {
+            max_entries: 3,
+            ttl_secs: 3600,
+            ..LlmCacheConfig::default()
+        };
+        let cache = LlmCache::new(config);
+
+        for i in 0..5 {
+            let entry = LlmCacheEntry {
+                id: format!("e{}", i),
+                prompt: format!("p{}", i),
+                embedding: vec![i as f32, 0.0, 0.0],
+                response: format!("r{}", i),
+                model: "test".into(),
+                input_tokens: 10,
+                output_tokens: 5,
+                created_at: i as u64,
+                hit_count: 0,
+                context_hash: 0,
+                file_paths: vec![],
+            };
+            cache.store(entry);
+        }
+
+        let emb_count = cache.embeddings.read().unwrap().len();
+        assert!(emb_count <= 3);
+    }
+
+    #[test]
+    fn test_llm_cache_lookup_best_similarity_wins() {
+        let config = LlmCacheConfig {
+            similarity_threshold: 0.5,
+            ..LlmCacheConfig::default()
+        };
+        let cache = LlmCache::new(config);
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let entry1 = LlmCacheEntry {
+            id: "e1".into(),
+            prompt: "p1".into(),
+            embedding: vec![0.8, 0.6, 0.0, 0.0],
+            response: "less similar".into(),
+            model: "test".into(),
+            input_tokens: 10,
+            output_tokens: 5,
+            created_at: now,
+            hit_count: 0,
+            context_hash: 0,
+            file_paths: vec![],
+        };
+        cache.store(entry1);
+
+        let entry2 = LlmCacheEntry {
+            id: "e2".into(),
+            prompt: "p2".into(),
+            embedding: vec![1.0, 0.0, 0.0, 0.0],
+            response: "most similar".into(),
+            model: "test".into(),
+            input_tokens: 10,
+            output_tokens: 5,
+            created_at: now,
+            hit_count: 0,
+            context_hash: 0,
+            file_paths: vec![],
+        };
+        cache.store(entry2);
+
+        let query = vec![1.0, 0.0, 0.0, 0.0];
+        let result = cache.lookup("q", &query, 0);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().response, "most similar");
+    }
+}
+
+#[cfg(test)]
+mod l2_normalize_tests {
+    use super::*;
+
+    #[test]
+    fn test_l2_normalize_unit_vector() {
+        let mut v = vec![1.0, 0.0, 0.0];
+        l2_normalize(&mut v);
+        assert!((v[0] - 1.0).abs() < 1e-6);
+        assert!((v[1] - 0.0).abs() < 1e-6);
+        assert!((v[2] - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_l2_normalize_non_unit_vector() {
+        let mut v = vec![3.0, 4.0];
+        l2_normalize(&mut v);
+        assert!((v[0] - 0.6).abs() < 1e-6);
+        assert!((v[1] - 0.8).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_l2_normalize_zero_vector() {
+        let mut v = vec![0.0, 0.0, 0.0];
+        l2_normalize(&mut v);
+        assert_eq!(v, vec![0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn test_l2_normalize_produces_unit_norm() {
+        let mut v = vec![1.5, 2.3, 0.7, 4.1];
+        l2_normalize(&mut v);
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_l2_normalize_negative_values() {
+        let mut v = vec![-3.0, 4.0];
+        l2_normalize(&mut v);
+        assert!((v[0] - (-0.6)).abs() < 1e-6);
+        assert!((v[1] - 0.8).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod cosine_similarity_extended_tests {
+    use super::*;
+
+    #[test]
+    fn test_cosine_similarity_partial_overlap() {
+        let a = vec![1.0, 1.0, 0.0];
+        let b = vec![1.0, 0.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cosine_similarity_with_negative_values() {
+        let a = vec![-1.0, 0.0];
+        let b = vec![1.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - (-1.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cosine_similarity_all_ones() {
+        let a = vec![1.0, 1.0, 1.0];
+        let b = vec![1.0, 1.0, 1.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cosine_similarity_single_element() {
+        let a = vec![0.5];
+        let b = vec![0.5];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - 0.25).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod semantic_matcher_extended_tests {
+    use super::*;
+
+    #[test]
+    fn test_semantic_matcher_threshold_clamping_above() {
+        let matcher = SemanticMatcher::new(1.5);
+        assert!((matcher.threshold - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_semantic_matcher_threshold_clamping_below() {
+        let matcher = SemanticMatcher::new(-0.5);
+        assert!((matcher.threshold - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_semantic_matcher_threshold_within_range() {
+        let matcher = SemanticMatcher::new(0.75);
+        assert!((matcher.threshold - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_semantic_matcher_find_best_among_multiple() {
+        let matcher = SemanticMatcher::new(0.1);
+
+        matcher.add("exact", vec![1.0, 0.0, 0.0]);
+        matcher.add("partial", vec![0.7, 0.7, 0.0]);
+        matcher.add("different", vec![0.0, 0.0, 1.0]);
+
+        let result = matcher.find_match(&[1.0, 0.0, 0.0]);
+        assert!(result.is_some());
+        let (id, _sim) = result.unwrap();
+        assert_eq!(id, "exact");
+    }
+
+    #[test]
+    fn test_semantic_matcher_remove_nonexistent() {
+        let matcher = SemanticMatcher::new(0.9);
+        matcher.add("entry-1", vec![1.0, 0.0]);
+        matcher.remove("nonexistent");
+        assert_eq!(matcher.count(), 1);
+    }
+
+    #[test]
+    fn test_semantic_matcher_find_match_empty() {
+        let matcher = SemanticMatcher::new(0.9);
+        let result = matcher.find_match(&[1.0, 0.0, 0.0]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_semantic_matcher_default_threshold() {
+        let matcher = SemanticMatcher::default();
+        assert!((matcher.threshold - 0.85).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod cost_tracker_extended_tests {
+    use super::*;
+
+    #[test]
+    fn test_cost_tracker_default() {
+        let tracker = CostTracker::default();
+        assert_eq!(tracker.total_savings(), 0.0);
+        assert_eq!(tracker.hits_with_savings(), 0);
+        assert_eq!(tracker.calls_avoided(), 0);
+    }
+
+    #[test]
+    fn test_cost_tracker_multiple_savings() {
+        let tracker = CostTracker::new();
+        for _ in 0..10 {
+            tracker.record_savings(0.001);
+        }
+        assert!((tracker.total_savings() - 0.01).abs() < 0.001);
+        assert_eq!(tracker.hits_with_savings(), 10);
+        assert_eq!(tracker.calls_avoided(), 10);
+    }
+
+    #[test]
+    fn test_cost_tracker_history_preserves_order() {
+        let tracker = CostTracker::new();
+        tracker.record_savings(0.01);
+        tracker.record_savings(0.02);
+        tracker.record_savings(0.03);
+
+        let history = tracker.history();
+        assert_eq!(history.len(), 3);
+        assert!((history[0].amount - 0.01).abs() < 0.001);
+        assert!((history[1].amount - 0.02).abs() < 0.001);
+        assert!((history[2].amount - 0.03).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_cost_tracker_history_cumulative() {
+        let tracker = CostTracker::new();
+        tracker.record_savings(0.01);
+        tracker.record_savings(0.02);
+
+        let history = tracker.history();
+        assert!(history[1].cumulative >= history[0].cumulative);
+    }
+
+    #[test]
+    fn test_cost_tracker_reset_clears_history() {
+        let tracker = CostTracker::new();
+        tracker.record_savings(0.01);
+        tracker.record_savings(0.02);
+        tracker.reset();
+
+        assert!(tracker.history().is_empty());
+        assert_eq!(tracker.total_savings(), 0.0);
+        assert_eq!(tracker.hits_with_savings(), 0);
+        assert_eq!(tracker.calls_avoided(), 0);
+    }
+
+    #[test]
+    fn test_cost_tracker_summary_fields() {
+        let tracker = CostTracker::new();
+        tracker.record_savings(0.1);
+        tracker.record_savings(0.2);
+
+        let summary = tracker.summary();
+        assert!((summary.total_savings - 0.3).abs() < 0.001);
+        assert_eq!(summary.hits_with_savings, 2);
+        assert_eq!(summary.calls_avoided, 2);
+        assert!((summary.average_per_hit - 0.15).abs() < 0.001);
+    }
+}
+
+#[cfg(test)]
+mod cache_analytics_extended_tests {
+    use super::*;
+
+    #[test]
+    fn test_analytics_default() {
+        let analytics = CacheAnalytics::default();
+        assert_eq!(analytics.total_requests(), 0);
+        assert_eq!(analytics.hits(), 0);
+        assert_eq!(analytics.misses(), 0);
+        assert_eq!(analytics.stores(), 0);
+    }
+
+    #[test]
+    fn test_analytics_history_recorded_at_multiples_of_10() {
+        let analytics = CacheAnalytics::new();
+
+        for _ in 0..10 {
+            analytics.record_request();
+        }
+        for _ in 0..10 {
+            analytics.record_hit();
+        }
+
+        let history = analytics.history();
+        assert!(!history.is_empty());
+    }
+
+    #[test]
+    fn test_analytics_history_not_recorded_at_non_multiples() {
+        let analytics = CacheAnalytics::new();
+
+        for _ in 0..3 {
+            analytics.record_request();
+            analytics.record_hit();
+        }
+
+        let history = analytics.history();
+        assert!(history.is_empty());
+    }
+
+    #[test]
+    fn test_analytics_optimization_suggestions_many_misses() {
+        let analytics = CacheAnalytics::new();
+
+        for _ in 0..2500 {
+            analytics.record_request();
+        }
+        for _ in 0..500 {
+            analytics.record_hit();
+        }
+        for _ in 0..2000 {
+            analytics.record_miss();
+        }
+
+        let suggestions = analytics.optimization_suggestions();
+        assert!(suggestions.iter().any(|s| s.category == "Threshold"));
+        assert!(suggestions.iter().any(|s| s.category == "Capacity"));
+    }
+
+    #[test]
+    fn test_analytics_optimization_no_suggestions_when_insufficient_data() {
+        let analytics = CacheAnalytics::new();
+
+        for _ in 0..10 {
+            analytics.record_request();
+        }
+        for _ in 0..2 {
+            analytics.record_hit();
+        }
+
+        let suggestions = analytics.optimization_suggestions();
+        assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn test_analytics_optimization_no_capacity_suggestion_when_few_misses() {
+        let analytics = CacheAnalytics::new();
+
+        for _ in 0..200 {
+            analytics.record_request();
+        }
+        for _ in 0..80 {
+            analytics.record_hit();
+        }
+        for _ in 0..120 {
+            analytics.record_miss();
+        }
+
+        let suggestions = analytics.optimization_suggestions();
+        assert!(!suggestions.iter().any(|s| s.category == "Capacity"));
+    }
+
+    #[test]
+    fn test_analytics_reset_clears_everything() {
+        let analytics = CacheAnalytics::new();
+
+        for _ in 0..20 {
+            analytics.record_request();
+            analytics.record_hit();
+        }
+        analytics.record_miss();
+        analytics.record_store();
+
+        analytics.reset();
+
+        assert_eq!(analytics.total_requests(), 0);
+        assert_eq!(analytics.hits(), 0);
+        assert_eq!(analytics.misses(), 0);
+        assert_eq!(analytics.stores(), 0);
+        assert!(analytics.history().is_empty());
+    }
+
+    #[test]
+    fn test_analytics_summary_fields() {
+        let analytics = CacheAnalytics::new();
+        for _ in 0..5 {
+            analytics.record_request();
+        }
+        for _ in 0..3 {
+            analytics.record_hit();
+        }
+        for _ in 0..2 {
+            analytics.record_miss();
+        }
+        analytics.record_store();
+
+        let summary = analytics.summary();
+        assert_eq!(summary.total_requests, 5);
+        assert_eq!(summary.hits, 3);
+        assert_eq!(summary.misses, 2);
+        assert_eq!(summary.stores, 1);
+        assert!((summary.hit_rate - 0.6).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_hit_rate_record_fields() {
+        let record = HitRateRecord {
+            timestamp: 1000,
+            hit_rate: 0.75,
+            total_requests: 100,
+        };
+        assert_eq!(record.timestamp, 1000);
+        assert!((record.hit_rate - 0.75).abs() < 1e-6);
+        assert_eq!(record.total_requests, 100);
+    }
+}
+
+#[cfg(test)]
+mod invalidator_extended_tests {
+    use super::*;
+
+    #[test]
+    fn test_invalidator_default() {
+        let inv = CacheInvalidator::default();
+        assert!(inv.get_entries_for_path("/any").is_empty());
+        assert!(!inv.should_invalidate(0));
+    }
+
+    #[test]
+    fn test_invalidator_remove_entry() {
+        let inv = CacheInvalidator::new();
+        inv.register_path("e1", "/tmp/a.txt");
+        inv.register_path("e2", "/tmp/a.txt");
+        inv.register_path("e1", "/tmp/b.txt");
+
+        inv.remove_entry("e1");
+
+        let entries_a = inv.get_entries_for_path("/tmp/a.txt");
+        assert!(!entries_a.contains(&"e1".to_string()));
+        assert!(entries_a.contains(&"e2".to_string()));
+
+        let entries_b = inv.get_entries_for_path("/tmp/b.txt");
+        assert!(entries_b.is_empty());
+    }
+
+    #[test]
+    fn test_invalidator_mark_invalidated_dedup() {
+        let inv = CacheInvalidator::new();
+        inv.mark_invalidated(42);
+        inv.mark_invalidated(42);
+
+        let contexts = inv.invalidated_contexts.read().unwrap();
+        let count = contexts.iter().filter(|&&c| c == 42).count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_invalidator_mark_invalidated_capacity_limit() {
+        let inv = CacheInvalidator::new();
+
+        for i in 0..110 {
+            inv.mark_invalidated(i);
+        }
+
+        let contexts = inv.invalidated_contexts.read().unwrap();
+        assert!(contexts.len() <= 100);
+        assert!(contexts.contains(&109));
+        assert!(!contexts.contains(&0));
+    }
+
+    #[test]
+    fn test_invalidator_should_invalidate_unknown_hash() {
+        let inv = CacheInvalidator::new();
+        assert!(!inv.should_invalidate(99999));
+    }
+
+    #[test]
+    fn test_invalidator_is_file_stale_no_cached_mtime() {
+        let inv = CacheInvalidator::new();
+        assert!(!inv.is_file_stale("/nonexistent/path/to/file.txt"));
+    }
+
+    #[test]
+    fn test_invalidator_get_entries_for_path_unknown() {
+        let inv = CacheInvalidator::new();
+        let entries = inv.get_entries_for_path("/unknown/path");
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_invalidator_clear_all() {
+        let inv = CacheInvalidator::new();
+        inv.register_path("e1", "/tmp/a.txt");
+        inv.register_path("e2", "/tmp/b.txt");
+        inv.mark_invalidated(1);
+        inv.mark_invalidated(2);
+
+        inv.clear();
+
+        assert!(inv.get_entries_for_path("/tmp/a.txt").is_empty());
+        assert!(inv.get_entries_for_path("/tmp/b.txt").is_empty());
+        assert!(!inv.should_invalidate(1));
+        assert!(!inv.should_invalidate(2));
+    }
+
+    #[test]
+    fn test_invalidator_remove_entry_nonexistent() {
+        let inv = CacheInvalidator::new();
+        inv.register_path("e1", "/tmp/a.txt");
+
+        inv.remove_entry("nonexistent");
+
+        let entries = inv.get_entries_for_path("/tmp/a.txt");
+        assert!(entries.contains(&"e1".to_string()));
+    }
+
+    #[test]
+    fn test_invalidator_multiple_entries_same_path() {
+        let inv = CacheInvalidator::new();
+        inv.register_path("e1", "/tmp/shared.txt");
+        inv.register_path("e2", "/tmp/shared.txt");
+        inv.register_path("e3", "/tmp/shared.txt");
+
+        let entries = inv.get_entries_for_path("/tmp/shared.txt");
+        assert_eq!(entries.len(), 3);
+    }
+}
+
+#[cfg(test)]
+mod cache_manager_extended_tests {
+    use super::*;
+
+    #[test]
+    fn test_cache_manager_with_custom_config() {
+        let config = LlmCacheConfig {
+            max_entries: 100,
+            ttl_secs: 600,
+            semantic_matching: false,
+            similarity_threshold: 0.5,
+            track_costs: false,
+            input_cost_per_1k: 0.001,
+            output_cost_per_1k: 0.002,
+        };
+        let manager = CacheManager::new(config);
+        let stats = manager.stats();
+        assert_eq!(stats.tool_cache.entries, 0);
+        assert_eq!(stats.llm_cache_size, 0);
+    }
+
+    #[test]
+    fn test_cache_manager_default_trait() {
+        let manager = CacheManager::default();
+        let stats = manager.stats();
+        assert_eq!(stats.tool_cache.max_entries, 1000);
+    }
+
+    #[test]
+    fn test_cache_manager_invalidate_path_both_caches() {
+        let manager = CacheManager::default();
+
+        manager.tool_cache.set(
+            "file_read",
+            &serde_json::json!({"path": "/tmp/target.txt"}),
+            serde_json::json!("content"),
+        );
+
+        let entry = LlmCacheEntry {
+            id: "llm1".into(),
+            prompt: "test".into(),
+            embedding: vec![1.0, 0.0],
+            response: "resp".into(),
+            model: "test".into(),
+            input_tokens: 10,
+            output_tokens: 5,
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            hit_count: 0,
+            context_hash: 0,
+            file_paths: vec!["/tmp/target.txt".into()],
+        };
+        manager.llm_cache.store(entry);
+
+        manager.invalidate_path("/tmp/target.txt");
+
+        assert!(manager
+            .tool_cache
+            .get("file_read", &serde_json::json!({"path": "/tmp/target.txt"}))
+            .is_none());
+        assert_eq!(manager.llm_cache.size(), 0);
+    }
+
+    #[test]
+    fn test_cache_manager_clear_all_both_caches() {
+        let manager = CacheManager::default();
+
+        manager
+            .tool_cache
+            .set("t1", &serde_json::json!({}), serde_json::json!(1));
+        manager
+            .tool_cache
+            .set("t2", &serde_json::json!({}), serde_json::json!(2));
+
+        let entry = LlmCacheEntry {
+            id: "llm1".into(),
+            prompt: "test".into(),
+            embedding: vec![1.0],
+            response: "resp".into(),
+            model: "test".into(),
+            input_tokens: 10,
+            output_tokens: 5,
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            hit_count: 0,
+            context_hash: 0,
+            file_paths: vec![],
+        };
+        manager.llm_cache.store(entry);
+
+        manager.clear_all();
+
+        assert_eq!(manager.stats().tool_cache.entries, 0);
+        assert_eq!(manager.stats().llm_cache_size, 0);
+    }
+
+    #[test]
+    fn test_cache_manager_stats_comprehensive() {
+        let manager = CacheManager::default();
+
+        manager
+            .tool_cache
+            .set("t1", &serde_json::json!({}), serde_json::json!(1));
+        manager.cost_tracker().record_savings(0.05);
+
+        let stats = manager.stats();
+        assert_eq!(stats.tool_cache.entries, 1);
+        assert!((stats.cost_summary.total_savings - 0.05).abs() < 0.001);
+        assert_eq!(stats.llm_analytics.total_requests, 0);
+        assert_eq!(stats.llm_cache_size, 0);
+    }
+
+    #[test]
+    fn test_cache_manager_cost_tracker_shared() {
+        let manager = CacheManager::default();
+
+        manager.cost_tracker().record_savings(0.01);
+
+        let direct = manager.cost_tracker().total_savings();
+        let via_stats = manager.stats().cost_summary.total_savings;
+
+        assert!((direct - 0.01).abs() < 0.001);
+        assert!((via_stats - 0.01).abs() < 0.001);
+    }
+}
+
+#[cfg(test)]
+mod llm_cache_config_extended_tests {
+    use super::*;
+
+    #[test]
+    fn test_llm_cache_config_default_values() {
+        let config = LlmCacheConfig::default();
+        assert!(config.semantic_matching);
+        assert!((config.similarity_threshold - 0.85).abs() < 1e-6);
+        assert_eq!(config.max_entries, 500);
+        assert_eq!(config.ttl_secs, 3600);
+        assert!(config.track_costs);
+        assert!((config.input_cost_per_1k - 0.003).abs() < 1e-6);
+        assert!((config.output_cost_per_1k - 0.015).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_llm_cache_config_custom() {
+        let config = LlmCacheConfig {
+            semantic_matching: false,
+            similarity_threshold: 0.5,
+            max_entries: 100,
+            ttl_secs: 1800,
+            track_costs: false,
+            input_cost_per_1k: 0.001,
+            output_cost_per_1k: 0.002,
+        };
+        assert!(!config.semantic_matching);
+        assert_eq!(config.max_entries, 100);
+    }
+
+    #[test]
+    fn test_llm_cache_config_serde_roundtrip() {
+        let config = LlmCacheConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: LlmCacheConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.max_entries, config.max_entries);
+        assert_eq!(deserialized.ttl_secs, config.ttl_secs);
+        assert!((deserialized.similarity_threshold - config.similarity_threshold).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod optimization_priority_tests {
+    use super::*;
+
+    #[test]
+    fn test_optimization_priority_equality() {
+        assert_eq!(OptimizationPriority::Low, OptimizationPriority::Low);
+        assert_eq!(OptimizationPriority::Medium, OptimizationPriority::Medium);
+        assert_eq!(OptimizationPriority::High, OptimizationPriority::High);
+        assert_ne!(OptimizationPriority::Low, OptimizationPriority::High);
+    }
+
+    #[test]
+    fn test_optimization_priority_debug() {
+        let low = format!("{:?}", OptimizationPriority::Low);
+        assert_eq!(low, "Low");
+        let med = format!("{:?}", OptimizationPriority::Medium);
+        assert_eq!(med, "Medium");
+        let high = format!("{:?}", OptimizationPriority::High);
+        assert_eq!(high, "High");
+    }
+
+    #[test]
+    fn test_optimization_suggestion_fields() {
+        let suggestion = OptimizationSuggestion {
+            category: "TestCat".into(),
+            message: "Test message".into(),
+            priority: OptimizationPriority::Medium,
+        };
+        assert_eq!(suggestion.category, "TestCat");
+        assert_eq!(suggestion.message, "Test message");
+        assert_eq!(suggestion.priority, OptimizationPriority::Medium);
+    }
+
+    #[test]
+    fn test_optimization_priority_serde_roundtrip() {
+        let original = OptimizationPriority::High;
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: OptimizationPriority = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, deserialized);
+    }
+}
+
+#[cfg(test)]
+mod cost_record_tests {
+    use super::*;
+
+    #[test]
+    fn test_cost_record_fields() {
+        let record = CostRecord {
+            timestamp: 1000,
+            amount: 0.05,
+            cumulative: 0.15,
+        };
+        assert_eq!(record.timestamp, 1000);
+        assert!((record.amount - 0.05).abs() < 1e-6);
+        assert!((record.cumulative - 0.15).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cost_record_serde_roundtrip() {
+        let record = CostRecord {
+            timestamp: 12345,
+            amount: 0.123,
+            cumulative: 0.456,
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        let deserialized: CostRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.timestamp, record.timestamp);
+        assert!((deserialized.amount - record.amount).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_cost_summary_fields() {
+        let summary = CostSummary {
+            total_savings: 1.5,
+            hits_with_savings: 10,
+            calls_avoided: 15,
+            average_per_hit: 0.15,
+        };
+        assert!((summary.total_savings - 1.5).abs() < 1e-6);
+        assert_eq!(summary.hits_with_savings, 10);
+        assert_eq!(summary.calls_avoided, 15);
+    }
+
+    #[test]
+    fn test_cost_summary_serde_roundtrip() {
+        let summary = CostSummary {
+            total_savings: 2.5,
+            hits_with_savings: 20,
+            calls_avoided: 25,
+            average_per_hit: 0.125,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: CostSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.hits_with_savings, 20);
+        assert!((deserialized.total_savings - 2.5).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod analytics_summary_tests {
+    use super::*;
+
+    #[test]
+    fn test_analytics_summary_fields() {
+        let summary = AnalyticsSummary {
+            total_requests: 100,
+            hits: 75,
+            misses: 25,
+            stores: 50,
+            hit_rate: 0.75,
+        };
+        assert_eq!(summary.total_requests, 100);
+        assert_eq!(summary.hits, 75);
+        assert_eq!(summary.misses, 25);
+        assert_eq!(summary.stores, 50);
+        assert!((summary.hit_rate - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_analytics_summary_serde_roundtrip() {
+        let summary = AnalyticsSummary {
+            total_requests: 50,
+            hits: 30,
+            misses: 20,
+            stores: 10,
+            hit_rate: 0.6,
+        };
+        let json = serde_json::to_string(&summary).unwrap();
+        let deserialized: AnalyticsSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.total_requests, 50);
+        assert_eq!(deserialized.hits, 30);
+    }
+}
+
+#[cfg(test)]
+mod cache_stats_tests {
+    use super::*;
+
+    #[test]
+    fn test_cache_stats_debug() {
+        let stats = CacheStats {
+            entries: 42,
+            max_entries: 1000,
+            default_ttl_secs: 300,
+        };
+        let debug = format!("{:?}", stats);
+        assert!(debug.contains("42"));
+        assert!(debug.contains("1000"));
+        assert!(debug.contains("300"));
+    }
+
+    #[test]
+    fn test_cache_stats_clone() {
+        let stats = CacheStats {
+            entries: 10,
+            max_entries: 500,
+            default_ttl_secs: 120,
+        };
+        let cloned = stats.clone();
+        assert_eq!(cloned.entries, 10);
+        assert_eq!(cloned.max_entries, 500);
+        assert_eq!(cloned.default_ttl_secs, 120);
+    }
+}
+
+#[cfg(test)]
+mod is_cacheable_edge_cases {
+    use super::*;
+
+    #[test]
+    fn test_is_cacheable_empty_string() {
+        assert!(!is_cacheable(""));
+    }
+
+    #[test]
+    fn test_is_cacheable_case_sensitivity() {
+        assert!(!is_cacheable("File_Read"));
+        assert!(!is_cacheable("FILE_READ"));
+        assert!(is_cacheable("file_read"));
+    }
+
+    #[test]
+    fn test_invalidates_cache_empty_string() {
+        assert!(!invalidates_cache(""));
+    }
+
+    #[test]
+    fn test_invalidates_cache_case_sensitivity() {
+        assert!(!invalidates_cache("File_Write"));
+        assert!(!invalidates_cache("FILE_WRITE"));
+        assert!(invalidates_cache("file_write"));
+    }
+
+    #[test]
+    fn test_cacheable_and_invalidates_are_disjoint() {
+        let cacheable = [
+            "file_read",
+            "directory_tree",
+            "git_status",
+            "git_diff",
+            "grep_search",
+            "glob_find",
+            "symbol_search",
+        ];
+        let invalidators = [
+            "file_write",
+            "file_edit",
+            "git_commit",
+            "git_checkout",
+            "shell_exec",
+        ];
+
+        for tool in &cacheable {
+            assert!(
+                !invalidates_cache(tool),
+                "{} should not invalidate cache",
+                tool
+            );
+        }
+        for tool in &invalidators {
+            assert!(!is_cacheable(tool), "{} should not be cacheable", tool);
+        }
+    }
+}
+
+#[cfg(test)]
+mod cache_manager_stats_tests {
+    use super::*;
+
+    #[test]
+    fn test_cache_manager_stats_debug() {
+        let stats = CacheManagerStats {
+            tool_cache: CacheStats {
+                entries: 5,
+                max_entries: 1000,
+                default_ttl_secs: 300,
+            },
+            llm_analytics: AnalyticsSummary {
+                total_requests: 10,
+                hits: 7,
+                misses: 3,
+                stores: 5,
+                hit_rate: 0.7,
+            },
+            cost_summary: CostSummary {
+                total_savings: 0.5,
+                hits_with_savings: 7,
+                calls_avoided: 7,
+                average_per_hit: 0.071,
+            },
+            llm_cache_size: 5,
+        };
+        let debug = format!("{:?}", stats);
+        assert!(debug.contains("tool_cache"));
+        assert!(debug.contains("llm_analytics"));
+        assert!(debug.contains("cost_summary"));
+        assert!(debug.contains("llm_cache_size"));
+    }
+}

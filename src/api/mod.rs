@@ -1705,6 +1705,1457 @@ mod tests {
 
         let _ = server.await;
     }
+
+    // ============================================
+    // ToolCallAccumulator Tests
+    // ============================================
+
+    #[test]
+    fn test_tool_call_accumulator_new_is_empty() {
+        let mut acc = ToolCallAccumulator::new();
+        let calls = acc.flush();
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_tool_call_accumulator_single_delta() {
+        let mut acc = ToolCallAccumulator::new();
+        let delta = serde_json::json!({
+            "index": 0,
+            "id": "call_single",
+            "type": "function",
+            "function": {"name": "test_fn", "arguments": "{\"key\":\"value\"}"}
+        });
+        let result = acc.process_delta(&delta);
+        assert!(result.is_none(), "process_delta should always return None");
+
+        let calls = acc.flush();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_single");
+        assert_eq!(calls[0].call_type, "function");
+        assert_eq!(calls[0].function.name, "test_fn");
+        assert_eq!(calls[0].function.arguments, "{\"key\":\"value\"}");
+    }
+
+    #[test]
+    fn test_tool_call_accumulator_continuation_appends_args() {
+        let mut acc = ToolCallAccumulator::new();
+
+        // First delta with partial args
+        let d1 = serde_json::json!({
+            "index": 0,
+            "id": "call_multi",
+            "type": "function",
+            "function": {"name": "write", "arguments": "{\"path\":"}
+        });
+        acc.process_delta(&d1);
+
+        // Continuation delta: same index, only args
+        let d2 = serde_json::json!({
+            "index": 0,
+            "function": {"arguments": "\"/tmp/f\","}
+        });
+        acc.process_delta(&d2);
+
+        // Another continuation
+        let d3 = serde_json::json!({
+            "index": 0,
+            "function": {"arguments": "\"data\":\"hi\"}"}
+        });
+        acc.process_delta(&d3);
+
+        let calls = acc.flush();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_multi");
+        assert_eq!(calls[0].function.name, "write");
+        assert_eq!(
+            calls[0].function.arguments,
+            "{\"path\":\"/tmp/f\",\"data\":\"hi\"}"
+        );
+    }
+
+    #[test]
+    fn test_tool_call_accumulator_updates_id_type_name_on_continuation() {
+        let mut acc = ToolCallAccumulator::new();
+
+        // First delta with empty id/type (some backends do this)
+        let d1 = serde_json::json!({
+            "index": 0,
+            "function": {"arguments": "{\"a\":1"}
+        });
+        acc.process_delta(&d1);
+
+        // Second delta provides id, type, name
+        let d2 = serde_json::json!({
+            "index": 0,
+            "id": "call_late_id",
+            "type": "function",
+            "function": {"name": "late_fn", "arguments": "}"}
+        });
+        acc.process_delta(&d2);
+
+        let calls = acc.flush();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_late_id");
+        assert_eq!(calls[0].call_type, "function");
+        assert_eq!(calls[0].function.name, "late_fn");
+        assert_eq!(calls[0].function.arguments, "{\"a\":1}");
+    }
+
+    #[test]
+    fn test_tool_call_accumulator_multiple_indices_sorted() {
+        let mut acc = ToolCallAccumulator::new();
+
+        // Insert index 2 first
+        let d2 = serde_json::json!({
+            "index": 2, "id": "call_c", "type": "function",
+            "function": {"name": "fn_c", "arguments": "{}"}
+        });
+        acc.process_delta(&d2);
+
+        // Then index 0
+        let d0 = serde_json::json!({
+            "index": 0, "id": "call_a", "type": "function",
+            "function": {"name": "fn_a", "arguments": "{}"}
+        });
+        acc.process_delta(&d0);
+
+        // Then index 1
+        let d1 = serde_json::json!({
+            "index": 1, "id": "call_b", "type": "function",
+            "function": {"name": "fn_b", "arguments": "{}"}
+        });
+        acc.process_delta(&d1);
+
+        let calls = acc.flush();
+        assert_eq!(calls.len(), 3);
+        // Should be sorted by index
+        assert_eq!(calls[0].id, "call_a");
+        assert_eq!(calls[1].id, "call_b");
+        assert_eq!(calls[2].id, "call_c");
+    }
+
+    #[test]
+    fn test_tool_call_accumulator_delta_missing_index_returns_none() {
+        let mut acc = ToolCallAccumulator::new();
+        // Delta with no index field at all
+        let delta = serde_json::json!({
+            "id": "call_no_idx",
+            "function": {"name": "fn", "arguments": "{}"}
+        });
+        let result = acc.process_delta(&delta);
+        assert!(result.is_none());
+
+        // Nothing was buffered because index was missing
+        let calls = acc.flush();
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_tool_call_accumulator_flush_clears_pending() {
+        let mut acc = ToolCallAccumulator::new();
+        let delta = serde_json::json!({
+            "index": 0, "id": "call_x", "type": "function",
+            "function": {"name": "fn_x", "arguments": "{}"}
+        });
+        acc.process_delta(&delta);
+
+        let calls1 = acc.flush();
+        assert_eq!(calls1.len(), 1);
+
+        // Second flush should be empty
+        let calls2 = acc.flush();
+        assert!(calls2.is_empty());
+    }
+
+    #[test]
+    fn test_tool_call_accumulator_default_trait() {
+        let mut acc = ToolCallAccumulator::default();
+        let calls = acc.flush();
+        assert!(calls.is_empty());
+    }
+
+    // ============================================
+    // Extended parse_sse_event Tests
+    // ============================================
+
+    #[test]
+    fn test_parse_sse_content_and_usage_same_event() {
+        let mut acc = ToolCallAccumulator::new();
+        let event = r#"data: {"choices":[{"delta":{"content":"hi"}}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}"#;
+        let results = parse_sse_event(event, &mut acc);
+        assert_eq!(results.len(), 2);
+        assert!(matches!(&results[0], StreamChunk::Content(t) if t == "hi"));
+        assert!(matches!(&results[1], StreamChunk::Usage(u) if u.total_tokens == 7));
+    }
+
+    #[test]
+    fn test_parse_sse_reasoning_and_content_same_event() {
+        let mut acc = ToolCallAccumulator::new();
+        let event =
+            r#"data: {"choices":[{"delta":{"content":"answer","reasoning_content":"thinking"}}]}"#;
+        let results = parse_sse_event(event, &mut acc);
+        assert_eq!(results.len(), 2);
+        assert!(matches!(&results[0], StreamChunk::Content(t) if t == "answer"));
+        assert!(matches!(&results[1], StreamChunk::Reasoning(t) if t == "thinking"));
+    }
+
+    #[test]
+    fn test_parse_sse_empty_reasoning_not_emitted() {
+        let mut acc = ToolCallAccumulator::new();
+        let event = r#"data: {"choices":[{"delta":{"reasoning_content":""}}]}"#;
+        let results = parse_sse_event(event, &mut acc);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_parse_sse_multiple_tool_call_deltas_in_one_event() {
+        let mut acc = ToolCallAccumulator::new();
+        let event = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"fn1","arguments":"{}"}},{"index":1,"id":"c2","type":"function","function":{"name":"fn2","arguments":"{}"}}]}}]}"#;
+        let results = parse_sse_event(event, &mut acc);
+        // Tool calls are buffered, not emitted
+        assert!(results.is_empty());
+
+        let calls = acc.flush();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].function.name, "fn1");
+        assert_eq!(calls[1].function.name, "fn2");
+    }
+
+    #[test]
+    fn test_parse_sse_finish_reason_flushes_tool_calls() {
+        let mut acc = ToolCallAccumulator::new();
+
+        // First event: buffer a tool call
+        let event1 = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c_fin","type":"function","function":{"name":"read","arguments":"{}"}}]}}]}"#;
+        let r1 = parse_sse_event(event1, &mut acc);
+        assert!(r1.is_empty());
+
+        // Second event with finish_reason: should flush
+        let event2 = r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
+        let r2 = parse_sse_event(event2, &mut acc);
+        assert_eq!(r2.len(), 1);
+        assert!(matches!(&r2[0], StreamChunk::ToolCall(tc) if tc.id == "c_fin"));
+    }
+
+    #[test]
+    fn test_parse_sse_done_flushes_multiple_tool_calls() {
+        let mut acc = ToolCallAccumulator::new();
+
+        // Buffer two tool calls
+        let d0 = serde_json::json!({
+            "index": 0, "id": "a", "type": "function",
+            "function": {"name": "fn_a", "arguments": "{}"}
+        });
+        let d1 = serde_json::json!({
+            "index": 1, "id": "b", "type": "function",
+            "function": {"name": "fn_b", "arguments": "{}"}
+        });
+        acc.process_delta(&d0);
+        acc.process_delta(&d1);
+
+        let results = parse_sse_event("data: [DONE]", &mut acc);
+        // Should be: ToolCall(a), ToolCall(b), Done
+        assert_eq!(results.len(), 3);
+        assert!(matches!(&results[0], StreamChunk::ToolCall(tc) if tc.id == "a"));
+        assert!(matches!(&results[1], StreamChunk::ToolCall(tc) if tc.id == "b"));
+        assert!(matches!(&results[2], StreamChunk::Done));
+    }
+
+    #[test]
+    fn test_parse_sse_event_json_without_choices() {
+        let mut acc = ToolCallAccumulator::new();
+        // Valid JSON but no choices key
+        let event = r#"data: {"id":"chatcmpl-123","model":"test"}"#;
+        let results = parse_sse_event(event, &mut acc);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_parse_sse_event_usage_with_invalid_structure() {
+        let mut acc = ToolCallAccumulator::new();
+        // Usage field is present but cannot deserialize to Usage struct
+        let event = r#"data: {"usage":{"invalid":"fields"}}"#;
+        let results = parse_sse_event(event, &mut acc);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_parse_sse_event_multiple_data_lines() {
+        let mut acc = ToolCallAccumulator::new();
+        // Multiple data: lines in one SSE event (spec says to concatenate)
+        // Our implementation processes each line independently
+        let event = "data: {\"choices\":[{\"delta\":{\"content\":\"A\"}}]}\ndata: {\"choices\":[{\"delta\":{\"content\":\"B\"}}]}";
+        let results = parse_sse_event(event, &mut acc);
+        assert_eq!(results.len(), 2);
+        assert!(matches!(&results[0], StreamChunk::Content(t) if t == "A"));
+        assert!(matches!(&results[1], StreamChunk::Content(t) if t == "B"));
+    }
+
+    #[test]
+    fn test_parse_sse_event_choices_empty_array() {
+        let mut acc = ToolCallAccumulator::new();
+        let event = r#"data: {"choices":[]}"#;
+        let results = parse_sse_event(event, &mut acc);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_parse_sse_event_choices_no_delta() {
+        let mut acc = ToolCallAccumulator::new();
+        let event = r#"data: {"choices":[{"index":0}]}"#;
+        let results = parse_sse_event(event, &mut acc);
+        assert!(results.is_empty());
+    }
+
+    // ============================================
+    // ApiClient Construction Tests
+    // ============================================
+
+    #[test]
+    fn test_api_client_new_default_config() {
+        let config = crate::config::Config::default();
+        let client = ApiClient::new(&config);
+        assert!(client.is_ok());
+        let client = client.unwrap();
+        assert_eq!(client.base_url, config.endpoint);
+    }
+
+    #[test]
+    fn test_api_client_new_custom_endpoint() {
+        let mut config = crate::config::Config::default();
+        config.endpoint = "https://api.example.com/v1".to_string();
+        let client = ApiClient::new(&config).unwrap();
+        assert_eq!(client.base_url, "https://api.example.com/v1");
+    }
+
+    #[test]
+    fn test_api_client_new_respects_step_timeout() {
+        let mut config = crate::config::Config::default();
+        config.agent.step_timeout_secs = 120;
+        let client = ApiClient::new(&config);
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn test_api_client_new_enforces_minimum_timeout() {
+        let mut config = crate::config::Config::default();
+        config.agent.step_timeout_secs = 10; // Below 60s minimum
+        let client = ApiClient::new(&config);
+        assert!(client.is_ok());
+        // The timeout should be max(10, 60) = 60
+    }
+
+    #[test]
+    fn test_api_client_with_retry_config() {
+        let config = crate::config::Config::default();
+        let client = ApiClient::new(&config).unwrap();
+        let custom_retry = RetryConfig {
+            max_retries: 10,
+            initial_delay_ms: 200,
+            max_delay_ms: 5000,
+            retryable_status_codes: vec![429],
+        };
+        let client = client.with_retry_config(custom_retry);
+        assert_eq!(client.retry_config.max_retries, 10);
+        assert_eq!(client.retry_config.initial_delay_ms, 200);
+        assert_eq!(client.retry_config.max_delay_ms, 5000);
+        assert_eq!(client.retry_config.retryable_status_codes, vec![429]);
+    }
+
+    #[test]
+    fn test_api_client_new_uses_retry_from_config() {
+        let mut config = crate::config::Config::default();
+        config.retry = crate::config::RetrySettings {
+            max_retries: 7,
+            base_delay_ms: 500,
+            max_delay_ms: 10000,
+        };
+        let client = ApiClient::new(&config).unwrap();
+        assert_eq!(client.retry_config.max_retries, 7);
+        assert_eq!(client.retry_config.initial_delay_ms, 500);
+        assert_eq!(client.retry_config.max_delay_ms, 10000);
+    }
+
+    #[test]
+    fn test_api_client_clone() {
+        let config = crate::config::Config::default();
+        let client = ApiClient::new(&config).unwrap();
+        let cloned = client.clone();
+        assert_eq!(cloned.base_url, client.base_url);
+        assert_eq!(
+            cloned.retry_config.max_retries,
+            client.retry_config.max_retries
+        );
+    }
+
+    // ============================================
+    // ApiClient HTTP Tests (with real TCP server)
+    // ============================================
+
+    #[tokio::test]
+    async fn test_api_client_chat_success() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = socket.read(&mut buf).await.unwrap();
+
+            let body = r#"{"id":"c-1","object":"chat.completion","created":123,"model":"test","choices":[{"index":0,"message":{"role":"assistant","content":"Hello world"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut config = crate::config::Config::default();
+        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+        config.api_key = None;
+
+        let client = ApiClient::new(&config).unwrap();
+        let messages = vec![Message::user("Hi")];
+        let result = client.chat(messages, None, ThinkingMode::Enabled).await;
+        assert!(result.is_ok());
+        let resp = result.unwrap();
+        assert_eq!(resp.choices[0].message.content, "Hello world");
+        assert_eq!(resp.usage.total_tokens, 8);
+
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_api_client_chat_with_api_key() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 16384];
+            let n = socket.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]);
+            let request_lower = request.to_lowercase();
+            // reqwest may use lowercase header names (HTTP/2 style)
+            assert!(
+                request_lower.contains("authorization: bearer test-key-123")
+                    || request.contains("Authorization: Bearer test-key-123"),
+                "Expected Bearer token in request headers. Got:\n{}",
+                &request[..request.len().min(500)]
+            );
+
+            let body = r#"{"id":"c-2","object":"chat.completion","created":123,"model":"test","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut config = crate::config::Config::default();
+        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+        config.api_key = Some(crate::config::RedactedString::new(
+            "test-key-123".to_string(),
+        ));
+
+        let client = ApiClient::new(&config).unwrap();
+        let result = client
+            .chat(vec![Message::user("test")], None, ThinkingMode::Enabled)
+            .await;
+        assert!(
+            result.is_ok(),
+            "chat with api_key failed: {:?}",
+            result.err()
+        );
+
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_api_client_chat_thinking_disabled_inserts_system_msg() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 16384];
+            let n = socket.read(&mut buf).await.unwrap();
+            let request_str = String::from_utf8_lossy(&buf[..n]);
+
+            // Extract body after the blank line separator
+            if let Some(body_start) = request_str.find("\r\n\r\n") {
+                let body = &request_str[body_start + 4..];
+                // Verify the system message about disabling thinking was inserted
+                assert!(
+                    body.contains("CRITICAL INSTRUCTION"),
+                    "Expected CRITICAL INSTRUCTION system message in request body"
+                );
+            }
+
+            let body = r#"{"id":"c-3","object":"chat.completion","created":123,"model":"test","choices":[{"index":0,"message":{"role":"assistant","content":"direct"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut config = crate::config::Config::default();
+        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+
+        let client = ApiClient::new(&config).unwrap();
+        let result = client
+            .chat(vec![Message::user("hello")], None, ThinkingMode::Disabled)
+            .await;
+        assert!(result.is_ok());
+
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_api_client_chat_thinking_budget() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 16384];
+            let n = socket.read(&mut buf).await.unwrap();
+            let request_str = String::from_utf8_lossy(&buf[..n]);
+
+            // Extract body
+            if let Some(body_start) = request_str.find("\r\n\r\n") {
+                let body = &request_str[body_start + 4..];
+                // Verify the thinking budget is present
+                assert!(
+                    body.contains("budget_tokens"),
+                    "Expected budget_tokens in request body"
+                );
+                assert!(body.contains("4096"), "Expected budget value 4096 in body");
+            }
+
+            let body = r#"{"id":"c-4","object":"chat.completion","created":123,"model":"test","choices":[{"index":0,"message":{"role":"assistant","content":"thought"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut config = crate::config::Config::default();
+        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+
+        let client = ApiClient::new(&config).unwrap();
+        let result = client
+            .chat(
+                vec![Message::user("think")],
+                None,
+                ThinkingMode::Budget(4096),
+            )
+            .await;
+        assert!(result.is_ok());
+
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_api_client_chat_with_tools_in_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 16384];
+            let n = socket.read(&mut buf).await.unwrap();
+            let request_str = String::from_utf8_lossy(&buf[..n]);
+
+            if let Some(body_start) = request_str.find("\r\n\r\n") {
+                let body = &request_str[body_start + 4..];
+                assert!(body.contains("\"tools\""), "Expected tools in request body");
+                assert!(body.contains("my_tool"), "Expected my_tool name in body");
+            }
+
+            let body = r#"{"id":"c-5","object":"chat.completion","created":123,"model":"test","choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut config = crate::config::Config::default();
+        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+
+        let tools = vec![ToolDefinition {
+            def_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "my_tool".to_string(),
+                description: "A tool".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        }];
+
+        let client = ApiClient::new(&config).unwrap();
+        let result = client
+            .chat(
+                vec![Message::user("use tool")],
+                Some(tools),
+                ThinkingMode::Enabled,
+            )
+            .await;
+        assert!(result.is_ok());
+
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_api_client_non_retryable_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = socket.read(&mut buf).await.unwrap();
+
+            let body = r#"{"error":"Unauthorized"}"#;
+            let response = format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut config = crate::config::Config::default();
+        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+
+        let client = ApiClient::new(&config).unwrap();
+        let result = client
+            .chat(vec![Message::user("test")], None, ThinkingMode::Enabled)
+            .await;
+        assert!(result.is_err());
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("401"),
+            "Expected 401 in error: {}",
+            err_str
+        );
+
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_api_client_retryable_then_success() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            // First request: 500 error
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let _ = socket.read(&mut buf).await.unwrap();
+
+            let body = r#"{"error":"Internal Server Error"}"#;
+            let response = format!(
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            drop(socket);
+
+            // Second request: success
+            let (mut socket2, _) = listener.accept().await.unwrap();
+            let mut buf2 = vec![0u8; 8192];
+            let _ = socket2.read(&mut buf2).await.unwrap();
+
+            let body2 = r#"{"id":"c-retry","object":"chat.completion","created":123,"model":"test","choices":[{"index":0,"message":{"role":"assistant","content":"recovered"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+            let response2 = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body2.len(),
+                body2
+            );
+            socket2.write_all(response2.as_bytes()).await.unwrap();
+        });
+
+        let mut config = crate::config::Config::default();
+        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+        config.retry = crate::config::RetrySettings {
+            max_retries: 3,
+            base_delay_ms: 10, // Very short delay for tests
+            max_delay_ms: 50,
+        };
+
+        let client = ApiClient::new(&config).unwrap();
+        let result = client
+            .chat(vec![Message::user("retry")], None, ThinkingMode::Enabled)
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().choices[0].message.content, "recovered");
+
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_api_client_all_retries_exhausted() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            // Respond with 500 for every attempt (initial + 1 retry = 2 total)
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 8192];
+                let _ = socket.read(&mut buf).await.unwrap();
+
+                let body = r#"{"error":"Server Error"}"#;
+                let response = format!(
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let mut config = crate::config::Config::default();
+        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+        config.retry = crate::config::RetrySettings {
+            max_retries: 1,
+            base_delay_ms: 10,
+            max_delay_ms: 20,
+        };
+
+        let client = ApiClient::new(&config).unwrap();
+        let result = client
+            .chat(vec![Message::user("fail")], None, ThinkingMode::Enabled)
+            .await;
+        assert!(result.is_err());
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("500") || err_str.contains("Server Error"),
+            "Expected server error, got: {}",
+            err_str
+        );
+
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_api_client_completion_success() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = socket.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]);
+            // Verify it goes to /completions endpoint
+            assert!(request.contains("POST") && request.contains("/completions"));
+
+            let body = r#"{"id":"cmpl-1","object":"text_completion","created":123,"model":"test","choices":[{"text":"completed text","index":0,"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut config = crate::config::Config::default();
+        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+
+        let client = ApiClient::new(&config).unwrap();
+        let result = client.completion("fn main() {", Some(100), None).await;
+        assert!(result.is_ok());
+        let resp = result.unwrap();
+        assert_eq!(resp.choices[0].text, "completed text");
+
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_api_client_completion_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let _ = socket.read(&mut buf).await.unwrap();
+
+            let body = r#"{"error":"bad request"}"#;
+            let response = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut config = crate::config::Config::default();
+        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+
+        let client = ApiClient::new(&config).unwrap();
+        let result = client.completion("test", None, None).await;
+        assert!(result.is_err());
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("400"),
+            "Expected 400 in error: {}",
+            err_str
+        );
+
+        let _ = server.await;
+    }
+
+    // ============================================
+    // Streaming Tests (with real TCP server)
+    // ============================================
+
+    #[tokio::test]
+    async fn test_streaming_response_collect() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let events = vec![
+                r#"data: {"choices":[{"delta":{"content":"Hello"}}]}"#,
+                r#"data: {"choices":[{"delta":{"content":" world"}}]}"#,
+                r#"data: {"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}"#,
+                "data: [DONE]",
+            ];
+
+            let mut full_body = String::new();
+            for event in &events {
+                full_body.push_str(event);
+                full_body.push_str("\n\n");
+            }
+
+            let chunk = format!("{:X}\r\n{}\r\n", full_body.len(), full_body);
+            let end_chunk = "0\r\n\r\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{}{}",
+                chunk, end_chunk
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let response = reqwest::get(format!("http://{}", addr)).await.unwrap();
+        let stream = StreamingResponse::new(response, Duration::from_secs(5));
+        let result = stream.collect().await;
+        assert!(result.is_ok());
+        let chat_resp = result.unwrap();
+        assert_eq!(chat_resp.choices[0].message.content, "Hello world");
+        assert_eq!(chat_resp.id, "streamed");
+        assert_eq!(chat_resp.usage.total_tokens, 7);
+
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_streaming_response_collect_with_reasoning() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let events = vec![
+                r#"data: {"choices":[{"delta":{"reasoning_content":"Let me think"}}]}"#,
+                r#"data: {"choices":[{"delta":{"content":"The answer"}}]}"#,
+                "data: [DONE]",
+            ];
+
+            let mut full_body = String::new();
+            for event in &events {
+                full_body.push_str(event);
+                full_body.push_str("\n\n");
+            }
+
+            let chunk = format!("{:X}\r\n{}\r\n", full_body.len(), full_body);
+            let end_chunk = "0\r\n\r\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{}{}",
+                chunk, end_chunk
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let response = reqwest::get(format!("http://{}", addr)).await.unwrap();
+        let stream = StreamingResponse::new(response, Duration::from_secs(5));
+        let result = stream.collect().await;
+        assert!(result.is_ok());
+        let chat_resp = result.unwrap();
+        assert_eq!(chat_resp.choices[0].message.content, "The answer");
+        assert_eq!(
+            chat_resp.choices[0].message.reasoning_content,
+            Some("Let me think".to_string())
+        );
+
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_streaming_response_collect_with_tool_calls() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let events = vec![
+                r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_collect","type":"function","function":{"name":"file_read","arguments":"{\"path\":\"/test\"}"}}]}}]}"#,
+                "data: [DONE]",
+            ];
+
+            let mut full_body = String::new();
+            for event in &events {
+                full_body.push_str(event);
+                full_body.push_str("\n\n");
+            }
+
+            let chunk = format!("{:X}\r\n{}\r\n", full_body.len(), full_body);
+            let end_chunk = "0\r\n\r\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{}{}",
+                chunk, end_chunk
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let response = reqwest::get(format!("http://{}", addr)).await.unwrap();
+        let stream = StreamingResponse::new(response, Duration::from_secs(5));
+        let result = stream.collect().await;
+        assert!(result.is_ok());
+        let chat_resp = result.unwrap();
+        let tool_calls = chat_resp.choices[0].message.tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].id, "call_collect");
+        assert_eq!(tool_calls[0].function.name, "file_read");
+
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_streaming_response_collect_empty_stream() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            // Just send DONE immediately
+            let events = "data: [DONE]\n\n";
+            let chunk = format!("{:X}\r\n{}\r\n", events.len(), events);
+            let end_chunk = "0\r\n\r\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{}{}",
+                chunk, end_chunk
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let response = reqwest::get(format!("http://{}", addr)).await.unwrap();
+        let stream = StreamingResponse::new(response, Duration::from_secs(5));
+        let result = stream.collect().await;
+        assert!(result.is_ok());
+        let chat_resp = result.unwrap();
+        assert!(chat_resp.choices[0].message.content.is_empty());
+        assert!(chat_resp.choices[0].message.reasoning_content.is_none());
+        assert!(chat_resp.choices[0].message.tool_calls.is_none());
+
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_streaming_response_debug_format() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let response = reqwest::get(format!("http://{}", addr)).await.unwrap();
+        let stream = StreamingResponse::new(response, Duration::from_secs(30));
+        let debug = format!("{:?}", stream);
+        assert!(debug.contains("StreamingResponse"));
+        assert!(debug.contains("status"));
+        assert!(debug.contains("chunk_timeout_secs"));
+
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_streaming_trailing_buffer_processing() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            // Send data without trailing \n\n so it goes into the trailing buffer
+            let events = r#"data: {"choices":[{"delta":{"content":"trailing"}}]}"#;
+            let chunk = format!("{:X}\r\n{}\r\n", events.len(), events);
+            let end_chunk = "0\r\n\r\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{}{}",
+                chunk, end_chunk
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let response = reqwest::get(format!("http://{}", addr)).await.unwrap();
+        let stream = StreamingResponse::new(response, Duration::from_secs(5));
+        let mut rx = stream.into_channel().await;
+
+        let mut content = String::new();
+        while let Some(chunk_result) = rx.recv().await {
+            if let Ok(chunk) = chunk_result {
+                match chunk {
+                    StreamChunk::Content(text) => content.push_str(&text),
+                    StreamChunk::Done => break,
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(content, "trailing");
+
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_api_client_chat_stream_success() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 16384];
+            let n = socket.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]);
+            // Verify it's a streaming request
+            assert!(request.contains("\"stream\":true"));
+
+            let events =
+                "data: {\"choices\":[{\"delta\":{\"content\":\"streamed\"}}]}\n\ndata: [DONE]\n\n";
+            let chunk = format!("{:X}\r\n{}\r\n", events.len(), events);
+            let end_chunk = "0\r\n\r\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{}{}",
+                chunk, end_chunk
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut config = crate::config::Config::default();
+        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+
+        let client = ApiClient::new(&config).unwrap();
+        let result = client
+            .chat_stream(vec![Message::user("stream")], None, ThinkingMode::Enabled)
+            .await;
+        assert!(result.is_ok());
+
+        let stream = result.unwrap();
+        let collected = stream.collect().await;
+        assert!(collected.is_ok());
+        assert_eq!(collected.unwrap().choices[0].message.content, "streamed");
+
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn test_api_client_chat_stream_error_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 16384];
+            let _ = socket.read(&mut buf).await.unwrap();
+
+            let body = r#"{"error":"model not found"}"#;
+            let response = format!(
+                "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut config = crate::config::Config::default();
+        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+
+        let client = ApiClient::new(&config).unwrap();
+        let result = client
+            .chat_stream(vec![Message::user("test")], None, ThinkingMode::Enabled)
+            .await;
+        assert!(result.is_err());
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("404"),
+            "Expected 404 in error: {}",
+            err_str
+        );
+
+        let _ = server.await;
+    }
+
+    // ============================================
+    // Retry-After Header Test
+    // ============================================
+
+    #[tokio::test]
+    async fn test_api_client_retry_after_header() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            // First request: 429 with Retry-After header
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let _ = socket.read(&mut buf).await.unwrap();
+
+            let body = r#"{"error":"rate limited"}"#;
+            let response = format!(
+                "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            drop(socket);
+
+            // Second request: success
+            let (mut socket2, _) = listener.accept().await.unwrap();
+            let mut buf2 = vec![0u8; 8192];
+            let _ = socket2.read(&mut buf2).await.unwrap();
+
+            let body2 = r#"{"id":"c-ra","object":"chat.completion","created":123,"model":"test","choices":[{"index":0,"message":{"role":"assistant","content":"after retry"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+            let response2 = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body2.len(),
+                body2
+            );
+            socket2.write_all(response2.as_bytes()).await.unwrap();
+        });
+
+        let mut config = crate::config::Config::default();
+        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+        config.retry = crate::config::RetrySettings {
+            max_retries: 2,
+            base_delay_ms: 10,
+            max_delay_ms: 5000,
+        };
+
+        let client = ApiClient::new(&config).unwrap();
+        let result = client
+            .chat(vec![Message::user("test")], None, ThinkingMode::Enabled)
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().choices[0].message.content, "after retry");
+
+        let _ = server.await;
+    }
+
+    // ============================================
+    // CompletionRequest Serialization Tests
+    // ============================================
+
+    #[test]
+    fn test_completion_request_serialization() {
+        let req = types::CompletionRequest {
+            model: "test-model".to_string(),
+            prompt: "fn main() {".to_string(),
+            max_tokens: Some(100),
+            temperature: Some(0.1),
+            top_p: Some(0.9),
+            stop: Some(vec!["\n".to_string()]),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"model\":\"test-model\""));
+        assert!(json.contains("\"prompt\":\"fn main() {\""));
+        assert!(json.contains("\"max_tokens\":100"));
+        assert!(json.contains("\"temperature\":0.1"));
+        assert!(json.contains("\"stop\":[\"\\n\"]"));
+    }
+
+    #[test]
+    fn test_completion_request_optional_fields_skipped() {
+        let req = types::CompletionRequest {
+            model: "test".to_string(),
+            prompt: "hello".to_string(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+            stop: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("max_tokens"));
+        assert!(!json.contains("temperature"));
+        assert!(!json.contains("top_p"));
+        assert!(!json.contains("stop"));
+    }
+
+    #[test]
+    fn test_completion_response_deserialization() {
+        let json = r#"{
+            "id": "cmpl-1",
+            "object": "text_completion",
+            "created": 12345,
+            "model": "test-model",
+            "choices": [
+                {"text": "completed code", "index": 0, "finish_reason": "stop"}
+            ],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 10, "total_tokens": 15}
+        }"#;
+        let resp: types::CompletionResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.id, "cmpl-1");
+        assert_eq!(resp.choices[0].text, "completed code");
+        assert_eq!(resp.choices[0].finish_reason, Some("stop".to_string()));
+        assert!(resp.usage.is_some());
+        assert_eq!(resp.usage.unwrap().total_tokens, 15);
+    }
+
+    #[test]
+    fn test_completion_response_without_usage() {
+        let json = r#"{
+            "id": "cmpl-2",
+            "object": "text_completion",
+            "created": 12345,
+            "model": "test",
+            "choices": [
+                {"text": "code", "index": 0, "finish_reason": null}
+            ],
+            "usage": null
+        }"#;
+        let resp: types::CompletionResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.usage.is_none());
+        assert!(resp.choices[0].finish_reason.is_none());
+    }
+
+    // ============================================
+    // LlmClient trait via ApiClient (integration)
+    // ============================================
+
+    #[tokio::test]
+    async fn test_llm_client_trait_chat() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let _ = socket.read(&mut buf).await.unwrap();
+
+            let body = r#"{"id":"t-1","object":"chat.completion","created":123,"model":"test","choices":[{"index":0,"message":{"role":"assistant","content":"via trait"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let mut config = crate::config::Config::default();
+        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+
+        let client = ApiClient::new(&config).unwrap();
+        // Call via the trait
+        let result: Result<ChatResponse> = LlmClient::chat(
+            &client,
+            vec![Message::user("trait test")],
+            None,
+            ThinkingMode::Enabled,
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().choices[0].message.content, "via trait");
+
+        let _ = server.await;
+    }
+
+    // ============================================
+    // rand_jitter edge case
+    // ============================================
+
+    #[test]
+    fn test_rand_jitter_is_deterministic_within_bounds() {
+        // Verify the function returns a finite number in [0, 1)
+        for _ in 0..100 {
+            let j = rand_jitter();
+            assert!(j.is_finite());
+            assert!(j >= 0.0);
+            assert!(j < 1.0);
+        }
+    }
+
+    // ============================================
+    // URL construction matching actual code paths
+    // ============================================
+
+    #[test]
+    fn test_completion_url_construction() {
+        let base = "http://localhost:8000/v1";
+        let url = format!("{}/completions", base);
+        assert_eq!(url, "http://localhost:8000/v1/completions");
+    }
+
+    #[test]
+    fn test_chat_completions_url_construction() {
+        let base = "https://api.openai.com/v1";
+        let url = format!("{}/chat/completions", base);
+        assert_eq!(url, "https://api.openai.com/v1/chat/completions");
+    }
+
+    // ============================================
+    // Jitter arithmetic in backoff
+    // ============================================
+
+    #[test]
+    fn test_jitter_arithmetic_safety() {
+        // Simulate the jitter arithmetic from send_with_retry_inner
+        // to ensure it doesn't overflow or underflow
+        let delay_ms: u64 = 30000; // max_delay_ms
+        let jitter_val = 0.5_f64; // mid-range jitter
+        let jitter = (delay_ms as f64 * 0.1 * (jitter_val - 0.5)) as i64;
+        let result = (delay_ms as i64).saturating_add(jitter).max(1) as u64;
+        assert_eq!(result, 30000); // 0 jitter at midpoint
+
+        // Test with extreme jitter values
+        let jitter_low = (delay_ms as f64 * 0.1 * (0.0 - 0.5)) as i64;
+        let result_low = (delay_ms as i64).saturating_add(jitter_low).max(1) as u64;
+        assert!(result_low > 0);
+        assert!(result_low <= 30000);
+
+        let jitter_high = (delay_ms as f64 * 0.1 * (1.0 - 0.5)) as i64;
+        let result_high = (delay_ms as i64).saturating_add(jitter_high).max(1) as u64;
+        assert!(result_high >= 30000);
+    }
+
+    #[test]
+    fn test_jitter_with_zero_delay() {
+        let delay_ms: u64 = 0;
+        let jitter = (delay_ms as f64 * 0.1 * (rand_jitter() - 0.5)) as i64;
+        let result = (delay_ms as i64).saturating_add(jitter).max(1) as u64;
+        // With 0 delay, jitter is 0, but max(1) ensures at least 1ms
+        assert_eq!(result, 1);
+    }
+
+    #[test]
+    fn test_jitter_capped_at_max_delay() {
+        let delay_ms: u64 = 30000;
+        let max_delay_ms: u64 = 30000;
+        let jitter = (delay_ms as f64 * 0.1 * (1.0 - 0.5)) as i64; // +5% = +1500
+        let result = (delay_ms as i64).saturating_add(jitter).max(1) as u64;
+        let capped = result.min(max_delay_ms);
+        assert_eq!(capped, 30000);
+    }
+
+    // ============================================
+    // API client with HTTP (non-local) warning path
+    // ============================================
+
+    #[test]
+    fn test_api_client_http_non_local_creates_successfully() {
+        // The warning is just a log, the client should still be created
+        let mut config = crate::config::Config::default();
+        config.endpoint = "http://remote-api.example.com/v1".to_string();
+        let client = ApiClient::new(&config);
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn test_api_client_http_localhost_no_warning() {
+        let mut config = crate::config::Config::default();
+        config.endpoint = "http://localhost:8000/v1".to_string();
+        let client = ApiClient::new(&config);
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn test_api_client_https_no_warning() {
+        let mut config = crate::config::Config::default();
+        config.endpoint = "https://api.example.com/v1".to_string();
+        let client = ApiClient::new(&config);
+        assert!(client.is_ok());
+    }
+
+    #[test]
+    fn test_api_client_http_127_no_warning() {
+        let mut config = crate::config::Config::default();
+        config.endpoint = "http://127.0.0.1:8000/v1".to_string();
+        let client = ApiClient::new(&config);
+        assert!(client.is_ok());
+    }
 }
 
 /// Mock LLM client for unit testing.

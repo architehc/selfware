@@ -14,11 +14,17 @@ FROM rust:bookworm AS builder
 # - libssl-dev: Required for reqwest/native-tls
 # - pkg-config: Required for OpenSSL discovery
 # - cmake: Required for libgit2
-# - libgit2-dev: Required for git2 crate (optional, can use bundled)
+# - libdbus-1-dev: Required for xcap (screen capture) via libdbus-sys
+# - libxcb*-dev: Required for xcap X11 screen capture on Linux
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
     cmake \
+    libdbus-1-dev \
+    libxcb1-dev \
+    libxcb-randr0-dev \
+    libxcb-shm0-dev \
+    libxcb-composite0-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a new empty project for dependency caching

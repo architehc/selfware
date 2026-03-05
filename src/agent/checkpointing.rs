@@ -717,4 +717,1128 @@ mod tests {
         let delta = cp.compute_delta(&cp);
         assert!(delta.is_none());
     }
+
+    // =========================================================================
+    // Additional should_persist coverage
+    // =========================================================================
+
+    #[test]
+    fn test_should_persist_both_intervals_tool_triggers_first() {
+        let config = ContinuousWorkConfig {
+            enabled: true,
+            checkpoint_interval_tools: 3,
+            checkpoint_interval_secs: 300,
+            ..Default::default()
+        };
+        // Tool interval reached, time not reached
+        assert!(should_persist(&config, true, 5, 2, 10));
+    }
+
+    #[test]
+    fn test_should_persist_both_intervals_time_triggers_first() {
+        let config = ContinuousWorkConfig {
+            enabled: true,
+            checkpoint_interval_tools: 100,
+            checkpoint_interval_secs: 30,
+            ..Default::default()
+        };
+        // Time interval reached, tool interval not reached
+        assert!(should_persist(&config, true, 2, 0, 60));
+    }
+
+    #[test]
+    fn test_should_persist_both_intervals_neither_reached() {
+        let config = ContinuousWorkConfig {
+            enabled: true,
+            checkpoint_interval_tools: 10,
+            checkpoint_interval_secs: 120,
+            ..Default::default()
+        };
+        // Neither interval reached
+        assert!(!should_persist(&config, true, 3, 0, 30));
+    }
+
+    #[test]
+    fn test_should_persist_both_intervals_both_reached() {
+        let config = ContinuousWorkConfig {
+            enabled: true,
+            checkpoint_interval_tools: 5,
+            checkpoint_interval_secs: 60,
+            ..Default::default()
+        };
+        // Both intervals reached
+        assert!(should_persist(&config, true, 10, 0, 120));
+    }
+
+    #[test]
+    fn test_should_persist_tool_calls_saturating_sub() {
+        let config = ContinuousWorkConfig {
+            enabled: true,
+            checkpoint_interval_tools: 5,
+            checkpoint_interval_secs: 0,
+            ..Default::default()
+        };
+        // current_tool_calls < last_checkpoint_tool_calls: saturating_sub yields 0
+        assert!(!should_persist(&config, true, 2, 10, 0));
+    }
+
+    #[test]
+    fn test_should_persist_tool_interval_only_exact_boundary() {
+        let config = ContinuousWorkConfig {
+            enabled: true,
+            checkpoint_interval_tools: 1,
+            checkpoint_interval_secs: 0,
+            ..Default::default()
+        };
+        // Exactly 1 tool call elapsed
+        assert!(should_persist(&config, true, 1, 0, 0));
+        // Zero tool calls elapsed
+        assert!(!should_persist(&config, true, 0, 0, 0));
+    }
+
+    #[test]
+    fn test_should_persist_time_interval_boundary() {
+        let config = ContinuousWorkConfig {
+            enabled: true,
+            checkpoint_interval_tools: 0,
+            checkpoint_interval_secs: 1,
+            ..Default::default()
+        };
+        // Exactly 1 second elapsed
+        assert!(should_persist(&config, true, 0, 0, 1));
+        // Zero seconds elapsed
+        assert!(!should_persist(&config, true, 0, 0, 0));
+    }
+
+    // =========================================================================
+    // Version bumping on all mutation methods
+    // =========================================================================
+
+    #[test]
+    fn test_version_bump_on_set_iteration() {
+        let mut cp = TaskCheckpoint::new("v-iter".to_string(), "desc".to_string());
+        let v0 = cp.version;
+        cp.set_iteration(10);
+        assert!(cp.version > v0, "set_iteration should bump version");
+    }
+
+    #[test]
+    fn test_version_bump_on_set_status() {
+        let mut cp = TaskCheckpoint::new("v-status".to_string(), "desc".to_string());
+        let v0 = cp.version;
+        cp.set_status(TaskStatus::Failed);
+        assert!(cp.version > v0, "set_status should bump version");
+    }
+
+    #[test]
+    fn test_version_bump_on_set_messages() {
+        let mut cp = TaskCheckpoint::new("v-msg".to_string(), "desc".to_string());
+        let v0 = cp.version;
+        cp.set_messages(vec![Message::user("hi")]);
+        assert!(cp.version > v0, "set_messages should bump version");
+    }
+
+    #[test]
+    fn test_version_bump_on_set_estimated_tokens() {
+        let mut cp = TaskCheckpoint::new("v-tok".to_string(), "desc".to_string());
+        let v0 = cp.version;
+        cp.set_estimated_tokens(42_000);
+        assert!(cp.version > v0, "set_estimated_tokens should bump version");
+        assert_eq!(cp.estimated_tokens, 42_000);
+    }
+
+    #[test]
+    fn test_version_bump_on_log_tool_call() {
+        let mut cp = TaskCheckpoint::new("v-tc".to_string(), "desc".to_string());
+        let v0 = cp.version;
+        cp.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "test".to_string(),
+            arguments: "{}".to_string(),
+            result: None,
+            success: true,
+            duration_ms: None,
+        });
+        assert!(cp.version > v0, "log_tool_call should bump version");
+    }
+
+    #[test]
+    fn test_version_bump_on_log_error() {
+        let mut cp = TaskCheckpoint::new("v-err".to_string(), "desc".to_string());
+        let v0 = cp.version;
+        cp.log_error(0, "oops".to_string(), false);
+        assert!(cp.version > v0, "log_error should bump version");
+    }
+
+    #[test]
+    fn test_version_increments_sequentially() {
+        let mut cp = TaskCheckpoint::new("v-seq".to_string(), "desc".to_string());
+        let v0 = cp.version;
+        cp.set_step(1);
+        assert_eq!(cp.version, v0 + 1);
+        cp.set_step(2);
+        assert_eq!(cp.version, v0 + 2);
+        cp.set_iteration(5);
+        assert_eq!(cp.version, v0 + 3);
+        cp.set_status(TaskStatus::Completed);
+        assert_eq!(cp.version, v0 + 4);
+    }
+
+    // =========================================================================
+    // to_summary
+    // =========================================================================
+
+    #[test]
+    fn test_to_summary_all_fields() {
+        let mut cp = TaskCheckpoint::new("sum-test".to_string(), "Summary task".to_string());
+        cp.set_step(7);
+        cp.set_status(TaskStatus::Paused);
+        cp.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "a".to_string(),
+            arguments: "{}".to_string(),
+            result: None,
+            success: true,
+            duration_ms: None,
+        });
+        cp.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "b".to_string(),
+            arguments: "{}".to_string(),
+            result: None,
+            success: false,
+            duration_ms: None,
+        });
+        cp.log_error(1, "err1".to_string(), false);
+        cp.log_error(2, "err2".to_string(), true);
+        cp.log_error(3, "err3".to_string(), false);
+
+        let summary = cp.to_summary();
+        assert_eq!(summary.task_id, "sum-test");
+        assert_eq!(summary.task_description, "Summary task");
+        assert_eq!(summary.status, TaskStatus::Paused);
+        assert_eq!(summary.current_step, 7);
+        assert_eq!(summary.tool_call_count, 2);
+        assert_eq!(summary.error_count, 3);
+        assert_eq!(summary.created_at, cp.created_at);
+        assert_eq!(summary.updated_at, cp.updated_at);
+    }
+
+    #[test]
+    fn test_to_summary_empty_checkpoint() {
+        let cp = TaskCheckpoint::new("empty".to_string(), "".to_string());
+        let summary = cp.to_summary();
+        assert_eq!(summary.tool_call_count, 0);
+        assert_eq!(summary.error_count, 0);
+        assert_eq!(summary.current_step, 0);
+    }
+
+    // =========================================================================
+    // Delta edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_delta_mismatched_task_id_returns_none() {
+        let base = TaskCheckpoint::new("task-a".to_string(), "desc".to_string());
+        let mut other = TaskCheckpoint::new("task-b".to_string(), "desc".to_string());
+        other.set_step(1); // bump version so it's higher
+        let delta = other.compute_delta(&base);
+        assert!(delta.is_none(), "different task_id should return None");
+    }
+
+    #[test]
+    fn test_delta_lower_version_returns_none() {
+        let mut base = TaskCheckpoint::new("task-1".to_string(), "desc".to_string());
+        base.set_step(5); // bump version several times
+        base.set_step(6);
+        let earlier = TaskCheckpoint::new("task-1".to_string(), "desc".to_string());
+        // earlier has version 1, base has higher version
+        let delta = earlier.compute_delta(&base);
+        assert!(delta.is_none(), "lower version should not produce a delta");
+    }
+
+    #[test]
+    fn test_delta_shrunk_messages_returns_none() {
+        let mut base = TaskCheckpoint::new("shrink".to_string(), "desc".to_string());
+        base.set_messages(vec![
+            Message::user("a"),
+            Message::user("b"),
+            Message::user("c"),
+        ]);
+
+        let mut updated = base.clone();
+        // Shrink messages (simulating context truncation)
+        updated.set_messages(vec![Message::user("a")]);
+
+        let delta = updated.compute_delta(&base);
+        assert!(
+            delta.is_none(),
+            "shrunk messages should force full save (no delta)"
+        );
+    }
+
+    #[test]
+    fn test_delta_shrunk_tool_calls_returns_none() {
+        let mut base = TaskCheckpoint::new("shrink-tc".to_string(), "desc".to_string());
+        base.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "t1".to_string(),
+            arguments: "{}".to_string(),
+            result: None,
+            success: true,
+            duration_ms: None,
+        });
+        base.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "t2".to_string(),
+            arguments: "{}".to_string(),
+            result: None,
+            success: true,
+            duration_ms: None,
+        });
+
+        let mut updated = base.clone();
+        // Remove tool calls (clear vector and re-touch to bump version)
+        updated.tool_calls.clear();
+        updated.set_step(1); // bump version to be > base
+
+        let delta = updated.compute_delta(&base);
+        assert!(delta.is_none(), "shrunk tool_calls should force full save");
+    }
+
+    #[test]
+    fn test_delta_shrunk_errors_returns_none() {
+        let mut base = TaskCheckpoint::new("shrink-err".to_string(), "desc".to_string());
+        base.log_error(0, "e1".to_string(), false);
+        base.log_error(1, "e2".to_string(), true);
+
+        let mut updated = base.clone();
+        updated.errors.clear();
+        updated.set_step(1); // bump version
+
+        let delta = updated.compute_delta(&base);
+        assert!(delta.is_none(), "shrunk errors should force full save");
+    }
+
+    #[test]
+    fn test_delta_shrunk_memory_entries_returns_none() {
+        use crate::checkpoint::MemoryEntry;
+        let mut base = TaskCheckpoint::new("shrink-mem".to_string(), "desc".to_string());
+        base.memory_entries.push(MemoryEntry {
+            timestamp: "2025-01-01T00:00:00Z".to_string(),
+            role: "user".to_string(),
+            content: "hello".to_string(),
+            token_estimate: 10,
+        });
+        // bump version so base has a nonzero version
+        base.set_step(0);
+
+        let mut updated = base.clone();
+        updated.memory_entries.clear();
+        updated.set_step(1); // bump version higher
+
+        let delta = updated.compute_delta(&base);
+        assert!(
+            delta.is_none(),
+            "shrunk memory_entries should force full save"
+        );
+    }
+
+    #[test]
+    fn test_delta_git_checkpoint_cleared_returns_none() {
+        let mut base = TaskCheckpoint::new("git-clear".to_string(), "desc".to_string());
+        base.git_checkpoint = Some(GitCheckpointInfo {
+            branch: "main".to_string(),
+            commit_hash: "abc".to_string(),
+            dirty: false,
+            staged_files: vec![],
+            modified_files: vec![],
+        });
+        base.set_step(0);
+
+        let mut updated = base.clone();
+        updated.git_checkpoint = None;
+        updated.set_step(1); // bump version
+
+        let delta = updated.compute_delta(&base);
+        assert!(
+            delta.is_none(),
+            "clearing git_checkpoint should force full save"
+        );
+    }
+
+    #[test]
+    fn test_delta_git_checkpoint_added() {
+        let mut base = TaskCheckpoint::new("git-add".to_string(), "desc".to_string());
+        base.set_step(0);
+
+        let mut updated = base.clone();
+        updated.git_checkpoint = Some(GitCheckpointInfo {
+            branch: "feature".to_string(),
+            commit_hash: "def456".to_string(),
+            dirty: true,
+            staged_files: vec!["a.rs".to_string()],
+            modified_files: vec!["b.rs".to_string()],
+        });
+        updated.set_step(1); // bump version
+
+        let delta = updated.compute_delta(&base);
+        assert!(
+            delta.is_some(),
+            "adding git_checkpoint should produce a delta"
+        );
+        let d = delta.unwrap();
+        assert!(d.git_checkpoint.is_some());
+        let git = d.git_checkpoint.unwrap();
+        assert_eq!(git.branch, "feature");
+        assert!(git.dirty);
+    }
+
+    #[test]
+    fn test_delta_git_checkpoint_changed() {
+        let mut base = TaskCheckpoint::new("git-chg".to_string(), "desc".to_string());
+        base.git_checkpoint = Some(GitCheckpointInfo {
+            branch: "main".to_string(),
+            commit_hash: "aaa".to_string(),
+            dirty: false,
+            staged_files: vec![],
+            modified_files: vec![],
+        });
+        base.set_step(0);
+
+        let mut updated = base.clone();
+        updated.git_checkpoint = Some(GitCheckpointInfo {
+            branch: "main".to_string(),
+            commit_hash: "bbb".to_string(),
+            dirty: true,
+            staged_files: vec!["x.rs".to_string()],
+            modified_files: vec![],
+        });
+        updated.set_step(1); // bump version
+
+        let delta = updated.compute_delta(&base);
+        assert!(delta.is_some());
+        let d = delta.unwrap();
+        assert_eq!(d.git_checkpoint.as_ref().unwrap().commit_hash, "bbb");
+    }
+
+    #[test]
+    fn test_delta_only_iteration_change() {
+        let mut base = TaskCheckpoint::new("iter-only".to_string(), "desc".to_string());
+        base.set_step(0);
+
+        let mut updated = base.clone();
+        updated.set_iteration(5);
+
+        let delta = updated.compute_delta(&base);
+        assert!(delta.is_some());
+        let d = delta.unwrap();
+        assert_eq!(d.current_iteration, Some(5));
+        assert!(d.status.is_none());
+        assert!(d.current_step.is_none());
+        assert!(d.new_messages.is_empty());
+        assert!(d.updated_tokens.is_none());
+    }
+
+    #[test]
+    fn test_delta_only_errors_added() {
+        let mut base = TaskCheckpoint::new("err-only".to_string(), "desc".to_string());
+        base.set_step(0);
+
+        let mut updated = base.clone();
+        updated.log_error(0, "new error".to_string(), false);
+
+        let delta = updated.compute_delta(&base);
+        assert!(delta.is_some());
+        let d = delta.unwrap();
+        assert_eq!(d.new_errors.len(), 1);
+        assert_eq!(d.new_errors[0].error, "new error");
+        assert!(d.new_messages.is_empty());
+    }
+
+    #[test]
+    fn test_delta_only_tool_calls_added() {
+        let mut base = TaskCheckpoint::new("tc-only".to_string(), "desc".to_string());
+        base.set_step(0);
+
+        let mut updated = base.clone();
+        updated.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "new_tool".to_string(),
+            arguments: "{}".to_string(),
+            result: Some("ok".to_string()),
+            success: true,
+            duration_ms: Some(50),
+        });
+
+        let delta = updated.compute_delta(&base);
+        assert!(delta.is_some());
+        let d = delta.unwrap();
+        assert_eq!(d.new_tool_calls.len(), 1);
+        assert_eq!(d.new_tool_calls[0].tool_name, "new_tool");
+    }
+
+    #[test]
+    fn test_delta_only_memory_entries_added() {
+        use crate::checkpoint::MemoryEntry;
+        let mut base = TaskCheckpoint::new("mem-only".to_string(), "desc".to_string());
+        base.set_step(0);
+
+        let mut updated = base.clone();
+        updated.memory_entries.push(MemoryEntry {
+            timestamp: "2025-06-01T00:00:00Z".to_string(),
+            role: "assistant".to_string(),
+            content: "remembered".to_string(),
+            token_estimate: 20,
+        });
+        updated.set_step(1); // bump version
+
+        let delta = updated.compute_delta(&base);
+        assert!(delta.is_some());
+        let d = delta.unwrap();
+        assert_eq!(d.new_memory_entries.len(), 1);
+        assert_eq!(d.new_memory_entries[0].content, "remembered");
+    }
+
+    // =========================================================================
+    // apply_delta error paths
+    // =========================================================================
+
+    #[test]
+    fn test_apply_delta_task_id_mismatch() {
+        use crate::checkpoint::CheckpointDelta;
+        let mut cp = TaskCheckpoint::new("task-a".to_string(), "desc".to_string());
+        let delta = CheckpointDelta {
+            task_id: "task-b".to_string(),
+            base_version: cp.version,
+            target_version: cp.version + 1,
+            updated_at: Utc::now(),
+            status: None,
+            current_step: None,
+            current_iteration: None,
+            new_messages: vec![],
+            new_memory_entries: vec![],
+            new_tool_calls: vec![],
+            new_errors: vec![],
+            updated_tokens: None,
+            git_checkpoint: None,
+        };
+        let result = cp.apply_delta(&delta);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("task ID mismatch"),
+            "should report task ID mismatch"
+        );
+    }
+
+    #[test]
+    fn test_apply_delta_version_mismatch() {
+        use crate::checkpoint::CheckpointDelta;
+        let mut cp = TaskCheckpoint::new("task-x".to_string(), "desc".to_string());
+        let delta = CheckpointDelta {
+            task_id: "task-x".to_string(),
+            base_version: cp.version + 99, // wrong base version
+            target_version: cp.version + 100,
+            updated_at: Utc::now(),
+            status: None,
+            current_step: None,
+            current_iteration: None,
+            new_messages: vec![],
+            new_memory_entries: vec![],
+            new_tool_calls: vec![],
+            new_errors: vec![],
+            updated_tokens: None,
+            git_checkpoint: None,
+        };
+        let result = cp.apply_delta(&delta);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("version mismatch"),
+            "should report version mismatch"
+        );
+    }
+
+    #[test]
+    fn test_apply_delta_with_all_fields_set() {
+        use crate::checkpoint::{CheckpointDelta, ErrorLog, MemoryEntry};
+        let mut cp = TaskCheckpoint::new("full-delta".to_string(), "desc".to_string());
+        cp.set_step(0); // version = 2
+
+        let delta = CheckpointDelta {
+            task_id: "full-delta".to_string(),
+            base_version: cp.version,
+            target_version: cp.version + 1,
+            updated_at: Utc::now(),
+            status: Some(TaskStatus::Completed),
+            current_step: Some(10),
+            current_iteration: Some(25),
+            new_messages: vec![Message::user("new msg")],
+            new_memory_entries: vec![MemoryEntry {
+                timestamp: "2025-01-01T00:00:00Z".to_string(),
+                role: "system".to_string(),
+                content: "memory".to_string(),
+                token_estimate: 5,
+            }],
+            new_tool_calls: vec![ToolCallLog {
+                timestamp: Utc::now(),
+                tool_name: "applied_tool".to_string(),
+                arguments: "{}".to_string(),
+                result: None,
+                success: true,
+                duration_ms: None,
+            }],
+            new_errors: vec![ErrorLog {
+                timestamp: Utc::now(),
+                step: 9,
+                error: "applied error".to_string(),
+                recovered: true,
+            }],
+            updated_tokens: Some(9999),
+            git_checkpoint: Some(GitCheckpointInfo {
+                branch: "dev".to_string(),
+                commit_hash: "xyz789".to_string(),
+                dirty: false,
+                staged_files: vec![],
+                modified_files: vec![],
+            }),
+        };
+
+        cp.apply_delta(&delta).expect("apply should succeed");
+        assert_eq!(cp.status, TaskStatus::Completed);
+        assert_eq!(cp.current_step, 10);
+        assert_eq!(cp.current_iteration, 25);
+        assert_eq!(cp.messages.len(), 1);
+        assert_eq!(cp.memory_entries.len(), 1);
+        assert_eq!(cp.tool_calls.len(), 1);
+        assert_eq!(cp.errors.len(), 1);
+        assert_eq!(cp.estimated_tokens, 9999);
+        assert_eq!(cp.git_checkpoint.as_ref().unwrap().branch, "dev");
+        assert_eq!(cp.version, delta.target_version);
+    }
+
+    #[test]
+    fn test_apply_delta_preserves_existing_data_when_fields_none() {
+        use crate::checkpoint::CheckpointDelta;
+        let mut cp = TaskCheckpoint::new("partial".to_string(), "desc".to_string());
+        cp.set_step(5);
+        cp.set_iteration(10);
+        cp.set_status(TaskStatus::Paused);
+        cp.set_estimated_tokens(1000);
+        cp.set_messages(vec![Message::user("existing")]);
+
+        let delta = CheckpointDelta {
+            task_id: "partial".to_string(),
+            base_version: cp.version,
+            target_version: cp.version + 1,
+            updated_at: Utc::now(),
+            status: None,       // should not change
+            current_step: None, // should not change
+            current_iteration: None,
+            new_messages: vec![], // no new messages
+            new_memory_entries: vec![],
+            new_tool_calls: vec![],
+            new_errors: vec![],
+            updated_tokens: None, // should not change
+            git_checkpoint: None,
+        };
+
+        cp.apply_delta(&delta).expect("apply should succeed");
+        // All existing fields should be preserved
+        assert_eq!(cp.current_step, 5);
+        assert_eq!(cp.current_iteration, 10);
+        assert_eq!(cp.status, TaskStatus::Paused);
+        assert_eq!(cp.estimated_tokens, 1000);
+        assert_eq!(cp.messages.len(), 1);
+    }
+
+    // =========================================================================
+    // CheckpointDelta serialization
+    // =========================================================================
+
+    #[test]
+    fn test_checkpoint_delta_serialization_roundtrip() {
+        use crate::checkpoint::CheckpointDelta;
+        let delta = CheckpointDelta {
+            task_id: "delta-ser".to_string(),
+            base_version: 3,
+            target_version: 5,
+            updated_at: Utc::now(),
+            status: Some(TaskStatus::Failed),
+            current_step: Some(8),
+            current_iteration: Some(20),
+            new_messages: vec![Message::assistant("response")],
+            new_memory_entries: vec![],
+            new_tool_calls: vec![],
+            new_errors: vec![],
+            updated_tokens: Some(15000),
+            git_checkpoint: None,
+        };
+
+        let json = serde_json::to_string(&delta).expect("serialize delta");
+        let restored: CheckpointDelta = serde_json::from_str(&json).expect("deserialize delta");
+
+        assert_eq!(restored.task_id, "delta-ser");
+        assert_eq!(restored.base_version, 3);
+        assert_eq!(restored.target_version, 5);
+        assert_eq!(restored.status, Some(TaskStatus::Failed));
+        assert_eq!(restored.current_step, Some(8));
+        assert_eq!(restored.current_iteration, Some(20));
+        assert_eq!(restored.new_messages.len(), 1);
+        assert_eq!(restored.updated_tokens, Some(15000));
+        assert!(restored.git_checkpoint.is_none());
+    }
+
+    // =========================================================================
+    // CheckpointManager save/load integration (via tempfile)
+    // =========================================================================
+
+    #[test]
+    fn test_checkpoint_manager_save_load_roundtrip() {
+        use crate::checkpoint::CheckpointManager;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        let mut cp = TaskCheckpoint::new("mgr-rt".to_string(), "Manager roundtrip".to_string());
+        cp.set_step(3);
+        cp.set_iteration(7);
+        cp.set_status(TaskStatus::Paused);
+        cp.set_messages(vec![Message::system("sys"), Message::user("hello")]);
+        cp.set_estimated_tokens(2500);
+        cp.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "cargo_check".to_string(),
+            arguments: "{}".to_string(),
+            result: Some("ok".to_string()),
+            success: true,
+            duration_ms: Some(500),
+        });
+        cp.log_error(2, "warning".to_string(), true);
+        cp.git_checkpoint = Some(GitCheckpointInfo {
+            branch: "test-branch".to_string(),
+            commit_hash: "1234abcd".to_string(),
+            dirty: false,
+            staged_files: vec![],
+            modified_files: vec![],
+        });
+
+        manager.save(&cp).unwrap();
+        let loaded = manager.load("mgr-rt").unwrap();
+
+        assert_eq!(loaded.task_id, "mgr-rt");
+        assert_eq!(loaded.task_description, "Manager roundtrip");
+        assert_eq!(loaded.current_step, 3);
+        assert_eq!(loaded.current_iteration, 7);
+        assert_eq!(loaded.status, TaskStatus::Paused);
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.estimated_tokens, 2500);
+        assert_eq!(loaded.tool_calls.len(), 1);
+        assert_eq!(loaded.errors.len(), 1);
+        assert!(loaded.errors[0].recovered);
+        let git = loaded.git_checkpoint.unwrap();
+        assert_eq!(git.branch, "test-branch");
+        assert!(!git.dirty);
+    }
+
+    #[test]
+    fn test_checkpoint_manager_overwrite_preserves_latest() {
+        use crate::checkpoint::CheckpointManager;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        let mut cp = TaskCheckpoint::new("overwrite".to_string(), "First".to_string());
+        manager.save(&cp).unwrap();
+
+        cp.set_step(10);
+        cp.set_status(TaskStatus::Completed);
+        cp.set_estimated_tokens(99_000);
+        manager.save(&cp).unwrap();
+
+        let loaded = manager.load("overwrite").unwrap();
+        assert_eq!(loaded.current_step, 10);
+        assert_eq!(loaded.status, TaskStatus::Completed);
+        assert_eq!(loaded.estimated_tokens, 99_000);
+    }
+
+    #[test]
+    fn test_checkpoint_manager_multiple_tasks() {
+        use crate::checkpoint::CheckpointManager;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        for i in 0..5 {
+            let cp = TaskCheckpoint::new(format!("task-{}", i), format!("Task {}", i));
+            manager.save(&cp).unwrap();
+        }
+
+        let tasks = manager.list_tasks().unwrap();
+        assert_eq!(tasks.len(), 5);
+    }
+
+    #[test]
+    fn test_checkpoint_manager_delete_cleans_up() {
+        use crate::checkpoint::CheckpointManager;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        let cp = TaskCheckpoint::new("del-test".to_string(), "Delete me".to_string());
+        manager.save(&cp).unwrap();
+        assert!(manager.exists("del-test"));
+
+        manager.delete("del-test").unwrap();
+        assert!(!manager.exists("del-test"));
+
+        let tasks = manager.list_tasks().unwrap();
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn test_checkpoint_manager_load_nonexistent_recovers() {
+        use crate::checkpoint::CheckpointManager;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        // Recovery creates a fresh checkpoint for unknown task IDs
+        let result = manager.load("does-not-exist");
+        assert!(result.is_ok());
+        let cp = result.unwrap();
+        assert_eq!(cp.task_id, "does-not-exist");
+        assert_eq!(cp.status, TaskStatus::InProgress);
+    }
+
+    #[test]
+    fn test_checkpoint_manager_corrupted_file_recovers() {
+        use crate::checkpoint::CheckpointManager;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        // Write garbage to the checkpoint file
+        let path = dir.path().join("corrupt-task.json");
+        std::fs::write(&path, "this is not valid json!!!").unwrap();
+
+        // Load should recover (create a fresh checkpoint)
+        let result = manager.load("corrupt-task");
+        assert!(result.is_ok());
+        let cp = result.unwrap();
+        assert_eq!(cp.task_id, "corrupt-task");
+    }
+
+    #[test]
+    fn test_checkpoint_manager_backup_recovery() {
+        use crate::checkpoint::CheckpointManager;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        // First, save a valid checkpoint (this creates a .json file)
+        let mut cp = TaskCheckpoint::new("backup-test".to_string(), "Backup".to_string());
+        cp.set_step(5);
+        manager.save(&cp).unwrap();
+
+        // Save again to create a .json.bak backup
+        cp.set_step(10);
+        manager.save(&cp).unwrap();
+
+        // Now corrupt the primary file
+        let primary = dir.path().join("backup-test.json");
+        std::fs::write(&primary, "corrupted!!!").unwrap();
+
+        // Load should recover from .json.bak
+        let loaded = manager.load("backup-test").unwrap();
+        assert_eq!(loaded.task_id, "backup-test");
+        // The backup should have step 5 (the previous save)
+        assert_eq!(loaded.current_step, 5);
+    }
+
+    // =========================================================================
+    // Corrupt checkpoint detection (mirrors Agent::resume validation)
+    // =========================================================================
+
+    #[test]
+    fn test_corrupt_checkpoint_step_without_messages() {
+        // Manually simulate the condition checked in Agent::resume:
+        // current_step > 0 but messages is empty
+        let step = 5_usize;
+        let messages_empty = true;
+
+        // This mirrors the Agent::resume validation logic
+        let is_corrupt = step > 0 && messages_empty;
+        assert!(
+            is_corrupt,
+            "step > 0 with empty messages should be detected as corrupt"
+        );
+    }
+
+    #[test]
+    fn test_valid_checkpoint_step_zero_no_messages() {
+        // step == 0 with empty messages is valid (fresh checkpoint)
+        let step = 0_usize;
+        let messages_empty = true;
+        let is_corrupt = step > 0 && messages_empty;
+        assert!(!is_corrupt);
+    }
+
+    #[test]
+    fn test_valid_checkpoint_step_with_messages() {
+        let step = 5_usize;
+        let messages_empty = false;
+        let is_corrupt = step > 0 && messages_empty;
+        assert!(!is_corrupt);
+    }
+
+    // =========================================================================
+    // TaskStatus serialization coverage
+    // =========================================================================
+
+    #[test]
+    fn test_task_status_all_variants_serde() {
+        let variants = vec![
+            (TaskStatus::InProgress, "\"in_progress\""),
+            (TaskStatus::Completed, "\"completed\""),
+            (TaskStatus::Failed, "\"failed\""),
+            (TaskStatus::Paused, "\"paused\""),
+        ];
+        for (status, expected_json) in variants {
+            let json = serde_json::to_string(&status).unwrap();
+            assert_eq!(json, expected_json);
+            let parsed: TaskStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, status);
+        }
+    }
+
+    // =========================================================================
+    // GitCheckpointInfo serialization edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_git_checkpoint_info_full_roundtrip() {
+        let info = GitCheckpointInfo {
+            branch: "feature/special-chars-#123".to_string(),
+            commit_hash: "abcdef1234567890abcdef1234567890abcdef12".to_string(),
+            dirty: true,
+            staged_files: vec![
+                "src/main.rs".to_string(),
+                "src/lib.rs".to_string(),
+                "Cargo.toml".to_string(),
+            ],
+            modified_files: vec!["README.md".to_string(), "tests/integration.rs".to_string()],
+        };
+
+        let json = serde_json::to_string_pretty(&info).unwrap();
+        let restored: GitCheckpointInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, info);
+    }
+
+    #[test]
+    fn test_git_checkpoint_info_clean_state() {
+        let info = GitCheckpointInfo {
+            branch: "main".to_string(),
+            commit_hash: "0000000".to_string(),
+            dirty: false,
+            staged_files: vec![],
+            modified_files: vec![],
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let restored: GitCheckpointInfo = serde_json::from_str(&json).unwrap();
+        assert!(!restored.dirty);
+        assert!(restored.staged_files.is_empty());
+        assert!(restored.modified_files.is_empty());
+    }
+
+    // =========================================================================
+    // ToolCallLog and ErrorLog serialization
+    // =========================================================================
+
+    #[test]
+    fn test_tool_call_log_with_none_result() {
+        let log = ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "shell_exec".to_string(),
+            arguments: r#"{"cmd":"ls"}"#.to_string(),
+            result: None,
+            success: false,
+            duration_ms: None,
+        };
+        let json = serde_json::to_string(&log).unwrap();
+        let restored: ToolCallLog = serde_json::from_str(&json).unwrap();
+        assert!(restored.result.is_none());
+        assert!(restored.duration_ms.is_none());
+        assert!(!restored.success);
+    }
+
+    #[test]
+    fn test_error_log_serialization() {
+        use crate::checkpoint::ErrorLog;
+        let log = ErrorLog {
+            timestamp: Utc::now(),
+            step: 42,
+            error: "segfault in module X".to_string(),
+            recovered: false,
+        };
+        let json = serde_json::to_string(&log).unwrap();
+        let restored: ErrorLog = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.step, 42);
+        assert_eq!(restored.error, "segfault in module X");
+        assert!(!restored.recovered);
+    }
+
+    // =========================================================================
+    // Multiple sequential delta applications
+    // =========================================================================
+
+    #[test]
+    fn test_multiple_delta_applications() {
+        let mut base = TaskCheckpoint::new("multi-delta".to_string(), "desc".to_string());
+        base.set_step(0);
+
+        // First delta: add a message and change step
+        let mut v1 = base.clone();
+        v1.set_messages(vec![Message::user("msg1")]);
+        v1.set_step(1);
+        let delta1 = v1.compute_delta(&base).unwrap();
+
+        base.apply_delta(&delta1).unwrap();
+        assert_eq!(base.messages.len(), 1);
+        assert_eq!(base.current_step, 1);
+
+        // Second delta: add another message and bump iteration
+        let mut v2 = base.clone();
+        v2.set_messages(vec![Message::user("msg1"), Message::assistant("reply1")]);
+        v2.set_iteration(3);
+        let delta2 = v2.compute_delta(&base).unwrap();
+
+        base.apply_delta(&delta2).unwrap();
+        assert_eq!(base.messages.len(), 2);
+        assert_eq!(base.current_iteration, 3);
+
+        // Third delta: add error and complete
+        let mut v3 = base.clone();
+        v3.log_error(1, "test err".to_string(), true);
+        v3.set_status(TaskStatus::Completed);
+        let delta3 = v3.compute_delta(&base).unwrap();
+
+        base.apply_delta(&delta3).unwrap();
+        assert_eq!(base.errors.len(), 1);
+        assert_eq!(base.status, TaskStatus::Completed);
+    }
+
+    // =========================================================================
+    // Checkpoint with large data
+    // =========================================================================
+
+    #[test]
+    fn test_checkpoint_with_many_messages() {
+        let mut cp = TaskCheckpoint::new("large".to_string(), "desc".to_string());
+        let mut msgs = Vec::new();
+        for i in 0..100 {
+            if i % 2 == 0 {
+                msgs.push(Message::user(format!("Question {}", i)));
+            } else {
+                msgs.push(Message::assistant(format!("Answer {}", i)));
+            }
+        }
+        cp.set_messages(msgs);
+        assert_eq!(cp.messages.len(), 100);
+
+        // Serialize and deserialize
+        let json = serde_json::to_string(&cp).unwrap();
+        let restored: TaskCheckpoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.messages.len(), 100);
+    }
+
+    #[test]
+    fn test_checkpoint_with_many_tool_calls_and_errors() {
+        let mut cp = TaskCheckpoint::new("many-tc".to_string(), "desc".to_string());
+        for i in 0..50 {
+            cp.log_tool_call(ToolCallLog {
+                timestamp: Utc::now(),
+                tool_name: format!("tool_{}", i),
+                arguments: format!(r#"{{"arg":{}}}"#, i),
+                result: Some(format!("result_{}", i)),
+                success: i % 3 != 0,
+                duration_ms: Some(i as u64 * 10),
+            });
+        }
+        for i in 0..20 {
+            cp.log_error(i, format!("error_{}", i), i % 2 == 0);
+        }
+        assert_eq!(cp.tool_calls.len(), 50);
+        assert_eq!(cp.errors.len(), 20);
+
+        let json = serde_json::to_string(&cp).unwrap();
+        let restored: TaskCheckpoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.tool_calls.len(), 50);
+        assert_eq!(restored.errors.len(), 20);
+
+        // Verify specific entries
+        assert!(!restored.tool_calls[0].success); // 0 % 3 == 0
+        assert!(restored.tool_calls[1].success); // 1 % 3 != 0
+        assert!(restored.errors[0].recovered); // 0 % 2 == 0
+        assert!(!restored.errors[1].recovered); // 1 % 2 != 0
+    }
+
+    // =========================================================================
+    // CheckpointManager save_with_retry
+    // =========================================================================
+
+    #[test]
+    fn test_checkpoint_manager_save_with_retry_succeeds() {
+        use crate::checkpoint::CheckpointManager;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        let cp = TaskCheckpoint::new("retry-ok".to_string(), "retry test".to_string());
+        // save_with_retry should succeed on first try
+        manager.save_with_retry(&cp).unwrap();
+
+        let loaded = manager.load("retry-ok").unwrap();
+        assert_eq!(loaded.task_id, "retry-ok");
+    }
+
+    // =========================================================================
+    // CheckpointManager delta persistence
+    // =========================================================================
+
+    #[test]
+    fn test_checkpoint_manager_delta_persistence() {
+        use crate::checkpoint::CheckpointManager;
+        let dir = tempfile::tempdir().unwrap();
+        let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
+
+        // Create a checkpoint with enough data to make deltas efficient
+        let mut cp = TaskCheckpoint::new("delta-persist".to_string(), "Delta test".to_string());
+        let msgs: Vec<Message> = (0..20)
+            .map(|i| Message::user(format!("msg {} {}", i, "padding ".repeat(20))))
+            .collect();
+        cp.set_messages(msgs);
+        manager.save(&cp).unwrap();
+
+        // Make a small change (should use delta if efficient)
+        cp.set_step(2);
+        cp.set_iteration(5);
+        manager.save(&cp).unwrap();
+
+        // Load and verify the data is correct
+        let loaded = manager.load("delta-persist").unwrap();
+        assert_eq!(loaded.current_step, 2);
+        assert_eq!(loaded.current_iteration, 5);
+        assert_eq!(loaded.messages.len(), 20);
+    }
+
+    // =========================================================================
+    // Checkpoint created_at / updated_at tracking
+    // =========================================================================
+
+    #[test]
+    fn test_checkpoint_timestamps() {
+        let cp = TaskCheckpoint::new("ts-test".to_string(), "timestamps".to_string());
+        assert_eq!(
+            cp.created_at, cp.updated_at,
+            "new checkpoint should have same created/updated"
+        );
+
+        let created = cp.created_at;
+        // After mutation, updated_at should be >= created_at
+        let mut cp2 = cp;
+        cp2.set_step(1);
+        assert!(cp2.updated_at >= created);
+    }
 }

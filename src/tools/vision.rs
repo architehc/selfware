@@ -299,8 +299,8 @@ fn resolve_image_data_uri(args: &Value) -> Result<String> {
 
 /// Read an image file, validate it, and return base64-encoded data.
 fn encode_image_file(path: &str) -> Result<String> {
-    let metadata = std::fs::metadata(path)
-        .with_context(|| format!("Image file not found: {}", path))?;
+    let metadata =
+        std::fs::metadata(path).with_context(|| format!("Image file not found: {}", path))?;
 
     if metadata.len() > MAX_IMAGE_SIZE {
         anyhow::bail!(
@@ -310,8 +310,8 @@ fn encode_image_file(path: &str) -> Result<String> {
         );
     }
 
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("Failed to read image file: {}", path))?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("Failed to read image file: {}", path))?;
 
     // Validate it's actually an image by checking magic bytes
     validate_image_magic(&bytes, path)?;
@@ -328,7 +328,7 @@ fn validate_image_magic(bytes: &[u8], path: &str) -> Result<()> {
         || bytes.starts_with(&[0xFF, 0xD8, 0xFF])                 // JPEG
         || bytes.starts_with(b"GIF8")                              // GIF
         || bytes.starts_with(b"RIFF") && bytes.len() > 11 && &bytes[8..12] == b"WEBP"  // WEBP
-        || bytes.starts_with(b"BM");                               // BMP
+        || bytes.starts_with(b"BM"); // BMP
     if !is_valid {
         anyhow::bail!(
             "File does not appear to be a valid image (unrecognized magic bytes): {}",
@@ -509,7 +509,10 @@ mod tests {
         let white = image::RgbaImage::from_pixel(10, 10, image::Rgba([255, 255, 255, 255]));
         let black = image::RgbaImage::from_pixel(10, 10, image::Rgba([0, 0, 0, 0]));
         let sim = compute_pixel_similarity(&white, &black);
-        assert!(sim < 1.0, "Opposite images should have near-zero similarity");
+        assert!(
+            sim < 1.0,
+            "Opposite images should have near-zero similarity"
+        );
     }
 
     #[test]
@@ -517,7 +520,11 @@ mod tests {
         let img_a = image::RgbaImage::from_pixel(10, 10, image::Rgba([100, 100, 100, 255]));
         let img_b = image::RgbaImage::from_pixel(10, 10, image::Rgba([110, 110, 110, 255]));
         let sim = compute_pixel_similarity(&img_a, &img_b);
-        assert!(sim > 95.0, "Similar images should have high similarity: {}", sim);
+        assert!(
+            sim > 95.0,
+            "Similar images should have high similarity: {}",
+            sim
+        );
         assert!(sim < 100.0, "Non-identical should be < 100");
     }
 

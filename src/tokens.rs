@@ -1849,4 +1849,1086 @@ mod cost_optimizer_tests {
         // 1024×1024: both sides > 512, auto chooses high
         assert_eq!(estimate_image_tokens(1024, 1024, "auto"), 765);
     }
+
+    // ── Additional coverage tests ──
+
+    #[test]
+    fn test_estimate_tokens_empty_string() {
+        // Empty string should return at least 1 (due to .max(1))
+        let estimate = estimate_tokens("");
+        assert_eq!(estimate, 1);
+    }
+
+    #[test]
+    fn test_estimate_tokens_whitespace_only() {
+        let estimate = estimate_tokens("   \n\t  ");
+        assert!(estimate >= 1);
+    }
+
+    #[test]
+    fn test_estimate_tokens_very_long_text() {
+        let text = "word ".repeat(10_000);
+        let estimate = estimate_tokens(&text);
+        assert!(estimate > 1000);
+    }
+
+    #[test]
+    fn test_estimate_json_tokens_empty_object() {
+        let json = serde_json::json!({});
+        let estimate = estimate_json_tokens(&json);
+        assert!(estimate >= 1);
+    }
+
+    #[test]
+    fn test_estimate_json_tokens_null() {
+        let json = serde_json::json!(null);
+        let estimate = estimate_json_tokens(&json);
+        assert!(estimate >= 1);
+    }
+
+    #[test]
+    fn test_estimate_json_tokens_array() {
+        let json = serde_json::json!([1, 2, 3, 4, 5]);
+        let estimate = estimate_json_tokens(&json);
+        assert!(estimate >= 1);
+    }
+
+    #[test]
+    fn test_estimate_json_tokens_deeply_nested() {
+        let json = serde_json::json!({
+            "a": {"b": {"c": {"d": {"e": "deep"}}}}
+        });
+        let estimate = estimate_json_tokens(&json);
+        assert!(estimate > 3);
+    }
+
+    #[test]
+    fn test_image_tokens_high_detail_very_large() {
+        // 8000×6000: longest side 8000 > 2048, scale by 2048/8000 = 0.256
+        // → 2048 × 1536; shortest side 1536 > 768, scale by 768/1536 = 0.5
+        // → 1024 × 768
+        // tiles: ceil(1024/512) × ceil(768/512) = 2 × 2 = 4
+        // cost: 4 × 170 + 85 = 765
+        assert_eq!(estimate_image_tokens(8000, 6000, "high"), 765);
+    }
+
+    #[test]
+    fn test_image_tokens_high_detail_no_scaling_needed() {
+        // 400×300: no scaling needed (both < 2048, shortest 300 < 768)
+        // tiles: ceil(400/512) × ceil(300/512) = 1 × 1 = 1
+        // cost: 1 × 170 + 85 = 255
+        assert_eq!(estimate_image_tokens(400, 300, "high"), 255);
+    }
+
+    #[test]
+    fn test_image_tokens_high_detail_only_longest_side_scaling() {
+        // 3000×500: longest=3000 > 2048, scale by 2048/3000 ≈ 0.6827
+        // → 2048 × 341.3; shortest=341.3 < 768, no second scaling
+        // tiles: ceil(2048/512) × ceil(341.3/512) = 4 × 1 = 4
+        // cost: 4 × 170 + 85 = 765
+        assert_eq!(estimate_image_tokens(3000, 500, "high"), 765);
+    }
+
+    #[test]
+    fn test_image_tokens_auto_one_side_large_one_small() {
+        // 600×200: width > 512 but height <= 512, auto checks BOTH > 512
+        // Since height is not > 512, auto chooses low
+        assert_eq!(estimate_image_tokens(600, 200, "auto"), 85);
+    }
+
+    #[test]
+    fn test_image_tokens_auto_both_at_boundary() {
+        // 512×512: both sides are exactly 512, not > 512, so auto chooses low
+        assert_eq!(estimate_image_tokens(512, 512, "auto"), 85);
+    }
+
+    #[test]
+    fn test_image_tokens_unknown_detail_treated_as_auto() {
+        // Unknown detail string treated like "auto"
+        assert_eq!(estimate_image_tokens(256, 256, "medium"), 85);
+        assert_eq!(estimate_image_tokens(1024, 1024, "something"), 765);
+    }
+
+    #[test]
+    fn test_image_tokens_high_detail_tall_narrow() {
+        // 200×4000: longest=4000 > 2048, scale by 2048/4000 = 0.512
+        // → 102.4 × 2048; shortest=102.4 < 768, no second scaling
+        // tiles: ceil(102.4/512) × ceil(2048/512) = 1 × 4 = 4
+        // cost: 4 × 170 + 85 = 765
+        assert_eq!(estimate_image_tokens(200, 4000, "high"), 765);
+    }
+
+    #[test]
+    fn test_summary_display_without_duration_and_without_drift() {
+        // Construct a TokenSummary manually with no duration and no drift
+        let summary = TokenSummary {
+            prompt_tokens: 500,
+            completion_tokens: 200,
+            total_tokens: 700,
+            api_calls: 3,
+            estimated_cost: 0.0045,
+            duration: None,
+            drift: DriftStats::default(),
+        };
+        let display = format!("{}", summary);
+        assert!(display.contains("700"));
+        assert!(display.contains("500"));
+        assert!(display.contains("200"));
+        assert!(display.contains("3"));
+        // Should not contain Duration or Drift sections
+        assert!(!display.contains("Duration"));
+        assert!(!display.contains("Drift"));
+    }
+
+    #[test]
+    fn test_summary_display_with_duration() {
+        let summary = TokenSummary {
+            prompt_tokens: 1000,
+            completion_tokens: 500,
+            total_tokens: 1500,
+            api_calls: 2,
+            estimated_cost: 0.01,
+            duration: Some(std::time::Duration::from_secs_f64(5.3)),
+            drift: DriftStats::default(),
+        };
+        let display = format!("{}", summary);
+        assert!(display.contains("Duration: 5.3s"));
+        // No drift samples, so no drift section
+        assert!(!display.contains("Drift"));
+    }
+
+    #[test]
+    fn test_summary_display_with_drift() {
+        let summary = TokenSummary {
+            prompt_tokens: 1000,
+            completion_tokens: 500,
+            total_tokens: 1500,
+            api_calls: 2,
+            estimated_cost: 0.01,
+            duration: None,
+            drift: DriftStats {
+                samples: 4,
+                cumulative_drift: 40,
+                cumulative_abs_drift: 60,
+                max_over: 30,
+                max_under: -10,
+            },
+        };
+        let display = format!("{}", summary);
+        // avg drift = 40/4 = 10, MAE = 60/4 = 15
+        assert!(display.contains("Drift"));
+        assert!(display.contains("4 samples"));
+    }
+
+    #[test]
+    fn test_summary_display_with_both_duration_and_drift() {
+        let summary = TokenSummary {
+            prompt_tokens: 1000,
+            completion_tokens: 500,
+            total_tokens: 1500,
+            api_calls: 2,
+            estimated_cost: 0.01,
+            duration: Some(std::time::Duration::from_secs(10)),
+            drift: DriftStats {
+                samples: 2,
+                cumulative_drift: -20,
+                cumulative_abs_drift: 20,
+                max_over: 0,
+                max_under: -10,
+            },
+        };
+        let display = format!("{}", summary);
+        assert!(display.contains("Duration"));
+        assert!(display.contains("Drift"));
+    }
+
+    #[test]
+    fn test_tracker_record_step_no_tool_name() {
+        let tracker = TokenTracker::new();
+        tracker.record_step(0, 50, 25, None);
+        let steps = tracker.step_usage();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].tool_name, None);
+        assert_eq!(steps[0].prompt_tokens, 50);
+        assert_eq!(steps[0].completion_tokens, 25);
+    }
+
+    #[test]
+    fn test_tracker_estimate_cost_zero_tokens() {
+        let tracker = TokenTracker::new();
+        let cost = tracker.estimate_cost();
+        assert!((cost - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_drift_exact_match() {
+        let tracker = TokenTracker::new();
+        tracker.record_drift(100, 100);
+        let drift = tracker.drift_stats();
+        assert_eq!(drift.samples, 1);
+        assert_eq!(drift.cumulative_drift, 0);
+        assert_eq!(drift.cumulative_abs_drift, 0);
+        assert_eq!(drift.max_over, 0);
+        assert_eq!(drift.max_under, 0);
+    }
+
+    #[test]
+    fn test_drift_zero_actual() {
+        // When actual is 0, drift percentage check is skipped (no divide-by-zero)
+        let tracker = TokenTracker::new();
+        tracker.record_drift(50, 0);
+        let drift = tracker.drift_stats();
+        assert_eq!(drift.samples, 1);
+        assert_eq!(drift.cumulative_drift, 50);
+        assert_eq!(drift.max_over, 50);
+    }
+
+    #[test]
+    fn test_drift_large_deviation_triggers_log() {
+        // >15% deviation with actual > 0: exercises the tracing::warn branch
+        let tracker = TokenTracker::new();
+        // estimated=200, actual=100 -> 100% deviation
+        tracker.record_drift(200, 100);
+        let drift = tracker.drift_stats();
+        assert_eq!(drift.samples, 1);
+        assert_eq!(drift.cumulative_drift, 100);
+    }
+
+    #[test]
+    fn test_drift_small_deviation_no_warn() {
+        // <15% deviation: does not trigger the warn branch
+        let tracker = TokenTracker::new();
+        // estimated=105, actual=100 -> 5% deviation
+        tracker.record_drift(105, 100);
+        let drift = tracker.drift_stats();
+        assert_eq!(drift.samples, 1);
+        assert_eq!(drift.cumulative_drift, 5);
+    }
+
+    #[test]
+    fn test_reset_clears_step_usage() {
+        let tracker = TokenTracker::new();
+        tracker.record_step(1, 100, 50, Some("tool".to_string()));
+        tracker.record_step(2, 200, 100, None);
+        assert_eq!(tracker.step_usage().len(), 2);
+        tracker.reset();
+        assert_eq!(tracker.step_usage().len(), 0);
+        assert_eq!(tracker.total_tokens(), 0);
+    }
+
+    #[test]
+    fn test_reset_clears_drift() {
+        let tracker = TokenTracker::new();
+        tracker.record_drift(200, 100);
+        tracker.record_drift(50, 100);
+        assert_eq!(tracker.drift_stats().samples, 2);
+        tracker.reset();
+        let drift = tracker.drift_stats();
+        assert_eq!(drift.samples, 0);
+        assert_eq!(drift.cumulative_drift, 0);
+        assert_eq!(drift.cumulative_abs_drift, 0);
+        assert_eq!(drift.max_over, 0);
+        assert_eq!(drift.max_under, 0);
+    }
+
+    #[test]
+    fn test_model_pricing_calculate_cost_zero_tokens() {
+        let pricing = ModelPricing::claude_sonnet();
+        let cost = pricing.calculate_cost(0, 0);
+        assert!((cost - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_model_pricing_calculate_cost_large_tokens() {
+        let pricing = ModelPricing::claude_haiku();
+        // 1M input at 0.00025/1K + 1M output at 0.00125/1K
+        // = 1000 * 0.00025 + 1000 * 0.00125 = 0.25 + 1.25 = 1.50
+        let cost = pricing.calculate_cost(1_000_000, 1_000_000);
+        assert!((cost - 1.50).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_model_pricing_opus_cost() {
+        let pricing = ModelPricing::claude_opus();
+        // 10K input at 0.015/1K + 5K output at 0.075/1K
+        // = 10 * 0.015 + 5 * 0.075 = 0.15 + 0.375 = 0.525
+        let cost = pricing.calculate_cost(10_000, 5_000);
+        assert!((cost - 0.525).abs() < 0.0001);
+    }
+}
+
+#[cfg(test)]
+mod extended_model_selector_tests {
+    use super::*;
+
+    #[test]
+    fn test_selector_auto_select_disabled() {
+        let config = ModelSelectionConfig {
+            auto_select: false,
+            ..Default::default()
+        };
+        let selector = ModelSelector::new(config);
+        // With auto_select disabled, always returns default model
+        let model = selector.select(TaskComplexity::Simple, 1000);
+        assert_eq!(model, "claude-3-5-sonnet");
+        let model = selector.select(TaskComplexity::Critical, 1000);
+        assert_eq!(model, "claude-3-5-sonnet");
+    }
+
+    #[test]
+    fn test_selector_select_standard() {
+        let selector = ModelSelector::default();
+        let model = selector.select(TaskComplexity::Standard, 1000);
+        // Standard falls through to "balance cost and capability" branch,
+        // finds tier 2 model
+        assert_eq!(model, "claude-3-5-sonnet");
+    }
+
+    #[test]
+    fn test_selector_select_complex() {
+        let selector = ModelSelector::default();
+        let model = selector.select(TaskComplexity::Complex, 1000);
+        // Complex prefers most capable (highest tier)
+        assert_eq!(model, "claude-3-opus");
+    }
+
+    #[test]
+    fn test_selector_select_no_suitable_models() {
+        let config = ModelSelectionConfig {
+            models: vec![ModelPricing {
+                model_id: "tiny-model".to_string(),
+                input_cost_per_1k: 0.0001,
+                output_cost_per_1k: 0.0005,
+                max_context: 100,
+                capability_tier: 1,
+                speed_tier: 3,
+            }],
+            default_model: "fallback".to_string(),
+            auto_select: true,
+            max_cost_per_request: 0.50,
+        };
+        let selector = ModelSelector::new(config);
+        // Token count exceeds max_context, no suitable models
+        let model = selector.select(TaskComplexity::Standard, 50_000);
+        assert_eq!(model, "fallback");
+    }
+
+    #[test]
+    fn test_selector_select_no_tier_match() {
+        let config = ModelSelectionConfig {
+            models: vec![ModelPricing {
+                model_id: "basic-model".to_string(),
+                input_cost_per_1k: 0.0001,
+                output_cost_per_1k: 0.0005,
+                max_context: 200_000,
+                capability_tier: 1,
+                speed_tier: 3,
+            }],
+            default_model: "fallback".to_string(),
+            auto_select: true,
+            max_cost_per_request: 0.50,
+        };
+        let selector = ModelSelector::new(config);
+        // Critical needs tier 3, only have tier 1
+        let model = selector.select(TaskComplexity::Critical, 1000);
+        assert_eq!(model, "fallback");
+    }
+
+    #[test]
+    fn test_selector_simple_picks_cheapest() {
+        let config = ModelSelectionConfig {
+            models: vec![
+                ModelPricing {
+                    model_id: "expensive".to_string(),
+                    input_cost_per_1k: 0.01,
+                    output_cost_per_1k: 0.05,
+                    max_context: 200_000,
+                    capability_tier: 1,
+                    speed_tier: 2,
+                },
+                ModelPricing {
+                    model_id: "cheap".to_string(),
+                    input_cost_per_1k: 0.001,
+                    output_cost_per_1k: 0.005,
+                    max_context: 200_000,
+                    capability_tier: 1,
+                    speed_tier: 3,
+                },
+            ],
+            default_model: "expensive".to_string(),
+            auto_select: true,
+            max_cost_per_request: 1.0,
+        };
+        let selector = ModelSelector::new(config);
+        let model = selector.select(TaskComplexity::Simple, 1000);
+        assert_eq!(model, "cheap");
+    }
+
+    #[test]
+    fn test_selector_standard_no_tier2_falls_to_first() {
+        // If no tier-2 model exists, Standard balance branch takes first suitable
+        let config = ModelSelectionConfig {
+            models: vec![ModelPricing {
+                model_id: "tier3-only".to_string(),
+                input_cost_per_1k: 0.01,
+                output_cost_per_1k: 0.05,
+                max_context: 200_000,
+                capability_tier: 3,
+                speed_tier: 1,
+            }],
+            default_model: "fallback".to_string(),
+            auto_select: true,
+            max_cost_per_request: 1.0,
+        };
+        let selector = ModelSelector::new(config);
+        let model = selector.select(TaskComplexity::Standard, 1000);
+        assert_eq!(model, "tier3-only");
+    }
+
+    #[test]
+    fn test_selector_record_usage_overflow() {
+        let selector = ModelSelector::default();
+        // Record > 100 entries to exercise the pop_front trimming
+        for i in 0..110 {
+            selector.record_usage(ModelUsage {
+                model_id: format!("model-{}", i),
+                complexity: TaskComplexity::Standard,
+                input_tokens: 100,
+                output_tokens: 50,
+                cost: 0.001,
+                success: true,
+                timestamp: i as u64,
+            });
+        }
+        let summary = selector.usage_summary();
+        assert_eq!(summary.total_requests, 100);
+    }
+
+    #[test]
+    fn test_selector_usage_summary_empty() {
+        let selector = ModelSelector::default();
+        let summary = selector.usage_summary();
+        assert_eq!(summary.total_requests, 0);
+        assert_eq!(summary.total_cost, 0.0);
+        assert_eq!(summary.total_tokens, 0);
+        assert_eq!(summary.success_rate, 0.0);
+        assert!(summary.by_model.is_empty());
+    }
+
+    #[test]
+    fn test_selector_usage_summary_success_rate() {
+        let selector = ModelSelector::default();
+        for i in 0..10 {
+            selector.record_usage(ModelUsage {
+                model_id: "claude-3-5-sonnet".to_string(),
+                complexity: TaskComplexity::Standard,
+                input_tokens: 100,
+                output_tokens: 50,
+                cost: 0.01,
+                success: i < 8, // 8 successes, 2 failures
+                timestamp: i as u64,
+            });
+        }
+        let summary = selector.usage_summary();
+        assert_eq!(summary.total_requests, 10);
+        assert!((summary.success_rate - 0.8).abs() < 0.001);
+        assert_eq!(*summary.by_model.get("claude-3-5-sonnet").unwrap(), 10);
+    }
+
+    #[test]
+    fn test_selector_usage_summary_multiple_models() {
+        let selector = ModelSelector::default();
+        selector.record_usage(ModelUsage {
+            model_id: "model-a".to_string(),
+            complexity: TaskComplexity::Simple,
+            input_tokens: 100,
+            output_tokens: 50,
+            cost: 0.01,
+            success: true,
+            timestamp: 1,
+        });
+        selector.record_usage(ModelUsage {
+            model_id: "model-b".to_string(),
+            complexity: TaskComplexity::Complex,
+            input_tokens: 200,
+            output_tokens: 100,
+            cost: 0.05,
+            success: true,
+            timestamp: 2,
+        });
+        selector.record_usage(ModelUsage {
+            model_id: "model-a".to_string(),
+            complexity: TaskComplexity::Standard,
+            input_tokens: 150,
+            output_tokens: 75,
+            cost: 0.02,
+            success: false,
+            timestamp: 3,
+        });
+
+        let summary = selector.usage_summary();
+        assert_eq!(summary.total_requests, 3);
+        assert!((summary.total_cost - 0.08).abs() < 0.001);
+        assert_eq!(summary.total_tokens, 100 + 50 + 200 + 100 + 150 + 75);
+        assert_eq!(*summary.by_model.get("model-a").unwrap(), 2);
+        assert_eq!(*summary.by_model.get("model-b").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_recommend_simple() {
+        let selector = ModelSelector::default();
+        let rec = selector.recommend(TaskComplexity::Simple, 1000);
+        assert_eq!(rec.model_id, "claude-3-haiku");
+        assert_eq!(rec.reason, "Using faster, cheaper model for simple task");
+        assert_eq!(rec.alternative, Some("claude-3-5-sonnet".to_string()));
+        assert!(rec.estimated_cost > 0.0);
+    }
+
+    #[test]
+    fn test_recommend_complex() {
+        let selector = ModelSelector::default();
+        let rec = selector.recommend(TaskComplexity::Complex, 5000);
+        assert_eq!(rec.reason, "Using capable model for complex task");
+        assert_eq!(rec.alternative, Some("claude-3-opus".to_string()));
+    }
+
+    #[test]
+    fn test_recommend_critical() {
+        let selector = ModelSelector::default();
+        let rec = selector.recommend(TaskComplexity::Critical, 5000);
+        assert_eq!(rec.reason, "Using most capable model for critical task");
+        assert_eq!(rec.alternative, None);
+    }
+
+    #[test]
+    fn test_get_alternative_standard() {
+        let selector = ModelSelector::default();
+        let rec = selector.recommend(TaskComplexity::Standard, 1000);
+        assert_eq!(rec.alternative, Some("claude-3-haiku".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod extended_context_pruner_tests {
+    use super::*;
+    use crate::api::types::Message;
+
+    #[test]
+    fn test_pruner_default() {
+        let pruner = ContextPruner::default();
+        assert!(!pruner.needs_pruning(50_000));
+        assert_eq!(pruner.stats().total_operations, 0);
+    }
+
+    #[test]
+    fn test_pruner_reset_stats() {
+        let pruner = ContextPruner::default();
+        // Manually can't trigger prune without enough messages to exceed tokens,
+        // but we can test reset_stats independently
+        pruner.reset_stats();
+        let stats = pruner.stats();
+        assert_eq!(stats.total_operations, 0);
+        assert_eq!(stats.tokens_removed, 0);
+        assert_eq!(stats.messages_removed, 0);
+        assert!((stats.cost_saved - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_prune_no_pruning_needed() {
+        let config = PruningConfig {
+            target_tokens: 1_000_000, // very high target
+            strategy: PruningStrategy::KeepRecent,
+            min_messages: 2,
+            keep_system: true,
+            keep_last_n: 2,
+        };
+        let pruner = ContextPruner::new(config);
+        let messages = vec![
+            Message::system("System prompt"),
+            Message::user("Hello"),
+            Message::assistant("Hi there"),
+        ];
+        let result = pruner.prune(&messages);
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_prune_keep_recent_strategy() {
+        let config = PruningConfig {
+            target_tokens: 1, // force pruning
+            strategy: PruningStrategy::KeepRecent,
+            min_messages: 1,
+            keep_system: true,
+            keep_last_n: 1,
+        };
+        let pruner = ContextPruner::new(config);
+        let messages = vec![
+            Message::system("You are a helpful assistant"),
+            Message::user("First question"),
+            Message::assistant("First answer"),
+            Message::user("Second question"),
+            Message::assistant("Second answer"),
+        ];
+        let result = pruner.prune(&messages);
+        // Should keep system message + last 1 message at minimum
+        assert!(result.len() >= 2);
+        // System message should be first
+        assert_eq!(result[0].role, "system");
+        // stats should be updated
+        let stats = pruner.stats();
+        assert_eq!(stats.total_operations, 1);
+    }
+
+    #[test]
+    fn test_prune_keep_ends_strategy() {
+        let config = PruningConfig {
+            target_tokens: 1, // force pruning
+            strategy: PruningStrategy::KeepEnds,
+            min_messages: 2,
+            keep_system: true,
+            keep_last_n: 2,
+        };
+        let pruner = ContextPruner::new(config);
+        let messages = vec![
+            Message::system("System prompt"),
+            Message::user("First question"),
+            Message::assistant("First answer"),
+            Message::user("Middle question"),
+            Message::assistant("Middle answer"),
+            Message::user("Last question"),
+            Message::assistant("Last answer"),
+        ];
+        let result = pruner.prune(&messages);
+        // KeepEnds: pushes first, then last N in reverse, then reverses all.
+        // Result = [Last question, Last answer, System prompt]
+        assert_eq!(result.len(), 3);
+        // After the reversal, the last 2 come first, then system at end
+        assert_eq!(result[0].content.text(), "Last question");
+        assert_eq!(result[1].content.text(), "Last answer");
+        assert_eq!(result[2].role, "system");
+        // Stats should be updated
+        let stats = pruner.stats();
+        assert_eq!(stats.total_operations, 1);
+    }
+
+    #[test]
+    fn test_prune_keep_ends_few_messages() {
+        let config = PruningConfig {
+            target_tokens: 1, // force pruning
+            strategy: PruningStrategy::KeepEnds,
+            min_messages: 10, // more than messages.len()
+            keep_system: true,
+            keep_last_n: 2,
+        };
+        let pruner = ContextPruner::new(config);
+        let messages = vec![
+            Message::system("System"),
+            Message::user("Hello"),
+            Message::assistant("Hi"),
+        ];
+        // len <= min_messages, so returns all
+        let result = pruner.prune(&messages);
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_prune_remove_tool_results_strategy() {
+        let config = PruningConfig {
+            target_tokens: 1, // force pruning
+            strategy: PruningStrategy::RemoveToolResults,
+            min_messages: 1,
+            keep_system: true,
+            keep_last_n: 1,
+        };
+        let pruner = ContextPruner::new(config);
+        let messages = vec![
+            Message::system("System"),
+            Message::user("Run a command"),
+            Message::assistant("Sure"),
+            Message::tool("command output", "call_1"),
+            Message::assistant("Done"),
+        ];
+        let result = pruner.prune(&messages);
+        // Tool messages should be removed
+        assert!(result.iter().all(|m| m.role != "tool"));
+        assert_eq!(result.len(), 4);
+    }
+
+    #[test]
+    fn test_prune_remove_system_messages_strategy() {
+        let config = PruningConfig {
+            target_tokens: 1, // force pruning
+            strategy: PruningStrategy::RemoveSystemMessages,
+            min_messages: 1,
+            keep_system: true,
+            keep_last_n: 1,
+        };
+        let pruner = ContextPruner::new(config);
+        let messages = vec![
+            Message::system("First system"),
+            Message::user("Hello"),
+            Message::system("Second system"),
+            Message::assistant("Hi"),
+            Message::system("Third system"),
+        ];
+        let result = pruner.prune(&messages);
+        // Only first system should remain
+        let system_count = result.iter().filter(|m| m.role == "system").count();
+        assert_eq!(system_count, 1);
+        assert_eq!(result[0].role, "system");
+    }
+
+    #[test]
+    fn test_prune_fallback_strategies() {
+        // ByRelevance and Summarize fall through to KeepRecent
+        for strategy in [PruningStrategy::ByRelevance, PruningStrategy::Summarize] {
+            let config = PruningConfig {
+                target_tokens: 1,
+                strategy,
+                min_messages: 1,
+                keep_system: false,
+                keep_last_n: 1,
+            };
+            let pruner = ContextPruner::new(config);
+            let messages = vec![
+                Message::user("Hello"),
+                Message::assistant("Hi"),
+                Message::user("Bye"),
+            ];
+            let result = pruner.prune(&messages);
+            // Should not panic, and should return some messages
+            assert!(!result.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_prune_keep_recent_no_system() {
+        let config = PruningConfig {
+            target_tokens: 1,
+            strategy: PruningStrategy::KeepRecent,
+            min_messages: 1,
+            keep_system: false,
+            keep_last_n: 1,
+        };
+        let pruner = ContextPruner::new(config);
+        let messages = vec![
+            Message::user("First"),
+            Message::assistant("First reply"),
+            Message::user("Second"),
+            Message::assistant("Second reply"),
+        ];
+        let result = pruner.prune(&messages);
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_prune_updates_stats_correctly() {
+        let config = PruningConfig {
+            target_tokens: 1,
+            strategy: PruningStrategy::RemoveToolResults,
+            min_messages: 1,
+            keep_system: true,
+            keep_last_n: 1,
+        };
+        let pruner = ContextPruner::new(config);
+        let messages = vec![
+            Message::system("System"),
+            Message::user("Do something"),
+            Message::tool("result", "call_1"),
+            Message::assistant("Done"),
+        ];
+        pruner.prune(&messages);
+        let stats = pruner.stats();
+        assert_eq!(stats.total_operations, 1);
+        assert!(stats.messages_removed > 0);
+    }
+
+    #[test]
+    fn test_prune_empty_messages() {
+        let config = PruningConfig {
+            target_tokens: 1,
+            strategy: PruningStrategy::KeepRecent,
+            min_messages: 1,
+            keep_system: true,
+            keep_last_n: 1,
+        };
+        let pruner = ContextPruner::new(config);
+        let messages: Vec<Message> = vec![];
+        let result = pruner.prune(&messages);
+        // No pruning needed since 0 tokens < target
+        assert!(result.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod extended_budget_manager_tests {
+    use super::*;
+
+    #[test]
+    fn test_budget_can_spend_no_hard_limit() {
+        let config = BudgetConfig {
+            hard_limit: false,
+            daily_budget: 5.0,
+            ..Default::default()
+        };
+        let manager = BudgetManager::new(config);
+        manager.record_spending(100.0); // Way over budget
+                                        // Without hard limit, can always spend
+        assert!(manager.can_spend(1000.0));
+    }
+
+    #[test]
+    fn test_budget_monthly_spending_and_remaining() {
+        let manager = BudgetManager::default();
+        manager.record_spending(20.0);
+        assert!((manager.monthly_spending() - 20.0).abs() < 0.001);
+        assert!((manager.monthly_remaining() - 80.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_budget_daily_exceeded_alert() {
+        let config = BudgetConfig {
+            daily_budget: 10.0,
+            monthly_budget: 100.0,
+            alert_threshold: 0.8,
+            hard_limit: false,
+        };
+        let manager = BudgetManager::new(config);
+        // Spend 11.0 > daily budget of 10.0 → should trigger DailyExceeded
+        manager.record_spending(11.0);
+        let alerts = manager.alerts();
+        assert!(!alerts.is_empty());
+        let daily_exceeded = alerts
+            .iter()
+            .any(|a| a.alert_type == BudgetAlertType::DailyExceeded);
+        assert!(daily_exceeded);
+    }
+
+    #[test]
+    fn test_budget_daily_warning_alert() {
+        let config = BudgetConfig {
+            daily_budget: 10.0,
+            monthly_budget: 100.0,
+            alert_threshold: 0.8,
+            hard_limit: false,
+        };
+        let manager = BudgetManager::new(config);
+        // Spend 8.5 → 85% of 10.0, above threshold but below budget
+        manager.record_spending(8.5);
+        let alerts = manager.alerts();
+        let daily_warning = alerts
+            .iter()
+            .any(|a| a.alert_type == BudgetAlertType::DailyWarning);
+        assert!(daily_warning);
+    }
+
+    #[test]
+    fn test_budget_monthly_exceeded_alert() {
+        let config = BudgetConfig {
+            daily_budget: 1000.0, // High daily to avoid daily alerts
+            monthly_budget: 50.0,
+            alert_threshold: 0.8,
+            hard_limit: false,
+        };
+        let manager = BudgetManager::new(config);
+        manager.record_spending(55.0);
+        let alerts = manager.alerts();
+        let monthly_exceeded = alerts
+            .iter()
+            .any(|a| a.alert_type == BudgetAlertType::MonthlyExceeded);
+        assert!(monthly_exceeded);
+    }
+
+    #[test]
+    fn test_budget_monthly_warning_alert() {
+        let config = BudgetConfig {
+            daily_budget: 1000.0,
+            monthly_budget: 100.0,
+            alert_threshold: 0.8,
+            hard_limit: false,
+        };
+        let manager = BudgetManager::new(config);
+        // 85% of 100 = 85
+        manager.record_spending(85.0);
+        let alerts = manager.alerts();
+        let monthly_warning = alerts
+            .iter()
+            .any(|a| a.alert_type == BudgetAlertType::MonthlyWarning);
+        assert!(monthly_warning);
+    }
+
+    #[test]
+    fn test_budget_no_alert_below_threshold() {
+        let config = BudgetConfig {
+            daily_budget: 100.0,
+            monthly_budget: 1000.0,
+            alert_threshold: 0.8,
+            hard_limit: false,
+        };
+        let manager = BudgetManager::new(config);
+        // Spend only 10% of daily/monthly
+        manager.record_spending(10.0);
+        let alerts = manager.alerts();
+        assert!(alerts.is_empty());
+    }
+
+    #[test]
+    fn test_budget_hard_limit_blocks_monthly() {
+        let config = BudgetConfig {
+            daily_budget: 1000.0,
+            monthly_budget: 5.0,
+            alert_threshold: 0.8,
+            hard_limit: true,
+        };
+        let manager = BudgetManager::new(config);
+        manager.record_spending(4.0);
+        // 4.0 + 2.0 = 6.0 > monthly budget 5.0
+        assert!(!manager.can_spend(2.0));
+        assert!(manager.can_spend(0.5));
+    }
+
+    #[test]
+    fn test_budget_status_full() {
+        let config = BudgetConfig {
+            daily_budget: 20.0,
+            monthly_budget: 200.0,
+            alert_threshold: 0.8,
+            hard_limit: false,
+        };
+        let manager = BudgetManager::new(config);
+        manager.record_spending(5.0);
+        let status = manager.status();
+        assert!((status.daily_spent - 5.0).abs() < 0.001);
+        assert_eq!(status.daily_budget, 20.0);
+        assert!((status.daily_remaining - 15.0).abs() < 0.001);
+        assert!((status.monthly_spent - 5.0).abs() < 0.001);
+        assert_eq!(status.monthly_budget, 200.0);
+        assert!((status.monthly_remaining - 195.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_budget_daily_remaining_saturates_at_zero() {
+        let manager = BudgetManager::default(); // daily_budget = 10.0
+        manager.record_spending(15.0);
+        assert_eq!(manager.daily_remaining(), 0.0);
+    }
+
+    #[test]
+    fn test_budget_monthly_remaining_saturates_at_zero() {
+        let manager = BudgetManager::default(); // monthly_budget = 100.0
+        manager.record_spending(150.0);
+        assert_eq!(manager.monthly_remaining(), 0.0);
+    }
+
+    #[test]
+    fn test_budget_multiple_spending_records() {
+        let manager = BudgetManager::default();
+        manager.record_spending(1.0);
+        manager.record_spending(2.0);
+        manager.record_spending(3.0);
+        assert!((manager.daily_spending() - 6.0).abs() < 0.001);
+        assert!((manager.monthly_spending() - 6.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_budget_alert_message_format() {
+        let config = BudgetConfig {
+            daily_budget: 10.0,
+            monthly_budget: 100.0,
+            alert_threshold: 0.5,
+            hard_limit: false,
+        };
+        let manager = BudgetManager::new(config);
+        manager.record_spending(6.0); // 60% of daily
+        let alerts = manager.alerts();
+        assert!(!alerts.is_empty());
+        let alert = &alerts[0];
+        assert!(alert.message.contains("budget at"));
+        assert_eq!(alert.threshold, 0.5);
+        assert!((alert.current_usage - 6.0).abs() < 0.001);
+    }
+}
+
+#[cfg(test)]
+mod extended_cost_optimizer_tests {
+    use super::*;
+
+    #[test]
+    fn test_cost_optimizer_new_custom_configs() {
+        let optimizer = CostOptimizer::new(
+            PruningConfig {
+                target_tokens: 50_000,
+                ..Default::default()
+            },
+            ModelSelectionConfig::default(),
+            BudgetConfig {
+                daily_budget: 5.0,
+                ..Default::default()
+            },
+        );
+        assert_eq!(optimizer.tracker().total_tokens(), 0);
+        assert!(optimizer.pruner().needs_pruning(60_000));
+        assert!(!optimizer.pruner().needs_pruning(40_000));
+    }
+
+    #[test]
+    fn test_cost_optimizer_components_interact() {
+        let optimizer = CostOptimizer::default();
+        optimizer.tracker().record_usage(5000, 2000);
+        optimizer.budget().record_spending(0.05);
+
+        let summary = optimizer.summary();
+        assert_eq!(summary.token_summary.prompt_tokens, 5000);
+        assert_eq!(summary.token_summary.completion_tokens, 2000);
+        assert!(summary.budget_status.daily_spent > 0.0);
+    }
+
+    #[test]
+    fn test_cost_optimizer_recommendations_budget_nearly_exhausted() {
+        let optimizer = CostOptimizer::new(
+            PruningConfig::default(),
+            ModelSelectionConfig::default(),
+            BudgetConfig {
+                daily_budget: 10.0,
+                monthly_budget: 100.0,
+                alert_threshold: 0.8,
+                hard_limit: false,
+            },
+        );
+        // Spend 9.0 out of 10.0, leaving only 10% remaining
+        optimizer.budget().record_spending(9.0);
+
+        let recommendations = optimizer.get_recommendations();
+        let budget_rec = recommendations
+            .iter()
+            .any(|r| r.category == "Budget" && r.message.contains("nearly exhausted"));
+        assert!(budget_rec);
+    }
+
+    #[test]
+    fn test_cost_optimizer_no_recommendations_fresh() {
+        let optimizer = CostOptimizer::default();
+        let recommendations = optimizer.get_recommendations();
+        // With fresh state, budget is full → no budget recommendation
+        // No pruning or model usage → no other recommendations
+        assert!(
+            recommendations.is_empty(),
+            "Expected no recommendations for fresh optimizer, got: {:?}",
+            recommendations
+        );
+    }
+
+    #[test]
+    fn test_cost_optimizer_summary_fields() {
+        let optimizer = CostOptimizer::default();
+        optimizer.tracker().record_usage(1000, 500);
+        optimizer.tracker().record_drift(1100, 1000);
+
+        let summary = optimizer.summary();
+        assert_eq!(summary.token_summary.total_tokens, 1500);
+        assert_eq!(summary.token_summary.api_calls, 1);
+        assert_eq!(summary.pruning_stats.total_operations, 0);
+        assert_eq!(summary.model_usage.total_requests, 0);
+        assert_eq!(summary.token_summary.drift.samples, 1);
+    }
 }

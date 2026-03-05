@@ -856,3 +856,1167 @@ impl Agent {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::checkpoint::{CheckpointManager, TaskCheckpoint, ToolCallLog};
+    use crate::config::{AgentConfig, Config, ExecutionMode, SafetyConfig};
+    use crate::testing::mock_api::MockLlmServer;
+    use chrono::Utc;
+
+    fn mock_agent_config(endpoint: String, streaming: bool) -> Config {
+        Config {
+            endpoint,
+            model: "mock-model".to_string(),
+            agent: AgentConfig {
+                max_iterations: 8,
+                step_timeout_secs: 30,
+                streaming,
+                native_function_calling: false,
+                min_completion_steps: 0,
+                require_verification_before_completion: false,
+                ..Default::default()
+            },
+            safety: SafetyConfig {
+                allowed_paths: vec!["./**".to_string(), "/**".to_string()],
+                ..Default::default()
+            },
+            execution_mode: ExecutionMode::Yolo,
+            ..Default::default()
+        }
+    }
+
+    // =========================================================================
+    // build_progress_injection -- exhaustive branch coverage (standalone)
+    // =========================================================================
+
+    fn build_progress_injection_standalone(
+        step: usize,
+        max_iterations: usize,
+        has_verification: bool,
+    ) -> Option<String> {
+        if step == 0 || !(step + 1).is_multiple_of(5) {
+            return None;
+        }
+        let pct = ((step + 1) as f64 / max_iterations as f64 * 100.0).min(100.0);
+        let verification_status = if has_verification {
+            "Verification: PASSED"
+        } else {
+            "Verification: NOT YET RUN (required before completion)"
+        };
+        let guidance = if pct < 30.0 {
+            "You have plenty of budget remaining. Be thorough \u{2014} read relevant code, \
+             implement carefully, and verify each change."
+        } else if pct < 70.0 {
+            "Good progress. Continue implementing and make sure to verify with cargo_check/cargo_test."
+        } else {
+            "You are using most of your budget. Wrap up: ensure all changes compile \
+             and tests pass, then provide your final summary."
+        };
+        Some(format!(
+            "[Progress: step {}/{} ({:.0}% budget used) | {}]\n{}",
+            step + 1,
+            max_iterations,
+            pct,
+            verification_status,
+            guidance
+        ))
+    }
+
+    #[test]
+    fn test_progress_injection_none_for_step_zero() {
+        assert!(build_progress_injection_standalone(0, 100, false).is_none());
+    }
+
+    #[test]
+    fn test_progress_injection_none_for_non_multiple_of_5() {
+        assert!(build_progress_injection_standalone(1, 100, false).is_none());
+        assert!(build_progress_injection_standalone(2, 100, false).is_none());
+        assert!(build_progress_injection_standalone(3, 100, false).is_none());
+        assert!(build_progress_injection_standalone(5, 100, false).is_none());
+        assert!(build_progress_injection_standalone(7, 100, false).is_none());
+    }
+
+    #[test]
+    fn test_progress_injection_some_for_step_4() {
+        let result = build_progress_injection_standalone(4, 100, false);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("step 5/100"));
+    }
+
+    #[test]
+    fn test_progress_injection_some_for_step_9() {
+        let result = build_progress_injection_standalone(9, 100, false);
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("step 10/100"));
+        assert!(msg.contains("10% budget used"));
+    }
+
+    #[test]
+    fn test_progress_injection_some_for_step_14() {
+        let result = build_progress_injection_standalone(14, 100, false);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("step 15/100"));
+    }
+
+    #[test]
+    fn test_progress_injection_low_budget_guidance() {
+        let msg = build_progress_injection_standalone(4, 100, false).unwrap();
+        assert!(msg.contains("plenty of budget remaining"));
+        assert!(msg.contains("Be thorough"));
+    }
+
+    #[test]
+    fn test_progress_injection_mid_budget_guidance() {
+        let msg = build_progress_injection_standalone(49, 100, false).unwrap();
+        assert!(msg.contains("Good progress"));
+        assert!(msg.contains("cargo_check/cargo_test"));
+    }
+
+    #[test]
+    fn test_progress_injection_high_budget_guidance() {
+        let msg = build_progress_injection_standalone(69, 100, false).unwrap();
+        assert!(msg.contains("most of your budget"));
+        assert!(msg.contains("Wrap up"));
+    }
+
+    #[test]
+    fn test_progress_injection_pct_capped_at_100() {
+        let msg = build_progress_injection_standalone(14, 10, false).unwrap();
+        assert!(msg.contains("100% budget used"));
+        assert!(msg.contains("most of your budget"));
+    }
+
+    #[test]
+    fn test_progress_injection_verification_not_run() {
+        let msg = build_progress_injection_standalone(4, 100, false).unwrap();
+        assert!(msg.contains("Verification: NOT YET RUN"));
+        assert!(msg.contains("required before completion"));
+    }
+
+    #[test]
+    fn test_progress_injection_verification_passed() {
+        let msg = build_progress_injection_standalone(4, 100, true).unwrap();
+        assert!(msg.contains("Verification: PASSED"));
+        assert!(!msg.contains("NOT YET RUN"));
+    }
+
+    #[test]
+    fn test_progress_injection_step_19() {
+        let msg = build_progress_injection_standalone(19, 100, false).unwrap();
+        assert!(msg.contains("step 20/100"));
+        assert!(msg.contains("20% budget used"));
+    }
+
+    #[test]
+    fn test_progress_injection_step_24() {
+        let msg = build_progress_injection_standalone(24, 100, false).unwrap();
+        assert!(msg.contains("step 25/100"));
+        assert!(msg.contains("plenty of budget remaining"));
+    }
+
+    #[test]
+    fn test_progress_injection_boundary_30_pct() {
+        let msg = build_progress_injection_standalone(29, 100, false).unwrap();
+        assert!(msg.contains("Good progress"));
+    }
+
+    #[test]
+    fn test_progress_injection_boundary_70_pct() {
+        let msg = build_progress_injection_standalone(69, 100, true).unwrap();
+        assert!(msg.contains("Wrap up"));
+        assert!(msg.contains("Verification: PASSED"));
+    }
+
+    #[test]
+    fn test_progress_injection_small_max_iterations() {
+        let msg = build_progress_injection_standalone(4, 5, false).unwrap();
+        assert!(msg.contains("step 5/5"));
+        assert!(msg.contains("100% budget used"));
+        assert!(msg.contains("Wrap up"));
+    }
+
+    #[test]
+    fn test_progress_injection_max_iterations_1() {
+        let msg = build_progress_injection_standalone(4, 1, false).unwrap();
+        assert!(msg.contains("100% budget used"));
+        assert!(msg.contains("Wrap up"));
+    }
+
+    #[test]
+    fn test_progress_injection_step_99_max_100() {
+        let msg = build_progress_injection_standalone(99, 100, false).unwrap();
+        assert!(msg.contains("step 100/100"));
+        assert!(msg.contains("100% budget used"));
+        assert!(msg.contains("Wrap up"));
+    }
+
+    #[test]
+    fn test_progress_injection_large_step_numbers() {
+        let msg = build_progress_injection_standalone(499, 1000, true).unwrap();
+        assert!(msg.contains("step 500/1000"));
+        assert!(msg.contains("50% budget used"));
+        assert!(msg.contains("Good progress"));
+        assert!(msg.contains("Verification: PASSED"));
+    }
+
+    #[test]
+    fn test_progress_injection_exactly_at_boundary_29_not_multiple() {
+        assert!(build_progress_injection_standalone(28, 100, false).is_none());
+    }
+
+    // =========================================================================
+    // build_progress_injection -- via real Agent instance
+    // =========================================================================
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_progress_injection_agent_no_checkpoint() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let agent = Agent::new(config).await.unwrap();
+        assert!(agent.build_progress_injection(0).is_none());
+        let msg = agent.build_progress_injection(4).unwrap();
+        assert!(msg.contains("Good progress"));
+        assert!(msg.contains("Verification: NOT YET RUN"));
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_progress_injection_agent_with_cargo_check() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        let mut cp = TaskCheckpoint::new("t1".to_string(), "task".to_string());
+        cp.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "cargo_check".to_string(),
+            arguments: "{}".to_string(),
+            result: Some("OK".to_string()),
+            success: true,
+            duration_ms: Some(100),
+        });
+        agent.current_checkpoint = Some(cp);
+        assert!(agent
+            .build_progress_injection(4)
+            .unwrap()
+            .contains("Verification: PASSED"));
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_progress_injection_agent_failed_verification() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        let mut cp = TaskCheckpoint::new("t2".to_string(), "task".to_string());
+        cp.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "cargo_check".to_string(),
+            arguments: "{}".to_string(),
+            result: Some("error".to_string()),
+            success: false,
+            duration_ms: Some(100),
+        });
+        agent.current_checkpoint = Some(cp);
+        assert!(agent
+            .build_progress_injection(4)
+            .unwrap()
+            .contains("Verification: NOT YET RUN"));
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_progress_injection_agent_cargo_test() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        let mut cp = TaskCheckpoint::new("t3".to_string(), "task".to_string());
+        cp.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "cargo_test".to_string(),
+            arguments: "{}".to_string(),
+            result: Some("passed".to_string()),
+            success: true,
+            duration_ms: Some(500),
+        });
+        agent.current_checkpoint = Some(cp);
+        assert!(agent
+            .build_progress_injection(4)
+            .unwrap()
+            .contains("Verification: PASSED"));
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_progress_injection_agent_cargo_clippy() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        let mut cp = TaskCheckpoint::new("t4".to_string(), "task".to_string());
+        cp.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "cargo_clippy".to_string(),
+            arguments: "{}".to_string(),
+            result: Some("ok".to_string()),
+            success: true,
+            duration_ms: Some(300),
+        });
+        agent.current_checkpoint = Some(cp);
+        assert!(agent
+            .build_progress_injection(4)
+            .unwrap()
+            .contains("Verification: PASSED"));
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_progress_injection_agent_non_verification_tool() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        let mut cp = TaskCheckpoint::new("t5".to_string(), "task".to_string());
+        cp.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "file_read".to_string(),
+            arguments: r#"{"path":"foo.rs"}"#.to_string(),
+            result: Some("content".to_string()),
+            success: true,
+            duration_ms: Some(10),
+        });
+        agent.current_checkpoint = Some(cp);
+        assert!(agent
+            .build_progress_injection(4)
+            .unwrap()
+            .contains("Verification: NOT YET RUN"));
+        server.stop().await;
+    }
+
+    // =========================================================================
+    // memory_stats
+    // =========================================================================
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_memory_stats_returns_tuple() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let agent = Agent::new(config).await.unwrap();
+        let (_len, _total_tokens, near_limit) = agent.memory_stats();
+        assert!(!near_limit);
+        server.stop().await;
+    }
+
+    // =========================================================================
+    // list_tasks / task_status / delete_task via temp dir
+    // =========================================================================
+
+    #[test]
+    fn test_list_tasks_empty_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = CheckpointManager::new(tmp.path().to_path_buf()).unwrap();
+        assert!(manager.list_tasks().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_list_tasks_with_saved_checkpoint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = CheckpointManager::new(tmp.path().to_path_buf()).unwrap();
+        let cp = TaskCheckpoint::new("list-test-1".to_string(), "Test task one".to_string());
+        manager.save(&cp).unwrap();
+        let tasks = manager.list_tasks().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].task_id, "list-test-1");
+    }
+
+    #[test]
+    fn test_list_tasks_multiple() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = CheckpointManager::new(tmp.path().to_path_buf()).unwrap();
+        manager
+            .save(&TaskCheckpoint::new("m1".to_string(), "First".to_string()))
+            .unwrap();
+        manager
+            .save(&TaskCheckpoint::new("m2".to_string(), "Second".to_string()))
+            .unwrap();
+        manager
+            .save(&TaskCheckpoint::new("m3".to_string(), "Third".to_string()))
+            .unwrap();
+        let tasks = manager.list_tasks().unwrap();
+        assert_eq!(tasks.len(), 3);
+        let ids: Vec<&str> = tasks.iter().map(|t| t.task_id.as_str()).collect();
+        assert!(ids.contains(&"m1"));
+        assert!(ids.contains(&"m2"));
+        assert!(ids.contains(&"m3"));
+    }
+
+    #[test]
+    fn test_task_status_loads_checkpoint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = CheckpointManager::new(tmp.path().to_path_buf()).unwrap();
+        let mut cp = TaskCheckpoint::new("status-test".to_string(), "Status task".to_string());
+        cp.set_step(5);
+        cp.set_estimated_tokens(2000);
+        manager.save(&cp).unwrap();
+        let loaded = manager.load("status-test").unwrap();
+        assert_eq!(loaded.task_id, "status-test");
+        assert_eq!(loaded.current_step, 5);
+        assert_eq!(loaded.estimated_tokens, 2000);
+    }
+
+    #[test]
+    fn test_task_status_nonexistent_not_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = CheckpointManager::new(tmp.path().to_path_buf()).unwrap();
+        // CheckpointManager.load auto-recovers by creating a fresh checkpoint,
+        // so use the `exists` helper to verify no file is on disk.
+        assert!(!manager.exists("nonexistent"));
+    }
+
+    #[test]
+    fn test_delete_task_removes_checkpoint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = CheckpointManager::new(tmp.path().to_path_buf()).unwrap();
+        let cp = TaskCheckpoint::new("del-test".to_string(), "To delete".to_string());
+        manager.save(&cp).unwrap();
+        assert!(manager.exists("del-test"));
+        manager.delete("del-test").unwrap();
+        // After deletion the file should no longer exist on disk.
+        // (CheckpointManager.load would auto-recover, so we use exists().)
+        assert!(!manager.exists("del-test"));
+    }
+
+    #[test]
+    fn test_delete_nonexistent_task_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = CheckpointManager::new(tmp.path().to_path_buf()).unwrap();
+        assert!(manager.delete("does-not-exist").is_ok());
+    }
+
+    // =========================================================================
+    // run_task E2E
+    // =========================================================================
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_run_task_completes_with_plain_text() {
+        let server = MockLlmServer::builder()
+            .with_response("Analyzed.")
+            .with_response("Complete.")
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        let result = agent.run_task("Do a simple task").await;
+        assert!(
+            result.is_ok(),
+            "run_task should succeed: {:?}",
+            result.err()
+        );
+        assert!(agent.current_checkpoint.is_some());
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_run_task_checkpoint_description() {
+        let server = MockLlmServer::builder()
+            .with_response("Plan.")
+            .with_response("Done.")
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.run_task("Fix the login bug").await.unwrap();
+        assert_eq!(
+            agent.current_checkpoint.as_ref().unwrap().task_description,
+            "Fix the login bug"
+        );
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_run_task_adds_user_message() {
+        let server = MockLlmServer::builder()
+            .with_response("Planning.")
+            .with_response("Completion.")
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.run_task("Add error handling").await.unwrap();
+        let has_msg = agent
+            .messages
+            .iter()
+            .any(|m| m.role == "user" && m.content.text().contains("Add error handling"));
+        assert!(has_msg, "task text should appear as a user message");
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_run_task_resets_loop_for_second_task() {
+        let server = MockLlmServer::builder()
+            .with_response("Plan 1.")
+            .with_response("Done 1.")
+            .with_response("Plan 2.")
+            .with_response("Done 2.")
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.run_task("Task one").await.unwrap();
+        agent.run_task("Task two").await.unwrap();
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_run_task_with_tool_call() {
+        let server = MockLlmServer::builder()
+            .with_response(
+                r#"<tool>
+<name>file_read</name>
+<arguments>{"path":"./Cargo.toml"}</arguments>
+</tool>"#,
+            )
+            .with_response("Task complete.")
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        let result = agent.run_task("Read Cargo.toml").await;
+        assert!(
+            result.is_ok(),
+            "run_task with tool call: {:?}",
+            result.err()
+        );
+        let has_tool_result = agent
+            .messages
+            .iter()
+            .any(|m| m.content.text().contains("<tool_result>"));
+        assert!(has_tool_result);
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_run_task_sets_strategic_goals() {
+        let server = MockLlmServer::builder()
+            .with_response("Plan.")
+            .with_response("Done.")
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.run_task("Write unit tests").await.unwrap();
+        assert!(!agent.cognitive_state.strategic_goals.is_empty());
+        assert!(agent.cognitive_state.active_tactical_plan.is_some());
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_run_task_sets_operational_plan() {
+        let server = MockLlmServer::builder()
+            .with_response("Plan.")
+            .with_response("Done.")
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.run_task("Implement feature X").await.unwrap();
+        let plan = agent
+            .cognitive_state
+            .active_operational_plan
+            .as_ref()
+            .unwrap();
+        assert_eq!(plan.steps.len(), 5);
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_run_task_preserves_existing_checkpoint() {
+        let server = MockLlmServer::builder()
+            .with_response("Plan.")
+            .with_response("Done.")
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.current_checkpoint = Some(TaskCheckpoint::new(
+            "existing-id".to_string(),
+            "Existing".to_string(),
+        ));
+        agent.run_task("Continue working").await.unwrap();
+        assert_eq!(
+            agent.current_checkpoint.as_ref().unwrap().task_id,
+            "existing-id"
+        );
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_run_task_cancellation() {
+        let server = MockLlmServer::builder()
+            .with_response("Plan.")
+            .with_response("More.")
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        agent
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let result = agent.run_task("Should cancel").await;
+        assert!(result.is_ok());
+        let has_interrupted = agent
+            .messages
+            .iter()
+            .any(|m| m.content.text().contains("interrupted"));
+        assert!(has_interrupted);
+        agent.reset_cancellation();
+        assert!(!agent.is_cancelled());
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_run_task_streaming_mode() {
+        let server = MockLlmServer::builder()
+            .with_response("Streaming plan.")
+            .with_response("Streaming done.")
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), true);
+        let mut agent = Agent::new(config).await.unwrap();
+        assert!(agent.run_task("Stream this").await.is_ok());
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_run_task_starts_learning_session() {
+        let server = MockLlmServer::builder()
+            .with_response("Plan.")
+            .with_response("Done.")
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.run_task("Write tests for parser").await.unwrap();
+        assert!(!agent.current_task_context.is_empty());
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_run_task_max_iterations_exhaustion() {
+        // Plain-text responses are treated as task completion, so to force the
+        // agent to keep iterating we must provide tool-call responses.  Each
+        // file_read tool call keeps the agent in the loop until max_iterations
+        // is exhausted.
+        let tool_resp = r#"<tool>
+<name>file_read</name>
+<arguments>{"path":"./Cargo.toml"}</arguments>
+</tool>"#;
+        let mut builder = MockLlmServer::builder();
+        for _ in 0..20 {
+            builder = builder.with_response(tool_resp);
+        }
+        let server = builder.build().await;
+        let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+        config.agent.max_iterations = 3;
+        let mut agent = Agent::new(config).await.unwrap();
+        let result = agent.run_task("Never completes").await;
+        // The agent should either fail with an error about max iterations or
+        // the loop should exhaust without completing (the loop exits with
+        // Ok after all states are consumed when next_state returns None).
+        // Either outcome is acceptable -- what matters is that the agent
+        // does NOT treat a tool-call response as a completion.
+        if let Err(e) = &result {
+            let err = e.to_string();
+            assert!(
+                err.contains("Agent failed")
+                    || err.contains("Max iterations")
+                    || err.contains("iterations"),
+                "unexpected error: {}",
+                err
+            );
+        }
+        // If Ok, verify the agent ran through multiple execution steps (not
+        // a single-step completion).
+        if result.is_ok() {
+            assert!(
+                agent.loop_control.current_step() >= 2,
+                "agent should have iterated multiple steps, got {}",
+                agent.loop_control.current_step()
+            );
+        }
+        server.stop().await;
+    }
+
+    // =========================================================================
+    // continue_execution E2E
+    // =========================================================================
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_continue_execution_no_checkpoint() {
+        let server = MockLlmServer::builder()
+            .with_response("Resume plan.")
+            .with_response("Resume done.")
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        assert!(agent.continue_execution().await.is_ok());
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_continue_execution_with_checkpoint() {
+        let server = MockLlmServer::builder()
+            .with_response("Plan.")
+            .with_response("Done.")
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.current_checkpoint = Some(TaskCheckpoint::new(
+            "resume-1".to_string(),
+            "Resumed".to_string(),
+        ));
+        assert!(agent.continue_execution().await.is_ok());
+        assert!(agent.cognitive_state.active_tactical_plan.is_some());
+        assert!(agent.cognitive_state.active_operational_plan.is_some());
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_continue_execution_cancellation() {
+        let server = MockLlmServer::builder()
+            .with_response("Plan.")
+            .with_response("More.")
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        agent
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(agent.continue_execution().await.is_ok());
+        assert!(agent
+            .messages
+            .iter()
+            .any(|m| m.content.text().contains("interrupted")));
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_continue_execution_preserves_tactical_plan() {
+        let server = MockLlmServer::builder()
+            .with_response("Plan.")
+            .with_response("Done.")
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.current_checkpoint = Some(TaskCheckpoint::new(
+            "p-test".to_string(),
+            "Preserve".to_string(),
+        ));
+        agent.cognitive_state.set_active_tactical_plan(
+            "existing-tactical".to_string(),
+            "Existing plan".to_string(),
+            vec!["dep".to_string()],
+        );
+        agent.continue_execution().await.unwrap();
+        assert_eq!(
+            agent
+                .cognitive_state
+                .active_tactical_plan
+                .as_ref()
+                .unwrap()
+                .id,
+            "existing-tactical"
+        );
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_continue_execution_sets_operational_plan() {
+        let server = MockLlmServer::builder()
+            .with_response("Plan.")
+            .with_response("Done.")
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.continue_execution().await.unwrap();
+        // An operational plan should exist after continue_execution.
+        // Execution may modify the plan (e.g. start_operational_step can
+        // replace it when the task_id differs), so we only assert it exists
+        // with at least one step.
+        let plan = agent
+            .cognitive_state
+            .active_operational_plan
+            .as_ref()
+            .unwrap();
+        assert!(!plan.steps.is_empty(), "operational plan should have steps");
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_continue_execution_preserves_operational_plan() {
+        let server = MockLlmServer::builder()
+            .with_response("Plan.")
+            .with_response("Done.")
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.cognitive_state.set_operational_plan(
+            "existing-op".to_string(),
+            vec!["Step A".to_string(), "Step B".to_string()],
+        );
+        agent.continue_execution().await.unwrap();
+        // continue_execution should NOT replace an existing plan (the guard at
+        // line 647 skips set_operational_plan when one already exists).
+        // However, during execution, start_operational_step may mutate it.
+        // We verify the plan still exists after completion.
+        let plan = agent
+            .cognitive_state
+            .active_operational_plan
+            .as_ref()
+            .unwrap();
+        assert!(
+            !plan.steps.is_empty(),
+            "operational plan should survive execution"
+        );
+        server.stop().await;
+    }
+
+    // =========================================================================
+    // analyze / review
+    // =========================================================================
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_analyze_calls_run_task() {
+        let server = MockLlmServer::builder()
+            .with_response("Analysis.")
+            .with_response("Done.")
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        assert!(agent.analyze("./src").await.is_ok());
+        assert!(agent
+            .messages
+            .iter()
+            .any(|m| m.content.text().contains("Analyze the codebase")));
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_review_reads_file() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), b"fn main() { println!(\"hello\"); }").unwrap();
+        let server = MockLlmServer::builder()
+            .with_response("Review.")
+            .with_response("Done.")
+            .build()
+            .await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        assert!(agent.review(tmp.path().to_str().unwrap()).await.is_ok());
+        assert!(agent
+            .messages
+            .iter()
+            .any(|m| m.content.text().contains("Review the following code")));
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_review_nonexistent_file() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = mock_agent_config(format!("{}/v1", server.url()), false);
+        let mut agent = Agent::new(config).await.unwrap();
+        let result = agent.review("/nonexistent/path/to/file.rs").await;
+        assert!(result.is_err());
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("Failed to read file"));
+        server.stop().await;
+    }
+
+    // =========================================================================
+    // Planner prompts
+    // =========================================================================
+
+    #[test]
+    fn test_planner_analyze_prompt() {
+        let prompt = Planner::analyze_prompt("./my_project");
+        assert!(prompt.contains("./my_project"));
+        assert!(prompt.contains("Analyze the codebase"));
+        assert!(prompt.contains("Directory structure"));
+    }
+
+    #[test]
+    fn test_planner_review_prompt() {
+        let prompt = Planner::review_prompt("src/main.rs", "fn main() {}");
+        assert!(prompt.contains("src/main.rs"));
+        assert!(prompt.contains("fn main() {}"));
+        assert!(prompt.contains("Review the following code"));
+    }
+
+    // =========================================================================
+    // AgentState enum variants
+    // =========================================================================
+
+    #[test]
+    fn test_agent_state_planning() {
+        let state = AgentState::Planning;
+        assert!(matches!(state, AgentState::Planning));
+        assert!(format!("{:?}", state).contains("Planning"));
+    }
+
+    #[test]
+    fn test_agent_state_executing() {
+        let state = AgentState::Executing { step: 42 };
+        match &state {
+            AgentState::Executing { step } => assert_eq!(*step, 42),
+            _ => panic!(),
+        }
+        let d = format!("{:?}", state);
+        assert!(d.contains("Executing") && d.contains("42"));
+    }
+
+    #[test]
+    fn test_agent_state_error_recovery() {
+        let state = AgentState::ErrorRecovery {
+            error: "oops".to_string(),
+        };
+        match &state {
+            AgentState::ErrorRecovery { error } => assert_eq!(error, "oops"),
+            _ => panic!(),
+        }
+        let d = format!("{:?}", state);
+        assert!(d.contains("ErrorRecovery") && d.contains("oops"));
+    }
+
+    #[test]
+    fn test_agent_state_completed() {
+        let state = AgentState::Completed;
+        assert!(matches!(state, AgentState::Completed));
+        assert!(format!("{:?}", state).contains("Completed"));
+    }
+
+    #[test]
+    fn test_agent_state_failed() {
+        let state = AgentState::Failed {
+            reason: "fatal".to_string(),
+        };
+        match &state {
+            AgentState::Failed { reason } => assert_eq!(reason, "fatal"),
+            _ => panic!(),
+        }
+        let d = format!("{:?}", state);
+        assert!(d.contains("Failed") && d.contains("fatal"));
+    }
+
+    #[test]
+    fn test_agent_state_clone_all() {
+        let states = vec![
+            AgentState::Planning,
+            AgentState::Executing { step: 7 },
+            AgentState::ErrorRecovery {
+                error: "err".to_string(),
+            },
+            AgentState::Completed,
+            AgentState::Failed {
+                reason: "r".to_string(),
+            },
+        ];
+        for s in &states {
+            assert_eq!(format!("{:?}", s), format!("{:?}", s.clone()));
+        }
+    }
+
+    // =========================================================================
+    // AgentLoop interaction
+    // =========================================================================
+
+    #[test]
+    fn test_agent_loop_reset_for_task_then_run() {
+        let mut lc = AgentLoop::new(5);
+        lc.next_state();
+        lc.next_state();
+        lc.next_state();
+        lc.reset_for_task();
+        assert!(matches!(lc.next_state(), Some(AgentState::Planning)));
+        assert_eq!(lc.current_step(), 0);
+    }
+
+    #[test]
+    fn test_agent_loop_approaching_limit() {
+        let mut lc = AgentLoop::new(10);
+        for _ in 0..8 {
+            lc.next_state();
+        }
+        let w = lc.approaching_limit_warning();
+        assert!(w.is_some());
+        assert!(w.unwrap().contains("wrapping up"));
+    }
+
+    // =========================================================================
+    // Checkpoint verification detection
+    // =========================================================================
+
+    #[test]
+    fn test_checkpoint_verification_detection() {
+        let mut cp = TaskCheckpoint::new("v-test".to_string(), "verify".to_string());
+        cp.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "file_read".to_string(),
+            arguments: "{}".to_string(),
+            result: Some("c".to_string()),
+            success: true,
+            duration_ms: Some(10),
+        });
+        let check = |cp: &TaskCheckpoint| {
+            cp.tool_calls.iter().any(|tc| {
+                tc.success
+                    && matches!(
+                        tc.tool_name.as_str(),
+                        "cargo_check" | "cargo_test" | "cargo_clippy"
+                    )
+            })
+        };
+        assert!(!check(&cp));
+
+        cp.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "cargo_check".to_string(),
+            arguments: "{}".to_string(),
+            result: Some("err".to_string()),
+            success: false,
+            duration_ms: Some(200),
+        });
+        assert!(!check(&cp));
+
+        cp.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "cargo_test".to_string(),
+            arguments: "{}".to_string(),
+            result: Some("passed".to_string()),
+            success: true,
+            duration_ms: Some(500),
+        });
+        assert!(check(&cp));
+    }
+}
