@@ -2394,7 +2394,7 @@ mod tests {
 
     #[test]
     fn test_overall_passed_all_pass() {
-        let checks = vec![
+        let checks = [
             CheckResult {
                 check_type: CheckType::TypeCheck,
                 passed: true,
@@ -2419,7 +2419,7 @@ mod tests {
 
     #[test]
     fn test_overall_passed_one_fails() {
-        let checks = vec![
+        let checks = [
             CheckResult {
                 check_type: CheckType::TypeCheck,
                 passed: true,

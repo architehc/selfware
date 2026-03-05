@@ -1747,7 +1747,7 @@ mod tests {
 
     #[test]
     fn test_display_float() {
-        assert_eq!(ConfigValue::float(3.14).display(), "3.14");
+        assert_eq!(ConfigValue::float(1.23).display(), "1.23");
     }
 
     #[test]
@@ -1815,7 +1815,7 @@ mod tests {
 
     #[test]
     fn test_as_float_from_float_variant() {
-        assert_eq!(ConfigValue::float(2.718).as_float(), Some(2.718));
+        assert_eq!(ConfigValue::float(1.234).as_float(), Some(1.234));
     }
 
     #[test]
@@ -1883,8 +1883,8 @@ mod tests {
 
     #[test]
     fn test_from_f64() {
-        let v: ConfigValue = 3.14f64.into();
-        assert_eq!(v.as_float(), Some(3.14));
+        let v: ConfigValue = 1.23f64.into();
+        assert_eq!(v.as_float(), Some(1.23));
     }
 
     #[test]
@@ -1898,7 +1898,7 @@ mod tests {
         let values = vec![
             ConfigValue::string("hello"),
             ConfigValue::int(42),
-            ConfigValue::float(3.14),
+            ConfigValue::float(1.23),
             ConfigValue::bool(true),
             ConfigValue::Null,
             ConfigValue::path("/tmp"),
@@ -2573,10 +2573,10 @@ mod tests {
     fn test_parse_env_value_float_ok() {
         let s = ConfigStore::new();
         assert_eq!(
-            s.parse_env_value("3.14", &ValueType::Float)
+            s.parse_env_value("1.23", &ValueType::Float)
                 .unwrap()
                 .as_float(),
-            Some(3.14)
+            Some(1.23)
         );
     }
 

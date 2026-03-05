@@ -685,7 +685,7 @@ mod tests {
     fn test_command_category_clone_and_copy() {
         let original = CommandCategory::General;
         let cloned = original; // Copy
-        let cloned2 = original.clone();
+        let cloned2 = original;
         assert_eq!(original, cloned);
         assert_eq!(original, cloned2);
     }

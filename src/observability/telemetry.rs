@@ -1691,9 +1691,7 @@ mod tests {
         let saved = LOG_ENTRY_COUNT.load(Ordering::Relaxed);
         LOG_ENTRY_COUNT.store(MAX_LOG_ENTRIES + 100, Ordering::Relaxed);
 
-        let handles: Vec<_> = (0..4)
-            .map(|_| thread::spawn(|| rotate_if_needed()))
-            .collect();
+        let handles: Vec<_> = (0..4).map(|_| thread::spawn(rotate_if_needed)).collect();
 
         let mut any_rotated = false;
         for h in handles {

@@ -2992,7 +2992,7 @@ fn handler(input: &str) {
         let model = ThreatModel::new("Empty");
         let coverage = model.stride_coverage();
         assert_eq!(coverage.len(), 6);
-        for (_, count) in &coverage {
+        for count in coverage.values() {
             assert_eq!(*count, 0);
         }
     }

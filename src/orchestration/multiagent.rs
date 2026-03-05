@@ -2473,8 +2473,10 @@ mod tests {
     #[test]
     fn test_multiagent_chat_concurrency_clamped_on_construct() {
         let config = Config::default();
-        let mut agent_config = MultiAgentConfig::default();
-        agent_config.max_concurrency = 100; // Bypass builder, set directly
+        let agent_config = MultiAgentConfig {
+            max_concurrency: 100, // Bypass builder, set directly
+            ..Default::default()
+        };
         let chat = MultiAgentChat::new(&config, agent_config).unwrap();
         // new() clamps concurrency for the semaphore
         assert!(chat.semaphore.available_permits() <= MAX_CONCURRENT_AGENTS);
@@ -2826,14 +2828,15 @@ mod tests {
 
     #[test]
     fn test_config_fields_are_mutable() {
-        let mut config = MultiAgentConfig::default();
-        config.max_concurrency = 12;
-        config.streaming = false;
-        config.timeout_secs = 60;
-        config.temperature = 0.5;
-        config.max_tokens = 1024;
-        config.failure_policy = MultiAgentFailurePolicy::FailFast;
-        config.roles = vec![AgentRole::General];
+        let config = MultiAgentConfig {
+            max_concurrency: 12,
+            streaming: false,
+            timeout_secs: 60,
+            temperature: 0.5,
+            max_tokens: 1024,
+            failure_policy: MultiAgentFailurePolicy::FailFast,
+            roles: vec![AgentRole::General],
+        };
 
         assert_eq!(config.max_concurrency, 12);
         assert!(!config.streaming);
@@ -2851,7 +2854,6 @@ mod tests {
     #[test]
     fn test_max_concurrent_agents_value() {
         assert_eq!(MAX_CONCURRENT_AGENTS, 16);
-        assert!(MAX_CONCURRENT_AGENTS > 0);
     }
 
     // ---------------------------------------------------------------
@@ -2886,13 +2888,15 @@ mod tests {
 
     #[test]
     fn test_config_clone_preserves_all_fields() {
-        let mut config = MultiAgentConfig::default();
-        config.max_concurrency = 7;
-        config.streaming = false;
-        config.timeout_secs = 300;
-        config.temperature = 0.8;
-        config.max_tokens = 2048;
-        config.failure_policy = MultiAgentFailurePolicy::FailFast;
+        let config = MultiAgentConfig {
+            max_concurrency: 7,
+            streaming: false,
+            timeout_secs: 300,
+            temperature: 0.8,
+            max_tokens: 2048,
+            failure_policy: MultiAgentFailurePolicy::FailFast,
+            ..Default::default()
+        };
 
         let cloned = config.clone();
         assert_eq!(config.max_concurrency, cloned.max_concurrency);

@@ -1577,16 +1577,18 @@ mod tests {
 
     #[test]
     fn test_self_model_serialize_deserialize() {
-        let mut model = SelfModel::default();
-        model.version = "0.1.0".to_string();
-        model.limitations = vec!["limit_a".to_string()];
-        model.capabilities.push(Capability {
-            name: "cap1".to_string(),
-            description: "desc1".to_string(),
-            implementing_modules: vec![],
-            confidence: 0.5,
-            limitations: vec![],
-        });
+        let model = SelfModel {
+            version: "0.1.0".to_string(),
+            limitations: vec!["limit_a".to_string()],
+            capabilities: vec![Capability {
+                name: "cap1".to_string(),
+                description: "desc1".to_string(),
+                implementing_modules: vec![],
+                confidence: 0.5,
+                limitations: vec![],
+            }],
+            ..Default::default()
+        };
 
         let json = serde_json::to_string(&model).expect("serialize");
         let deserialized: SelfModel = serde_json::from_str(&json).expect("deserialize");
@@ -1645,22 +1647,24 @@ mod tests {
 
     #[test]
     fn test_self_model_with_architecture_serialize() {
-        let mut model = SelfModel::default();
-        model.architecture = ArchitectureModel {
-            layers: vec![ArchitectureLayer {
-                name: "Layer1".to_string(),
-                description: "First layer".to_string(),
-                modules: vec!["mod1".to_string()],
-                responsibilities: vec!["resp1".to_string()],
-            }],
-            data_flows: vec![DataFlow {
-                from: "A".to_string(),
-                to: "B".to_string(),
-                data_type: "Messages".to_string(),
-                description: "A to B flow".to_string(),
-            }],
-            design_patterns: vec!["Pattern1".to_string()],
-            key_abstractions: vec!["Abstraction1".to_string()],
+        let model = SelfModel {
+            architecture: ArchitectureModel {
+                layers: vec![ArchitectureLayer {
+                    name: "Layer1".to_string(),
+                    description: "First layer".to_string(),
+                    modules: vec!["mod1".to_string()],
+                    responsibilities: vec!["resp1".to_string()],
+                }],
+                data_flows: vec![DataFlow {
+                    from: "A".to_string(),
+                    to: "B".to_string(),
+                    data_type: "Messages".to_string(),
+                    description: "A to B flow".to_string(),
+                }],
+                design_patterns: vec!["Pattern1".to_string()],
+                key_abstractions: vec!["Abstraction1".to_string()],
+            },
+            ..Default::default()
         };
 
         let json = serde_json::to_string(&model).expect("serialize");
@@ -1678,12 +1682,14 @@ mod tests {
 
     #[test]
     fn test_self_model_with_performance_serialize() {
-        let mut model = SelfModel::default();
-        model.performance = PerformanceModel {
-            avg_response_time_ms: 50.5,
-            token_throughput: 100.0,
-            memory_efficiency: 0.8,
-            bottlenecks: vec!["disk I/O".to_string()],
+        let model = SelfModel {
+            performance: PerformanceModel {
+                avg_response_time_ms: 50.5,
+                token_throughput: 100.0,
+                memory_efficiency: 0.8,
+                bottlenecks: vec!["disk I/O".to_string()],
+            },
+            ..Default::default()
         };
 
         let json = serde_json::to_string(&model).expect("serialize");
@@ -2488,9 +2494,11 @@ mod tests {
 
     #[test]
     fn test_self_model_clone() {
-        let mut model = SelfModel::default();
-        model.version = "1.0.0".to_string();
-        model.limitations.push("limit1".to_string());
+        let model = SelfModel {
+            version: "1.0.0".to_string(),
+            limitations: vec!["limit1".to_string()],
+            ..Default::default()
+        };
 
         let cloned = model.clone();
         assert_eq!(cloned.version, "1.0.0");
@@ -2499,8 +2507,10 @@ mod tests {
 
     #[test]
     fn test_self_model_debug() {
-        let mut model = SelfModel::default();
-        model.version = "2.0.0".to_string();
+        let model = SelfModel {
+            version: "2.0.0".to_string(),
+            ..Default::default()
+        };
         let debug_str = format!("{:?}", model);
         assert!(debug_str.contains("2.0.0"));
         assert!(debug_str.contains("SelfModel"));

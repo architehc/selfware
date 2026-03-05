@@ -3807,10 +3807,10 @@ fn test_var_value_serde_string() {
 
 #[test]
 fn test_var_value_serde_number() {
-    let val = VarValue::Number(3.14);
+    let val = VarValue::Number(1.23);
     let json = serde_json::to_string(&val).unwrap();
     let deserialized: VarValue = serde_json::from_str(&json).unwrap();
-    assert_eq!(deserialized.as_string(), Some("3.14".to_string()));
+    assert_eq!(deserialized.as_string(), Some("1.23".to_string()));
 }
 
 #[test]

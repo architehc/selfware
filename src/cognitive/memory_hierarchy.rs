@@ -1616,9 +1616,11 @@ mod tests {
 
     #[test]
     fn test_memory_metrics_clone() {
-        let mut m = MemoryMetrics::default();
-        m.cache_hits = 5;
-        m.compressions = 3;
+        let m = MemoryMetrics {
+            cache_hits: 5,
+            compressions: 3,
+            ..Default::default()
+        };
         let cloned = m.clone();
         assert_eq!(cloned.cache_hits, 5);
         assert_eq!(cloned.compressions, 3);

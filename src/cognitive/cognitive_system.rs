@@ -1443,7 +1443,7 @@ mod tests {
             !prompt.contains(&long_content),
             "Full long content should not appear in prompt"
         );
-        let truncated: String = std::iter::repeat('x').take(200).collect();
+        let truncated: String = "x".repeat(200);
         assert!(
             prompt.contains(&truncated),
             "Should contain first 200 chars of content"
@@ -1766,7 +1766,7 @@ mod tests {
         let tokens =
             CognitiveSystem::estimate_context_tokens(&working, &episodic, &semantic, &self_ctx);
 
-        let expected_working: usize = vec![
+        let expected_working: usize = [
             estimate_tokens_with_overhead("What about the architecture?", 50),
             estimate_tokens_with_overhead("It has several layers.", 50),
         ]

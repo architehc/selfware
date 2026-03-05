@@ -2772,15 +2772,12 @@ mod tests {
                 "runtime": "docker"
             }))
             .await;
-        match result {
-            Err(e) => {
-                assert!(
-                    !e.to_string().contains("Invalid env var name"),
-                    "Valid env var name should not be rejected: {}",
-                    e
-                );
-            }
-            Ok(_) => {}
+        if let Err(e) = result {
+            assert!(
+                !e.to_string().contains("Invalid env var name"),
+                "Valid env var name should not be rejected: {}",
+                e
+            );
         }
     }
 
@@ -2795,20 +2792,17 @@ mod tests {
                 "runtime": "docker"
             }))
             .await;
-        match result {
-            Err(e) => {
-                assert!(
-                    !e.to_string().contains("Invalid env var name"),
-                    "Non-string env values should be skipped: {}",
-                    e
-                );
-                assert!(
-                    !e.to_string().contains("null bytes"),
-                    "Non-string env values should be skipped: {}",
-                    e
-                );
-            }
-            Ok(_) => {}
+        if let Err(e) = result {
+            assert!(
+                !e.to_string().contains("Invalid env var name"),
+                "Non-string env values should be skipped: {}",
+                e
+            );
+            assert!(
+                !e.to_string().contains("null bytes"),
+                "Non-string env values should be skipped: {}",
+                e
+            );
         }
     }
 
@@ -2963,15 +2957,12 @@ mod tests {
             }))
             .await;
         // Should not fail with forbidden metacharacter error
-        match result {
-            Err(e) => {
-                assert!(
-                    !e.to_string().contains("forbidden metacharacter"),
-                    "Safe command should not be blocked: {}",
-                    e
-                );
-            }
-            Ok(_) => {}
+        if let Err(e) = result {
+            assert!(
+                !e.to_string().contains("forbidden metacharacter"),
+                "Safe command should not be blocked: {}",
+                e
+            );
         }
     }
 
@@ -3333,15 +3324,12 @@ mod tests {
                 "runtime": "docker"
             }))
             .await;
-        match result {
-            Err(e) => {
-                assert!(
-                    !e.to_string().contains("Invalid port mapping"),
-                    "Non-string port should be skipped: {}",
-                    e
-                );
-            }
-            Ok(_) => {}
+        if let Err(e) = result {
+            assert!(
+                !e.to_string().contains("Invalid port mapping"),
+                "Non-string port should be skipped: {}",
+                e
+            );
         }
     }
 
@@ -3355,15 +3343,12 @@ mod tests {
                 "runtime": "docker"
             }))
             .await;
-        match result {
-            Err(e) => {
-                assert!(
-                    !e.to_string().contains("Invalid volume spec"),
-                    "Non-string volume should be skipped: {}",
-                    e
-                );
-            }
-            Ok(_) => {}
+        if let Err(e) = result {
+            assert!(
+                !e.to_string().contains("Invalid volume spec"),
+                "Non-string volume should be skipped: {}",
+                e
+            );
         }
     }
 

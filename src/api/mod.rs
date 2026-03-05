@@ -2075,8 +2075,10 @@ mod tests {
 
     #[test]
     fn test_api_client_new_custom_endpoint() {
-        let mut config = crate::config::Config::default();
-        config.endpoint = "https://api.example.com/v1".to_string();
+        let config = crate::config::Config {
+            endpoint: "https://api.example.com/v1".to_string(),
+            ..Default::default()
+        };
         let client = ApiClient::new(&config).unwrap();
         assert_eq!(client.base_url, "https://api.example.com/v1");
     }
@@ -2167,9 +2169,11 @@ mod tests {
             socket.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let mut config = crate::config::Config::default();
-        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
-        config.api_key = None;
+        let config = crate::config::Config {
+            endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+            api_key: None,
+            ..Default::default()
+        };
 
         let client = ApiClient::new(&config).unwrap();
         let messages = vec![Message::user("Hi")];
@@ -2265,8 +2269,10 @@ mod tests {
             socket.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let mut config = crate::config::Config::default();
-        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+        let config = crate::config::Config {
+            endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+            ..Default::default()
+        };
 
         let client = ApiClient::new(&config).unwrap();
         let result = client
@@ -2311,8 +2317,10 @@ mod tests {
             socket.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let mut config = crate::config::Config::default();
-        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+        let config = crate::config::Config {
+            endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+            ..Default::default()
+        };
 
         let client = ApiClient::new(&config).unwrap();
         let result = client
@@ -2356,8 +2364,10 @@ mod tests {
             socket.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let mut config = crate::config::Config::default();
-        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+        let config = crate::config::Config {
+            endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+            ..Default::default()
+        };
 
         let tools = vec![ToolDefinition {
             def_type: "function".to_string(),
@@ -2403,8 +2413,10 @@ mod tests {
             socket.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let mut config = crate::config::Config::default();
-        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+        let config = crate::config::Config {
+            endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+            ..Default::default()
+        };
 
         let client = ApiClient::new(&config).unwrap();
         let result = client
@@ -2549,8 +2561,10 @@ mod tests {
             socket.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let mut config = crate::config::Config::default();
-        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+        let config = crate::config::Config {
+            endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+            ..Default::default()
+        };
 
         let client = ApiClient::new(&config).unwrap();
         let result = client.completion("fn main() {", Some(100), None).await;
@@ -2583,8 +2597,10 @@ mod tests {
             socket.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let mut config = crate::config::Config::default();
-        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+        let config = crate::config::Config {
+            endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+            ..Default::default()
+        };
 
         let client = ApiClient::new(&config).unwrap();
         let result = client.completion("test", None, None).await;
@@ -2859,8 +2875,10 @@ mod tests {
             socket.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let mut config = crate::config::Config::default();
-        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+        let config = crate::config::Config {
+            endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+            ..Default::default()
+        };
 
         let client = ApiClient::new(&config).unwrap();
         let result = client
@@ -2898,8 +2916,10 @@ mod tests {
             socket.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let mut config = crate::config::Config::default();
-        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+        let config = crate::config::Config {
+            endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+            ..Default::default()
+        };
 
         let client = ApiClient::new(&config).unwrap();
         let result = client
@@ -3077,8 +3097,10 @@ mod tests {
             socket.write_all(response.as_bytes()).await.unwrap();
         });
 
-        let mut config = crate::config::Config::default();
-        config.endpoint = format!("http://127.0.0.1:{}/v1", addr.port());
+        let config = crate::config::Config {
+            endpoint: format!("http://127.0.0.1:{}/v1", addr.port()),
+            ..Default::default()
+        };
 
         let client = ApiClient::new(&config).unwrap();
         // Call via the trait
@@ -3179,32 +3201,40 @@ mod tests {
     #[test]
     fn test_api_client_http_non_local_creates_successfully() {
         // The warning is just a log, the client should still be created
-        let mut config = crate::config::Config::default();
-        config.endpoint = "http://remote-api.example.com/v1".to_string();
+        let config = crate::config::Config {
+            endpoint: "http://remote-api.example.com/v1".to_string(),
+            ..Default::default()
+        };
         let client = ApiClient::new(&config);
         assert!(client.is_ok());
     }
 
     #[test]
     fn test_api_client_http_localhost_no_warning() {
-        let mut config = crate::config::Config::default();
-        config.endpoint = "http://localhost:8000/v1".to_string();
+        let config = crate::config::Config {
+            endpoint: "http://localhost:8000/v1".to_string(),
+            ..Default::default()
+        };
         let client = ApiClient::new(&config);
         assert!(client.is_ok());
     }
 
     #[test]
     fn test_api_client_https_no_warning() {
-        let mut config = crate::config::Config::default();
-        config.endpoint = "https://api.example.com/v1".to_string();
+        let config = crate::config::Config {
+            endpoint: "https://api.example.com/v1".to_string(),
+            ..Default::default()
+        };
         let client = ApiClient::new(&config);
         assert!(client.is_ok());
     }
 
     #[test]
     fn test_api_client_http_127_no_warning() {
-        let mut config = crate::config::Config::default();
-        config.endpoint = "http://127.0.0.1:8000/v1".to_string();
+        let config = crate::config::Config {
+            endpoint: "http://127.0.0.1:8000/v1".to_string(),
+            ..Default::default()
+        };
         let client = ApiClient::new(&config);
         assert!(client.is_ok());
     }

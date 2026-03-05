@@ -2442,7 +2442,7 @@ mod tests {
     #[test]
     fn test_execution_mode_clone_and_copy() {
         let mode = ExecutionMode::Yolo;
-        let cloned = mode.clone();
+        let cloned = mode;
         let copied = mode;
         assert_eq!(mode, cloned);
         assert_eq!(mode, copied);
@@ -3490,7 +3490,7 @@ model = "explicit-default-model"
         let debug = format!("{:?}", src);
         assert_eq!(debug, "EnvVar");
 
-        let cloned = src.clone();
+        let cloned = src;
         assert_eq!(src, cloned);
     }
 
