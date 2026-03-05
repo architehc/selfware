@@ -225,6 +225,15 @@ impl Agent {
         self
     }
 
+    /// Returns `true` if the agent's model profile supports vision.
+    pub fn supports_vision(&self, config: &crate::config::Config) -> bool {
+        self.model_id
+            .as_deref()
+            .and_then(|id| config.resolve_model(Some(id)))
+            .map(|p| p.supports_vision())
+            .unwrap_or(false)
+    }
+
     /// Get effective system prompt
     pub fn system_prompt(&self) -> &str {
         self.custom_prompt
@@ -3009,5 +3018,54 @@ mod tests {
         let assigned = swarm.assign_task(&task_id);
         assert_eq!(assigned.len(), 1);
         assert_eq!(assigned[0], high_trust_id);
+    }
+
+    // ---- Agent::supports_vision ----
+
+    #[test]
+    fn test_agent_supports_vision_with_profile() {
+        let mut config = crate::config::Config::default();
+        config.models.insert(
+            "vision".to_string(),
+            crate::config::ModelProfile {
+                endpoint: "http://localhost:9000/v1".to_string(),
+                model: "vision-model".to_string(),
+                api_key: None,
+                max_tokens: 4096,
+                temperature: 0.5,
+                modalities: vec!["text".to_string(), "vision".to_string()],
+                context_length: 8192,
+            },
+        );
+
+        let agent = Agent::new("V", AgentRole::VisualCritic).with_model("vision");
+        assert!(agent.supports_vision(&config));
+    }
+
+    #[test]
+    fn test_agent_supports_vision_text_only() {
+        let mut config = crate::config::Config::default();
+        config.models.insert(
+            "coder".to_string(),
+            crate::config::ModelProfile {
+                endpoint: "http://localhost:8000/v1".to_string(),
+                model: "text-model".to_string(),
+                api_key: None,
+                max_tokens: 8192,
+                temperature: 1.0,
+                modalities: vec!["text".to_string()],
+                context_length: 131072,
+            },
+        );
+
+        let agent = Agent::new("C", AgentRole::Coder).with_model("coder");
+        assert!(!agent.supports_vision(&config));
+    }
+
+    #[test]
+    fn test_agent_supports_vision_no_model() {
+        let config = crate::config::Config::default();
+        let agent = Agent::new("G", AgentRole::General);
+        assert!(!agent.supports_vision(&config));
     }
 }

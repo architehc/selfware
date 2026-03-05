@@ -34,6 +34,35 @@ impl MessageContent {
         }
     }
 
+    /// Concatenate all text blocks separated by `\n`. For `Text`, returns the
+    /// string directly. For `Blocks`, joins all `Text` block contents.
+    pub fn text_all(&self) -> String {
+        match self {
+            Self::Text(s) => s.clone(),
+            Self::Blocks(blocks) => {
+                let texts: Vec<&str> = blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                texts.join("\n")
+            }
+        }
+    }
+
+    /// Count the number of image blocks in the content.
+    pub fn image_count(&self) -> usize {
+        match self {
+            Self::Text(_) => 0,
+            Self::Blocks(blocks) => blocks
+                .iter()
+                .filter(|b| matches!(b, ContentBlock::ImageUrl { .. }))
+                .count(),
+        }
+    }
+
     /// Returns `true` if any block contains an image.
     pub fn has_images(&self) -> bool {
         match self {
@@ -62,6 +91,27 @@ impl MessageContent {
     /// Iterator over the characters of the text portion.
     pub fn chars(&self) -> std::str::Chars<'_> {
         self.text().chars()
+    }
+
+    /// Return a copy with all image blocks removed. If only one text block
+    /// remains, collapses back to `Text` variant.
+    pub fn strip_images(&self) -> Self {
+        match self {
+            Self::Text(_) => self.clone(),
+            Self::Blocks(blocks) => {
+                let text_blocks: Vec<ContentBlock> = blocks
+                    .iter()
+                    .filter(|b| matches!(b, ContentBlock::Text { .. }))
+                    .cloned()
+                    .collect();
+                if text_blocks.len() == 1 {
+                    if let ContentBlock::Text { text } = &text_blocks[0] {
+                        return Self::Text(text.clone());
+                    }
+                }
+                Self::Blocks(text_blocks)
+            }
+        }
     }
 
     /// Convert to `Blocks` (if not already) and append an image.
@@ -222,6 +272,18 @@ impl Message {
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
             name: None,
+        }
+    }
+
+    /// Return a clone with all image blocks stripped from the content.
+    pub fn strip_images(&self) -> Self {
+        Self {
+            role: self.role.clone(),
+            content: self.content.strip_images(),
+            reasoning_content: self.reasoning_content.clone(),
+            tool_calls: self.tool_calls.clone(),
+            tool_call_id: self.tool_call_id.clone(),
+            name: self.name.clone(),
         }
     }
 
@@ -638,6 +700,68 @@ mod tests {
         let msg: Message = serde_json::from_str(json).unwrap();
         assert_eq!(msg.content.text(), "What is this?");
         assert!(msg.content.has_images());
+    }
+
+    #[test]
+    fn test_text_all_plain_text() {
+        let mc = MessageContent::from_text("hello world");
+        assert_eq!(mc.text_all(), "hello world");
+    }
+
+    #[test]
+    fn test_text_all_blocks_with_images() {
+        let mc = MessageContent::from_text("first")
+            .with_image("img1")
+            .with_image("img2");
+        // Add a second text block manually
+        let mut blocks = match mc {
+            MessageContent::Blocks(b) => b,
+            _ => panic!("expected Blocks"),
+        };
+        blocks.push(ContentBlock::Text {
+            text: "second".to_string(),
+        });
+        let mc = MessageContent::Blocks(blocks);
+        assert_eq!(mc.text_all(), "first\nsecond");
+    }
+
+    #[test]
+    fn test_image_count() {
+        let mc = MessageContent::from_text("hello");
+        assert_eq!(mc.image_count(), 0);
+
+        let mc = mc.with_image("img1").with_image("img2");
+        assert_eq!(mc.image_count(), 2);
+    }
+
+    #[test]
+    fn test_strip_images_plain_text() {
+        let mc = MessageContent::from_text("hello");
+        let stripped = mc.strip_images();
+        assert_eq!(stripped.text(), "hello");
+        assert!(!stripped.has_images());
+    }
+
+    #[test]
+    fn test_strip_images_blocks() {
+        let mc = MessageContent::from_text("describe this").with_image("abc123");
+        assert!(mc.has_images());
+        let stripped = mc.strip_images();
+        assert!(!stripped.has_images());
+        assert_eq!(stripped.text(), "describe this");
+        // Should collapse to Text variant when only one text block remains
+        assert!(matches!(stripped, MessageContent::Text(_)));
+    }
+
+    #[test]
+    fn test_message_strip_images() {
+        let content = MessageContent::from_text("look at this").with_image("img_data");
+        let msg = Message::user_multimodal(content);
+        assert!(msg.content.has_images());
+        let stripped = msg.strip_images();
+        assert!(!stripped.content.has_images());
+        assert_eq!(stripped.role, "user");
+        assert_eq!(stripped.content.text(), "look at this");
     }
 
     #[test]

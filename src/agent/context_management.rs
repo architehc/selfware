@@ -16,7 +16,10 @@ impl Agent {
         let total: usize = self
             .messages
             .iter()
-            .map(|m| crate::token_count::estimate_tokens_with_overhead(m.content.text(), 4))
+            .map(|m| {
+                crate::token_count::estimate_tokens_with_overhead(&m.content.text_all(), 4)
+                    + m.content.image_count() * crate::tokens::DEFAULT_IMAGE_TOKEN_ESTIMATE
+            })
             .sum();
         if total <= self.max_context_tokens {
             return;
@@ -27,7 +30,10 @@ impl Agent {
         let token_counts: Vec<usize> = self
             .messages
             .iter()
-            .map(|m| crate::token_count::estimate_tokens_with_overhead(m.content.text(), 4))
+            .map(|m| {
+                crate::token_count::estimate_tokens_with_overhead(&m.content.text_all(), 4)
+                    + m.content.image_count() * crate::tokens::DEFAULT_IMAGE_TOKEN_ESTIMATE
+            })
             .collect();
 
         // Walk non-system messages oldest-first and mark them for removal until
@@ -57,7 +63,13 @@ impl Agent {
     pub(super) fn estimate_messages_tokens(&self) -> usize {
         self.messages
             .iter()
-            .map(|m| crate::token_count::estimate_tokens_with_overhead(m.content.text(), 4))
+            .map(|m| {
+                let text_tokens =
+                    crate::token_count::estimate_tokens_with_overhead(&m.content.text_all(), 4);
+                let image_tokens =
+                    m.content.image_count() * crate::tokens::DEFAULT_IMAGE_TOKEN_ESTIMATE;
+                text_tokens + image_tokens
+            })
             .sum()
     }
 

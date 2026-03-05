@@ -687,7 +687,20 @@ impl ApiClient {
     }
 
     async fn send_with_retry_inner(&self, body: &serde_json::Value) -> Result<ChatResponse> {
-        let url = format!("{}/chat/completions", self.base_url);
+        self.send_request_with_retry(body, &self.base_url, self.config.api_key.as_ref())
+            .await
+    }
+
+    /// Parameterized retry logic: sends a request to the given endpoint using
+    /// the provided API key. Both `send_with_retry_inner` (default model) and
+    /// `chat_with_profile` (alternate model) delegate here.
+    async fn send_request_with_retry(
+        &self,
+        body: &serde_json::Value,
+        endpoint: &str,
+        api_key: Option<&crate::config::RedactedString>,
+    ) -> Result<ChatResponse> {
+        let url = format!("{}/chat/completions", endpoint);
         let mut last_error: Option<anyhow::Error> = None;
         let mut delay_ms = self.retry_config.initial_delay_ms;
 
@@ -713,7 +726,7 @@ impl ApiClient {
                 .post(&url)
                 .header("Content-Type", "application/json");
 
-            if let Some(ref key) = self.config.api_key {
+            if let Some(key) = api_key {
                 request = request.header("Authorization", format!("Bearer {}", key.expose()));
             }
 
@@ -803,6 +816,45 @@ impl ApiClient {
         Err(last_error.unwrap_or_else(|| {
             ApiError::Network("Request failed after all retries".to_string()).into()
         }))
+    }
+
+    /// Send a chat completion to an alternate model described by a `ModelProfile`.
+    ///
+    /// Images are automatically stripped if the profile does not support vision.
+    pub async fn chat_with_profile(
+        &self,
+        messages: Vec<Message>,
+        tools: Option<Vec<ToolDefinition>>,
+        thinking: ThinkingMode,
+        profile: &crate::config::ModelProfile,
+    ) -> Result<ChatResponse> {
+        let messages: Vec<Message> = if !profile.supports_vision() {
+            messages.iter().map(|m| m.strip_images()).collect()
+        } else {
+            messages
+        };
+
+        let mut body = serde_json::json!({
+            "model": profile.model,
+            "messages": messages,
+            "temperature": profile.temperature,
+            "max_tokens": profile.max_tokens,
+            "stream": false,
+        });
+
+        if let Some(ref tools) = tools {
+            body["tools"] = serde_json::json!(tools);
+        }
+
+        if let ThinkingMode::Budget(tokens) = thinking {
+            body["thinking"] = serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": tokens
+            });
+        }
+
+        self.send_request_with_retry(&body, &profile.endpoint, profile.api_key.as_ref())
+            .await
     }
 }
 

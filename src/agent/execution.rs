@@ -14,6 +14,29 @@ use crate::cognitive::CyclePhase;
 use crate::errors::AgentError;
 use crate::tool_parser::parse_tool_calls;
 
+/// Try to extract a `base64_png` field from a JSON tool result string.
+fn try_extract_base64_png(result: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(result)
+        .ok()?
+        .get("base64_png")?
+        .as_str()
+        .map(String::from)
+}
+
+/// Build a text summary of a JSON tool result by removing the large `base64_png`
+/// blob and adding an `"image_attached": true` marker.
+fn build_image_result_summary(result: &str) -> String {
+    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(result) {
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove("base64_png");
+            obj.insert("image_attached".to_string(), serde_json::Value::Bool(true));
+        }
+        serde_json::to_string(&v).unwrap_or_else(|_| result.to_string())
+    } else {
+        result.to_string()
+    }
+}
+
 struct AssistantStepResponse {
     content: String,
     reasoning_content: Option<String>,
@@ -262,7 +285,7 @@ impl Agent {
                 let spinner = crate::ui::spinner::TerminalSpinner::start(&error_msg);
                 spinner.stop_error(&error_msg);
                 output::safety_blocked(&error_msg);
-                self.push_tool_result_message(use_native_fc, &call_id, false, &error_msg);
+                self.push_tool_result_message(use_native_fc, &call_id, &name, false, &error_msg);
                 self.log_tool_call(&name, &args_str, &error_msg, false, start_time, false);
                 let duration_ms = start_time.elapsed().as_millis() as u64;
                 self.self_improvement.record_tool(
@@ -386,7 +409,7 @@ impl Agent {
                 }
             }
 
-            self.push_tool_result_message(use_native_fc, &call_id, success, &result);
+            self.push_tool_result_message(use_native_fc, &call_id, &name, success, &result);
         }
 
         Ok(())
@@ -499,7 +522,7 @@ impl Agent {
             Err(e) => {
                 let err = format!("Invalid JSON arguments: {}", e);
                 println!("{} {}", "✗".bright_red(), err);
-                self.push_tool_result_message(use_native_fc, call_id, false, &err);
+                self.push_tool_result_message(use_native_fc, call_id, name, false, &err);
                 self.log_tool_call(name, args_str, &err, false, start_time, false);
                 let duration_ms = start_time.elapsed().as_millis() as u64;
                 self.self_improvement.record_tool(
@@ -680,9 +703,33 @@ impl Agent {
         &mut self,
         use_native_fc: bool,
         call_id: &str,
+        _tool_name: &str,
         success: bool,
         result: &str,
     ) {
+        // Detect base64_png in successful tool results and promote to multimodal
+        if success {
+            if let Some(base64_png) = try_extract_base64_png(result) {
+                let summary = build_image_result_summary(result);
+                let content =
+                    crate::api::types::MessageContent::from_text(&summary).with_image(&base64_png);
+                if use_native_fc {
+                    // For native FC, create a tool message with multimodal content
+                    self.messages.push(crate::api::types::Message {
+                        role: "tool".to_string(),
+                        content,
+                        reasoning_content: None,
+                        tool_calls: None,
+                        tool_call_id: Some(call_id.to_string()),
+                        name: None,
+                    });
+                } else {
+                    self.messages.push(Message::user_multimodal(content));
+                }
+                return;
+            }
+        }
+
         if use_native_fc {
             let result_json = if success {
                 result.to_string()
@@ -1883,7 +1930,7 @@ mod tests {
         let mut agent = Agent::new(config).await.unwrap();
         let initial_len = agent.messages.len();
 
-        agent.push_tool_result_message(false, "call_1", true, r#"{"output":"hello"}"#);
+        agent.push_tool_result_message(false, "call_1", "test_tool", true, r#"{"output":"hello"}"#);
 
         assert_eq!(agent.messages.len(), initial_len + 1);
         let msg = agent.messages.last().unwrap();
@@ -1902,7 +1949,7 @@ mod tests {
         let mut agent = Agent::new(config).await.unwrap();
         let initial_len = agent.messages.len();
 
-        agent.push_tool_result_message(false, "call_1", false, "Something went wrong");
+        agent.push_tool_result_message(false, "call_1", "test_tool", false, "Something went wrong");
 
         assert_eq!(agent.messages.len(), initial_len + 1);
         let msg = agent.messages.last().unwrap();
@@ -1920,7 +1967,13 @@ mod tests {
         let mut agent = Agent::new(config).await.unwrap();
         let initial_len = agent.messages.len();
 
-        agent.push_tool_result_message(true, "call_native_1", true, r#"{"data":"ok"}"#);
+        agent.push_tool_result_message(
+            true,
+            "call_native_1",
+            "test_tool",
+            true,
+            r#"{"data":"ok"}"#,
+        );
 
         assert_eq!(agent.messages.len(), initial_len + 1);
         let msg = agent.messages.last().unwrap();
@@ -1938,7 +1991,13 @@ mod tests {
         let mut agent = Agent::new(config).await.unwrap();
         let initial_len = agent.messages.len();
 
-        agent.push_tool_result_message(true, "call_native_2", false, "Permission denied");
+        agent.push_tool_result_message(
+            true,
+            "call_native_2",
+            "test_tool",
+            false,
+            "Permission denied",
+        );
 
         assert_eq!(agent.messages.len(), initial_len + 1);
         let msg = agent.messages.last().unwrap();
@@ -1947,6 +2006,71 @@ mod tests {
         assert!(msg.content.text().contains("Permission denied"));
 
         server.stop().await;
+    }
+
+    // =========================================================================
+    // image promotion tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_push_result_image_promotion_xml() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+        let initial_len = agent.messages.len();
+
+        let result = r#"{"base64_png":"iVBORw0KGgo=","width":100,"height":100}"#;
+        agent.push_tool_result_message(false, "call_img", "screen_capture", true, result);
+
+        assert_eq!(agent.messages.len(), initial_len + 1);
+        let msg = agent.messages.last().unwrap();
+        assert_eq!(msg.role, "user");
+        assert!(msg.content.has_images());
+        assert_eq!(msg.content.image_count(), 1);
+        // Summary should contain image_attached but not base64_png
+        assert!(msg.content.text().contains("image_attached"));
+        assert!(!msg.content.text().contains("iVBORw0KGgo="));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_push_result_image_promotion_native_fc() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+        let initial_len = agent.messages.len();
+
+        let result = r#"{"base64_png":"abc123","note":"screenshot"}"#;
+        agent.push_tool_result_message(true, "call_img_native", "screen_capture", true, result);
+
+        assert_eq!(agent.messages.len(), initial_len + 1);
+        let msg = agent.messages.last().unwrap();
+        assert_eq!(msg.role, "tool");
+        assert_eq!(msg.tool_call_id.as_deref(), Some("call_img_native"));
+        assert!(msg.content.has_images());
+        assert!(msg.content.text().contains("image_attached"));
+
+        server.stop().await;
+    }
+
+    #[test]
+    fn test_try_extract_base64_png() {
+        assert_eq!(
+            try_extract_base64_png(r#"{"base64_png":"abc"}"#),
+            Some("abc".to_string())
+        );
+        assert_eq!(try_extract_base64_png(r#"{"other":"val"}"#), None);
+        assert_eq!(try_extract_base64_png("not json"), None);
+    }
+
+    #[test]
+    fn test_build_image_result_summary() {
+        let result = r#"{"base64_png":"longdata","width":800}"#;
+        let summary = build_image_result_summary(result);
+        assert!(!summary.contains("longdata"));
+        assert!(summary.contains("image_attached"));
+        assert!(summary.contains("800"));
     }
 
     // =========================================================================

@@ -117,6 +117,13 @@ pub struct ModelProfile {
     pub context_length: usize,
 }
 
+impl ModelProfile {
+    /// Returns `true` if this model profile lists `"vision"` among its modalities.
+    pub fn supports_vision(&self) -> bool {
+        self.modalities.iter().any(|m| m == "vision")
+    }
+}
+
 fn default_modalities() -> Vec<String> {
     vec!["text".to_string()]
 }

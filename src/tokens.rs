@@ -338,6 +338,10 @@ pub fn estimate_image_tokens(width: u32, height: u32, detail: &str) -> usize {
     num_tiles * TILE_COST + BASE_COST
 }
 
+/// Default token estimate per image when dimensions are unknown.
+/// Based on a 1024×1024 high-detail image: 4 tiles × 170 + 85 = 765.
+pub const DEFAULT_IMAGE_TOKEN_ESTIMATE: usize = 765;
+
 /// Estimate tokens for a JSON value
 pub fn estimate_json_tokens(value: &serde_json::Value) -> usize {
     let json_str = serde_json::to_string(value).unwrap_or_default();
@@ -352,8 +356,10 @@ pub fn estimate_messages_tokens(messages: &[crate::api::types::Message]) -> usiz
     for msg in messages {
         // Role overhead
         total += 4;
-        // Content
-        total += estimate_tokens(msg.content.text());
+        // Content (use text_all to capture all text blocks)
+        total += estimate_tokens(&msg.content.text_all());
+        // Image tokens
+        total += msg.content.image_count() * DEFAULT_IMAGE_TOKEN_ESTIMATE;
         // Tool calls if present
         if let Some(ref tool_calls) = msg.tool_calls {
             for call in tool_calls {
