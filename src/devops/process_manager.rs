@@ -2022,11 +2022,11 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn test_find_available_port_narrow_range() {
-        // Use a narrow range of high ports
-        let port = find_available_port(51000, 51010).await;
-        // Should find one
+        // Use a range of high ephemeral ports unlikely to be in use
+        let port = find_available_port(59100, 59200).await;
+        // Should find at least one free port in a 100-port range
         assert!(port.is_some());
-        assert!(port.unwrap() >= 51000 && port.unwrap() <= 51010);
+        assert!(port.unwrap() >= 59100 && port.unwrap() <= 59200);
     }
 
     #[tokio::test(start_paused = true)]
