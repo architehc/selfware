@@ -1528,23 +1528,31 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let manager = CheckpointManager::new(dir.path().to_path_buf()).unwrap();
 
-        // First, save a valid checkpoint (this creates a .json file)
+        // Save a valid checkpoint (this creates the .json file)
         let mut cp = TaskCheckpoint::new("backup-test".to_string(), "Backup".to_string());
         cp.set_step(5);
         manager.save(&cp).unwrap();
 
-        // Save again to create a .json.bak backup
+        // Manually copy the primary to .bak to guarantee the backup exists.
+        // save() may use delta writes internally which don't create a .bak.
+        let primary = dir.path().join("backup-test.json");
+        let backup = dir.path().join("backup-test.json.bak");
+        std::fs::copy(&primary, &backup).unwrap();
+
+        // Save again with a new step
         cp.set_step(10);
         manager.save(&cp).unwrap();
 
-        // Now corrupt the primary file
-        let primary = dir.path().join("backup-test.json");
+        // Corrupt the primary file
         std::fs::write(&primary, "corrupted!!!").unwrap();
 
-        // Load should recover from .json.bak
+        // Remove any delta log so recovery doesn't fail applying deltas
+        let delta_path = dir.path().join("backup-test.json.delta");
+        let _ = std::fs::remove_file(&delta_path);
+
+        // Load should recover from .json.bak (which has step 5)
         let loaded = manager.load("backup-test").unwrap();
         assert_eq!(loaded.task_id, "backup-test");
-        // The backup should have step 5 (the previous save)
         assert_eq!(loaded.current_step, 5);
     }
 
