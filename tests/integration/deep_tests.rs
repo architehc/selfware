@@ -137,10 +137,11 @@ async fn deep_test_model_connectivity() {
 
     let response = response.unwrap();
     let content = &response.choices[0].message.content;
-    println!("  Response: {}", safe_truncate(content, 100));
+    println!("  Response: {}", safe_truncate(content.text(), 100));
 
     assert!(
-        content.to_lowercase().contains("hello") || content.to_lowercase().contains("working"),
+        content.text().to_lowercase().contains("hello")
+            || content.text().to_lowercase().contains("working"),
         "Response should acknowledge the request"
     );
 }
@@ -187,7 +188,7 @@ async fn deep_test_thinking_mode() {
     assert!(
         has_number,
         "Response to a multiplication question should contain digits: {}",
-        safe_truncate(content, 500)
+        safe_truncate(content.text(), 500)
     );
 }
 
@@ -237,12 +238,12 @@ Available tools:
     let response = result.unwrap().expect("Chat should succeed");
 
     let content = &response.choices[0].message.content;
-    println!("  Response preview: {}", safe_truncate(content, 300));
+    println!("  Response preview: {}", safe_truncate(content.text(), 300));
 
     // Should attempt to use the file_read tool
     let has_tool_format = content.contains("<tool>") || content.contains("<name>");
-    let mentions_file_read = content.to_lowercase().contains("file_read");
-    let mentions_cargo = content.to_lowercase().contains("cargo");
+    let mentions_file_read = content.text().to_lowercase().contains("file_read");
+    let mentions_cargo = content.text().to_lowercase().contains("cargo");
 
     assert!(
         has_tool_format || mentions_file_read || mentions_cargo,
@@ -341,10 +342,10 @@ fn fibonacci(n: u32) -> u32 {
     let response = result.unwrap().expect("Chat should succeed");
 
     let content = &response.choices[0].message.content;
-    println!("  Response preview: {}", safe_truncate(content, 400));
+    println!("  Response preview: {}", safe_truncate(content.text(), 400));
 
     // Should understand it's a Fibonacci function
-    let understands_fibonacci = content.to_lowercase().contains("fibonacci");
+    let understands_fibonacci = content.text().to_lowercase().contains("fibonacci");
     // fibonacci(10) = 55
     let has_correct_answer = content.contains("55");
 
@@ -397,7 +398,7 @@ async fn deep_test_code_generation() {
     assert!(
         has_fn || has_rust_code,
         "Should generate Rust function code: {}",
-        safe_truncate(content, 500)
+        safe_truncate(content.text(), 500)
     );
 
     if has_fn && has_bool {
@@ -443,11 +444,11 @@ async fn deep_test_conversation_memory() {
     let turn1_response = response.choices[0].message.content.clone();
     println!(
         "    Response: {}",
-        &turn1_response[..turn1_response.len().min(100)]
+        &turn1_response.text()[..turn1_response.len().min(100)]
     );
 
     // Turn 2: Ask about the fact
-    messages.push(Message::assistant(&turn1_response));
+    messages.push(Message::assistant(turn1_response.text()));
     messages.push(Message::user("What is my favorite color?"));
 
     println!("  Turn 2: Recalling fact...");
@@ -469,11 +470,11 @@ async fn deep_test_conversation_memory() {
     let turn2_response = &response.choices[0].message.content;
     println!(
         "    Response: {}",
-        &turn2_response[..turn2_response.len().min(100)]
+        &turn2_response.text()[..turn2_response.len().min(100)]
     );
 
     assert!(
-        turn2_response.to_lowercase().contains("blue"),
+        turn2_response.text().to_lowercase().contains("blue"),
         "Should remember that favorite color is blue: {}",
         turn2_response
     );
@@ -605,14 +606,14 @@ async fn deep_test_error_handling() {
     let response = result.unwrap().expect("Chat should succeed");
 
     let content = &response.choices[0].message.content;
-    println!("  Response preview: {}", safe_truncate(content, 300));
+    println!("  Response preview: {}", safe_truncate(content.text(), 300));
 
     // Model should acknowledge the file doesn't exist or can't be read
-    let handles_error = content.to_lowercase().contains("not found")
-        || content.to_lowercase().contains("doesn't exist")
-        || content.to_lowercase().contains("cannot")
-        || content.to_lowercase().contains("error")
-        || content.to_lowercase().contains("unable");
+    let handles_error = content.text().to_lowercase().contains("not found")
+        || content.text().to_lowercase().contains("doesn't exist")
+        || content.text().to_lowercase().contains("cannot")
+        || content.text().to_lowercase().contains("error")
+        || content.text().to_lowercase().contains("unable");
 
     assert!(handles_error, "Model should acknowledge file access issue");
 }
@@ -794,17 +795,17 @@ error[E0382]: use of moved value: `data`
     let response = result.unwrap().expect("Chat should succeed");
 
     let content = &response.choices[0].message.content;
-    println!("  Response preview: {}", safe_truncate(content, 400));
+    println!("  Response preview: {}", safe_truncate(content.text(), 400));
 
     // Should understand ownership/move semantics
-    let understands_move = content.to_lowercase().contains("move")
-        || content.to_lowercase().contains("ownership")
-        || content.to_lowercase().contains("borrow");
+    let understands_move = content.text().to_lowercase().contains("move")
+        || content.text().to_lowercase().contains("ownership")
+        || content.text().to_lowercase().contains("borrow");
 
     // Should suggest a fix
-    let has_fix = content.to_lowercase().contains("clone")
-        || content.to_lowercase().contains("reference")
-        || content.to_lowercase().contains("&");
+    let has_fix = content.text().to_lowercase().contains("clone")
+        || content.text().to_lowercase().contains("reference")
+        || content.contains("&");
 
     assert!(
         understands_move,
@@ -856,13 +857,13 @@ let a=x+y;let b=a*z;let c=b-x;c+1}
     let response = result.unwrap().expect("Chat should succeed");
 
     let content = &response.choices[0].message.content;
-    println!("  Response preview: {}", safe_truncate(content, 500));
+    println!("  Response preview: {}", safe_truncate(content.text(), 500));
 
     // Should produce cleaner code with proper formatting
     let has_fn = content.contains("fn ");
     let has_proper_spacing =
         content.contains("x: i32") || content.contains("x : i32") || content.contains("(x:");
-    let has_newlines = content.matches('\n').count() > 3;
+    let has_newlines = content.text().matches('\n').count() > 3;
 
     assert!(has_fn, "Should produce a function");
 
@@ -908,7 +909,7 @@ pub fn is_valid_email(email: &str) -> bool {
     let response = result.unwrap().expect("Chat should succeed");
 
     let content = &response.choices[0].message.content;
-    println!("  Response preview: {}", safe_truncate(content, 600));
+    println!("  Response preview: {}", safe_truncate(content.text(), 600));
 
     // Should include test annotations
     let has_test_attr = content.contains("#[test]");
@@ -973,17 +974,17 @@ where
     let response = result.unwrap().expect("Chat should succeed");
 
     let content = &response.choices[0].message.content;
-    println!("  Response preview: {}", safe_truncate(content, 500));
+    println!("  Response preview: {}", safe_truncate(content.text(), 500));
 
     // Should understand the pattern
-    let understands_trait =
-        content.to_lowercase().contains("trait") || content.to_lowercase().contains("handler");
-    let understands_impl = content.to_lowercase().contains("impl")
-        || content.to_lowercase().contains("blanket")
-        || content.to_lowercase().contains("generic");
-    let understands_closure = content.to_lowercase().contains("function")
-        || content.to_lowercase().contains("closure")
-        || content.to_lowercase().contains("fn");
+    let understands_trait = content.text().to_lowercase().contains("trait")
+        || content.text().to_lowercase().contains("handler");
+    let understands_impl = content.text().to_lowercase().contains("impl")
+        || content.text().to_lowercase().contains("blanket")
+        || content.text().to_lowercase().contains("generic");
+    let understands_closure = content.text().to_lowercase().contains("function")
+        || content.text().to_lowercase().contains("closure")
+        || content.text().to_lowercase().contains("fn");
 
     assert!(
         understands_trait || understands_impl,
@@ -1025,7 +1026,7 @@ async fn deep_test_git_workflow() {
     let response = result.unwrap().expect("Chat should succeed");
 
     let content = &response.choices[0].message.content;
-    println!("  Response preview: {}", safe_truncate(content, 400));
+    println!("  Response preview: {}", safe_truncate(content.text(), 400));
 
     // Should mention the typical workflow
     let has_add = content.contains("git add") || content.contains("`add`");
@@ -1082,19 +1083,19 @@ What's wrong and how do I fix it?
     let response = result.unwrap().expect("Chat should succeed");
 
     let content = &response.choices[0].message.content;
-    println!("  Response preview: {}", safe_truncate(content, 400));
+    println!("  Response preview: {}", safe_truncate(content.text(), 400));
 
     // Should identify the index out of bounds issue
-    let identifies_issue = content.to_lowercase().contains("index")
-        || content.to_lowercase().contains("bounds")
-        || content.to_lowercase().contains("out of range")
-        || content.to_lowercase().contains("only 3");
+    let identifies_issue = content.text().to_lowercase().contains("index")
+        || content.text().to_lowercase().contains("bounds")
+        || content.text().to_lowercase().contains("out of range")
+        || content.text().to_lowercase().contains("only 3");
 
     let suggests_fix = content.contains(".get(")
         || content.contains("[0]")
         || content.contains("[1]")
         || content.contains("[2]")
-        || content.to_lowercase().contains("valid index");
+        || content.text().to_lowercase().contains("valid index");
 
     assert!(
         identifies_issue,
@@ -1171,15 +1172,15 @@ async fn deep_test_concurrency_understanding() {
     let response = result.unwrap().expect("Chat should succeed");
 
     let content = &response.choices[0].message.content;
-    println!("  Response preview: {}", safe_truncate(content, 500));
+    println!("  Response preview: {}", safe_truncate(content.text(), 500));
 
     // Should understand both types
-    let understands_mutex = content.to_lowercase().contains("mutex")
-        || content.to_lowercase().contains("exclusive")
-        || content.to_lowercase().contains("lock");
-    let understands_rwlock = content.to_lowercase().contains("rwlock")
-        || content.to_lowercase().contains("read")
-        || content.to_lowercase().contains("write");
+    let understands_mutex = content.text().to_lowercase().contains("mutex")
+        || content.text().to_lowercase().contains("exclusive")
+        || content.text().to_lowercase().contains("lock");
+    let understands_rwlock = content.text().to_lowercase().contains("rwlock")
+        || content.text().to_lowercase().contains("read")
+        || content.text().to_lowercase().contains("write");
 
     assert!(
         understands_mutex || understands_rwlock,

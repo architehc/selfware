@@ -309,7 +309,7 @@ async fn qwen3_test_concurrent_requests() {
                 println!(
                     "  {} -> {}",
                     prompt,
-                    response.choices[0].message.content.trim()
+                    response.choices[0].message.content.text().trim()
                 );
             }
             Err(e) => {
@@ -387,7 +387,7 @@ async fn qwen3_test_parallel_agents_simulation() {
         let (agent, task, result, elapsed) = handle.await.expect("Task panicked");
         match result {
             Ok(response) => {
-                let content = response.choices[0].message.content.trim();
+                let content = response.choices[0].message.content.text().trim();
                 println!("\n{} ({:.2?}):", agent, elapsed);
                 println!("  Task: {}", task);
                 println!("  Result: {}", &content[..content.len().min(200)]);
@@ -429,7 +429,7 @@ async fn qwen3_test_conversation_memory() {
     println!("Turn 1 - Assistant: {}", assistant_reply1);
 
     // Add assistant response and ask follow-up
-    messages.push(Message::assistant(&assistant_reply1));
+    messages.push(Message::assistant(assistant_reply1.text()));
     messages.push(Message::user("What is my name and favorite color?"));
 
     // Second turn
@@ -442,7 +442,7 @@ async fn qwen3_test_conversation_memory() {
     println!("Turn 2 - Assistant: {}", assistant_reply2);
 
     // Should remember the name and color
-    let reply_lower = assistant_reply2.to_lowercase();
+    let reply_lower = assistant_reply2.text().to_lowercase();
     assert!(
         reply_lower.contains("alice") || reply_lower.contains("blue"),
         "Expected model to remember name or color: {}",
@@ -483,7 +483,7 @@ fn calculate_average(numbers: Vec<i32>) -> f64 {
     println!("Code review result:\n{}", content);
 
     // Should identify the division by zero risk
-    let content_lower = content.to_lowercase();
+    let content_lower = content.text().to_lowercase();
     assert!(
         content_lower.contains("empty")
             || content_lower.contains("zero")
@@ -651,7 +651,7 @@ async fn qwen3_test_rapid_requests() {
                     "Request {} succeeded in {:.2?}: {}",
                     i,
                     elapsed,
-                    response.choices[0].message.content.trim()
+                    response.choices[0].message.content.text().trim()
                 );
             }
             Err(e) => {
@@ -700,7 +700,7 @@ async fn qwen3_test_long_context() {
 
     // Should identify "This" as the first word
     assert!(
-        content.to_lowercase().contains("this"),
+        content.text().to_lowercase().contains("this"),
         "Expected 'this' as first word"
     );
 }
@@ -840,7 +840,7 @@ async fn qwen3_test_10_concurrent_agents() {
             Ok(response) => {
                 successes += 1;
                 total_response_time += elapsed;
-                let content = response.choices[0].message.content.trim();
+                let content = response.choices[0].message.content.text().trim();
                 let preview = if content.chars().count() > 80 {
                     format!("{}...", content.chars().take(80).collect::<String>())
                 } else {
@@ -904,10 +904,11 @@ Complete tasks step by step."#;
         .await
         .expect("Turn 1 failed");
     let content1 = &response1.choices[0].message.content;
-    println!("Turn 1 - Agent: {}", &content1[..content1.len().min(200)]);
+    let text1 = content1.text();
+    println!("Turn 1 - Agent: {}", &text1[..text1.len().min(200)]);
 
     // Add assistant response and simulate tool result
-    messages.push(Message::assistant(content1));
+    messages.push(Message::assistant(content1.text()));
     messages.push(Message::user("Tool result: File test.txt does not exist."));
 
     // Turn 2: Agent should request file creation
@@ -916,10 +917,11 @@ Complete tasks step by step."#;
         .await
         .expect("Turn 2 failed");
     let content2 = &response2.choices[0].message.content;
-    println!("Turn 2 - Agent: {}", &content2[..content2.len().min(200)]);
+    let text2 = content2.text();
+    println!("Turn 2 - Agent: {}", &text2[..text2.len().min(200)]);
 
     // Add assistant response and simulate tool result
-    messages.push(Message::assistant(content2));
+    messages.push(Message::assistant(content2.text()));
     messages.push(Message::user("Tool result: File created successfully."));
 
     // Turn 3: Agent should summarize
@@ -928,7 +930,8 @@ Complete tasks step by step."#;
         .await
         .expect("Turn 3 failed");
     let content3 = &response3.choices[0].message.content;
-    println!("Turn 3 - Agent: {}", &content3[..content3.len().min(200)]);
+    let text3 = content3.text();
+    println!("Turn 3 - Agent: {}", &text3[..text3.len().min(200)]);
 
     // Verify the loop worked
     let all_content = format!("{}\n{}\n{}", content1, content2, content3);
@@ -1009,7 +1012,7 @@ async fn qwen3_test_error_recovery() {
     println!("Error recovery response:\n{}", content);
 
     // Should provide helpful guidance
-    let content_lower = content.to_lowercase();
+    let content_lower = content.text().to_lowercase();
     assert!(
         content_lower.contains("define")
             || content_lower.contains("declare")
@@ -1054,18 +1057,18 @@ async fn qwen3_test_continuous_dialogue() {
         let preview = if content.chars().count() > 150 {
             format!("{}...", content.chars().take(150).collect::<String>())
         } else {
-            content.clone()
+            content.to_string()
         };
 
         println!("\nQ{}: {}", i + 1, question);
         println!("A{}: {}", i + 1, preview);
 
-        messages.push(Message::assistant(&content));
+        messages.push(Message::assistant(content.text()));
     }
 
     // Final message should still have context from earlier
     let last_response = &messages.last().unwrap().content;
-    let content_lower = last_response.to_lowercase();
+    let content_lower = last_response.text().to_lowercase();
 
     // Should mention moved value, ownership, or error concepts
     assert!(

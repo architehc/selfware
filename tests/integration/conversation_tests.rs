@@ -4,7 +4,7 @@
 //! across multiple turns and handle complex interactions.
 
 use super::helpers::*;
-use selfware::api::types::Message;
+use selfware::api::types::{Message, MessageContent};
 use selfware::api::ApiClient;
 use tokio::time::timeout;
 
@@ -62,7 +62,7 @@ async fn test_multi_turn_context() {
     assert!(result2.is_ok(), "Second request should not timeout");
     let response2 = result2.unwrap().expect("Second chat should succeed");
 
-    let content = response2.choices[0].message.content.to_lowercase();
+    let content = response2.choices[0].message.content.text().to_lowercase();
     assert!(
         content.contains("blue"),
         "Model should remember the favorite color was blue: {}",
@@ -86,7 +86,7 @@ async fn test_conversation_with_tool_results() {
         Message::user("What does the Cargo.toml say about this project's name?"),
         Message {
             role: "assistant".to_string(),
-            content: "<tool><name>file_read</name><arguments>{\"path\": \"./Cargo.toml\"}</arguments></tool>".to_string(),
+            content: MessageContent::from_text("<tool><name>file_read</name><arguments>{\"path\": \"./Cargo.toml\"}</arguments></tool>"),
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
@@ -104,7 +104,7 @@ async fn test_conversation_with_tool_results() {
     assert!(result.is_ok(), "Request should not timeout");
     let response = result.unwrap().expect("Chat should succeed");
 
-    let content = response.choices[0].message.content.to_lowercase();
+    let content = response.choices[0].message.content.text().to_lowercase();
     assert!(
         content.contains("selfware"),
         "Model should reference the project name from tool result: {}",
@@ -187,7 +187,7 @@ async fn test_error_recovery_in_conversation() {
         Message::user("Read the file at /nonexistent/path/file.txt"),
         Message {
             role: "assistant".to_string(),
-            content: "<tool><name>file_read</name><arguments>{\"path\": \"/nonexistent/path/file.txt\"}</arguments></tool>".to_string(),
+            content: MessageContent::from_text("<tool><name>file_read</name><arguments>{\"path\": \"/nonexistent/path/file.txt\"}</arguments></tool>"),
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
@@ -205,7 +205,7 @@ async fn test_error_recovery_in_conversation() {
     assert!(result.is_ok(), "Request should not timeout");
     let response = result.unwrap().expect("Chat should succeed");
 
-    let content = response.choices[0].message.content.to_lowercase();
+    let content = response.choices[0].message.content.text().to_lowercase();
     // Model should acknowledge the error or try a different approach
     assert!(
         content.contains("error")
@@ -313,7 +313,7 @@ async fn test_code_in_conversation() {
     );
     let response = result.unwrap().expect("Chat should succeed");
 
-    let content = response.choices[0].message.content.to_lowercase();
+    let content = response.choices[0].message.content.text().to_lowercase();
 
     // Model should understand the code
     assert!(
