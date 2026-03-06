@@ -50,8 +50,13 @@ pub fn clear() {
 mod tests {
     use super::*;
 
+    /// Tests that mutate the global `LAST_OUTPUT` must not run concurrently.
+    /// This mutex serialises them without adding an external dependency.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn store_and_retrieve_round_trip() {
+        let _g = TEST_LOCK.lock().unwrap();
         clear();
 
         assert!(retrieve().is_none(), "should start empty");
@@ -75,6 +80,7 @@ mod tests {
 
     #[test]
     fn latest_store_wins() {
+        let _g = TEST_LOCK.lock().unwrap();
         clear();
 
         store(LastToolOutput {
@@ -102,6 +108,7 @@ mod tests {
 
     #[test]
     fn retrieve_clones_not_takes() {
+        let _g = TEST_LOCK.lock().unwrap();
         clear();
 
         store(LastToolOutput {
@@ -123,6 +130,7 @@ mod tests {
 
     #[test]
     fn clear_resets_state() {
+        let _g = TEST_LOCK.lock().unwrap();
         store(LastToolOutput {
             tool_name: "test".into(),
             ..Default::default()
