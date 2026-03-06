@@ -10,7 +10,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use selfware::vlm_bench::scoring::{
     json_field_accuracy, keyword_accuracy, keyword_overlap_score, pearson_correlation, Rating,
 };
-use selfware::vlm_bench::{BenchScenario, Difficulty, ExpectedAnswer};
+use selfware::vlm_bench::{BenchScenario, ExpectedAnswer};
 
 fn bench_keyword_accuracy(c: &mut Criterion) {
     let response = "The dashboard panel shows a loading spinner with error status \
