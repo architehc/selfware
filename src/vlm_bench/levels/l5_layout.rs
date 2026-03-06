@@ -63,7 +63,8 @@ impl VlmBenchLevel for L5Layout {
                          \"position\": \"<left|right|top|bottom>\", \
                          \"constraint\": \"<Percentage(N) or Min(N)>\"}], \
                          \"layout_direction\": \"<Horizontal|Vertical>\", \
-                         \"code_snippet\": \"<ratatui layout code>\"}".into(),
+                         \"code_snippet\": \"<ratatui layout code>\"}"
+                    .into(),
                 expected: ExpectedAnswer::Keywords(vec![
                     "layout".into(),
                     "horizontal".into(),
@@ -81,7 +82,8 @@ impl VlmBenchLevel for L5Layout {
                          and widget types. Respond with JSON: \
                          {\"layout_tree\": {\"direction\": \"Vertical\", \
                          \"children\": [...]}, \
-                         \"widget_types\": [\"<type>\", ...]}".into(),
+                         \"widget_types\": [\"<type>\", ...]}"
+                    .into(),
                 expected: ExpectedAnswer::Keywords(vec![
                     "vertical".into(),
                     "horizontal".into(),
@@ -99,7 +101,8 @@ impl VlmBenchLevel for L5Layout {
                          identify all widget types. Respond with JSON: \
                          {\"widgets\": [{\"type\": \"<type>\", \"name\": \"<name>\"}], \
                          \"nesting_depth\": <N>, \"has_popup\": true/false, \
-                         \"code_outline\": \"<pseudocode or ratatui code>\"}".into(),
+                         \"code_outline\": \"<pseudocode or ratatui code>\"}"
+                    .into(),
                 expected: ExpectedAnswer::Keywords(vec![
                     "tab".into(),
                     "list".into(),
@@ -124,7 +127,9 @@ impl VlmBenchLevel for L5Layout {
                     .collect();
                 (acc, details)
             }
-            ExpectedAnswer::JsonFields(expected) => scoring::json_field_accuracy(response, expected),
+            ExpectedAnswer::JsonFields(expected) => {
+                scoring::json_field_accuracy(response, expected)
+            }
             _ => (0.0, vec![]),
         };
 

@@ -62,11 +62,9 @@ impl VlmBenchLevel for L4Profiling {
                          Respond with JSON: {\"hottest_function\": \"<function name>\", \
                          \"estimated_pct\": <percentage of total time>, \
                          \"call_stack\": [\"<caller1>\", \"<caller2>\", ...], \
-                         \"optimization_suggestions\": [\"<suggestion>\"]}".into(),
-                expected: ExpectedAnswer::Keywords(vec![
-                    "function".into(),
-                    "hot".into(),
-                ]),
+                         \"optimization_suggestions\": [\"<suggestion>\"]}"
+                    .into(),
+                expected: ExpectedAnswer::Keywords(vec!["function".into(), "hot".into()]),
             },
             BenchScenario {
                 id: "l4_multithread_profile".into(),
@@ -78,11 +76,9 @@ impl VlmBenchLevel for L4Profiling {
                          \"busiest_thread\": \"<thread name>\", \
                          \"hottest_function\": \"<function>\", \
                          \"contention_detected\": true/false, \
-                         \"suggestions\": [\"<optimization>\"]}".into(),
-                expected: ExpectedAnswer::Keywords(vec![
-                    "thread".into(),
-                    "function".into(),
-                ]),
+                         \"suggestions\": [\"<optimization>\"]}"
+                    .into(),
+                expected: ExpectedAnswer::Keywords(vec!["thread".into(), "function".into()]),
             },
             BenchScenario {
                 id: "l4_memory_profile".into(),
@@ -93,11 +89,9 @@ impl VlmBenchLevel for L4Profiling {
                          Respond with JSON: {\"top_allocator\": \"<function>\", \
                          \"estimated_allocation_pct\": <pct>, \
                          \"allocation_pattern\": \"<steady|bursty|growing>\", \
-                         \"suggestions\": [\"<suggestion>\"]}".into(),
-                expected: ExpectedAnswer::Keywords(vec![
-                    "allocat".into(),
-                    "memory".into(),
-                ]),
+                         \"suggestions\": [\"<suggestion>\"]}"
+                    .into(),
+                expected: ExpectedAnswer::Keywords(vec!["allocat".into(), "memory".into()]),
             },
         ]
     }
@@ -115,7 +109,9 @@ impl VlmBenchLevel for L4Profiling {
                     .collect();
                 (acc, details)
             }
-            ExpectedAnswer::JsonFields(expected) => scoring::json_field_accuracy(response, expected),
+            ExpectedAnswer::JsonFields(expected) => {
+                scoring::json_field_accuracy(response, expected)
+            }
             _ => (0.0, vec![]),
         };
 
@@ -156,10 +152,7 @@ mod tests {
             description: "test".into(),
             image_path: PathBuf::from("test.png"),
             prompt: "test".into(),
-            expected: ExpectedAnswer::Keywords(vec![
-                "function".into(),
-                "hot".into(),
-            ]),
+            expected: ExpectedAnswer::Keywords(vec!["function".into(), "hot".into()]),
         };
         let response = "The hottest function is parse_tokens taking 45% of CPU time";
         let score = level.evaluate(&scenario, response);

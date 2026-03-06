@@ -63,21 +63,24 @@ impl VlmBenchLevel for MegaEvolution {
                          {\"composition\": <0-100>, \"hierarchy\": <0-100>, \
                          \"readability\": <0-100>, \"consistency\": <0-100>, \
                          \"accessibility\": <0-100>, \
-                         \"suggestions\": [\"<improvement 1>\", ...]}".into(),
+                         \"suggestions\": [\"<improvement 1>\", ...]}"
+                    .into(),
                 expected: ExpectedAnswer::VisualScores(vec![75.0, 70.0, 80.0, 72.0, 68.0]),
             },
             BenchScenario {
                 id: "mega_progression_analysis".into(),
                 description: "Analyze visual improvement between two iterations".into(),
                 image_path: self.fixtures_dir.join("progression_pair.png"),
-                prompt: "These two screenshots show before (left) and after (right) of a TUI update. \
+                prompt:
+                    "These two screenshots show before (left) and after (right) of a TUI update. \
                          Score each version on composition, hierarchy, readability, consistency, \
                          and accessibility (0-100). Identify what changed and whether it improved. \
                          Respond with JSON: {\"before\": {\"composition\": <N>, ...}, \
                          \"after\": {\"composition\": <N>, ...}, \
                          \"improvements\": [\"<what improved>\"], \
                          \"regressions\": [\"<what got worse>\"], \
-                         \"trajectory\": \"<improving|stable|declining>\"}".into(),
+                         \"trajectory\": \"<improving|stable|declining>\"}"
+                        .into(),
                 expected: ExpectedAnswer::Keywords(vec![
                     "composition".into(),
                     "hierarchy".into(),
@@ -96,11 +99,9 @@ impl VlmBenchLevel for MegaEvolution {
                          {\"rating\": \"BLOOM|GROW|WILT|FROST\", \
                          \"composition\": <0-100>, \"hierarchy\": <0-100>, \
                          \"readability\": <0-100>, \"consistency\": <0-100>, \
-                         \"accessibility\": <0-100>, \"justification\": \"<why>\"}".into(),
-                expected: ExpectedAnswer::Keywords(vec![
-                    "bloom".into(),
-                    "grow".into(),
-                ]),
+                         \"accessibility\": <0-100>, \"justification\": \"<why>\"}"
+                    .into(),
+                expected: ExpectedAnswer::Keywords(vec!["bloom".into(), "grow".into()]),
             },
         ]
     }
@@ -144,7 +145,13 @@ impl VlmBenchLevel for MegaEvolution {
 /// Extracts the 5 dimension scores from the response JSON and computes
 /// Pearson correlation with the ground-truth scores.
 fn evaluate_visual_scores(response: &str, ground_truth: &[f64]) -> LevelScore {
-    let dimensions = ["composition", "hierarchy", "readability", "consistency", "accessibility"];
+    let dimensions = [
+        "composition",
+        "hierarchy",
+        "readability",
+        "consistency",
+        "accessibility",
+    ];
 
     // Try to parse scores from response
     let predicted = extract_dimension_scores(response, &dimensions);
@@ -228,7 +235,13 @@ mod tests {
     #[test]
     fn test_extract_dimension_scores_valid() {
         let response = r#"{"composition": 80, "hierarchy": 70, "readability": 90, "consistency": 75, "accessibility": 85}"#;
-        let dims = ["composition", "hierarchy", "readability", "consistency", "accessibility"];
+        let dims = [
+            "composition",
+            "hierarchy",
+            "readability",
+            "consistency",
+            "accessibility",
+        ];
         let scores = extract_dimension_scores(response, &dims);
         assert_eq!(scores.len(), 5);
         assert!((scores[0] - 80.0).abs() < f64::EPSILON);
@@ -238,7 +251,13 @@ mod tests {
     #[test]
     fn test_extract_dimension_scores_with_text() {
         let response = r#"Here are my scores: {"composition": 60, "hierarchy": 55, "readability": 70, "consistency": 65, "accessibility": 50} That's my analysis."#;
-        let dims = ["composition", "hierarchy", "readability", "consistency", "accessibility"];
+        let dims = [
+            "composition",
+            "hierarchy",
+            "readability",
+            "consistency",
+            "accessibility",
+        ];
         let scores = extract_dimension_scores(response, &dims);
         assert_eq!(scores.len(), 5);
     }

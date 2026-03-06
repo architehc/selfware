@@ -122,7 +122,9 @@ impl VlmBenchLevel for L1TuiState {
                     .collect();
                 (acc, details)
             }
-            ExpectedAnswer::JsonFields(expected) => scoring::json_field_accuracy(response, expected),
+            ExpectedAnswer::JsonFields(expected) => {
+                scoring::json_field_accuracy(response, expected)
+            }
             _ => (0.0, vec![]),
         };
 

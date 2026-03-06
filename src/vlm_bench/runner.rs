@@ -105,8 +105,15 @@ impl VlmBenchRunner {
 
             let handle = tokio::spawn(async move {
                 let start = Instant::now();
-                let result =
-                    call_vlm(&client, &endpoint, &model, &scenario, max_tokens, temperature).await;
+                let result = call_vlm(
+                    &client,
+                    &endpoint,
+                    &model,
+                    &scenario,
+                    max_tokens,
+                    temperature,
+                )
+                .await;
                 let latency_ms = start.elapsed().as_millis() as u64;
                 drop(permit);
                 (scenario, result, latency_ms)
@@ -125,11 +132,7 @@ impl VlmBenchRunner {
                     scores.push(score);
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "Scenario {} failed: {}",
-                        scenario.id,
-                        e
-                    );
+                    tracing::warn!("Scenario {} failed: {}", scenario.id, e);
                     scores.push(LevelScore {
                         accuracy: 0.0,
                         detail_scores: vec![("error".into(), 0.0)],
@@ -257,9 +260,7 @@ mod tests {
     #[test]
     fn test_pass_thresholds() {
         assert!((pass_threshold_for(super::super::Difficulty::Easy) - 0.80).abs() < f64::EPSILON);
-        assert!(
-            (pass_threshold_for(super::super::Difficulty::Medium) - 0.70).abs() < f64::EPSILON
-        );
+        assert!((pass_threshold_for(super::super::Difficulty::Medium) - 0.70).abs() < f64::EPSILON);
         assert!((pass_threshold_for(super::super::Difficulty::Hard) - 0.60).abs() < f64::EPSILON);
         assert!(
             (pass_threshold_for(super::super::Difficulty::VeryHard) - 0.50).abs() < f64::EPSILON

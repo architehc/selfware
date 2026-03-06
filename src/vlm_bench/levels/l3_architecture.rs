@@ -62,7 +62,8 @@ impl VlmBenchLevel for L3Architecture {
                          Respond with JSON: {\"components\": [{\"name\": \"<box label>\", \
                          \"module\": \"<rust module path>\", \"role\": \"<brief description>\"}], \
                          \"data_flow\": [{\"from\": \"<component>\", \"to\": \"<component>\", \
-                         \"data\": \"<what flows>\"}]}".into(),
+                         \"data\": \"<what flows>\"}]}"
+                    .into(),
                 expected: ExpectedAnswer::Keywords(vec![
                     "daemon".into(),
                     "sandbox".into(),
@@ -79,7 +80,8 @@ impl VlmBenchLevel for L3Architecture {
                          Identify the stages and their corresponding Rust modules. \
                          Respond with JSON: {\"stages\": [{\"name\": \"<stage>\", \
                          \"module\": \"<path>\", \"inputs\": [\"<input>\"], \
-                         \"outputs\": [\"<output>\"]}]}".into(),
+                         \"outputs\": [\"<output>\"]}]}"
+                    .into(),
                 expected: ExpectedAnswer::Keywords(vec![
                     "agent".into(),
                     "tool".into(),
@@ -95,7 +97,8 @@ impl VlmBenchLevel for L3Architecture {
                          List each layer from outermost to innermost and describe \
                          what it validates. Respond with JSON: \
                          {\"layers\": [{\"name\": \"<layer>\", \"validates\": \"<what>\", \
-                         \"module\": \"<path>\"}]}".into(),
+                         \"module\": \"<path>\"}]}"
+                    .into(),
                 expected: ExpectedAnswer::Keywords(vec![
                     "safety".into(),
                     "validation".into(),
@@ -119,7 +122,9 @@ impl VlmBenchLevel for L3Architecture {
                     .collect();
                 (acc, details)
             }
-            ExpectedAnswer::JsonFields(expected) => scoring::json_field_accuracy(response, expected),
+            ExpectedAnswer::JsonFields(expected) => {
+                scoring::json_field_accuracy(response, expected)
+            }
             ExpectedAnswer::KeyValuePairs(pairs) => {
                 let mut total = 0.0;
                 let mut details = Vec::new();

@@ -59,21 +59,14 @@ impl BenchReport {
     pub fn to_markdown(&self) -> String {
         let mut md = String::new();
 
-        md.push_str(&format!(
-            "# VLM Benchmark Report — {} \n",
-            self.model
-        ));
+        md.push_str(&format!("# VLM Benchmark Report — {} \n", self.model));
         md.push_str(&format!(
             "**Date**: {} | **Endpoint**: {}\n\n",
             self.timestamp, self.endpoint
         ));
 
-        md.push_str(
-            "| Level | Difficulty | Score | Rating | Tokens | Avg Latency |\n",
-        );
-        md.push_str(
-            "|-------|-----------|-------|--------|--------|-------------|\n",
-        );
+        md.push_str("| Level | Difficulty | Score | Rating | Tokens | Avg Latency |\n");
+        md.push_str("|-------|-----------|-------|--------|--------|-------------|\n");
 
         for level in &self.levels {
             md.push_str(&format!(
