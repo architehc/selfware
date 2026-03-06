@@ -50,13 +50,34 @@ impl VlmBenchRunner {
         let run_start = Instant::now();
         let mut level_reports = Vec::new();
 
+        let total_levels = self
+            .levels
+            .iter()
+            .filter(|l| self.config.levels.contains(&l.difficulty()))
+            .count();
+
         for level in &self.levels {
             // Skip levels not in the configured difficulty set
             if !self.config.levels.contains(&level.difficulty()) {
                 continue;
             }
 
+            eprintln!(
+                "\n[{}/{}] Running {} ({:?})...",
+                level_reports.len() + 1,
+                total_levels,
+                level.name(),
+                level.difficulty()
+            );
             let report = self.run_level(level.as_ref()).await?;
+            eprintln!(
+                "  => {}: {:.0}% {} | {} tokens | {:.1}s avg",
+                level.name(),
+                report.score * 100.0,
+                report.rating,
+                report.total_tokens,
+                report.avg_latency_ms / 1000.0
+            );
             level_reports.push(report);
         }
 
@@ -84,12 +105,19 @@ impl VlmBenchRunner {
     /// Run a single benchmark level.
     async fn run_level(&self, level: &dyn VlmBenchLevel) -> Result<LevelReport> {
         let scenarios = level.scenarios();
-        let mut scores = Vec::with_capacity(scenarios.len());
+        let scenario_count = scenarios.len();
+        let mut scores = Vec::with_capacity(scenario_count);
 
         // Run scenarios with semaphore-bounded concurrency
         let mut handles = Vec::new();
 
-        for scenario in &scenarios {
+        for (idx, scenario) in scenarios.iter().enumerate() {
+            eprintln!(
+                "  [{}/{}] {} ...",
+                idx + 1,
+                scenario_count,
+                scenario.id
+            );
             let permit = self
                 .semaphore
                 .clone()
@@ -129,10 +157,24 @@ impl VlmBenchRunner {
                     let mut score = level.evaluate(&scenario, &response_text);
                     score.latency_ms = latency_ms;
                     score.response_tokens = token_count;
+                    eprintln!(
+                        "    {} => {:.0}% {} | {} tok | {:.1}s",
+                        scenario.id,
+                        score.accuracy * 100.0,
+                        score.rating,
+                        token_count,
+                        latency_ms as f64 / 1000.0
+                    );
                     scores.push(score);
                 }
                 Err(e) => {
                     tracing::warn!("Scenario {} failed: {}", scenario.id, e);
+                    eprintln!(
+                        "    {} => FAILED ({:.1}s): {}",
+                        scenario.id,
+                        latency_ms as f64 / 1000.0,
+                        e
+                    );
                     scores.push(LevelScore {
                         accuracy: 0.0,
                         detail_scores: vec![("error".into(), 0.0)],
