@@ -17,7 +17,15 @@ fn bench_keyword_accuracy(c: &mut Criterion) {
                     and the help menu is visible in the sidebar with multiple widgets \
                     including a chart, table, and status bar";
     let keywords: Vec<String> = vec![
-        "dashboard", "panel", "spinner", "error", "help", "sidebar", "chart", "table", "status",
+        "dashboard",
+        "panel",
+        "spinner",
+        "error",
+        "help",
+        "sidebar",
+        "chart",
+        "table",
+        "status",
     ]
     .into_iter()
     .map(String::from)
