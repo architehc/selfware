@@ -278,9 +278,18 @@ async fn call_vlm(
         .as_str()
         .unwrap_or("")
         .to_string();
+    // Some thinking models put reasoning in a separate field — include it for keyword matching
+    let reasoning = json["choices"][0]["message"]["reasoning_content"]
+        .as_str()
+        .unwrap_or("");
+    let full_response = if reasoning.is_empty() {
+        content
+    } else {
+        format!("{}\n{}", reasoning, content)
+    };
     let tokens = json["usage"]["total_tokens"].as_u64().unwrap_or(0);
 
-    Ok((content, tokens))
+    Ok((full_response, tokens))
 }
 
 /// Get the pass threshold for a given difficulty level.
