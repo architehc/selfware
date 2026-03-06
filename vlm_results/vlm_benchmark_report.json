@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-03-06T13:28:00.729544+00:00",
+  "timestamp": "2026-03-06T15:01:23.662079+00:00",
   "model": "unsloth/Qwen3.5-9B-GGUF:Q8_0",
   "endpoint": "https://97921268284d.ngrok.app/v1",
   "levels": [
@@ -10,8 +10,8 @@
       "scenario_count": 4,
       "score": 0.875,
       "rating": "Bloom",
-      "total_tokens": 3548,
-      "avg_latency_ms": 5459.25,
+      "total_tokens": 3527,
+      "avg_latency_ms": 5027.5,
       "scores": [
         {
           "accuracy": 0.5,
@@ -25,8 +25,8 @@
               1.0
             ]
           ],
-          "response_tokens": 774,
-          "latency_ms": 3651,
+          "response_tokens": 773,
+          "latency_ms": 3934,
           "rating": "Wilt"
         },
         {
@@ -42,7 +42,7 @@
             ]
           ],
           "response_tokens": 760,
-          "latency_ms": 4862,
+          "latency_ms": 3847,
           "rating": "Bloom"
         },
         {
@@ -57,8 +57,8 @@
               1.0
             ]
           ],
-          "response_tokens": 1158,
-          "latency_ms": 9027,
+          "response_tokens": 1154,
+          "latency_ms": 7930,
           "rating": "Bloom"
         },
         {
@@ -73,8 +73,8 @@
               1.0
             ]
           ],
-          "response_tokens": 856,
-          "latency_ms": 4297,
+          "response_tokens": 840,
+          "latency_ms": 4399,
           "rating": "Bloom"
         }
       ]
@@ -86,8 +86,8 @@
       "scenario_count": 3,
       "score": 0.38888888888888884,
       "rating": "Wilt",
-      "total_tokens": 950,
-      "avg_latency_ms": 2065.3333333333335,
+      "total_tokens": 948,
+      "avg_latency_ms": 1979.0,
       "scores": [
         {
           "accuracy": 0.0,
@@ -98,7 +98,7 @@
             ]
           ],
           "response_tokens": 301,
-          "latency_ms": 1901,
+          "latency_ms": 1843,
           "rating": "Frost"
         },
         {
@@ -117,8 +117,8 @@
               1.0
             ]
           ],
-          "response_tokens": 318,
-          "latency_ms": 2180,
+          "response_tokens": 314,
+          "latency_ms": 2148,
           "rating": "Grow"
         },
         {
@@ -133,8 +133,8 @@
               0.0
             ]
           ],
-          "response_tokens": 331,
-          "latency_ms": 2115,
+          "response_tokens": 333,
+          "latency_ms": 1946,
           "rating": "Wilt"
         }
       ]
@@ -146,8 +146,8 @@
       "scenario_count": 3,
       "score": 0.3,
       "rating": "Wilt",
-      "total_tokens": 3610,
-      "avg_latency_ms": 9033.333333333334,
+      "total_tokens": 3686,
+      "avg_latency_ms": 8396.333333333334,
       "scores": [
         {
           "accuracy": 0.4,
@@ -173,8 +173,8 @@
               0.0
             ]
           ],
-          "response_tokens": 1536,
-          "latency_ms": 13091,
+          "response_tokens": 1585,
+          "latency_ms": 13005,
           "rating": "Wilt"
         },
         {
@@ -197,8 +197,8 @@
               0.0
             ]
           ],
-          "response_tokens": 1059,
-          "latency_ms": 7013,
+          "response_tokens": 1091,
+          "latency_ms": 6642,
           "rating": "Frost"
         },
         {
@@ -221,8 +221,8 @@
               0.0
             ]
           ],
-          "response_tokens": 1015,
-          "latency_ms": 6996,
+          "response_tokens": 1010,
+          "latency_ms": 5542,
           "rating": "Frost"
         }
       ]
@@ -234,8 +234,8 @@
       "scenario_count": 3,
       "score": 1.0,
       "rating": "Bloom",
-      "total_tokens": 2532,
-      "avg_latency_ms": 4852.333333333333,
+      "total_tokens": 2494,
+      "avg_latency_ms": 4333.333333333333,
       "scores": [
         {
           "accuracy": 1.0,
@@ -249,8 +249,8 @@
               1.0
             ]
           ],
-          "response_tokens": 848,
-          "latency_ms": 5600,
+          "response_tokens": 862,
+          "latency_ms": 4972,
           "rating": "Bloom"
         },
         {
@@ -265,8 +265,8 @@
               1.0
             ]
           ],
-          "response_tokens": 804,
-          "latency_ms": 4447,
+          "response_tokens": 772,
+          "latency_ms": 3447,
           "rating": "Bloom"
         },
         {
@@ -281,8 +281,8 @@
               1.0
             ]
           ],
-          "response_tokens": 880,
-          "latency_ms": 4510,
+          "response_tokens": 860,
+          "latency_ms": 4581,
           "rating": "Bloom"
         }
       ]
@@ -292,10 +292,10 @@
       "difficulty": "Extreme",
       "description": "Visual mockup to code translation: identify widget types from ASCII/visual mockups, generate ratatui layout code, specify correct constraint percentages.",
       "scenario_count": 3,
-      "score": 0.7666666666666666,
+      "score": 0.85,
       "rating": "Bloom",
-      "total_tokens": 7007,
-      "avg_latency_ms": 23056.666666666668,
+      "total_tokens": 4232,
+      "avg_latency_ms": 11982.333333333334,
       "scores": [
         {
           "accuracy": 1.0,
@@ -317,12 +317,12 @@
               1.0
             ]
           ],
-          "response_tokens": 837,
-          "latency_ms": 4249,
+          "response_tokens": 1425,
+          "latency_ms": 13110,
           "rating": "Bloom"
         },
         {
-          "accuracy": 0.5,
+          "accuracy": 0.75,
           "detail_scores": [
             [
               "vertical",
@@ -338,11 +338,11 @@
             ],
             [
               "sidebar",
-              0.0
+              1.0
             ]
           ],
-          "response_tokens": 4771,
-          "latency_ms": 54340,
+          "response_tokens": 1348,
+          "latency_ms": 11641,
           "rating": "Bloom"
         },
         {
@@ -369,8 +369,8 @@
               0.0
             ]
           ],
-          "response_tokens": 1399,
-          "latency_ms": 10581,
+          "response_tokens": 1459,
+          "latency_ms": 11196,
           "rating": "Bloom"
         }
       ]
@@ -382,8 +382,8 @@
       "scenario_count": 3,
       "score": 0.5314306878808899,
       "rating": "Bloom",
-      "total_tokens": 3052,
-      "avg_latency_ms": 5119.0,
+      "total_tokens": 3089,
+      "avg_latency_ms": 6072.666666666667,
       "scores": [
         {
           "accuracy": 0.5942920636426696,
@@ -410,7 +410,7 @@
             ]
           ],
           "response_tokens": 981,
-          "latency_ms": 4670,
+          "latency_ms": 5477,
           "rating": "Bloom"
         },
         {
@@ -433,8 +433,8 @@
               1.0
             ]
           ],
-          "response_tokens": 966,
-          "latency_ms": 5229,
+          "response_tokens": 976,
+          "latency_ms": 6827,
           "rating": "Bloom"
         },
         {
@@ -449,15 +449,15 @@
               0.0
             ]
           ],
-          "response_tokens": 1105,
-          "latency_ms": 5458,
+          "response_tokens": 1132,
+          "latency_ms": 5914,
           "rating": "Frost"
         }
       ]
     }
   ],
-  "overall_score": 0.6436643739060742,
+  "overall_score": 0.6575532627949632,
   "overall_rating": "Bloom",
-  "total_tokens": 20699,
-  "total_duration_secs": 154.230656083
+  "total_tokens": 17976,
+  "total_duration_secs": 118.413816166
 }
