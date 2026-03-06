@@ -1,5 +1,7 @@
 //! Service Virtualization (WireMock-style)
 
+#![allow(dead_code, unused_imports, unused_variables)]
+
 use super::*;
 
 /// Stub request matcher

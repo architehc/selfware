@@ -1,7 +1,7 @@
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
 
@@ -173,7 +173,8 @@ impl RecoveryExecutor {
             error,
         };
 
-        if let Ok(mut history) = self.history.write() {
+        {
+            let mut history = self.history.write();
             history.push_back(execution.clone());
             while history.len() > 100 {
                 history.pop_front();
@@ -258,8 +259,8 @@ impl RecoveryExecutor {
                 manager.clear();
 
                 // Also clear retry states so the next recovery starts fresh
-                if let Ok(mut states) = self.retry_states.write() {
-                    states.clear();
+                {
+                    self.retry_states.write().clear();
                     debug!("Retry states cleared");
                 }
 
@@ -275,9 +276,7 @@ impl RecoveryExecutor {
                 manager.clear();
 
                 // Reset retry tracking
-                if let Ok(mut states) = self.retry_states.write() {
-                    states.clear();
-                }
+                self.retry_states.write().clear();
 
                 Ok(())
             }
@@ -339,10 +338,7 @@ impl RecoveryExecutor {
 
         // Get or create retry state for this pattern
         let (attempt, actual_delay_ms) = {
-            let mut states = self
-                .retry_states
-                .write()
-                .map_err(|_| "failed to acquire retry state lock".to_string())?;
+            let mut states = self.retry_states.write();
 
             let state = states.entry(key.clone()).or_insert_with(|| RetryState {
                 attempt_count: 0,
@@ -425,17 +421,15 @@ impl RecoveryExecutor {
 
     /// Reset retry state for a specific pattern (e.g. after a successful operation).
     pub fn reset_retry_state(&self, pattern_key: &str) {
-        if let Ok(mut states) = self.retry_states.write() {
-            states.remove(pattern_key);
-        }
+        self.retry_states.write().remove(pattern_key);
     }
 
     /// Get the current retry attempt count for a pattern.
     pub fn retry_attempt_count(&self, pattern_key: &str) -> u32 {
         self.retry_states
             .read()
-            .ok()
-            .and_then(|states| states.get(pattern_key).map(|s| s.attempt_count))
+            .get(pattern_key)
+            .map(|s| s.attempt_count)
             .unwrap_or(0)
     }
 
@@ -452,10 +446,7 @@ impl RecoveryExecutor {
 
     /// Get history
     pub fn history(&self) -> Vec<RecoveryExecution> {
-        self.history
-            .read()
-            .map(|h| h.iter().cloned().collect())
-            .unwrap_or_default()
+        self.history.read().iter().cloned().collect()
     }
 
     /// Get summary

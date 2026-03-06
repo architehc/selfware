@@ -18,7 +18,7 @@
 //! }
 //! ```
 
-// Feature-gated module - dead_code lint disabled at crate level
+#![allow(dead_code, unused_imports, unused_variables)]
 
 pub mod ast;
 pub mod lexer;

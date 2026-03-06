@@ -7,6 +7,8 @@
 //! - Error tracking
 //! - CLI stats command
 
+#![allow(dead_code, unused_imports, unused_variables)]
+
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

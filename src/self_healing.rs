@@ -25,12 +25,11 @@
 
 // Feature-gated module - dead_code lint disabled at crate level
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tracing::{error, warn};
 
 mod executor;
 
@@ -190,12 +189,9 @@ impl ErrorLearner {
             .unwrap_or_default()
             .as_secs();
 
-        // Add to recent errors (recover from poisoned lock)
+        // Add to recent errors
         {
-            let mut errors = self.errors.write().unwrap_or_else(|e| {
-                error!("ErrorLearner::errors write lock poisoned - recovering from potentially corrupt state");
-                e.into_inner()
-            });
+            let mut errors = self.errors.write();
             errors.push_back(error.clone());
 
             // Remove old errors outside window
@@ -215,14 +211,7 @@ impl ErrorLearner {
 
     /// Detect error patterns
     fn detect_patterns(&self) {
-        let errors = self
-            .errors
-            .read()
-            .unwrap_or_else(|e| {
-                warn!("ErrorLearner::errors read lock poisoned - recovering from potentially corrupt state");
-                e.into_inner()
-            })
-            .clone();
+        let errors = self.errors.read().clone();
 
         // Group by error type and context
         let mut groups: HashMap<String, Vec<&ErrorOccurrence>> = HashMap::new();
@@ -231,12 +220,9 @@ impl ErrorLearner {
             groups.entry(key).or_default().push(error);
         }
 
-        // Create patterns from groups that exceed threshold (recover from poisoned lock)
+        // Create patterns from groups that exceed threshold
         {
-            let mut patterns = self.patterns.write().unwrap_or_else(|e| {
-                error!("ErrorLearner::patterns write lock poisoned - recovering from potentially corrupt state");
-                e.into_inner()
-            });
+            let mut patterns = self.patterns.write();
             for (key, group) in groups {
                 if group.len() >= self.config.pattern_threshold as usize {
                     let first = group.first().unwrap();
@@ -279,13 +265,7 @@ impl ErrorLearner {
 
     /// Find best recovery strategy for an error pattern
     fn find_best_recovery(&self, pattern_id: &str) -> Option<RecoveryStrategy> {
-        let history = self
-            .recovery_history
-            .read()
-            .unwrap_or_else(|e| {
-                warn!("ErrorLearner::recovery_history read lock poisoned - recovering from potentially corrupt state");
-                e.into_inner()
-            });
+        let history = self.recovery_history.read();
         if let Some(results) = history.get(pattern_id) {
             // Find strategy with highest success rate
             let mut strategy_stats: HashMap<String, (u32, u32)> = HashMap::new(); // (success, total)
@@ -315,13 +295,7 @@ impl ErrorLearner {
 
     /// Record recovery result
     pub fn record_recovery(&self, pattern_id: &str, strategy: &str, success: bool) {
-        let mut history = self
-            .recovery_history
-            .write()
-            .unwrap_or_else(|e| {
-                error!("ErrorLearner::recovery_history write lock poisoned - recovering from potentially corrupt state");
-                e.into_inner()
-            });
+        let mut history = self.recovery_history.write();
         let results = history.entry(pattern_id.to_string()).or_default();
         results.push(RecoveryResult {
             strategy: strategy.to_string(),
@@ -340,15 +314,7 @@ impl ErrorLearner {
 
     /// Get patterns
     pub fn patterns(&self) -> Vec<ErrorPattern> {
-        self.patterns
-            .read()
-            .unwrap_or_else(|e| {
-                warn!("ErrorLearner::patterns read lock poisoned - recovering from potentially corrupt state");
-                e.into_inner()
-            })
-            .values()
-            .cloned()
-            .collect()
+        self.patterns.read().values().cloned().collect()
     }
 
     /// Get recommended recovery for error
@@ -358,15 +324,7 @@ impl ErrorLearner {
             .recoveries_suggested
             .fetch_add(1, Ordering::Relaxed);
 
-        self.patterns
-            .read()
-            .unwrap_or_else(|e| {
-                warn!("ErrorLearner::patterns read lock poisoned in recommend_recovery - recovering from potentially corrupt state");
-                e.into_inner()
-            })
-            .get(&key)?
-            .recommended_recovery
-            .clone()
+        self.patterns.read().get(&key)?.recommended_recovery.clone()
     }
 
     /// Get summary
@@ -375,40 +333,15 @@ impl ErrorLearner {
             errors_recorded: self.stats.errors_recorded.load(Ordering::Relaxed),
             patterns_detected: self.stats.patterns_detected.load(Ordering::Relaxed),
             recoveries_suggested: self.stats.recoveries_suggested.load(Ordering::Relaxed),
-            active_patterns: self
-                .patterns
-                .read()
-                .unwrap_or_else(|e| {
-                    warn!("ErrorLearner::patterns read lock poisoned in summary - recovering from potentially corrupt state");
-                    e.into_inner()
-                })
-                .len(),
+            active_patterns: self.patterns.read().len(),
         }
     }
 
     /// Clear all data
     pub fn clear(&self) {
-        self.errors
-            .write()
-            .unwrap_or_else(|e| {
-                error!("ErrorLearner::errors write lock poisoned in clear - recovering from potentially corrupt state");
-                e.into_inner()
-            })
-            .clear();
-        self.patterns
-            .write()
-            .unwrap_or_else(|e| {
-                error!("ErrorLearner::patterns write lock poisoned in clear - recovering from potentially corrupt state");
-                e.into_inner()
-            })
-            .clear();
-        self.recovery_history
-            .write()
-            .unwrap_or_else(|e| {
-                error!("ErrorLearner::recovery_history write lock poisoned in clear - recovering from potentially corrupt state");
-                e.into_inner()
-            })
-            .clear();
+        self.errors.write().clear();
+        self.patterns.write().clear();
+        self.recovery_history.write().clear();
     }
 }
 
@@ -625,10 +558,7 @@ impl StateManager {
             .fetch_add(checkpoint.size_bytes as u64, Ordering::Relaxed);
 
         {
-            let mut checkpoints = self.checkpoints.write().unwrap_or_else(|e| {
-                error!("StateManager::checkpoints write lock poisoned - recovering from potentially corrupt state");
-                e.into_inner()
-            });
+            let mut checkpoints = self.checkpoints.write();
             checkpoints.push_back(checkpoint);
 
             // Limit checkpoints
@@ -637,13 +567,7 @@ impl StateManager {
             }
         }
 
-        *self
-            .last_checkpoint
-            .write()
-            .unwrap_or_else(|e| {
-                error!("StateManager::last_checkpoint write lock poisoned - recovering from potentially corrupt state");
-                e.into_inner()
-            }) = Some(Instant::now());
+        *self.last_checkpoint.write() = Some(Instant::now());
 
         id
     }
@@ -654,13 +578,7 @@ impl StateManager {
             return false;
         }
 
-        let last = self
-            .last_checkpoint
-            .read()
-            .unwrap_or_else(|e| {
-                warn!("StateManager::last_checkpoint read lock poisoned - recovering from potentially corrupt state");
-                e.into_inner()
-            });
+        let last = self.last_checkpoint.read();
         if let Some(instant) = *last {
             return instant.elapsed() >= Duration::from_secs(self.config.checkpoint_interval_secs);
         }
@@ -673,10 +591,7 @@ impl StateManager {
             .restores_performed
             .fetch_add(1, Ordering::Relaxed);
 
-        let checkpoints = self.checkpoints.read().unwrap_or_else(|e| {
-            warn!("StateManager::checkpoints read lock poisoned in restore - recovering from potentially corrupt state");
-            e.into_inner()
-        });
+        let checkpoints = self.checkpoints.read();
 
         if let Some(id) = checkpoint_id {
             checkpoints.iter().find(|c| c.id == id).cloned()
@@ -688,38 +603,17 @@ impl StateManager {
 
     /// Get latest checkpoint
     pub fn latest(&self) -> Option<StateCheckpoint> {
-        self.checkpoints
-            .read()
-            .unwrap_or_else(|e| {
-                warn!("StateManager::checkpoints read lock poisoned in latest - recovering from potentially corrupt state");
-                e.into_inner()
-            })
-            .back()
-            .cloned()
+        self.checkpoints.read().back().cloned()
     }
 
     /// Get all checkpoints
     pub fn all(&self) -> Vec<StateCheckpoint> {
-        self.checkpoints
-            .read()
-            .unwrap_or_else(|e| {
-                warn!("StateManager::checkpoints read lock poisoned in all - recovering from potentially corrupt state");
-                e.into_inner()
-            })
-            .iter()
-            .cloned()
-            .collect()
+        self.checkpoints.read().iter().cloned().collect()
     }
 
     /// Clear checkpoints
     pub fn clear(&self) {
-        self.checkpoints
-            .write()
-            .unwrap_or_else(|e| {
-                error!("StateManager::checkpoints write lock poisoned in clear - recovering from potentially corrupt state");
-                e.into_inner()
-            })
-            .clear();
+        self.checkpoints.write().clear();
     }
 
     /// Get summary
@@ -728,14 +622,7 @@ impl StateManager {
             checkpoints_created: self.stats.checkpoints_created.load(Ordering::Relaxed),
             restores_performed: self.stats.restores_performed.load(Ordering::Relaxed),
             total_bytes_saved: self.stats.total_bytes_saved.load(Ordering::Relaxed),
-            active_checkpoints: self
-                .checkpoints
-                .read()
-                .unwrap_or_else(|e| {
-                    warn!("StateManager::checkpoints read lock poisoned in summary - recovering from potentially corrupt state");
-                    e.into_inner()
-                })
-                .len(),
+            active_checkpoints: self.checkpoints.read().len(),
         }
     }
 }
@@ -832,10 +719,7 @@ impl HealthPredictor {
             .as_secs();
 
         {
-            let mut history = self.history.write().unwrap_or_else(|e| {
-                error!("HealthPredictor::history write lock poisoned - recovering from potentially corrupt state");
-                e.into_inner()
-            });
+            let mut history = self.history.write();
             let points = history.entry(component.to_string()).or_default();
             points.push(HealthDataPoint {
                 timestamp: now,
@@ -859,10 +743,6 @@ impl HealthPredictor {
         let history = self
             .history
             .read()
-            .unwrap_or_else(|e| {
-                warn!("HealthPredictor::history read lock poisoned - recovering from potentially corrupt state");
-                e.into_inner()
-            })
             .get(component)
             .cloned()
             .unwrap_or_default();
@@ -922,36 +802,17 @@ impl HealthPredictor {
 
         self.predictions
             .write()
-            .unwrap_or_else(|e| {
-                error!("HealthPredictor::predictions write lock poisoned - recovering from potentially corrupt state");
-                e.into_inner()
-            })
             .insert(component.to_string(), prediction);
     }
 
     /// Get prediction for component
     pub fn predict(&self, component: &str) -> Option<HealthPrediction> {
-        self.predictions
-            .read()
-            .unwrap_or_else(|e| {
-                warn!("HealthPredictor::predictions read lock poisoned in predict - recovering from potentially corrupt state");
-                e.into_inner()
-            })
-            .get(component)
-            .cloned()
+        self.predictions.read().get(component).cloned()
     }
 
     /// Get all predictions
     pub fn all_predictions(&self) -> Vec<HealthPrediction> {
-        self.predictions
-            .read()
-            .unwrap_or_else(|e| {
-                warn!("HealthPredictor::predictions read lock poisoned in all_predictions - recovering from potentially corrupt state");
-                e.into_inner()
-            })
-            .values()
-            .cloned()
-            .collect()
+        self.predictions.read().values().cloned().collect()
     }
 
     /// Record prediction outcome
@@ -976,20 +837,8 @@ impl HealthPredictor {
 
     /// Clear all data
     pub fn clear(&self) {
-        self.history
-            .write()
-            .unwrap_or_else(|e| {
-                error!("HealthPredictor::history write lock poisoned in clear - recovering from potentially corrupt state");
-                e.into_inner()
-            })
-            .clear();
-        self.predictions
-            .write()
-            .unwrap_or_else(|e| {
-                error!("HealthPredictor::predictions write lock poisoned in clear - recovering from potentially corrupt state");
-                e.into_inner()
-            })
-            .clear();
+        self.history.write().clear();
+        self.predictions.write().clear();
     }
 }
 
@@ -1038,11 +887,7 @@ pub struct HealthPredictorState {
 impl HealthPredictor {
     /// Save history and stats to a JSON file.
     pub fn save_history(&self, path: &std::path::Path) -> anyhow::Result<()> {
-        let history = self
-            .history
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let history = self.history.read().clone();
         let state = HealthPredictorState {
             history,
             stats: self.stats.snapshot(),
@@ -1059,7 +904,7 @@ impl HealthPredictor {
     pub fn load_history(&self, path: &std::path::Path) -> anyhow::Result<()> {
         let data = std::fs::read_to_string(path)?;
         let state: HealthPredictorState = serde_json::from_str(&data)?;
-        *self.history.write().unwrap_or_else(|e| e.into_inner()) = state.history;
+        *self.history.write() = state.history;
         self.stats.restore(&state.stats);
         Ok(())
     }
@@ -1075,16 +920,8 @@ pub struct ErrorLearnerState {
 impl ErrorLearner {
     /// Save patterns and recovery history to a JSON file.
     pub fn save_patterns(&self, path: &std::path::Path) -> anyhow::Result<()> {
-        let patterns = self
-            .patterns
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        let recovery_history = self
-            .recovery_history
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let patterns = self.patterns.read().clone();
+        let recovery_history = self.recovery_history.read().clone();
         let state = ErrorLearnerState {
             patterns,
             recovery_history,
@@ -1101,11 +938,8 @@ impl ErrorLearner {
     pub fn load_patterns(&self, path: &std::path::Path) -> anyhow::Result<()> {
         let data = std::fs::read_to_string(path)?;
         let state: ErrorLearnerState = serde_json::from_str(&data)?;
-        *self.patterns.write().unwrap_or_else(|e| e.into_inner()) = state.patterns;
-        *self
-            .recovery_history
-            .write()
-            .unwrap_or_else(|e| e.into_inner()) = state.recovery_history;
+        *self.patterns.write() = state.patterns;
+        *self.recovery_history.write() = state.recovery_history;
         Ok(())
     }
 }
@@ -2538,8 +2372,8 @@ mod tests {
         let predictor2 = HealthPredictor::new();
         predictor2.load_history(&path).unwrap();
 
-        let h1 = predictor.history.read().unwrap();
-        let h2 = predictor2.history.read().unwrap();
+        let h1 = predictor.history.read();
+        let h2 = predictor2.history.read();
         assert_eq!(
             h1.get("svc_a").map(|v| v.len()),
             h2.get("svc_a").map(|v| v.len())
@@ -2567,8 +2401,8 @@ mod tests {
         let learner2 = ErrorLearner::default();
         learner2.load_patterns(&path).unwrap();
 
-        let p1 = learner.patterns.read().unwrap();
-        let p2 = learner2.patterns.read().unwrap();
+        let p1 = learner.patterns.read();
+        let p2 = learner2.patterns.read();
         assert_eq!(p1.len(), p2.len());
     }
 

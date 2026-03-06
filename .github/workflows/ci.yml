@@ -238,7 +238,7 @@ jobs:
         uses: taiki-e/install-action@cargo-tarpaulin
 
       - name: Generate coverage
-        run: cargo tarpaulin --out Html --out Xml --output-dir coverage --features extras --timeout 600 --fail-under 78 --skip-clean -- --test-threads 1
+        run: cargo tarpaulin --out Html --out Xml --output-dir coverage --features extras --timeout 600 --fail-under 80 --skip-clean -- --test-threads 1
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4

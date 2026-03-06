@@ -1,5 +1,7 @@
 //! AST -- Abstract Syntax Tree node definitions for the workflow DSL.
 
+#![allow(dead_code, unused_imports, unused_variables)]
+
 /// AST Node types
 #[derive(Debug, Clone)]
 pub enum AstNode {

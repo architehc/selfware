@@ -3,6 +3,8 @@
 //! Tracks all edits with checkpoints, enabling undo/redo
 //! and timeline visualization for the agent's file operations.
 
+#![allow(dead_code, unused_imports, unused_variables)]
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

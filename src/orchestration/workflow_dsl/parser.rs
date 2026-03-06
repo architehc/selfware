@@ -7,6 +7,8 @@
 //! `#[cfg(test)]` module are intentional test assertions and do not affect
 //! production safety.
 
+#![allow(dead_code, unused_imports, unused_variables)]
+
 use super::ast::AstNode;
 use super::lexer::Token;
 

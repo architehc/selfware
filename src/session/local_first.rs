@@ -3,6 +3,8 @@
 //! Minimize network usage through aggressive caching, offline capabilities,
 //! edge computing patterns, and sync efficiency.
 
+#![allow(dead_code, unused_imports, unused_variables)]
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};

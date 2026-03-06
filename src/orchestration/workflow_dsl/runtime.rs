@@ -1,5 +1,7 @@
 //! Runtime -- workflow executor that walks the AST and evaluates nodes.
 
+#![allow(dead_code, unused_imports, unused_variables)]
+
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;

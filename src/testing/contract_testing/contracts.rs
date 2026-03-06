@@ -1,5 +1,7 @@
 //! Consumer-Driven Contracts (Pact-style)
 
+#![allow(dead_code, unused_imports, unused_variables)]
+
 use super::*;
 
 /// HTTP method

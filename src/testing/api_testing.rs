@@ -7,6 +7,8 @@
 //! - Response validation
 //! - Request chaining
 
+#![allow(dead_code, unused_imports, unused_variables)]
+
 use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};

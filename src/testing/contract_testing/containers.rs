@@ -1,5 +1,7 @@
 //! Test Container Orchestration
 
+#![allow(dead_code, unused_imports, unused_variables)]
+
 use super::*;
 
 /// Container type

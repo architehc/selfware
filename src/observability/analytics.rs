@@ -10,6 +10,8 @@
 //! or by calling `AnalyticsDashboard::set_enabled(false)`. When disabled,
 //! all `record_*` methods become no-ops.
 
+#![allow(dead_code, unused_imports, unused_variables)]
+
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};

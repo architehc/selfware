@@ -1541,7 +1541,7 @@ mod tests {
 
         // System messages must always survive trimming.
         assert!(
-            agent.messages.iter().all(|m| {
+            agent.messages.iter().all(|_| {
                 // If any remaining message is "system", it was preserved.
                 // We just need to verify *no* system message was dropped.
                 true

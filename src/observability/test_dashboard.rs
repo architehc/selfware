@@ -7,6 +7,8 @@
 //! - Failing test isolation
 //! - Progress visualization
 
+#![allow(dead_code, unused_imports, unused_variables)]
+
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};

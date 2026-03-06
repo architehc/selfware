@@ -3,6 +3,8 @@
 //! Provides consumer-driven contracts, service virtualization,
 //! test container orchestration, and API compatibility checking.
 
+#![allow(dead_code, unused_imports, unused_variables)]
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

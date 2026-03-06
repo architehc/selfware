@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports, unused_variables)]
+
 use crate::kv_store::entry::Entry;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -31,6 +31,8 @@
 //! 4. All mutations must pass `cargo check` before entering evaluation
 //! 5. Property tests are mandatory for core module mutations
 
+#![allow(dead_code, unused_imports, unused_variables)]
+
 pub mod ast_tools;
 pub mod daemon;
 pub mod fitness;

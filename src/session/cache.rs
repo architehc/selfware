@@ -23,7 +23,7 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
-// Feature-gated module - dead_code lint disabled at crate level
+#![allow(dead_code, unused_imports, unused_variables)]
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

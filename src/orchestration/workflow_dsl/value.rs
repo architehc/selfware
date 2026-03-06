@@ -1,5 +1,7 @@
 //! Value -- runtime value representation and conversions.
 
+#![allow(dead_code, unused_imports, unused_variables)]
+
 use std::collections::HashMap;
 
 use super::ast::AstNode;

@@ -1,5 +1,7 @@
 //! API Compatibility Checking
 
+#![allow(dead_code, unused_imports, unused_variables)]
+
 use super::*;
 
 /// API version

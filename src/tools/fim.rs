@@ -117,12 +117,62 @@ impl Tool for FileFimEdit {
             .map(|c| c.text.clone())
             .unwrap_or_default();
 
+        // Validate generated output before writing
+        let trimmed = middle.trim();
+        if trimmed.is_empty() {
+            return Err(anyhow!(
+                "FIM generated empty output — refusing to write. \
+                 The model may not have understood the instruction."
+            ));
+        }
+
         let new_content = format!("{}{}{}", prefix, middle, suffix);
-        fs::write(path, new_content).await?;
+
+        // For Rust files, run a quick syntax check before writing
+        if path.ends_with(".rs") {
+            use tokio::process::Command;
+            let check = Command::new("rustfmt")
+                .args(["--edition", "2021", "--check"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .spawn();
+
+            if let Ok(mut child) = check {
+                if let Some(ref mut stdin) = child.stdin {
+                    use tokio::io::AsyncWriteExt;
+                    let _ = stdin.write_all(new_content.as_bytes()).await;
+                }
+                // rustfmt exits 1 on parse errors (not just format diffs).
+                // Only block on actual parse failures, not formatting diffs.
+                // We use --check so it doesn't modify stdin; exit code 0 or 1
+                // both mean "parseable". Exit code 2+ means parse error.
+                if let Ok(status) = child.wait().await {
+                    if status.code().unwrap_or(0) >= 2 {
+                        return Err(anyhow!(
+                            "FIM-generated code has Rust syntax errors (rustfmt \
+                             exit code {}). Refusing to write to prevent corruption.",
+                            status.code().unwrap_or(-1)
+                        ));
+                    }
+                }
+            }
+            // If rustfmt is not available, proceed without the check.
+        }
+
+        // Create backup before overwriting
+        let backup_path = format!("{}.fim-backup", path);
+        if let Err(e) = fs::copy(path, &backup_path).await {
+            // Non-fatal: warn but proceed (file might be new)
+            tracing::debug!("Could not create FIM backup: {}", e);
+        }
+
+        fs::write(path, &new_content).await?;
 
         Ok(serde_json::json!({
             "status": "success",
-            "message": format!("Successfully replaced lines {}-{} using FIM.", start_line, end_line)
+            "message": format!("Successfully replaced lines {}-{} using FIM.", start_line, end_line),
+            "backup": backup_path
         }))
     }
 }

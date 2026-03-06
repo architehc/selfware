@@ -1,5 +1,7 @@
 //! Lexer -- tokenizes DSL source text into a stream of [`Token`]s.
 
+#![allow(dead_code, unused_imports, unused_variables)]
+
 /// Token types for the DSL
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {

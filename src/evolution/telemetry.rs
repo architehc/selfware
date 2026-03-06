@@ -5,6 +5,8 @@
 //! gradient signal to guide mutations toward actual bottlenecks rather than
 //! blind search.
 
+#![allow(dead_code, unused_imports, unused_variables)]
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;

@@ -10,6 +10,8 @@
 //! day, provider, and workload characteristics. These figures are intended for
 //! directional awareness, not precise carbon accounting.
 
+#![allow(dead_code, unused_imports, unused_variables)]
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

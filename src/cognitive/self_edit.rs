@@ -406,17 +406,38 @@ impl SelfEditOrchestrator {
     /// Uses path canonicalization to catch symlink-based bypasses: the
     /// target file is resolved relative to `project_root` so that
     /// `../../safety/checker.rs` or a symlink pointing there is still
-    /// caught.  Falls back to plain substring matching when
-    /// canonicalization is not possible (e.g. the file doesn't exist yet).
+    /// caught.
+    ///
+    /// **Fail-closed**: if the target path exists on disk but
+    /// canonicalization fails (e.g. broken symlink, permission error),
+    /// the path is denied by default to prevent bypass.  Non-existent
+    /// paths (common in tests and for proposed-but-not-yet-created files)
+    /// fall through to substring matching.
     fn is_denied(&self, target: &ImprovementTarget) -> bool {
         if let Some(ref file) = target.file {
-            // Attempt to canonicalize the target path so symlinks and
-            // traversals (../.. etc.) resolve to the real location.
-            let resolved = self
-                .project_root
-                .join(file)
-                .canonicalize()
-                .unwrap_or_else(|_| self.project_root.join(file));
+            let raw_path = self.project_root.join(file);
+
+            // If the path exists on disk, we MUST be able to canonicalize it.
+            // Failure here (broken symlink, permission denied, etc.) is
+            // treated as denied to prevent symlink-based bypass attacks.
+            let resolved = match raw_path.canonicalize() {
+                Ok(p) => p,
+                Err(_) if raw_path.exists() || raw_path.symlink_metadata().is_ok() => {
+                    // Path exists (or is a symlink) but can't be resolved —
+                    // fail closed.
+                    return true;
+                }
+                Err(_) => {
+                    // Path doesn't exist — fall through to substring check
+                    // (covers tests and proposed files).
+                    for denied in DENY_LIST {
+                        if file.contains(denied) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            };
             let resolved_str = resolved.to_string_lossy();
 
             for denied in DENY_LIST {
@@ -434,8 +455,8 @@ impl SelfEditOrchestrator {
                     return true;
                 }
 
-                // Fallback: plain substring check covers cases where
-                // canonicalization isn't possible (non-existent paths in tests).
+                // Also check the raw file string for substring matches,
+                // covering cases where the denied path itself doesn't exist.
                 if file.contains(denied) {
                     return true;
                 }
@@ -994,5 +1015,55 @@ mod tests {
     fn test_glob_rs_files_nonexistent_dir() {
         let result = glob_rs_files(Path::new("/tmp/selfware_nonexistent_dir_123456"));
         assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_deny_list_broken_symlink_fails_closed() {
+        // A broken symlink should be denied (fail-closed) because we
+        // can't verify it doesn't resolve to a protected file.
+        let tmp = std::env::temp_dir().join("selfware_test_symlink_deny");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Create a broken symlink
+        let link_path = tmp.join("sneaky.rs");
+        let _ = std::fs::remove_file(&link_path);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/nonexistent/target", &link_path).unwrap();
+
+        #[cfg(unix)]
+        {
+            let orchestrator = SelfEditOrchestrator::new(tmp.clone());
+            let target = ImprovementTarget::new(
+                ImprovementCategory::CodeQuality,
+                "edit sneaky file",
+                "reason",
+                ImprovementSource::CodeSmell,
+            )
+            .with_file("sneaky.rs");
+
+            // Broken symlink exists but can't be canonicalized → denied
+            assert!(
+                orchestrator.is_denied(&target),
+                "broken symlink should be denied (fail-closed)"
+            );
+        }
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn test_deny_list_traversal_denied() {
+        let orchestrator = SelfEditOrchestrator::new(PathBuf::from("/tmp/selfware_test"));
+        let target = ImprovementTarget::new(
+            ImprovementCategory::CodeQuality,
+            "traverse",
+            "reason",
+            ImprovementSource::CodeSmell,
+        )
+        .with_file("../../etc/safety/checker.rs");
+        assert!(
+            orchestrator.is_denied(&target),
+            "path traversal to denied file should be caught"
+        );
     }
 }
