@@ -655,7 +655,7 @@ mod tests {
         assert!(cont);
         // Refresh adds a "Manual refresh" event
         assert!(app.swarm_state.events.len() > initial_event_count);
-        let last_event = app.swarm_state.events.last().unwrap();
+        let last_event = app.swarm_state.events.back().unwrap();
         assert_eq!(last_event.message, "Manual refresh");
     }
 
@@ -795,7 +795,7 @@ mod tests {
 
         // Should have added an event about the new task
         assert!(app.swarm_state.events.len() > events_before);
-        let last = app.swarm_state.events.last().unwrap();
+        let last = app.swarm_state.events.back().unwrap();
         assert_eq!(last.message, "New task added to queue");
     }
 
@@ -811,7 +811,7 @@ mod tests {
         app.handle_event(event);
 
         assert!(app.swarm_state.events.len() > events_before);
-        let last = app.swarm_state.events.last().unwrap();
+        let last = app.swarm_state.events.back().unwrap();
         assert!(last.message.starts_with("Created decision:"));
     }
 
@@ -835,7 +835,7 @@ mod tests {
 
         // Should have added a vote event
         assert!(app.swarm_state.events.len() > events_before);
-        let last = app.swarm_state.events.last().unwrap();
+        let last = app.swarm_state.events.back().unwrap();
         assert!(last.message.contains("voted on"));
     }
 
@@ -1174,7 +1174,7 @@ mod tests {
         )));
 
         assert!(app.swarm_state.events.len() > events_before);
-        let last = app.swarm_state.events.last().unwrap();
+        let last = app.swarm_state.events.back().unwrap();
         assert!(last.message.starts_with("Focused on agent:"));
     }
 
@@ -1197,7 +1197,7 @@ mod tests {
         )));
 
         assert!(app.swarm_state.events.len() > events_before);
-        let last = app.swarm_state.events.last().unwrap();
+        let last = app.swarm_state.events.back().unwrap();
         assert_eq!(last.message, "Unfocused agent (showing all)");
     }
 
@@ -1212,7 +1212,7 @@ mod tests {
         )));
 
         assert!(app.swarm_state.events.len() > events_before);
-        let last = app.swarm_state.events.last().unwrap();
+        let last = app.swarm_state.events.back().unwrap();
         assert!(last.message.starts_with("Quick-focused on agent:"));
     }
 

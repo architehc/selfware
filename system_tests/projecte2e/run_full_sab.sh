@@ -12,7 +12,7 @@
 #   ./run_full_sab.sh                      # Run all scenarios
 #   ./run_full_sab.sh expert_async_race    # Run a single scenario
 # =============================================================================
-set -uo pipefail
+set -euo pipefail
 
 THIS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${THIS_DIR}/../.." && pwd)"
