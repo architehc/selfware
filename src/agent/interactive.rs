@@ -537,9 +537,10 @@ impl Agent {
             // === New slash commands ===
 
             if input == "/diff" {
-                match std::process::Command::new("git")
+                match tokio::process::Command::new("git")
                     .args(["diff", "--stat"])
                     .output()
+                    .await
                 {
                     Ok(out) => {
                         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -555,9 +556,10 @@ impl Agent {
             }
 
             if input == "/git" {
-                match std::process::Command::new("git")
+                match tokio::process::Command::new("git")
                     .args(["status", "--short", "--branch"])
                     .output()
+                    .await
                 {
                     Ok(out) => {
                         let stdout = String::from_utf8_lossy(&out.stdout);

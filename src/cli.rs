@@ -1140,7 +1140,9 @@ async fn handle_command(
         }
 
         Commands::Init { template } => {
-            run_init_wizard(template)?;
+            tokio::task::spawn_blocking(move || run_init_wizard(template))
+                .await
+                .unwrap()?;
         }
     }
 

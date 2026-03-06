@@ -4,8 +4,8 @@ use crate::cognitive::self_edit::SelfEditOrchestrator;
 use crate::errors::{Result, SelfwareError};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
+use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 
 /// Serializable snapshot of RSI loop state for persistence across restarts.
@@ -295,6 +295,7 @@ impl RSIOrchestrator {
             .arg(&script_path)
             .current_dir(work_dir)
             .output()
+            .await
             .map_err(|e| {
                 SelfwareError::Internal(format!("Failed to run benchmark script: {}", e))
             })?;
@@ -355,6 +356,7 @@ impl RSIOrchestrator {
             .arg(format!("{}/", sandbox.work_dir().display()))
             .arg(format!("{}/", self.project_root.display()))
             .output()
+            .await
             .map_err(|e| SelfwareError::Internal(e.to_string()))?;
 
         if !output.status.success() {

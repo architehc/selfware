@@ -1,6 +1,5 @@
 // Crate is under active development — many types/functions are defined ahead
-// of use across modules.  Suppress dead-code noise so clippy -D warnings passes.
-#![allow(dead_code, unused_imports, unused_variables)]
+// of use across modules.
 
 //! Selfware Workshop - Your Personal AI Companion
 //!
