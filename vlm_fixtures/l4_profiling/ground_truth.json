@@ -1,0 +1,41 @@
+{
+  "level": "l4_profiling",
+  "scenarios": [
+    {
+      "id": "simple_flamegraph",
+      "image": "simple_flamegraph.png",
+      "expected": {
+        "hottest_function": "hnsw::search_layer",
+        "estimated_pct": 18,
+        "call_stack": ["main", "agent::run_loop", "agent::context::build_context", "memory::vector_search", "hnsw::search_layer"],
+        "total_threads": 4,
+        "optimization_suggestions": ["optimize HNSW search parameters", "cache frequent vector lookups", "reduce embedding dimensionality"]
+      }
+    },
+    {
+      "id": "multithread_profile",
+      "image": "multithread_profile.png",
+      "expected": {
+        "thread_count": 4,
+        "busiest_thread": "Thread 0 (main)",
+        "busiest_thread_pct": 45,
+        "hottest_function": "agent::run_loop",
+        "contention_detected": true,
+        "contention_location": "context::SharedState",
+        "suggestions": ["reduce lock contention on SharedState", "offload work from main thread"]
+      }
+    },
+    {
+      "id": "memory_profile",
+      "image": "memory_profile.png",
+      "expected": {
+        "top_allocator": "memory::vector_store::index",
+        "top_allocator_pct": 36.8,
+        "peak_memory_mb": 847,
+        "allocation_pattern": "bursty",
+        "peak_trigger": "context build at 4s",
+        "suggestions": ["pool vector_store allocations", "stream tokenizer output", "cap context buffer with LRU eviction"]
+      }
+    }
+  ]
+}

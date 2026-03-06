@@ -1,0 +1,40 @@
+{
+  "level": "mega_evolution",
+  "scenarios": [
+    {
+      "id": "iteration_scoring",
+      "image": "iteration_01.png",
+      "expected": {
+        "composition": 75,
+        "hierarchy": 70,
+        "readability": 80,
+        "consistency": 72,
+        "accessibility": 68,
+        "notes": "Basic single-panel layout with minimal structure. Readable but lacks visual hierarchy and widget density."
+      }
+    },
+    {
+      "id": "progression_analysis",
+      "image": "progression_pair.png",
+      "expected": {
+        "before": {"composition": 30, "hierarchy": 20, "readability": 60, "consistency": 40, "accessibility": 50},
+        "after": {"composition": 75, "hierarchy": 80, "readability": 85, "consistency": 78, "accessibility": 72},
+        "trajectory": "improving",
+        "improvements": ["layout hierarchy", "widget density", "status visibility", "multi-panel structure"]
+      }
+    },
+    {
+      "id": "rating_prediction",
+      "image": "iteration_03.png",
+      "expected": {
+        "rating": "BLOOM",
+        "composition": 85,
+        "hierarchy": 88,
+        "readability": 82,
+        "consistency": 80,
+        "accessibility": 78,
+        "justification": "Well-structured 4-panel dashboard with clear hierarchy, status bar, knowledge graph preview, and comprehensive keyboard shortcuts"
+      }
+    }
+  ]
+}

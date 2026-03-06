@@ -183,6 +183,17 @@ path = "examples/multi_agent.rs"
 name = "custom_config"
 path = "examples/custom_config.rs"
 
+# VLM Benchmark binaries
+[[bin]]
+name = "vlm_gen_fixtures"
+path = "src/bin/vlm_gen_fixtures.rs"
+required-features = ["vlm-bench"]
+
+[[bin]]
+name = "vlm_bench_run"
+path = "src/bin/vlm_bench_run.rs"
+required-features = ["vlm-bench"]
+
 # Benchmarks
 [[bench]]
 name = "token_processing"
