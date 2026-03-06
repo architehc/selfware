@@ -1,10 +1,12 @@
 //! Run the VLM benchmark suite against a live endpoint.
 //!
 //! Usage:
-//!   cargo run --features vlm-bench --bin vlm_bench_run -- \
-//!     --endpoint https://97921268284d.ngrok.app/v1 \
-//!     --model "unsloth/Qwen3.5-9B-GGUF:Q8_0" \
-//!     --concurrency 1
+//! ```sh
+//! cargo run --features vlm-bench --bin vlm_bench_run -- \
+//!   --endpoint <ENDPOINT_URL> \
+//!   --model "unsloth/Qwen3.5-9B-GGUF:Q8_0" \
+//!   --concurrency 1
+//! ```
 
 use clap::Parser;
 use selfware::vlm_bench::config::VlmBenchConfig;
@@ -86,8 +88,8 @@ async fn main() -> anyhow::Result<()> {
     println!("Timeout:     {}s", args.timeout);
     println!();
 
-    let mut config = VlmBenchConfig::new(&args.endpoint, &args.model)
-        .with_concurrency(args.concurrency);
+    let mut config =
+        VlmBenchConfig::new(&args.endpoint, &args.model).with_concurrency(args.concurrency);
     config.max_tokens = args.max_tokens;
     config.temperature = args.temperature;
     config.timeout_secs = args.timeout;
@@ -119,16 +121,9 @@ async fn main() -> anyhow::Result<()> {
     let output_dir = std::path::Path::new(&args.output_dir);
     report.write_to_dir(output_dir)?;
 
-    println!(
-        "Reports written to {}/",
-        output_dir.display()
-    );
-    println!(
-        "  - vlm_benchmark_report.json",
-    );
-    println!(
-        "  - vlm_benchmark_report.md",
-    );
+    println!("Reports written to {}/", output_dir.display());
+    println!("  - vlm_benchmark_report.json",);
+    println!("  - vlm_benchmark_report.md",);
 
     Ok(())
 }

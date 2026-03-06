@@ -34,11 +34,14 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 
 # Create dummy source files and directories to build dependencies
-RUN mkdir -p src && \
+RUN mkdir -p src/bin && \
     echo "fn main() {}" > src/main.rs && \
     echo "// dummy lib" > src/lib.rs && \
+    echo "fn main() {}" > src/bin/vlm_gen_fixtures.rs && \
+    echo "fn main() {}" > src/bin/vlm_bench_run.rs && \
     mkdir -p benches && \
     echo "fn main() {}" > benches/token_processing.rs && \
+    echo "fn main() {}" > benches/vlm_benchmark.rs && \
     mkdir -p tests/unit && echo "" > tests/unit/mod.rs && \
     mkdir -p tests/integration && echo "" > tests/integration/mod.rs
 
