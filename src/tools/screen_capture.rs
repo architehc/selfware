@@ -77,16 +77,30 @@ impl Tool for ScreenCapture {
                 let region = args
                     .get("region")
                     .context("region is required when target=region")?;
-                let x = region.get("x").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-                let y = region.get("y").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
-                let width = region
+                const MAX_COORD: i64 = 100_000;
+                const MAX_DIMENSION: u64 = 100_000;
+
+                let x_val = region.get("x").and_then(|v| v.as_i64()).unwrap_or(0);
+                let y_val = region.get("y").and_then(|v| v.as_i64()).unwrap_or(0);
+                if x_val.abs() > MAX_COORD || y_val.abs() > MAX_COORD {
+                    anyhow::bail!("Region coordinates out of range (max {})", MAX_COORD);
+                }
+                let x = x_val as i32;
+                let y = y_val as i32;
+
+                let w_val = region
                     .get("width")
                     .and_then(|v| v.as_u64())
-                    .context("region.width is required")? as u32;
-                let height = region
+                    .context("region.width is required")?;
+                let h_val = region
                     .get("height")
                     .and_then(|v| v.as_u64())
-                    .context("region.height is required")? as u32;
+                    .context("region.height is required")?;
+                if w_val > MAX_DIMENSION || h_val > MAX_DIMENSION {
+                    anyhow::bail!("Region dimensions out of range (max {})", MAX_DIMENSION);
+                }
+                let width = w_val as u32;
+                let height = h_val as u32;
                 capture_region(x, y, width, height)?
             }
             other => anyhow::bail!(

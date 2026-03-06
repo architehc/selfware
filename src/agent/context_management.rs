@@ -611,8 +611,11 @@ impl Agent {
                         crate::token_count::estimate_tokens_with_overhead(&full_content, 4);
                     total_tokens += file_tokens;
 
-                    // Add to context files tracking
-                    if !self.context_files.contains(&path_str) {
+                    // Add to context files tracking (bounded to prevent memory exhaustion)
+                    const MAX_CONTEXT_FILES: usize = 10_000;
+                    if !self.context_files.contains(&path_str)
+                        && self.context_files.len() < MAX_CONTEXT_FILES
+                    {
                         self.context_files.push(path_str.clone());
                     }
 

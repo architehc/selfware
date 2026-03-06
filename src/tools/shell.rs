@@ -68,7 +68,11 @@ impl Tool for ShellExec {
             10000
         }
 
-        let args: Args = serde_json::from_value(args)?;
+        let mut args: Args = serde_json::from_value(args)?;
+
+        // Cap timeout to prevent indefinite hangs (1 hour max)
+        const MAX_TIMEOUT_SECS: u64 = 3600;
+        args.timeout_secs = args.timeout_secs.min(MAX_TIMEOUT_SECS);
 
         // Command length limit to prevent abuse
         const MAX_COMMAND_LENGTH: usize = 10_000;

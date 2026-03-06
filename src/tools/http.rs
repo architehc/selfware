@@ -88,7 +88,11 @@ impl Tool for HttpRequest {
             true
         }
 
-        let args: Args = serde_json::from_value(args)?;
+        let mut args: Args = serde_json::from_value(args)?;
+
+        // Cap timeout to prevent indefinite hangs (5 minutes max for HTTP)
+        const MAX_TIMEOUT_SECS: u64 = 300;
+        args.timeout_secs = args.timeout_secs.min(MAX_TIMEOUT_SECS);
 
         // Validate URL
         let url = reqwest::Url::parse(&args.url).context("Invalid URL")?;

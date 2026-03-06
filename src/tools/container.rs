@@ -85,6 +85,10 @@ const SHELL_METACHARACTERS: &[char] = &[
 fn validate_port_mapping(mapping: &str) -> bool {
     let (port_part, proto) = if let Some(idx) = mapping.rfind('/') {
         let (p, pr) = mapping.split_at(idx);
+        // pr starts with '/'; trailing '/' with no protocol is invalid
+        if pr.len() <= 1 {
+            return false;
+        }
         (p, Some(&pr[1..]))
     } else {
         (mapping, None)
