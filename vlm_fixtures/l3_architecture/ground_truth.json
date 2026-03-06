@@ -1,0 +1,55 @@
+{
+  "level": "l3_architecture",
+  "scenarios": [
+    {
+      "id": "evolution_engine",
+      "image": "evolution_diagram.png",
+      "expected": {
+        "components": [
+          {"name": "Daemon Loop", "module": "src/cognitive/evolution/daemon.rs", "role": "orchestrates evolution cycles"},
+          {"name": "Scheduler", "module": "src/cognitive/evolution/scheduler.rs", "role": "dispatches evaluation tasks"},
+          {"name": "Sandbox Executor", "module": "src/cognitive/evolution/sandbox.rs", "role": "runs candidates in isolation"},
+          {"name": "Tournament Selection", "module": "src/cognitive/evolution/tournament.rs", "role": "selects survivors from pool"},
+          {"name": "Fitness Evaluator", "module": "src/cognitive/evolution/fitness.rs", "role": "scores candidate quality"},
+          {"name": "Mutation Engine", "module": "src/cognitive/evolution/mutation.rs", "role": "generates candidate variants"},
+          {"name": "Generation Pool", "module": "src/cognitive/evolution/pool.rs", "role": "stores candidates and history"}
+        ],
+        "data_flow": [
+          {"from": "Daemon Loop", "to": "Scheduler", "data": "trigger"},
+          {"from": "Scheduler", "to": "Sandbox Executor", "data": "dispatch"},
+          {"from": "Sandbox Executor", "to": "Mutation Engine", "data": "results"},
+          {"from": "Mutation Engine", "to": "Fitness Evaluator", "data": "candidates"},
+          {"from": "Fitness Evaluator", "to": "Tournament Selection", "data": "scores"},
+          {"from": "Tournament Selection", "to": "Generation Pool", "data": "survivors"}
+        ]
+      }
+    },
+    {
+      "id": "agent_pipeline",
+      "image": "agent_pipeline.png",
+      "expected": {
+        "stages": [
+          {"name": "Parser", "module": "src/agent/parser.rs"},
+          {"name": "Context Manager", "module": "src/agent/context.rs"},
+          {"name": "Planner", "module": "src/cognitive/reasoning.rs"},
+          {"name": "Executor", "module": "src/agent/executor.rs"},
+          {"name": "Safety Checker", "module": "src/safety/checker.rs"},
+          {"name": "Tool Registry", "module": "src/tools/mod.rs"}
+        ],
+        "tool_types": ["Shell", "HTTP", "File", "Search"]
+      }
+    },
+    {
+      "id": "safety_layers",
+      "image": "safety_layers.png",
+      "expected": {
+        "layers": [
+          {"name": "Input Validation", "module": "src/safety/checker.rs", "validates": "command syntax, argument bounds, encoding"},
+          {"name": "Path Validation", "module": "src/safety/path_validator.rs", "validates": "path traversal, symlink resolution"},
+          {"name": "Command Filtering", "module": "src/safety/scanner.rs", "validates": "blocklist, injection patterns"},
+          {"name": "Sandbox Execution", "module": "src/tools/shell.rs", "validates": "timeouts, resource limits"}
+        ]
+      }
+    }
+  ]
+}

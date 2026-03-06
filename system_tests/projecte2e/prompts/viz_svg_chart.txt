@@ -1,0 +1,15 @@
+You are working on a Rust crate in the current directory.
+
+Task:
+1. Run cargo test to see the failing tests.
+2. Implement the `render()` method on `BarChart` in src/lib.rs.
+   It must generate a valid SVG string with:
+   - Root <svg> element with correct width, height, viewBox, and xmlns
+   - A background <rect>
+   - A centered title <text>
+   - One <rect> bar per data point, proportionally scaled
+   - A <text> label below each bar
+3. Handle the empty data case (still produce a valid SVG wrapper).
+4. Run cargo test again and finish only when all tests pass.
+
+Provide a brief summary of your implementation.

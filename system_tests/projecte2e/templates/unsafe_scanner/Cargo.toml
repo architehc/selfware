@@ -1,0 +1,11 @@
+[package]
+name = "unsafe_scanner"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "unsafe_scanner"
+path = "src/main.rs"

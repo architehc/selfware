@@ -1,0 +1,38 @@
+{
+  "level": "l5_layout",
+  "scenarios": [
+    {
+      "id": "simple_split",
+      "image": "simple_split.png",
+      "expected": {
+        "layout_direction": "Horizontal",
+        "widgets": [
+          {"type": "List", "position": "left", "constraint": "Percentage(30)"},
+          {"type": "Paragraph", "position": "right", "constraint": "Percentage(70)"}
+        ],
+        "code_pattern": "Layout::horizontal([Constraint::Percentage(30), Constraint::Percentage(70)])"
+      }
+    },
+    {
+      "id": "dashboard_grid",
+      "image": "dashboard_grid.png",
+      "expected": {
+        "outer_direction": "Vertical",
+        "outer_constraints": ["Length(3)", "Min(10)", "Length(1)"],
+        "inner_direction": "Horizontal",
+        "inner_constraints": ["Percentage(25)", "Percentage(75)"],
+        "widget_types": ["header", "sidebar", "paragraph", "status bar"]
+      }
+    },
+    {
+      "id": "complex_nested",
+      "image": "complex_nested.png",
+      "expected": {
+        "nesting_depth": 4,
+        "has_popup": true,
+        "widget_types": ["tab", "list", "chart", "text", "table", "popup"],
+        "layout_structure": "vertical outer with tab bar, horizontal split of left/right panes, each pane vertically split, plus floating popup"
+      }
+    }
+  ]
+}

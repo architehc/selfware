@@ -1,0 +1,13 @@
+You are working on a Rust crate in the current directory.
+
+Task:
+1. Run cargo test to see the failing tests.
+2. Fix the bugs in src/grid.rs, src/generator.rs, and src/ascii.rs:
+   - Cells must start with ALL walls (0b1111), not no walls
+   - remove_wall() must CLEAR wall bits (use &= !wall), not SET them
+   - unvisited_neighbors() must bounds-check south (row+1 < height) and east (col+1 < width)
+   - ASCII rendering must use "--" for horizontal walls, not "||"
+3. Keep all public function signatures unchanged.
+4. Run cargo test again and finish only when all tests pass.
+
+Provide a brief summary of the fixes.

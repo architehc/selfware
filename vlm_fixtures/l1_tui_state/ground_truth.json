@@ -1,0 +1,41 @@
+{
+  "level": "l1_tui_state",
+  "scenarios": [
+    {
+      "id": "dashboard_normal",
+      "image": "dashboard_normal.png",
+      "expected": {
+        "active_panel": "dashboard",
+        "theme": "dark",
+        "widget_count": 5,
+        "status": "ok"
+      }
+    },
+    {
+      "id": "dashboard_error",
+      "image": "dashboard_error.png",
+      "expected": {
+        "has_error": true,
+        "error_type": "connection",
+        "active_panel": "dashboard"
+      }
+    },
+    {
+      "id": "help_panel",
+      "image": "help_panel.png",
+      "expected": {
+        "panel_type": "help",
+        "shortcuts": ["q: quit", "h: help", "j/k: navigate"]
+      }
+    },
+    {
+      "id": "loading_state",
+      "image": "loading_state.png",
+      "expected": {
+        "is_loading": true,
+        "indicators": ["spinner", "progress bar"],
+        "active_panel": "main"
+      }
+    }
+  ]
+}

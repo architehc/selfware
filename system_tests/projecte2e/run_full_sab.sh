@@ -30,6 +30,8 @@ PID_DIR="${OUT_DIR}/pids"
 
 MAX_PARALLEL="${MAX_PARALLEL:-6}"
 POLL_INTERVAL="${POLL_INTERVAL:-300}"  # 5 minutes
+STALL_TIMEOUT="${STALL_TIMEOUT:-300}"  # Kill after 5min of no progress
+MAX_TIMEOUT_MULT="${MAX_TIMEOUT_MULT:-3}"  # Absolute ceiling = timeout * multiplier
 
 # All scenarios: name:difficulty:prompt:timeout_secs:validate_cmd
 ALL_SCENARIOS=(
@@ -45,6 +47,16 @@ ALL_SCENARIOS=(
   "codegen_task_runner:hard:codegen_task_runner.txt:600:cargo test -q"
   "testgen_ringbuf:medium:testgen_ringbuf.txt:480:cargo test -q"
   "refactor_monolith:medium:refactor_monolith.txt:600:cargo test -q"
+  # Visual SAB scenarios (extended timeouts for local 9B VLM)
+  "viz_svg_chart:easy:viz_svg_chart.txt:600:cargo test -q"
+  "viz_ascii_table:easy:viz_ascii_table.txt:600:cargo test -q"
+  "viz_histogram:easy-medium:viz_histogram.txt:900:cargo test -q"
+  "viz_sparkline:easy-medium:viz_sparkline.txt:900:cargo test -q"
+  "viz_progress_bar:medium:viz_progress_bar.txt:1200:cargo test -q"
+  "viz_maze_gen:medium:viz_maze_gen.txt:1200:cargo test -q"
+  # Kimi-inspired scenarios (unsafe code, state machines)
+  "unsafe_scanner:hard:unsafe_scanner.txt:900:cargo test -q"
+  "actor_pdvr:hard:actor_pdvr.txt:900:cargo test -q"
 )
 
 # Resolve timeout command
@@ -95,6 +107,8 @@ echo "  Endpoint: ${ENDPOINT}"
 echo "  Model: ${MODEL_NAME}"
 echo "  Scenarios: ${#ALL_SCENARIOS[@]}"
 echo "  Max parallel: ${MAX_PARALLEL}"
+echo "  Stall timeout: ${STALL_TIMEOUT}s"
+echo "  Max timeout multiplier: ${MAX_TIMEOUT_MULT}x"
 echo "  Poll interval: ${POLL_INTERVAL}s"
 echo "  Output: ${OUT_DIR}"
 echo "============================================================"
@@ -137,22 +151,96 @@ run_scenario() {
   local baseline_status=0
   (cd "${work_dir}" && "${TIMEOUT_CMD}" 120 ${validate_cmd}) > "${log_dir}/baseline.log" 2>&1 || baseline_status=$?
 
-  # Run agent
+  # Run agent with progress-aware timeout
   local start_ts
   start_ts="$(date +%s)"
+  local max_deadline=$((start_ts + timeout_secs * MAX_TIMEOUT_MULT))
+  local stall_marker="${log_dir}/.stall_marker"
+  local progress_file="${log_dir}/progress_events.log"
 
-  local agent_status=0
-  "${TIMEOUT_CMD}" "${timeout_secs}" "${BIN}" \
+  touch "${stall_marker}"
+  : > "${progress_file}"
+
+  # Launch agent in background
+  "${BIN}" \
     --config "${CONFIG_FILE}" \
     -C "${work_dir}" \
     -y \
-    -p - < "${THIS_DIR}/prompts/${prompt_file}" > "${log_dir}/agent.log" 2>&1 || agent_status=$?
+    -p - < "${THIS_DIR}/prompts/${prompt_file}" > "${log_dir}/agent.log" 2>&1 &
+  local agent_pid=$!
+
+  echo "[$(date +%H:%M:%S)] ${name}: agent started (pid=${agent_pid}, stall=${STALL_TIMEOUT}s, max=$((timeout_secs * MAX_TIMEOUT_MULT))s)" >> "${progress_file}"
+
+  # Monitor progress: log growth + source file changes
+  local last_log_size=0
+  local last_activity_ts="${start_ts}"
+  local kill_reason=""
+
+  while kill -0 "${agent_pid}" 2>/dev/null; do
+    sleep 10
+    local now
+    now="$(date +%s)"
+
+    # Progress signal 1: agent log file is growing
+    local new_log_size=0
+    if [[ -f "${log_dir}/agent.log" ]]; then
+      new_log_size="$(wc -c < "${log_dir}/agent.log" | tr -d ' ')" || new_log_size=0
+    fi
+
+    # Progress signal 2: source files modified since last check
+    local src_changes=""
+    src_changes="$(find "${work_dir}" -not -path '*/target/*' -not -name 'Cargo.lock' \
+      -type f -newer "${stall_marker}" 2>/dev/null | head -1)" || true
+
+    if [[ ${new_log_size} -gt ${last_log_size} ]] || [[ -n "${src_changes}" ]]; then
+      # Progress detected — reset stall timer
+      local delta=$((new_log_size - last_log_size))
+      last_log_size=${new_log_size}
+      last_activity_ts=${now}
+      touch "${stall_marker}"
+      if [[ -n "${src_changes}" ]]; then
+        echo "[$(date +%H:%M:%S)] ${name}: progress — file change detected (log +${delta}B)" >> "${progress_file}"
+      elif [[ ${delta} -gt 100 ]]; then
+        echo "[$(date +%H:%M:%S)] ${name}: progress — log +${delta}B" >> "${progress_file}"
+      fi
+    fi
+
+    # Check stall timeout
+    local idle_secs=$((now - last_activity_ts))
+    if [[ ${idle_secs} -ge ${STALL_TIMEOUT} ]]; then
+      kill_reason="stall"
+      echo "[$(date +%H:%M:%S)] ${name}: STALLED for ${idle_secs}s — killing" >> "${progress_file}"
+      kill "${agent_pid}" 2>/dev/null || true
+      sleep 2
+      kill -9 "${agent_pid}" 2>/dev/null || true
+      break
+    fi
+
+    # Check absolute max timeout
+    if [[ ${now} -ge ${max_deadline} ]]; then
+      kill_reason="max_timeout"
+      local elapsed=$((now - start_ts))
+      echo "[$(date +%H:%M:%S)] ${name}: MAX TIMEOUT (${elapsed}s) — killing" >> "${progress_file}"
+      kill "${agent_pid}" 2>/dev/null || true
+      sleep 2
+      kill -9 "${agent_pid}" 2>/dev/null || true
+      break
+    fi
+  done
+
+  local agent_status=0
+  wait "${agent_pid}" 2>/dev/null || agent_status=$?
 
   local end_ts
   end_ts="$(date +%s)"
   local duration=$((end_ts - start_ts))
   local timed_out=0
-  [[ ${agent_status} -eq 124 ]] && timed_out=1
+  if [[ -n "${kill_reason}" ]]; then
+    timed_out=1
+    echo "[$(date +%H:%M:%S)] ${name}: killed (reason=${kill_reason}, duration=${duration}s, exit=${agent_status})" >> "${progress_file}"
+  else
+    echo "[$(date +%H:%M:%S)] ${name}: completed normally (duration=${duration}s, exit=${agent_status})" >> "${progress_file}"
+  fi
 
   # Post validation (with timeout to prevent hanging on slow algorithms)
   local post_status=0
@@ -190,7 +278,10 @@ run_scenario() {
   "post_status": ${post_status},
   "agent_status": ${agent_status},
   "timed_out": ${timed_out},
+  "kill_reason": "${kill_reason}",
   "duration_secs": ${duration},
+  "max_timeout_secs": $((timeout_secs * MAX_TIMEOUT_MULT)),
+  "stall_timeout_secs": ${STALL_TIMEOUT},
   "score": ${score},
   "rating": "${rating}",
   "changed_files": ${changed_files},
@@ -340,14 +431,20 @@ passed = sum(1 for r in results if r['post_status'] == 0)
 total_score = sum(r['score'] for r in results)
 avg_score = total_score // completed if completed > 0 else 0
 
+# Difficulty-weighted scoring (harder tasks count more)
+diff_weights = {'easy': 1.0, 'easy-medium': 1.5, 'medium': 2.0, 'hard': 3.0, 'expert': 4.0}
+weighted_sum = sum(r['score'] * diff_weights.get(r['difficulty'], 1.0) for r in results)
+weight_total = sum(diff_weights.get(r['difficulty'], 1.0) for r in results)
+weighted_avg = int(weighted_sum / weight_total) if weight_total > 0 else 0
+
 bloom = sum(1 for r in results if r['rating'] == 'BLOOM')
 grow = sum(1 for r in results if r['rating'] == 'GROW')
 wilt = sum(1 for r in results if r['rating'] == 'WILT')
 frost = sum(1 for r in results if r['rating'] == 'FROST')
 
-if avg_score >= 85: overall = 'BLOOM'
-elif avg_score >= 60: overall = 'GROW'
-elif avg_score >= 30: overall = 'WILT'
+if weighted_avg >= 85: overall = 'BLOOM'
+elif weighted_avg >= 60: overall = 'GROW'
+elif weighted_avg >= 30: overall = 'WILT'
 else: overall = 'FROST'
 
 icon_map = {'BLOOM': '🌸', 'GROW': '🌿', 'WILT': '🥀', 'FROST': '❄️'}
@@ -366,7 +463,8 @@ lines.append(f'| Max Context | {token_budget:,} tokens |')
 lines.append(f'| Total Scenarios | {total} |')
 lines.append(f'| Completed | {completed} |')
 lines.append(f'| Passed (tests green) | {passed}/{completed} |')
-lines.append(f'| Average Score | {avg_score}/100 |')
+lines.append(f'| Average Score (raw) | {avg_score}/100 |')
+lines.append(f'| Average Score (weighted) | {weighted_avg}/100 |')
 lines.append(f'| Overall Rating | **{icon_map.get(overall, \"?\")} {overall}** |')
 lines.append(f'| Total Duration | {total_elapsed // 60}m {total_elapsed % 60}s |')
 lines.append('')
@@ -381,21 +479,23 @@ lines.append(f'| ❄️ FROST | {frost} | Not ready for this task class. |')
 lines.append('')
 lines.append('## Detailed Results')
 lines.append('')
-lines.append('| Scenario | Difficulty | Score | Rating | Duration | Baseline | Post | Agent Exit | Timeout | Changed | Errors |')
-lines.append('|----------|-----------|-------|--------|----------|----------|------|------------|---------|---------|--------|')
+lines.append('| Scenario | Difficulty | Score | Rating | Duration | Kill Reason | Baseline | Post | Changed | Errors |')
+lines.append('|----------|-----------|-------|--------|----------|-------------|----------|------|---------|--------|')
 for r in sorted(results, key=lambda x: -x['score']):
     icon = icon_map.get(r['rating'], '?')
-    lines.append(f'| \`{r[\"name\"]}\` | {r[\"difficulty\"]} | {r[\"score\"]}/100 | {icon} {r[\"rating\"]} | {r[\"duration_secs\"]}s | {r[\"baseline_status\"]} | {r[\"post_status\"]} | {r[\"agent_status\"]} | {r[\"timed_out\"]} | {r[\"changed_files\"]} | {r[\"error_hits\"]} |')
+    kr = r.get('kill_reason', '') or '—'
+    lines.append(f'| \`{r[\"name\"]}\` | {r[\"difficulty\"]} | {r[\"score\"]}/100 | {icon} {r[\"rating\"]} | {r[\"duration_secs\"]}s | {kr} | {r[\"baseline_status\"]} | {r[\"post_status\"]} | {r[\"changed_files\"]} | {r[\"error_hits\"]} |')
 
 lines.append('')
 lines.append('## Category Breakdown')
 lines.append('')
-for diff in ['easy', 'medium', 'hard', 'expert']:
+for diff in ['easy', 'easy-medium', 'medium', 'hard', 'expert']:
     group = [r for r in results if r['difficulty'] == diff]
     if group:
         g_pass = sum(1 for r in group if r['post_status'] == 0)
         g_avg = sum(r['score'] for r in group) // len(group)
-        lines.append(f'### {diff.title()} ({g_pass}/{len(group)} passed, avg {g_avg}/100)')
+        w = diff_weights.get(diff, 1.0)
+        lines.append(f'### {diff.title()} ({g_pass}/{len(group)} passed, avg {g_avg}/100, weight {w}x)')
         lines.append('')
         for r in group:
             icon = icon_map.get(r['rating'], '?')
@@ -430,6 +530,23 @@ else:
     lines.append('(no progress log)')
 lines.append('\`\`\`')
 lines.append('')
+lines.append('## Progress Events (per scenario)')
+lines.append('')
+for spec in all_scenarios:
+    name = spec.split(':')[0]
+    pef = os.path.join(log_root, name, 'progress_events.log')
+    lines.append(f'### {name}')
+    if os.path.exists(pef) and os.path.getsize(pef) > 0:
+        lines.append('\`\`\`')
+        with open(pef) as f:
+            for i, line in enumerate(f):
+                if i >= 50: break
+                lines.append(line.rstrip())
+        lines.append('\`\`\`')
+    else:
+        lines.append('No progress events recorded.')
+    lines.append('')
+lines.append('')
 lines.append('## Artifacts')
 lines.append('')
 lines.append(f'- Report: \`system_tests/projecte2e/reports/{timestamp}/REPORT.md\`')
@@ -446,7 +563,7 @@ print(f'  SAB RUN COMPLETE')
 print(f'')
 print(f'  Scenarios: {completed}/{total}')
 print(f'  Passed:    {passed}/{completed}')
-print(f'  Score:     {avg_score}/100')
+print(f'  Score:     {avg_score}/100 (raw)  {weighted_avg}/100 (weighted)')
 print(f'  Rating:    {icon_map.get(overall, \"?\")} {overall}')
 print(f'')
 print(f'  🌸 BLOOM: {bloom}  🌿 GROW: {grow}  🥀 WILT: {wilt}  ❄️ FROST: {frost}')

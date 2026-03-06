@@ -1,0 +1,12 @@
+You are working on a Rust crate in the current directory.
+
+Task:
+1. Run cargo test to see the failing tests.
+2. Fix the bugs in src/lib.rs:
+   - Column widths must fit the longest content (no off-by-one errors)
+   - Horizontal border lines must use the box-drawing character ─ (U+2500), not regular hyphens
+   - Right-aligned columns must right-align their content (not left-align)
+3. Keep all public function signatures unchanged.
+4. Run cargo test again and finish only when all tests pass.
+
+Provide a brief summary of the fixes.

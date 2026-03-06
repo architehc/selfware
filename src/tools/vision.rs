@@ -298,7 +298,7 @@ fn resolve_image_data_uri(args: &Value) -> Result<String> {
 }
 
 /// Read an image file, validate it, and return base64-encoded data.
-fn encode_image_file(path: &str) -> Result<String> {
+pub(crate) fn encode_image_file(path: &str) -> Result<String> {
     let metadata =
         std::fs::metadata(path).with_context(|| format!("Image file not found: {}", path))?;
 
@@ -320,7 +320,7 @@ fn encode_image_file(path: &str) -> Result<String> {
 }
 
 /// Check the first few bytes to verify this is a real image file.
-fn validate_image_magic(bytes: &[u8], path: &str) -> Result<()> {
+pub(crate) fn validate_image_magic(bytes: &[u8], path: &str) -> Result<()> {
     if bytes.len() < 4 {
         anyhow::bail!("File too small to be a valid image: {}", path);
     }
@@ -339,7 +339,7 @@ fn validate_image_magic(bytes: &[u8], path: &str) -> Result<()> {
 }
 
 /// Guess MIME type from file extension.
-fn guess_mime(path: &str) -> &'static str {
+pub(crate) fn guess_mime(path: &str) -> &'static str {
     match path.rsplit('.').next().map(|e| e.to_lowercase()).as_deref() {
         Some("png") => "image/png",
         Some("jpg" | "jpeg") => "image/jpeg",
@@ -351,7 +351,7 @@ fn guess_mime(path: &str) -> &'static str {
 }
 
 /// Send a request to an OpenAI-compatible vision endpoint.
-async fn call_vision_endpoint(endpoint: &str, body: &Value) -> Result<Value> {
+pub(crate) async fn call_vision_endpoint(endpoint: &str, body: &Value) -> Result<Value> {
     let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
     let client = Client::builder()
         .timeout(Duration::from_secs(120))
@@ -385,7 +385,7 @@ async fn call_vision_endpoint(endpoint: &str, body: &Value) -> Result<Value> {
 
 /// Compute pixel-level similarity between two same-sized RGBA images.
 /// Returns a percentage (0.0–100.0) where 100 = identical.
-fn compute_pixel_similarity(a: &image::RgbaImage, b: &image::RgbaImage) -> f64 {
+pub(crate) fn compute_pixel_similarity(a: &image::RgbaImage, b: &image::RgbaImage) -> f64 {
     let pixels_a = a.as_raw();
     let pixels_b = b.as_raw();
     if pixels_a.len() != pixels_b.len() || pixels_a.is_empty() {

@@ -1,0 +1,463 @@
+{
+  "timestamp": "2026-03-06T13:28:00.729544+00:00",
+  "model": "unsloth/Qwen3.5-9B-GGUF:Q8_0",
+  "endpoint": "https://97921268284d.ngrok.app/v1",
+  "levels": [
+    {
+      "name": "L1 TUI State",
+      "difficulty": "Easy",
+      "description": "Terminal state recognition: identify panels, read status text, detect color themes, and count visible widgets in TUI screenshots.",
+      "scenario_count": 4,
+      "score": 0.875,
+      "rating": "Bloom",
+      "total_tokens": 3548,
+      "avg_latency_ms": 5459.25,
+      "scores": [
+        {
+          "accuracy": 0.5,
+          "detail_scores": [
+            [
+              "active_panel",
+              0.0
+            ],
+            [
+              "theme",
+              1.0
+            ]
+          ],
+          "response_tokens": 774,
+          "latency_ms": 3651,
+          "rating": "Wilt"
+        },
+        {
+          "accuracy": 1.0,
+          "detail_scores": [
+            [
+              "error",
+              1.0
+            ],
+            [
+              "true",
+              1.0
+            ]
+          ],
+          "response_tokens": 760,
+          "latency_ms": 4862,
+          "rating": "Bloom"
+        },
+        {
+          "accuracy": 1.0,
+          "detail_scores": [
+            [
+              "help",
+              1.0
+            ],
+            [
+              "shortcut",
+              1.0
+            ]
+          ],
+          "response_tokens": 1158,
+          "latency_ms": 9027,
+          "rating": "Bloom"
+        },
+        {
+          "accuracy": 1.0,
+          "detail_scores": [
+            [
+              "loading",
+              1.0
+            ],
+            [
+              "true",
+              1.0
+            ]
+          ],
+          "response_tokens": 856,
+          "latency_ms": 4297,
+          "rating": "Bloom"
+        }
+      ]
+    },
+    {
+      "name": "L2 Diagnostics",
+      "difficulty": "Medium",
+      "description": "Compiler diagnostic reading: identify error types, extract error codes (E0xxx), locate file:line references, and suggest fix categories from terminal screenshots.",
+      "scenario_count": 3,
+      "score": 0.38888888888888884,
+      "rating": "Wilt",
+      "total_tokens": 950,
+      "avg_latency_ms": 2065.3333333333335,
+      "scores": [
+        {
+          "accuracy": 0.0,
+          "detail_scores": [
+            [
+              "error_type",
+              0.0
+            ]
+          ],
+          "response_tokens": 301,
+          "latency_ms": 1901,
+          "rating": "Frost"
+        },
+        {
+          "accuracy": 0.6666666666666666,
+          "detail_scores": [
+            [
+              "type",
+              1.0
+            ],
+            [
+              "mismatch",
+              0.0
+            ],
+            [
+              "expected",
+              1.0
+            ]
+          ],
+          "response_tokens": 318,
+          "latency_ms": 2180,
+          "rating": "Grow"
+        },
+        {
+          "accuracy": 0.5,
+          "detail_scores": [
+            [
+              "trait",
+              1.0
+            ],
+            [
+              "bound",
+              0.0
+            ]
+          ],
+          "response_tokens": 331,
+          "latency_ms": 2115,
+          "rating": "Wilt"
+        }
+      ]
+    },
+    {
+      "name": "L3 Architecture",
+      "difficulty": "Hard",
+      "description": "Architecture diagram comprehension: identify components from diagrams, trace data flow between modules, and map diagram boxes to Rust module paths.",
+      "scenario_count": 3,
+      "score": 0.3,
+      "rating": "Wilt",
+      "total_tokens": 3610,
+      "avg_latency_ms": 9033.333333333334,
+      "scores": [
+        {
+          "accuracy": 0.4,
+          "detail_scores": [
+            [
+              "daemon",
+              0.0
+            ],
+            [
+              "sandbox",
+              0.0
+            ],
+            [
+              "fitness",
+              1.0
+            ],
+            [
+              "mutation",
+              1.0
+            ],
+            [
+              "tournament",
+              0.0
+            ]
+          ],
+          "response_tokens": 1536,
+          "latency_ms": 13091,
+          "rating": "Wilt"
+        },
+        {
+          "accuracy": 0.25,
+          "detail_scores": [
+            [
+              "agent",
+              1.0
+            ],
+            [
+              "tool",
+              0.0
+            ],
+            [
+              "parser",
+              0.0
+            ],
+            [
+              "context",
+              0.0
+            ]
+          ],
+          "response_tokens": 1059,
+          "latency_ms": 7013,
+          "rating": "Frost"
+        },
+        {
+          "accuracy": 0.25,
+          "detail_scores": [
+            [
+              "safety",
+              0.0
+            ],
+            [
+              "validation",
+              1.0
+            ],
+            [
+              "path",
+              0.0
+            ],
+            [
+              "command",
+              0.0
+            ]
+          ],
+          "response_tokens": 1015,
+          "latency_ms": 6996,
+          "rating": "Frost"
+        }
+      ]
+    },
+    {
+      "name": "L4 Profiling",
+      "difficulty": "VeryHard",
+      "description": "Performance profile analysis: identify hot functions from flamegraphs, estimate time percentages, suggest optimization targets, and detect anomalies.",
+      "scenario_count": 3,
+      "score": 1.0,
+      "rating": "Bloom",
+      "total_tokens": 2532,
+      "avg_latency_ms": 4852.333333333333,
+      "scores": [
+        {
+          "accuracy": 1.0,
+          "detail_scores": [
+            [
+              "function",
+              1.0
+            ],
+            [
+              "hot",
+              1.0
+            ]
+          ],
+          "response_tokens": 848,
+          "latency_ms": 5600,
+          "rating": "Bloom"
+        },
+        {
+          "accuracy": 1.0,
+          "detail_scores": [
+            [
+              "thread",
+              1.0
+            ],
+            [
+              "function",
+              1.0
+            ]
+          ],
+          "response_tokens": 804,
+          "latency_ms": 4447,
+          "rating": "Bloom"
+        },
+        {
+          "accuracy": 1.0,
+          "detail_scores": [
+            [
+              "allocat",
+              1.0
+            ],
+            [
+              "memory",
+              1.0
+            ]
+          ],
+          "response_tokens": 880,
+          "latency_ms": 4510,
+          "rating": "Bloom"
+        }
+      ]
+    },
+    {
+      "name": "L5 Layout",
+      "difficulty": "Extreme",
+      "description": "Visual mockup to code translation: identify widget types from ASCII/visual mockups, generate ratatui layout code, specify correct constraint percentages.",
+      "scenario_count": 3,
+      "score": 0.7666666666666666,
+      "rating": "Bloom",
+      "total_tokens": 7007,
+      "avg_latency_ms": 23056.666666666668,
+      "scores": [
+        {
+          "accuracy": 1.0,
+          "detail_scores": [
+            [
+              "layout",
+              1.0
+            ],
+            [
+              "horizontal",
+              1.0
+            ],
+            [
+              "constraint",
+              1.0
+            ],
+            [
+              "percentage",
+              1.0
+            ]
+          ],
+          "response_tokens": 837,
+          "latency_ms": 4249,
+          "rating": "Bloom"
+        },
+        {
+          "accuracy": 0.5,
+          "detail_scores": [
+            [
+              "vertical",
+              1.0
+            ],
+            [
+              "horizontal",
+              0.0
+            ],
+            [
+              "header",
+              1.0
+            ],
+            [
+              "sidebar",
+              0.0
+            ]
+          ],
+          "response_tokens": 4771,
+          "latency_ms": 54340,
+          "rating": "Bloom"
+        },
+        {
+          "accuracy": 0.8,
+          "detail_scores": [
+            [
+              "tab",
+              1.0
+            ],
+            [
+              "list",
+              1.0
+            ],
+            [
+              "chart",
+              1.0
+            ],
+            [
+              "popup",
+              1.0
+            ],
+            [
+              "nested",
+              0.0
+            ]
+          ],
+          "response_tokens": 1399,
+          "latency_ms": 10581,
+          "rating": "Bloom"
+        }
+      ]
+    },
+    {
+      "name": "Mega Evolution",
+      "difficulty": "Mega",
+      "description": "Multi-image visual evolution: score iterative TUI improvements across composition, hierarchy, readability, consistency, and accessibility dimensions. Compare VLM ratings against ground-truth human scores.",
+      "scenario_count": 3,
+      "score": 0.5314306878808899,
+      "rating": "Bloom",
+      "total_tokens": 3052,
+      "avg_latency_ms": 5119.0,
+      "scores": [
+        {
+          "accuracy": 0.5942920636426696,
+          "detail_scores": [
+            [
+              "composition",
+              0.8
+            ],
+            [
+              "hierarchy",
+              1.0
+            ],
+            [
+              "readability",
+              0.6
+            ],
+            [
+              "consistency",
+              0.64
+            ],
+            [
+              "accessibility",
+              0.54
+            ]
+          ],
+          "response_tokens": 981,
+          "latency_ms": 4670,
+          "rating": "Bloom"
+        },
+        {
+          "accuracy": 1.0,
+          "detail_scores": [
+            [
+              "composition",
+              1.0
+            ],
+            [
+              "hierarchy",
+              1.0
+            ],
+            [
+              "readability",
+              1.0
+            ],
+            [
+              "improving",
+              1.0
+            ]
+          ],
+          "response_tokens": 966,
+          "latency_ms": 5229,
+          "rating": "Bloom"
+        },
+        {
+          "accuracy": 0.0,
+          "detail_scores": [
+            [
+              "bloom",
+              0.0
+            ],
+            [
+              "grow",
+              0.0
+            ]
+          ],
+          "response_tokens": 1105,
+          "latency_ms": 5458,
+          "rating": "Frost"
+        }
+      ]
+    }
+  ],
+  "overall_score": 0.6436643739060742,
+  "overall_rating": "Bloom",
+  "total_tokens": 20699,
+  "total_duration_secs": 154.230656083
+}
