@@ -7,6 +7,7 @@ use crate::orchestration::swarm::{
     TaskStatus,
 };
 use crate::ui::tui::animation::agent_avatar::{ActivityLevel, AgentRole as AvatarRole};
+use std::collections::VecDeque;
 use std::sync::{Arc, RwLock};
 use tracing::warn;
 
@@ -232,7 +233,7 @@ pub struct SwarmUiState {
     pub memory_entries: Vec<MemoryEntryView>,
     pub decisions: Vec<DecisionView>,
     pub tasks: Vec<TaskView>,
-    pub events: Vec<SwarmEvent>,
+    pub events: VecDeque<SwarmEvent>,
     pub stats: SwarmStats,
     swarm: Arc<RwLock<Swarm>>,
 }
@@ -245,7 +246,7 @@ impl SwarmUiState {
             memory_entries: Vec::new(),
             decisions: Vec::new(),
             tasks: Vec::new(),
-            events: Vec::new(),
+            events: VecDeque::new(),
             stats: SwarmStats::default(),
             swarm,
         }
@@ -367,7 +368,7 @@ impl SwarmUiState {
         message: impl Into<String>,
         agent_id: Option<String>,
     ) {
-        self.events.push(SwarmEvent {
+        self.events.push_back(SwarmEvent {
             timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
             event_type,
             message: message.into(),
@@ -376,7 +377,7 @@ impl SwarmUiState {
 
         // Keep only last 100 events
         if self.events.len() > 100 {
-            self.events.remove(0);
+            self.events.pop_front();
         }
     }
 

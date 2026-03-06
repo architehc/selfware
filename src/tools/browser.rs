@@ -185,15 +185,18 @@ async fn fetch_with_chrome(
     let temp_dir = std::env::temp_dir();
     let output_file = temp_dir.join(format!("browser_fetch_{}.html", std::process::id()));
 
+    let no_sandbox = std::env::var("SELFWARE_BROWSER_NO_SANDBOX").unwrap_or_default() == "1";
     let mut cmd = Command::new(chrome_path);
     cmd.args([
         "--headless",
         "--disable-gpu",
-        "--no-sandbox",
         "--disable-dev-shm-usage",
         "--disable-extensions",
         &format!("--timeout={}", timeout_secs * 1000),
     ]);
+    if no_sandbox {
+        cmd.arg("--no-sandbox");
+    }
 
     if let Some(ua) = user_agent {
         cmd.arg(format!("--user-agent={}", ua));
@@ -454,16 +457,20 @@ impl Tool for BrowserScreenshot {
 
         match browser {
             BrowserType::Chrome(chrome_path) => {
+                let no_sandbox =
+                    std::env::var("SELFWARE_BROWSER_NO_SANDBOX").unwrap_or_default() == "1";
                 let mut cmd = Command::new(&chrome_path);
                 cmd.args([
                     "--headless",
                     "--disable-gpu",
-                    "--no-sandbox",
                     "--disable-dev-shm-usage",
                     &format!("--window-size={},{}", width, height),
                     &format!("--screenshot={}", output_path),
                     &format!("--timeout={}", timeout_secs * 1000),
                 ]);
+                if no_sandbox {
+                    cmd.arg("--no-sandbox");
+                }
                 if !pinned_target.host_is_ip {
                     cmd.arg(format!(
                         "--host-resolver-rules={}",
@@ -639,15 +646,19 @@ impl Tool for BrowserPdf {
 
         match browser {
             BrowserType::Chrome(chrome_path) => {
+                let no_sandbox =
+                    std::env::var("SELFWARE_BROWSER_NO_SANDBOX").unwrap_or_default() == "1";
                 let mut cmd = Command::new(&chrome_path);
                 cmd.args([
                     "--headless",
                     "--disable-gpu",
-                    "--no-sandbox",
                     "--disable-dev-shm-usage",
                     &format!("--print-to-pdf={}", output_path),
                     &format!("--timeout={}", timeout_secs * 1000),
                 ]);
+                if no_sandbox {
+                    cmd.arg("--no-sandbox");
+                }
                 if !pinned_target.host_is_ip {
                     cmd.arg(format!(
                         "--host-resolver-rules={}",
