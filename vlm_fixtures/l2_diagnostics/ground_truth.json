@@ -1,0 +1,39 @@
+{
+  "level": "l2_diagnostics",
+  "scenarios": [
+    {
+      "id": "lifetime_error",
+      "image": "lifetime_error.png",
+      "expected": {
+        "error_code": "E0106",
+        "error_type": "lifetime",
+        "file": "src/main.rs",
+        "line": 42,
+        "fix_category": "add lifetime annotation"
+      }
+    },
+    {
+      "id": "type_mismatch",
+      "image": "type_mismatch.png",
+      "expected": {
+        "error_code": "E0308",
+        "error_type": "type",
+        "expected_type": "u32",
+        "found_type": "String",
+        "file": "src/lib.rs",
+        "line": 15
+      }
+    },
+    {
+      "id": "trait_bound",
+      "image": "trait_bound.png",
+      "expected": {
+        "error_code": "E0277",
+        "error_type": "trait",
+        "missing_trait": "Send",
+        "on_type": "Rc<RefCell<State>>",
+        "fix_category": "use Arc instead of Rc"
+      }
+    }
+  ]
+}

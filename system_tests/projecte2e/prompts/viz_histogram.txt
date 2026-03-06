@@ -1,0 +1,16 @@
+You are working on a Rust crate in the current directory.
+
+Task:
+1. Run cargo test to see the failing tests.
+2. Fix the bugs across src/color.rs and src/histogram.rs:
+   - ANSI color codes must have correct RGB channel order
+   - Background colors must use ANSI code 48, not 38
+   - The reset() function must return the proper ANSI reset sequence
+   - Sort order must respect the sort_ascending flag correctly
+   - Division by zero must be handled when all values are zero
+   - Label padding must not truncate long labels
+   - Color must be reset after each bar to prevent color leaking
+3. Keep all public function signatures unchanged.
+4. Run cargo test again and finish only when all tests pass.
+
+Provide a brief summary of the fixes.

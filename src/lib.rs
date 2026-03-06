@@ -58,6 +58,10 @@ pub(crate) mod testing;
 #[cfg(feature = "self-improvement")]
 pub mod evolution;
 
+// VLM benchmark suite for visual understanding evaluation
+#[cfg(feature = "vlm-bench")]
+pub mod vlm_bench;
+
 // Backward-compatible re-exports for safety module
 pub use safety::redact;
 

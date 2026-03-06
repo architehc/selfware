@@ -136,8 +136,11 @@ self-improvement = []
 # Dynamic library hot-reload (security-sensitive, off by default)
 hot-reload = []
 
+# VLM benchmark suite for visual understanding evaluation
+vlm-bench = []
+
 # Convenience feature that enables all optional modules
-extras = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-analysis", "tokens", "self-improvement", "hot-reload"]
+extras = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-analysis", "tokens", "self-improvement", "hot-reload", "vlm-bench"]
 
 [dev-dependencies]
 tokio-test = "0.4"
@@ -184,3 +187,8 @@ path = "examples/custom_config.rs"
 [[bench]]
 name = "token_processing"
 harness = false
+
+[[bench]]
+name = "vlm_benchmark"
+harness = false
+required-features = ["vlm-bench"]

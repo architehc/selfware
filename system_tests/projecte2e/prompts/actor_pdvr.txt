@@ -1,0 +1,33 @@
+You are working on a Rust project called `actor_pdvr` — a PDVR (Plan-Do-Verify-Reflect) actor state machine for cognitive task processing.
+
+The project has two source files:
+- `src/state.rs` — The PDVR state machine with transition validation
+- `src/actor.rs` — The actor that processes messages through the state machine
+
+The code has multiple bugs across both files affecting state transitions, message handling, queue management, and lifecycle.
+
+Your task:
+1. Run `cargo test -q` to see which tests fail
+2. Read the source code in `src/state.rs` and `src/actor.rs`
+3. Fix ALL bugs so that every test passes
+4. Run `cargo test -q` again to verify all tests pass
+
+Key things to understand:
+- PDVR is a cycle: Plan → Do → Verify → Reflect → Plan (next iteration)
+- Valid transitions on SUCCESS: Plan→Do, Do→Verify, Verify→Reflect, Reflect→Plan
+- Valid transitions on FAILURE: Do→Plan (re-plan), Verify→Do (retry action)
+- Valid transitions on RETRY: stay in same phase
+- Plan→Verify (skipping Do) should NEVER be allowed
+- The actor has a message queue with backpressure (max queue size)
+- Messages must be processed in FIFO order
+- Shutdown should process all pending messages before stopping
+- The state machine's reset() must fully reset for new tasks
+- Iteration counting must prevent infinite retry loops
+
+Bug categories to look for:
+- Invalid state transitions allowed
+- Valid state transitions blocked
+- Queue/backpressure logic errors
+- Message ordering issues
+- Lifecycle management (reset, shutdown)
+- Iteration counting gaps

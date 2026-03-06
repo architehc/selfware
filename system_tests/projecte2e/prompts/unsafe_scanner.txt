@@ -1,0 +1,23 @@
+You are working on a Rust project called `unsafe_scanner` — a pattern scanner that uses manual memory management with raw pointers for performance.
+
+The code has multiple bugs related to unsafe code, memory management, and correctness. Some bugs are in the `RawBuffer` struct (manual allocation/deallocation), and others are in the `Scanner` logic.
+
+Your task:
+1. Run `cargo test -q` to see which tests fail
+2. Read the source code in `src/lib.rs` carefully
+3. Fix ALL bugs so that every test passes
+4. Run `cargo test -q` again to verify all tests pass
+
+Important constraints:
+- Keep the overall structure (Scanner + RawBuffer) intact
+- You may replace unsafe code with safe alternatives where appropriate
+- You may add bounds checks, null guards, deduplication, etc.
+- Make sure the code is memory-safe (no leaks, no double-free, no uninitialized reads)
+- Be aware that some bugs are layered — fixing one may reveal another
+
+Common bug categories to look for:
+- Buffer size vs capacity confusion
+- Off-by-one errors in search bounds
+- Missing deduplication
+- Zero-capacity edge case
+- Layout mismatches in realloc

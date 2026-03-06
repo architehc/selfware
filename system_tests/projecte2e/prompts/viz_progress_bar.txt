@@ -1,0 +1,16 @@
+You are working on a Rust crate in the current directory.
+
+Task:
+1. Run cargo test to see the failing tests.
+2. Fix the bugs across src/style.rs, src/bar.rs, src/eta.rs, and src/multi.rs:
+   - Classic bar style must render the correct number of filled characters
+   - Spinner must cycle through all frames without skipping any
+   - Percentage formatting must round, not truncate (0.999 → 100%)
+   - Position must be clamped to total (ratio never exceeds 1.0)
+   - finish() must set the bar to 100% complete
+   - ETA alpha should weight recent measurements heavily (use ~0.8)
+   - MultiProgress must render bars in the order they were added
+3. Keep all public function signatures unchanged.
+4. Run cargo test again and finish only when all tests pass.
+
+Provide a brief summary of the fixes.
