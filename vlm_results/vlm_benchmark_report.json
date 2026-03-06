@@ -1,20 +1,20 @@
 {
-  "timestamp": "2026-03-06T15:01:23.662079+00:00",
-  "model": "unsloth/Qwen3.5-9B-GGUF:Q8_0",
-  "endpoint": "https://97921268284d.ngrok.app/v1",
+  "timestamp": "2026-03-06T15:27:00.076304+00:00",
+  "model": "Qwen/Qwen3-VL-30B-A3B-Thinking-FP8",
+  "endpoint": "https://ivo.ngrok.dev/v1",
   "levels": [
     {
       "name": "L1 TUI State",
       "difficulty": "Easy",
       "description": "Terminal state recognition: identify panels, read status text, detect color themes, and count visible widgets in TUI screenshots.",
       "scenario_count": 4,
-      "score": 0.875,
-      "rating": "Bloom",
-      "total_tokens": 3527,
-      "avg_latency_ms": 5027.5,
+      "score": 0.625,
+      "rating": "Grow",
+      "total_tokens": 7349,
+      "avg_latency_ms": 49270.5,
       "scores": [
         {
-          "accuracy": 0.5,
+          "accuracy": 0.0,
           "detail_scores": [
             [
               "active_panel",
@@ -22,12 +22,12 @@
             ],
             [
               "theme",
-              1.0
+              0.0
             ]
           ],
-          "response_tokens": 773,
-          "latency_ms": 3934,
-          "rating": "Wilt"
+          "response_tokens": 3177,
+          "latency_ms": 162724,
+          "rating": "Frost"
         },
         {
           "accuracy": 1.0,
@@ -41,8 +41,8 @@
               1.0
             ]
           ],
-          "response_tokens": 760,
-          "latency_ms": 3847,
+          "response_tokens": 1406,
+          "latency_ms": 12084,
           "rating": "Bloom"
         },
         {
@@ -57,12 +57,12 @@
               1.0
             ]
           ],
-          "response_tokens": 1154,
-          "latency_ms": 7930,
+          "response_tokens": 994,
+          "latency_ms": 6961,
           "rating": "Bloom"
         },
         {
-          "accuracy": 1.0,
+          "accuracy": 0.5,
           "detail_scores": [
             [
               "loading",
@@ -70,12 +70,12 @@
             ],
             [
               "true",
-              1.0
+              0.0
             ]
           ],
-          "response_tokens": 840,
-          "latency_ms": 4399,
-          "rating": "Bloom"
+          "response_tokens": 1772,
+          "latency_ms": 15313,
+          "rating": "Wilt"
         }
       ]
     },
@@ -84,10 +84,10 @@
       "difficulty": "Medium",
       "description": "Compiler diagnostic reading: identify error types, extract error codes (E0xxx), locate file:line references, and suggest fix categories from terminal screenshots.",
       "scenario_count": 3,
-      "score": 0.38888888888888884,
-      "rating": "Wilt",
-      "total_tokens": 948,
-      "avg_latency_ms": 1979.0,
+      "score": 0.6666666666666666,
+      "rating": "Grow",
+      "total_tokens": 3273,
+      "avg_latency_ms": 10943.333333333334,
       "scores": [
         {
           "accuracy": 0.0,
@@ -97,12 +97,12 @@
               0.0
             ]
           ],
-          "response_tokens": 301,
-          "latency_ms": 1843,
+          "response_tokens": 1136,
+          "latency_ms": 11762,
           "rating": "Frost"
         },
         {
-          "accuracy": 0.6666666666666666,
+          "accuracy": 1.0,
           "detail_scores": [
             [
               "type",
@@ -110,19 +110,19 @@
             ],
             [
               "mismatch",
-              0.0
+              1.0
             ],
             [
               "expected",
               1.0
             ]
           ],
-          "response_tokens": 314,
-          "latency_ms": 2148,
-          "rating": "Grow"
+          "response_tokens": 1000,
+          "latency_ms": 10087,
+          "rating": "Bloom"
         },
         {
-          "accuracy": 0.5,
+          "accuracy": 1.0,
           "detail_scores": [
             [
               "trait",
@@ -130,12 +130,12 @@
             ],
             [
               "bound",
-              0.0
+              1.0
             ]
           ],
-          "response_tokens": 333,
-          "latency_ms": 1946,
-          "rating": "Wilt"
+          "response_tokens": 1137,
+          "latency_ms": 10981,
+          "rating": "Bloom"
         }
       ]
     },
@@ -144,10 +144,10 @@
       "difficulty": "Hard",
       "description": "Architecture diagram comprehension: identify components from diagrams, trace data flow between modules, and map diagram boxes to Rust module paths.",
       "scenario_count": 3,
-      "score": 0.3,
-      "rating": "Wilt",
-      "total_tokens": 3686,
-      "avg_latency_ms": 8396.333333333334,
+      "score": 0.4666666666666666,
+      "rating": "Grow",
+      "total_tokens": 8609,
+      "avg_latency_ms": 27733.666666666668,
       "scores": [
         {
           "accuracy": 0.4,
@@ -173,12 +173,12 @@
               0.0
             ]
           ],
-          "response_tokens": 1585,
-          "latency_ms": 13005,
+          "response_tokens": 3014,
+          "latency_ms": 29400,
           "rating": "Wilt"
         },
         {
-          "accuracy": 0.25,
+          "accuracy": 0.5,
           "detail_scores": [
             [
               "agent",
@@ -186,7 +186,7 @@
             ],
             [
               "tool",
-              0.0
+              1.0
             ],
             [
               "parser",
@@ -197,33 +197,33 @@
               0.0
             ]
           ],
-          "response_tokens": 1091,
-          "latency_ms": 6642,
-          "rating": "Frost"
+          "response_tokens": 2514,
+          "latency_ms": 23320,
+          "rating": "Grow"
         },
         {
-          "accuracy": 0.25,
+          "accuracy": 0.5,
           "detail_scores": [
             [
               "safety",
-              0.0
-            ],
-            [
-              "validation",
               1.0
             ],
             [
-              "path",
+              "validation",
               0.0
+            ],
+            [
+              "path",
+              1.0
             ],
             [
               "command",
               0.0
             ]
           ],
-          "response_tokens": 1010,
-          "latency_ms": 5542,
-          "rating": "Frost"
+          "response_tokens": 3081,
+          "latency_ms": 30481,
+          "rating": "Grow"
         }
       ]
     },
@@ -234,8 +234,8 @@
       "scenario_count": 3,
       "score": 1.0,
       "rating": "Bloom",
-      "total_tokens": 2494,
-      "avg_latency_ms": 4333.333333333333,
+      "total_tokens": 5366,
+      "avg_latency_ms": 16222.666666666666,
       "scores": [
         {
           "accuracy": 1.0,
@@ -249,8 +249,8 @@
               1.0
             ]
           ],
-          "response_tokens": 862,
-          "latency_ms": 4972,
+          "response_tokens": 1856,
+          "latency_ms": 16106,
           "rating": "Bloom"
         },
         {
@@ -265,8 +265,8 @@
               1.0
             ]
           ],
-          "response_tokens": 772,
-          "latency_ms": 3447,
+          "response_tokens": 1994,
+          "latency_ms": 19046,
           "rating": "Bloom"
         },
         {
@@ -281,8 +281,8 @@
               1.0
             ]
           ],
-          "response_tokens": 860,
-          "latency_ms": 4581,
+          "response_tokens": 1516,
+          "latency_ms": 13516,
           "rating": "Bloom"
         }
       ]
@@ -292,10 +292,10 @@
       "difficulty": "Extreme",
       "description": "Visual mockup to code translation: identify widget types from ASCII/visual mockups, generate ratatui layout code, specify correct constraint percentages.",
       "scenario_count": 3,
-      "score": 0.85,
+      "score": 1.0,
       "rating": "Bloom",
-      "total_tokens": 4232,
-      "avg_latency_ms": 11982.333333333334,
+      "total_tokens": 8999,
+      "avg_latency_ms": 28023.333333333332,
       "scores": [
         {
           "accuracy": 1.0,
@@ -317,12 +317,12 @@
               1.0
             ]
           ],
-          "response_tokens": 1425,
-          "latency_ms": 13110,
+          "response_tokens": 4789,
+          "latency_ms": 47959,
           "rating": "Bloom"
         },
         {
-          "accuracy": 0.75,
+          "accuracy": 1.0,
           "detail_scores": [
             [
               "vertical",
@@ -330,7 +330,7 @@
             ],
             [
               "horizontal",
-              0.0
+              1.0
             ],
             [
               "header",
@@ -341,12 +341,12 @@
               1.0
             ]
           ],
-          "response_tokens": 1348,
-          "latency_ms": 11641,
+          "response_tokens": 1968,
+          "latency_ms": 17063,
           "rating": "Bloom"
         },
         {
-          "accuracy": 0.8,
+          "accuracy": 1.0,
           "detail_scores": [
             [
               "tab",
@@ -366,11 +366,11 @@
             ],
             [
               "nested",
-              0.0
+              1.0
             ]
           ],
-          "response_tokens": 1459,
-          "latency_ms": 11196,
+          "response_tokens": 2242,
+          "latency_ms": 19048,
           "rating": "Bloom"
         }
       ]
@@ -380,38 +380,38 @@
       "difficulty": "Mega",
       "description": "Multi-image visual evolution: score iterative TUI improvements across composition, hierarchy, readability, consistency, and accessibility dimensions. Compare VLM ratings against ground-truth human scores.",
       "scenario_count": 3,
-      "score": 0.5314306878808899,
-      "rating": "Bloom",
-      "total_tokens": 3089,
-      "avg_latency_ms": 6072.666666666667,
+      "score": 0.3333333333333333,
+      "rating": "Wilt",
+      "total_tokens": 5060,
+      "avg_latency_ms": 13310.333333333334,
       "scores": [
         {
-          "accuracy": 0.5942920636426696,
+          "accuracy": 0.0,
           "detail_scores": [
             [
               "composition",
-              0.8
+              0.0
             ],
             [
               "hierarchy",
-              1.0
+              0.0
             ],
             [
               "readability",
-              0.6
+              0.0
             ],
             [
               "consistency",
-              0.64
+              0.0
             ],
             [
               "accessibility",
-              0.54
+              0.0
             ]
           ],
-          "response_tokens": 981,
-          "latency_ms": 5477,
-          "rating": "Bloom"
+          "response_tokens": 2106,
+          "latency_ms": 16914,
+          "rating": "Frost"
         },
         {
           "accuracy": 1.0,
@@ -433,8 +433,8 @@
               1.0
             ]
           ],
-          "response_tokens": 976,
-          "latency_ms": 6827,
+          "response_tokens": 1570,
+          "latency_ms": 12885,
           "rating": "Bloom"
         },
         {
@@ -449,15 +449,15 @@
               0.0
             ]
           ],
-          "response_tokens": 1132,
-          "latency_ms": 5914,
+          "response_tokens": 1384,
+          "latency_ms": 10132,
           "rating": "Frost"
         }
       ]
     }
   ],
-  "overall_score": 0.6575532627949632,
+  "overall_score": 0.6819444444444444,
   "overall_rating": "Bloom",
-  "total_tokens": 17976,
-  "total_duration_secs": 118.413816166
+  "total_tokens": 38656,
+  "total_duration_secs": 485.795709875
 }
