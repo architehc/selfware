@@ -958,13 +958,15 @@ mod tests {
 
     #[test]
     fn test_rotate_if_needed_below_limit() {
-        // Should not rotate when well below limit
-        // (log entry count is shared across tests, but should be far below MAX_LOG_ENTRIES)
+        let _guard = rotation_test_guard();
+        // Save and reset to a known state below the limit
+        let saved = LOG_ENTRY_COUNT.load(Ordering::Relaxed);
+        LOG_ENTRY_COUNT.store(0, Ordering::Relaxed);
+
         let rotated = rotate_if_needed();
-        // We can't guarantee state across tests, but if count < MAX_LOG_ENTRIES, should be false
-        if log_entry_count() < MAX_LOG_ENTRIES {
-            assert!(!rotated);
-        }
+        assert!(!rotated);
+
+        LOG_ENTRY_COUNT.store(saved, Ordering::Relaxed);
     }
 
     #[test]
