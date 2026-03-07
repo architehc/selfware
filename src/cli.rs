@@ -56,8 +56,8 @@ struct Cli {
     quiet: bool,
 
     /// Execution mode: normal (ask), auto-edit, yolo, daemon
-    #[arg(short = 'm', long, value_enum, default_value = "normal")]
-    mode: ExecutionMode,
+    #[arg(short = 'm', long, value_enum)]
+    mode: Option<ExecutionMode>,
 
     /// Shortcut for --mode=yolo
     #[arg(short = 'y', long)]
@@ -348,13 +348,15 @@ pub async fn run() -> Result<()> {
 
     let mut config = Config::load(config_path.as_deref())?;
 
-    // Resolve execution mode (flags override --mode)
+    // Resolve execution mode: explicit CLI flags > --mode > env var (from Config::load)
     let exec_mode = if cli.daemon {
         ExecutionMode::Daemon
     } else if cli.yolo {
         ExecutionMode::Yolo
+    } else if let Some(mode) = cli.mode {
+        mode
     } else {
-        cli.mode
+        config.execution_mode // Preserve SELFWARE_MODE env var / default
     };
 
     // Apply execution mode to config
