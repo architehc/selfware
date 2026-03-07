@@ -24,7 +24,7 @@ An **agentic coding harness** for local LLMs that runs entirely on your hardware
 
 ## What It Looks Like
 
-### Interactive Chat
+### Interactive Chat (`selfware chat`)
 
 ```
 ╭─── selfware workshop ────────────────────────────────────╮
@@ -152,11 +152,11 @@ Selfware needs an **OpenAI-compatible API endpoint**. Pick any backend:
 | Backend | Best For | One-liner |
 |---------|----------|-----------|
 | **[vLLM](https://docs.vllm.ai/)** | Fast inference, GPU servers | `vllm serve Qwen/Qwen3-Coder-Next-FP8` |
-| **[Ollama](https://ollama.ai/)** | Easy setup, any hardware | `ollama run qwen2.5-coder` |
+| **[Ollama](https://ollama.ai/)** | Easy setup, any hardware | `ollama run qwen3.5:4b` |
 | **[llama.cpp](https://github.com/ggerganov/llama.cpp)** | GGUF models, minimal deps | `./llama-server -m model.gguf -c 65536` |
 | **[LM Studio](https://lmstudio.ai/)** | GUI, Windows/Mac | Download → load model → start server |
 | **[MLX](https://github.com/ml-explore/mlx-examples)** | Apple Silicon native | `mlx_lm.server --model mlx-community/Qwen3.5-Coder-35B-A3B-4bit` |
-| **[SGLang](https://github.com/sgl-project/sglang)** | High throughput, tool calling | `python -m sglang.launch_server --model Qwen/Qwen3-Coder-Next-FP8` |
+| **[SGLang](https://github.com/architehc/sglang)** | High throughput, tool calling | `python -m sglang.launch_server --model Qwen/Qwen3-Coder-Next-FP8` |
 
 > For finding and downloading the best local models, see **[Unsloth Model Zoo](https://unsloth.ai/docs/models/qwen3.5)** — they provide optimized quantized versions ready to run.
 
@@ -284,11 +284,87 @@ mlx_lm.server --model mlx-community/Qwen3.5-Coder-35B-A3B-4bit \
   --port 8000
 
 # Any machine with Ollama
-ollama run qwen2.5-coder:14b
+ollama run qwen3.5:4b
 
 # Ultra-light (CPU or weak GPU)
-ollama run qwen2.5-coder:1.5b
+ollama run qwen3.5:0.8b
 ```
+
+### Dual RTX 4090 (SGLang)
+
+```bash
+SGLANG_DISABLE_CUDNN_CHECK=1 python3 -m sglang.launch_server \
+  --model-path Qwen/Qwen3-VL-30B-A3B-Thinking-FP8 \
+  --trust-remote-code \
+  --tensor-parallel-size 2 \
+  --enable-multimodal \
+  --context-length 131072 \
+  --attention-backend flashinfer \
+  --mem-fraction-static 0.85 \
+  --max-running-requests 32 \
+  --chunked-prefill-size 8192 \
+  --max-prefill-tokens 65536 \
+  --kv-cache-dtype fp8_e5m2 \
+  --disable-custom-all-reduce \
+  --cuda-graph-max-bs 32 \
+  --port 8000 \
+  --host 0.0.0.0
+```
+
+### vLLM
+
+```bash
+vllm serve Qwen/Qwen3.5-4B --port 8000 --tensor-parallel-size 1 \
+  --max-model-len 262144 --reasoning-parser qwen3 \
+  --enable-auto-tool-choice --tool-call-parser qwen3_coder
+```
+
+### llama.cpp
+
+**Kimi K2.5 Thinking on RTX 6000 Pro (96 GB VRAM + 1 TB RAM):**
+
+```bash
+llama.cpp/build/bin/llama-server \
+    --model models/unsloth/Kimi-K2-Thinking-GGUF/Q4_K_S/Kimi-K2-Thinking-Q4_K_S-00001-of-00013.gguf \
+    --alias "unsloth/Kimi-K2-Thinking" \
+    --threads -1 \
+    --n-gpu-layers 1999 \
+    --temp 1 \
+    --min_p 0.01 \
+    --ctx-size 198304 \
+    --seed 3407 \
+    -fa on \
+    --cache-type-k q4_0 \
+    --cache-type-v q4_0 \
+    --port 8000 \
+    -ot ".ffn_.*_exps.=CPU" \
+    --chat-template chatml \
+    --special
+```
+
+**Qwen3.5-122B-A10B on RTX 6000 Pro:**
+
+```bash
+LLAMA_SET_ROWS=1 llama.cpp/build/bin/llama-server \
+    --model models/models/unsloth/Qwen3.5-122B-A10B-GGUF/UD-Q4_K_XL/Qwen3.5-122B-A10B-UD-Q4_K_XL-00001-of-00003.gguf \
+    --mmproj models/unsloth/Qwen3.5-122B-A10B-GGUF/mmproj-F16.gguf \
+    --alias "Qwen3.5-122B-A10B" \
+    --threads 64 \
+    --n-gpu-layers 999 \
+    --ctx-size 2097152 \
+    --seed 3407 \
+    -fa on \
+    --cache-type-k q4_0 \
+    --cache-type-v q4_0 \
+    --port 8000 \
+    --special \
+    --chat-template chatml \
+    -np 16
+```
+
+### LM Studio
+
+Enable **KV cache quantization** (set to Q4) to fit larger context windows in limited VRAM.
 
 ---
 
@@ -514,7 +590,7 @@ Round ratings: **BLOOM** (>=85) · **GROW** (>=60) · **WILT** (>=30) · **FROST
 
 ### Benchmark Results — Qwen3-Coder-Next-FP8
 
-Tested on NVIDIA H100 via vLLM, 6 parallel scenarios, 27 rounds (323 scenario runs):
+Tested on RTX 6000 Pro via custom [SGLang](https://github.com/architehc/sglang), 6 parallel scenarios, 27 rounds (323 scenario runs):
 
 | Metric | Value |
 |--------|-------|
