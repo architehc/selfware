@@ -32,14 +32,38 @@ fn open_nofollow_and_resolve(path: &Path) -> std::io::Result<PathBuf> {
         .custom_flags(O_NOFOLLOW)
         .open(path)?;
 
-    let fd_path = format!("/proc/self/fd/{}", fd.as_raw_fd());
+    let raw_fd = fd.as_raw_fd();
+
+    // Linux: resolve via /proc/self/fd which is atomic
+    let fd_path = format!("/proc/self/fd/{}", raw_fd);
     let proc_path = Path::new(&fd_path);
     if proc_path.exists() {
-        std::fs::read_link(proc_path)
-    } else {
-        // macOS: /proc unavailable. O_NOFOLLOW succeeded so path is not a symlink.
-        path.canonicalize()
+        return std::fs::read_link(proc_path);
     }
+
+    // macOS: use F_GETPATH to resolve fd to path atomically (no TOCTOU)
+    #[cfg(target_os = "macos")]
+    {
+        const F_GETPATH: i32 = 50;
+        const MAXPATHLEN: usize = 1024;
+        let mut buf = vec![0u8; MAXPATHLEN];
+        let ret = unsafe {
+            extern "C" {
+                fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+            }
+            fcntl(raw_fd, F_GETPATH, buf.as_mut_ptr())
+        };
+        if ret != -1 {
+            let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            buf.truncate(len);
+            return Ok(PathBuf::from(
+                std::ffi::OsString::from(String::from_utf8_lossy(&buf).into_owned()),
+            ));
+        }
+    }
+
+    // Final fallback for other Unix platforms without /proc
+    path.canonicalize()
 }
 
 #[cfg(not(unix))]

@@ -8,7 +8,6 @@
 //! - Tool-specific options
 
 pub mod resources;
-pub mod typed;
 
 pub use resources::*;
 

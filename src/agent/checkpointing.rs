@@ -296,27 +296,39 @@ impl Agent {
             );
         }
 
-        // Save global episodic memory
+        // Save global episodic memory — offloaded to a background thread
+        // to avoid blocking the Tokio executor on synchronous filesystem I/O.
         let data_dir = dirs::data_local_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("selfware");
-        let global_memory_path = data_dir.join("global_episodic_memory.json");
 
-        if let Some(parent) = global_memory_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        // Serialize in the main thread (cheap), write to disk in background (slow I/O)
+        let memory_content =
+            serde_json::to_string_pretty(&self.cognitive_state.episodic_memory)?;
 
-        let content = serde_json::to_string_pretty(&self.cognitive_state.episodic_memory)?;
-        std::fs::write(&global_memory_path, content)?;
-        info!("Saved global episodic memory");
-
-        // Save self-improvement engine state
         let engine_path = data_dir.join("improvement_engine.json");
-        if let Err(e) = self.self_improvement.save(&engine_path) {
+        let engine_save_result = self.self_improvement.save(&engine_path);
+        if let Err(e) = &engine_save_result {
             warn!("Failed to save improvement engine state: {}", e);
         } else {
             info!("Saved self-improvement engine state");
         }
+
+        let bg_data_dir = data_dir.clone();
+        std::thread::spawn(move || {
+            let memory_path = bg_data_dir.join("global_episodic_memory.json");
+            if let Some(parent) = memory_path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    tracing::warn!("Failed to create episodic memory dir: {}", e);
+                    return;
+                }
+            }
+            if let Err(e) = std::fs::write(&memory_path, memory_content) {
+                tracing::warn!("Failed to write episodic memory: {}", e);
+            } else {
+                tracing::info!("Saved global episodic memory (background)");
+            }
+        });
 
         Ok(())
     }

@@ -914,6 +914,9 @@ pub fn run_tui_dashboard_with_events(
     let mut paused = false;
     let mut quit_armed_at: Option<Instant> = None;
 
+    // Channel for receiving background git command results
+    let (git_cmd_tx, git_cmd_rx) = std::sync::mpsc::channel::<String>();
+
     // Scan current directory for garden view
     let cwd = std::env::current_dir().unwrap_or_default();
     let garden = crate::ui::garden::scan_directory(&cwd);
@@ -938,6 +941,12 @@ pub fn run_tui_dashboard_with_events(
     let mut needs_redraw = true;
 
     loop {
+        // Drain background git command results (non-blocking)
+        while let Ok(msg) = git_cmd_rx.try_recv() {
+            app.add_system_message(&msg);
+            needs_redraw = true;
+        }
+
         // Process any pending events from the agent (non-blocking)
         loop {
             match event_rx.try_recv() {
@@ -1394,75 +1403,55 @@ pub fn run_tui_dashboard_with_events(
                                         });
                                     }
                                     "/diff" => {
-                                        let output = std::process::Command::new("git")
-                                            .args(["diff", "--stat"])
-                                            .output();
-                                        match output {
-                                            Ok(result) => {
-                                                let stdout =
-                                                    String::from_utf8_lossy(&result.stdout);
-                                                let stderr =
-                                                    String::from_utf8_lossy(&result.stderr);
-                                                if stdout.is_empty() && stderr.is_empty() {
-                                                    app.add_system_message(
-                                                        "No changes (working tree clean).",
-                                                    );
-                                                } else if !stdout.is_empty() {
-                                                    app.add_system_message(&format!(
-                                                        "git diff --stat:\n{}",
-                                                        stdout.trim_end()
-                                                    ));
-                                                } else {
-                                                    app.add_system_message(&format!(
-                                                        "git diff error: {}",
-                                                        stderr.trim_end()
-                                                    ));
+                                        app.add_system_message("Running git diff --stat...");
+                                        let tx = git_cmd_tx.clone();
+                                        std::thread::spawn(move || {
+                                            let msg = match std::process::Command::new("git")
+                                                .args(["diff", "--stat"])
+                                                .output()
+                                            {
+                                                Ok(result) => {
+                                                    let stdout = String::from_utf8_lossy(&result.stdout);
+                                                    let stderr = String::from_utf8_lossy(&result.stderr);
+                                                    if stdout.is_empty() && stderr.is_empty() {
+                                                        "No changes (working tree clean).".to_string()
+                                                    } else if !stdout.is_empty() {
+                                                        format!("git diff --stat:\n{}", stdout.trim_end())
+                                                    } else {
+                                                        format!("git diff error: {}", stderr.trim_end())
+                                                    }
                                                 }
-                                            }
-                                            Err(e) => {
-                                                app.add_system_message(&format!(
-                                                    "Failed to run git diff: {}",
-                                                    e
-                                                ));
-                                            }
-                                        }
+                                                Err(e) => format!("Failed to run git diff: {}", e),
+                                            };
+                                            let _ = tx.send(msg);
+                                        });
                                         with_dashboard_state(&shared_state, |state| {
                                             state.log(LogLevel::Info, "Ran git diff --stat");
                                         });
                                     }
                                     "/git" => {
-                                        let output = std::process::Command::new("git")
-                                            .args(["status", "--short", "--branch"])
-                                            .output();
-                                        match output {
-                                            Ok(result) => {
-                                                let stdout =
-                                                    String::from_utf8_lossy(&result.stdout);
-                                                let stderr =
-                                                    String::from_utf8_lossy(&result.stderr);
-                                                if !stdout.is_empty() {
-                                                    app.add_system_message(&format!(
-                                                        "git status:\n{}",
-                                                        stdout.trim_end()
-                                                    ));
-                                                } else if !stderr.is_empty() {
-                                                    app.add_system_message(&format!(
-                                                        "git error: {}",
-                                                        stderr.trim_end()
-                                                    ));
-                                                } else {
-                                                    app.add_system_message(
-                                                        "git status returned no output.",
-                                                    );
+                                        app.add_system_message("Running git status...");
+                                        let tx = git_cmd_tx.clone();
+                                        std::thread::spawn(move || {
+                                            let msg = match std::process::Command::new("git")
+                                                .args(["status", "--short", "--branch"])
+                                                .output()
+                                            {
+                                                Ok(result) => {
+                                                    let stdout = String::from_utf8_lossy(&result.stdout);
+                                                    let stderr = String::from_utf8_lossy(&result.stderr);
+                                                    if !stdout.is_empty() {
+                                                        format!("git status:\n{}", stdout.trim_end())
+                                                    } else if !stderr.is_empty() {
+                                                        format!("git error: {}", stderr.trim_end())
+                                                    } else {
+                                                        "git status returned no output.".to_string()
+                                                    }
                                                 }
-                                            }
-                                            Err(e) => {
-                                                app.add_system_message(&format!(
-                                                    "Failed to run git status: {}",
-                                                    e
-                                                ));
-                                            }
-                                        }
+                                                Err(e) => format!("Failed to run git status: {}", e),
+                                            };
+                                            let _ = tx.send(msg);
+                                        });
                                         with_dashboard_state(&shared_state, |state| {
                                             state.log(LogLevel::Info, "Ran git status");
                                         });
@@ -1750,6 +1739,38 @@ fn render_terminal_pane(frame: &mut Frame, area: Rect, pane: &Pane, state: &Dash
     frame.render_widget(List::new(items), inner);
 }
 
+/// Cached directory listing to avoid blocking read_dir on every frame.
+fn cached_dir_entries() -> Vec<String> {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    static CACHE: Mutex<Option<(Vec<String>, Instant)>> = Mutex::new(None);
+    const CACHE_TTL: Duration = Duration::from_secs(2);
+
+    let mut guard = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some((ref entries, ref ts)) = *guard {
+        if ts.elapsed() < CACHE_TTL {
+            return entries.clone();
+        }
+    }
+
+    let mut entries = Vec::new();
+    if let Ok(read_dir) = std::fs::read_dir(".") {
+        for entry in read_dir.flatten() {
+            let file_type = entry.file_type().ok();
+            let icon = match file_type {
+                Some(ft) if ft.is_dir() => "📁",
+                Some(ft) if ft.is_symlink() => "🔗",
+                _ => "📄",
+            };
+            entries.push(format!("{} {}", icon, entry.file_name().to_string_lossy()));
+        }
+    }
+    entries.sort();
+    *guard = Some((entries.clone(), Instant::now()));
+    entries
+}
+
 fn render_explorer_pane(frame: &mut Frame, area: Rect, pane: &Pane) {
     use ratatui::text::Span;
     use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
@@ -1771,20 +1792,7 @@ fn render_explorer_pane(frame: &mut Frame, area: Rect, pane: &Pane) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let mut entries = Vec::new();
-    if let Ok(read_dir) = std::fs::read_dir(".") {
-        for entry in read_dir.flatten() {
-            let file_type = entry.file_type().ok();
-            let icon = match file_type {
-                Some(ft) if ft.is_dir() => "📁",
-                Some(ft) if ft.is_symlink() => "🔗",
-                _ => "📄",
-            };
-            entries.push(format!("{} {}", icon, entry.file_name().to_string_lossy()));
-        }
-    }
-
-    entries.sort();
+    let entries = cached_dir_entries();
     if entries.is_empty() {
         let empty = Paragraph::new("  No files found").style(TuiPalette::muted_style());
         frame.render_widget(empty, inner);

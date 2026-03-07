@@ -4,6 +4,18 @@ use std::time::Instant;
 
 use super::*;
 
+/// Truncate a string at a char boundary, avoiding panics on multi-byte UTF-8.
+fn safe_truncate(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 impl Agent {
     pub async fn interactive(&mut self) -> Result<()> {
         use std::io::IsTerminal;
@@ -886,7 +898,7 @@ impl Agent {
                 } else {
                     println!("{} Queued messages ({}):", "📋".bright_cyan(), msgs.len());
                     for (i, msg) in msgs.iter().enumerate() {
-                        let preview = if msg.len() > 60 { &msg[..60] } else { msg };
+                        let preview = safe_truncate(msg, 60);
                         println!(
                             "  {}. {}{}",
                             i + 1,
@@ -914,11 +926,7 @@ impl Agent {
                     let idx = idx.saturating_sub(1); // 1-based to 0-based
                     if idx < self.pending_messages.len() {
                         let removed = self.pending_messages.remove(idx).unwrap_or_default();
-                        let preview = if removed.len() > 40 {
-                            &removed[..40]
-                        } else {
-                            &removed
-                        };
+                        let preview = safe_truncate(&removed, 40);
                         println!(
                             "{} Removed message {}: {}{}",
                             "📋".bright_cyan(),
@@ -1596,7 +1604,7 @@ impl Agent {
                 } else {
                     println!("{} Queued messages ({}):", "📋".bright_cyan(), msgs.len());
                     for (i, msg) in msgs.iter().enumerate() {
-                        let preview = if msg.len() > 60 { &msg[..60] } else { msg };
+                        let preview = safe_truncate(msg, 60);
                         println!(
                             "  {}. {}{}",
                             i + 1,
@@ -1624,11 +1632,7 @@ impl Agent {
                     let idx = idx.saturating_sub(1); // 1-based to 0-based
                     if idx < self.pending_messages.len() {
                         let removed = self.pending_messages.remove(idx).unwrap_or_default();
-                        let preview = if removed.len() > 40 {
-                            &removed[..40]
-                        } else {
-                            &removed
-                        };
+                        let preview = safe_truncate(&removed, 40);
                         println!(
                             "{} Removed message {}: {}{}",
                             "📋".bright_cyan(),
@@ -1986,40 +1990,44 @@ mod tests {
 
     #[test]
     fn queue_list_preview_truncation() {
-        // The /queue list handler truncates at 60 chars
+        // The /queue list handler truncates at 60 chars using safe_truncate
         let short = "Short message";
-        let preview = if short.len() > 60 {
-            &short[..60]
-        } else {
-            short
-        };
+        let preview = safe_truncate(short, 60);
         let suffix = if short.len() > 60 { "..." } else { "" };
         assert_eq!(format!("{}{}", preview, suffix), "Short message");
 
         let long = "x".repeat(100);
-        let preview = if long.len() > 60 { &long[..60] } else { &long };
+        let preview = safe_truncate(&long, 60);
         let suffix = if long.len() > 60 { "..." } else { "" };
         assert_eq!(preview.len(), 60);
         assert_eq!(suffix, "...");
+
+        // Multi-byte: emoji at boundary should not panic
+        let emoji_str = "Hello 🦊 world! This is a test with emoji 🌸 and more text here...";
+        let preview = safe_truncate(emoji_str, 60);
+        assert!(preview.len() <= 60);
+        assert!(preview.is_char_boundary(preview.len()));
     }
 
     #[test]
     fn queue_drop_preview_truncation() {
-        // The /queue drop handler truncates at 40 chars
+        // The /queue drop handler truncates at 40 chars using safe_truncate
         let short = "Short task";
-        let preview = if short.len() > 40 {
-            &short[..40]
-        } else {
-            short
-        };
+        let preview = safe_truncate(short, 40);
         let suffix = if short.len() > 40 { "..." } else { "" };
         assert_eq!(format!("{}{}", preview, suffix), "Short task");
 
         let long = "y".repeat(80);
-        let preview = if long.len() > 40 { &long[..40] } else { &long };
+        let preview = safe_truncate(&long, 40);
         let suffix = if long.len() > 40 { "..." } else { "" };
         assert_eq!(preview.len(), 40);
         assert_eq!(suffix, "...");
+
+        // Multi-byte: emoji at boundary should not panic
+        let emoji_str = "🦊🌸🌿❄️🥀 abcdefghij 🦊🌸🌿❄️🥀";
+        let preview = safe_truncate(emoji_str, 40);
+        assert!(preview.len() <= 40);
+        assert!(preview.is_char_boundary(preview.len()));
     }
 
     #[test]

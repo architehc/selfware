@@ -67,9 +67,17 @@ impl Tool for FileFimEdit {
         let end_line = args["end_line"]
             .as_u64()
             .ok_or_else(|| anyhow!("Missing end_line"))? as usize;
-        let instruction = args["instruction"]
+        let raw_instruction = args["instruction"]
             .as_str()
             .ok_or_else(|| anyhow!("Missing instruction"))?;
+
+        // Strip FIM control tokens to prevent prompt injection
+        let instruction = raw_instruction
+            .replace("<|fim_prefix|>", "")
+            .replace("<|fim_suffix|>", "")
+            .replace("<|fim_middle|>", "")
+            .replace("<|endoftext|>", "")
+            .replace("<|file_separator|>", "");
 
         // Validate path safety BEFORE any file I/O
         validate_tool_path(path, self.safety_config.as_ref())?;
