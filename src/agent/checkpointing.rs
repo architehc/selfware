@@ -303,8 +303,7 @@ impl Agent {
             .join("selfware");
 
         // Serialize in the main thread (cheap), write to disk in background (slow I/O)
-        let memory_content =
-            serde_json::to_string_pretty(&self.cognitive_state.episodic_memory)?;
+        let memory_content = serde_json::to_string_pretty(&self.cognitive_state.episodic_memory)?;
 
         let engine_path = data_dir.join("improvement_engine.json");
         let engine_save_result = self.self_improvement.save(&engine_path);

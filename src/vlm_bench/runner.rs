@@ -112,12 +112,7 @@ impl VlmBenchRunner {
         let mut handles = Vec::new();
 
         for (idx, scenario) in scenarios.iter().enumerate() {
-            eprintln!(
-                "  [{}/{}] {} ...",
-                idx + 1,
-                scenario_count,
-                scenario.id
-            );
+            eprintln!("  [{}/{}] {} ...", idx + 1, scenario_count, scenario.id);
             let permit = self
                 .semaphore
                 .clone()

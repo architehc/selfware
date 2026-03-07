@@ -56,9 +56,9 @@ fn open_nofollow_and_resolve(path: &Path) -> std::io::Result<PathBuf> {
         if ret != -1 {
             let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
             buf.truncate(len);
-            return Ok(PathBuf::from(
-                std::ffi::OsString::from(String::from_utf8_lossy(&buf).into_owned()),
-            ));
+            return Ok(PathBuf::from(std::ffi::OsString::from(
+                String::from_utf8_lossy(&buf).into_owned(),
+            )));
         }
     }
 

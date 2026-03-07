@@ -1411,14 +1411,23 @@ pub fn run_tui_dashboard_with_events(
                                                 .output()
                                             {
                                                 Ok(result) => {
-                                                    let stdout = String::from_utf8_lossy(&result.stdout);
-                                                    let stderr = String::from_utf8_lossy(&result.stderr);
+                                                    let stdout =
+                                                        String::from_utf8_lossy(&result.stdout);
+                                                    let stderr =
+                                                        String::from_utf8_lossy(&result.stderr);
                                                     if stdout.is_empty() && stderr.is_empty() {
-                                                        "No changes (working tree clean).".to_string()
+                                                        "No changes (working tree clean)."
+                                                            .to_string()
                                                     } else if !stdout.is_empty() {
-                                                        format!("git diff --stat:\n{}", stdout.trim_end())
+                                                        format!(
+                                                            "git diff --stat:\n{}",
+                                                            stdout.trim_end()
+                                                        )
                                                     } else {
-                                                        format!("git diff error: {}", stderr.trim_end())
+                                                        format!(
+                                                            "git diff error: {}",
+                                                            stderr.trim_end()
+                                                        )
                                                     }
                                                 }
                                                 Err(e) => format!("Failed to run git diff: {}", e),
@@ -1438,17 +1447,24 @@ pub fn run_tui_dashboard_with_events(
                                                 .output()
                                             {
                                                 Ok(result) => {
-                                                    let stdout = String::from_utf8_lossy(&result.stdout);
-                                                    let stderr = String::from_utf8_lossy(&result.stderr);
+                                                    let stdout =
+                                                        String::from_utf8_lossy(&result.stdout);
+                                                    let stderr =
+                                                        String::from_utf8_lossy(&result.stderr);
                                                     if !stdout.is_empty() {
-                                                        format!("git status:\n{}", stdout.trim_end())
+                                                        format!(
+                                                            "git status:\n{}",
+                                                            stdout.trim_end()
+                                                        )
                                                     } else if !stderr.is_empty() {
                                                         format!("git error: {}", stderr.trim_end())
                                                     } else {
                                                         "git status returned no output.".to_string()
                                                     }
                                                 }
-                                                Err(e) => format!("Failed to run git status: {}", e),
+                                                Err(e) => {
+                                                    format!("Failed to run git status: {}", e)
+                                                }
                                             };
                                             let _ = tx.send(msg);
                                         });
