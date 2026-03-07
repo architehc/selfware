@@ -370,7 +370,7 @@ while true; do
   if [[ $((NOW - LAST_POLL)) -ge ${POLL_INTERVAL} ]]; then
     LAST_POLL="${NOW}"
     ELAPSED=$(( NOW - SAB_START ))
-    COMPLETED_COUNT=$(ls "${RESULTS_DIR}"/*.json 2>/dev/null | wc -l | tr -d ' ')
+    COMPLETED_COUNT=$(find "${RESULTS_DIR}" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
     TOTAL="${#ALL_SCENARIOS[@]}"
     RUNNING_COUNT=$(echo ${PIDS} | wc -w | tr -d ' ')
 
