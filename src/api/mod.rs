@@ -22,39 +22,36 @@ use types::*;
 /// This function moves any misplaced system messages to the front (after
 /// any existing leading system messages), preserving their relative order.
 fn canonicalize_message_order(messages: &mut Vec<Message>) {
-    // Find where the system prefix ends
-    let first_non_system = messages
-        .iter()
-        .position(|m| m.role != "system")
-        .unwrap_or(messages.len());
+    // Some OpenAI-compatible backends (e.g. SGLang) require exactly ONE system
+    // message at position 0.  Merge every system message in the conversation
+    // into a single leading system message.
 
-    // Collect indices of system messages that appear after non-system messages
-    let misplaced: Vec<usize> = messages
+    // Collect indices of ALL system messages (both leading and misplaced).
+    let sys_indices: Vec<usize> = messages
         .iter()
         .enumerate()
-        .skip(first_non_system)
         .filter(|(_, m)| m.role == "system")
         .map(|(i, _)| i)
         .collect();
 
-    if misplaced.is_empty() {
-        return;
+    if sys_indices.len() <= 1 {
+        return; // Zero or one system message – nothing to merge.
     }
 
-    // Extract misplaced system messages (reverse order to keep indices valid)
-    let extracted: Vec<Message> = misplaced
+    // Build the merged content from all system messages (preserving order).
+    let merged_content: String = sys_indices
         .iter()
-        .rev()
-        .map(|&i| messages.remove(i))
+        .map(|&i| messages[i].content.to_string())
         .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
+        .join("\n\n");
 
-    // Insert them right after the existing system prefix
-    for (offset, msg) in extracted.into_iter().enumerate() {
-        messages.insert(first_non_system + offset, msg);
+    // Remove all system messages in reverse index order to keep indices valid.
+    for &i in sys_indices.iter().rev() {
+        messages.remove(i);
     }
+
+    // Insert the single merged system message at position 0.
+    messages.insert(0, Message::system(merged_content));
 }
 
 /// Trait abstraction over the LLM API client, enabling test mocking.
