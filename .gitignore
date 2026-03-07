@@ -30,6 +30,9 @@ Thumbs.db
 /system_tests/projecte2e/work/
 /system_tests/projecte2e/reports/
 
+# Claude Code worktrees
+.claude/worktrees/
+
 # Local config overrides (keep examples)
 selfware-local.toml
 .env

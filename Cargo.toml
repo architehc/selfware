@@ -100,6 +100,7 @@ sysinfo = "0.38.3"
 xcap = "0.3"
 nvml-wrapper = "0.12.0"
 zstd = "0.13.3"
+openssl = { version = "0.10", features = ["vendored"], optional = true }  # For cross-compilation in release builds
 tokenizers = { version = "0.22.2", features = ["hf-hub", "http"] }
 tracing-appender = "0.2.4"
 opentelemetry = "0.21.0"
@@ -135,6 +136,8 @@ tokens = []
 self-improvement = []
 # Dynamic library hot-reload (security-sensitive, off by default)
 hot-reload = []
+# Vendored OpenSSL for cross-compilation (release builds)
+vendored-openssl = ["dep:openssl"]
 
 # VLM benchmark suite for visual understanding evaluation
 vlm-bench = []
