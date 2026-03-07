@@ -97,7 +97,7 @@ jobs:
           echo "deb [arch=arm64] http://ports.ubuntu.com/ jammy main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/arm64.list
           echo "deb [arch=arm64] http://ports.ubuntu.com/ jammy-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64.list
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu pkg-config \
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu pkg-config \
             libdbus-1-dev:arm64 libxcb1-dev:arm64 libxcb-randr0-dev:arm64 \
             libxcb-shm0-dev:arm64 libxcb-composite0-dev:arm64
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
