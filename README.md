@@ -108,19 +108,23 @@ An **agentic coding harness** for local LLMs that runs entirely on your hardware
 **Option A: Download prebuilt binary (recommended)**
 
 ```bash
-# Linux/macOS one-liner
-OS=$(uname -s | tr '[:upper:]' '[:lower:]' | sed 's/darwin/macos/')
+# Linux one-liner
 ARCH=$(uname -m | sed 's/arm64/aarch64/')
-curl -fsSL "https://github.com/architehc/selfware/releases/latest/download/selfware-${OS}-${ARCH}.tar.gz" | tar -xz
+curl -fsSL "https://github.com/architehc/selfware/releases/latest/download/selfware-linux-${ARCH}.tar.gz" | tar -xz
 sudo mv selfware /usr/local/bin/
+
+# macOS one-liner
+ARCH=$(uname -m | sed 's/arm64/aarch64/')
+curl -fsSL -o /tmp/selfware.zip "https://github.com/architehc/selfware/releases/latest/download/selfware-macos-${ARCH}.zip"
+unzip -o /tmp/selfware.zip -d /tmp/selfware && sudo mv /tmp/selfware/selfware /usr/local/bin/
 ```
 
 | Platform | Architecture | Download |
 |----------|--------------|----------|
 | **Linux** | x86_64 (Intel/AMD) | [selfware-linux-x86_64.tar.gz](https://github.com/architehc/selfware/releases/latest) |
 | **Linux** | aarch64 (ARM64) | [selfware-linux-aarch64.tar.gz](https://github.com/architehc/selfware/releases/latest) |
-| **macOS** | Apple Silicon (M1–M4) | [selfware-macos-aarch64.tar.gz](https://github.com/architehc/selfware/releases/latest) |
-| **macOS** | Intel | [selfware-macos-x86_64.tar.gz](https://github.com/architehc/selfware/releases/latest) |
+| **macOS** | Apple Silicon (M1–M4) | [selfware-macos-aarch64.zip](https://github.com/architehc/selfware/releases/latest) |
+| **macOS** | Intel | [selfware-macos-x86_64.zip](https://github.com/architehc/selfware/releases/latest) |
 | **Windows** | x86_64 | [selfware-windows-x86_64.zip](https://github.com/architehc/selfware/releases/latest) |
 
 **Option B: Install via Cargo**
@@ -823,6 +827,10 @@ step_timeout_secs = 14400  # 4 hours
 ## License
 
 MIT License
+
+## Sponsors
+
+Sponsored by **[Trebuchet Network](https://trebuchet.network)**
 
 ## Acknowledgments
 

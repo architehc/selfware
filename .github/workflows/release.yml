@@ -48,13 +48,13 @@ jobs:
           # macOS Apple Silicon
           - target: aarch64-apple-darwin
             os: macos-14
-            archive: tar.gz
+            archive: zip
             name: selfware-macos-aarch64
 
           # macOS Intel
           - target: x86_64-apple-darwin
             os: macos-14
-            archive: tar.gz
+            archive: zip
             name: selfware-macos-x86_64
 
           # Windows x86_64
@@ -93,8 +93,8 @@ jobs:
       - name: Build release binary
         run: cargo build --release --all-features --target ${{ matrix.target }}
 
-      - name: Prepare archive (Unix)
-        if: matrix.os != 'windows-2022'
+      - name: Prepare archive (Linux tar.gz)
+        if: matrix.archive == 'tar.gz'
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/selfware dist/
@@ -103,7 +103,17 @@ jobs:
           cd dist
           tar -czvf ../${{ matrix.name }}.tar.gz *
 
-      - name: Prepare archive (Windows)
+      - name: Prepare archive (macOS/Windows zip)
+        if: matrix.archive == 'zip' && matrix.os != 'windows-2022'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/selfware dist/
+          cp README.md LICENSE dist/ 2>/dev/null || true
+          cp selfware.example.toml dist/selfware.toml.example 2>/dev/null || true
+          cd dist
+          zip -r ../${{ matrix.name }}.zip *
+
+      - name: Prepare archive (Windows zip)
         if: matrix.os == 'windows-2022'
         shell: pwsh
         run: |
@@ -182,8 +192,8 @@ jobs:
           files: |
             artifacts/selfware-linux-x86_64/selfware-linux-x86_64.tar.gz
             artifacts/selfware-linux-aarch64/selfware-linux-aarch64.tar.gz
-            artifacts/selfware-macos-aarch64/selfware-macos-aarch64.tar.gz
-            artifacts/selfware-macos-x86_64/selfware-macos-x86_64.tar.gz
+            artifacts/selfware-macos-aarch64/selfware-macos-aarch64.zip
+            artifacts/selfware-macos-x86_64/selfware-macos-x86_64.zip
             artifacts/selfware-windows-x86_64/selfware-windows-x86_64.zip
             artifacts/sbom/selfware-sbom.json
 
