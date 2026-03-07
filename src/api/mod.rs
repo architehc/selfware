@@ -15,6 +15,48 @@ use crate::supervision::circuit_breaker::{
 use std::sync::Arc;
 use types::*;
 
+/// Enforce OpenAI-style message ordering: all system messages must precede
+/// non-system messages. SGLang and other strict backends reject requests
+/// where system messages appear after user/assistant/tool messages.
+///
+/// This function moves any misplaced system messages to the front (after
+/// any existing leading system messages), preserving their relative order.
+fn canonicalize_message_order(messages: &mut Vec<Message>) {
+    // Find where the system prefix ends
+    let first_non_system = messages
+        .iter()
+        .position(|m| m.role != "system")
+        .unwrap_or(messages.len());
+
+    // Collect indices of system messages that appear after non-system messages
+    let misplaced: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .skip(first_non_system)
+        .filter(|(_, m)| m.role == "system")
+        .map(|(i, _)| i)
+        .collect();
+
+    if misplaced.is_empty() {
+        return;
+    }
+
+    // Extract misplaced system messages (reverse order to keep indices valid)
+    let extracted: Vec<Message> = misplaced
+        .iter()
+        .rev()
+        .map(|&i| messages.remove(i))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+
+    // Insert them right after the existing system prefix
+    for (offset, msg) in extracted.into_iter().enumerate() {
+        messages.insert(first_non_system + offset, msg);
+    }
+}
+
 /// Trait abstraction over the LLM API client, enabling test mocking.
 #[async_trait]
 pub trait LlmClient: Send + Sync {
@@ -565,6 +607,8 @@ impl ApiClient {
             messages.insert(0, sys_msg);
         }
 
+        canonicalize_message_order(&mut messages);
+
         let mut body = serde_json::json!({
             "model": self.config.model,
             "messages": messages,
@@ -617,6 +661,8 @@ impl ApiClient {
             let sys_msg = crate::api::types::Message::system("CRITICAL INSTRUCTION: DO NOT use <think> blocks or any thinking process in your response. Output your final response directly and immediately.");
             messages.insert(0, sys_msg);
         }
+
+        canonicalize_message_order(&mut messages);
 
         let mut body = serde_json::json!({
             "model": self.config.model,
@@ -3264,6 +3310,160 @@ mod tests {
         };
         let client = ApiClient::new(&config);
         assert!(client.is_ok());
+    }
+
+    // --- canonicalize_message_order tests ---
+
+    #[test]
+    fn test_canonicalize_already_ordered() {
+        let mut msgs = vec![
+            Message::system("sys".to_string()),
+            Message::user("hello".to_string()),
+            Message::assistant("hi".to_string()),
+        ];
+        canonicalize_message_order(&mut msgs);
+        assert_eq!(msgs[0].role, "system");
+        assert_eq!(msgs[1].role, "user");
+        assert_eq!(msgs[2].role, "assistant");
+    }
+
+    #[test]
+    fn test_canonicalize_system_at_end() {
+        let mut msgs = vec![
+            Message::system("initial prompt".to_string()),
+            Message::user("do something".to_string()),
+            Message::assistant("tool call".to_string()),
+            Message::user("tool result".to_string()),
+            Message::system("learning hint".to_string()),
+        ];
+        canonicalize_message_order(&mut msgs);
+        assert_eq!(msgs[0].role, "system");
+        assert_eq!(msgs[0].content, "initial prompt");
+        assert_eq!(msgs[1].role, "system");
+        assert_eq!(msgs[1].content, "learning hint");
+        assert_eq!(msgs[2].role, "user");
+        assert_eq!(msgs[2].content, "do something");
+        assert_eq!(msgs[3].role, "assistant");
+        assert_eq!(msgs[4].role, "user");
+    }
+
+    #[test]
+    fn test_canonicalize_multiple_misplaced_system() {
+        let mut msgs = vec![
+            Message::system("sys1".to_string()),
+            Message::user("u1".to_string()),
+            Message::system("sys2".to_string()),
+            Message::assistant("a1".to_string()),
+            Message::system("sys3".to_string()),
+        ];
+        canonicalize_message_order(&mut msgs);
+        assert_eq!(msgs[0].role, "system");
+        assert_eq!(msgs[0].content, "sys1");
+        assert_eq!(msgs[1].role, "system");
+        assert_eq!(msgs[1].content, "sys2");
+        assert_eq!(msgs[2].role, "system");
+        assert_eq!(msgs[2].content, "sys3");
+        assert_eq!(msgs[3].role, "user");
+        assert_eq!(msgs[4].role, "assistant");
+    }
+
+    #[test]
+    fn test_canonicalize_no_system_messages() {
+        let mut msgs = vec![
+            Message::user("hello".to_string()),
+            Message::assistant("hi".to_string()),
+        ];
+        canonicalize_message_order(&mut msgs);
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[1].role, "assistant");
+    }
+
+    #[test]
+    fn test_canonicalize_all_system() {
+        let mut msgs = vec![
+            Message::system("s1".to_string()),
+            Message::system("s2".to_string()),
+            Message::system("s3".to_string()),
+        ];
+        canonicalize_message_order(&mut msgs);
+        assert_eq!(msgs.len(), 3);
+        assert!(msgs.iter().all(|m| m.role == "system"));
+    }
+
+    #[test]
+    fn test_canonicalize_empty() {
+        let mut msgs: Vec<Message> = vec![];
+        canonicalize_message_order(&mut msgs);
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn test_canonicalize_thinking_disabled_plus_learning_hint() {
+        let mut msgs = vec![
+            Message::system("no-think instruction".to_string()),
+            Message::system("initial prompt".to_string()),
+            Message::user("task".to_string()),
+            Message::assistant("response".to_string()),
+            Message::user("tool result".to_string()),
+            Message::system("learning hint".to_string()),
+        ];
+        canonicalize_message_order(&mut msgs);
+        assert_eq!(msgs[0].role, "system");
+        assert_eq!(msgs[1].role, "system");
+        assert_eq!(msgs[2].role, "system");
+        assert_eq!(msgs[3].role, "user");
+        assert_eq!(msgs[3].content, "task");
+        assert_eq!(msgs[4].role, "assistant");
+        assert_eq!(msgs[5].role, "user");
+        assert_eq!(msgs[5].content, "tool result");
+    }
+
+    #[test]
+    fn test_canonicalize_preserves_non_system_order() {
+        let mut msgs = vec![
+            Message::system("sys".to_string()),
+            Message::user("u1".to_string()),
+            Message::assistant("a1".to_string()),
+            Message::user("u2".to_string()),
+            Message::system("late sys".to_string()),
+            Message::assistant("a2".to_string()),
+            Message::user("u3".to_string()),
+        ];
+        canonicalize_message_order(&mut msgs);
+        let non_system: Vec<&str> = msgs
+            .iter()
+            .filter(|m| m.role != "system")
+            .map(|m| m.content.text())
+            .collect();
+        assert_eq!(non_system, vec!["u1", "a1", "u2", "a2", "u3"]);
+    }
+
+    #[test]
+    fn test_canonicalize_single_system_message() {
+        let mut msgs = vec![Message::system("only".to_string())];
+        canonicalize_message_order(&mut msgs);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "only");
+    }
+
+    #[test]
+    fn test_canonicalize_system_between_tool_messages() {
+        let mut msgs = vec![
+            Message::system("prompt".to_string()),
+            Message::user("task".to_string()),
+            Message::assistant("calling tool".to_string()),
+            Message::user("tool result 1".to_string()),
+            Message::system("injected hint".to_string()),
+            Message::assistant("calling tool 2".to_string()),
+            Message::user("tool result 2".to_string()),
+        ];
+        canonicalize_message_order(&mut msgs);
+        assert_eq!(msgs[0].role, "system");
+        assert_eq!(msgs[0].content, "prompt");
+        assert_eq!(msgs[1].role, "system");
+        assert_eq!(msgs[1].content, "injected hint");
+        assert_eq!(msgs[2].role, "user");
+        assert_eq!(msgs[2].content, "task");
     }
 }
 

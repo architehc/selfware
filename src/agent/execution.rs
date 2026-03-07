@@ -820,7 +820,17 @@ impl Agent {
 
         let mut request_messages = self.messages.clone();
         if let Some(learning_hint) = self.build_learning_hint(self.learning_context()) {
-            request_messages.push(Message::system(learning_hint));
+            // Merge into existing system message to maintain OpenAI message ordering
+            // (system messages must precede all user/assistant/tool messages)
+            if let Some(first) = request_messages.first_mut() {
+                if first.role == "system" {
+                    first.content = format!("{}\n\n{}", first.content, learning_hint).into();
+                } else {
+                    request_messages.insert(0, Message::system(learning_hint));
+                }
+            } else {
+                request_messages.insert(0, Message::system(learning_hint));
+            }
         }
 
         let (content, reasoning) = if self.config.agent.streaming {
@@ -1060,7 +1070,16 @@ impl Agent {
         self.trim_message_history();
         let mut request_messages = self.messages.clone();
         if let Some(learning_hint) = self.build_learning_hint(self.learning_context()) {
-            request_messages.push(Message::system(learning_hint));
+            // Merge into existing system message to maintain OpenAI message ordering
+            if let Some(first) = request_messages.first_mut() {
+                if first.role == "system" {
+                    first.content = format!("{}\n\n{}", first.content, learning_hint).into();
+                } else {
+                    request_messages.insert(0, Message::system(learning_hint));
+                }
+            } else {
+                request_messages.insert(0, Message::system(learning_hint));
+            }
         }
         let response = self
             .client
