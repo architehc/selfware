@@ -147,8 +147,7 @@ jobs:
       - name: Generate CycloneDX SBOM
         run: |
           cargo cyclonedx --format json
-          # Rename output (cargo-cyclonedx writes bom.json by default)
-          mv bom.json selfware-sbom.json
+          mv selfware.cdx.json selfware-sbom.json
 
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@v4
