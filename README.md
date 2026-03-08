@@ -164,6 +164,8 @@ Selfware needs an **OpenAI-compatible API endpoint**. Pick any backend:
 
 > For finding and downloading the best local models, see **[Unsloth Model Zoo](https://unsloth.ai/docs/models/qwen3.5)** — they provide optimized quantized versions ready to run.
 
+> **Mac + LM Studio?** See the dedicated **[LM Studio Mac Setup Guide](docs/LM_STUDIO_MAC_GUIDE.md)** for step-by-step setup with RAM-based model recommendations.
+
 ### 3. Configure
 
 Create `selfware.toml` in your project directory:
@@ -425,7 +427,11 @@ LLAMA_SET_ROWS=1 llama.cpp/build/bin/llama-server \
 
 ### LM Studio
 
-Enable **KV cache quantization** (set to Q4) to fit larger context windows in limited VRAM.
+LM Studio provides a GUI for running local models on Mac and Windows.
+
+> **Important:** Set the Prompt Template to **Manual → ChatML** (not Jinja) to ensure tool calling works correctly. See the full **[LM Studio Mac Setup Guide](docs/LM_STUDIO_MAC_GUIDE.md)** for detailed instructions.
+
+Enable **KV cache quantization** (set to Q4) to fit larger context windows in limited RAM.
 
 ---
 
