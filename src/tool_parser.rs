@@ -1452,27 +1452,12 @@ I'll check the output next."#;
     #[test]
     fn test_normalize_malformed_xml_unit() {
         // Direct unit test of the normalization function
-        assert_eq!(
-            normalize_malformed_xml("arguments>"),
-            "</arguments>"
-        );
-        assert_eq!(
-            normalize_malformed_xml(" arguments>"),
-            " </arguments>"
-        );
-        assert_eq!(
-            normalize_malformed_xml("\narguments>"),
-            "\n</arguments>"
-        );
+        assert_eq!(normalize_malformed_xml("arguments>"), "</arguments>");
+        assert_eq!(normalize_malformed_xml(" arguments>"), " </arguments>");
+        assert_eq!(normalize_malformed_xml("\narguments>"), "\n</arguments>");
         // Valid tags should be untouched
-        assert_eq!(
-            normalize_malformed_xml("</arguments>"),
-            "</arguments>"
-        );
-        assert_eq!(
-            normalize_malformed_xml("<arguments>"),
-            "<arguments>"
-        );
+        assert_eq!(normalize_malformed_xml("</arguments>"), "</arguments>");
+        assert_eq!(normalize_malformed_xml("<arguments>"), "<arguments>");
     }
 
     #[test]
@@ -1511,7 +1496,10 @@ I'll check the output next."#;
         let (json_str, _end) = result.unwrap();
         let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap();
         assert_eq!(parsed["path"], "./index.html");
-        assert!(parsed["content"].as_str().unwrap().contains("<h1>Welcome</h1>"));
+        assert!(parsed["content"]
+            .as_str()
+            .unwrap()
+            .contains("<h1>Welcome</h1>"));
     }
 
     #[test]
@@ -1534,10 +1522,7 @@ I'll check the output next."#;
         let (json_str, _end) = result.unwrap();
         let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap();
         assert_eq!(parsed["path"], "test.txt");
-        assert!(parsed["content"]
-            .as_str()
-            .unwrap()
-            .contains("hello"));
+        assert!(parsed["content"].as_str().unwrap().contains("hello"));
     }
 
     #[test]

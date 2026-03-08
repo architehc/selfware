@@ -32,11 +32,7 @@ impl EscListenerGuard {
         use std::sync::atomic::Ordering;
         self.stop.store(true, Ordering::Relaxed);
         // Give the blocking thread up to 200 ms to clean up raw mode.
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            self.handle,
-        )
-        .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(200), self.handle).await;
     }
 }
 

@@ -3361,14 +3361,14 @@ mod tests {
             Message::system("learning hint".to_string()),
         ];
         canonicalize_message_order(&mut msgs);
+        // All system messages merged into one at position 0
+        assert_eq!(msgs.len(), 4);
         assert_eq!(msgs[0].role, "system");
-        assert_eq!(msgs[0].content, "initial prompt");
-        assert_eq!(msgs[1].role, "system");
-        assert_eq!(msgs[1].content, "learning hint");
-        assert_eq!(msgs[2].role, "user");
-        assert_eq!(msgs[2].content, "do something");
-        assert_eq!(msgs[3].role, "assistant");
-        assert_eq!(msgs[4].role, "user");
+        assert_eq!(msgs[0].content, "initial prompt\n\nlearning hint");
+        assert_eq!(msgs[1].role, "user");
+        assert_eq!(msgs[1].content, "do something");
+        assert_eq!(msgs[2].role, "assistant");
+        assert_eq!(msgs[3].role, "user");
     }
 
     #[test]
@@ -3381,14 +3381,12 @@ mod tests {
             Message::system("sys3".to_string()),
         ];
         canonicalize_message_order(&mut msgs);
+        // All system messages merged into one at position 0
+        assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0].role, "system");
-        assert_eq!(msgs[0].content, "sys1");
-        assert_eq!(msgs[1].role, "system");
-        assert_eq!(msgs[1].content, "sys2");
-        assert_eq!(msgs[2].role, "system");
-        assert_eq!(msgs[2].content, "sys3");
-        assert_eq!(msgs[3].role, "user");
-        assert_eq!(msgs[4].role, "assistant");
+        assert_eq!(msgs[0].content, "sys1\n\nsys2\n\nsys3");
+        assert_eq!(msgs[1].role, "user");
+        assert_eq!(msgs[2].role, "assistant");
     }
 
     #[test]
@@ -3410,8 +3408,10 @@ mod tests {
             Message::system("s3".to_string()),
         ];
         canonicalize_message_order(&mut msgs);
-        assert_eq!(msgs.len(), 3);
-        assert!(msgs.iter().all(|m| m.role == "system"));
+        // All merged into one
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, "system");
+        assert_eq!(msgs[0].content, "s1\n\ns2\n\ns3");
     }
 
     #[test]
@@ -3432,14 +3432,18 @@ mod tests {
             Message::system("learning hint".to_string()),
         ];
         canonicalize_message_order(&mut msgs);
+        // All 3 system messages merged into one
+        assert_eq!(msgs.len(), 4);
         assert_eq!(msgs[0].role, "system");
-        assert_eq!(msgs[1].role, "system");
-        assert_eq!(msgs[2].role, "system");
+        assert_eq!(
+            msgs[0].content,
+            "no-think instruction\n\ninitial prompt\n\nlearning hint"
+        );
+        assert_eq!(msgs[1].role, "user");
+        assert_eq!(msgs[1].content, "task");
+        assert_eq!(msgs[2].role, "assistant");
         assert_eq!(msgs[3].role, "user");
-        assert_eq!(msgs[3].content, "task");
-        assert_eq!(msgs[4].role, "assistant");
-        assert_eq!(msgs[5].role, "user");
-        assert_eq!(msgs[5].content, "tool result");
+        assert_eq!(msgs[3].content, "tool result");
     }
 
     #[test]
@@ -3482,12 +3486,13 @@ mod tests {
             Message::user("tool result 2".to_string()),
         ];
         canonicalize_message_order(&mut msgs);
+        // Both system messages merged into one at position 0
+        assert_eq!(msgs.len(), 6);
         assert_eq!(msgs[0].role, "system");
-        assert_eq!(msgs[0].content, "prompt");
-        assert_eq!(msgs[1].role, "system");
-        assert_eq!(msgs[1].content, "injected hint");
-        assert_eq!(msgs[2].role, "user");
-        assert_eq!(msgs[2].content, "task");
+        assert_eq!(msgs[0].content, "prompt\n\ninjected hint");
+        assert_eq!(msgs[1].role, "user");
+        assert_eq!(msgs[1].content, "task");
+        assert_eq!(msgs[2].role, "assistant");
     }
 }
 
