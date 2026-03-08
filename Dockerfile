@@ -46,7 +46,7 @@ RUN mkdir -p src/bin && \
     mkdir -p tests/integration && echo "" > tests/integration/mod.rs
 
 # Build dependencies only (this layer will be cached)
-RUN cargo build --release && rm -rf src benches tests
+RUN cargo build --release 2>/dev/null || true && rm -rf src benches tests
 
 # Copy the actual source code
 COPY src ./src
@@ -54,8 +54,8 @@ COPY tests ./tests
 COPY benches ./benches
 COPY examples ./examples
 
-# Touch main.rs to ensure it rebuilds with actual code
-RUN touch src/main.rs
+# Touch source files to ensure cargo rebuilds with actual code
+RUN touch src/main.rs src/lib.rs
 
 # Build the release binary
 RUN cargo build --release --bin selfware
