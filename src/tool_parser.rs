@@ -481,16 +481,69 @@ fn parse_qwen3_parameters(params_str: &str) -> Result<serde_json::Value> {
     }
 }
 
+/// Extract a balanced JSON object from a string by counting braces.
+///
+/// Finds the first `{` in `s`, then tracks `{`/`}` depth while respecting
+/// JSON string literals (and escape sequences like `\"` and `\\` inside them).
+/// Returns the complete JSON substring and the byte index one past the closing `}`,
+/// or `None` if braces never balance.
+fn extract_json_balanced(s: &str) -> Option<(&str, usize)> {
+    let bytes = s.as_bytes();
+    let start = s.find('{')?;
+    let mut depth: usize = 0;
+    let mut in_string = false;
+    let mut i = start;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            if b == b'\\' {
+                // Skip the escaped character
+                i += 2;
+                continue;
+            }
+            if b == b'"' {
+                in_string = false;
+            }
+        } else {
+            match b {
+                b'"' => in_string = true,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let end = i + 1;
+                        return Some((&s[start..end], end));
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+
+    None
+}
+
 /// Parse arguments from XML format (can be JSON or XML elements)
 fn parse_xml_arguments(args_str: &str) -> Result<serde_json::Value> {
     let trimmed = args_str.trim();
 
-    // First try: parse as JSON directly
+    // First try: extract a balanced JSON object via brace counting, then parse.
+    // This handles cases where HTML tags inside JSON string values would confuse
+    // the regex-based capture (e.g., `{"content":"<div>hello</div>"}`).
+    if let Some((json_str, _end)) = extract_json_balanced(trimmed) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
+            return Ok(json);
+        }
+    }
+
+    // Second try: parse as JSON directly (handles the simple/clean case)
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
         return Ok(json);
     }
 
-    // Second try: parse as XML elements and convert to JSON
+    // Third try: parse as XML elements and convert to JSON
     let mut args = serde_json::Map::new();
 
     // XML element parser: <key>value</key>
@@ -1435,5 +1488,101 @@ I'll check the output next."#;
         assert_eq!(result.tool_calls[0].tool_name, "file_write");
         assert_eq!(result.tool_calls[0].arguments["path"], "./test.txt");
         assert_eq!(result.tool_calls[0].arguments["content"], "hello world");
+    }
+
+    #[test]
+    fn test_extract_json_balanced_simple() {
+        let input = r#"{"path": "test.txt", "content": "hello"}"#;
+        let result = extract_json_balanced(input);
+        assert!(result.is_some());
+        let (json_str, end) = result.unwrap();
+        assert_eq!(json_str, input);
+        assert_eq!(end, input.len());
+        let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap();
+        assert_eq!(parsed["path"], "test.txt");
+    }
+
+    #[test]
+    fn test_extract_json_balanced_with_html() {
+        // This is the bug case: HTML tags inside a JSON string value
+        let input = r#"{"path":"./index.html","content":"<html><head><title>Test</title></head><body><h1>Welcome</h1><div class=\"main\"><p>Hello</p></div></body></html>"}"#;
+        let result = extract_json_balanced(input);
+        assert!(result.is_some());
+        let (json_str, _end) = result.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap();
+        assert_eq!(parsed["path"], "./index.html");
+        assert!(parsed["content"].as_str().unwrap().contains("<h1>Welcome</h1>"));
+    }
+
+    #[test]
+    fn test_extract_json_balanced_nested() {
+        let input = r#"{"url": "https://api.example.com", "headers": {"Authorization": "Bearer token"}, "body": [1, 2, {"nested": true}]}"#;
+        let result = extract_json_balanced(input);
+        assert!(result.is_some());
+        let (json_str, _end) = result.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap();
+        assert!(parsed["headers"].is_object());
+        assert_eq!(parsed["headers"]["Authorization"], "Bearer token");
+        assert!(parsed["body"].is_array());
+    }
+
+    #[test]
+    fn test_extract_json_balanced_escaped_quotes() {
+        let input = r#"{"content": "She said \"hello\" and then left", "path": "test.txt"}"#;
+        let result = extract_json_balanced(input);
+        assert!(result.is_some());
+        let (json_str, _end) = result.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap();
+        assert_eq!(parsed["path"], "test.txt");
+        assert!(parsed["content"]
+            .as_str()
+            .unwrap()
+            .contains("hello"));
+    }
+
+    #[test]
+    fn test_extract_json_balanced_no_json() {
+        let input = "just plain text with no braces at all";
+        let result = extract_json_balanced(input);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_tool_call_with_html_content() {
+        // End-to-end: file_write with HTML content inside <arguments>
+        let content = r#"<tool>
+<name>file_write</name>
+<arguments>{"path":"./index.html","content":"<html><head><title>My Site</title></head><body><div class=\"container\"><h1>Welcome</h1><h2>Get in Touch</h2><p>Contact us</p></div></body></html>"}</arguments>
+</tool>"#;
+
+        let result = parse_tool_calls(content);
+
+        assert_eq!(
+            result.tool_calls.len(),
+            1,
+            "Should parse exactly one tool call"
+        );
+        assert_eq!(result.tool_calls[0].tool_name, "file_write");
+        assert_eq!(result.tool_calls[0].arguments["path"], "./index.html");
+        let content_val = result.tool_calls[0].arguments["content"]
+            .as_str()
+            .expect("content should be a string");
+        assert!(
+            content_val.contains("<h1>Welcome</h1>"),
+            "HTML tags should be preserved in content"
+        );
+        assert!(
+            content_val.contains("<h2>Get in Touch</h2>"),
+            "HTML tags should not be parsed as argument keys"
+        );
+        // Verify we did NOT get the broken parse where HTML tags become keys
+        assert!(
+            result.tool_calls[0].arguments.get("h1").is_none(),
+            "h1 should NOT appear as a top-level argument key"
+        );
+        assert!(
+            result.tool_calls[0].arguments.get("h2").is_none(),
+            "h2 should NOT appear as a top-level argument key"
+        );
     }
 }

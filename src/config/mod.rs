@@ -1455,6 +1455,7 @@ mod tests {
             compact_mode: false,
             verbose_mode: false,
             show_tokens: false,
+            extra_body: None,
         };
 
         let toml_str = toml::to_string(&config).unwrap();

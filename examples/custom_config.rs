@@ -178,6 +178,7 @@ fn build_custom_config() -> Config {
         compact_mode: false,
         verbose_mode: false,
         show_tokens: false,
+        extra_body: None,
     }
 }
 
