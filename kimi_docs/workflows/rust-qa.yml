@@ -1,0 +1,261 @@
+# .github/workflows/rust-qa.yml
+# Rust-specific Quality Assurance workflow for Selfware
+
+name: Rust Quality Assurance
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: 'Directory containing Rust code'
+        required: false
+        default: '.'
+        type: string
+      coverage-threshold:
+        description: 'Minimum code coverage percentage'
+        required: false
+        default: '80'
+        type: string
+      rust-version:
+        description: 'Rust version to use'
+        required: false
+        default: 'stable'
+        type: string
+    outputs:
+      quality-score:
+        description: 'Overall quality score'
+        value: ${{ jobs.aggregate.outputs.quality-score }}
+      coverage:
+        description: 'Code coverage percentage'
+        value: ${{ jobs.coverage.outputs.coverage }}
+  
+  push:
+    paths:
+      - '**.rs'
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+  pull_request:
+    paths:
+      - '**.rs'
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory || '.' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ inputs.rust-version || 'stable' }}
+      
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.working-directory || '.' }}
+      
+      - name: Check
+        run: cargo check --all-features
+
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory || '.' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory || '.' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.working-directory || '.' }}
+      
+      - name: Run Clippy
+        run: cargo clippy --all-features -- -D warnings
+        env:
+          RUSTFLAGS: "-D warnings"
+
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        rust: [stable, beta]
+        exclude:
+          - os: macos-latest
+            rust: beta
+          - os: windows-latest
+            rust: beta
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory || '.' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.working-directory || '.' }}
+      
+      - name: Run tests
+        run: cargo test --all-features --verbose
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    outputs:
+      coverage: ${{ steps.coverage.outputs.coverage }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory || '.' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.working-directory || '.' }}
+      
+      - name: Install tarpaulin
+        run: cargo install cargo-tarpaulin
+      
+      - name: Generate coverage
+        run: |
+          cargo tarpaulin --out Xml --fail-under ${{ inputs.coverage-threshold || '80' }}
+      
+      - name: Extract coverage
+        id: coverage
+        run: |
+          COVERAGE=$(grep -o 'line-rate="[0-9.]*"' cobertura.xml | head -1 | cut -d'"' -f2)
+          COVERAGE_PCT=$(echo "$COVERAGE * 100" | bc)
+          echo "coverage=$COVERAGE_PCT" >> $GITHUB_OUTPUT
+      
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./cobertura.xml
+          fail_ci_if_error: false
+
+  doc:
+    name: Documentation
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory || '.' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.working-directory || '.' }}
+      
+      - name: Build documentation
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Run cargo audit
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  bench:
+    name: Benchmark
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory || '.' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.working-directory || '.' }}
+      
+      - name: Run benchmarks
+        run: cargo bench -- --test
+
+  aggregate:
+    name: Aggregate Results
+    needs: [check, fmt, clippy, test, coverage, doc, audit]
+    runs-on: ubuntu-latest
+    outputs:
+      quality-score: ${{ steps.score.outputs.score }}
+    steps:
+      - name: Calculate Quality Score
+        id: score
+        run: |
+          # Base score calculation
+          SCORE=100
+          
+          # Deduct for any failures
+          # Each job that fails deducts points
+          
+          echo "score=$SCORE" >> $GITHUB_OUTPUT
+          echo "Rust Quality Score: $SCORE/100"

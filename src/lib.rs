@@ -35,6 +35,9 @@ pub mod config;
 pub mod errors;
 pub mod input;
 pub mod safety;
+pub mod computer;
+pub mod hooks;
+pub mod mcp;
 pub mod tools;
 pub mod ui;
 

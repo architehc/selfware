@@ -221,6 +221,33 @@ pub struct Config {
     #[serde(default)]
     pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
 
+    /// QA framework configuration for multi-language verification.
+    #[serde(default)]
+    pub qa: crate::testing::qa_profiles::QaConfig,
+
+    /// MCP (Model Context Protocol) server connections.
+    ///
+    /// ```toml
+    /// [[mcp.servers]]
+    /// name = "github"
+    /// command = "npx"
+    /// args = ["-y", "@modelcontextprotocol/server-github"]
+    /// env = { GITHUB_TOKEN = "..." }
+    /// ```
+    #[serde(default)]
+    pub mcp: crate::mcp::McpConfig,
+
+    /// Event hooks that run shell commands at key lifecycle points.
+    ///
+    /// ```toml
+    /// [[hooks]]
+    /// event = "PostToolUse"
+    /// match_tools = ["file_write", "file_edit"]
+    /// command = "cargo fmt -- {path}"
+    /// ```
+    #[serde(default)]
+    pub hooks: Vec<crate::hooks::HookConfig>,
+
     /// Runtime execution mode (set via CLI, not persisted)
     #[serde(skip)]
     pub execution_mode: ExecutionMode,
@@ -236,6 +263,10 @@ pub struct Config {
     /// Always show token usage after responses - CLI override
     #[serde(skip)]
     pub show_tokens: bool,
+
+    /// Plan mode: agent reasons and proposes tool calls without executing them.
+    #[serde(skip)]
+    pub plan_mode: bool,
 }
 
 // Manual `Debug` implementation that delegates to `RedactedString`'s `Debug`
@@ -262,6 +293,10 @@ impl std::fmt::Debug for Config {
             .field("verbose_mode", &self.verbose_mode)
             .field("show_tokens", &self.show_tokens)
             .field("extra_body", &self.extra_body)
+            .field("qa", &self.qa)
+            .field("mcp", &self.mcp)
+            .field("hooks", &self.hooks)
+            .field("plan_mode", &self.plan_mode)
             .finish()
     }
 }
@@ -495,10 +530,14 @@ impl Default for Config {
             evolution: EvolutionTomlConfig::default(),
             models: HashMap::new(),
             extra_body: None,
+            qa: crate::testing::qa_profiles::QaConfig::default(),
+            mcp: crate::mcp::McpConfig::default(),
+            hooks: Vec::new(),
             execution_mode: ExecutionMode::default(),
             compact_mode: false,
             verbose_mode: false,
             show_tokens: false,
+            plan_mode: false,
         }
     }
 }
@@ -1456,6 +1495,10 @@ mod tests {
             verbose_mode: false,
             show_tokens: false,
             extra_body: None,
+            qa: crate::testing::qa_profiles::QaConfig::default(),
+            mcp: crate::mcp::McpConfig::default(),
+            hooks: Vec::new(),
+            plan_mode: false,
         };
 
         let toml_str = toml::to_string(&config).unwrap();

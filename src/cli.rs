@@ -99,6 +99,14 @@ struct Cli {
     /// Use ASCII-only output (no emoji or extended Unicode)
     #[arg(long)]
     ascii: bool,
+
+    /// Plan mode: agent proposes tool calls without executing them
+    #[arg(long)]
+    plan: bool,
+
+    /// Resume a named chat session (alias for `selfware chat --resume <name>`)
+    #[arg(long, value_name = "NAME")]
+    resume_session: Option<String>,
 }
 
 /// Color theme for terminal output
@@ -400,6 +408,11 @@ pub async fn run() -> Result<()> {
     config.verbose_mode = verbose;
     config.show_tokens = show_tokens;
 
+    // Apply plan mode from CLI
+    if cli.plan {
+        config.plan_mode = true;
+    }
+
     // Initialize output control with merged settings
     output::init(compact, verbose, show_tokens);
 
@@ -499,7 +512,7 @@ pub async fn run() -> Result<()> {
 
     // Default to Chat if no subcommand specified (non-extras builds)
     let command = cli.command.unwrap_or(Commands::Chat);
-    handle_command(command, cli.quiet, config, &ctx, exec_mode).await
+    handle_command(command, cli.quiet, config, &ctx, exec_mode, cli.resume_session).await
 }
 
 async fn handle_command(
@@ -508,6 +521,7 @@ async fn handle_command(
     config: Config,
     ctx: &WorkshopContext,
     exec_mode: ExecutionMode,
+    resume_session: Option<String>,
 ) -> Result<()> {
     match command {
         Commands::Chat => {
@@ -515,6 +529,23 @@ async fn handle_command(
                 println!("{}", ui::components::render_welcome(ctx));
             }
             let mut agent = Agent::new(config).await?;
+            // Resume named session if --resume-session was provided
+            if let Some(ref session_name) = resume_session {
+                match agent.resume_named_session(session_name) {
+                    Ok(msg_count) => {
+                        if !quiet {
+                            println!(
+                                "▶ Resumed session '{}' ({} messages)",
+                                session_name,
+                                msg_count
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to resume session '{}': {}", session_name, e);
+                    }
+                }
+            }
             agent.interactive().await?;
         }
 

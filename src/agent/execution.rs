@@ -12,6 +12,7 @@ use crate::checkpoint::ToolCallLog;
 use crate::cognitive::self_improvement::Outcome;
 use crate::cognitive::CyclePhase;
 use crate::errors::AgentError;
+use crate::hooks::{HookAction, HookContext};
 use crate::tool_parser::parse_tool_calls;
 
 /// Try to extract a `base64_png` field from a JSON tool result string.
@@ -93,9 +94,36 @@ impl Agent {
                 self.messages.push(Message::user(gate_msg));
                 return Ok(false);
             }
+
+            // Fire Stop hooks before completing
+            let stop_ctx = HookContext::stop();
+            self.hook_registry.fire(&stop_ctx).await;
+
             output::final_answer(&content);
             self.last_assistant_response = content;
             return Ok(true);
+        }
+
+        // Plan mode: show proposed tool calls without executing
+        if self.plan_mode {
+            let mut plan_summary = String::from("Plan mode — proposed tool calls (not executed):\n");
+            for (i, (name, args_str, _)) in tool_calls.iter().enumerate() {
+                let args_preview: String = args_str.chars().take(200).collect();
+                plan_summary.push_str(&format!(
+                    "\n{}. {} — {}{}\n",
+                    i + 1,
+                    name,
+                    args_preview,
+                    if args_str.len() > 200 { "..." } else { "" }
+                ));
+            }
+            output::final_answer(&plan_summary);
+            self.messages.push(Message::user(
+                "The above tool calls were proposed but NOT executed (plan mode is active). \
+                 Review the plan and confirm, or adjust."
+            ));
+            self.last_assistant_response = plan_summary;
+            return Ok(false);
         }
 
         // Detect repetition loops before executing
@@ -309,6 +337,15 @@ impl Agent {
                 continue;
             }
 
+            // Fire PreToolUse hooks (may skip execution)
+            let pre_ctx = HookContext::pre_tool(&name, &args_str);
+            if let HookAction::Skip { reason } = self.hook_registry.fire(&pre_ctx).await {
+                let skip_msg = format!("Tool skipped by PreToolUse hook: {}", reason);
+                info!("{}", skip_msg);
+                self.push_tool_result_message(use_native_fc, &call_id, &name, false, &skip_msg);
+                continue;
+            }
+
             self.emit_event(AgentEvent::ToolStarted { name: name.clone() });
 
             let args =
@@ -410,6 +447,10 @@ impl Agent {
             }
 
             self.push_tool_result_message(use_native_fc, &call_id, &name, success, &result);
+
+            // Fire PostToolUse hooks (e.g., auto-format, lint, auto-commit)
+            let post_ctx = HookContext::post_tool(&name, &args_str, success, &result);
+            self.hook_registry.fire(&post_ctx).await;
         }
 
         Ok(())

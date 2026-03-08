@@ -1,0 +1,263 @@
+# .github/workflows/selfware-qa-orchestrator.yml
+# Main QA Orchestrator for Selfware Agentic Harness
+# Coordinates quality assurance across multiple languages
+
+name: Selfware QA Orchestrator
+
+on:
+  workflow_dispatch:
+    inputs:
+      generation_request:
+        description: 'Generation request JSON'
+        required: false
+        type: string
+        default: '{}'
+      qa_profile:
+        description: 'QA profile to use'
+        required: false
+        type: choice
+        options:
+          - standard
+          - strict
+          - minimal
+        default: 'standard'
+      working_directory:
+        description: 'Working directory for generated code'
+        required: false
+        type: string
+        default: './generated'
+  
+  push:
+    paths:
+      - 'generated/**'
+  
+  pull_request:
+    paths:
+      - 'generated/**'
+
+env:
+  QA_PROFILE: ${{ inputs.qa_profile || 'standard' }}
+  WORKING_DIR: ${{ inputs.working_directory || './generated' }}
+
+jobs:
+  # Detect which languages are present in the generated code
+  detect-languages:
+    name: Detect Languages
+    runs-on: ubuntu-latest
+    outputs:
+      has_rust: ${{ steps.detect.outputs.has_rust }}
+      has_python: ${{ steps.detect.outputs.has_python }}
+      has_nodejs: ${{ steps.detect.outputs.has_nodejs }}
+      has_typescript: ${{ steps.detect.outputs.has_typescript }}
+      languages: ${{ steps.detect.outputs.languages }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Detect Languages
+        id: detect
+        run: |
+          WORKDIR="${{ env.WORKING_DIR }}"
+          
+          HAS_RUST="false"
+          HAS_PYTHON="false"
+          HAS_NODEJS="false"
+          HAS_TYPESCRIPT="false"
+          LANGUAGES="[]"
+          
+          if [ -f "$WORKDIR/Cargo.toml" ]; then
+            HAS_RUST="true"
+            LANGUAGES=$(echo $LANGUAGES | jq '. + ["rust"]')
+            echo "Rust detected"
+          fi
+          
+          if [ -f "$WORKDIR/pyproject.toml" ] || [ -f "$WORKDIR/setup.py" ] || [ -f "$WORKDIR/requirements.txt" ]; then
+            HAS_PYTHON="true"
+            LANGUAGES=$(echo $LANGUAGES | jq '. + ["python"]')
+            echo "Python detected"
+          fi
+          
+          if [ -f "$WORKDIR/package.json" ]; then
+            # Check if TypeScript
+            if [ -f "$WORKDIR/tsconfig.json" ]; then
+              HAS_TYPESCRIPT="true"
+              LANGUAGES=$(echo $LANGUAGES | jq '. + ["typescript"]')
+              echo "TypeScript detected"
+            else
+              HAS_NODEJS="true"
+              LANGUAGES=$(echo $LANGUAGES | jq '. + ["nodejs"]')
+              echo "Node.js detected"
+            fi
+          fi
+          
+          echo "has_rust=$HAS_RUST" >> $GITHUB_OUTPUT
+          echo "has_python=$HAS_PYTHON" >> $GITHUB_OUTPUT
+          echo "has_nodejs=$HAS_NODEJS" >> $GITHUB_OUTPUT
+          echo "has_typescript=$HAS_TYPESCRIPT" >> $GITHUB_OUTPUT
+          echo "languages=$LANGUAGES" >> $GITHUB_OUTPUT
+          
+          echo "Detected languages: $LANGUAGES"
+
+  # Run Rust QA if Rust code detected
+  rust-qa:
+    name: Rust QA
+    needs: detect-languages
+    if: needs.detect-languages.outputs.has_rust == 'true'
+    uses: ./.github/workflows/rust-qa.yml
+    with:
+      working-directory: ${{ env.WORKING_DIR }}
+      coverage-threshold: '80'
+
+  # Run Python QA if Python code detected
+  python-qa:
+    name: Python QA
+    needs: detect-languages
+    if: needs.detect-languages.outputs.has_python == 'true'
+    uses: ./.github/workflows/python-qa.yml
+    with:
+      working-directory: ${{ env.WORKING_DIR }}
+      coverage-threshold: '80'
+
+  # Run Node.js QA if Node.js/TypeScript code detected
+  nodejs-qa:
+    name: Node.js QA
+    needs: detect-languages
+    if: needs.detect-languages.outputs.has_nodejs == 'true' || needs.detect-languages.outputs.has_typescript == 'true'
+    uses: ./.github/workflows/nodejs-qa.yml
+    with:
+      working-directory: ${{ env.WORKING_DIR }}
+      coverage-threshold: '80'
+
+  # Aggregate all QA results
+  aggregate-reports:
+    name: Aggregate Reports
+    needs: [detect-languages, rust-qa, python-qa, nodejs-qa]
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      quality-score: ${{ steps.aggregate.outputs.quality-score }}
+      passed: ${{ steps.aggregate.outputs.passed }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: reports/
+          pattern: "*-report"
+        continue-on-error: true
+      
+      - name: Aggregate Reports
+        id: aggregate
+        run: |
+          python scripts/qa-orchestrator.py \
+            --action aggregate \
+            --profile ${{ env.QA_PROFILE }} \
+            --languages '${{ needs.detect-languages.outputs.languages }}' \
+            --reports-dir reports/ \
+            --output reports/unified-report.json
+          
+          QUALITY_SCORE=$(jq -r '.quality_score' reports/unified-report.json)
+          PASSED=$(jq -r '.passed' reports/unified-report.json)
+          
+          echo "quality-score=$QUALITY_SCORE" >> $GITHUB_OUTPUT
+          echo "passed=$PASSED" >> $GITHUB_OUTPUT
+          
+          echo "Unified Quality Score: $QUALITY_SCORE"
+          echo "Passed: $PASSED"
+      
+      - name: Upload Unified Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: unified-qa-report
+          path: reports/unified-report.json
+
+  # Quality Gate - fail if quality score below threshold
+  quality-gate:
+    name: Quality Gate
+    needs: aggregate-reports
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Quality Gate
+        run: |
+          SCORE=${{ needs.aggregate-reports.outputs.quality-score }}
+          PASSED=${{ needs.aggregate-reports.outputs.passed }}
+          
+          echo "Quality Score: $SCORE"
+          echo "Passed: $PASSED"
+          
+          if [ "$PASSED" != "true" ]; then
+            echo "❌ Quality gate FAILED - code does not meet quality standards"
+            exit 1
+          fi
+          
+          if [ $(echo "$SCORE < 80" | bc) -eq 1 ]; then
+            echo "❌ Quality score $SCORE below threshold (80)"
+            exit 1
+          fi
+          
+          echo "✅ Quality gate PASSED"
+
+  # Generate feedback for agentic improvement
+  generate-feedback:
+    name: Generate Feedback
+    needs: [aggregate-reports, quality-gate]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Download Unified Report
+        uses: actions/download-artifact@v4
+        with:
+          name: unified-qa-report
+          path: reports/
+      
+      - name: Generate Feedback
+        run: |
+          python scripts/qa-orchestrator.py \
+            --action feedback \
+            --report reports/unified-report.json \
+            --output reports/feedback.json
+      
+      - name: Upload Feedback
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-feedback
+          path: reports/feedback.json
+
+  # Summary
+  summary:
+    name: QA Summary
+    needs: [detect-languages, aggregate-reports, quality-gate]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: QA Summary
+        run: |
+          echo "## Selfware QA Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Profile:** ${{ env.QA_PROFILE }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Languages Detected:** ${{ needs.detect-languages.outputs.languages }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Quality Score:** ${{ needs.aggregate-reports.outputs.quality-score }}/100" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ needs.quality-gate.result }}" == "success" ]; then
+            echo "✅ **Quality Gate:** PASSED" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Quality Gate:** FAILED" >> $GITHUB_STEP_SUMMARY
+          fi

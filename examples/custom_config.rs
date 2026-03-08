@@ -179,6 +179,10 @@ fn build_custom_config() -> Config {
         verbose_mode: false,
         show_tokens: false,
         extra_body: None,
+        qa: Default::default(),
+        mcp: Default::default(),
+        hooks: Vec::new(),
+        plan_mode: false,
     }
 }
 

@@ -14,6 +14,7 @@ use crate::checkpoint::{CheckpointManager, TaskCheckpoint};
 use crate::cognitive::self_improvement::{Outcome, SelfImprovementEngine};
 use crate::cognitive::{CognitiveState, CyclePhase};
 use crate::config::Config;
+use crate::hooks::HookRegistry;
 use crate::memory::AgentMemory;
 use crate::output;
 use crate::safety::SafetyChecker;
@@ -164,6 +165,10 @@ pub struct Agent {
     self_healing: SelfHealingEngine,
     /// Recent tool call signatures for repetition detection (name, args_hash)
     recent_tool_calls: VecDeque<(String, u64)>,
+    /// Hook registry for event-driven automation
+    hook_registry: HookRegistry,
+    /// Plan mode: propose tool calls without executing them
+    plan_mode: bool,
 }
 
 impl Agent {
@@ -368,6 +373,53 @@ To call a tool, use this EXACT XML structure:
         let edit_history = EditHistory::new();
         let chat_store = ChatStore::new().unwrap_or_else(|_| ChatStore::fallback());
 
+        // Connect to MCP servers and register their tools
+        if !config.mcp.servers.is_empty() {
+            info!(
+                "Connecting to {} MCP server(s)...",
+                config.mcp.servers.len()
+            );
+            for server_config in &config.mcp.servers {
+                match crate::mcp::McpClient::connect(server_config).await {
+                    Ok(client) => {
+                        let client = std::sync::Arc::new(client);
+                        match crate::mcp::discover_tools(&client).await {
+                            Ok(mcp_tools) => {
+                                let count = mcp_tools.len();
+                                for tool in mcp_tools {
+                                    tools.register(tool);
+                                }
+                                info!(
+                                    "Registered {} tool(s) from MCP server '{}'",
+                                    count, server_config.name
+                                );
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "Failed to discover tools from MCP server '{}': {}",
+                                    server_config.name, e
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to connect to MCP server '{}': {}",
+                            server_config.name, e
+                        );
+                    }
+                }
+            }
+        }
+
+        // Initialize hook registry from configuration
+        let hook_registry = HookRegistry::from_config(&config.hooks);
+        if !hook_registry.is_empty() {
+            info!("Loaded {} hook(s) from configuration", hook_registry.len());
+        }
+
+        let plan_mode = config.plan_mode;
+
         info!("Agent initialized with cognitive state, verification gate, and error analyzer");
 
         Ok(Self {
@@ -401,6 +453,8 @@ To call a tool, use this EXACT XML structure:
             #[cfg(feature = "resilience")]
             self_healing,
             recent_tool_calls: VecDeque::new(),
+            hook_registry,
+            plan_mode,
         })
     }
 
@@ -532,6 +586,51 @@ To call a tool, use this EXACT XML structure:
     /// Clear cancellation state after handling an interrupt.
     pub(crate) fn reset_cancellation(&self) {
         self.cancelled.store(false, Ordering::Relaxed);
+    }
+
+    /// Check if plan mode is active.
+    pub fn is_plan_mode(&self) -> bool {
+        self.plan_mode
+    }
+
+    /// Toggle plan mode on/off and return the new state.
+    pub fn toggle_plan_mode(&mut self) -> bool {
+        self.plan_mode = !self.plan_mode;
+        self.plan_mode
+    }
+
+    /// Set plan mode explicitly.
+    pub fn set_plan_mode(&mut self, enabled: bool) {
+        self.plan_mode = enabled;
+    }
+
+    /// Get a reference to the hook registry.
+    pub fn hook_registry(&self) -> &HookRegistry {
+        &self.hook_registry
+    }
+
+    /// Get a mutable reference to the hook registry.
+    pub fn hook_registry_mut(&mut self) -> &mut HookRegistry {
+        &mut self.hook_registry
+    }
+
+    /// Resume a named chat session by loading messages from the chat store.
+    /// Returns the number of messages restored on success.
+    pub fn resume_named_session(&mut self, name: &str) -> Result<usize> {
+        let chat = self.chat_store.load(name)?;
+        self.messages = chat.messages;
+
+        // Rebuild memory from recovered messages
+        self.memory.clear();
+        for msg in &self.messages {
+            if msg.role != "system" {
+                self.memory.add_message(msg);
+            }
+        }
+
+        let count = self.messages.len();
+        info!("Resumed named session '{}' with {} messages", name, count);
+        Ok(count)
     }
 }
 

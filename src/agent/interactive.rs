@@ -1163,6 +1163,86 @@ impl Agent {
                 continue;
             }
 
+            // /plan toggle
+            if input == "/plan" {
+                let enabled = self.toggle_plan_mode();
+                if enabled {
+                    println!(
+                        "{} Plan mode ON — tool calls will be proposed but not executed",
+                        "📝".bright_cyan()
+                    );
+                } else {
+                    println!(
+                        "{} Plan mode OFF — tool calls will execute normally",
+                        "⚡".bright_green()
+                    );
+                }
+                continue;
+            }
+
+            // /hooks - Show registered hooks
+            if input == "/hooks" {
+                if self.hook_registry.is_empty() {
+                    println!("{} No hooks registered", "ℹ".bright_yellow());
+                    println!(
+                        "  {} Add hooks in selfware.toml under [[hooks]]",
+                        "→".bright_black()
+                    );
+                } else {
+                    println!(
+                        "\n  {} Registered Hooks ({})",
+                        "🔗".bright_cyan(),
+                        self.hook_registry.len()
+                    );
+                    // We can't easily iterate hooks without exposing them,
+                    // so just show the count
+                    println!(
+                        "  {} {} hook(s) configured via selfware.toml",
+                        "→".bright_black(),
+                        self.hook_registry.len()
+                    );
+                    println!();
+                }
+                continue;
+            }
+
+            // /think - Toggle thinking mode
+            if input == "/think" || input.starts_with("/think ") {
+                let arg = input.strip_prefix("/think").unwrap().trim();
+                match arg {
+                    "" | "toggle" => {
+                        // Toggle between Enabled and Disabled
+                        let current = self.config.extra_body
+                            .as_ref()
+                            .and_then(|eb| eb.get("enable_thinking"))
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
+                        let new_state = !current;
+                        let eb = self.config.extra_body.get_or_insert_with(Default::default);
+                        eb.insert("enable_thinking".to_string(), serde_json::Value::Bool(new_state));
+                        if new_state {
+                            println!("{} Thinking enabled", "🧠".bright_cyan());
+                        } else {
+                            println!("{} Thinking disabled (faster responses)", "⚡".bright_green());
+                        }
+                    }
+                    "on" => {
+                        let eb = self.config.extra_body.get_or_insert_with(Default::default);
+                        eb.insert("enable_thinking".to_string(), serde_json::Value::Bool(true));
+                        println!("{} Thinking enabled", "🧠".bright_cyan());
+                    }
+                    "off" => {
+                        let eb = self.config.extra_body.get_or_insert_with(Default::default);
+                        eb.insert("enable_thinking".to_string(), serde_json::Value::Bool(false));
+                        println!("{} Thinking disabled (faster responses)", "⚡".bright_green());
+                    }
+                    _ => {
+                        println!("{} Usage: /think [on|off|toggle]", "ℹ".bright_yellow());
+                    }
+                }
+                continue;
+            }
+
             // /chat commands
             if input.starts_with("/chat save ") {
                 let Some(name) = input.strip_prefix("/chat save ").map(str::trim) else {
@@ -1642,6 +1722,16 @@ impl Agent {
                 match self.analyze(path).await {
                     Ok(_) => self.after_task_run().await,
                     Err(e) => println!("{} Error analyzing: {}", "❌".bright_red(), e),
+                }
+                continue;
+            }
+
+            if input == "/plan" {
+                let enabled = self.toggle_plan_mode();
+                if enabled {
+                    println!("Plan mode ON — tool calls will be proposed but not executed");
+                } else {
+                    println!("Plan mode OFF — tool calls will execute normally");
                 }
                 continue;
             }

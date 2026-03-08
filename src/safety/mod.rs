@@ -7,9 +7,11 @@
 //! - Sandboxing
 //! - Execution control modes
 
+pub mod audit;
 pub mod autonomy;
 pub mod checker;
 pub mod path_validator;
+pub mod permissions;
 pub mod redact;
 pub mod sandbox;
 pub mod scanner;
