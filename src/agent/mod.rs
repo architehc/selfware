@@ -48,6 +48,65 @@ use tui_events::{AgentEvent, EventEmitter, NoopEmitter};
 /// Upper bound for queued interactive messages to avoid unbounded memory growth.
 pub(crate) const MAX_PENDING_MESSAGES: usize = 100;
 
+/// Detected project type for adapting verification instructions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectType {
+    Rust,
+    Node,
+    Python,
+    Go,
+    Generic,
+}
+
+/// Detect the project type from marker files in the working directory.
+fn detect_project_type() -> ProjectType {
+    if std::path::Path::new("Cargo.toml").exists() {
+        ProjectType::Rust
+    } else if std::path::Path::new("package.json").exists() {
+        ProjectType::Node
+    } else if std::path::Path::new("pyproject.toml").exists()
+        || std::path::Path::new("setup.py").exists()
+        || std::path::Path::new("requirements.txt").exists()
+    {
+        ProjectType::Python
+    } else if std::path::Path::new("go.mod").exists() {
+        ProjectType::Go
+    } else {
+        ProjectType::Generic
+    }
+}
+
+/// Return (verify_step, test_step, completion_rule) for the detected project type.
+fn verification_instructions(pt: ProjectType) -> (&'static str, &'static str, &'static str) {
+    match pt {
+        ProjectType::Rust => (
+            "3. VERIFY: Run cargo_check IMMEDIATELY after every file change",
+            "5. TEST: Run cargo_test when implementation is complete",
+            "- NEVER declare complete without a successful cargo_check",
+        ),
+        ProjectType::Node => (
+            "3. VERIFY: Check for syntax errors after changes. Run npm test or the project's test script if available",
+            "5. TEST: Run the project's test command when implementation is complete",
+            "- Verify your changes work before declaring complete",
+        ),
+        ProjectType::Python => (
+            "3. VERIFY: Check for syntax errors after changes. Run pytest or the project's test command if available",
+            "5. TEST: Run pytest or the project's test command when implementation is complete",
+            "- Verify your changes work before declaring complete",
+        ),
+        ProjectType::Go => (
+            "3. VERIFY: Run go build after every file change",
+            "5. TEST: Run go test when implementation is complete",
+            "- NEVER declare complete without a successful go build",
+        ),
+        ProjectType::Generic => (
+            "3. VERIFY: Test your changes using appropriate tools for the project type",
+            "5. TEST: Verify the output works correctly when implementation is complete",
+            "- Verify your changes work before declaring complete",
+        ),
+    }
+}
+
 /// Core agent that orchestrates LLM reasoning with tool execution.
 ///
 /// The agent maintains conversation state, manages tool calls through a safety
@@ -161,28 +220,35 @@ impl Agent {
             SelfImprovementEngine::new()
         };
 
+        // Detect project type for verification instructions
+        let project_type = detect_project_type();
+        let (verify_step, test_step, completion_rule) = verification_instructions(project_type);
+        info!("Detected project type: {:?}", project_type);
+
         // Choose between native function calling or XML-based tool parsing
         let mut system_prompt = if config.agent.native_function_calling {
             // Native function calling: simple prompt, tools passed via API
             info!("Using native function calling mode");
-            r#"You are Selfware, an expert software engineering AI assistant.
+            format!(
+                r#"You are Selfware, an expert software engineering AI assistant.
 
-You have access to tools for file operations, git, cargo, shell commands, and more.
+You have access to tools for file operations, git, shell commands, and more.
 
 ## MANDATORY WORKFLOW
 1. PLAN: Understand what needs to change — read relevant files first
 2. IMPLEMENT: Make code changes using file_edit or file_write
-3. VERIFY: Run cargo_check IMMEDIATELY after every file change
+{}
 4. FIX: If verification fails, fix errors before proceeding
-5. TEST: Run cargo_test when implementation is complete
+{}
 
 ## CRITICAL RULES
 - NEVER skip verification after file_edit or file_write
-- NEVER declare complete without a successful cargo_check
+{}
 - When editing files, include 3-5 lines of context for unique matches
 - You have a large budget. Do NOT rush. Be thorough and methodical.
-- When the task is complete, respond with a summary of what was done."#
-                .to_string()
+- When the task is complete, respond with a summary of what was done."#,
+                verify_step, test_step, completion_rule
+            )
         } else {
             // XML-based: embed tools in system prompt
             // This works with backends that don't support native function calling
@@ -244,9 +310,9 @@ To call a tool, use this EXACT XML structure:
 ## MANDATORY WORKFLOW
 1. PLAN: Understand what needs to change — read relevant files first
 2. IMPLEMENT: Make code changes using file_edit or file_write
-3. VERIFY: Run cargo_check IMMEDIATELY after every file change
+{}
 4. FIX: If verification fails, fix errors before proceeding
-5. TEST: Run cargo_test when implementation is complete
+{}
 
 ## CRITICAL RULES
 - Use <name>TOOL_NAME</name> - never <function>
@@ -254,10 +320,10 @@ To call a tool, use this EXACT XML structure:
 - Each <tool>...</tool> block is executed separately
 - Wait for tool results before proceeding
 - NEVER skip verification after file_edit or file_write
-- NEVER declare complete without a successful cargo_check
+{}
 - You have a large budget. Do NOT rush. Be thorough and methodical.
 - When done, respond with plain text only (no tool tags)"#,
-                tool_descriptions
+                tool_descriptions, verify_step, test_step, completion_rule
             )
         };
 

@@ -1,5 +1,7 @@
 use anyhow::Result;
 use colored::*;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 use std::time::Instant;
 
 use super::*;
@@ -14,6 +16,94 @@ fn safe_truncate(s: &str, max_bytes: usize) -> &str {
         end -= 1;
     }
     &s[..end]
+}
+
+/// Handle returned by [`spawn_esc_listener`] so the caller can signal the
+/// listener to stop and wait for terminal raw-mode to be restored.
+struct EscListenerGuard {
+    stop: Arc<AtomicBool>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl EscListenerGuard {
+    /// Signal the background listener to exit and wait (briefly) for it to
+    /// restore terminal raw-mode before returning control to reedline.
+    async fn stop(self) {
+        use std::sync::atomic::Ordering;
+        self.stop.store(true, Ordering::Relaxed);
+        // Give the blocking thread up to 200 ms to clean up raw mode.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            self.handle,
+        )
+        .await;
+    }
+}
+
+/// Spawn a background task that listens for ESC key presses during model execution.
+///
+/// While the agent is running a task, reedline is not reading stdin, so we can safely
+/// enter raw mode and poll for keyboard events. When ESC is pressed the cancellation
+/// token is set, which is the same flag used by the Ctrl+C handler.
+///
+/// The listener exits when:
+/// - ESC is pressed (after setting the cancel flag)
+/// - The `stop` flag is set by the caller (task finished)
+/// - The cancel token is already set (Ctrl+C fired)
+/// - An unrecoverable error occurs reading events
+///
+/// Terminal raw mode is always restored before the thread returns.
+fn spawn_esc_listener(cancel_token: Arc<AtomicBool>) -> EscListenerGuard {
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_clone = Arc::clone(&stop);
+
+    let handle = tokio::task::spawn_blocking(move || {
+        use crossterm::event::{self, Event, KeyCode, KeyEvent};
+        use crossterm::terminal;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        // Enter raw mode so we can read individual key presses
+        if terminal::enable_raw_mode().is_err() {
+            return;
+        }
+
+        loop {
+            // Check if we should stop (task finished or already cancelled)
+            if stop_clone.load(Ordering::Relaxed) || cancel_token.load(Ordering::Relaxed) {
+                break;
+            }
+
+            // Poll with a short timeout so we can check the stop flag periodically
+            match event::poll(Duration::from_millis(100)) {
+                Ok(true) => match event::read() {
+                    Ok(Event::Key(KeyEvent {
+                        code: KeyCode::Esc, ..
+                    })) => {
+                        cancel_token.store(true, Ordering::Relaxed);
+                        // Print cancellation notice; use \r\n because we are in raw mode
+                        let _ = std::io::Write::write_all(
+                            &mut std::io::stderr(),
+                            b"\r\n\x1b[33m[ESC] Cancelling...\x1b[0m\r\n",
+                        );
+                        break;
+                    }
+                    Ok(_) => {
+                        // Ignore other keys
+                    }
+                    Err(_) => break,
+                },
+                Ok(false) => {
+                    // No event within the poll window — loop back and recheck
+                }
+                Err(_) => break,
+            }
+        }
+
+        let _ = terminal::disable_raw_mode();
+    });
+
+    EscListenerGuard { stop, handle }
 }
 
 impl Agent {
@@ -410,6 +500,7 @@ impl Agent {
                     "{}",
                     "├──────────────────────────────────────────────────────┤".bright_cyan()
                 );
+                println!("│  ESC           Interrupt running task               │");
                 println!("│  Ctrl+C        Interrupt running task               │");
                 println!("│  Ctrl+C ×2     Exit (double-tap at prompt)          │");
                 println!("│  Ctrl+J        Insert newline (multi-line)          │");
@@ -1312,17 +1403,24 @@ impl Agent {
             }
         }
 
+        // Clean up any managed background processes before exiting
+        crate::tools::process::cleanup_all_processes().await;
+
         Ok(())
     }
 
     async fn run_task_with_queue(&mut self, task: &str) -> Result<()> {
+        let esc_guard = spawn_esc_listener(self.cancel_token());
         let result = self.run_task(task).await;
+        esc_guard.stop().await;
         self.after_task_run().await;
         result
     }
 
     async fn run_swarm_with_queue(&mut self, task: &str) -> Result<()> {
+        let esc_guard = spawn_esc_listener(self.cancel_token());
         let result = self.run_swarm_task(task).await;
+        esc_guard.stop().await;
         self.after_task_run().await;
         result
     }
@@ -1720,6 +1818,9 @@ impl Agent {
                 Err(e) => println!("{} Error: {}", "❌".bright_red(), e),
             }
         }
+
+        // Clean up any managed background processes before exiting
+        crate::tools::process::cleanup_all_processes().await;
 
         Ok(())
     }

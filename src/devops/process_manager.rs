@@ -431,6 +431,41 @@ impl ProcessManager {
         Ok(proc.to_summary(20))
     }
 
+    /// Stop all running managed processes gracefully.
+    ///
+    /// Returns the number of processes that were actually stopped.
+    pub async fn stop_all(&self) -> usize {
+        let ids: Vec<String> = {
+            let processes = self.processes.read().await;
+            processes
+                .iter()
+                .filter(|(_, p)| {
+                    matches!(
+                        p.status,
+                        ProcessStatus::Running
+                            | ProcessStatus::Starting
+                            | ProcessStatus::Restarting { .. }
+                    )
+                })
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+
+        let mut stopped = 0;
+        for id in &ids {
+            match self.stop(id, false).await {
+                Ok(_) => {
+                    info!("Stopped managed process '{}'", id);
+                    stopped += 1;
+                }
+                Err(e) => {
+                    warn!("Failed to stop process '{}': {}", id, e);
+                }
+            }
+        }
+        stopped
+    }
+
     /// List all managed processes
     pub async fn list(&self) -> Vec<ProcessSummary> {
         let processes = self.processes.read().await;

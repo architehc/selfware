@@ -446,6 +446,21 @@ impl Tool for PortCheck {
     }
 }
 
+/// Stop all managed background processes and print a summary.
+///
+/// Call this when the interactive loop exits to ensure cleanup.
+pub async fn cleanup_all_processes() {
+    let manager = PROCESS_MANAGER.read().await;
+    let stopped = manager.stop_all().await;
+    if stopped > 0 {
+        println!(
+            "Stopped {} background process{}",
+            stopped,
+            if stopped == 1 { "" } else { "es" }
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
