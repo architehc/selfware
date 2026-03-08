@@ -1,0 +1,28 @@
+# RTX 4090 / 3090 + Qwen3.5-9B profile (SGLang with native tool calling)
+# Launch SGLang with: --tool-call-parser qwen --reasoning-parser qwen3
+endpoint = "http://127.0.0.1:8001/v1"
+model = "Qwen/Qwen3.5-9B"
+max_tokens = 65536
+temperature = 0.6
+
+[safety]
+allowed_paths = ["./**", "/tmp/**", "/home/habitat/selfware/**", "/home/habitat/selfware.design/**"]
+denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
+protected_branches = ["main"]
+
+[agent]
+max_iterations = 30
+step_timeout_secs = 600
+native_function_calling = false
+
+[continuous_work]
+enabled = false
+checkpoint_interval_tools = 10
+checkpoint_interval_secs = 300
+auto_recovery = false
+max_recovery_attempts = 1
+
+[retry]
+max_retries = 4
+base_delay_ms = 750
+max_delay_ms = 8000

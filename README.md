@@ -160,7 +160,7 @@ Selfware needs an **OpenAI-compatible API endpoint**. Pick any backend:
 | **[llama.cpp](https://github.com/ggerganov/llama.cpp)** | GGUF models, minimal deps | `./llama-server -m model.gguf -c 65536` |
 | **[LM Studio](https://lmstudio.ai/)** | GUI, Windows/Mac | Download → load model → start server |
 | **[MLX](https://github.com/ml-explore/mlx-examples)** | Apple Silicon native | `mlx_lm.server --model mlx-community/Qwen3.5-Coder-35B-A3B-4bit` |
-| **[SGLang](https://github.com/architehc/sglang)** | High throughput, tool calling | `python -m sglang.launch_server --model Qwen/Qwen3-Coder-Next-FP8` |
+| **[SGLang](https://github.com/architehc/sglang)** | High throughput, native tool calling | `python -m sglang.launch_server --model Qwen/Qwen3.5-4B --tool-call-parser qwen --reasoning-parser qwen3` |
 
 > For finding and downloading the best local models, see **[Unsloth Model Zoo](https://unsloth.ai/docs/models/qwen3.5)** — they provide optimized quantized versions ready to run.
 
@@ -280,6 +280,11 @@ vllm serve Qwen/Qwen3-Coder-Next-FP8 --max-model-len 131072
 ./llama-server -m qwen3.5-coder-35b-a3b-q4_k_m.gguf \
   -c 65536 -ngl 99 --port 8000
 
+# RTX 4090 / 3090 with SGLang (recommended — native tool calling)
+python -m sglang.launch_server --model-path Qwen/Qwen3.5-4B \
+  --context-length 131072 --kv-cache-dtype fp8_e4m3 \
+  --reasoning-parser qwen3 --tool-call-parser qwen --port 8000
+
 # RTX 4090 with Qwen3.5 27B (vLLM)
 vllm serve Qwen/Qwen3.5-27B-AWQ --max-model-len 32768
 
@@ -294,10 +299,58 @@ ollama run qwen3.5:4b
 ollama run qwen3.5:0.8b
 ```
 
-### Dual RTX 4090 (SGLang)
+### SGLang
+
+SGLang provides native tool calling support with `--tool-call-parser qwen` and `--reasoning-parser qwen3`, which is the recommended way to run Qwen models with selfware. This gives you proper OpenAI-compatible function calling instead of XML-based parsing.
+
+**Single RTX 4090 / 3090 (24 GB) — Qwen3.5-4B:**
 
 ```bash
-SGLANG_DISABLE_CUDNN_CHECK=1 python3 -m sglang.launch_server \
+python -m sglang.launch_server \
+  --model-path Qwen/Qwen3.5-4B \
+  --trust-remote-code \
+  --tensor-parallel-size 1 \
+  --context-length 131072 \
+  --attention-backend flashinfer \
+  --mem-fraction-static 0.90 \
+  --max-running-requests 32 \
+  --chunked-prefill-size 8192 \
+  --max-prefill-tokens 65536 \
+  --kv-cache-dtype fp8_e4m3 \
+  --disable-custom-all-reduce \
+  --cuda-graph-max-bs 8 \
+  --reasoning-parser qwen3 \
+  --tool-call-parser qwen \
+  --port 8000 \
+  --host 0.0.0.0
+```
+
+**Single RTX 4090 / 3090 — Qwen3.5-9B (Q8):**
+
+```bash
+python -m sglang.launch_server \
+  --model-path Qwen/Qwen3.5-9B \
+  --trust-remote-code \
+  --tensor-parallel-size 1 \
+  --context-length 65536 \
+  --attention-backend flashinfer \
+  --mem-fraction-static 0.90 \
+  --max-running-requests 16 \
+  --chunked-prefill-size 8192 \
+  --max-prefill-tokens 32768 \
+  --kv-cache-dtype fp8_e4m3 \
+  --disable-custom-all-reduce \
+  --cuda-graph-max-bs 8 \
+  --reasoning-parser qwen3 \
+  --tool-call-parser qwen \
+  --port 8000 \
+  --host 0.0.0.0
+```
+
+**Dual RTX 4090 — Qwen3-VL-30B-A3B (vision + tool calling):**
+
+```bash
+python -m sglang.launch_server \
   --model-path Qwen/Qwen3-VL-30B-A3B-Thinking-FP8 \
   --trust-remote-code \
   --tensor-parallel-size 2 \
@@ -311,9 +364,13 @@ SGLANG_DISABLE_CUDNN_CHECK=1 python3 -m sglang.launch_server \
   --kv-cache-dtype fp8_e5m2 \
   --disable-custom-all-reduce \
   --cuda-graph-max-bs 32 \
+  --reasoning-parser qwen3 \
+  --tool-call-parser qwen \
   --port 8000 \
   --host 0.0.0.0
 ```
+
+> **Tip:** When using SGLang with tool calling, set `native_function_calling = true` in your `selfware.toml`. This uses OpenAI-compatible function calling instead of XML parsing, which is more reliable with small models.
 
 ### vLLM
 

@@ -1,0 +1,29 @@
+# Local RTX 4090 / 3090 + Qwen3.5-4B profile (SGLang with native tool calling)
+# Launch SGLang with: --tool-call-parser qwen --reasoning-parser qwen3
+endpoint = "http://127.0.0.1:8000/v1"
+model = "Qwen/Qwen3.5-4B"
+max_tokens = 131072
+temperature = 0.6
+
+[safety]
+allowed_paths = ["./**", "/tmp/**", "/home/habitat/selfware/**"]
+denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
+protected_branches = ["main"]
+
+[agent]
+max_iterations = 80
+step_timeout_secs = 900
+# SGLang with --tool-call-parser qwen provides native OpenAI-compatible function calling
+native_function_calling = false
+
+[continuous_work]
+enabled = true
+checkpoint_interval_tools = 10
+checkpoint_interval_secs = 300
+auto_recovery = true
+max_recovery_attempts = 3
+
+[retry]
+max_retries = 5
+base_delay_ms = 1000
+max_delay_ms = 60000
