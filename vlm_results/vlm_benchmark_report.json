@@ -1,6 +1,6 @@
 {
-  "timestamp": "2026-03-06T23:45:39.971146+00:00",
-  "model": "Qwen3.5-122B-A10B",
+  "timestamp": "2026-03-08T03:23:47.767823+00:00",
+  "model": "txn545/Qwen3.5-122B-A10B-NVFP4",
   "endpoint": "https://crazyshit.ngrok.io/v1",
   "levels": [
     {
@@ -10,8 +10,8 @@
       "scenario_count": 4,
       "score": 0.75,
       "rating": "Grow",
-      "total_tokens": 12037,
-      "avg_latency_ms": 90406.75,
+      "total_tokens": 5913,
+      "avg_latency_ms": 26927.75,
       "scores": [
         {
           "accuracy": 0.5,
@@ -25,8 +25,8 @@
               1.0
             ]
           ],
-          "response_tokens": 1354,
-          "latency_ms": 37371,
+          "response_tokens": 1729,
+          "latency_ms": 32599,
           "rating": "Wilt"
         },
         {
@@ -41,8 +41,8 @@
               1.0
             ]
           ],
-          "response_tokens": 863,
-          "latency_ms": 18194,
+          "response_tokens": 1343,
+          "latency_ms": 26172,
           "rating": "Bloom"
         },
         {
@@ -57,8 +57,8 @@
               1.0
             ]
           ],
-          "response_tokens": 4929,
-          "latency_ms": 153031,
+          "response_tokens": 1833,
+          "latency_ms": 32358,
           "rating": "Bloom"
         },
         {
@@ -73,8 +73,8 @@
               0.0
             ]
           ],
-          "response_tokens": 4891,
-          "latency_ms": 153031,
+          "response_tokens": 1008,
+          "latency_ms": 16582,
           "rating": "Wilt"
         }
       ]
@@ -86,8 +86,8 @@
       "scenario_count": 3,
       "score": 0.6666666666666666,
       "rating": "Grow",
-      "total_tokens": 9485,
-      "avg_latency_ms": 82987.33333333333,
+      "total_tokens": 7117,
+      "avg_latency_ms": 38634.666666666664,
       "scores": [
         {
           "accuracy": 0.0,
@@ -97,8 +97,8 @@
               0.0
             ]
           ],
-          "response_tokens": 3578,
-          "latency_ms": 100805,
+          "response_tokens": 4339,
+          "latency_ms": 68499,
           "rating": "Frost"
         },
         {
@@ -117,8 +117,8 @@
               1.0
             ]
           ],
-          "response_tokens": 1535,
-          "latency_ms": 36076,
+          "response_tokens": 1006,
+          "latency_ms": 16848,
           "rating": "Bloom"
         },
         {
@@ -133,8 +133,8 @@
               1.0
             ]
           ],
-          "response_tokens": 4372,
-          "latency_ms": 112081,
+          "response_tokens": 1772,
+          "latency_ms": 30557,
           "rating": "Bloom"
         }
       ]
@@ -144,10 +144,10 @@
       "difficulty": "Hard",
       "description": "Architecture diagram comprehension: identify components from diagrams, trace data flow between modules, and map diagram boxes to Rust module paths.",
       "scenario_count": 3,
-      "score": 0.5499999999999999,
-      "rating": "Grow",
-      "total_tokens": 13605,
-      "avg_latency_ms": 99334.0,
+      "score": 0.6333333333333333,
+      "rating": "Bloom",
+      "total_tokens": 13058,
+      "avg_latency_ms": 83238.66666666667,
       "scores": [
         {
           "accuracy": 0.4,
@@ -173,8 +173,8 @@
               0.0
             ]
           ],
-          "response_tokens": 3726,
-          "latency_ms": 82104,
+          "response_tokens": 3179,
+          "latency_ms": 58144,
           "rating": "Wilt"
         },
         {
@@ -198,11 +198,11 @@
             ]
           ],
           "response_tokens": 4948,
-          "latency_ms": 107949,
+          "latency_ms": 95786,
           "rating": "Bloom"
         },
         {
-          "accuracy": 0.5,
+          "accuracy": 0.75,
           "detail_scores": [
             [
               "safety",
@@ -210,7 +210,7 @@
             ],
             [
               "validation",
-              0.0
+              1.0
             ],
             [
               "path",
@@ -222,8 +222,8 @@
             ]
           ],
           "response_tokens": 4931,
-          "latency_ms": 107949,
-          "rating": "Grow"
+          "latency_ms": 95786,
+          "rating": "Bloom"
         }
       ]
     },
@@ -234,8 +234,8 @@
       "scenario_count": 3,
       "score": 1.0,
       "rating": "Bloom",
-      "total_tokens": 13643,
-      "avg_latency_ms": 113072.66666666667,
+      "total_tokens": 13876,
+      "avg_latency_ms": 87217.0,
       "scores": [
         {
           "accuracy": 1.0,
@@ -250,7 +250,7 @@
             ]
           ],
           "response_tokens": 4778,
-          "latency_ms": 121133,
+          "latency_ms": 90567,
           "rating": "Bloom"
         },
         {
@@ -265,8 +265,8 @@
               1.0
             ]
           ],
-          "response_tokens": 3996,
-          "latency_ms": 96241,
+          "response_tokens": 4772,
+          "latency_ms": 89088,
           "rating": "Bloom"
         },
         {
@@ -281,8 +281,8 @@
               1.0
             ]
           ],
-          "response_tokens": 4869,
-          "latency_ms": 121844,
+          "response_tokens": 4326,
+          "latency_ms": 81996,
           "rating": "Bloom"
         }
       ]
@@ -292,10 +292,10 @@
       "difficulty": "Extreme",
       "description": "Visual mockup to code translation: identify widget types from ASCII/visual mockups, generate ratatui layout code, specify correct constraint percentages.",
       "scenario_count": 3,
-      "score": 1.0,
+      "score": 0.9333333333333332,
       "rating": "Bloom",
-      "total_tokens": 9892,
-      "avg_latency_ms": 63577.666666666664,
+      "total_tokens": 10343,
+      "avg_latency_ms": 62494.333333333336,
       "scores": [
         {
           "accuracy": 1.0,
@@ -318,7 +318,7 @@
             ]
           ],
           "response_tokens": 4789,
-          "latency_ms": 84147,
+          "latency_ms": 84972,
           "rating": "Bloom"
         },
         {
@@ -341,12 +341,12 @@
               1.0
             ]
           ],
-          "response_tokens": 2700,
-          "latency_ms": 57063,
+          "response_tokens": 3598,
+          "latency_ms": 67809,
           "rating": "Bloom"
         },
         {
-          "accuracy": 1.0,
+          "accuracy": 0.8,
           "detail_scores": [
             [
               "tab",
@@ -366,11 +366,11 @@
             ],
             [
               "nested",
-              1.0
+              0.0
             ]
           ],
-          "response_tokens": 2403,
-          "latency_ms": 49523,
+          "response_tokens": 1956,
+          "latency_ms": 34702,
           "rating": "Bloom"
         }
       ]
@@ -380,13 +380,13 @@
       "difficulty": "Mega",
       "description": "Multi-image visual evolution: score iterative TUI improvements across composition, hierarchy, readability, consistency, and accessibility dimensions. Compare VLM ratings against ground-truth human scores.",
       "scenario_count": 3,
-      "score": 0.6666666666666666,
+      "score": 0.8504690858573473,
       "rating": "Bloom",
-      "total_tokens": 9395,
-      "avg_latency_ms": 59298.0,
+      "total_tokens": 6727,
+      "avg_latency_ms": 45023.666666666664,
       "scores": [
         {
-          "accuracy": 0.0,
+          "accuracy": 0.5514072575720416,
           "detail_scores": [
             [
               "composition",
@@ -402,16 +402,16 @@
             ],
             [
               "consistency",
-              0.0
+              0.16000000000000003
             ],
             [
               "accessibility",
               0.0
             ]
           ],
-          "response_tokens": 2240,
-          "latency_ms": 47500,
-          "rating": "Frost"
+          "response_tokens": 1882,
+          "latency_ms": 41180,
+          "rating": "Bloom"
         },
         {
           "accuracy": 1.0,
@@ -433,8 +433,8 @@
               1.0
             ]
           ],
-          "response_tokens": 2384,
-          "latency_ms": 50742,
+          "response_tokens": 2556,
+          "latency_ms": 46894,
           "rating": "Bloom"
         },
         {
@@ -449,15 +449,15 @@
               1.0
             ]
           ],
-          "response_tokens": 4771,
-          "latency_ms": 79652,
+          "response_tokens": 2289,
+          "latency_ms": 46997,
           "rating": "Bloom"
         }
       ]
     }
   ],
-  "overall_score": 0.7722222222222221,
+  "overall_score": 0.8056337365317799,
   "overall_rating": "Bloom",
-  "total_tokens": 68057,
-  "total_duration_secs": 658.713201833
+  "total_tokens": 57034,
+  "total_duration_secs": 419.424235667
 }
