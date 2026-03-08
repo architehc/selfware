@@ -114,6 +114,9 @@ pub struct ModelProfile {
     /// Context window length in tokens
     #[serde(default = "default_context_length")]
     pub context_length: usize,
+    /// Extra fields merged into every chat-completion request body.
+    #[serde(default)]
+    pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 impl ModelProfile {
@@ -206,6 +209,18 @@ pub struct Config {
     #[serde(default)]
     pub models: HashMap<String, ModelProfile>,
 
+    /// Extra fields merged into every chat-completion request body.
+    ///
+    /// Use this for backend-specific extensions like SGLang's
+    /// `chat_template_kwargs`.
+    ///
+    /// ```toml
+    /// [extra_body]
+    /// chat_template_kwargs = { enable_thinking = false }
+    /// ```
+    #[serde(default)]
+    pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
+
     /// Runtime execution mode (set via CLI, not persisted)
     #[serde(skip)]
     pub execution_mode: ExecutionMode,
@@ -246,6 +261,7 @@ impl std::fmt::Debug for Config {
             .field("compact_mode", &self.compact_mode)
             .field("verbose_mode", &self.verbose_mode)
             .field("show_tokens", &self.show_tokens)
+            .field("extra_body", &self.extra_body)
             .finish()
     }
 }
@@ -478,6 +494,7 @@ impl Default for Config {
             resources: ResourcesConfig::default(),
             evolution: EvolutionTomlConfig::default(),
             models: HashMap::new(),
+            extra_body: None,
             execution_mode: ExecutionMode::default(),
             compact_mode: false,
             verbose_mode: false,
@@ -891,6 +908,7 @@ impl Config {
                     temperature: config.temperature,
                     modalities: default_modalities(),
                     context_length: default_context_length(),
+                    extra_body: config.extra_body.clone(),
                 },
             );
         }
@@ -2352,6 +2370,7 @@ mod tests {
             temperature: 0.5,
             modalities: vec!["text".to_string()],
             context_length: 4096,
+            extra_body: None,
         };
         let cloned = profile.clone();
         assert_eq!(cloned.endpoint, profile.endpoint);
@@ -2370,6 +2389,7 @@ mod tests {
             temperature: 0.9,
             modalities: vec!["text".to_string(), "vision".to_string()],
             context_length: 16384,
+            extra_body: None,
         };
         let toml_str = toml::to_string(&profile).unwrap();
         let parsed: ModelProfile = toml::from_str(&toml_str).unwrap();
@@ -2390,6 +2410,7 @@ mod tests {
             temperature: 0.5,
             modalities: vec!["text".to_string()],
             context_length: 4096,
+            extra_body: None,
         };
         let debug = format!("{:?}", profile);
         assert!(debug.contains("ModelProfile"));
@@ -2468,6 +2489,7 @@ mod tests {
                 temperature: 1.0,
                 modalities: vec!["text".to_string()],
                 context_length: 131072,
+                extra_body: None,
             },
         );
         let profile = config.resolve_model(None);
@@ -2488,6 +2510,7 @@ mod tests {
                 temperature: 0.5,
                 modalities: vec!["text".to_string(), "vision".to_string()],
                 context_length: 8192,
+                extra_body: None,
             },
         );
         let profile = config.resolve_model(Some("vision"));
@@ -2508,6 +2531,7 @@ mod tests {
                 temperature: 1.0,
                 modalities: vec!["text".to_string()],
                 context_length: 131072,
+                extra_body: None,
             },
         );
         let profile = config.resolve_model(Some("nonexistent"));
@@ -2535,6 +2559,7 @@ mod tests {
                 temperature: 1.0,
                 modalities: vec!["text".to_string()],
                 context_length: 131072,
+                extra_body: None,
             },
         );
         let profile = config.resolve_model(None);
@@ -3419,6 +3444,7 @@ model = "explicit-default-model"
                 temperature: 0.7,
                 modalities: vec!["text".to_string()],
                 context_length: 32768,
+                extra_body: None,
             },
         );
         models.insert(
@@ -3431,6 +3457,7 @@ model = "explicit-default-model"
                 temperature: 0.5,
                 modalities: vec!["text".to_string(), "vision".to_string()],
                 context_length: 16384,
+                extra_body: None,
             },
         );
 

@@ -625,6 +625,15 @@ impl ApiClient {
             });
         }
 
+        // Merge extra_body fields (e.g. chat_template_kwargs for SGLang)
+        if let Some(ref extra) = self.config.extra_body {
+            if let Some(obj) = body.as_object_mut() {
+                for (k, v) in extra {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
+
         self.send_with_retry(&body).await
     }
 
@@ -678,6 +687,15 @@ impl ApiClient {
                 "type": "enabled",
                 "budget_tokens": tokens
             });
+        }
+
+        // Merge extra_body fields (e.g. chat_template_kwargs for SGLang)
+        if let Some(ref extra) = self.config.extra_body {
+            if let Some(obj) = body.as_object_mut() {
+                for (k, v) in extra {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
         }
 
         let url = format!("{}/chat/completions", self.base_url);
@@ -894,6 +912,15 @@ impl ApiClient {
                 "type": "enabled",
                 "budget_tokens": tokens
             });
+        }
+
+        // Merge extra_body fields from profile (e.g. chat_template_kwargs for SGLang)
+        if let Some(ref extra) = profile.extra_body {
+            if let Some(obj) = body.as_object_mut() {
+                for (k, v) in extra {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
         }
 
         self.send_request_with_retry(&body, &profile.endpoint, profile.api_key.as_ref())

@@ -22,6 +22,9 @@ checkpoint_interval_secs = 300
 auto_recovery = false
 max_recovery_attempts = 1
 
+[extra_body]
+chat_template_kwargs = { enable_thinking = false }
+
 [retry]
 max_retries = 4
 base_delay_ms = 750

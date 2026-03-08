@@ -3035,6 +3035,7 @@ mod tests {
                 temperature: 0.5,
                 modalities: vec!["text".to_string(), "vision".to_string()],
                 context_length: 8192,
+                extra_body: None,
             },
         );
 
@@ -3055,6 +3056,7 @@ mod tests {
                 temperature: 1.0,
                 modalities: vec!["text".to_string()],
                 context_length: 131072,
+                extra_body: None,
             },
         );
 
