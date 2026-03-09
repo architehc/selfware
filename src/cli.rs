@@ -145,6 +145,9 @@ enum DemoScenarioKind {
 
 #[derive(Subcommand, Clone)]
 enum Commands {
+    /// Check system dependencies and tool availability
+    Doctor,
+
     /// Interactive setup wizard for first-time configuration
     Init {
         /// Use a specific template (rust, python, node, minimal)
@@ -1170,6 +1173,14 @@ async fn handle_command(
                 println!("      {} {} ({:?})", status_icon, id, step_result.status);
             }
             println!();
+        }
+
+        Commands::Doctor => {
+            if !quiet {
+                println!("{}", render_header(ctx));
+            }
+            let report = crate::doctor::run_doctor().await;
+            report.print();
         }
 
         Commands::Init { template } => {

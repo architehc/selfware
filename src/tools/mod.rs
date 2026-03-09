@@ -20,6 +20,7 @@ pub mod process;
 pub mod screen_capture;
 pub mod search;
 pub mod shell;
+pub mod pty_shell;
 pub mod computer;
 pub mod swarm_tool;
 pub mod vision;
@@ -42,6 +43,7 @@ use process::{PortCheck, ProcessList, ProcessLogs, ProcessRestart, ProcessStart,
 use screen_capture::ScreenCapture;
 use search::{GlobFind, GrepSearch, SymbolSearch};
 use shell::ShellExec;
+use pty_shell::PtyShellTool;
 use vision::{VisionAnalyze, VisionCompare};
 
 /// Pagination metadata for truncated tool output.
@@ -123,6 +125,7 @@ impl ToolRegistry {
 
         // System operations
         registry.register(ShellExec);
+        registry.register(PtyShellTool);
 
         // Search operations
         registry.register(GrepSearch);

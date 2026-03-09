@@ -32,6 +32,7 @@ pub mod agent;
 pub mod api;
 pub mod cli;
 pub mod config;
+pub mod doctor;
 pub mod errors;
 pub mod input;
 pub mod safety;
@@ -102,6 +103,7 @@ pub use testing::verification;
 // ============================================================================
 #[cfg(feature = "tokens")]
 pub mod kv_store;
+pub mod llm_doctor;
 pub mod memory;
 pub mod output;
 #[cfg(feature = "resilience")]
