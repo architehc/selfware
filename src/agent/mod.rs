@@ -180,6 +180,8 @@ pub struct Agent {
     local_first: crate::session::local_first::LocalFirstCoordinator,
     /// Concurrency governor for limiting concurrent streams and tool executions
     governor: ConcurrencyGovernor,
+    /// Pause flag for the ESC listener — set when a confirmation prompt needs stdin
+    esc_paused: Arc<AtomicBool>,
 }
 
 impl Agent {
@@ -489,6 +491,7 @@ To call a tool, use this EXACT XML structure:
             tool_cache: crate::session::cache::ToolCache::new(),
             local_first: crate::session::local_first::LocalFirstCoordinator::new(),
             governor: ConcurrencyGovernor::with_defaults(),
+            esc_paused: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -528,14 +531,14 @@ To call a tool, use this EXACT XML structure:
         self.config.execution_mode = mode;
     }
 
-    /// Cycle to next execution mode (for Shift+Tab switching)
+    /// Cycle to next execution mode (Shift+Tab): normal → auto-edit → yolo → daemon → normal
     pub fn cycle_execution_mode(&mut self) -> crate::config::ExecutionMode {
         use crate::config::ExecutionMode;
         self.config.execution_mode = match self.config.execution_mode {
             ExecutionMode::Normal => ExecutionMode::AutoEdit,
             ExecutionMode::AutoEdit => ExecutionMode::Yolo,
-            ExecutionMode::Yolo => ExecutionMode::Normal,
-            ExecutionMode::Daemon => ExecutionMode::Normal, // Daemon can't be cycled to
+            ExecutionMode::Yolo => ExecutionMode::Daemon,
+            ExecutionMode::Daemon => ExecutionMode::Normal,
         };
         self.config.execution_mode
     }
@@ -615,6 +618,11 @@ To call a tool, use this EXACT XML structure:
     /// Shared cancellation token for Ctrl+C interrupt handling.
     pub(crate) fn cancel_token(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.cancelled)
+    }
+
+    /// Shared pause flag for the ESC listener — used by confirmation prompts.
+    pub(crate) fn esc_pause_token(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.esc_paused)
     }
 
     /// True when the current task should stop as soon as possible.

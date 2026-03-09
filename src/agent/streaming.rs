@@ -6,6 +6,61 @@ use super::*;
 
 use super::tui_events::AgentEvent;
 
+/// All XML tag pairs that local models may emit and should be hidden from
+/// display.  Each entry is `(open_tag, close_tag)`.  The streaming renderer
+/// suppresses everything between (and including) these tags.
+const SUPPRESSED_TAGS: &[(&str, &str)] = &[
+    ("<tool_call>", "</tool_call>"),
+    ("<tool>", "</tool>"),
+    ("<think>", "</think>"),
+    ("<thinking>", "</thinking>"),
+];
+
+/// Find the earliest opening tag from `SUPPRESSED_TAGS` in `buf`.
+/// Returns `(byte_offset, tag_index)` or `None`.
+fn find_earliest_open_tag(buf: &str) -> Option<(usize, usize)> {
+    let mut best: Option<(usize, usize)> = None;
+    for (i, &(open, _)) in SUPPRESSED_TAGS.iter().enumerate() {
+        if let Some(pos) = buf.find(open) {
+            if best.map_or(true, |(b, _)| pos < b) {
+                best = Some((pos, i));
+            }
+        }
+    }
+    best
+}
+
+/// Check if `buf` ends with a prefix of any opening suppressed tag,
+/// indicating we should buffer instead of printing (the rest of the tag
+/// may arrive in the next chunk).
+fn has_partial_tag_at_end(buf: &str) -> bool {
+    for &(open, _) in SUPPRESSED_TAGS {
+        for prefix_len in 1..open.len() {
+            if buf.ends_with(&open[..prefix_len]) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Extract a tool name from a suppressed XML block for a clean one-line
+/// summary.  Tries `<name>x</name>` (used by `<tool>` blocks) and the
+/// existing `<function=x>` / `<function>x</function>` patterns.
+fn extract_display_name(xml: &str) -> Option<String> {
+    // <name>tool_name</name> — used in <tool> blocks from Qwen
+    if let Some(start) = xml.find("<name>") {
+        let rest = &xml[start + "<name>".len()..];
+        if let Some(end) = rest.find("</name>") {
+            let name = rest[..end].trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    Agent::extract_tool_name(xml)
+}
+
 impl Agent {
     /// Extract function name from a tool_call XML block for clean display
     pub(super) fn extract_tool_name(xml: &str) -> Option<String> {
@@ -41,11 +96,33 @@ impl Agent {
     ) -> Result<(String, Option<String>, Option<Vec<ToolCall>>)> {
         use std::io::{self, Write};
 
+        // Activate the sticky status bar if running interactively
+        let mode_label = match self.execution_mode() {
+            crate::config::ExecutionMode::Normal => "normal",
+            crate::config::ExecutionMode::AutoEdit => "auto-edit",
+            crate::config::ExecutionMode::Yolo => "YOLO",
+            crate::config::ExecutionMode::Daemon => "daemon",
+        };
+        let sticky_state = crate::ui::sticky_bar::StickyState::new(
+            mode_label,
+            &self.config.model,
+        );
+        // Sticky bar is available but disabled by default until terminal
+        // compatibility is fully validated.  Set SELFWARE_STICKY_BAR=1 to enable.
+        let sticky = if self.is_interactive()
+            && std::env::var("SELFWARE_STICKY_BAR").map_or(false, |v| v == "1")
+        {
+            crate::ui::sticky_bar::StickyBar::activate(sticky_state.clone())
+        } else {
+            None
+        };
+
         // Start loading spinner with a random phrase while waiting for first token
         let mut spinner = Some(crate::ui::spinner::TerminalSpinner::start(
             crate::ui::loading_phrases::random_phrase(),
         ));
         let mut phrase_rotation = tokio::time::Instant::now();
+        let mut last_bar_update = tokio::time::Instant::now();
 
         let stream = self.client.chat_stream(messages, tools, thinking).await?;
 
@@ -55,9 +132,19 @@ impl Agent {
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut in_reasoning = false;
         let mut display_buf = String::new();
-        let mut in_tool_tag = false;
+        // Which suppressed tag we're currently inside, if any
+        let mut suppressed_tag_idx: Option<usize> = None;
+
+        let cancel = self.cancel_token();
 
         while let Some(chunk_result) = rx.recv().await {
+            // Check for ESC / Ctrl+C cancellation
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                // Drop spinner if still active
+                drop(spinner.take());
+                break;
+            }
+
             let chunk = chunk_result?;
 
             // Rotate loading phrase every 3 seconds while spinner is active
@@ -68,6 +155,14 @@ impl Agent {
                 }
             }
 
+            // Refresh sticky bar every 500ms
+            if let Some(ref bar) = sticky {
+                if last_bar_update.elapsed() > tokio::time::Duration::from_millis(500) {
+                    bar.update();
+                    last_bar_update = tokio::time::Instant::now();
+                }
+            }
+
             match chunk {
                 StreamChunk::Content(text) => {
                     // Stop spinner on first content
@@ -75,39 +170,63 @@ impl Agent {
                         drop(s);
                     }
                     if in_reasoning {
-                        // Finished reasoning, now showing content
                         in_reasoning = false;
+                        sticky_state.is_thinking.store(false, std::sync::atomic::Ordering::Relaxed);
+                        sticky_state.thinking_secs.store(
+                            sticky_state.started.elapsed().as_secs(),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
                         if !output::is_compact() {
-                            println!(); // End reasoning line
+                            println!();
                         }
                     }
+                    sticky_state.set_activity("Generating...");
                     // Always accumulate full content for parsing
                     content.push_str(&text);
 
-                    // Filter out <tool_call> XML blocks from display
-                    // Buffer content and only print text outside tool_call tags
+                    // Buffer content and filter suppressed XML tags from display
                     display_buf.push_str(&text);
 
-                    // Process display buffer: suppress tool_call blocks
                     loop {
-                        if in_tool_tag {
-                            // We're inside a <tool_call> - look for closing tag
-                            if let Some(end_pos) = display_buf.find("</tool_call>") {
-                                let end = end_pos + "</tool_call>".len();
-                                // Extract the tool call text to show a clean summary
-                                let tool_xml = &display_buf[..end];
-                                if let Some(fname) = Self::extract_tool_name(tool_xml) {
-                                    print!("  {} {}...", "🔧".dimmed(), fname.bright_cyan());
-                                    io::stdout().flush().ok();
+                        if let Some(tag_idx) = suppressed_tag_idx {
+                            // We're inside a suppressed tag — look for its closing tag
+                            let (_, close) = SUPPRESSED_TAGS[tag_idx];
+                            if let Some(end_pos) = display_buf.find(close) {
+                                let end = end_pos + close.len();
+                                let block = &display_buf[..end];
+                                // For tool tags, show a clean one-line summary
+                                let is_think = tag_idx >= 2; // <think> and <thinking>
+                                if !is_think {
+                                    if let Some(fname) = extract_display_name(block) {
+                                        print!(
+                                            "  {} {}...",
+                                            "🔧".dimmed(),
+                                            fname.bright_cyan()
+                                        );
+                                        io::stdout().flush().ok();
+                                    }
+                                }
+                                // For <think> blocks, optionally show as dimmed reasoning
+                                if is_think && !output::is_compact() {
+                                    // Extract inner text, strip the open/close tags
+                                    let (open, _) = SUPPRESSED_TAGS[tag_idx];
+                                    let inner = &block
+                                        [open.len()..block.len().saturating_sub(close.len())];
+                                    let trimmed = inner.trim();
+                                    if !trimmed.is_empty() {
+                                        reasoning.push_str(trimmed);
+                                    }
                                 }
                                 display_buf = display_buf[end..].to_string();
-                                in_tool_tag = false;
+                                suppressed_tag_idx = None;
                             } else {
                                 break; // Wait for more data
                             }
                         } else {
-                            // Look for start of <tool_call>
-                            if let Some(start_pos) = display_buf.find("<tool_call>") {
+                            // Look for the earliest opening suppressed tag
+                            if let Some((start_pos, tag_idx)) =
+                                find_earliest_open_tag(&display_buf)
+                            {
                                 // Print everything before the tag
                                 let before = &display_buf[..start_pos];
                                 if !before.is_empty() {
@@ -115,12 +234,12 @@ impl Agent {
                                     io::stdout().flush().ok();
                                 }
                                 display_buf = display_buf[start_pos..].to_string();
-                                in_tool_tag = true;
-                            } else if display_buf.contains('<') && !display_buf.contains('>') {
-                                // Partial tag at end - buffer it
+                                suppressed_tag_idx = Some(tag_idx);
+                            } else if has_partial_tag_at_end(&display_buf) {
+                                // Partial opening tag at end — buffer it
                                 break;
                             } else {
-                                // No tags - print everything
+                                // No tags — print everything
                                 if !display_buf.is_empty() {
                                     print!("{}", display_buf);
                                     io::stdout().flush().ok();
@@ -136,6 +255,8 @@ impl Agent {
                     if let Some(s) = spinner.take() {
                         drop(s);
                     }
+                    sticky_state.is_thinking.store(true, std::sync::atomic::Ordering::Relaxed);
+                    sticky_state.set_activity("Thinking...");
                     if !output::is_compact() {
                         if !in_reasoning {
                             in_reasoning = true;
@@ -154,6 +275,7 @@ impl Agent {
                         "Token usage: {} prompt, {} completion",
                         u.prompt_tokens, u.completion_tokens
                     );
+                    sticky_state.add_tokens(u.completion_tokens as u64);
                     output::record_tokens(u.prompt_tokens as u64, u.completion_tokens as u64);
                     output::print_token_usage(u.prompt_tokens as u64, u.completion_tokens as u64);
 
@@ -166,8 +288,8 @@ impl Agent {
             }
         }
 
-        // Flush any remaining display buffer (non-tool-call text)
-        if !display_buf.is_empty() && !in_tool_tag {
+        // Flush any remaining display buffer (non-suppressed text)
+        if !display_buf.is_empty() && suppressed_tag_idx.is_none() {
             print!("{}", display_buf);
             io::stdout().flush().ok();
         }
@@ -360,5 +482,112 @@ mod tests {
 </tool_call>"#;
         let result = Agent::extract_tool_name(xml);
         assert_eq!(result, Some("file_edit".to_string()));
+    }
+
+    // =========================================================================
+    // Streaming display filter tests
+    // =========================================================================
+
+    #[test]
+    fn find_earliest_open_tag_tool_call() {
+        let buf = "hello <tool_call>stuff";
+        let result = find_earliest_open_tag(buf);
+        assert_eq!(result, Some((6, 0)));
+    }
+
+    #[test]
+    fn find_earliest_open_tag_tool() {
+        let buf = "hello <tool>stuff";
+        let result = find_earliest_open_tag(buf);
+        assert_eq!(result, Some((6, 1)));
+    }
+
+    #[test]
+    fn find_earliest_open_tag_think() {
+        let buf = "text <think>reasoning here";
+        let result = find_earliest_open_tag(buf);
+        assert_eq!(result, Some((5, 2)));
+    }
+
+    #[test]
+    fn find_earliest_open_tag_thinking() {
+        let buf = "text <thinking>reasoning here";
+        let result = find_earliest_open_tag(buf);
+        assert_eq!(result, Some((5, 3)));
+    }
+
+    #[test]
+    fn find_earliest_open_tag_none() {
+        let buf = "just regular text no tags";
+        assert_eq!(find_earliest_open_tag(buf), None);
+    }
+
+    #[test]
+    fn find_earliest_open_tag_picks_first_when_multiple() {
+        let buf = "<think>reasoning</think> <tool>call</tool>";
+        let result = find_earliest_open_tag(buf);
+        assert_eq!(result.unwrap().0, 0); // <think> is first
+    }
+
+    #[test]
+    fn has_partial_tag_at_end_detects_partial_tool() {
+        assert!(has_partial_tag_at_end("hello <too"));
+        assert!(has_partial_tag_at_end("hello <tool"));
+        assert!(has_partial_tag_at_end("hello <t"));
+    }
+
+    #[test]
+    fn has_partial_tag_at_end_detects_partial_think() {
+        assert!(has_partial_tag_at_end("hello <thin"));
+        assert!(has_partial_tag_at_end("hello <think"));
+    }
+
+    #[test]
+    fn has_partial_tag_at_end_no_partial() {
+        assert!(!has_partial_tag_at_end("hello world"));
+        assert!(!has_partial_tag_at_end("hello <tool>complete"));
+        assert!(!has_partial_tag_at_end(""));
+    }
+
+    #[test]
+    fn extract_display_name_from_tool_block() {
+        let xml = "<tool>\n<name>file_write</name>\n<arguments>{}</arguments>\n</tool>";
+        assert_eq!(
+            extract_display_name(xml),
+            Some("file_write".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_display_name_from_function_block() {
+        let xml = r#"<tool_call><function=shell_exec>{"cmd":"ls"}</function></tool_call>"#;
+        assert_eq!(
+            extract_display_name(xml),
+            Some("shell_exec".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_display_name_from_think_block() {
+        let xml = "<think>I should read the file first</think>";
+        assert_eq!(extract_display_name(xml), None);
+    }
+
+    #[test]
+    fn suppressed_tags_covers_all_local_model_formats() {
+        // Ensure all common local model XML formats are covered
+        let formats = [
+            "<tool_call>",
+            "<tool>",
+            "<think>",
+            "<thinking>",
+        ];
+        for fmt in &formats {
+            assert!(
+                SUPPRESSED_TAGS.iter().any(|(open, _)| open == fmt),
+                "Missing suppressed tag: {}",
+                fmt
+            );
+        }
     }
 }

@@ -14,6 +14,7 @@ pub mod loading_phrases;
 pub mod mascot;
 pub mod selections;
 pub mod spinner;
+pub mod sticky_bar;
 pub mod style;
 pub mod swarm_viz;
 pub mod task_display;

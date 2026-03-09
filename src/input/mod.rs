@@ -186,11 +186,11 @@ impl SelfwareEditor {
             ]),
         );
 
-        // Shift+Tab to toggle auto-edit mode (via host command)
+        // Shift+Tab to cycle execution mode: normal → auto-edit → yolo → daemon → normal
         keybindings.add_binding(
             KeyModifiers::SHIFT,
             KeyCode::BackTab,
-            ReedlineEvent::ExecuteHostCommand("__toggle_auto_edit__".to_string()),
+            ReedlineEvent::ExecuteHostCommand("__cycle_mode__".to_string()),
         );
 
         // Escape to close menu without selecting

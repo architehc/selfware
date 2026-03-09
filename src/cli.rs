@@ -143,7 +143,7 @@ enum DemoScenarioKind {
     TokenChallenge,
 }
 
-#[derive(Subcommand, Clone)]
+#[derive(Subcommand, Clone, Debug)]
 enum Commands {
     /// Check system dependencies and tool availability
     Doctor,
@@ -157,7 +157,11 @@ enum Commands {
 
     /// Open your workshop for an interactive session
     #[command(alias = "c")]
-    Chat,
+    Chat {
+        /// Shortcut for --mode=yolo (skip all confirmations)
+        #[arg(short = 'y', long)]
+        yolo: bool,
+    },
 
     /// Multi-agent chat with concurrent streams
     #[command(alias = "m")]
@@ -165,6 +169,9 @@ enum Commands {
         /// Maximum concurrent agents (1-16)
         #[arg(short = 'n', long, default_value_t = DEFAULT_MULTI_CHAT_CONCURRENCY)]
         concurrency: usize,
+        /// Shortcut for --mode=yolo (skip all confirmations)
+        #[arg(short = 'y', long)]
+        yolo: bool,
     },
 
     /// Tend to a specific task in your garden
@@ -172,6 +179,9 @@ enum Commands {
     Run {
         /// What shall we tend to?
         task: String,
+        /// Shortcut for --mode=yolo (skip all confirmations)
+        #[arg(short = 'y', long)]
+        yolo: bool,
     },
 
     /// Survey your garden (analyze codebase)
@@ -520,7 +530,7 @@ pub async fn run() -> Result<()> {
     }
 
     // Default to Chat if no subcommand specified (non-extras builds)
-    let command = cli.command.unwrap_or(Commands::Chat);
+    let command = cli.command.unwrap_or(Commands::Chat { yolo: false });
     handle_command(
         command,
         cli.quiet,
@@ -535,13 +545,16 @@ pub async fn run() -> Result<()> {
 async fn handle_command(
     command: Commands,
     quiet: bool,
-    config: Config,
+    mut config: Config,
     ctx: &WorkshopContext,
     exec_mode: ExecutionMode,
     resume_session: Option<String>,
 ) -> Result<()> {
     match command {
-        Commands::Chat => {
+        Commands::Chat { yolo } => {
+            if yolo {
+                config.execution_mode = ExecutionMode::Yolo;
+            }
             if !quiet {
                 println!("{}", ui::components::render_welcome(ctx));
             }
@@ -565,7 +578,10 @@ async fn handle_command(
             agent.interactive().await?;
         }
 
-        Commands::MultiChat { concurrency } => {
+        Commands::MultiChat { concurrency, yolo } => {
+            if yolo {
+                config.execution_mode = ExecutionMode::Yolo;
+            }
             if !quiet {
                 println!("{}", render_header(ctx));
                 println!(
@@ -582,7 +598,10 @@ async fn handle_command(
             multi_agent.interactive().await?;
         }
 
-        Commands::Run { task } => {
+        Commands::Run { task, yolo } => {
+            if yolo {
+                config.execution_mode = ExecutionMode::Yolo;
+            }
             if !quiet {
                 println!("{}", render_header(ctx));
                 println!("{}", render_task_start(&task));
@@ -1510,7 +1529,8 @@ execution_mode = "{}"
 allowed_paths = {}
 
 [agent]
-token_budget = 500000
+# token_budget defaults to max_tokens — set explicitly to match your model's context window
+# token_budget = 131072
 "#,
         endpoint, model, mode, allowed_paths
     );
@@ -1666,5 +1686,75 @@ mod tests {
         let max_errors: usize = MAX_JOURNAL_ERRORS_DISPLAY;
         assert_ne!(max_errors, 0);
         assert!(!DEFAULT_WORKFLOW_NAME.is_empty());
+    }
+
+    // ── CLI flag parsing tests ──
+
+    #[test]
+    fn cli_chat_yolo_short_flag() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["selfware", "chat", "-y"]).unwrap();
+        match cli.command.unwrap() {
+            Commands::Chat { yolo } => assert!(yolo, "chat -y should set yolo=true"),
+            other => panic!("Expected Chat, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cli_chat_yolo_long_flag() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["selfware", "chat", "--yolo"]).unwrap();
+        match cli.command.unwrap() {
+            Commands::Chat { yolo } => assert!(yolo),
+            other => panic!("Expected Chat, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cli_chat_no_yolo() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["selfware", "chat"]).unwrap();
+        match cli.command.unwrap() {
+            Commands::Chat { yolo } => assert!(!yolo, "chat without -y should be yolo=false"),
+            other => panic!("Expected Chat, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cli_run_yolo_flag() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["selfware", "run", "-y", "fix bug"]).unwrap();
+        match cli.command.unwrap() {
+            Commands::Run { yolo, task } => {
+                assert!(yolo, "run -y should set yolo=true");
+                assert_eq!(task, "fix bug");
+            }
+            other => panic!("Expected Run, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cli_multichat_yolo_flag() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["selfware", "multi-chat", "-y"]).unwrap();
+        match cli.command.unwrap() {
+            Commands::MultiChat { yolo, .. } => assert!(yolo),
+            other => panic!("Expected MultiChat, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn cli_global_yolo_still_works() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["selfware", "-y", "chat"]).unwrap();
+        assert!(cli.yolo, "global -y flag should still work");
+    }
+
+    #[test]
+    fn cli_default_command_is_chat() {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(["selfware"]).unwrap();
+        // No subcommand → defaults to Chat { yolo: false }
+        assert!(cli.command.is_none());
     }
 }

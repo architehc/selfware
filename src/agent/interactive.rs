@@ -49,7 +49,10 @@ impl EscListenerGuard {
 /// - An unrecoverable error occurs reading events
 ///
 /// Terminal raw mode is always restored before the thread returns.
-fn spawn_esc_listener(cancel_token: Arc<AtomicBool>) -> EscListenerGuard {
+fn spawn_esc_listener(
+    cancel_token: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+) -> EscListenerGuard {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_clone = Arc::clone(&stop);
 
@@ -68,6 +71,26 @@ fn spawn_esc_listener(cancel_token: Arc<AtomicBool>) -> EscListenerGuard {
             // Check if we should stop (task finished or already cancelled)
             if stop_clone.load(Ordering::Relaxed) || cancel_token.load(Ordering::Relaxed) {
                 break;
+            }
+
+            // When paused (confirmation prompt active), yield stdin by exiting
+            // raw mode and sleeping until unpaused.
+            if paused.load(Ordering::Relaxed) {
+                let _ = terminal::disable_raw_mode();
+                while paused.load(Ordering::Relaxed)
+                    && !stop_clone.load(Ordering::Relaxed)
+                    && !cancel_token.load(Ordering::Relaxed)
+                {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                if stop_clone.load(Ordering::Relaxed) || cancel_token.load(Ordering::Relaxed) {
+                    break;
+                }
+                // Re-enter raw mode after unpause
+                if terminal::enable_raw_mode().is_err() {
+                    break;
+                }
+                continue;
             }
 
             // Poll with a short timeout so we can check the stop flag periodically
@@ -232,18 +255,16 @@ impl Agent {
                             };
                             println!("{} Mode: {}", "⚡".bright_yellow(), label);
                         }
-                        "__toggle_auto_edit__" => {
+                        "__cycle_mode__" | "__toggle_auto_edit__" => {
                             use crate::config::ExecutionMode;
-                            let new_mode = match self.execution_mode() {
-                                ExecutionMode::AutoEdit => ExecutionMode::Normal,
-                                _ => ExecutionMode::AutoEdit,
+                            let new_mode = self.cycle_execution_mode();
+                            let (icon, label) = match new_mode {
+                                ExecutionMode::Normal => ("🟢", "Normal".bright_green()),
+                                ExecutionMode::AutoEdit => ("✏️", "Auto-Edit".bright_cyan()),
+                                ExecutionMode::Yolo => ("⚡", "YOLO".bright_red()),
+                                ExecutionMode::Daemon => ("🔄", "Daemon".bright_magenta()),
                             };
-                            self.set_execution_mode(new_mode);
-                            let label = match new_mode {
-                                ExecutionMode::AutoEdit => "Auto-Edit".bright_cyan(),
-                                _ => "Normal".bright_green(),
-                            };
-                            println!("{} Mode: {}", "✏️".bright_cyan(), label);
+                            println!("{} Mode: {}", icon, label);
                         }
                         _ => {}
                     }
@@ -1500,7 +1521,7 @@ impl Agent {
     }
 
     async fn run_task_with_queue(&mut self, task: &str) -> Result<()> {
-        let esc_guard = spawn_esc_listener(self.cancel_token());
+        let esc_guard = spawn_esc_listener(self.cancel_token(), self.esc_pause_token());
         let result = self.run_task(task).await;
         esc_guard.stop().await;
         self.after_task_run().await;
@@ -1508,7 +1529,7 @@ impl Agent {
     }
 
     async fn run_swarm_with_queue(&mut self, task: &str) -> Result<()> {
-        let esc_guard = spawn_esc_listener(self.cancel_token());
+        let esc_guard = spawn_esc_listener(self.cancel_token(), self.esc_pause_token());
         let result = self.run_swarm_task(task).await;
         esc_guard.stop().await;
         self.after_task_run().await;
@@ -2262,5 +2283,70 @@ mod tests {
         queue.clear();
         assert_eq!(count, 2);
         assert!(queue.is_empty());
+    }
+
+    // ── ESC listener pause/unpause tests ──
+
+    #[tokio::test]
+    async fn esc_listener_stops_cleanly() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(false));
+        let guard = spawn_esc_listener(cancel, paused);
+        // Should stop without hanging
+        guard.stop().await;
+    }
+
+    #[tokio::test]
+    async fn esc_listener_stops_when_cancelled() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(false));
+        let guard = spawn_esc_listener(Arc::clone(&cancel), paused);
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        guard.stop().await;
+    }
+
+    #[tokio::test]
+    async fn esc_listener_pauses_and_resumes() {
+        use std::sync::atomic::Ordering;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(false));
+        let guard = spawn_esc_listener(Arc::clone(&cancel), Arc::clone(&paused));
+
+        // Pause — the listener should yield raw mode
+        paused.store(true, Ordering::Release);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        // Unpause — the listener should re-enter raw mode
+        paused.store(false, Ordering::Release);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        // Clean stop
+        guard.stop().await;
+    }
+
+    #[tokio::test]
+    async fn esc_listener_stops_while_paused() {
+        use std::sync::atomic::Ordering;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(false));
+        let guard = spawn_esc_listener(Arc::clone(&cancel), Arc::clone(&paused));
+
+        // Pause then immediately stop — must not hang
+        paused.store(true, Ordering::Release);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        guard.stop().await;
+    }
+
+    #[tokio::test]
+    async fn esc_listener_cancel_while_paused() {
+        use std::sync::atomic::Ordering;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let paused = Arc::new(AtomicBool::new(false));
+        let guard = spawn_esc_listener(Arc::clone(&cancel), Arc::clone(&paused));
+
+        paused.store(true, Ordering::Release);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancel.store(true, Ordering::Relaxed);
+        guard.stop().await;
     }
 }

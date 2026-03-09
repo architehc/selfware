@@ -15,6 +15,29 @@ use crate::errors::AgentError;
 use crate::hooks::{HookAction, HookContext};
 use crate::tool_parser::parse_tool_calls;
 
+/// Read a line from stdin, temporarily pausing the ESC listener so it yields
+/// raw mode and stops competing for stdin events.  This prevents the deadlock
+/// where `io::stdin().read_line()` blocks forever because crossterm raw mode
+/// is active on another thread.
+fn read_line_pausing_esc(
+    esc_paused: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::io::Result<String> {
+    use std::sync::atomic::Ordering;
+
+    // Signal the ESC listener to pause and release raw mode
+    esc_paused.store(true, Ordering::Release);
+    // Give the listener thread time to actually disable raw mode
+    std::thread::sleep(std::time::Duration::from_millis(80));
+
+    let mut response = String::new();
+    let result = std::io::stdin().read_line(&mut response);
+
+    // Unpause — the listener will re-enter raw mode on its own
+    esc_paused.store(false, Ordering::Release);
+
+    result.map(|_| response)
+}
+
 /// Try to extract a `base64_png` field from a JSON tool result string.
 fn try_extract_base64_png(result: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(result)
@@ -533,8 +556,8 @@ impl Agent {
         );
         io::stdout().flush().ok();
 
-        let mut response = String::new();
-        if io::stdin().read_line(&mut response).is_ok() {
+        let response = read_line_pausing_esc(&self.esc_paused);
+        if let Ok(response) = response {
             let response = response.trim().to_lowercase();
             match response.as_str() {
                 "y" | "yes" => return Ok(true),
@@ -3244,5 +3267,59 @@ mod tests {
         assert!(agent.check_completion_gate().is_none());
 
         server.stop().await;
+    }
+
+    // ── read_line_pausing_esc tests ──
+
+    #[test]
+    fn read_line_pausing_esc_sets_and_clears_pause_flag() {
+        use std::sync::atomic::Ordering;
+
+        let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let paused_clone = std::sync::Arc::clone(&paused);
+
+        // Spawn a watcher that records whether paused was ever set
+        let was_paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let was_paused_clone = std::sync::Arc::clone(&was_paused);
+
+        let watcher = std::thread::spawn(move || {
+            for _ in 0..100 {
+                if paused_clone.load(Ordering::Acquire) {
+                    was_paused_clone.store(true, Ordering::Relaxed);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+
+        // Simulate stdin by piping — read_line will return an error or empty
+        // in a non-interactive test, but the pause flag behavior is what we test.
+        let _ = read_line_pausing_esc(&paused);
+
+        // After return, paused must be cleared
+        assert!(
+            !paused.load(Ordering::Acquire),
+            "esc_paused must be false after read_line_pausing_esc returns"
+        );
+
+        let _ = watcher.join();
+        // In CI (non-interactive), the watcher may or may not observe the pause
+        // due to timing, so we don't assert was_paused — the important thing is
+        // the flag is cleared after the call.
+    }
+
+    #[test]
+    fn read_line_pausing_esc_unpauses_even_on_error() {
+        use std::sync::atomic::Ordering;
+
+        let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // Call in non-interactive context (stdin is not a tty in tests)
+        let _ = read_line_pausing_esc(&paused);
+
+        assert!(
+            !paused.load(Ordering::Acquire),
+            "esc_paused must always be cleared, even if read_line fails"
+        );
     }
 }

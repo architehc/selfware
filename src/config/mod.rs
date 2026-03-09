@@ -564,7 +564,7 @@ impl Default for AgentConfig {
         Self {
             max_iterations: default_max_iterations(),
             step_timeout_secs: default_step_timeout(),
-            token_budget: default_token_budget(),
+            token_budget: default_max_tokens(), // matches max_tokens; overridden by Config::load() when user sets max_tokens
             native_function_calling: false,
             streaming: true,
             min_completion_steps: default_min_completion_steps(),
@@ -595,7 +595,7 @@ fn default_min_completion_steps() -> usize {
     3
 }
 fn default_token_budget() -> usize {
-    500000
+    0 // sentinel: 0 means "derive from max_tokens at load time"
 }
 fn default_allowed_paths() -> Vec<String> {
     vec!["./**".to_string()]
@@ -939,6 +939,13 @@ impl Config {
             );
         }
 
+        // If token_budget was not explicitly set (sentinel value 0), derive it
+        // from max_tokens.  Local models have varying context sizes — defaulting
+        // to 500k was wrong because it misrepresents the actual capacity.
+        if config.agent.token_budget == 0 {
+            config.agent.token_budget = config.max_tokens;
+        }
+
         // Validate the loaded configuration
         config.validate()?;
 
@@ -1138,7 +1145,7 @@ mod tests {
         let config = AgentConfig::default();
         assert_eq!(config.max_iterations, 100);
         assert_eq!(config.step_timeout_secs, 300);
-        assert_eq!(config.token_budget, 500000);
+        assert_eq!(config.token_budget, default_max_tokens(), "defaults to max_tokens");
     }
 
     #[test]
@@ -1688,7 +1695,7 @@ mod tests {
         assert!((default_temperature() - 1.0).abs() < f32::EPSILON);
         assert_eq!(default_max_iterations(), 100);
         assert_eq!(default_step_timeout(), 300);
-        assert_eq!(default_token_budget(), 500000);
+        assert_eq!(default_token_budget(), 0, "sentinel value, resolved from max_tokens at load");
         assert_eq!(default_allowed_paths(), vec!["./**".to_string()]);
         assert_eq!(
             default_protected_branches(),

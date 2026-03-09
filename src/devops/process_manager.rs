@@ -399,6 +399,7 @@ impl ProcessManager {
             if let Some(ref mut child) = *child_guard {
                 if force {
                     let _ = child.kill().await;
+                    let _ = child.wait().await; // reap zombie
                 } else {
                     // Try graceful shutdown first
                     #[cfg(unix)]
@@ -414,12 +415,30 @@ impl ProcessManager {
                                     pid
                                 );
                                 let _ = child.kill().await;
+                                let _ = child.wait().await;
                             }
                         }
                     }
                     #[cfg(not(unix))]
                     {
                         let _ = child.kill().await;
+                        let _ = child.wait().await;
+                    }
+
+                    // Wait up to 3 seconds for graceful exit, then force kill
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(3),
+                        child.wait(),
+                    )
+                    .await
+                    {
+                        Ok(_) => {} // Process exited
+                        Err(_) => {
+                            // Timeout — force kill and reap
+                            warn!("Process '{}' did not exit after SIGTERM, sending SIGKILL", id);
+                            let _ = child.kill().await;
+                            let _ = child.wait().await;
+                        }
                     }
                 }
             }
