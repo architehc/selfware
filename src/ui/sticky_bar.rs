@@ -226,88 +226,73 @@ pub struct StickyBar {
 }
 
 impl StickyBar {
-    /// Activate the sticky bar.  Sets the terminal scrolling region and
-    /// renders the initial top + bottom bars.
+    /// Activate the status bar.  No scroll regions — just tracks state and
+    /// renders inline via stderr on update().
     pub fn activate(state: StickyState) -> Option<Self> {
         let (width, height) = terminal::size().ok()?;
-        if height < 5 {
-            return None; // Terminal too small
+        if height < 3 {
+            return None;
         }
-
         STICKY_ACTIVE.store(true, Ordering::Relaxed);
-
-        let bar = Self {
+        Some(Self {
             state,
             height,
             width,
-        };
-        bar.setup_regions();
-        bar.paint();
-        Some(bar)
+        })
     }
 
-    /// Set up ANSI scrolling region: rows 2..(height-1) scroll, row 1 and
-    /// row height are pinned.
-    fn setup_regions(&self) {
-        let mut out = io::stdout();
-        // Set scrolling region to rows 2 through (height-1)
-        write!(out, "\x1b[2;{}r", self.height - 1).ok();
-        // Move cursor into the scrolling region
-        write!(out, "\x1b[2;1H").ok();
-        out.flush().ok();
-    }
-
-    /// Paint both bars without moving the content cursor.
-    fn paint(&self) {
-        // Sync global bash count into the state
+    /// Refresh: print the bottom status line on stderr (doesn't interfere
+    /// with stdout streaming).  Uses `\r\x1b[K` to overwrite the current
+    /// stderr line so it stays in place between calls.
+    pub fn update(&self) {
         self.state
             .active_bash
             .store(active_bash_count(), Ordering::Relaxed);
 
-        let mut out = io::stdout();
-        let w = self.width as usize;
-
-        // Save cursor position
-        write!(out, "\x1b7").ok();
-
-        // -- Top bar (row 1) --
-        write!(out, "\x1b[1;1H").ok(); // Move to row 1, col 1
-        let top = render_top(&self.state, w);
-        // Reverse video (white on dark) for the bar
-        write!(out, "\x1b[48;5;236m\x1b[38;5;215m{}\x1b[0m", top).ok();
-
-        // -- Bottom bar (last row) --
-        write!(out, "\x1b[{};1H", self.height).ok();
+        let w = terminal::size().map(|(w, _)| w as usize).unwrap_or(self.width as usize);
         let bottom = render_bottom(&self.state, w);
-        write!(out, "\x1b[48;5;236m\x1b[38;5;245m{}\x1b[0m", bottom).ok();
+        let top = render_top(&self.state, w);
 
-        // Restore cursor position
-        write!(out, "\x1b8").ok();
+        // Overwrite a single line on stderr with the combined status
+        let mut err = io::stderr().lock();
+        // Save cursor, move to column 0, clear line, print, restore cursor
+        write!(
+            err,
+            "\x1b7\x1b[{};1H\x1b[48;5;236m\x1b[38;5;245m{}\x1b[0m\x1b8",
+            self.height, bottom
+        ).ok();
+        err.flush().ok();
+    }
+
+    /// Print the final status summary inline (called once when generation ends).
+    pub fn finish(&self) {
+        self.state
+            .active_bash
+            .store(active_bash_count(), Ordering::Relaxed);
+
+        let w = terminal::size().map(|(w, _)| w as usize).unwrap_or(self.width as usize);
+        let top = render_top(&self.state, w);
+
+        // Clear the bottom bar we've been overwriting
+        let mut err = io::stderr().lock();
+        write!(err, "\x1b[{};1H\x1b[2K\x1b[A", self.height).ok();
+        err.flush().ok();
+
+        // Print final summary inline on stdout
+        let mut out = io::stdout();
+        write!(out, "\x1b[90m{}\x1b[0m", top.trim()).ok();
         out.flush().ok();
     }
 
-    /// Refresh the bar contents.  Call this periodically during streaming.
-    pub fn update(&self) {
-        self.paint();
-    }
-
-    /// Get a reference to the shared state for external updates.
     pub fn state(&self) -> &StickyState {
         &self.state
     }
 
-    /// Deactivate: reset scrolling region and clear the bar rows.
     fn teardown(&self) {
-        let mut out = io::stdout();
-        // Reset scrolling region to full terminal
-        write!(out, "\x1b[r").ok();
-        // Clear top bar row
-        write!(out, "\x1b[1;1H\x1b[2K").ok();
-        // Clear bottom bar row
-        write!(out, "\x1b[{};1H\x1b[2K", self.height).ok();
-        // Move cursor to row 2
-        write!(out, "\x1b[2;1H").ok();
-        out.flush().ok();
+        // Clear the bottom bar line
+        let mut err = io::stderr().lock();
+        write!(err, "\x1b[{};1H\x1b[2K", self.height).ok();
+        err.flush().ok();
         STICKY_ACTIVE.store(false, Ordering::Relaxed);
     }
 }
