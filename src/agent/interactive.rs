@@ -18,35 +18,39 @@ fn safe_truncate(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
-/// Handle returned by [`spawn_esc_listener`] so the caller can signal the
+/// Shared queue for messages typed during generation.
+type InputQueue = Arc<std::sync::Mutex<Vec<String>>>;
+
+/// Handle returned by [`spawn_input_listener`] so the caller can signal the
 /// listener to stop and wait for terminal raw-mode to be restored.
 struct EscListenerGuard {
     stop: Arc<AtomicBool>,
     handle: tokio::task::JoinHandle<()>,
+    /// Messages queued by the user while the model was generating.
+    pub queued: InputQueue,
 }
 
 impl EscListenerGuard {
     /// Signal the background listener to exit and wait (briefly) for it to
     /// restore terminal raw-mode before returning control to reedline.
-    async fn stop(self) {
+    async fn stop(self) -> Vec<String> {
         use std::sync::atomic::Ordering;
         self.stop.store(true, Ordering::Relaxed);
         // Give the blocking thread up to 200 ms to clean up raw mode.
         let _ = tokio::time::timeout(std::time::Duration::from_millis(200), self.handle).await;
+        // Drain any queued messages
+        self.queued.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
     }
 }
 
-/// Spawn a background task that listens for ESC key presses during model execution.
+/// Spawn a background input listener that runs during model execution.
 ///
-/// While the agent is running a task, reedline is not reading stdin, so we can safely
-/// enter raw mode and poll for keyboard events. When ESC is pressed the cancellation
-/// token is set, which is the same flag used by the Ctrl+C handler.
-///
-/// The listener exits when:
-/// - ESC is pressed (after setting the cancel flag)
-/// - The `stop` flag is set by the caller (task finished)
-/// - The cancel token is already set (Ctrl+C fired)
-/// - An unrecoverable error occurs reading events
+/// While the agent is running a task, reedline is not reading stdin, so we
+/// enter raw mode and poll for keyboard events:
+/// - **ESC** cancels the current generation
+/// - **Any other typing + Enter** queues the message for execution after
+///   the current task finishes (Claude Code-style input queuing)
+/// - A prompt hint `▸ ` is shown when the user starts typing
 ///
 /// Terminal raw mode is always restored before the thread returns.
 fn spawn_esc_listener(
@@ -55,10 +59,13 @@ fn spawn_esc_listener(
 ) -> EscListenerGuard {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_clone = Arc::clone(&stop);
+    let queued: InputQueue = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let queued_clone = Arc::clone(&queued);
 
     let handle = tokio::task::spawn_blocking(move || {
-        use crossterm::event::{self, Event, KeyCode, KeyEvent};
+        use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
         use crossterm::terminal;
+        use std::io::Write;
         use std::sync::atomic::Ordering;
         use std::time::Duration;
 
@@ -66,6 +73,9 @@ fn spawn_esc_listener(
         if terminal::enable_raw_mode().is_err() {
             return;
         }
+
+        let mut input_buf = String::new();
+        let mut showing_prompt = false;
 
         loop {
             // Check if we should stop (task finished or already cancelled)
@@ -96,20 +106,96 @@ fn spawn_esc_listener(
             // Poll with a short timeout so we can check the stop flag periodically
             match event::poll(Duration::from_millis(100)) {
                 Ok(true) => match event::read() {
-                    Ok(Event::Key(KeyEvent {
-                        code: KeyCode::Esc, ..
-                    })) => {
-                        cancel_token.store(true, Ordering::Relaxed);
-                        // Print cancellation notice; use \r\n because we are in raw mode
-                        let _ = std::io::Write::write_all(
-                            &mut std::io::stderr(),
-                            b"\r\n\x1b[33m[ESC] Cancelling...\x1b[0m\r\n",
-                        );
-                        break;
+                    Ok(Event::Key(KeyEvent { code, modifiers, .. })) => {
+                        match code {
+                            KeyCode::Esc => {
+                                // Clear any partial input
+                                if !input_buf.is_empty() {
+                                    // Erase the prompt line
+                                    let clear = format!(
+                                        "\r\x1b[2K"
+                                    );
+                                    let _ = std::io::stderr().write_all(clear.as_bytes());
+                                    let _ = std::io::stderr().flush();
+                                    input_buf.clear();
+                                    showing_prompt = false;
+                                } else {
+                                    cancel_token.store(true, Ordering::Relaxed);
+                                    let _ = std::io::stderr().write_all(
+                                        b"\r\n\x1b[33m[ESC] Cancelling...\x1b[0m\r\n",
+                                    );
+                                    break;
+                                }
+                            }
+                            KeyCode::Enter => {
+                                if !input_buf.is_empty() {
+                                    let msg = input_buf.trim().to_string();
+                                    input_buf.clear();
+                                    showing_prompt = false;
+                                    if !msg.is_empty() {
+                                        let count = {
+                                            let mut q = queued_clone.lock().unwrap();
+                                            q.push(msg.clone());
+                                            q.len()
+                                        };
+                                        // Show confirmation
+                                        let notice = format!(
+                                            "\r\x1b[2K\x1b[36m  ▸ Queued: \x1b[0m{}\x1b[90m ({})\x1b[0m\r\n",
+                                            safe_truncate(&msg, 50),
+                                            count,
+                                        );
+                                        let _ = std::io::stderr().write_all(notice.as_bytes());
+                                        let _ = std::io::stderr().flush();
+                                    } else {
+                                        let _ = std::io::stderr().write_all(b"\r\x1b[2K");
+                                        let _ = std::io::stderr().flush();
+                                    }
+                                }
+                            }
+                            KeyCode::Backspace => {
+                                if input_buf.pop().is_some() {
+                                    // Redraw prompt
+                                    let prompt = format!(
+                                        "\r\x1b[2K\x1b[90m  ▸ \x1b[0m{}",
+                                        input_buf
+                                    );
+                                    let _ = std::io::stderr().write_all(prompt.as_bytes());
+                                    let _ = std::io::stderr().flush();
+                                    if input_buf.is_empty() {
+                                        let _ = std::io::stderr().write_all(b"\r\x1b[2K");
+                                        let _ = std::io::stderr().flush();
+                                        showing_prompt = false;
+                                    }
+                                }
+                            }
+                            KeyCode::Char('c')
+                                if modifiers.contains(KeyModifiers::CONTROL) =>
+                            {
+                                cancel_token.store(true, Ordering::Relaxed);
+                                let _ = std::io::stderr().write_all(
+                                    b"\r\n\x1b[33m[Ctrl+C] Cancelling...\x1b[0m\r\n",
+                                );
+                                break;
+                            }
+                            KeyCode::Char(c) => {
+                                if !showing_prompt {
+                                    // Show the inline prompt on first keypress
+                                    let _ = std::io::stderr().write_all(
+                                        b"\r\x1b[2K\x1b[90m  \xe2\x96\xb8 \x1b[0m",
+                                    );
+                                    showing_prompt = true;
+                                }
+                                input_buf.push(c);
+                                // Echo the character
+                                let _ = std::io::stderr().write_all(
+                                    c.encode_utf8(&mut [0; 4]).as_bytes(),
+                                );
+                                let _ = std::io::stderr().flush();
+                            }
+                            _ => {}
+                        }
                     }
-                    Ok(_) => {
-                        // Ignore other keys
-                    }
+                    Ok(_) => {}
                     Err(_) => break,
                 },
                 Ok(false) => {
@@ -119,10 +205,16 @@ fn spawn_esc_listener(
             }
         }
 
+        // Clean up any partial input display
+        if showing_prompt {
+            let _ = std::io::stderr().write_all(b"\r\x1b[2K");
+            let _ = std::io::stderr().flush();
+        }
+
         let _ = terminal::disable_raw_mode();
     });
 
-    EscListenerGuard { stop, handle }
+    EscListenerGuard { stop, handle, queued }
 }
 
 impl Agent {
@@ -1523,7 +1615,11 @@ impl Agent {
     async fn run_task_with_queue(&mut self, task: &str) -> Result<()> {
         let esc_guard = spawn_esc_listener(self.cancel_token(), self.esc_pause_token());
         let result = self.run_task(task).await;
-        esc_guard.stop().await;
+        let queued = esc_guard.stop().await;
+        // Add messages typed during generation to the pending queue
+        for msg in queued {
+            self.enqueue_pending_message(&msg);
+        }
         self.after_task_run().await;
         result
     }
@@ -1531,7 +1627,10 @@ impl Agent {
     async fn run_swarm_with_queue(&mut self, task: &str) -> Result<()> {
         let esc_guard = spawn_esc_listener(self.cancel_token(), self.esc_pause_token());
         let result = self.run_swarm_task(task).await;
-        esc_guard.stop().await;
+        let queued = esc_guard.stop().await;
+        for msg in queued {
+            self.enqueue_pending_message(&msg);
+        }
         self.after_task_run().await;
         result
     }
