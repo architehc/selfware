@@ -197,12 +197,16 @@ impl Agent {
 
             match chunk {
                 StreamChunk::Content(text) => {
-                    // Stop spinner on first content
+                    // Stop spinner on first content — must complete
+                    // before we print anything to avoid interleaving
                     if tui_active && tui_spinner_active {
                         self.emit_event(AgentEvent::SpinnerStop);
                         tui_spinner_active = false;
                     } else if let Some(s) = spinner.take() {
+                        // Drop stops the spinner task and prints final line
                         drop(s);
+                        // Small delay to let the spinner task fully exit
+                        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
                     }
                     if in_reasoning {
                         in_reasoning = false;
