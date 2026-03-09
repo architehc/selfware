@@ -273,42 +273,41 @@ impl VerificationGate {
             }
         }
 
-        // Multi-language QA: Python files
-        let python_files_changed = files_to_check.iter().any(|f| f.ends_with(".py"));
-        if python_files_changed && !rust_files_changed {
-            let py_checks = self.run_python_verification().await;
-            for check in py_checks {
-                if !check.passed {
-                    suggested_next_steps
-                        .push(format!("Fix Python {} errors", check.check_type.as_str()));
-                }
-                checks.push(check);
-            }
-        }
+        // Multi-language QA: dispatch to language_qa runners for non-Rust files
+        if !rust_files_changed {
+            use crate::testing::language_qa::{QaLanguage, run_python_qa, run_node_qa, run_go_qa};
 
-        // Multi-language QA: JavaScript/TypeScript files
-        let node_files_changed = files_to_check
-            .iter()
-            .any(|f| f.ends_with(".js") || f.ends_with(".ts") || f.ends_with(".tsx") || f.ends_with(".jsx"));
-        if node_files_changed && !rust_files_changed {
-            let node_checks = self.run_node_verification().await;
-            for check in node_checks {
-                if !check.passed {
-                    suggested_next_steps
-                        .push(format!("Fix Node.js {} errors", check.check_type.as_str()));
-                }
-                checks.push(check);
-            }
-        }
+            let detected_lang = QaLanguage::detect(&self.project_root);
+            let timeout = self.config.check_timeout_secs;
 
-        // Multi-language QA: Go files
-        let go_files_changed = files_to_check.iter().any(|f| f.ends_with(".go"));
-        if go_files_changed && !rust_files_changed {
-            let go_checks = self.run_go_verification().await;
-            for check in go_checks {
+            let qa_results = match detected_lang {
+                QaLanguage::Python if files_to_check.iter().any(|f| f.ends_with(".py")) => {
+                    run_python_qa(&self.project_root, timeout).await
+                }
+                QaLanguage::Node
+                    if files_to_check.iter().any(|f| {
+                        f.ends_with(".js")
+                            || f.ends_with(".ts")
+                            || f.ends_with(".tsx")
+                            || f.ends_with(".jsx")
+                    }) =>
+                {
+                    run_node_qa(&self.project_root, timeout).await
+                }
+                QaLanguage::Go if files_to_check.iter().any(|f| f.ends_with(".go")) => {
+                    run_go_qa(&self.project_root, timeout).await
+                }
+                _ => Vec::new(),
+            };
+
+            for qa_stage in qa_results {
+                let check = Self::qa_stage_to_check_result(qa_stage);
                 if !check.passed {
-                    suggested_next_steps
-                        .push(format!("Fix Go {} errors", check.check_type.as_str()));
+                    suggested_next_steps.push(format!(
+                        "Fix {} {} errors",
+                        detected_lang,
+                        check.check_type.as_str()
+                    ));
                 }
                 checks.push(check);
             }
@@ -535,215 +534,26 @@ impl VerificationGate {
         false
     }
 
-    /// Run Python verification checks.
-    async fn run_python_verification(&self) -> Vec<CheckResult> {
-        let _timeout = self.config.check_timeout_secs;
-        let mut results = Vec::new();
-
-        // Syntax check
-        if self.config.check_on_edit {
-            let start = Instant::now();
-            let output = Command::new("sh")
-                .args([
-                    "-c",
-                    "find . -name '*.py' -not -path './.*' -not -path '*/node_modules/*' | head -50 | xargs python3 -m py_compile 2>&1",
-                ])
-                .current_dir(&self.project_root)
-                .output()
-                .await;
-            results.push(self.command_to_check_result(CheckType::TypeCheck, start, output));
-        }
-
-        // Format check (ruff or black)
-        if self.config.format_on_edit {
-            let start = Instant::now();
-            let output = Command::new("sh")
-                .args([
-                    "-c",
-                    "ruff format --check . 2>/dev/null || black --check . 2>/dev/null || true",
-                ])
-                .current_dir(&self.project_root)
-                .output()
-                .await;
-            results.push(self.command_to_check_result(CheckType::Format, start, output));
-        }
-
-        // Lint (ruff or flake8)
-        if self.config.lint_on_edit {
-            let start = Instant::now();
-            let output = Command::new("sh")
-                .args([
-                    "-c",
-                    "ruff check . 2>/dev/null || flake8 . 2>/dev/null || true",
-                ])
-                .current_dir(&self.project_root)
-                .output()
-                .await;
-            results.push(self.command_to_check_result(CheckType::Lint, start, output));
-        }
-
-        // Tests
-        if self.config.test_on_edit {
-            let start = Instant::now();
-            let output = Command::new("sh")
-                .args([
-                    "-c",
-                    "pytest --quiet --tb=short 2>/dev/null || python3 -m unittest discover -s . -q 2>&1",
-                ])
-                .current_dir(&self.project_root)
-                .output()
-                .await;
-            results.push(self.command_to_check_result(CheckType::Test, start, output));
-        }
-
-        results
-    }
-
-    /// Run Node.js/TypeScript verification checks.
-    async fn run_node_verification(&self) -> Vec<CheckResult> {
-        let mut results = Vec::new();
-        let has_ts = self.project_root.join("tsconfig.json").exists();
-
-        // TypeScript type check
-        if has_ts && self.config.check_on_edit {
-            let start = Instant::now();
-            let output = Command::new("npx")
-                .args(["tsc", "--noEmit"])
-                .current_dir(&self.project_root)
-                .output()
-                .await;
-            results.push(self.command_to_check_result(CheckType::TypeCheck, start, output));
-        }
-
-        // Format check (prettier)
-        if self.config.format_on_edit {
-            let start = Instant::now();
-            let output = Command::new("sh")
-                .args([
-                    "-c",
-                    "npx prettier --check . 2>/dev/null || true",
-                ])
-                .current_dir(&self.project_root)
-                .output()
-                .await;
-            results.push(self.command_to_check_result(CheckType::Format, start, output));
-        }
-
-        // Lint (eslint)
-        if self.config.lint_on_edit {
-            let start = Instant::now();
-            let output = Command::new("sh")
-                .args(["-c", "npx eslint . 2>/dev/null || true"])
-                .current_dir(&self.project_root)
-                .output()
-                .await;
-            results.push(self.command_to_check_result(CheckType::Lint, start, output));
-        }
-
-        // Tests
-        if self.config.test_on_edit {
-            let start = Instant::now();
-            let output = Command::new("sh")
-                .args([
-                    "-c",
-                    "npx vitest run --reporter=verbose 2>/dev/null || npm test --if-present 2>&1",
-                ])
-                .current_dir(&self.project_root)
-                .output()
-                .await;
-            results.push(self.command_to_check_result(CheckType::Test, start, output));
-        }
-
-        results
-    }
-
-    /// Run Go verification checks.
-    async fn run_go_verification(&self) -> Vec<CheckResult> {
-        let mut results = Vec::new();
-
-        // Build (syntax + type check)
-        if self.config.check_on_edit {
-            let start = Instant::now();
-            let output = Command::new("go")
-                .args(["build", "./..."])
-                .current_dir(&self.project_root)
-                .output()
-                .await;
-            results.push(self.command_to_check_result(CheckType::TypeCheck, start, output));
-        }
-
-        // Format check
-        if self.config.format_on_edit {
-            let start = Instant::now();
-            let output = Command::new("sh")
-                .args(["-c", "test -z \"$(gofmt -l . 2>/dev/null)\""])
-                .current_dir(&self.project_root)
-                .output()
-                .await;
-            results.push(self.command_to_check_result(CheckType::Format, start, output));
-        }
-
-        // Vet (lint)
-        if self.config.lint_on_edit {
-            let start = Instant::now();
-            let output = Command::new("go")
-                .args(["vet", "./..."])
-                .current_dir(&self.project_root)
-                .output()
-                .await;
-            results.push(self.command_to_check_result(CheckType::Lint, start, output));
-        }
-
-        // Tests
-        if self.config.test_on_edit {
-            let start = Instant::now();
-            let output = Command::new("go")
-                .args(["test", "./..."])
-                .current_dir(&self.project_root)
-                .output()
-                .await;
-            results.push(self.command_to_check_result(CheckType::Test, start, output));
-        }
-
-        results
-    }
-
-    /// Convert a command output to a CheckResult.
-    fn command_to_check_result(
-        &self,
-        check_type: CheckType,
-        start: Instant,
-        output: std::result::Result<std::process::Output, std::io::Error>,
+    /// Convert a QA stage result from language_qa into a CheckResult.
+    fn qa_stage_to_check_result(
+        stage: crate::testing::qa_profiles::QaStageResult,
     ) -> CheckResult {
-        let duration_ms = start.elapsed().as_millis() as u64;
-        match output {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                let combined = if stderr.is_empty() {
-                    stdout
-                } else {
-                    format!("{}\n{}", stdout, stderr)
-                };
-                CheckResult {
-                    check_type,
-                    passed: output.status.success(),
-                    duration_ms,
-                    output: combined,
-                    errors: vec![],
-                    warnings: vec![],
-                    suggestions: vec![],
-                }
-            }
-            Err(e) => CheckResult {
-                check_type,
-                passed: false,
-                duration_ms,
-                output: format!("Command failed: {}", e),
-                errors: vec![],
-                warnings: vec![],
-                suggestions: vec![],
-            },
+        use crate::testing::qa_profiles::QaStage;
+        let check_type = match stage.stage {
+            QaStage::Syntax | QaStage::TypeCheck => CheckType::TypeCheck,
+            QaStage::Format => CheckType::Format,
+            QaStage::Lint => CheckType::Lint,
+            QaStage::Test => CheckType::Test,
+            QaStage::Security => CheckType::Custom,
+        };
+        CheckResult {
+            check_type,
+            passed: stage.passed,
+            duration_ms: stage.duration_ms,
+            output: stage.output,
+            errors: vec![],
+            warnings: vec![],
+            suggestions: vec![],
         }
     }
 

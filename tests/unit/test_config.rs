@@ -165,6 +165,7 @@ mod safety_config_tests {
             protected_branches: vec!["main".to_string()],
             require_confirmation: vec!["git push".to_string()],
             strict_permissions: false,
+            permissions: vec![],
         };
 
         let toml = toml::to_string(&config).unwrap();

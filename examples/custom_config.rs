@@ -127,6 +127,7 @@ fn build_custom_config() -> Config {
                 "container_exec".to_string(),
             ],
             strict_permissions: false,
+            permissions: vec![],
         },
 
         // Agent behavior

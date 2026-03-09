@@ -169,6 +169,10 @@ pub struct Agent {
     hook_registry: HookRegistry,
     /// Plan mode: propose tool calls without executing them
     plan_mode: bool,
+    /// Audit logger for JSONL tool execution logging
+    audit_logger: Option<crate::safety::audit::AuditLogger>,
+    /// Permission store for pre-authorized tool grants
+    permission_store: crate::safety::permissions::PermissionStore,
 }
 
 impl Agent {
@@ -420,6 +424,24 @@ To call a tool, use this EXACT XML structure:
 
         let plan_mode = config.plan_mode;
 
+        // Initialize audit logger (writes JSONL events to ~/.selfware/audit/)
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let audit_logger = crate::safety::audit::AuditLogger::new(&session_id);
+        if let Some(ref logger) = audit_logger {
+            logger.log_session_start();
+        }
+
+        // Initialize permission store from config grants
+        let permission_store =
+            crate::safety::permissions::PermissionStore::from_config(&config.safety.permissions);
+
+        // Initialize session encryption from OS keychain (if available)
+        if let Ok(Some(password)) =
+            crate::session::encryption::EncryptionManager::load_from_keychain()
+        {
+            let _ = crate::session::encryption::EncryptionManager::init(&password);
+        }
+
         info!("Agent initialized with cognitive state, verification gate, and error analyzer");
 
         Ok(Self {
@@ -455,6 +477,8 @@ To call a tool, use this EXACT XML structure:
             recent_tool_calls: VecDeque::new(),
             hook_registry,
             plan_mode,
+            audit_logger,
+            permission_store,
         })
     }
 
@@ -528,6 +552,11 @@ To call a tool, use this EXACT XML structure:
         ];
 
         if safe_tools.contains(&tool_name) {
+            return false;
+        }
+
+        // Check permission store: pre-authorized grants skip confirmation
+        if self.permission_store.is_authorized(tool_name, None) {
             return false;
         }
 

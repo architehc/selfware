@@ -63,6 +63,7 @@ async fn main() -> Result<()> {
                 "shell_exec".to_string(),
             ],
             strict_permissions: false,
+            permissions: vec![],
         },
 
         // Agent behavior

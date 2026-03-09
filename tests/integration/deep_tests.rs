@@ -63,6 +63,7 @@ fn slow_model_config() -> Config {
             protected_branches: vec!["main".to_string()],
             require_confirmation: vec![],
             strict_permissions: false,
+            permissions: vec![],
         },
         agent: AgentConfig {
             max_iterations: 20, // Allow more iterations for complex tasks

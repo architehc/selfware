@@ -88,6 +88,7 @@ async fn test_file_write_restricted_directory_returns_error() {
         protected_branches: vec![],
         require_confirmation: vec![],
         strict_permissions: false,
+        permissions: vec![],
     };
 
     let tool = FileWrite::with_safety_config(safety);

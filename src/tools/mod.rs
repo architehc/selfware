@@ -20,6 +20,7 @@ pub mod process;
 pub mod screen_capture;
 pub mod search;
 pub mod shell;
+pub mod computer;
 pub mod swarm_tool;
 pub mod vision;
 
@@ -186,6 +187,12 @@ impl ToolRegistry {
 
         // Swarm orchestration
         registry.register(swarm_tool::SwarmDispatchTool::new());
+
+        // Computer control (mouse, keyboard, screen, window)
+        registry.register(computer::ComputerMouseTool);
+        registry.register(computer::ComputerKeyboardTool);
+        registry.register(computer::ComputerScreenTool);
+        registry.register(computer::ComputerWindowTool);
 
         registry
     }

@@ -482,6 +482,10 @@ pub struct SafetyConfig {
     /// Default: false (backward compatible -- warn only).
     #[serde(default)]
     pub strict_permissions: bool,
+    /// Pre-authorized permission grants for tool execution.
+    /// Reduces confirmation prompts for trusted operations.
+    #[serde(default)]
+    pub permissions: Vec<crate::safety::permissions::PermissionGrant>,
 }
 
 /// Agent behavior settings: iteration limits, timeouts, token budgets, and calling mode.
@@ -550,6 +554,7 @@ impl Default for SafetyConfig {
             protected_branches: default_protected_branches(),
             require_confirmation: default_require_confirmation(),
             strict_permissions: false,
+            permissions: Vec::new(),
         }
     }
 }
@@ -1447,6 +1452,7 @@ mod tests {
                 protected_branches: vec!["main".to_string()],
                 require_confirmation: vec!["deploy".to_string()],
                 strict_permissions: false,
+                permissions: vec![],
             },
             agent: AgentConfig {
                 max_iterations: 50,
@@ -3253,6 +3259,7 @@ model = "explicit-default-model"
             protected_branches: vec!["main".to_string(), "release".to_string()],
             require_confirmation: vec!["deploy".to_string()],
             strict_permissions: true,
+            permissions: vec![],
         };
         let toml_str = toml::to_string(&config).unwrap();
         let parsed: SafetyConfig = toml::from_str(&toml_str).unwrap();

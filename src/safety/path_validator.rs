@@ -392,6 +392,7 @@ mod tests {
             protected_branches: vec![],
             require_confirmation: vec![],
             strict_permissions: false,
+            permissions: vec![],
         }
     }
 

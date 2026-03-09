@@ -313,6 +313,10 @@ impl Agent {
                 let spinner = crate::ui::spinner::TerminalSpinner::start(&error_msg);
                 spinner.stop_error(&error_msg);
                 output::safety_blocked(&error_msg);
+                // Audit: log safety block
+                if let Some(ref logger) = self.audit_logger {
+                    logger.log_safety_block(&name, &error_msg);
+                }
                 self.push_tool_result_message(use_native_fc, &call_id, &name, false, &error_msg);
                 self.log_tool_call(&name, &args_str, &error_msg, false, start_time, false);
                 let duration_ms = start_time.elapsed().as_millis() as u64;
@@ -451,6 +455,15 @@ impl Agent {
             // Fire PostToolUse hooks (e.g., auto-format, lint, auto-commit)
             let post_ctx = HookContext::post_tool(&name, &args_str, success, &result);
             self.hook_registry.fire(&post_ctx).await;
+
+            // Audit: log tool execution
+            if let Some(ref logger) = self.audit_logger {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                args_str.hash(&mut hasher);
+                let args_hash = format!("{:x}", hasher.finish());
+                logger.log_tool_execution(&name, &args_hash, success, duration_ms, None);
+            }
         }
 
         Ok(())
