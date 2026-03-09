@@ -1,0 +1,6 @@
+[
+  { "key": "ctrl-shift-s", "command": "selfware::ask" },
+  { "key": "ctrl-shift-e", "command": "selfware::explain" },
+  { "key": "ctrl-shift-t", "command": "selfware::generate_tests" },
+  { "key": "ctrl-shift-r", "command": "selfware::refactor" }
+]

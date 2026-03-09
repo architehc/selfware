@@ -1,0 +1,8 @@
+{
+  "selfware": {
+    "endpoint": "http://localhost:8000/v1",
+    "model": "Qwen/Qwen3-Coder-Next-FP8",
+    "auto_suggest": true,
+    "inline_completions": true
+  }
+}

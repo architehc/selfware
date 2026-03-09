@@ -273,6 +273,9 @@ enum Commands {
         dry_run: bool,
     },
 
+    /// Start selfware in LSP server mode (for editor extensions)
+    Lsp,
+
     /// Execute a workflow from a YAML file
     #[command(alias = "w")]
     Workflow {
@@ -1173,6 +1176,13 @@ async fn handle_command(
                 println!("      {} {} ({:?})", status_icon, id, step_result.status);
             }
             println!();
+        }
+
+        Commands::Lsp => {
+            eprintln!("LSP server mode not yet implemented.");
+            eprintln!("This subcommand will start selfware as a Language Server Protocol server");
+            eprintln!("for editor integrations (ZED, VS Code, Neovim, etc.).");
+            std::process::exit(1);
         }
 
         Commands::Doctor => {

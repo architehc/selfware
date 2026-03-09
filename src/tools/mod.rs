@@ -23,6 +23,7 @@ pub mod shell;
 pub mod pty_shell;
 pub mod computer;
 pub mod swarm_tool;
+pub mod lsp_tools;
 pub mod vision;
 
 use browser::{BrowserEval, BrowserFetch, BrowserLinks, BrowserPdf, BrowserScreenshot};
@@ -196,6 +197,15 @@ impl ToolRegistry {
         registry.register(computer::ComputerKeyboardTool);
         registry.register(computer::ComputerScreenTool);
         registry.register(computer::ComputerWindowTool);
+
+        // LSP code intelligence tools
+        let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let (lsp_goto, lsp_refs, lsp_syms, lsp_hover) =
+            lsp_tools::create_lsp_tools(project_root);
+        registry.register(lsp_goto);
+        registry.register(lsp_refs);
+        registry.register(lsp_syms);
+        registry.register(lsp_hover);
 
         registry
     }

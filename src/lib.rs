@@ -38,6 +38,7 @@ pub mod input;
 pub mod safety;
 pub mod computer;
 pub mod hooks;
+pub mod lsp;
 pub mod mcp;
 pub mod tools;
 pub mod ui;

@@ -8,6 +8,7 @@ pub mod animations;
 pub mod banners;
 pub mod components;
 pub mod garden;
+pub mod input_handler;
 pub mod loading_phrases;
 pub mod mascot;
 pub mod spinner;
