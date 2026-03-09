@@ -142,6 +142,9 @@ vendored-openssl = ["dep:openssl"]
 # VLM benchmark suite for visual understanding evaluation
 vlm-bench = []
 
+# System-level E2E tests (require live LLM endpoint, run manually)
+system-tests = []
+
 # Convenience feature that enables all optional modules
 extras = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-analysis", "tokens", "self-improvement", "hot-reload", "vlm-bench"]
 
