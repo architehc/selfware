@@ -160,10 +160,12 @@ pub fn redact_secrets(input: &str) -> String {
 /// Initialize global tracing subscriber with configurable output
 /// By default, only enables tracing if RUST_LOG is explicitly set
 pub fn init_tracing() {
-    // Only initialize verbose tracing if RUST_LOG is set
-    // Otherwise use a quiet "error-only" mode to avoid polluting CLI output
-    if std::env::var("RUST_LOG").is_ok() {
-        init_tracing_with_filter(&std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()));
+    // Initialize tracing if RUST_LOG or SELFWARE_LOG_LEVEL is set.
+    // SELFWARE_LOG_LEVEL serves as a project-specific fallback.
+    let filter = std::env::var("RUST_LOG")
+        .or_else(|_| std::env::var("SELFWARE_LOG_LEVEL"));
+    if let Ok(f) = filter {
+        init_tracing_with_filter(&f);
     }
 }
 

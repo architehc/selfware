@@ -673,7 +673,7 @@ impl Agent {
                 if let Some(checkpoint) = self.edit_history.undo() {
                     let mut restored = 0;
                     for (path, snapshot) in &checkpoint.files {
-                        if std::fs::write(path, &snapshot.content).is_ok() {
+                        if tokio::fs::write(path, &snapshot.content).await.is_ok() {
                             println!(
                                 "  {} Restored {}",
                                 "✓".bright_green(),
@@ -1132,7 +1132,7 @@ impl Agent {
                                 .map(|(p, s)| (p.clone(), s.content.clone()))
                                 .collect();
                             for (path, content) in &files {
-                                if std::fs::write(path, content).is_ok() {
+                                if tokio::fs::write(path, content).await.is_ok() {
                                     println!(
                                         "  {} Restored {}",
                                         "✓".bright_green(),

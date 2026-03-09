@@ -657,8 +657,6 @@ impl Agent {
 
     /// Reload previously loaded context files
     pub(super) async fn reload_context(&mut self) -> Result<usize> {
-        use std::fs;
-
         let files = self.context_files.clone();
         if files.is_empty() {
             println!(
@@ -675,7 +673,7 @@ impl Agent {
 
         let mut loaded = 0;
         for path_str in &files {
-            if let Ok(content) = fs::read_to_string(path_str) {
+            if let Ok(content) = tokio::fs::read_to_string(path_str).await {
                 let file_header = format!("\n// ═══════════════════════════════════════════\n// FILE: {}\n// ═══════════════════════════════════════════\n", path_str);
                 self.messages
                     .push(Message::user(format!("{}{}", file_header, content)));

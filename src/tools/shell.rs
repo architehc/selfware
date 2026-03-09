@@ -87,6 +87,9 @@ impl Tool for ShellExec {
         // data exfiltration payloads. This is defense-in-depth; the safety
         // checker provides the primary validation layer.
         let lower_cmd = args.command.to_lowercase();
+        // Normalize whitespace: collapse runs of whitespace to single space
+        // to prevent bypass via extra spaces (e.g. "|  bash  -i").
+        let normalized_cmd: String = lower_cmd.split_whitespace().collect::<Vec<_>>().join(" ");
         let dangerous_patterns: &[&str] = &[
             "/dev/tcp/",
             "/dev/udp/",
@@ -95,7 +98,7 @@ impl Tool for ShellExec {
             "mkfifo /tmp",
         ];
         for pattern in dangerous_patterns {
-            if lower_cmd.contains(pattern) {
+            if normalized_cmd.contains(pattern) {
                 anyhow::bail!("Blocked potentially dangerous shell pattern: {}", pattern);
             }
         }
@@ -422,6 +425,34 @@ mod tests {
         });
         let result = tool.execute(args).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_dangerous_pattern_extra_whitespace_blocked() {
+        let tool = ShellExec;
+        // Extra spaces between pipe and command should still be caught
+        let args = serde_json::json!({
+            "command": "echo x |  bash  -i",
+            "timeout_secs": 5
+        });
+        let result = tool.execute(args).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Blocked potentially dangerous shell pattern"));
+    }
+
+    #[tokio::test]
+    async fn test_dangerous_pattern_tabs_blocked() {
+        let tool = ShellExec;
+        // Tabs between pipe and command should also be caught
+        let args = serde_json::json!({
+            "command": "echo x |\tbash\t-i",
+            "timeout_secs": 5
+        });
+        let result = tool.execute(args).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Blocked potentially dangerous shell pattern"));
     }
 
     // --- CWD validation tests ---

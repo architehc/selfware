@@ -15,7 +15,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tracing::{error, warn};
+use tracing::warn;
 
 /// A string wrapper that prevents accidental logging of secrets.
 ///
@@ -864,9 +864,9 @@ impl Config {
                     .map(|v| v == "1")
                     .unwrap_or(false);
                 if config.safety.strict_permissions || env_strict {
-                    error!(
+                    bail!(
                         "Plaintext API key in config file is not allowed in strict mode. \
-                         Use SELFWARE_API_KEY environment variable or system keyring."
+                         Use SELFWARE_API_KEY environment variable or system keyring via `selfware config set-key`."
                     );
                 }
             }
@@ -893,23 +893,9 @@ impl Config {
         if let Ok(theme) = std::env::var("SELFWARE_THEME") {
             config.ui.theme = theme;
         }
-        if let Ok(log_level) = std::env::var("SELFWARE_LOG_LEVEL") {
-            match log_level.to_lowercase().as_str() {
-                "trace" | "debug" | "info" | "warn" | "error" => {
-                    // Store in agent config for downstream tracing initialization.
-                    // The actual tracing subscriber is configured by the caller
-                    // using this value, but we validate it here so invalid values
-                    // are caught early.
-                }
-                other => {
-                    eprintln!(
-                        "Config warning: SELFWARE_LOG_LEVEL '{}' is not a valid level \
-                         (expected trace, debug, info, warn, or error)",
-                        other
-                    );
-                }
-            }
-        }
+        // SELFWARE_LOG_LEVEL is consumed by telemetry::init_tracing() as a
+        // fallback when RUST_LOG is not set. No validation needed here — the
+        // tracing EnvFilter handles invalid values gracefully.
         if let Ok(mode) = std::env::var("SELFWARE_MODE") {
             match mode.to_lowercase().as_str() {
                 "normal" => config.execution_mode = ExecutionMode::Normal,
@@ -1081,6 +1067,19 @@ impl Config {
         if let Some(ref key) = self.api_key {
             if key.expose().is_empty() {
                 eprintln!("Config warning: api_key is set but empty");
+            }
+        }
+
+        // --- Glob pattern validation ---
+        // Fail fast on invalid patterns instead of deferring to runtime.
+        for (label, patterns) in [
+            ("allowed_paths", &self.safety.allowed_paths),
+            ("denied_paths", &self.safety.denied_paths),
+        ] {
+            for pattern in patterns {
+                if let Err(e) = glob::Pattern::new(pattern) {
+                    bail!("Invalid glob in safety.{}: '{}' — {}", label, pattern, e);
+                }
             }
         }
 
@@ -3819,6 +3818,79 @@ strict_permissions = true
 
         let result = Config::load(Some(config_path.to_str().unwrap()));
         assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_config_load_strict_permissions_rejects_plaintext_api_key() {
+        clear_selfware_env_vars();
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("strict_key.toml");
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        write!(
+            file,
+            r#"
+endpoint = "http://localhost:8000/v1"
+api_key = "sk-plaintext-key-should-fail"
+
+[safety]
+strict_permissions = true
+"#
+        )
+        .unwrap();
+
+        // Use mode 0o600 so it passes the file-permissions check but fails
+        // on the plaintext API key in strict mode.
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let result = Config::load(Some(config_path.to_str().unwrap()));
+        assert!(result.is_err(), "Expected error for plaintext key in strict mode");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Plaintext API key"),
+            "Error message was: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_config_validate_rejects_invalid_glob_pattern() {
+        let mut config = Config::default();
+        config.safety.allowed_paths = vec!["[".to_string()];
+        let result = config.validate();
+        assert!(result.is_err(), "Expected error for invalid glob pattern");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Invalid glob in safety.allowed_paths"),
+            "Error message was: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_config_validate_rejects_invalid_denied_glob() {
+        let mut config = Config::default();
+        config.safety.denied_paths = vec!["valid/**".to_string(), "[bad".to_string()];
+        let result = config.validate();
+        assert!(result.is_err(), "Expected error for invalid denied_paths glob");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Invalid glob in safety.denied_paths"),
+            "Error message was: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_config_validate_accepts_valid_glob_patterns() {
+        let mut config = Config::default();
+        config.safety.allowed_paths = vec!["./**".to_string(), "/home/user/**/*.rs".to_string()];
+        config.safety.denied_paths = vec!["**/.env".to_string(), "**/node_modules/**".to_string()];
+        let result = config.validate();
+        assert!(result.is_ok(), "Valid glob patterns should pass validation");
     }
 
     #[cfg(unix)]
