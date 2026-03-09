@@ -1,29 +1,53 @@
 // Crate is under active development — many types/functions are defined ahead
 // of use across modules.
 
-//! Selfware Workshop - Your Personal AI Companion
+//! # Selfware — Your Personal AI Workshop
 //!
-//! A sophisticated agent framework for autonomous coding tasks, built on the
-//! selfware philosophy: software you own, software that knows you, software
-//! that lasts.
+//! An agentic coding harness for local LLMs. 70+ tools, multi-agent swarm,
+//! evolution engine, hooks, MCP, LSP, and a fox mascot — all local-first,
+//! no cloud required.
 //!
-//! - **Tools**: 54 built-in tools for file, git, cargo, search, and more
-//! - **Safety**: Multi-layer validation, path protection, command filtering
-//! - **Persistence**: Checkpoint system for long-running tasks
-//! - **Self-Healing**: Error classification, recovery strategies, exponential backoff
+//! ## Core Features
+//!
+//! - **70+ Tools**: File, git, cargo, search, shell, PTY, browser automation,
+//!   computer control, LSP, MCP, knowledge graph, vision, FIM editing
+//! - **Multi-Agent Swarm**: Up to 16 concurrent agents with consensus voting
+//! - **Safety**: Multi-layer validation, path protection, command filtering,
+//!   JSONL audit logging, permission grants with expiry
+//! - **Hooks**: Event-driven automation (PreToolUse, PostToolUse, Stop)
+//! - **MCP**: Both client (connect to external tools) and server (expose selfware
+//!   tools to other AI systems)
+//! - **LSP**: Semantic code intelligence via rust-analyzer, pyright, tsserver, gopls
+//! - **Doctor**: System dependency checker (30+ tools) and LLM backend diagnostics
+//! - **Templates**: Project scaffolding for Rust, Python, Node.js with QA profiles
 //! - **Cognition**: PDVR cycle (Plan-Do-Verify-Reflect), working memory
-//! - **Garden View**: Visualize your codebase as a living garden
-//! - **Local-First**: Runs on your hardware, your rules
+//! - **Persistence**: Checkpoint system for long-running tasks with session resume
+//! - **Self-Healing**: Error classification, recovery strategies, exponential backoff
+//! - **Evolution Engine**: Recursive self-improvement with SAB-based fitness
+//! - **Local-First**: Runs entirely on your hardware, zero data egress
 //!
-//! # Quick Start
+//! ## Quick Start
 //!
 //! ```ignore
 //! use selfware::{Agent, Config};
 //!
 //! let config = Config::load(None)?;
 //! let mut agent = Agent::new(config).await?;
-//! agent.run_task("Tend to the garden").await?;
+//! agent.run_task("Add unit tests for the auth module").await?;
 //! ```
+//!
+//! ## CLI
+//!
+//! ```bash
+//! selfware chat                    # Interactive mode
+//! selfware run "add unit tests"    # One-shot task
+//! selfware doctor                  # Check system dependencies
+//! selfware init                    # Project scaffold wizard
+//! selfware multi-chat -n 4         # Multi-agent swarm
+//! selfware mcp-server              # Run as MCP server
+//! ```
+//!
+//! See [selfware.design](https://selfware.design) for full documentation.
 
 // ============================================================================
 // Core modules (public API)
