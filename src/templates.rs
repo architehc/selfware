@@ -37,7 +37,7 @@ use crate::interview::InterviewContext;
 // Embedded templates (compile-time via include_str!)
 // ---------------------------------------------------------------------------
 
-const RUST_CARGO_TOML: &str = include_str!("../templates/rust/Cargo.toml");
+const RUST_CARGO_TOML: &str = include_str!("../templates/rust/Cargo.toml.template");
 const PYTHON_PYPROJECT_TOML: &str = include_str!("../templates/python/pyproject.toml");
 const NODEJS_PACKAGE_JSON: &str = include_str!("../templates/nodejs/package.json");
 const NODEJS_TSCONFIG_JSON: &str = include_str!("../templates/nodejs/tsconfig.json");
