@@ -74,11 +74,6 @@ fn spawn_esc_listener(
         use std::sync::atomic::Ordering;
         use std::time::Duration;
 
-        // Enter raw mode so we can read individual key presses
-        if terminal::enable_raw_mode().is_err() {
-            return;
-        }
-
         let mut input_buf = String::new();
         let mut showing_prompt = false;
 
@@ -88,29 +83,35 @@ fn spawn_esc_listener(
                 break;
             }
 
-            // When paused (confirmation prompt active), yield stdin by exiting
-            // raw mode and sleeping until unpaused.
+            // When paused (confirmation prompt active), just sleep.
             if paused.load(Ordering::Relaxed) {
-                let _ = terminal::disable_raw_mode();
-                while paused.load(Ordering::Relaxed)
-                    && !stop_clone.load(Ordering::Relaxed)
-                    && !cancel_token.load(Ordering::Relaxed)
-                {
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                if stop_clone.load(Ordering::Relaxed) || cancel_token.load(Ordering::Relaxed) {
-                    break;
-                }
-                // Re-enter raw mode after unpause
-                if terminal::enable_raw_mode().is_err() {
-                    break;
-                }
+                std::thread::sleep(Duration::from_millis(50));
                 continue;
             }
 
-            // Poll with a short timeout so we can check the stop flag periodically
-            match event::poll(Duration::from_millis(100)) {
-                Ok(true) => match event::read() {
+            // Enter raw mode briefly to poll for key events, then exit so
+            // stdout prints work normally (raw mode turns \n into LF-only,
+            // which causes output to drift right).
+            if terminal::enable_raw_mode().is_err() {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+
+            let poll_result = event::poll(Duration::from_millis(50));
+            let event_result = match poll_result {
+                Ok(true) => Some(event::read()),
+                Ok(false) => None,
+                Err(_) => {
+                    let _ = terminal::disable_raw_mode();
+                    break;
+                }
+            };
+
+            // Exit raw mode BEFORE processing the event (so any prints work)
+            let _ = terminal::disable_raw_mode();
+
+            if let Some(read_result) = event_result {
+                match read_result {
                     Ok(Event::Key(KeyEvent { code, modifiers, .. })) => {
                         match code {
                             KeyCode::Esc => {
@@ -214,11 +215,7 @@ fn spawn_esc_listener(
                     }
                     Ok(_) => {}
                     Err(_) => break,
-                },
-                Ok(false) => {
-                    // No event within the poll window — loop back and recheck
                 }
-                Err(_) => break,
             }
         }
 
