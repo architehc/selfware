@@ -3,7 +3,7 @@
 //!
 //! Provides `LspGotoDefinitionTool`, `LspFindReferencesTool`,
 //! `LspDocumentSymbolsTool`, and `LspHoverTool`, each backed by a shared
-//! [`LspClient`](crate::lsp::LspClient) that lazily starts language servers.
+//! [`LspClient`] that lazily starts language servers.
 
 use anyhow::Result;
 use async_trait::async_trait;
