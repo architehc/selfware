@@ -288,7 +288,7 @@ fn test_tool_registry_has_all_tools() {
         // LSP
         "lsp_goto_definition",
         "lsp_find_references",
-        "lsp_workspace_symbols",
+        "lsp_document_symbols",
         "lsp_hover",
     ];
 
