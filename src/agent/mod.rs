@@ -615,6 +615,11 @@ To call a tool, use this EXACT XML structure:
         std::io::stdin().is_terminal()
     }
 
+    /// Returns true when the TUI is active and owns rendering.
+    pub fn has_tui_renderer(&self) -> bool {
+        crate::output::is_tui_active()
+    }
+
     /// Shared cancellation token for Ctrl+C interrupt handling.
     pub(crate) fn cancel_token(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.cancelled)

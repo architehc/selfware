@@ -14,6 +14,19 @@ static COMPACT_MODE: AtomicBool = AtomicBool::new(false);
 static VERBOSE_MODE: AtomicBool = AtomicBool::new(false);
 static SHOW_TOKENS: AtomicBool = AtomicBool::new(false);
 
+/// When true, all print functions become no-ops — the TUI owns rendering.
+static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Set the TUI active flag. Call with `true` when the TUI launches.
+pub fn set_tui_active(active: bool) {
+    TUI_ACTIVE.store(active, Ordering::SeqCst);
+}
+
+/// Returns true when the TUI is rendering — print functions should be suppressed.
+pub fn is_tui_active() -> bool {
+    TUI_ACTIVE.load(Ordering::Relaxed)
+}
+
 /// Token counters for the session
 static TOTAL_PROMPT_TOKENS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_COMPLETION_TOKENS: AtomicU64 = AtomicU64::new(0);

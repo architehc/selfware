@@ -42,6 +42,22 @@ pub enum TuiEvent {
     GardenHealthUpdate { health: f64 },
     /// Log message
     Log { level: LogLevel, message: String },
+    /// Streaming content chunk from the assistant
+    AssistantDelta { text: String },
+    /// Streaming reasoning/thinking chunk
+    ThinkingDelta { text: String },
+    /// Reasoning phase finished
+    ThinkingEnd,
+    /// Tool execution progress update
+    ToolProgress { name: String, status: String },
+    /// Loading spinner started
+    SpinnerStart { message: String },
+    /// Loading spinner message changed
+    SpinnerUpdate { message: String },
+    /// Loading spinner finished
+    SpinnerStop,
+    /// User queued a message during generation
+    InputQueued { message: String, position: usize },
 }
 
 /// Dashboard state containing all widget data
@@ -193,6 +209,30 @@ impl DashboardState {
             }
             TuiEvent::Log { level, message } => {
                 self.log(level, &message);
+            }
+            TuiEvent::AssistantDelta { text } => {
+                tracing::debug!("Assistant delta: {} chars", text.len());
+            }
+            TuiEvent::ThinkingDelta { text } => {
+                tracing::debug!("Thinking delta: {} chars", text.len());
+            }
+            TuiEvent::ThinkingEnd => {
+                tracing::debug!("Thinking ended");
+            }
+            TuiEvent::ToolProgress { name, status } => {
+                self.status_message = format!("{}: {}", name, status);
+            }
+            TuiEvent::SpinnerStart { message } => {
+                self.status_message = message;
+            }
+            TuiEvent::SpinnerUpdate { message } => {
+                self.status_message = message;
+            }
+            TuiEvent::SpinnerStop => {
+                self.status_message = "Ready".to_string();
+            }
+            TuiEvent::InputQueued { message, position } => {
+                self.log(LogLevel::Info, &format!("Queued ({}): {}", position, message));
             }
         }
     }

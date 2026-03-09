@@ -30,6 +30,36 @@ pub enum AgentEvent {
         success: bool,
         duration_ms: u64,
     },
+    /// Streaming content chunk from the assistant
+    AssistantDelta {
+        text: String,
+    },
+    /// Streaming reasoning/thinking chunk
+    ThinkingDelta {
+        text: String,
+    },
+    /// Reasoning phase finished
+    ThinkingEnd,
+    /// Tool execution progress update
+    ToolProgress {
+        name: String,
+        status: String,
+    },
+    /// Loading spinner started
+    SpinnerStart {
+        message: String,
+    },
+    /// Loading spinner message changed
+    SpinnerUpdate {
+        message: String,
+    },
+    /// Loading spinner finished
+    SpinnerStop,
+    /// User queued a message during generation
+    InputQueued {
+        message: String,
+        position: usize,
+    },
 }
 
 /// Trait for emitting real-time events during agent execution.
@@ -84,6 +114,18 @@ impl EventEmitter for TuiEmitter {
                 success,
                 duration_ms,
             },
+            AgentEvent::AssistantDelta { text } => TuiEvent::AssistantDelta { text },
+            AgentEvent::ThinkingDelta { text } => TuiEvent::ThinkingDelta { text },
+            AgentEvent::ThinkingEnd => TuiEvent::ThinkingEnd,
+            AgentEvent::ToolProgress { name, status } => {
+                TuiEvent::ToolProgress { name, status }
+            }
+            AgentEvent::SpinnerStart { message } => TuiEvent::SpinnerStart { message },
+            AgentEvent::SpinnerUpdate { message } => TuiEvent::SpinnerUpdate { message },
+            AgentEvent::SpinnerStop => TuiEvent::SpinnerStop,
+            AgentEvent::InputQueued { message, position } => {
+                TuiEvent::InputQueued { message, position }
+            }
         };
         let _ = self.tx.send(tui_event);
     }
