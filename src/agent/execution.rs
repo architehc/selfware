@@ -750,6 +750,15 @@ impl Agent {
             .await
             .map_err(|e| anyhow::anyhow!("concurrency governor error: {}", e))?;
 
+        // Track bash/shell commands for the sticky status bar.
+        // The guard decrements on drop regardless of how execution exits.
+        let is_bash = matches!(name, "shell_exec" | "pty_shell");
+        let _bash_guard: Option<crate::ui::sticky_bar::BashGuard> = if is_bash {
+            Some(crate::ui::sticky_bar::BashGuard::new())
+        } else {
+            None
+        };
+
         let timeout_secs = self.config.agent.step_timeout_secs.max(1);
         let execution = tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),

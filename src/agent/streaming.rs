@@ -107,10 +107,9 @@ impl Agent {
             mode_label,
             &self.config.model,
         );
-        // Sticky bar is available but disabled by default until terminal
-        // compatibility is fully validated.  Set SELFWARE_STICKY_BAR=1 to enable.
+        // Sticky status bar — disable with SELFWARE_STICKY_BAR=0
         let sticky = if self.is_interactive()
-            && std::env::var("SELFWARE_STICKY_BAR").map_or(false, |v| v == "1")
+            && !std::env::var("SELFWARE_STICKY_BAR").map_or(false, |v| v == "0")
         {
             crate::ui::sticky_bar::StickyBar::activate(sticky_state.clone())
         } else {

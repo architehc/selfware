@@ -177,6 +177,23 @@ fn spawn_esc_listener(
                                 );
                                 break;
                             }
+                            KeyCode::Up => {
+                                // Edit last queued message
+                                let popped = {
+                                    let mut q = queued_clone.lock().unwrap();
+                                    q.pop()
+                                };
+                                if let Some(msg) = popped {
+                                    input_buf = msg;
+                                    showing_prompt = true;
+                                    let prompt = format!(
+                                        "\r\x1b[2K\x1b[90m  ▸ \x1b[0m{}",
+                                        input_buf
+                                    );
+                                    let _ = std::io::stderr().write_all(prompt.as_bytes());
+                                    let _ = std::io::stderr().flush();
+                                }
+                            }
                             KeyCode::Char(c) => {
                                 if !showing_prompt {
                                     // Show the inline prompt on first keypress

@@ -19,6 +19,44 @@ pub fn is_active() -> bool {
     STICKY_ACTIVE.load(Ordering::Relaxed)
 }
 
+/// Global counter for active bash/shell commands.
+static ACTIVE_BASH: AtomicU64 = AtomicU64::new(0);
+
+/// Increment active bash count (call when shell_exec/pty_shell starts).
+pub fn bash_started() {
+    ACTIVE_BASH.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Decrement active bash count (call when shell_exec/pty_shell finishes).
+pub fn bash_finished() {
+    let prev = ACTIVE_BASH.fetch_sub(1, Ordering::Relaxed);
+    if prev == 0 {
+        // Saturate at 0
+        ACTIVE_BASH.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Current active bash count.
+pub fn active_bash_count() -> u64 {
+    ACTIVE_BASH.load(Ordering::Relaxed)
+}
+
+/// RAII guard that increments on creation and decrements on drop.
+pub struct BashGuard;
+
+impl BashGuard {
+    pub fn new() -> Self {
+        bash_started();
+        Self
+    }
+}
+
+impl Drop for BashGuard {
+    fn drop(&mut self) {
+        bash_finished();
+    }
+}
+
 /// Shared mutable state for the bars, updated from streaming/execution code.
 #[derive(Clone)]
 pub struct StickyState {
@@ -38,6 +76,10 @@ pub struct StickyState {
     pub model: String,
     /// Active background process count
     pub active_processes: Arc<AtomicU64>,
+    /// Active bash/shell command count
+    pub active_bash: Arc<AtomicU64>,
+    /// Number of queued messages from the user
+    pub queued_count: Arc<AtomicU64>,
 }
 
 impl StickyState {
@@ -55,6 +97,8 @@ impl StickyState {
                 model.to_string()
             },
             active_processes: Arc::new(AtomicU64::new(0)),
+            active_bash: Arc::new(AtomicU64::new(0)),
+            queued_count: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -130,6 +174,8 @@ fn render_top(state: &StickyState, width: usize) -> String {
 /// Render the bottom bar content string.
 fn render_bottom(state: &StickyState, width: usize) -> String {
     let procs = state.active_processes.load(Ordering::Relaxed);
+    let bash = state.active_bash.load(Ordering::Relaxed);
+    let queued = state.queued_count.load(Ordering::Relaxed);
 
     let mut parts: Vec<String> = Vec::new();
 
@@ -137,13 +183,24 @@ fn render_bottom(state: &StickyState, width: usize) -> String {
     let mode_str = match state.mode.as_str() {
         "YOLO" => "▸▸ auto-approve on".to_string(),
         "auto-edit" => "▸ auto-edit on".to_string(),
+        "daemon" => "▸▸ daemon mode".to_string(),
         _ => "▸ confirm mode".to_string(),
     };
     parts.push(mode_str);
 
-    // Active processes
+    // Active bash commands
+    if bash > 0 {
+        parts.push(format!("{} bash", bash));
+    }
+
+    // Active background processes
     if procs > 0 {
         parts.push(format!("{} process{}", procs, if procs == 1 { "" } else { "es" }));
+    }
+
+    // Queued messages
+    if queued > 0 {
+        parts.push(format!("↑ to edit queued ({})", queued));
     }
 
     // Shortcuts
@@ -202,6 +259,11 @@ impl StickyBar {
 
     /// Paint both bars without moving the content cursor.
     fn paint(&self) {
+        // Sync global bash count into the state
+        self.state
+            .active_bash
+            .store(active_bash_count(), Ordering::Relaxed);
+
         let mut out = io::stdout();
         let w = self.width as usize;
 
