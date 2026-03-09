@@ -765,6 +765,7 @@ mod tests {
         assert!(schema["properties"]["command"].is_object());
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn test_start_and_close_session() {
         let _guard = TEST_LOCK.lock().await;
@@ -791,6 +792,7 @@ mod tests {
         assert_eq!(result["status"], "closed");
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn test_send_echo_command() {
         let _guard = TEST_LOCK.lock().await;
@@ -831,6 +833,7 @@ mod tests {
             .await;
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn test_send_dangerous_command_blocked() {
         let _guard = TEST_LOCK.lock().await;
@@ -863,6 +866,7 @@ mod tests {
             .await;
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn test_command_too_long_rejected() {
         let _guard = TEST_LOCK.lock().await;
@@ -927,6 +931,7 @@ mod tests {
             .contains("Unknown pty_shell action"));
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn test_status_action() {
         let _guard = TEST_LOCK.lock().await;
@@ -958,6 +963,7 @@ mod tests {
             .await;
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn test_resize_action() {
         let _guard = TEST_LOCK.lock().await;

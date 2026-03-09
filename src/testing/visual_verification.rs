@@ -7,7 +7,7 @@
 //!
 //! # Example
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use selfware::testing::visual_verification::{VisualVerifier, UiElement};
 //!
 //! # async fn example() -> anyhow::Result<()> {

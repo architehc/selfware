@@ -913,21 +913,27 @@ mod tests {
 
     #[test]
     fn test_file_uri() {
-        let uri = LspClient::file_uri("/home/user/project/src/main.rs");
-        assert_eq!(uri, "file:///home/user/project/src/main.rs");
-
-        // Already a URI
+        // Already a URI should pass through on all platforms
         let uri = LspClient::file_uri("file:///already/a/uri.rs");
         assert_eq!(uri, "file:///already/a/uri.rs");
+
+        // Unix-style absolute paths only valid on non-Windows
+        #[cfg(not(target_os = "windows"))]
+        {
+            let uri = LspClient::file_uri("/home/user/project/src/main.rs");
+            assert_eq!(uri, "file:///home/user/project/src/main.rs");
+        }
     }
 
     #[test]
     fn test_uri_to_path() {
+        assert_eq!(LspClient::uri_to_path("/plain/path"), "/plain/path");
+
+        #[cfg(not(target_os = "windows"))]
         assert_eq!(
             LspClient::uri_to_path("file:///home/user/main.rs"),
             "/home/user/main.rs"
         );
-        assert_eq!(LspClient::uri_to_path("/plain/path"), "/plain/path");
     }
 
     #[test]

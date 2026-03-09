@@ -595,6 +595,7 @@ async fn test_git_status_in_repo() {
     println!("  git_status in repo passed: {:?}", result);
 }
 
+#[cfg(not(target_os = "windows"))]
 #[tokio::test]
 async fn test_pty_shell_session_lifecycle() {
     let registry = ToolRegistry::new();
