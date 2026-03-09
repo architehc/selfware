@@ -73,6 +73,8 @@ Documentation = "{{docs_url}}"
 target-version = "py311"
 line-length = 100
 src = ["src"]
+
+[tool.ruff.lint]
 select = [
     "E",    # pycodestyle errors
     "F",    # Pyflakes

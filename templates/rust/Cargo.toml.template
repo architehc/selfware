@@ -49,8 +49,7 @@ fake = { version = "4.0", features = ["derive"] }
 # Benchmarking
 criterion = { version = "0.5", features = ["html_reports"] }
 
-# Coverage
-cargo-tarpaulin = "0.31"
+# Coverage: install via `cargo install cargo-tarpaulin`
 
 # Additional utilities
 tempfile = "3.14"

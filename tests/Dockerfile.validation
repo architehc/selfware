@@ -1,0 +1,101 @@
+# =============================================================================
+# Selfware Validation Dockerfile
+# =============================================================================
+# Builds selfware from source and runs the full user-journey validation suite.
+#
+# Build:  docker build -f tests/Dockerfile.validation -t selfware-validation .
+# Run:    docker run --rm selfware-validation
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Stage 1: Builder — compile selfware from local source
+# ---------------------------------------------------------------------------
+FROM rust:1.91-bookworm AS builder
+
+# Build dependencies (mirrors production Dockerfile)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    cmake \
+    libdbus-1-dev \
+    libxcb1-dev \
+    libxcb-randr0-dev \
+    libxcb-shm0-dev \
+    libxcb-composite0-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy manifests first for dependency caching
+COPY Cargo.toml Cargo.lock ./
+
+# Create dummy source tree so cargo can resolve and cache deps
+RUN mkdir -p src/bin && \
+    echo "fn main() {}" > src/main.rs && \
+    echo "// dummy lib" > src/lib.rs && \
+    echo "fn main() {}" > src/bin/vlm_gen_fixtures.rs && \
+    echo "fn main() {}" > src/bin/vlm_bench_run.rs && \
+    mkdir -p benches && \
+    echo "fn main() {}" > benches/token_processing.rs && \
+    echo "fn main() {}" > benches/vlm_benchmark.rs && \
+    mkdir -p tests/unit && echo "" > tests/unit/mod.rs && \
+    mkdir -p tests/integration && echo "" > tests/integration/mod.rs
+
+# Build deps only (layer cache)
+RUN cargo build --release 2>/dev/null || true && rm -rf src benches tests
+
+# Copy real source
+COPY src ./src
+COPY tests ./tests
+COPY benches ./benches
+COPY examples ./examples
+
+RUN touch src/main.rs src/lib.rs
+
+# Build release binary
+RUN cargo build --release --bin selfware
+
+# Strip for smaller image
+RUN strip /app/target/release/selfware
+
+# ---------------------------------------------------------------------------
+# Stage 2: Validation runtime
+# ---------------------------------------------------------------------------
+FROM debian:bookworm-slim
+
+# Runtime deps + language toolchains for template / QA validation
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl3 \
+    libgcc-s1 \
+    curl \
+    git \
+    python3 \
+    python3-pip \
+    python3-venv \
+    nodejs \
+    npm \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Create a non-root validation user
+RUN groupadd --gid 1000 validator && \
+    useradd --uid 1000 --gid validator --shell /bin/bash --create-home validator
+
+# Copy the binary from builder
+COPY --from=builder /app/target/release/selfware /usr/local/bin/selfware
+RUN chmod +x /usr/local/bin/selfware
+
+# Copy the validation script
+COPY tests/docker_validation.sh /usr/local/bin/docker_validation.sh
+RUN chmod +x /usr/local/bin/docker_validation.sh
+
+# Configure git for the validator user (needed for git tool tests)
+USER validator
+RUN git config --global user.email "validator@selfware.test" && \
+    git config --global user.name "Selfware Validator" && \
+    git config --global init.defaultBranch main
+
+WORKDIR /home/validator
+
+ENTRYPOINT ["/usr/local/bin/docker_validation.sh"]
