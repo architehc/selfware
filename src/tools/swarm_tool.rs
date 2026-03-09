@@ -137,11 +137,7 @@ mod tests {
 
         let schema = tool.schema();
         assert!(schema.get("required").is_some());
-        assert!(schema
-            .get("properties")
-            .unwrap()
-            .get("task")
-            .is_some());
+        assert!(schema.get("properties").unwrap().get("task").is_some());
     }
 
     #[tokio::test]
@@ -154,7 +150,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.get("status").unwrap().as_str().unwrap(), "swarm_initialized");
+        assert_eq!(
+            result.get("status").unwrap().as_str().unwrap(),
+            "swarm_initialized"
+        );
         assert!(result.get("agents").unwrap().as_u64().unwrap() > 0);
     }
 }

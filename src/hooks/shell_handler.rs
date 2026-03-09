@@ -66,10 +66,7 @@ pub async fn execute_hook(hook: &HookConfig, ctx: &HookContext) -> HookAction {
             HookAction::Error { message: msg }
         }
         Err(_) => {
-            let msg = format!(
-                "Hook '{}' timed out after {}s",
-                command, hook.timeout_secs
-            );
+            let msg = format!("Hook '{}' timed out after {}s", command, hook.timeout_secs);
             warn!("{}", msg);
             HookAction::Error { message: msg }
         }
@@ -92,10 +89,12 @@ async fn run_shell_command(command: &str) -> Result<ShellOutput> {
         .output()
         .await?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout[..output.stdout.len().min(MAX_OUTPUT_BYTES)])
-        .to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr[..output.stderr.len().min(MAX_OUTPUT_BYTES)])
-        .to_string();
+    let stdout =
+        String::from_utf8_lossy(&output.stdout[..output.stdout.len().min(MAX_OUTPUT_BYTES)])
+            .to_string();
+    let stderr =
+        String::from_utf8_lossy(&output.stderr[..output.stderr.len().min(MAX_OUTPUT_BYTES)])
+            .to_string();
 
     Ok(ShellOutput {
         success: output.status.success(),

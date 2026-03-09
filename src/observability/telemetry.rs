@@ -162,8 +162,7 @@ pub fn redact_secrets(input: &str) -> String {
 pub fn init_tracing() {
     // Initialize tracing if RUST_LOG or SELFWARE_LOG_LEVEL is set.
     // SELFWARE_LOG_LEVEL serves as a project-specific fallback.
-    let filter = std::env::var("RUST_LOG")
-        .or_else(|_| std::env::var("SELFWARE_LOG_LEVEL"));
+    let filter = std::env::var("RUST_LOG").or_else(|_| std::env::var("SELFWARE_LOG_LEVEL"));
     if let Ok(f) = filter {
         init_tracing_with_filter(&f);
     }

@@ -106,7 +106,8 @@ impl Agent {
 
         // Plan mode: show proposed tool calls without executing
         if self.plan_mode {
-            let mut plan_summary = String::from("Plan mode — proposed tool calls (not executed):\n");
+            let mut plan_summary =
+                String::from("Plan mode — proposed tool calls (not executed):\n");
             for (i, (name, args_str, _)) in tool_calls.iter().enumerate() {
                 let args_preview: String = args_str.chars().take(200).collect();
                 plan_summary.push_str(&format!(
@@ -120,7 +121,7 @@ impl Agent {
             output::final_answer(&plan_summary);
             self.messages.push(Message::user(
                 "The above tool calls were proposed but NOT executed (plan mode is active). \
-                 Review the plan and confirm, or adjust."
+                 Review the plan and confirm, or adjust.",
             ));
             self.last_assistant_response = plan_summary;
             return Ok(false);
@@ -674,8 +675,7 @@ impl Agent {
                 }
 
                 // Cache tool results in LocalFirstCoordinator
-                let cache_key =
-                    crate::session::cache::ToolCache::cache_key(name, args);
+                let cache_key = crate::session::cache::ToolCache::cache_key(name, args);
                 self.local_first
                     .cache_response(&cache_key, result_str.clone(), result_str.len());
 

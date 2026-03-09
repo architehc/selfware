@@ -386,9 +386,7 @@ fn score_task(task: &str) -> TaskScores {
     if lower.contains("docker") || lower.contains("container") || lower.contains("kubernetes") {
         s.docker += 3.0;
     }
-    if lower.contains("serverless")
-        || lower.contains("lambda")
-        || lower.contains("cloud function")
+    if lower.contains("serverless") || lower.contains("lambda") || lower.contains("cloud function")
     {
         s.serverless += 3.0;
     }
@@ -483,7 +481,12 @@ pub fn recommend_architecture(project_type: &str) -> SelectionMenu {
             opt('a', "Layered", "routes / services / models", rec),
             opt('b', "Hexagonal", "ports & adapters", rec),
             opt('c', "Clean Architecture", "use-case centric", rec),
-            opt('d', "Microservices", "independently deployable services", rec),
+            opt(
+                'd',
+                "Microservices",
+                "independently deployable services",
+                rec,
+            ),
             opt('e', "Monolith (simple)", "single deployable unit", rec),
         ],
         allow_custom: false,
@@ -531,12 +534,7 @@ pub fn recommend_testing_strategy(project_size: &str) -> SelectionMenu {
         title: "Testing Strategy".to_string(),
         description: None,
         options: vec![
-            opt(
-                'a',
-                "Comprehensive",
-                "unit + integration + e2e",
-                rec,
-            ),
+            opt('a', "Comprehensive", "unit + integration + e2e", rec),
             opt('b', "Standard", "unit + integration", rec),
             opt('c', "Minimal", "unit only", rec),
             opt('d', "TDD", "tests first", rec),
@@ -561,19 +559,9 @@ pub fn recommend_deployment(project_type: &str) -> SelectionMenu {
         description: None,
         options: vec![
             opt('a', "Docker container", "Containerised deploy", rec),
-            opt(
-                'b',
-                "Serverless",
-                "Lambda / Cloud Functions",
-                rec,
-            ),
+            opt('b', "Serverless", "Lambda / Cloud Functions", rec),
             opt('c', "Binary release", "Standalone executable", rec),
-            opt(
-                'd',
-                "Package registry",
-                "crates.io / npm / pypi",
-                rec,
-            ),
+            opt('d', "Package registry", "crates.io / npm / pypi", rec),
             {
                 let mut o = opt('e', "Not now", "Decide later", rec);
                 o.tags.clear();
@@ -646,8 +634,16 @@ pub fn present_selection(menu: &SelectionMenu) -> Result<SelectionResult> {
     writeln!(
         out,
         "  {}{}{}",
-        "\u{256d}\u{2500} ".custom_color(colored::CustomColor { r: 212, g: 163, b: 115 }),
-        menu.title.bold().custom_color(colored::CustomColor { r: 212, g: 163, b: 115 }),
+        "\u{256d}\u{2500} ".custom_color(colored::CustomColor {
+            r: 212,
+            g: 163,
+            b: 115
+        }),
+        menu.title.bold().custom_color(colored::CustomColor {
+            r: 212,
+            g: 163,
+            b: 115
+        }),
         format!(
             " {}{}",
             horiz_bar
@@ -656,22 +652,23 @@ pub fn present_selection(menu: &SelectionMenu) -> Result<SelectionResult> {
                 .collect::<String>(),
             "\u{256e}"
         )
-        .custom_color(colored::CustomColor { r: 212, g: 163, b: 115 }),
+        .custom_color(colored::CustomColor {
+            r: 212,
+            g: 163,
+            b: 115
+        }),
     )?;
 
     // --- Description ---
-    let vert = "\u{2502}".custom_color(colored::CustomColor { r: 212, g: 163, b: 115 });
+    let vert = "\u{2502}".custom_color(colored::CustomColor {
+        r: 212,
+        g: 163,
+        b: 115,
+    });
     if let Some(ref desc) = menu.description {
         writeln!(out, "  {}", vert)?;
-        writeln!(
-            out,
-            "  {}  {}",
-            vert,
-            desc.dimmed()
-        )?;
-        writeln!(out, "  {}",
-            vert,
-        )?;
+        writeln!(out, "  {}  {}", vert, desc.dimmed())?;
+        writeln!(out, "  {}", vert,)?;
     } else {
         writeln!(out, "  {}", vert)?;
     }
@@ -716,12 +713,11 @@ pub fn present_selection(menu: &SelectionMenu) -> Result<SelectionResult> {
     writeln!(
         out,
         "  {}",
-        format!(
-            "\u{2570}{}{}",
-            horiz_bar,
-            "\u{256f}"
-        )
-        .custom_color(colored::CustomColor { r: 212, g: 163, b: 115 }),
+        format!("\u{2570}{}{}", horiz_bar, "\u{256f}").custom_color(colored::CustomColor {
+            r: 212,
+            g: 163,
+            b: 115
+        }),
     )?;
 
     // --- Prompt ---
@@ -958,9 +954,14 @@ pub async fn guided_project_setup(task: &str) -> Result<ProjectPlan> {
     writeln!(
         out,
         "  {}",
-        "Guided Project Setup".bold().underline().custom_color(
-            colored::CustomColor { r: 212, g: 163, b: 115 }
-        )
+        "Guided Project Setup"
+            .bold()
+            .underline()
+            .custom_color(colored::CustomColor {
+                r: 212,
+                g: 163,
+                b: 115
+            })
     )?;
     writeln!(
         out,
@@ -984,7 +985,11 @@ pub async fn guided_project_setup(task: &str) -> Result<ProjectPlan> {
     let db_result = present_selection(&db_menu)?;
     let database = {
         let db = first_label_or(&db_result, "None");
-        if db == "None" { None } else { Some(db) }
+        if db == "None" {
+            None
+        } else {
+            Some(db)
+        }
     };
 
     // 4. Testing
@@ -997,7 +1002,11 @@ pub async fn guided_project_setup(task: &str) -> Result<ProjectPlan> {
     let deploy_result = present_selection(&deploy_menu)?;
     let deployment = {
         let dep = first_label_or(&deploy_result, "Not now");
-        if dep == "Not now" { None } else { Some(dep) }
+        if dep == "Not now" {
+            None
+        } else {
+            Some(dep)
+        }
     };
 
     let plan = ProjectPlan {
@@ -1017,9 +1026,14 @@ pub async fn guided_project_setup(task: &str) -> Result<ProjectPlan> {
     writeln!(
         out,
         "  {}",
-        "Project Plan Summary".bold().underline().custom_color(
-            colored::CustomColor { r: 96, g: 108, b: 56 }
-        )
+        "Project Plan Summary"
+            .bold()
+            .underline()
+            .custom_color(colored::CustomColor {
+                r: 96,
+                g: 108,
+                b: 56
+            })
     )?;
     writeln!(out, "  {} {}", "Template:".bold(), plan.template)?;
     writeln!(out, "  {} {}", "Language:".bold(), plan.language)?;
@@ -1060,11 +1074,7 @@ fn parse_template_result(result: &SelectionResult) -> (String, String, String) {
                 "TypeScript".to_string(),
                 "Express".to_string(),
             ),
-            'd' => (
-                "Go + Gin".to_string(),
-                "Go".to_string(),
-                "Gin".to_string(),
-            ),
+            'd' => ("Go + Gin".to_string(), "Go".to_string(), "Gin".to_string()),
             _ => (
                 option.label.clone(),
                 option.label.clone(),
@@ -1430,12 +1440,7 @@ mod tests {
             let before = keys.len();
             keys.sort();
             keys.dedup();
-            assert_eq!(
-                keys.len(),
-                before,
-                "Duplicate keys in menu: {}",
-                menu.title
-            );
+            assert_eq!(keys.len(), before, "Duplicate keys in menu: {}", menu.title);
         }
     }
 
@@ -1629,7 +1634,10 @@ mod tests {
     fn test_score_empty_task() {
         let scores = score_task("");
         // Should have baseline Rust score
-        assert!(scores.rust_axum > 0.0, "Empty task should have Rust baseline");
+        assert!(
+            scores.rust_axum > 0.0,
+            "Empty task should have Rust baseline"
+        );
     }
 
     #[test]

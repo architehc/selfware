@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{oneshot, Mutex};
 use tracing::{debug, info, warn};
 
 use super::Tool;
@@ -325,15 +325,17 @@ fn validate_url(url: &str) -> Result<()> {
     let parsed = url::Url::parse(url).context("Invalid URL")?;
 
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
-        bail!("Only http:// and https:// URLs are allowed, got {}://", parsed.scheme());
+        bail!(
+            "Only http:// and https:// URLs are allowed, got {}://",
+            parsed.scheme()
+        );
     }
 
     let host = parsed
         .host_str()
         .ok_or_else(|| anyhow::anyhow!("URL must have a host"))?;
 
-    let allow_private =
-        std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1";
+    let allow_private = std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1";
 
     if !allow_private {
         // Check for literal private IPs
@@ -344,11 +346,7 @@ fn validate_url(url: &str) -> Result<()> {
         }
 
         // Check common private hostnames
-        if host == "localhost"
-            || host == "127.0.0.1"
-            || host == "::1"
-            || host == "0.0.0.0"
-        {
+        if host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0" {
             bail!("Blocked request to private/internal address: {}", host);
         }
 
@@ -375,10 +373,7 @@ fn validate_url(url: &str) -> Result<()> {
 fn is_private_ip(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
         }
         IpAddr::V6(v6) => {
             v6.is_loopback()
@@ -691,9 +686,7 @@ mod tests {
     fn test_page_control_schema_action_enum() {
         let tool = PageControlTool::new();
         let schema = tool.schema();
-        let action_enum = schema["properties"]["action"]["enum"]
-            .as_array()
-            .unwrap();
+        let action_enum = schema["properties"]["action"]["enum"].as_array().unwrap();
         assert!(action_enum.contains(&json!("goto")));
         assert!(action_enum.contains(&json!("click")));
         assert!(action_enum.contains(&json!("type")));
@@ -709,7 +702,9 @@ mod tests {
     fn test_valid_actions_completeness() {
         // Ensure all documented action categories are present
         let nav_actions = ["goto", "back", "forward", "reload", "wait_for"];
-        let interaction_actions = ["click", "type", "fill", "select", "check", "uncheck", "hover", "press"];
+        let interaction_actions = [
+            "click", "type", "fill", "select", "check", "uncheck", "hover", "press",
+        ];
         let content_actions = ["text", "html", "attribute", "value", "count", "visible"];
         let page_info_actions = ["title", "url", "screenshot", "pdf"];
         let js_actions = ["evaluate", "evaluate_handle"];
@@ -725,11 +720,7 @@ mod tests {
             .chain(tab_actions.iter())
             .chain(lifecycle_actions.iter())
         {
-            assert!(
-                VALID_ACTIONS.contains(action),
-                "Missing action: {}",
-                action
-            );
+            assert!(VALID_ACTIONS.contains(action), "Missing action: {}", action);
         }
     }
 
@@ -738,7 +729,10 @@ mod tests {
         let tool = PageControlTool::new();
         let result = tool.execute(json!({})).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("action is required"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("action is required"));
     }
 
     #[tokio::test]
@@ -853,7 +847,11 @@ mod tests {
         ];
 
         for param in &expected_params {
-            assert!(props.contains_key(*param), "Missing schema param: {}", param);
+            assert!(
+                props.contains_key(*param),
+                "Missing schema param: {}",
+                param
+            );
         }
     }
 
@@ -869,7 +867,8 @@ mod tests {
 
     #[test]
     fn test_bridge_response_deserialization() {
-        let json_str = r#"{"id":1,"success":true,"result":{"url":"https://example.com"},"error":null}"#;
+        let json_str =
+            r#"{"id":1,"success":true,"result":{"url":"https://example.com"},"error":null}"#;
         let resp: BridgeResponse = serde_json::from_str(json_str).unwrap();
         assert_eq!(resp.id, Some(1));
         assert!(resp.success);

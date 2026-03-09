@@ -162,8 +162,8 @@ impl TaskDisplay {
     pub fn render_status_line(&self) -> String {
         let elapsed = self.start_time.elapsed();
         let time_str = format_duration(elapsed);
-        let total_tokens = self.tokens_in.load(Ordering::Relaxed)
-            + self.tokens_out.load(Ordering::Relaxed);
+        let total_tokens =
+            self.tokens_in.load(Ordering::Relaxed) + self.tokens_out.load(Ordering::Relaxed);
         let token_str = format_tokens(total_tokens);
         let calls = self.tool_calls.load(Ordering::Relaxed);
 
@@ -267,18 +267,10 @@ impl TaskDisplay {
             "unknown".to_string()
         };
 
-        let (files_created, files_modified) = self
-            .file_stats
-            .lock()
-            .map(|s| *s)
-            .unwrap_or((0, 0));
+        let (files_created, files_modified) = self.file_stats.lock().map(|s| *s).unwrap_or((0, 0));
 
         // Determine the box inner width
-        let desc_line = format!(
-            "{} {}",
-            Glyphs::bloom(),
-            self.task_description
-        );
+        let desc_line = format!("{} {}", Glyphs::bloom(), self.task_description);
         let dur_line = format!("Duration: {}", time_str);
         let tok_line = format!(
             "Tokens:   {} in / {} out",

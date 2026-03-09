@@ -75,10 +75,7 @@ impl McpClient {
             .request("initialize", Some(params))
             .await
             .with_context(|| {
-                format!(
-                    "MCP initialize handshake failed for '{}'",
-                    self.server_name
-                )
+                format!("MCP initialize handshake failed for '{}'", self.server_name)
             })?;
 
         self.server_info = Some(result.clone());

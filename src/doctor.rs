@@ -310,53 +310,185 @@ pub async fn run_doctor() -> DoctorReport {
     ];
 
     let languages: Vec<CheckFut> = vec![
-        ck("node", Category::Languages, false, &["node", "nodejs"], &["--version"]),
+        ck(
+            "node",
+            Category::Languages,
+            false,
+            &["node", "nodejs"],
+            &["--version"],
+        ),
         ck("npm", Category::Languages, false, &["npm"], &["--version"]),
-        ck("python", Category::Languages, false, &["python3", "python"], &["--version"]),
-        ck("pip", Category::Languages, false, &["pip3", "pip"], &["--version"]),
+        ck(
+            "python",
+            Category::Languages,
+            false,
+            &["python3", "python"],
+            &["--version"],
+        ),
+        ck(
+            "pip",
+            Category::Languages,
+            false,
+            &["pip3", "pip"],
+            &["--version"],
+        ),
         ck("go", Category::Languages, false, &["go"], &["version"]),
     ];
 
     let rust_tools: Vec<CheckFut> = vec![
-        ck("cargo-clippy", Category::RustTools, false, &["cargo"], &["clippy", "--version"]),
-        ck("cargo-fmt", Category::RustTools, false, &["cargo"], &["fmt", "--version"]),
-        ck("cargo-tarpaulin", Category::RustTools, false, &["cargo"], &["tarpaulin", "--version"]),
+        ck(
+            "cargo-clippy",
+            Category::RustTools,
+            false,
+            &["cargo"],
+            &["clippy", "--version"],
+        ),
+        ck(
+            "cargo-fmt",
+            Category::RustTools,
+            false,
+            &["cargo"],
+            &["fmt", "--version"],
+        ),
+        ck(
+            "cargo-tarpaulin",
+            Category::RustTools,
+            false,
+            &["cargo"],
+            &["tarpaulin", "--version"],
+        ),
     ];
 
     let python_tools: Vec<CheckFut> = vec![
-        ck("ruff", Category::PythonTools, false, &["ruff"], &["--version"]),
-        ck("mypy", Category::PythonTools, false, &["mypy"], &["--version"]),
-        ck("pytest", Category::PythonTools, false, &["pytest"], &["--version"]),
-        ck("black", Category::PythonTools, false, &["black"], &["--version"]),
-        ck("bandit", Category::PythonTools, false, &["bandit"], &["--version"]),
+        ck(
+            "ruff",
+            Category::PythonTools,
+            false,
+            &["ruff"],
+            &["--version"],
+        ),
+        ck(
+            "mypy",
+            Category::PythonTools,
+            false,
+            &["mypy"],
+            &["--version"],
+        ),
+        ck(
+            "pytest",
+            Category::PythonTools,
+            false,
+            &["pytest"],
+            &["--version"],
+        ),
+        ck(
+            "black",
+            Category::PythonTools,
+            false,
+            &["black"],
+            &["--version"],
+        ),
+        ck(
+            "bandit",
+            Category::PythonTools,
+            false,
+            &["bandit"],
+            &["--version"],
+        ),
     ];
 
     let node_tools: Vec<CheckFut> = vec![
         ck("npx", Category::NodeTools, false, &["npx"], &["--version"]),
-        ck("eslint", Category::NodeTools, false, &["eslint"], &["--version"]),
-        ck("prettier", Category::NodeTools, false, &["prettier"], &["--version"]),
+        ck(
+            "eslint",
+            Category::NodeTools,
+            false,
+            &["eslint"],
+            &["--version"],
+        ),
+        ck(
+            "prettier",
+            Category::NodeTools,
+            false,
+            &["prettier"],
+            &["--version"],
+        ),
         ck("tsc", Category::NodeTools, false, &["tsc"], &["--version"]),
-        ck("vitest", Category::NodeTools, false, &["vitest"], &["--version"]),
+        ck(
+            "vitest",
+            Category::NodeTools,
+            false,
+            &["vitest"],
+            &["--version"],
+        ),
     ];
 
     let go_tools: Vec<CheckFut> = vec![
-        ck("golangci-lint", Category::GoTools, false, &["golangci-lint"], &["--version"]),
-        ck("gofmt", Category::GoTools, false, &["gofmt"], &["-e", "/dev/null"]),
+        ck(
+            "golangci-lint",
+            Category::GoTools,
+            false,
+            &["golangci-lint"],
+            &["--version"],
+        ),
+        ck(
+            "gofmt",
+            Category::GoTools,
+            false,
+            &["gofmt"],
+            &["-e", "/dev/null"],
+        ),
     ];
 
     let container: Vec<CheckFut> = vec![
-        ck("docker", Category::ContainerTools, false, &["docker"], &["--version"]),
-        ck("docker-compose", Category::ContainerTools, false, &["docker-compose"], &["--version"]),
+        ck(
+            "docker",
+            Category::ContainerTools,
+            false,
+            &["docker"],
+            &["--version"],
+        ),
+        ck(
+            "docker-compose",
+            Category::ContainerTools,
+            false,
+            &["docker-compose"],
+            &["--version"],
+        ),
     ];
 
     let security: Vec<CheckFut> = vec![
-        ck("cargo-audit", Category::Security, false, &["cargo"], &["audit", "--version"]),
-        ck("safety", Category::Security, false, &["safety"], &["--version"]),
+        ck(
+            "cargo-audit",
+            Category::Security,
+            false,
+            &["cargo"],
+            &["audit", "--version"],
+        ),
+        ck(
+            "safety",
+            Category::Security,
+            false,
+            &["safety"],
+            &["--version"],
+        ),
     ];
 
     let computer: Vec<CheckFut> = vec![
-        ck("ImageMagick", Category::ComputerControl, false, &["convert"], &["--version"]),
-        ck("ffmpeg", Category::ComputerControl, false, &["ffmpeg"], &["-version"]),
+        ck(
+            "ImageMagick",
+            Category::ComputerControl,
+            false,
+            &["convert"],
+            &["--version"],
+        ),
+        ck(
+            "ffmpeg",
+            Category::ComputerControl,
+            false,
+            &["ffmpeg"],
+            &["-version"],
+        ),
     ];
 
     let browser: Vec<CheckFut> = vec![
@@ -468,9 +600,7 @@ impl DoctorReport {
         println!();
         println!(
             "{}",
-            "  Selfware Doctor — System Diagnostics"
-                .bold()
-                .underline()
+            "  Selfware Doctor — System Diagnostics".bold().underline()
         );
         println!();
 
@@ -543,12 +673,7 @@ impl DoctorReport {
         match self.health {
             OverallHealth::Healthy => {
                 println!("  {}", summary_line.green().bold());
-                println!(
-                    "  {}",
-                    "  Status: healthy — all systems go!"
-                        .green()
-                        .bold()
-                );
+                println!("  {}", "  Status: healthy — all systems go!".green().bold());
             }
             OverallHealth::Degraded => {
                 println!("  {}", summary_line.yellow().bold());
@@ -606,10 +731,7 @@ mod tests {
 
     #[test]
     fn test_extract_version_with_v_prefix() {
-        assert_eq!(
-            extract_version("v20.11.1"),
-            Some("20.11.1".to_string())
-        );
+        assert_eq!(extract_version("v20.11.1"), Some("20.11.1".to_string()));
     }
 
     #[test]

@@ -521,7 +521,15 @@ pub async fn run() -> Result<()> {
 
     // Default to Chat if no subcommand specified (non-extras builds)
     let command = cli.command.unwrap_or(Commands::Chat);
-    handle_command(command, cli.quiet, config, &ctx, exec_mode, cli.resume_session).await
+    handle_command(
+        command,
+        cli.quiet,
+        config,
+        &ctx,
+        exec_mode,
+        cli.resume_session,
+    )
+    .await
 }
 
 async fn handle_command(
@@ -545,8 +553,7 @@ async fn handle_command(
                         if !quiet {
                             println!(
                                 "▶ Resumed session '{}' ({} messages)",
-                                session_name,
-                                msg_count
+                                session_name, msg_count
                             );
                         }
                     }

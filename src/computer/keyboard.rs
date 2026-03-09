@@ -7,7 +7,7 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use super::{ActionRateLimiter, TypingProfile, is_blocked_combo};
+use super::{is_blocked_combo, ActionRateLimiter, TypingProfile};
 
 /// Keyboard controller with rate limiting and typing profiles.
 pub struct KeyboardController {

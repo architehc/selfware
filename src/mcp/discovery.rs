@@ -29,10 +29,7 @@ pub async fn discover_tools(client: &std::sync::Arc<McpClient>) -> Result<Vec<Mc
             .cloned()
             .unwrap_or(serde_json::json!({"type": "object", "properties": {}}));
 
-        debug!(
-            "Discovered MCP tool: {} — {}",
-            name, description
-        );
+        debug!("Discovered MCP tool: {} — {}", name, description);
 
         // Prefix MCP tool names with "mcp_<server>_" to avoid collisions
         let prefixed_name = format!("mcp_{}_{}", client.server_name(), name);

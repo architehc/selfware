@@ -7,6 +7,7 @@ use std::collections::HashMap;
 pub mod analyzer;
 pub mod browser;
 pub mod cargo;
+pub mod computer;
 pub mod container;
 pub mod file;
 pub mod fim;
@@ -15,17 +16,16 @@ pub mod git;
 pub mod hot_reload;
 pub mod http;
 pub mod knowledge;
+pub mod lsp_tools;
 pub mod package;
+pub mod page_controller;
 pub mod process;
+pub mod pty_shell;
 pub mod screen_capture;
 pub mod search;
 pub mod shell;
-pub mod pty_shell;
-pub mod computer;
 pub mod swarm_tool;
-pub mod lsp_tools;
 pub mod vision;
-pub mod page_controller;
 
 use browser::{BrowserEval, BrowserFetch, BrowserLinks, BrowserPdf, BrowserScreenshot};
 use cargo::{CargoCheck, CargoClippy, CargoFmt, CargoTest};
@@ -41,13 +41,13 @@ use knowledge::{
     KnowledgeRemove, KnowledgeStats as KnowledgeStatsTool,
 };
 use package::{NpmInstall, NpmRun, NpmScripts, PipFreeze, PipInstall, PipList, YarnInstall};
+use page_controller::PageControlTool;
 use process::{PortCheck, ProcessList, ProcessLogs, ProcessRestart, ProcessStart, ProcessStop};
+use pty_shell::PtyShellTool;
 use screen_capture::ScreenCapture;
 use search::{GlobFind, GrepSearch, SymbolSearch};
 use shell::ShellExec;
-use pty_shell::PtyShellTool;
 use vision::{VisionAnalyze, VisionCompare};
-use page_controller::PageControlTool;
 
 /// Pagination metadata for truncated tool output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,9 +204,9 @@ impl ToolRegistry {
         registry.register(computer::ComputerWindowTool);
 
         // LSP code intelligence tools
-        let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let (lsp_goto, lsp_refs, lsp_syms, lsp_hover) =
-            lsp_tools::create_lsp_tools(project_root);
+        let project_root =
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let (lsp_goto, lsp_refs, lsp_syms, lsp_hover) = lsp_tools::create_lsp_tools(project_root);
         registry.register(lsp_goto);
         registry.register(lsp_refs);
         registry.register(lsp_syms);

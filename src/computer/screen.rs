@@ -77,8 +77,7 @@ impl ScreenCapture {
 
         let png_data = std::fs::read(&tmp_path)?;
         use base64::Engine as _;
-        let base64_png =
-            base64::engine::general_purpose::STANDARD.encode(&png_data);
+        let base64_png = base64::engine::general_purpose::STANDARD.encode(&png_data);
 
         Ok(CapturedScreen {
             width,
@@ -90,12 +89,7 @@ impl ScreenCapture {
 
     /// Capture a specific screen region.
     pub async fn capture_region(region: ScreenRegion) -> Result<CapturedScreen> {
-        Self::validate_capture_dimensions(
-            region.x,
-            region.y,
-            region.width,
-            region.height,
-        )?;
+        Self::validate_capture_dimensions(region.x, region.y, region.width, region.height)?;
 
         info!(
             "Capturing screen region: ({}, {}) {}x{}",

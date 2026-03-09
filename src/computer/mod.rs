@@ -101,9 +101,9 @@ pub struct TypingProfile {
 /// Blocked key combinations (dangerous system keys).
 const BLOCKED_COMBOS: &[&str] = &[
     "ctrl+alt+delete",
-    "cmd+q",        // Force quit on macOS
-    "alt+f4",       // Close window on Windows/Linux
-    "ctrl+alt+f1",  // Switch to TTY on Linux
+    "cmd+q",       // Force quit on macOS
+    "alt+f4",      // Close window on Windows/Linux
+    "ctrl+alt+f1", // Switch to TTY on Linux
     "ctrl+alt+f2",
     "ctrl+alt+f3",
 ];

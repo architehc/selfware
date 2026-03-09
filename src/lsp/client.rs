@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{oneshot, Mutex};
 use tracing::{debug, error, info, warn};
 
 // ---------------------------------------------------------------------------
@@ -93,10 +93,7 @@ impl Language {
 fn server_candidates(lang: Language) -> Vec<(&'static str, Vec<&'static str>)> {
     match lang {
         Language::Rust => vec![("rust-analyzer", vec![])],
-        Language::Python => vec![
-            ("pyright-langserver", vec!["--stdio"]),
-            ("pylsp", vec![]),
-        ],
+        Language::Python => vec![("pyright-langserver", vec!["--stdio"]), ("pylsp", vec![])],
         Language::TypeScript | Language::JavaScript => {
             vec![("typescript-language-server", vec!["--stdio"])]
         }
@@ -135,13 +132,11 @@ struct LspServerConnection {
 
 impl LspServerConnection {
     /// Spawn the language server and start the background reader.
-    async fn spawn(
-        command: &str,
-        args: &[&str],
-        root: &Path,
-        language: Language,
-    ) -> Result<Self> {
-        info!("Spawning LSP server: {} {:?} (lang={:?})", command, args, language);
+    async fn spawn(command: &str, args: &[&str], root: &Path, language: Language) -> Result<Self> {
+        info!(
+            "Spawning LSP server: {} {:?} (lang={:?})",
+            command, args, language
+        );
 
         let mut cmd = Command::new(command);
         cmd.args(args)
@@ -155,7 +150,10 @@ impl LspServerConnection {
             .with_context(|| format!("Failed to spawn LSP server: {} {:?}", command, args))?;
 
         let stdin = child.stdin.take().context("Failed to capture LSP stdin")?;
-        let stdout = child.stdout.take().context("Failed to capture LSP stdout")?;
+        let stdout = child
+            .stdout
+            .take()
+            .context("Failed to capture LSP stdout")?;
 
         let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -613,12 +611,7 @@ impl LspClient {
     }
 
     /// Go to the definition of the symbol at the given position.
-    pub async fn goto_definition(
-        &self,
-        file: &str,
-        line: u32,
-        col: u32,
-    ) -> Result<Vec<Location>> {
+    pub async fn goto_definition(&self, file: &str, line: u32, col: u32) -> Result<Vec<Location>> {
         let lang = Language::from_path(file)
             .ok_or_else(|| anyhow::anyhow!("Cannot detect language for: {}", file))?;
         let conn = self.connection_for(lang).await?;
@@ -637,12 +630,7 @@ impl LspClient {
     }
 
     /// Find all references to the symbol at the given position.
-    pub async fn find_references(
-        &self,
-        file: &str,
-        line: u32,
-        col: u32,
-    ) -> Result<Vec<Location>> {
+    pub async fn find_references(&self, file: &str, line: u32, col: u32) -> Result<Vec<Location>> {
         let lang = Language::from_path(file)
             .ok_or_else(|| anyhow::anyhow!("Cannot detect language for: {}", file))?;
         let conn = self.connection_for(lang).await?;
@@ -831,20 +819,14 @@ impl LspClient {
             let start = sel_range.get("start").unwrap_or(&Value::Null);
             (
                 start.get("line").and_then(|l| l.as_u64()).unwrap_or(0) as u32,
-                start
-                    .get("character")
-                    .and_then(|c| c.as_u64())
-                    .unwrap_or(0) as u32,
+                start.get("character").and_then(|c| c.as_u64()).unwrap_or(0) as u32,
             )
         } else if let Some(location) = value.get("location") {
             let range = location.get("range").unwrap_or(&Value::Null);
             let start = range.get("start").unwrap_or(&Value::Null);
             (
                 start.get("line").and_then(|l| l.as_u64()).unwrap_or(0) as u32,
-                start
-                    .get("character")
-                    .and_then(|c| c.as_u64())
-                    .unwrap_or(0) as u32,
+                start.get("character").and_then(|c| c.as_u64()).unwrap_or(0) as u32,
             )
         } else {
             (0, 0)

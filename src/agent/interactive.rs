@@ -1212,18 +1212,26 @@ impl Agent {
                 match arg {
                     "" | "toggle" => {
                         // Toggle between Enabled and Disabled
-                        let current = self.config.extra_body
+                        let current = self
+                            .config
+                            .extra_body
                             .as_ref()
                             .and_then(|eb| eb.get("enable_thinking"))
                             .and_then(|v| v.as_bool())
                             .unwrap_or(true);
                         let new_state = !current;
                         let eb = self.config.extra_body.get_or_insert_with(Default::default);
-                        eb.insert("enable_thinking".to_string(), serde_json::Value::Bool(new_state));
+                        eb.insert(
+                            "enable_thinking".to_string(),
+                            serde_json::Value::Bool(new_state),
+                        );
                         if new_state {
                             println!("{} Thinking enabled", "🧠".bright_cyan());
                         } else {
-                            println!("{} Thinking disabled (faster responses)", "⚡".bright_green());
+                            println!(
+                                "{} Thinking disabled (faster responses)",
+                                "⚡".bright_green()
+                            );
                         }
                     }
                     "on" => {
@@ -1233,8 +1241,14 @@ impl Agent {
                     }
                     "off" => {
                         let eb = self.config.extra_body.get_or_insert_with(Default::default);
-                        eb.insert("enable_thinking".to_string(), serde_json::Value::Bool(false));
-                        println!("{} Thinking disabled (faster responses)", "⚡".bright_green());
+                        eb.insert(
+                            "enable_thinking".to_string(),
+                            serde_json::Value::Bool(false),
+                        );
+                        println!(
+                            "{} Thinking disabled (faster responses)",
+                            "⚡".bright_green()
+                        );
                     }
                     _ => {
                         println!("{} Usage: /think [on|off|toggle]", "ℹ".bright_yellow());

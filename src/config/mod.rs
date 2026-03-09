@@ -3854,7 +3854,10 @@ strict_permissions = true
         std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
         let result = Config::load(Some(config_path.to_str().unwrap()));
-        assert!(result.is_err(), "Expected error for plaintext key in strict mode");
+        assert!(
+            result.is_err(),
+            "Expected error for plaintext key in strict mode"
+        );
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("Plaintext API key"),
@@ -3882,7 +3885,10 @@ strict_permissions = true
         let mut config = Config::default();
         config.safety.denied_paths = vec!["valid/**".to_string(), "[bad".to_string()];
         let result = config.validate();
-        assert!(result.is_err(), "Expected error for invalid denied_paths glob");
+        assert!(
+            result.is_err(),
+            "Expected error for invalid denied_paths glob"
+        );
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("Invalid glob in safety.denied_paths"),

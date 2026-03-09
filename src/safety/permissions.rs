@@ -65,9 +65,7 @@ impl PermissionGrant {
 
     /// Check if this grant has expired.
     pub fn is_expired(&self) -> bool {
-        self.expires_at
-            .map(|exp| Utc::now() > exp)
-            .unwrap_or(false)
+        self.expires_at.map(|exp| Utc::now() > exp).unwrap_or(false)
     }
 
     /// Check if this grant matches a tool name.
@@ -121,9 +119,7 @@ pub struct PermissionStore {
 
 impl PermissionStore {
     pub fn new() -> Self {
-        Self {
-            grants: Vec::new(),
-        }
+        Self { grants: Vec::new() }
     }
 
     /// Create a store from configuration grants.

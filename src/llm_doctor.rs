@@ -154,9 +154,7 @@ pub async fn run_llm_doctor(config: &Config) -> Result<()> {
     // Step 3: Template / Chat Format Check
     println!(
         "{}",
-        "Step 3: Template / Chat Format Check"
-            .bold()
-            .underline()
+        "Step 3: Template / Chat Format Check".bold().underline()
     );
     check_template(&det, &model_name);
     println!();
@@ -228,9 +226,7 @@ pub async fn run_llm_doctor(config: &Config) -> Result<()> {
 // ── Step 1 implementation ────────────────────────────────────────────────────
 
 async fn detect_backend(endpoint: &str) -> Result<DetectionResult> {
-    let client = Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        .build()?;
+    let client = Client::builder().timeout(HTTP_TIMEOUT).build()?;
 
     // Strip trailing /v1 for base URL probes
     let base = endpoint.trim_end_matches('/');
@@ -246,11 +242,7 @@ async fn detect_backend(endpoint: &str) -> Result<DetectionResult> {
 
     let status = resp.status();
     if !status.is_success() {
-        anyhow::bail!(
-            "Endpoint returned HTTP {} for GET {}",
-            status,
-            models_url
-        );
+        anyhow::bail!("Endpoint returned HTTP {} for GET {}", status, models_url);
     }
 
     let body: Value = resp.json().await?;
@@ -283,14 +275,8 @@ fn parse_models(body: &Value) -> Vec<ModelInfo> {
             let max_model_len = item
                 .get("max_model_len")
                 .and_then(|v| v.as_u64())
-                .or_else(|| {
-                    item.get("context_length")
-                        .and_then(|v| v.as_u64())
-                })
-                .or_else(|| {
-                    item.get("max_tokens")
-                        .and_then(|v| v.as_u64())
-                });
+                .or_else(|| item.get("context_length").and_then(|v| v.as_u64()))
+                .or_else(|| item.get("max_tokens").and_then(|v| v.as_u64()));
 
             models.push(ModelInfo {
                 id,
@@ -424,10 +410,7 @@ fn analyse_model(det: &DetectionResult, configured_model: &str) {
                 );
                 print_context_extension_help(&det.backend);
             } else {
-                println!(
-                    "  {} Context length is sufficient",
-                    "ok".green().bold()
-                );
+                println!("  {} Context length is sufficient", "ok".green().bold());
             }
         } else {
             println!(
@@ -487,10 +470,7 @@ fn print_context_extension_help(backend: &Backend) {
             );
         }
         Backend::Vllm => {
-            println!(
-                "     vllm: {}",
-                "--max-model-len 131072".bright_white()
-            );
+            println!("     vllm: {}", "--max-model-len 131072".bright_white());
         }
         Backend::Ollama => {
             println!(
@@ -499,15 +479,10 @@ fn print_context_extension_help(backend: &Backend) {
             );
         }
         Backend::LlamaCpp => {
-            println!(
-                "     llama.cpp: {}",
-                "-c 131072".bright_white()
-            );
+            println!("     llama.cpp: {}", "-c 131072".bright_white());
         }
         Backend::LmStudio => {
-            println!(
-                "     LM Studio: set context length in the model settings UI"
-            );
+            println!("     LM Studio: set context length in the model settings UI");
         }
         Backend::Unknown(_) => {
             println!("     Check your backend's documentation for context length flags.");
@@ -520,10 +495,7 @@ fn print_context_extension_help(backend: &Backend) {
                 "       vllm:      {}",
                 "--max-model-len 131072".bright_white()
             );
-            println!(
-                "       llama.cpp: {}",
-                "-c 131072".bright_white()
-            );
+            println!("       llama.cpp: {}", "-c 131072".bright_white());
         }
     }
 }
@@ -548,13 +520,10 @@ fn check_template(det: &DetectionResult, model_name: &str) {
                     "     Recommended: {} (sglang auto-detects from model metadata)",
                     "--chat-template auto".bright_white()
                 );
-                println!(
-                    "     If tool calls fail, try specifying a template explicitly:"
-                );
+                println!("     If tool calls fail, try specifying a template explicitly:");
                 println!(
                     "       {}",
-                    "--chat-template /path/to/qwen_tool_call.jinja"
-                        .bright_white()
+                    "--chat-template /path/to/qwen_tool_call.jinja".bright_white()
                 );
             } else {
                 println!(
@@ -574,9 +543,7 @@ fn check_template(det: &DetectionResult, model_name: &str) {
                     "  {} Qwen models with vllm: the bundled chat template usually",
                     ">>".cyan()
                 );
-                println!(
-                    "     supports tool calling out of the box."
-                );
+                println!("     supports tool calling out of the box.");
                 println!(
                     "     If issues arise, pass {} for Hermes-style tool use.",
                     "--tool-call-parser hermes".bright_white()
@@ -620,9 +587,7 @@ fn check_template(det: &DetectionResult, model_name: &str) {
                     "  {} Tool calling with llama.cpp may require a custom",
                     "!!".yellow().bold()
                 );
-                println!(
-                    "     grammar or GBNF constraint. Consider sglang or vllm for"
-                );
+                println!("     grammar or GBNF constraint. Consider sglang or vllm for");
                 println!("     full tool-calling support.");
             }
         }
@@ -652,9 +617,7 @@ fn check_template(det: &DetectionResult, model_name: &str) {
                     "  {} For Qwen models, ensure the backend applies a Jinja template",
                     ">>".yellow()
                 );
-                println!(
-                    "     that supports tool calling (function-call tokens)."
-                );
+                println!("     that supports tool calling (function-call tokens).");
             }
         }
     }
@@ -676,9 +639,7 @@ fn assess_capabilities(model_name: &str) {
                 "Visual / multimodal processing (with vision endpoint)",
                 "Long-context reasoning",
             ],
-            limitations: vec![
-                "Requires significant VRAM (may need quantisation or multi-GPU)",
-            ],
+            limitations: vec!["Requires significant VRAM (may need quantisation or multi-GPU)"],
         }
     } else if lower.contains("qwen3-coder") || lower.contains("qwen3.5-coder") {
         ModelAssessment {
@@ -720,9 +681,7 @@ fn assess_capabilities(model_name: &str) {
                 "Tool calling support",
                 "Multi-language understanding",
             ],
-            limitations: vec![
-                "Performance depends on model size and quantisation",
-            ],
+            limitations: vec!["Performance depends on model size and quantisation"],
         }
     } else {
         ModelAssessment {
@@ -765,10 +724,7 @@ fn assess_capabilities(model_name: &str) {
         ("Shell tool execution", true),
         ("File editing", true),
         ("Code analysis", true),
-        (
-            "Multi-step tool workflows",
-            assessment.quality != "Limited",
-        ),
+        ("Multi-step tool workflows", assessment.quality != "Limited"),
         (
             "Tool calling (function use)",
             assessment.quality != "Limited" && assessment.quality != "Unknown",
@@ -777,10 +733,7 @@ fn assess_capabilities(model_name: &str) {
             "Visual processing",
             lower.contains("122b") || lower.contains("vision") || lower.contains("vl"),
         ),
-        (
-            "Long-context tasks (>32K)",
-            !is_model_small(&lower),
-        ),
+        ("Long-context tasks (>32K)", !is_model_small(&lower)),
     ];
 
     for (feature, supported) in &features {
@@ -804,9 +757,7 @@ fn is_model_small(lower: &str) -> bool {
     // We need to be careful not to match "72b" as "2b", so we require that
     // the digit(s) forming the param count are preceded by a separator
     // (-, _, or start of the token).
-    let small_sizes = [
-        "0.5b", "1b", "1.5b", "2b", "3b", "4b", "5b", "6b", "7b",
-    ];
+    let small_sizes = ["0.5b", "1b", "1.5b", "2b", "3b", "4b", "5b", "6b", "7b"];
     for size in &small_sizes {
         // Match "-{size}", "_{size}", or the string starting with the size
         let with_dash = format!("-{}", size);
@@ -817,9 +768,7 @@ fn is_model_small(lower: &str) -> bool {
             if let Some(pos) = lower.find(pat.as_str()) {
                 let after = pos + pat.len();
                 // Accept if at end, or next char is not alphanumeric (except known suffixes like -instruct)
-                if after >= lower.len()
-                    || !lower.as_bytes()[after].is_ascii_digit()
-                {
+                if after >= lower.len() || !lower.as_bytes()[after].is_ascii_digit() {
                     return true;
                 }
             }
@@ -835,18 +784,13 @@ async fn connection_test(
     model: &str,
     config: &Config,
 ) -> Result<ConnectionTestResult> {
-    let client = Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        .build()?;
+    let client = Client::builder().timeout(HTTP_TIMEOUT).build()?;
 
     let base = endpoint.trim_end_matches('/');
     let completions_url = format!("{}/chat/completions", base);
 
     // Build the auth header if available
-    let api_key = config
-        .api_key
-        .as_ref()
-        .map(|k| k.expose().to_string());
+    let api_key = config.api_key.as_ref().map(|k| k.expose().to_string());
 
     // Simple completion test
     let request_body = serde_json::json!({
@@ -875,18 +819,15 @@ async fn connection_test(
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!(
-            "Completion request returned HTTP {}: {}",
-            status,
-            body
-        );
+        anyhow::bail!("Completion request returned HTTP {}: {}", status, body);
     }
 
     let body: Value = resp.json().await?;
     let tokens_per_second = extract_tokens_per_second(&body, latency);
 
     // Test tool calling
-    let tool_calling_works = test_tool_calling(&client, &completions_url, model, api_key.as_deref()).await;
+    let tool_calling_works =
+        test_tool_calling(&client, &completions_url, model, api_key.as_deref()).await;
 
     Ok(ConnectionTestResult {
         latency,
@@ -998,9 +939,7 @@ fn print_recommendations(
         .unwrap_or_else(|| "unknown".to_string());
 
     let backend_str = det.backend.to_string();
-    let model_display = model_info
-        .map(|m| m.id.as_str())
-        .unwrap_or(model_name);
+    let model_display = model_info.map(|m| m.id.as_str()).unwrap_or(model_name);
 
     // Collect recommendations
     let mut checks: Vec<(CheckStatus, String)> = Vec::new();
@@ -1258,6 +1197,9 @@ mod tests {
         assert_eq!(tps, Some(10.0));
 
         let empty = serde_json::json!({});
-        assert_eq!(extract_tokens_per_second(&empty, Duration::from_secs(1)), None);
+        assert_eq!(
+            extract_tokens_per_second(&empty, Duration::from_secs(1)),
+            None
+        );
     }
 }

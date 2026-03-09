@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{oneshot, Mutex};
 use tracing::{debug, info, warn};
 
 /// JSON-RPC 2.0 request.
@@ -274,7 +274,8 @@ mod tests {
 
     #[test]
     fn test_json_rpc_error_deserialization() {
-        let json = r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"Method not found"}}"#;
+        let json =
+            r#"{"jsonrpc":"2.0","id":2,"error":{"code":-32601,"message":"Method not found"}}"#;
         let response: JsonRpcResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.id, Some(2));
         assert!(response.error.is_some());

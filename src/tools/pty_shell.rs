@@ -146,10 +146,7 @@ impl PtySession {
 
     /// Send a synchronization marker after startup to consume any banner output.
     async fn drain_startup(&mut self) -> Result<()> {
-        let marker_cmd = format!(
-            "echo {}{}_STARTUP__\n",
-            CMD_DONE_MARKER, "0"
-        );
+        let marker_cmd = format!("echo {}{}_STARTUP__\n", CMD_DONE_MARKER, "0");
         self.stdin
             .write_all(marker_cmd.as_bytes())
             .await
@@ -169,7 +166,7 @@ impl PtySession {
             line.clear();
             let read_future = self.stdout.read_line(&mut line);
             match tokio::time::timeout(Duration::from_millis(500), read_future).await {
-                Ok(Ok(0)) => break,   // EOF
+                Ok(Ok(0)) => break, // EOF
                 Ok(Ok(_)) => {
                     if line.contains(&startup_marker) {
                         break;
@@ -298,7 +295,10 @@ impl PtySession {
         let cleaned = strip_ansi(&raw);
         if cleaned.len() > MAX_OUTPUT_BYTES {
             let truncated: String = cleaned.chars().take(MAX_OUTPUT_BYTES).collect();
-            format!("{}\n... [output truncated at {} bytes]", truncated, MAX_OUTPUT_BYTES)
+            format!(
+                "{}\n... [output truncated at {} bytes]",
+                truncated, MAX_OUTPUT_BYTES
+            )
         } else {
             cleaned
         }
@@ -395,10 +395,7 @@ fn check_dangerous_patterns(command: &str) -> Result<()> {
     let normalized: String = lower.split_whitespace().collect::<Vec<_>>().join(" ");
     for pattern in DANGEROUS_PATTERNS {
         if normalized.contains(pattern) {
-            bail!(
-                "Blocked potentially dangerous shell pattern: {}",
-                pattern
-            );
+            bail!("Blocked potentially dangerous shell pattern: {}", pattern);
         }
     }
     Ok(())
@@ -709,14 +706,8 @@ mod tests {
 
     #[test]
     fn test_parse_marker_valid() {
-        assert_eq!(
-            PtySession::parse_marker("__SELFWARE_CMD_DONE_0__"),
-            Some(0)
-        );
-        assert_eq!(
-            PtySession::parse_marker("__SELFWARE_CMD_DONE_1__"),
-            Some(1)
-        );
+        assert_eq!(PtySession::parse_marker("__SELFWARE_CMD_DONE_0__"), Some(0));
+        assert_eq!(PtySession::parse_marker("__SELFWARE_CMD_DONE_1__"), Some(1));
         assert_eq!(
             PtySession::parse_marker("__SELFWARE_CMD_DONE_127__"),
             Some(127)
@@ -894,7 +885,10 @@ mod tests {
             }))
             .await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("exceeds maximum length"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("exceeds maximum length"));
 
         let _ = tool
             .execute(serde_json::json!({

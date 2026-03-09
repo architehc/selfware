@@ -45,9 +45,11 @@ const DEFAULT_TEST_MODEL: &str = "txn545/Qwen3.5-122B-A10B-NVFP4";
 fn test_llm_config() -> Config {
     let endpoint = std::env::var("SELFWARE_TEST_ENDPOINT")
         .unwrap_or_else(|_| DEFAULT_TEST_ENDPOINT.to_string());
-    let model = std::env::var("SELFWARE_TEST_MODEL")
-        .unwrap_or_else(|_| DEFAULT_TEST_MODEL.to_string());
-    let api_key = std::env::var("SELFWARE_API_KEY").ok().map(RedactedString::new);
+    let model =
+        std::env::var("SELFWARE_TEST_MODEL").unwrap_or_else(|_| DEFAULT_TEST_MODEL.to_string());
+    let api_key = std::env::var("SELFWARE_API_KEY")
+        .ok()
+        .map(RedactedString::new);
 
     Config {
         endpoint,
@@ -136,8 +138,10 @@ fn test_config_loads_with_defaults() {
         !config.safety.allowed_paths.is_empty(),
         "allowed_paths must have defaults"
     );
-    println!("  config defaults: endpoint={}, model={}, max_tokens={}, temperature={}",
-        config.endpoint, config.model, config.max_tokens, config.temperature);
+    println!(
+        "  config defaults: endpoint={}, model={}, max_tokens={}, temperature={}",
+        config.endpoint, config.model, config.max_tokens, config.temperature
+    );
 }
 
 #[test]
@@ -327,16 +331,15 @@ async fn test_doctor_runs_without_panic() {
     let report = run_doctor().await;
     let elapsed = start.elapsed();
 
-    assert!(!report.checks.is_empty(), "doctor must return at least one check");
+    assert!(
+        !report.checks.is_empty(),
+        "doctor must return at least one check"
+    );
 
     // rustc must be OK in any Rust build environment
     let rustc = report.checks.iter().find(|c| c.name == "rustc");
     assert!(rustc.is_some(), "rustc check missing from doctor report");
-    assert_eq!(
-        rustc.unwrap().status,
-        CheckStatus::Ok,
-        "rustc should be OK"
-    );
+    assert_eq!(rustc.unwrap().status, CheckStatus::Ok, "rustc should be OK");
 
     println!(
         "  doctor completed in {:?} — {} checks, health={}",
@@ -581,10 +584,7 @@ async fn test_git_status_in_repo() {
     let registry = ToolRegistry::new();
     let git_status = registry.get("git_status").unwrap();
 
-    let result = git_status
-        .execute(serde_json::json!({}))
-        .await
-        .unwrap();
+    let result = git_status.execute(serde_json::json!({})).await.unwrap();
 
     // We should at least get a branch name
     assert!(
@@ -654,12 +654,8 @@ async fn test_llm_simple_completion() {
     let client = selfware::api::ApiClient::new(&config).expect("failed to create API client");
 
     let messages = vec![
-        selfware::api::types::Message::system(
-            "You are a helpful assistant. Respond concisely.",
-        ),
-        selfware::api::types::Message::user(
-            "What is 7 * 8? Reply with just the number.",
-        ),
+        selfware::api::types::Message::system("You are a helpful assistant. Respond concisely."),
+        selfware::api::types::Message::user("What is 7 * 8? Reply with just the number."),
     ];
 
     let start = Instant::now();
@@ -726,9 +722,8 @@ async fn test_llm_tool_calling() {
             let msg = &resp.choices[0].message;
             let text = msg.content.text();
             let has_tool_call = msg.tool_calls.as_ref().map_or(false, |tc| !tc.is_empty());
-            let mentions_tool = text.contains("file_read")
-                || text.contains("<tool>")
-                || text.contains("\"name\"");
+            let mentions_tool =
+                text.contains("file_read") || text.contains("<tool>") || text.contains("\"name\"");
 
             assert!(
                 has_tool_call || mentions_tool,
@@ -875,9 +870,7 @@ async fn test_llm_code_generation_python() {
             let src = dir.path().join("test_script.py");
             fs::write(&src, code).unwrap();
 
-            let output = std::process::Command::new("python3")
-                .arg(&src)
-                .output();
+            let output = std::process::Command::new("python3").arg(&src).output();
 
             match output {
                 Ok(o) if o.status.success() => {
@@ -918,9 +911,7 @@ async fn test_llm_multi_step_task() {
 
     // Step 1: Ask LLM to design a function
     let messages = vec![
-        selfware::api::types::Message::system(
-            "You are a senior Rust developer. Reply concisely.",
-        ),
+        selfware::api::types::Message::system("You are a senior Rust developer. Reply concisely."),
         selfware::api::types::Message::user(
             "Design a Rust function signature for a function called `merge_sorted` that \
              takes two sorted slices of i32 and returns a Vec<i32> containing all elements \
@@ -994,7 +985,10 @@ async fn test_llm_multi_step_task() {
                 .await
                 .unwrap();
             assert!(
-                read_result["content"].as_str().unwrap().contains("merge_sorted"),
+                read_result["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("merge_sorted"),
                 "Written file should contain function"
             );
 
@@ -1174,8 +1168,8 @@ step_timeout_secs = 300
 
 #[test]
 fn test_benchmark_safety_checker() {
-    use selfware::safety::checker::SafetyChecker;
     use selfware::api::types::{ToolCall, ToolFunction};
+    use selfware::safety::checker::SafetyChecker;
 
     let config = SafetyConfig {
         allowed_paths: vec!["/tmp/**".to_string(), "./**".to_string()],
@@ -1229,7 +1223,8 @@ async fn test_scenario_create_rust_project() {
         .await
         .unwrap();
     assert_eq!(
-        result["exit_code"], 0,
+        result["exit_code"],
+        0,
         "cargo init failed: {}",
         result["stderr"].as_str().unwrap_or("")
     );
@@ -1267,7 +1262,8 @@ mod tests {
         .await
         .unwrap();
     assert_eq!(
-        result["exit_code"], 0,
+        result["exit_code"],
+        0,
         "cargo check failed: {}",
         result["stdout"].as_str().unwrap_or("")
     );
@@ -1281,7 +1277,8 @@ mod tests {
         .await
         .unwrap();
     assert_eq!(
-        result["exit_code"], 0,
+        result["exit_code"],
+        0,
         "cargo test failed: {}",
         result["stdout"].as_str().unwrap_or("")
     );
@@ -1316,10 +1313,7 @@ fn main() {
         .output()
         .expect("failed to run rustc");
 
-    assert!(
-        !output.status.success(),
-        "broken code should not compile"
-    );
+    assert!(!output.status.success(), "broken code should not compile");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("mismatched types") || stderr.contains("expected"),
@@ -1408,7 +1402,11 @@ fn test_scenario_multi_language_detection() {
     // Go project
     let go_dir = dir.path().join("go_project");
     fs::create_dir_all(&go_dir).unwrap();
-    fs::write(go_dir.join("go.mod"), "module example.com/test\n\ngo 1.21\n").unwrap();
+    fs::write(
+        go_dir.join("go.mod"),
+        "module example.com/test\n\ngo 1.21\n",
+    )
+    .unwrap();
     assert_eq!(detect_language(&go_dir), "Go");
 
     // Unknown project
@@ -1539,10 +1537,7 @@ fn test_all_tools_have_descriptions() {
     let tools = registry.list();
 
     for tool in &tools {
-        assert!(
-            !tool.name().is_empty(),
-            "Tool must have a non-empty name"
-        );
+        assert!(!tool.name().is_empty(), "Tool must have a non-empty name");
         assert!(
             !tool.description().is_empty(),
             "Tool '{}' must have a non-empty description",
@@ -1557,8 +1552,5 @@ fn test_all_tools_have_descriptions() {
         );
     }
 
-    println!(
-        "  all {} tools have names and descriptions",
-        tools.len()
-    );
+    println!("  all {} tools have names and descriptions", tools.len());
 }

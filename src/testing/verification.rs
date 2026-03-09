@@ -275,7 +275,7 @@ impl VerificationGate {
 
         // Multi-language QA: dispatch to language_qa runners for non-Rust files
         if !rust_files_changed {
-            use crate::testing::language_qa::{QaLanguage, run_python_qa, run_node_qa, run_go_qa};
+            use crate::testing::language_qa::{run_go_qa, run_node_qa, run_python_qa, QaLanguage};
 
             let detected_lang = QaLanguage::detect(&self.project_root);
             let timeout = self.config.check_timeout_secs;
@@ -535,9 +535,7 @@ impl VerificationGate {
     }
 
     /// Convert a QA stage result from language_qa into a CheckResult.
-    fn qa_stage_to_check_result(
-        stage: crate::testing::qa_profiles::QaStageResult,
-    ) -> CheckResult {
+    fn qa_stage_to_check_result(stage: crate::testing::qa_profiles::QaStageResult) -> CheckResult {
         use crate::testing::qa_profiles::QaStage;
         let check_type = match stage.stage {
             QaStage::Syntax | QaStage::TypeCheck => CheckType::TypeCheck,

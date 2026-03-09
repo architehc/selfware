@@ -105,9 +105,9 @@ impl WorkQueue {
         let mut q = self.queue.lock().await;
         let now = Instant::now();
         // Find the first item that is ready.
-        let pos = q.iter().position(|item| {
-            item.execute_after.is_none_or(|after| now >= after)
-        });
+        let pos = q
+            .iter()
+            .position(|item| item.execute_after.is_none_or(|after| now >= after));
         pos.and_then(|i| q.remove(i))
     }
 
@@ -714,11 +714,7 @@ impl RawInputLoop {
                 format!("{}s", secs)
             };
             self.write_raw(
-                format!(
-                    "\x1b[36m[Delayed @{}]\x1b[0m {}\r\n",
-                    label, remaining
-                )
-                .as_bytes(),
+                format!("\x1b[36m[Delayed @{}]\x1b[0m {}\r\n", label, remaining).as_bytes(),
             );
             // Spawn a background tokio task to add the item after the delay.
             let remaining_clone = remaining.clone();
@@ -796,13 +792,8 @@ impl RawInputLoop {
                     } else {
                         item.input.clone()
                     };
-                    let line = format!(
-                        "  {}. {}{}{}\r\n",
-                        i + 1,
-                        preview,
-                        priority_tag,
-                        delay_info,
-                    );
+                    let line =
+                        format!("  {}. {}{}{}\r\n", i + 1, preview, priority_tag, delay_info,);
                     self.write_raw(line.as_bytes());
                 }
             }
@@ -811,8 +802,7 @@ impl RawInputLoop {
 
         if input == "/queue clear" || input == "/q clear" {
             let count = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(async { self.work_queue.clear().await })
+                tokio::runtime::Handle::current().block_on(async { self.work_queue.clear().await })
             });
             let msg = format!("\x1b[36m[Queue] Cleared {} item(s)\x1b[0m\r\n", count);
             self.write_raw(msg.as_bytes());
@@ -821,8 +811,7 @@ impl RawInputLoop {
 
         if input == "/queue next" || input == "/q next" {
             let next = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(async { self.work_queue.peek().await })
+                tokio::runtime::Handle::current().block_on(async { self.work_queue.peek().await })
             });
             match next {
                 Some(item) => {
@@ -845,8 +834,7 @@ impl RawInputLoop {
 
         // Build the prompt prefix.
         let queue_len = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { self.work_queue.len().await })
+            tokio::runtime::Handle::current().block_on(async { self.work_queue.len().await })
         });
 
         let mode_indicator = match self.execution_mode {
@@ -990,8 +978,12 @@ mod tests {
     async fn test_work_queue_delayed_not_ready() {
         let q = WorkQueue::new();
         let future = Instant::now() + Duration::from_secs(3600);
-        q.push_with_priority("future task".to_string(), WorkPriority::Delayed, Some(future))
-            .await;
+        q.push_with_priority(
+            "future task".to_string(),
+            WorkPriority::Delayed,
+            Some(future),
+        )
+        .await;
 
         // Should not be available yet.
         assert!(q.try_pop().await.is_none());

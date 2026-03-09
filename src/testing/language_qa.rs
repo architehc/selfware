@@ -69,7 +69,10 @@ async fn run_stage(
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(timeout_secs.max(5)),
-        Command::new(program).args(args).current_dir(project_root).output(),
+        Command::new(program)
+            .args(args)
+            .current_dir(project_root)
+            .output(),
     )
     .await;
 
@@ -77,12 +80,14 @@ async fn run_stage(
 
     match result {
         Ok(Ok(output)) => {
-            let stdout =
-                String::from_utf8_lossy(&output.stdout[..output.stdout.len().min(MAX_OUTPUT_BYTES)])
-                    .to_string();
-            let stderr =
-                String::from_utf8_lossy(&output.stderr[..output.stderr.len().min(MAX_OUTPUT_BYTES)])
-                    .to_string();
+            let stdout = String::from_utf8_lossy(
+                &output.stdout[..output.stdout.len().min(MAX_OUTPUT_BYTES)],
+            )
+            .to_string();
+            let stderr = String::from_utf8_lossy(
+                &output.stderr[..output.stderr.len().min(MAX_OUTPUT_BYTES)],
+            )
+            .to_string();
             let combined = if stderr.is_empty() {
                 stdout
             } else {
@@ -122,9 +127,7 @@ async fn run_stage(
 
 /// Rough count of a pattern in output (case-insensitive).
 fn count_pattern(text: &str, pattern: &str) -> usize {
-    text.to_lowercase()
-        .matches(&pattern.to_lowercase())
-        .count()
+    text.to_lowercase().matches(&pattern.to_lowercase()).count()
 }
 
 /// Try to run a command, returning None if the command is not found.
@@ -152,10 +155,28 @@ pub async fn run_rust_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStageR
     let mut results = Vec::new();
 
     // Syntax: cargo check
-    results.push(run_stage(QaStage::Syntax, "cargo", &["check", "--quiet"], project_root, timeout_secs).await);
+    results.push(
+        run_stage(
+            QaStage::Syntax,
+            "cargo",
+            &["check", "--quiet"],
+            project_root,
+            timeout_secs,
+        )
+        .await,
+    );
 
     // Format: cargo fmt --check
-    results.push(run_stage(QaStage::Format, "cargo", &["fmt", "--check"], project_root, timeout_secs).await);
+    results.push(
+        run_stage(
+            QaStage::Format,
+            "cargo",
+            &["fmt", "--check"],
+            project_root,
+            timeout_secs,
+        )
+        .await,
+    );
 
     // Lint: cargo clippy
     results.push(
@@ -265,14 +286,8 @@ pub async fn run_python_qa(project_root: &Path, timeout_secs: u64) -> Vec<QaStag
     .await
     {
         results.push(lint);
-    } else if let Some(lint) = try_run_stage(
-        QaStage::Lint,
-        "flake8",
-        &["."],
-        project_root,
-        timeout_secs,
-    )
-    .await
+    } else if let Some(lint) =
+        try_run_stage(QaStage::Lint, "flake8", &["."], project_root, timeout_secs).await
     {
         results.push(lint);
     }

@@ -69,7 +69,10 @@ impl MouseController {
             );
             // Note: This is a placeholder. Real implementation would use
             // CoreGraphics CGEventCreateMouseEvent for precise control.
-            info!("Mouse move to ({}, {}) — requires Accessibility permissions", x, y);
+            info!(
+                "Mouse move to ({}, {}) — requires Accessibility permissions",
+                x, y
+            );
         }
 
         Ok(())

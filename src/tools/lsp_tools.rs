@@ -126,10 +126,14 @@ impl Tool for LspGotoDefinitionTool {
         let client = self.handle.get().await?;
 
         // Ensure the file is open in the server.
-        let content = tokio::fs::read_to_string(&args.file).await.unwrap_or_default();
+        let content = tokio::fs::read_to_string(&args.file)
+            .await
+            .unwrap_or_default();
         client.did_open(&args.file, &content).await?;
 
-        let locations = client.goto_definition(&args.file, args.line, args.column).await?;
+        let locations = client
+            .goto_definition(&args.file, args.line, args.column)
+            .await?;
 
         if locations.is_empty() {
             Ok(json!({
@@ -196,10 +200,14 @@ impl Tool for LspFindReferencesTool {
         let args: Args = serde_json::from_value(args)?;
         let client = self.handle.get().await?;
 
-        let content = tokio::fs::read_to_string(&args.file).await.unwrap_or_default();
+        let content = tokio::fs::read_to_string(&args.file)
+            .await
+            .unwrap_or_default();
         client.did_open(&args.file, &content).await?;
 
-        let locations = client.find_references(&args.file, args.line, args.column).await?;
+        let locations = client
+            .find_references(&args.file, args.line, args.column)
+            .await?;
 
         Ok(json!({
             "status": "ok",
@@ -250,7 +258,9 @@ impl Tool for LspDocumentSymbolsTool {
         let args: Args = serde_json::from_value(args)?;
         let client = self.handle.get().await?;
 
-        let content = tokio::fs::read_to_string(&args.file).await.unwrap_or_default();
+        let content = tokio::fs::read_to_string(&args.file)
+            .await
+            .unwrap_or_default();
         client.did_open(&args.file, &content).await?;
 
         let symbols = client.document_symbols(&args.file).await?;
@@ -314,7 +324,9 @@ impl Tool for LspHoverTool {
         let args: Args = serde_json::from_value(args)?;
         let client = self.handle.get().await?;
 
-        let content = tokio::fs::read_to_string(&args.file).await.unwrap_or_default();
+        let content = tokio::fs::read_to_string(&args.file)
+            .await
+            .unwrap_or_default();
         client.did_open(&args.file, &content).await?;
 
         let info = client.hover(&args.file, args.line, args.column).await?;

@@ -31,15 +31,15 @@
 pub mod agent;
 pub mod api;
 pub mod cli;
+pub mod computer;
 pub mod config;
 pub mod doctor;
 pub mod errors;
-pub mod input;
-pub mod safety;
-pub mod computer;
 pub mod hooks;
+pub mod input;
 pub mod lsp;
 pub mod mcp;
+pub mod safety;
 pub mod tools;
 pub mod ui;
 
@@ -102,6 +102,7 @@ pub use testing::verification;
 // ============================================================================
 // Utility modules
 // ============================================================================
+pub mod interview;
 #[cfg(feature = "tokens")]
 pub mod kv_store;
 pub mod llm_doctor;
@@ -112,7 +113,6 @@ pub mod self_healing;
 pub mod token_count;
 pub mod tokens;
 pub mod tool_parser;
-pub mod interview;
 
 // ============================================================================
 // Global shutdown coordination

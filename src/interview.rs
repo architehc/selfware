@@ -533,7 +533,8 @@ fn framework_options_for(language: &str) -> Vec<QuestionOption> {
             ("d", "click / typer (CLI)"),
             ("e", "Let me specify..."),
         ]
-    } else if lower.contains("typescript") || lower.contains("node") || lower.contains("javascript") {
+    } else if lower.contains("typescript") || lower.contains("node") || lower.contains("javascript")
+    {
         vec![
             ("a", "Next.js"),
             ("b", "Express"),
@@ -660,13 +661,19 @@ fn parse_project_type(answer: &str) -> ProjectType {
     let lower = answer.to_lowercase();
     if lower.contains("cli") {
         ProjectType::CliTool
-    } else if lower.contains("api") || lower.contains("backend") || lower.contains("web") && !lower.contains("app") {
+    } else if lower.contains("api")
+        || lower.contains("backend")
+        || lower.contains("web") && !lower.contains("app")
+    {
         ProjectType::WebApi
     } else if lower.contains("frontend") || lower.contains("ui") {
         ProjectType::FrontendUi
     } else if lower.contains("library") || lower.contains("crate") {
         ProjectType::Library
-    } else if lower.contains("full-stack") || lower.contains("full stack") || lower.contains("fullstack") {
+    } else if lower.contains("full-stack")
+        || lower.contains("full stack")
+        || lower.contains("fullstack")
+    {
         ProjectType::FullStack
     } else if lower.contains("script") || lower.contains("automation") {
         ProjectType::Script
@@ -694,7 +701,8 @@ fn parse_scope(answer: &str) -> ProjectScope {
         ProjectScope::Quick
     } else if lower.contains("small") || lower.contains("100-500") || lower.contains("100–500") {
         ProjectScope::Small
-    } else if lower.contains("medium") || lower.contains("500-2000") || lower.contains("500–2000") {
+    } else if lower.contains("medium") || lower.contains("500-2000") || lower.contains("500–2000")
+    {
         ProjectScope::Medium
     } else {
         ProjectScope::Large
@@ -724,11 +732,7 @@ pub fn run_interview(task: &str, cwd: &Path) -> Result<InterviewContext> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     writeln!(out)?;
-    writeln!(
-        out,
-        "  {}",
-        "Interview Mode".bold().underline()
-    )?;
+    writeln!(out, "  {}", "Interview Mode".bold().underline())?;
     writeln!(
         out,
         "  {}",
@@ -983,10 +987,7 @@ mod tests {
     fn test_detect_existing_project_go() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("go.mod"), "module example").unwrap();
-        assert_eq!(
-            detect_existing_project(dir.path()),
-            Some("Go".to_string())
-        );
+        assert_eq!(detect_existing_project(dir.path()), Some("Go".to_string()));
     }
 
     #[test]
@@ -998,18 +999,12 @@ mod tests {
     #[test]
     fn test_parse_project_type() {
         assert_eq!(parse_project_type("CLI tool"), ProjectType::CliTool);
-        assert_eq!(
-            parse_project_type("Web API / backend"),
-            ProjectType::WebApi
-        );
+        assert_eq!(parse_project_type("Web API / backend"), ProjectType::WebApi);
         assert_eq!(
             parse_project_type("Script / automation"),
             ProjectType::Script
         );
-        assert_eq!(
-            parse_project_type("Library / crate"),
-            ProjectType::Library
-        );
+        assert_eq!(parse_project_type("Library / crate"), ProjectType::Library);
     }
 
     #[test]

@@ -104,16 +104,16 @@ impl AgentStatus {
     /// Return the emoji glyph for this agent's role.
     fn role_icon(&self) -> &'static str {
         match self.role.as_str() {
-            "Architect" => "\u{1F3D7}\u{FE0F} ", // 🏗️
-            "Coder" => "\u{1F4BB}",               // 💻
-            "Tester" => "\u{1F9EA}",              // 🧪
-            "Reviewer" => "\u{1F4CB}",            // 📋
-            "DevOps" => "\u{2699}\u{FE0F} ",      // ⚙️
-            "Security" => "\u{1F512}",            // 🔒
-            "Documenter" => "\u{1F4DD}",          // 📝
-            "Performance" => "\u{26A1}",          // ⚡
+            "Architect" => "\u{1F3D7}\u{FE0F} ",    // 🏗️
+            "Coder" => "\u{1F4BB}",                 // 💻
+            "Tester" => "\u{1F9EA}",                // 🧪
+            "Reviewer" => "\u{1F4CB}",              // 📋
+            "DevOps" => "\u{2699}\u{FE0F} ",        // ⚙️
+            "Security" => "\u{1F512}",              // 🔒
+            "Documenter" => "\u{1F4DD}",            // 📝
+            "Performance" => "\u{26A1}",            // ⚡
             "VisualCritic" => "\u{1F441}\u{FE0F} ", // 👁️
-            _ => "\u{1F916}",                     // 🤖
+            _ => "\u{1F916}",                       // 🤖
         }
     }
 
@@ -388,13 +388,28 @@ impl SwarmVisualization {
         let decisions_made = self.consensus_history.len();
         let total_decisions = decisions_made + self.pending_consensus_count();
         let strategy = self.dominant_strategy();
-        let consensus_line = format!("Consensus: {}/{} decisions made", decisions_made, total_decisions);
+        let consensus_line = format!(
+            "Consensus: {}/{} decisions made",
+            decisions_made, total_decisions
+        );
         let strategy_line = format!("Strategy: {}", strategy);
 
         let c_pad = inner_width.saturating_sub(consensus_line.chars().count());
-        lines.push(format!("{} {}{} {}", v, consensus_line, " ".repeat(c_pad), v));
+        lines.push(format!(
+            "{} {}{} {}",
+            v,
+            consensus_line,
+            " ".repeat(c_pad),
+            v
+        ));
         let s_pad = inner_width.saturating_sub(strategy_line.chars().count());
-        lines.push(format!("{} {}{} {}", v, strategy_line, " ".repeat(s_pad), v));
+        lines.push(format!(
+            "{} {}{} {}",
+            v,
+            strategy_line,
+            " ".repeat(s_pad),
+            v
+        ));
 
         // Bottom border
         lines.push(format!(
@@ -436,20 +451,12 @@ impl SwarmVisualization {
             // Show last 5 consensus events
             let start = self.consensus_history.len().saturating_sub(5);
             for event in &self.consensus_history[start..] {
-                let elapsed = event
-                    .timestamp
-                    .duration_since(self.start_time);
+                let elapsed = event.timestamp.duration_since(self.start_time);
                 let time_tag = format_elapsed_compact(elapsed);
 
                 let topic_line = format!("[{}] {}", time_tag, event.topic);
                 let t_pad = inner_width.saturating_sub(topic_line.chars().count());
-                lines.push(format!(
-                    "{} {}{} {}",
-                    v,
-                    topic_line,
-                    " ".repeat(t_pad),
-                    v,
-                ));
+                lines.push(format!("{} {}{} {}", v, topic_line, " ".repeat(t_pad), v,));
 
                 // Votes line
                 let votes_str: Vec<String> = event
@@ -468,13 +475,7 @@ impl SwarmVisualization {
                 let votes_line = format!("       {} {}", votes_str.join(" "), outcome_mark);
                 let vl_chars = votes_line.chars().count();
                 let v_pad = inner_width.saturating_sub(vl_chars);
-                lines.push(format!(
-                    "{} {}{} {}",
-                    v,
-                    votes_line,
-                    " ".repeat(v_pad),
-                    v,
-                ));
+                lines.push(format!("{} {}{} {}", v, votes_line, " ".repeat(v_pad), v,));
             }
         }
 
@@ -518,21 +519,14 @@ impl SwarmVisualization {
             // Show last 10 timeline entries
             let start = self.timeline.len().saturating_sub(10);
             for entry in &self.timeline[start..] {
-                let elapsed = entry
-                    .timestamp
-                    .duration_since(self.start_time);
+                let elapsed = entry.timestamp.duration_since(self.start_time);
                 let time_tag = format_elapsed_compact(elapsed);
 
-                let line_content = format!(
-                    "\u{25B8} {}  {}",
-                    time_tag,
-                    entry.description,
-                );
+                let line_content = format!("\u{25B8} {}  {}", time_tag, entry.description,);
                 let lc_chars = line_content.chars().count();
                 // Truncate if too long
                 let display = if lc_chars > inner_width {
-                    let truncated: String =
-                        line_content.chars().take(inner_width - 3).collect();
+                    let truncated: String = line_content.chars().take(inner_width - 3).collect();
                     format!("{}...", truncated)
                 } else {
                     line_content
@@ -583,8 +577,7 @@ impl SwarmVisualization {
         if self.consensus_history.is_empty() {
             return "none".to_string();
         }
-        let mut counts: std::collections::HashMap<&str, usize> =
-            std::collections::HashMap::new();
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
         for event in &self.consensus_history {
             *counts.entry(event.strategy.as_str()).or_insert(0) += 1;
         }
@@ -748,12 +741,22 @@ mod tests {
 
         // Same state again should NOT add a timeline entry
         let len_before = viz.timeline.len();
-        viz.update_agent("Architect", AgentState::Working, Some("still planning"), 0.3);
+        viz.update_agent(
+            "Architect",
+            AgentState::Working,
+            Some("still planning"),
+            0.3,
+        );
         assert_eq!(viz.timeline.len(), len_before);
 
         // Transition to Done
         viz.update_agent("Architect", AgentState::Done, None, 1.0);
-        assert!(viz.timeline.last().unwrap().description.contains("completed"));
+        assert!(viz
+            .timeline
+            .last()
+            .unwrap()
+            .description
+            .contains("completed"));
     }
 
     #[test]
@@ -1031,10 +1034,7 @@ mod tests {
             timestamp: Instant::now(),
             topic: "REST vs GraphQL".to_string(),
             strategy: "majority".to_string(),
-            votes: vec![
-                ("Architect".to_string(), true),
-                ("Coder".to_string(), true),
-            ],
+            votes: vec![("Architect".to_string(), true), ("Coder".to_string(), true)],
             outcome: true,
         });
 
@@ -1118,10 +1118,7 @@ mod tests {
             timestamp: viz.start_time,
             topic: "Use REST".to_string(),
             strategy: "majority".to_string(),
-            votes: vec![
-                ("Architect".to_string(), true),
-                ("Coder".to_string(), true),
-            ],
+            votes: vec![("Architect".to_string(), true), ("Coder".to_string(), true)],
             outcome: true,
         });
 

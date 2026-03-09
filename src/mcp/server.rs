@@ -119,14 +119,13 @@ async fn read_message<R: tokio::io::AsyncRead + Unpin>(
     let mut buf = vec![0u8; length];
     reader.read_exact(&mut buf).await?;
 
-    String::from_utf8(buf).context("Message body is not valid UTF-8").map(Some)
+    String::from_utf8(buf)
+        .context("Message body is not valid UTF-8")
+        .map(Some)
 }
 
 /// Write a Content-Length framed message to `writer`.
-async fn write_message<W: tokio::io::AsyncWrite + Unpin>(
-    writer: &mut W,
-    body: &str,
-) -> Result<()> {
+async fn write_message<W: tokio::io::AsyncWrite + Unpin>(writer: &mut W, body: &str) -> Result<()> {
     let header = format!("Content-Length: {}\r\n\r\n", body.len());
     writer.write_all(header.as_bytes()).await?;
     writer.write_all(body.as_bytes()).await?;
@@ -256,18 +255,12 @@ impl McpServer {
             }
         });
 
-        info!(
-            "MCP server initialized (protocol {})",
-            MCP_PROTOCOL_VERSION
-        );
+        info!("MCP server initialized (protocol {})", MCP_PROTOCOL_VERSION);
         (Some(result), None)
     }
 
     /// Handle `tools/list` request.
-    fn handle_tools_list(
-        &self,
-        params: &Option<Value>,
-    ) -> (Option<Value>, Option<JsonRpcError>) {
+    fn handle_tools_list(&self, params: &Option<Value>) -> (Option<Value>, Option<JsonRpcError>) {
         let tools: Vec<Value> = self
             .registry
             .list()
@@ -543,7 +536,11 @@ impl McpServer {
                 }
 
                 if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                    result.push_str(&self.build_directory_tree(&entry.path(), depth + 1, max_depth));
+                    result.push_str(&self.build_directory_tree(
+                        &entry.path(),
+                        depth + 1,
+                        max_depth,
+                    ));
                 } else {
                     result.push_str(&format!("{}  {}\n", indent, name));
                 }
@@ -783,7 +780,10 @@ mod tests {
             message: "Method not found".to_string(),
             data: None,
         };
-        assert_eq!(format!("{}", err), "JSON-RPC error -32601: Method not found");
+        assert_eq!(
+            format!("{}", err),
+            "JSON-RPC error -32601: Method not found"
+        );
     }
 
     #[tokio::test]
@@ -1042,7 +1042,10 @@ mod tests {
         };
 
         let response = server.handle_request(&request).await;
-        assert!(response.is_none(), "Notifications should not produce a response");
+        assert!(
+            response.is_none(),
+            "Notifications should not produce a response"
+        );
     }
 
     #[tokio::test]
@@ -1053,7 +1056,11 @@ mod tests {
         let mut buffer: Vec<u8> = Vec::new();
         write_message(&mut buffer, message_body).await.unwrap();
 
-        let expected = format!("Content-Length: {}\r\n\r\n{}", message_body.len(), message_body);
+        let expected = format!(
+            "Content-Length: {}\r\n\r\n{}",
+            message_body.len(),
+            message_body
+        );
         assert_eq!(String::from_utf8(buffer.clone()).unwrap(), expected);
 
         // Read back
@@ -1092,10 +1099,7 @@ mod tests {
             if let Some(contents) = result.get("contents").and_then(|c| c.as_array()) {
                 for content in contents {
                     if let Some(text) = content.get("text").and_then(|t| t.as_str()) {
-                        assert!(
-                            !text.contains("root:"),
-                            "Path traversal should be blocked"
-                        );
+                        assert!(!text.contains("root:"), "Path traversal should be blocked");
                     }
                 }
             }
@@ -1124,7 +1128,11 @@ mod tests {
             let schema = tool.get("inputSchema").unwrap();
 
             assert!(!name.is_empty(), "Tool name should not be empty");
-            assert!(!description.is_empty(), "Tool '{}' description should not be empty", name);
+            assert!(
+                !description.is_empty(),
+                "Tool '{}' description should not be empty",
+                name
+            );
             // MCP requires inputSchema to be a JSON Schema object
             assert!(
                 schema.is_object(),

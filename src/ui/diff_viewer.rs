@@ -286,16 +286,13 @@ impl DiffViewer {
                         }
                         ChangeTag::Delete => {
                             // Look ahead for a paired insert (word-level diff)
-                            if i + 1 < changes.len()
-                                && changes[i + 1].tag() == ChangeTag::Insert
-                            {
+                            if i + 1 < changes.len() && changes[i + 1].tag() == ChangeTag::Insert {
                                 let old_line = change.value().trim_end_matches('\n');
                                 let new_line = changes[i + 1].value().trim_end_matches('\n');
                                 let old_no = change.old_index().unwrap_or(0) + 1;
                                 let new_no = changes[i + 1].new_index().unwrap_or(0) + 1;
 
-                                let (old_hl, new_hl) =
-                                    word_level_highlight(old_line, new_line);
+                                let (old_hl, new_hl) = word_level_highlight(old_line, new_line);
 
                                 writeln!(
                                     out,
@@ -459,12 +456,7 @@ impl DiffViewer {
     }
 
     /// Compute diff for a string replacement within a file.
-    pub fn diff_before_edit(
-        &self,
-        path: &str,
-        old_str: &str,
-        new_str: &str,
-    ) -> Result<String> {
+    pub fn diff_before_edit(&self, path: &str, old_str: &str, new_str: &str) -> Result<String> {
         let content = std::fs::read_to_string(path)?;
 
         if !content.contains(old_str) {
@@ -675,7 +667,11 @@ mod tests {
         // Should have two @@ markers for two separate hunks
         let hunk_count = plain.matches("@@").count();
         // Each @@ marker appears as a pair (opening), so count pairs
-        assert!(hunk_count >= 2, "Expected at least 2 hunk markers, got {}", hunk_count);
+        assert!(
+            hunk_count >= 2,
+            "Expected at least 2 hunk markers, got {}",
+            hunk_count
+        );
     }
 
     #[test]
@@ -717,8 +713,14 @@ mod tests {
     #[test]
     fn test_very_long_diff_truncation() {
         let viewer = DiffViewer::new().with_max_changed(10);
-        let old = (0..50).map(|i| format!("old_line_{}", i)).collect::<Vec<_>>().join("\n");
-        let new = (0..50).map(|i| format!("new_line_{}", i)).collect::<Vec<_>>().join("\n");
+        let old = (0..50)
+            .map(|i| format!("old_line_{}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let new = (0..50)
+            .map(|i| format!("new_line_{}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         let result = viewer.show_diff("big.rs", &old, &new);
         let plain = strip_ansi(&result);
 
@@ -727,10 +729,7 @@ mod tests {
 
     #[test]
     fn test_word_level_highlighting() {
-        let (old_hl, new_hl) = word_level_highlight(
-            "let x = foo(bar);",
-            "let x = baz(bar);",
-        );
+        let (old_hl, new_hl) = word_level_highlight("let x = foo(bar);", "let x = baz(bar);");
 
         // The highlighted strings should contain the text
         let old_plain = strip_ansi(&old_hl);
@@ -744,11 +743,7 @@ mod tests {
 
     #[test]
     fn test_stats_computation() {
-        let stats = compute_stats(
-            "test.rs",
-            "aaa\nbbb\nccc\n",
-            "aaa\nBBB\nccc\nddd\n",
-        );
+        let stats = compute_stats("test.rs", "aaa\nbbb\nccc\n", "aaa\nBBB\nccc\nddd\n");
 
         assert_eq!(stats.file_path, "test.rs");
         assert_eq!(stats.additions, 2); // BBB + ddd
@@ -759,7 +754,8 @@ mod tests {
     #[test]
     fn test_show_creation() {
         let viewer = DiffViewer::new();
-        let result = viewer.show_creation("new_file.rs", "fn main() {\n    println!(\"hello\");\n}\n");
+        let result =
+            viewer.show_creation("new_file.rs", "fn main() {\n    println!(\"hello\");\n}\n");
         let plain = strip_ansi(&result);
 
         assert!(plain.contains("new_file.rs"));
@@ -830,7 +826,10 @@ mod tests {
     #[test]
     fn test_show_creation_truncation() {
         let viewer = DiffViewer::new().with_max_changed(5);
-        let content = (0..20).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+        let content = (0..20)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         let result = viewer.show_creation("big.rs", &content);
         let plain = strip_ansi(&result);
 
@@ -839,9 +838,18 @@ mod tests {
 
     #[test]
     fn test_extract_identifier() {
-        assert_eq!(extract_identifier("fn hello()", "fn "), Some("hello".to_string()));
-        assert_eq!(extract_identifier("pub fn world()", "pub fn "), Some("world".to_string()));
-        assert_eq!(extract_identifier("struct Foo {", "struct "), Some("Foo".to_string()));
+        assert_eq!(
+            extract_identifier("fn hello()", "fn "),
+            Some("hello".to_string())
+        );
+        assert_eq!(
+            extract_identifier("pub fn world()", "pub fn "),
+            Some("world".to_string())
+        );
+        assert_eq!(
+            extract_identifier("struct Foo {", "struct "),
+            Some("Foo".to_string())
+        );
         assert_eq!(extract_identifier("no match here", "fn "), None);
     }
 }

@@ -57,7 +57,9 @@ impl Tool for ComputerMouseTool {
                 Ok(json!({"status": "ok", "action": "move_to", "x": x, "y": y}))
             }
             "click" => {
-                controller.click_at(x, y, crate::computer::mouse::MouseButton::Left).await?;
+                controller
+                    .click_at(x, y, crate::computer::mouse::MouseButton::Left)
+                    .await?;
                 Ok(json!({"status": "ok", "action": "click", "x": x, "y": y}))
             }
             "double_click" => {
@@ -66,14 +68,18 @@ impl Tool for ComputerMouseTool {
                 Ok(json!({"status": "ok", "action": "double_click", "x": x, "y": y}))
             }
             "right_click" => {
-                controller.click_at(x, y, crate::computer::mouse::MouseButton::Right).await?;
+                controller
+                    .click_at(x, y, crate::computer::mouse::MouseButton::Right)
+                    .await?;
                 Ok(json!({"status": "ok", "action": "right_click", "x": x, "y": y}))
             }
             "scroll" => {
                 let delta_x = args["delta_x"].as_i64().unwrap_or(0) as i32;
                 let delta_y = args["delta_y"].as_i64().unwrap_or(0) as i32;
                 controller.scroll(delta_x, delta_y).await?;
-                Ok(json!({"status": "ok", "action": "scroll", "delta_x": delta_x, "delta_y": delta_y}))
+                Ok(
+                    json!({"status": "ok", "action": "scroll", "delta_x": delta_x, "delta_y": delta_y}),
+                )
             }
             "drag" => {
                 let end_x = args["end_x"].as_i64().unwrap_or(0) as i32;

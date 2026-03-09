@@ -227,10 +227,7 @@ impl VisualVerifier {
     }
 
     /// Extract visible text from a screenshot using the VLM as an OCR engine.
-    pub async fn extract_text_from_screenshot(
-        &self,
-        image_base64: &str,
-    ) -> Result<String> {
+    pub async fn extract_text_from_screenshot(&self, image_base64: &str) -> Result<String> {
         let prompt = "Extract ALL visible text from this screenshot. \
                       Return only the extracted text, preserving line breaks \
                       and layout as much as possible. Do not add commentary.";
@@ -251,10 +248,7 @@ impl VisualVerifier {
     }
 
     /// Analyze page layout for alignment, spacing, and quality.
-    pub async fn analyze_layout(
-        &self,
-        image_base64: &str,
-    ) -> Result<LayoutAnalysis> {
+    pub async fn analyze_layout(&self, image_base64: &str) -> Result<LayoutAnalysis> {
         let prompt = "Analyze the layout of this screenshot. Respond in JSON with these fields:\n\
                       - \"overall_quality\": \"good\", \"fair\", or \"poor\"\n\
                       - \"alignment_issues\": array of strings describing any alignment problems\n\
@@ -275,10 +269,7 @@ impl VisualVerifier {
     ///
     /// Combines [`crate::computer::screen::ScreenCapture::capture_full`]
     /// with [`verify_screenshot`](Self::verify_screenshot).
-    pub async fn capture_and_verify(
-        &self,
-        expected: &str,
-    ) -> Result<VisualVerificationResult> {
+    pub async fn capture_and_verify(&self, expected: &str) -> Result<VisualVerificationResult> {
         let captured = crate::computer::screen::ScreenCapture::capture_full().await?;
         self.verify_screenshot(&captured.base64_png, expected).await
     }
@@ -429,10 +420,7 @@ impl VisualVerifier {
 
     /// Send a request to the VLM endpoint and extract the response text.
     async fn call_vlm(&self, body: &Value) -> Result<String> {
-        let url = format!(
-            "{}/chat/completions",
-            self.endpoint.trim_end_matches('/')
-        );
+        let url = format!("{}/chat/completions", self.endpoint.trim_end_matches('/'));
         debug!("Calling VLM endpoint: {}", url);
 
         let client = Client::builder()
@@ -518,12 +506,7 @@ fn build_elements_prompt(elements: &[UiElement]) -> String {
         .iter()
         .enumerate()
         .map(|(i, el)| {
-            let mut desc = format!(
-                "{}. \"{}\" (type: {})",
-                i + 1,
-                el.name,
-                el.element_type
-            );
+            let mut desc = format!("{}. \"{}\" (type: {})", i + 1, el.name, el.element_type);
             if let Some(ref text) = el.expected_text {
                 desc.push_str(&format!(", expected text: \"{}\"", text));
             }
@@ -609,10 +592,7 @@ fn parse_verification_response(raw: &str) -> Result<VisualVerificationResult> {
     Ok(VisualVerificationResult {
         passed: parsed["passed"].as_bool().unwrap_or(false),
         confidence: parsed["confidence"].as_f64().unwrap_or(0.0).clamp(0.0, 1.0),
-        description: parsed["description"]
-            .as_str()
-            .unwrap_or("")
-            .to_string(),
+        description: parsed["description"].as_str().unwrap_or("").to_string(),
         issues: parsed["issues"]
             .as_array()
             .map(|arr| {
@@ -636,13 +616,8 @@ fn parse_diff_response(raw: &str) -> Result<VisualDiffResult> {
 
     Ok(VisualDiffResult {
         changes_detected: parsed["changes_detected"].as_bool().unwrap_or(false),
-        expected_change_found: parsed["expected_change_found"]
-            .as_bool()
-            .unwrap_or(false),
-        description: parsed["description"]
-            .as_str()
-            .unwrap_or("")
-            .to_string(),
+        expected_change_found: parsed["expected_change_found"].as_bool().unwrap_or(false),
+        description: parsed["description"].as_str().unwrap_or("").to_string(),
         unexpected_changes: parsed["unexpected_changes"]
             .as_array()
             .map(|arr| {
@@ -655,10 +630,7 @@ fn parse_diff_response(raw: &str) -> Result<VisualDiffResult> {
 }
 
 /// Parse element verification responses from the VLM.
-fn parse_elements_response(
-    raw: &str,
-    elements: &[UiElement],
-) -> Result<Vec<ElementVerification>> {
+fn parse_elements_response(raw: &str, elements: &[UiElement]) -> Result<Vec<ElementVerification>> {
     let json_str = extract_json_from_response(raw);
     let parsed: Value = serde_json::from_str(json_str).with_context(|| {
         format!(
@@ -667,9 +639,9 @@ fn parse_elements_response(
         )
     })?;
 
-    let arr = parsed.as_array().with_context(|| {
-        "Expected a JSON array from VLM elements response"
-    })?;
+    let arr = parsed
+        .as_array()
+        .with_context(|| "Expected a JSON array from VLM elements response")?;
 
     // Build results by matching VLM output back to our element list.
     // If the VLM returns fewer items than we asked for, mark the rest as not found.
@@ -678,7 +650,10 @@ fn parse_elements_response(
     for element in elements {
         // Try to find a matching entry in the VLM response
         let matched = arr.iter().find(|item| {
-            item["name"].as_str().map(|n| n == element.name).unwrap_or(false)
+            item["name"]
+                .as_str()
+                .map(|n| n == element.name)
+                .unwrap_or(false)
         });
 
         match matched {
@@ -816,7 +791,10 @@ mod tests {
         assert_eq!(deserialized.name, "Submit Button");
         assert_eq!(deserialized.element_type, "button");
         assert_eq!(deserialized.expected_text.as_deref(), Some("Submit"));
-        assert_eq!(deserialized.expected_location.as_deref(), Some("bottom-right"));
+        assert_eq!(
+            deserialized.expected_location.as_deref(),
+            Some("bottom-right")
+        );
     }
 
     #[test]
@@ -1052,7 +1030,8 @@ mod tests {
             },
         ];
         // VLM only returned info about "Button", not "Missing"
-        let raw = r#"[{"name": "Button", "found": true, "location": "center", "actual_text": null}]"#;
+        let raw =
+            r#"[{"name": "Button", "found": true, "location": "center", "actual_text": null}]"#;
         let results = parse_elements_response(raw, &elements).unwrap();
         assert_eq!(results.len(), 2);
         assert!(results[0].found);
@@ -1171,8 +1150,7 @@ mod tests {
 
     #[test]
     fn test_verifier_with_timeout() {
-        let v = VisualVerifier::new("http://localhost/v1", "m")
-            .with_timeout(45);
+        let v = VisualVerifier::new("http://localhost/v1", "m").with_timeout(45);
         assert_eq!(v.timeout_secs, 45);
     }
 

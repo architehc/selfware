@@ -496,12 +496,15 @@ mod tests {
         );
 
         // Verify both are cached
-        assert!(cache.get("file_read", &serde_json::json!({"path": path})).is_some());
-        assert!(
-            cache
-                .get("grep_search", &serde_json::json!({"pattern": "foo", "path": path}))
-                .is_some()
-        );
+        assert!(cache
+            .get("file_read", &serde_json::json!({"path": path}))
+            .is_some());
+        assert!(cache
+            .get(
+                "grep_search",
+                &serde_json::json!({"pattern": "foo", "path": path})
+            )
+            .is_some());
 
         // Simulate a file_write invalidation by calling invalidate_path
         assert!(
@@ -512,12 +515,17 @@ mod tests {
 
         // Verify both entries are now gone
         assert!(
-            cache.get("file_read", &serde_json::json!({"path": path})).is_none(),
+            cache
+                .get("file_read", &serde_json::json!({"path": path}))
+                .is_none(),
             "file_read cache should be invalidated after file_write"
         );
         assert!(
             cache
-                .get("grep_search", &serde_json::json!({"pattern": "foo", "path": path}))
+                .get(
+                    "grep_search",
+                    &serde_json::json!({"pattern": "foo", "path": path})
+                )
                 .is_none(),
             "grep_search cache should be invalidated after file_write"
         );
