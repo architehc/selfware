@@ -114,23 +114,18 @@ fn spawn_esc_listener(
                     Ok(Event::Key(KeyEvent { code, modifiers, .. })) => {
                         match code {
                             KeyCode::Esc => {
-                                // Clear any partial input
-                                if !input_buf.is_empty() {
-                                    // Erase the prompt line
-                                    let clear = format!(
-                                        "\r\x1b[2K"
-                                    );
-                                    let _ = std::io::stderr().write_all(clear.as_bytes());
+                                // ESC always cancels generation
+                                if showing_prompt {
+                                    let _ = std::io::stderr().write_all(b"\r\x1b[2K");
                                     let _ = std::io::stderr().flush();
-                                    input_buf.clear();
-                                    showing_prompt = false;
-                                } else {
-                                    cancel_token.store(true, Ordering::Relaxed);
-                                    let _ = std::io::stderr().write_all(
-                                        b"\r\n\x1b[33m[ESC] Cancelling...\x1b[0m\r\n",
-                                    );
-                                    break;
                                 }
+                                input_buf.clear();
+                                showing_prompt = false;
+                                cancel_token.store(true, Ordering::Relaxed);
+                                let _ = std::io::stderr().write_all(
+                                    b"\r\n\x1b[33m[ESC] Cancelling...\x1b[0m\r\n",
+                                );
+                                break;
                             }
                             KeyCode::Enter => {
                                 if !input_buf.is_empty() {
