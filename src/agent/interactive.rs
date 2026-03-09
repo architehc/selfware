@@ -6,6 +6,11 @@ use std::time::Instant;
 
 use super::*;
 
+/// Check if input is an exit command.
+fn is_exit_command(input: &str) -> bool {
+    matches!(input, "exit" | "quit" | "/exit" | "/quit" | "q" | "/q")
+}
+
 /// Truncate a string at a char boundary, avoiding panics on multi-byte UTF-8.
 fn safe_truncate(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
@@ -392,7 +397,7 @@ impl Agent {
 
             let input = input.trim();
 
-            if input == "exit" || input == "quit" || input == "/exit" || input == "/quit" {
+            if is_exit_command(input) {
                 break;
             }
 
@@ -1794,7 +1799,7 @@ impl Agent {
                 }
             }
 
-            if input == "exit" || input == "quit" || input == "/exit" || input == "/quit" {
+            if is_exit_command(input) {
                 break;
             }
 
@@ -2207,23 +2212,12 @@ mod tests {
 
     #[test]
     fn exit_commands_recognized() {
-        for input in &["exit", "quit"] {
-            let trimmed = input.trim();
-            assert!(
-                trimmed == "exit" || trimmed == "quit",
-                "'{}' should trigger exit",
-                input
-            );
+        for input in &["exit", "quit", "/exit", "/quit", "q", "/q"] {
+            assert!(is_exit_command(input), "'{}' should trigger exit", input);
         }
 
-        // These should NOT trigger exit
-        for input in &["exiting", "quitting", "EXIT", "/exit", "exit now"] {
-            let trimmed = input.trim();
-            assert!(
-                trimmed != "exit" && trimmed != "quit",
-                "'{}' should NOT trigger exit",
-                input
-            );
+        for input in &["exiting", "quitting", "EXIT", "exit now", "query", "/question"] {
+            assert!(!is_exit_command(input), "'{}' should NOT trigger exit", input);
         }
     }
 
