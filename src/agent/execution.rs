@@ -227,8 +227,13 @@ impl Agent {
         const WINDOW_SIZE: usize = 10;
 
         for (name, args_str, _) in tool_calls {
+            // Normalize JSON args to canonical form so semantically identical
+            // calls with different whitespace produce the same hash.
+            let canonical_args = serde_json::from_str::<serde_json::Value>(args_str)
+                .and_then(|v| serde_json::to_string(&v))
+                .unwrap_or_else(|_| args_str.to_string());
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            args_str.hash(&mut hasher);
+            canonical_args.hash(&mut hasher);
             let args_hash = hasher.finish();
             let sig = (name.clone(), args_hash);
 
@@ -653,6 +658,14 @@ impl Agent {
                 }
             }
         }
+
+        // Acquire concurrency governor permit before executing the tool.
+        // The permit is held for the duration of execution and released on drop.
+        let _tool_permit = self
+            .governor
+            .acquire_tool()
+            .await
+            .map_err(|e| anyhow::anyhow!("concurrency governor error: {}", e))?;
 
         let timeout_secs = self.config.agent.step_timeout_secs.max(1);
         let execution = tokio::time::timeout(
@@ -2024,6 +2037,78 @@ mod tests {
         // Third time, file_read with same args appears 3 times
         let result = agent.detect_repetition(&batch);
         assert!(result.is_some());
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_repetition_json_whitespace_normalization() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+
+        // Call with compact JSON
+        let compact: Vec<CollectedToolCall> = vec![(
+            "file_write".to_string(),
+            r#"{"path":"foo.rs","content":"bar"}"#.to_string(),
+            None,
+        )];
+        assert!(agent.detect_repetition(&compact).is_none());
+
+        // Call with whitespace-padded but semantically identical JSON
+        let spaced: Vec<CollectedToolCall> = vec![(
+            "file_write".to_string(),
+            r#"{ "path" : "foo.rs" , "content" : "bar" }"#.to_string(),
+            None,
+        )];
+        assert!(agent.detect_repetition(&spaced).is_none());
+
+        // Third call with yet another whitespace variant — should trigger loop detection
+        let newlines: Vec<CollectedToolCall> = vec![(
+            "file_write".to_string(),
+            "{\n  \"path\": \"foo.rs\",\n  \"content\": \"bar\"\n}".to_string(),
+            None,
+        )];
+        let result = agent.detect_repetition(&newlines);
+        assert!(
+            result.is_some(),
+            "should detect loop across whitespace variants"
+        );
+        assert!(result.unwrap().contains("STUCK LOOP DETECTED"));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_repetition_invalid_json_falls_back_to_raw() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+
+        // Invalid JSON strings that differ only in whitespace — should NOT be normalized
+        // (they are not valid JSON, so fallback hashes raw strings which differ)
+        let raw1: Vec<CollectedToolCall> =
+            vec![("custom_tool".to_string(), "not json {".to_string(), None)];
+        let raw2: Vec<CollectedToolCall> = vec![(
+            "custom_tool".to_string(),
+            "not json  {".to_string(), // extra space
+            None,
+        )];
+
+        assert!(agent.detect_repetition(&raw1).is_none());
+        assert!(agent.detect_repetition(&raw2).is_none());
+        // Third call with raw1 again — only 2 of raw1 in window, so no loop
+        assert!(agent.detect_repetition(&raw1).is_none());
+
+        // But three identical raw strings DO trigger detection
+        agent.recent_tool_calls.clear();
+        assert!(agent.detect_repetition(&raw1).is_none());
+        assert!(agent.detect_repetition(&raw1).is_none());
+        let result = agent.detect_repetition(&raw1);
+        assert!(
+            result.is_some(),
+            "identical invalid-JSON raw strings should still trigger loop"
+        );
 
         server.stop().await;
     }

@@ -1,0 +1,30 @@
+╭─── selfware workshop ────────────────────────────────────╮
+│                                                           │
+│   /\___/\                                                 │
+│  ( o   o )  Welcome to your workshop!                     │
+│  (  =^=  )  What shall we tend to today?                  │
+│   )     (                                                 │
+│                                                           │
+╰───────────────────────────────────────────────────────────╯
+
+selfware> Add unit tests for the auth module
+
+  Planning...
+  Reading src/auth/mod.rs (245 lines)
+  ✓ Found 3 public functions: authenticate, verify_token, refresh_token
+
+  Writing tests/auth_test.rs
+  ✓ Created 12 unit tests covering:
+    - authenticate: valid credentials, invalid password, missing user
+    - verify_token: valid, expired, malformed, revoked
+    - refresh_token: valid, expired, invalid
+
+  Running cargo test tests/auth_test.rs
+  ✓ 12 passed, 0 failed (1.2s)
+
+  Committing: "Add 12 unit tests for auth module"
+  ✓ [main abc1234] Add 12 unit tests for auth module
+
+  BLOOM — Task complete! (2m 34s | 8.2K tokens | 7 tools)
+
+selfware>

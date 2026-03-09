@@ -13,6 +13,7 @@ use crate::api::{ApiClient, StreamChunk, ThinkingMode};
 use crate::checkpoint::{CheckpointManager, TaskCheckpoint};
 use crate::cognitive::self_improvement::{Outcome, SelfImprovementEngine};
 use crate::cognitive::{CognitiveState, CyclePhase};
+use crate::concurrency::ConcurrencyGovernor;
 use crate::config::Config;
 use crate::hooks::HookRegistry;
 use crate::memory::AgentMemory;
@@ -177,6 +178,8 @@ pub struct Agent {
     tool_cache: crate::session::cache::ToolCache,
     /// Local-first coordinator for response caching and offline support
     local_first: crate::session::local_first::LocalFirstCoordinator,
+    /// Concurrency governor for limiting concurrent streams and tool executions
+    governor: ConcurrencyGovernor,
 }
 
 impl Agent {
@@ -485,6 +488,7 @@ To call a tool, use this EXACT XML structure:
             permission_store,
             tool_cache: crate::session::cache::ToolCache::new(),
             local_first: crate::session::local_first::LocalFirstCoordinator::new(),
+            governor: ConcurrencyGovernor::with_defaults(),
         })
     }
 

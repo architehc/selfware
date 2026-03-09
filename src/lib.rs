@@ -56,6 +56,7 @@ pub mod agent;
 pub mod api;
 pub mod cli;
 pub mod computer;
+pub mod concurrency;
 pub mod config;
 pub mod doctor;
 pub mod errors;

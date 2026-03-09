@@ -1,0 +1,11 @@
+╭─────────────────────────────────────────╮
+│  🦊 Selfware Workshop v0.2.0            │
+│  Software that improves itself.          │
+│  Local-first. Privacy-owned.             │
+╰─────────────────────────────────────────╯
+
+       /\___/\
+      ( o   o )
+      (  =^=  )
+       )     (
+      (       )

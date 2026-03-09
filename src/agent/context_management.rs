@@ -1010,6 +1010,29 @@ impl Agent {
             patina, reset, patina, reset
         );
 
+        // Concurrency governor stats
+        let gov_stats = self.governor.stats();
+        println!(
+            "  {}│{}  {bold}{}⊘ CONCURRENCY{}{:<43}    {}│{}",
+            patina, reset, sand, reset, "", patina, reset
+        );
+        println!(
+            "  {}│{}     Streams         {:>8} / {:<8}                          {}│{}",
+            patina, reset, gov_stats.streams_available, gov_stats.streams_max, patina, reset
+        );
+        println!(
+            "  {}│{}     Tools           {:>8} / {:<8}                          {}│{}",
+            patina, reset, gov_stats.tools_available, gov_stats.tools_max, patina, reset
+        );
+        println!(
+            "  {}│{}     Global          {:>8} / {:<8}                          {}│{}",
+            patina, reset, gov_stats.global_available, gov_stats.global_max, patina, reset
+        );
+        println!(
+            "  {}│{}                                                                    {}│{}",
+            patina, reset, patina, reset
+        );
+
         println!(
             "  {}│{}  {bold}{}≋ MODE{}{:<50}    {}│{}",
             patina, reset, worn, reset, "", patina, reset
