@@ -685,7 +685,7 @@ pub fn load_qa_schema_profile(path: Option<&Path>, profile_name: &str) -> Result
 }
 
 /// Convert a [`QaSchemaConfig`] into weights compatible with
-/// [`crate::testing::qa_profiles::QaWeights`].
+/// `QaWeights` from the QA profiles module.
 pub fn qa_schema_to_weights(schema: &QaSchemaConfig) -> crate::testing::qa_profiles::QaWeights {
     let defaults = crate::testing::qa_profiles::QaWeights::standard();
     let scoring = match &schema.qa_profile.scoring {

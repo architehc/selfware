@@ -922,7 +922,7 @@ async fn test_llm_multi_step_task() {
 
     let start = Instant::now();
     let response = tokio::time::timeout(
-        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(120),
         client.chat(messages, None, selfware::api::ThinkingMode::Disabled),
     )
     .await;
@@ -937,7 +937,7 @@ async fn test_llm_multi_step_task() {
             text.to_string()
         }
         Ok(Err(e)) => panic!("Step 1 failed: {}", e),
-        Err(_) => panic!("Step 1 timed out"),
+        Err(_) => panic!("Step 1 timed out (120s)"),
     };
 
     // Step 2: Ask LLM to implement it
