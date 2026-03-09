@@ -133,13 +133,28 @@ impl Agent {
 
         let cancel = self.cancel_token();
 
-        while let Some(chunk_result) = rx.recv().await {
-            // Check for ESC / Ctrl+C cancellation
-            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                // Drop spinner if still active
-                drop(spinner.take());
-                break;
-            }
+        loop {
+            // Use select to check cancellation even when recv is waiting
+            let chunk_result = tokio::select! {
+                biased;
+                _ = async {
+                    loop {
+                        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                            return;
+                        }
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    }
+                } => {
+                    drop(spinner.take());
+                    break;
+                }
+                result = rx.recv() => {
+                    match result {
+                        Some(r) => r,
+                        None => break,
+                    }
+                }
+            };
 
             let chunk = chunk_result?;
 
