@@ -114,7 +114,7 @@ metrics-exporter-prometheus = "0.12.1"
 nix = { version = "0.31", features = ["signal"] }
 
 [features]
-default = []
+default = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-analysis", "tokens", "self-improvement"]
 integration = []  # Enable with: cargo test --features integration
 
 # Semantic feature flags (replacing monolithic "extras")

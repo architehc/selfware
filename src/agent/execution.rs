@@ -201,6 +201,55 @@ impl Agent {
         true
     }
 
+    /// Tool categories that inherently bypass the Rust/cargo verification gate.
+    /// These tools indicate non-Rust tasks (browser automation, vision analysis,
+    /// desktop control, web fetching, etc.) where `cargo check` is meaningless.
+    const NON_RUST_TOOL_PREFIXES: &'static [&'static str] = &[
+        "browser_",        // browser_fetch, browser_screenshot, browser_pdf, browser_eval, browser_links
+        "vision_",         // vision_analyze, vision_compare
+        "computer_",       // computer_mouse, computer_keyboard, computer_screen, computer_window
+        "screen_capture",  // screen_capture
+        "page_control",    // page_control (screenshot, click, type, scroll, etc.)
+        "http_request",    // http_request
+    ];
+
+    /// Returns true if the current task appears to be a non-Rust task that should
+    /// bypass cargo-based verification.  Two conditions trigger the bypass:
+    ///
+    /// 1. **No Cargo.toml** in the working directory — there is no Rust project to verify.
+    /// 2. **Only non-Rust tools used** — the task exclusively used browser, vision,
+    ///    computer-control, or web tools with no file-write or cargo activity.
+    fn should_skip_cargo_verification(&self) -> bool {
+        // Condition 1: No Cargo.toml in working directory → not a Rust project
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        if !cwd.join("Cargo.toml").exists() {
+            debug!("Completion gate: no Cargo.toml found in {:?}, skipping cargo verification", cwd);
+            return true;
+        }
+
+        // Condition 2: Every tool call in the checkpoint is a non-Rust tool
+        let all_non_rust = self
+            .current_checkpoint
+            .as_ref()
+            .map(|cp| {
+                // If there are no tool calls at all, don't bypass (let the normal gate logic decide)
+                if cp.tool_calls.is_empty() {
+                    return false;
+                }
+                cp.tool_calls.iter().all(|tc| {
+                    Self::NON_RUST_TOOL_PREFIXES
+                        .iter()
+                        .any(|prefix| tc.tool_name.starts_with(prefix))
+                })
+            })
+            .unwrap_or(false);
+
+        if all_non_rust {
+            debug!("Completion gate: all tool calls are non-Rust tools, skipping cargo verification");
+        }
+        all_non_rust
+    }
+
     /// Check whether the agent has done enough work to accept completion.
     /// Returns `None` to accept, or `Some(message)` to reject with instructions.
     fn check_completion_gate(&self) -> Option<String> {
@@ -208,15 +257,26 @@ impl Agent {
         let min_steps = self.config.agent.min_completion_steps;
 
         if step_count < min_steps {
+            // Tailor the message: don't mention cargo for non-Rust tasks
+            let verification_hint = if self.should_skip_cargo_verification() {
+                "Continue working: review your results and ensure the task is fully complete."
+            } else {
+                "Continue working: verify your changes compile with cargo_check and pass tests with cargo_test."
+            };
             return Some(format!(
                 "You are trying to complete the task after only {} step(s), but at least {} are required. \
-                 You have a large budget — do not rush. Continue working: verify your changes compile \
-                 with cargo_check and pass tests with cargo_test.",
-                step_count, min_steps
+                 You have a large budget — do not rush. {}",
+                step_count, min_steps, verification_hint
             ));
         }
 
         if self.config.agent.require_verification_before_completion {
+            // Skip cargo verification entirely for non-Rust tasks
+            if self.should_skip_cargo_verification() {
+                debug!("Completion gate: bypassing cargo verification for non-Rust task");
+                return None;
+            }
+
             let has_verification = self
                 .current_checkpoint
                 .as_ref()
@@ -1915,6 +1975,324 @@ mod tests {
         assert!(msg.contains("step"));
 
         server.stop().await;
+    }
+
+    // =========================================================================
+    // Non-Rust task bypass tests (P0 fix: cargo gate skipped for non-Rust tasks)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_gate_bypassed_for_browser_only_task() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.agent.min_completion_steps = 0;
+        config.agent.require_verification_before_completion = true;
+        let mut agent = Agent::new(config).await.unwrap();
+
+        // Simulate a task that only used browser tools — no cargo calls
+        let mut checkpoint = crate::checkpoint::TaskCheckpoint::new(
+            "browser-task".to_string(),
+            "fetch a webpage".to_string(),
+        );
+        checkpoint.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "browser_fetch".to_string(),
+            arguments: r#"{"url":"https://example.com"}"#.to_string(),
+            result: Some("ok".to_string()),
+            success: true,
+            duration_ms: Some(500),
+        });
+        checkpoint.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "browser_screenshot".to_string(),
+            arguments: r#"{"url":"https://example.com"}"#.to_string(),
+            result: Some("ok".to_string()),
+            success: true,
+            duration_ms: Some(300),
+        });
+        agent.current_checkpoint = Some(checkpoint);
+
+        // Gate should pass — no cargo verification needed for browser-only tasks
+        assert!(
+            agent.check_completion_gate().is_none(),
+            "Browser-only tasks should bypass the cargo verification gate"
+        );
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_gate_bypassed_for_vision_only_task() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.agent.min_completion_steps = 0;
+        config.agent.require_verification_before_completion = true;
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let mut checkpoint = crate::checkpoint::TaskCheckpoint::new(
+            "vision-task".to_string(),
+            "analyze an image".to_string(),
+        );
+        checkpoint.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "vision_analyze".to_string(),
+            arguments: r#"{"path":"/tmp/img.png"}"#.to_string(),
+            result: Some("ok".to_string()),
+            success: true,
+            duration_ms: Some(200),
+        });
+        agent.current_checkpoint = Some(checkpoint);
+
+        assert!(
+            agent.check_completion_gate().is_none(),
+            "Vision-only tasks should bypass the cargo verification gate"
+        );
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_gate_bypassed_for_computer_control_task() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.agent.min_completion_steps = 0;
+        config.agent.require_verification_before_completion = true;
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let mut checkpoint = crate::checkpoint::TaskCheckpoint::new(
+            "desktop-task".to_string(),
+            "click a button".to_string(),
+        );
+        checkpoint.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "computer_mouse".to_string(),
+            arguments: r#"{"action":"click","x":100,"y":200}"#.to_string(),
+            result: Some("ok".to_string()),
+            success: true,
+            duration_ms: Some(50),
+        });
+        checkpoint.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "screen_capture".to_string(),
+            arguments: "{}".to_string(),
+            result: Some("ok".to_string()),
+            success: true,
+            duration_ms: Some(100),
+        });
+        agent.current_checkpoint = Some(checkpoint);
+
+        assert!(
+            agent.check_completion_gate().is_none(),
+            "Computer-control tasks should bypass the cargo verification gate"
+        );
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_gate_bypassed_for_http_only_task() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.agent.min_completion_steps = 0;
+        config.agent.require_verification_before_completion = true;
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let mut checkpoint = crate::checkpoint::TaskCheckpoint::new(
+            "http-task".to_string(),
+            "call an API".to_string(),
+        );
+        checkpoint.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "http_request".to_string(),
+            arguments: r#"{"url":"https://api.example.com","method":"GET"}"#.to_string(),
+            result: Some("ok".to_string()),
+            success: true,
+            duration_ms: Some(300),
+        });
+        agent.current_checkpoint = Some(checkpoint);
+
+        assert!(
+            agent.check_completion_gate().is_none(),
+            "HTTP-only tasks should bypass the cargo verification gate"
+        );
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_gate_still_required_for_mixed_rust_and_browser_task() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.agent.min_completion_steps = 0;
+        config.agent.require_verification_before_completion = true;
+        let mut agent = Agent::new(config).await.unwrap();
+
+        // Task that used both browser tools AND file_write (a Rust-project tool)
+        let mut checkpoint = crate::checkpoint::TaskCheckpoint::new(
+            "mixed-task".to_string(),
+            "fetch web data and write Rust code".to_string(),
+        );
+        checkpoint.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "browser_fetch".to_string(),
+            arguments: r#"{"url":"https://example.com"}"#.to_string(),
+            result: Some("ok".to_string()),
+            success: true,
+            duration_ms: Some(500),
+        });
+        checkpoint.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "file_write".to_string(),
+            arguments: r#"{"path":"src/main.rs","content":"fn main() {}"}"#.to_string(),
+            result: Some("ok".to_string()),
+            success: true,
+            duration_ms: Some(50),
+        });
+        agent.current_checkpoint = Some(checkpoint);
+
+        // Gate should REJECT — mixed task with file_write still needs cargo verification
+        // (we're running from the selfware project root which has a Cargo.toml)
+        let result = agent.check_completion_gate();
+        assert!(
+            result.is_some(),
+            "Mixed Rust + browser tasks should still require cargo verification"
+        );
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_gate_bypassed_when_no_cargo_toml_in_cwd() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.agent.min_completion_steps = 0;
+        config.agent.require_verification_before_completion = true;
+        let mut agent = Agent::new(config).await.unwrap();
+
+        // Create a temp directory without a Cargo.toml and chdir into it
+        let tmp = tempfile::tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        // Task with file_write in a non-Rust project — should bypass gate
+        let mut checkpoint = crate::checkpoint::TaskCheckpoint::new(
+            "python-task".to_string(),
+            "write a python script".to_string(),
+        );
+        checkpoint.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "file_write".to_string(),
+            arguments: r#"{"path":"script.py","content":"print('hello')"}"#.to_string(),
+            result: Some("ok".to_string()),
+            success: true,
+            duration_ms: Some(50),
+        });
+        agent.current_checkpoint = Some(checkpoint);
+
+        let result = agent.check_completion_gate();
+        assert!(
+            result.is_none(),
+            "Non-Rust project (no Cargo.toml) should bypass cargo verification, got: {:?}",
+            result,
+        );
+
+        // Restore cwd
+        std::env::set_current_dir(original_dir).unwrap();
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_gate_min_steps_message_omits_cargo_for_non_rust_task() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.agent.min_completion_steps = 100;
+        config.agent.require_verification_before_completion = true;
+        let mut agent = Agent::new(config).await.unwrap();
+
+        // Only non-Rust tools used
+        let mut checkpoint = crate::checkpoint::TaskCheckpoint::new(
+            "browser-task".to_string(),
+            "browse the web".to_string(),
+        );
+        checkpoint.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "browser_fetch".to_string(),
+            arguments: r#"{"url":"https://example.com"}"#.to_string(),
+            result: Some("ok".to_string()),
+            success: true,
+            duration_ms: Some(500),
+        });
+        agent.current_checkpoint = Some(checkpoint);
+
+        let result = agent.check_completion_gate();
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        // Should NOT mention cargo for non-Rust tasks
+        assert!(
+            !msg.contains("cargo_check"),
+            "Min-steps message for non-Rust task should not mention cargo, got: {}",
+            msg
+        );
+        assert!(msg.contains("step"));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_non_rust_tool_prefixes_list_is_comprehensive() {
+        // Ensure all known non-Rust tool names match at least one prefix
+        let known_non_rust_tools = [
+            "browser_fetch",
+            "browser_screenshot",
+            "browser_pdf",
+            "browser_eval",
+            "browser_links",
+            "vision_analyze",
+            "vision_compare",
+            "computer_mouse",
+            "computer_keyboard",
+            "computer_screen",
+            "computer_window",
+            "screen_capture",
+            "page_control",
+            "http_request",
+        ];
+
+        for tool_name in &known_non_rust_tools {
+            let matches = Agent::NON_RUST_TOOL_PREFIXES
+                .iter()
+                .any(|prefix| tool_name.starts_with(prefix));
+            assert!(
+                matches,
+                "Tool '{}' should match a non-Rust prefix but does not",
+                tool_name
+            );
+        }
+    }
+
+    #[test]
+    fn test_rust_tools_do_not_match_non_rust_prefixes() {
+        // Ensure regular Rust-project tools do NOT match the bypass list
+        let rust_tools = [
+            "cargo_check",
+            "cargo_test",
+            "cargo_clippy",
+            "file_write",
+            "file_read",
+            "shell_execute",
+            "search_files",
+        ];
+
+        for tool_name in &rust_tools {
+            let matches = Agent::NON_RUST_TOOL_PREFIXES
+                .iter()
+                .any(|prefix| tool_name.starts_with(prefix));
+            assert!(
+                !matches,
+                "Rust tool '{}' should NOT match a non-Rust prefix",
+                tool_name
+            );
+        }
     }
 
     // =========================================================================

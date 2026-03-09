@@ -512,6 +512,10 @@ pub struct AgentConfig {
     pub min_completion_steps: usize,
     /// Require at least one successful verification (cargo_check/cargo_test/cargo_clippy)
     /// before accepting task completion.
+    ///
+    /// This gate is project-type-aware: it is automatically skipped when the working
+    /// directory has no `Cargo.toml` or when only non-Rust tools (browser, vision,
+    /// computer control, web fetch, etc.) were used during the task.
     #[serde(default = "default_true")]
     pub require_verification_before_completion: bool,
 }

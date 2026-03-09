@@ -332,9 +332,26 @@ impl ProcessManager {
             loop {
                 if start.elapsed() > timeout {
                     warn!("Health check timeout for process '{}'", id);
+
+                    // Check if the process already exited
+                    let exit_code = {
+                        let mut child_guard = child_handle.write().await;
+                        if let Some(ref mut child) = *child_guard {
+                            child.try_wait().ok().flatten().and_then(|s| s.code())
+                        } else {
+                            None
+                        }
+                    };
+
                     let mut processes = self.processes.write().await;
                     if let Some(proc) = processes.get_mut(&id) {
-                        proc.status = ProcessStatus::HealthCheckFailed;
+                        if let Some(code) = exit_code {
+                            proc.status = ProcessStatus::Crashed {
+                                exit_code: Some(code),
+                            };
+                        } else {
+                            proc.status = ProcessStatus::HealthCheckFailed;
+                        }
                     }
                     break;
                 }
@@ -360,22 +377,79 @@ impl ProcessManager {
         } else {
             // No health check, mark as running after brief delay
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            // Check if process already exited during the brief delay
+            let exit_code = {
+                let mut child_guard = child_handle.write().await;
+                if let Some(ref mut child) = *child_guard {
+                    child.try_wait().ok().flatten().and_then(|s| s.code())
+                } else {
+                    None
+                }
+            };
+
             let mut processes = self.processes.write().await;
             if let Some(proc) = processes.get_mut(&id) {
-                if matches!(proc.status, ProcessStatus::Starting) {
+                if let Some(code) = exit_code {
+                    proc.status = ProcessStatus::Crashed {
+                        exit_code: Some(code),
+                    };
+                } else if matches!(proc.status, ProcessStatus::Starting) {
                     proc.status = ProcessStatus::Running;
                     proc.health_matched = true;
                 }
             }
         }
 
-        // Return summary
+        // Return summary -- check for failure states and return errors
         let processes = self.processes.read().await;
         let proc = processes
             .get(&id)
             .ok_or_else(|| anyhow::anyhow!("Process disappeared after start"))?;
 
-        Ok(proc.to_summary(50))
+        let summary = proc.to_summary(50);
+        match &summary.status {
+            ProcessStatus::HealthCheckFailed => {
+                let recent_output: Vec<&str> = summary
+                    .recent_logs
+                    .iter()
+                    .rev()
+                    .take(5)
+                    .map(|l| l.content.as_str())
+                    .collect();
+                anyhow::bail!(
+                    "Process '{}' started but health check timed out after {}s. \
+                     Recent output: {:?}",
+                    id,
+                    health_timeout,
+                    recent_output
+                );
+            }
+            ProcessStatus::Crashed { exit_code } => {
+                let recent_output: Vec<&str> = summary
+                    .recent_logs
+                    .iter()
+                    .rev()
+                    .take(5)
+                    .map(|l| l.content.as_str())
+                    .collect();
+                anyhow::bail!(
+                    "Process '{}' exited immediately with code {}. Recent output: {:?}",
+                    id,
+                    exit_code
+                        .map(|c| c.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    recent_output
+                );
+            }
+            ProcessStatus::Stopped => {
+                anyhow::bail!(
+                    "Process '{}' was stopped before it could become ready",
+                    id
+                );
+            }
+            _ => Ok(summary),
+        }
     }
 
     /// Stop a managed process
@@ -1006,10 +1080,11 @@ mod tests {
     async fn test_process_manager_start_simple() {
         let manager = ProcessManager::new();
 
+        // Use sleep which stays alive, unlike echo which exits immediately
         let config = ProcessConfig {
             id: "echo-test".to_string(),
-            command: "echo".to_string(),
-            args: vec!["hello".to_string()],
+            command: "sleep".to_string(),
+            args: vec!["60".to_string()],
             cwd: None,
             env: HashMap::new(),
             health_check_pattern: None,
@@ -1025,6 +1100,9 @@ mod tests {
         let summary = result.unwrap();
         assert_eq!(summary.id, "echo-test");
         assert!(summary.pid.is_some());
+
+        // Cleanup
+        let _ = manager.stop("echo-test", true).await;
     }
 
     #[tokio::test(start_paused = true)]
@@ -1182,12 +1260,13 @@ mod tests {
             max_restart_attempts: 0,
         };
 
-        let result = manager.start(config).await;
-        assert!(result.is_ok());
+        // Process exits immediately after echo, so start returns Err
+        let _ = manager.start(config).await;
 
         // Give it time to capture output
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
+        // The process entry still exists and logs were captured before it exited
         let logs = manager.logs("env-test", 10).await.unwrap();
         assert!(logs.iter().any(|l| l.content.contains("test_value")));
     }
@@ -1856,11 +1935,12 @@ mod tests {
             max_restart_attempts: 0,
         };
 
-        let result = manager.start(config).await;
-        assert!(result.is_ok());
+        // pwd exits immediately, so start returns Err
+        let _ = manager.start(config).await;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
+        // The process entry still exists and logs were captured
         let logs = manager.logs("cwd-test", 10).await.unwrap();
         assert!(logs.iter().any(|l| l.content.contains("/tmp")));
     }
@@ -1883,10 +1963,25 @@ mod tests {
         };
 
         let result = manager.start(config).await;
-        assert!(result.is_ok());
-
-        let summary = result.unwrap();
-        assert!(summary.health_matched);
+        // echo prints "Server ready" matching the health check, then exits.
+        // Depending on task scheduling, health_matched may be set to true
+        // before or after the monitor marks the process as Crashed.
+        match result {
+            Ok(summary) => {
+                // Health check matched before crash was detected
+                assert!(summary.health_matched);
+                assert_eq!(summary.status, ProcessStatus::Running);
+            }
+            Err(e) => {
+                // Process crashed before/after health check was evaluated
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("exited immediately") || msg.contains("health check"),
+                    "Unexpected error: {}",
+                    msg
+                );
+            }
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -2326,5 +2421,210 @@ mod tests {
 
         assert!(config.cwd.is_some());
         assert_eq!(config.cwd.unwrap().to_str(), Some("/home/user/project/src"));
+    }
+
+    /// A process that exits with a non-zero code immediately should return an error
+    /// from start() instead of silently reporting success.
+    #[tokio::test]
+    #[cfg(not(target_os = "windows"))]
+    async fn test_start_returns_error_when_process_exits_with_nonzero() {
+        let manager = ProcessManager::new();
+
+        let config = ProcessConfig {
+            id: "exit-fail-test".to_string(),
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), "exit 42".to_string()],
+            cwd: None,
+            env: HashMap::new(),
+            health_check_pattern: None,
+            health_check_timeout_secs: None,
+            expected_port: None,
+            auto_restart: false,
+            max_restart_attempts: 0,
+        };
+
+        let result = manager.start(config).await;
+        assert!(
+            result.is_err(),
+            "start() should return Err when process exits immediately with non-zero code"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("exited immediately") || err_msg.contains("42"),
+            "Error should mention exit code. Got: {}",
+            err_msg
+        );
+    }
+
+    /// A process with a health check that times out should return an error.
+    #[tokio::test]
+    #[cfg(not(target_os = "windows"))]
+    async fn test_start_returns_error_on_health_check_timeout() {
+        let manager = ProcessManager::new();
+
+        // Process that runs but never prints the health check pattern
+        let config = ProcessConfig {
+            id: "health-timeout-test".to_string(),
+            command: "sleep".to_string(),
+            args: vec!["60".to_string()],
+            cwd: None,
+            env: HashMap::new(),
+            health_check_pattern: Some("READY_PATTERN_THAT_NEVER_APPEARS".to_string()),
+            health_check_timeout_secs: Some(1), // 1 second timeout
+            expected_port: None,
+            auto_restart: false,
+            max_restart_attempts: 0,
+        };
+
+        let result = manager.start(config).await;
+        assert!(
+            result.is_err(),
+            "start() should return Err when health check times out"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("health check timed out"),
+            "Error should mention health check timeout. Got: {}",
+            err_msg
+        );
+
+        // Cleanup
+        let _ = manager.stop("health-timeout-test", true).await;
+    }
+
+    /// A process that exits during health check wait should return an error
+    /// with the exit code.
+    #[tokio::test]
+    #[cfg(not(target_os = "windows"))]
+    async fn test_start_returns_error_when_process_crashes_during_health_check() {
+        let manager = ProcessManager::new();
+
+        let config = ProcessConfig {
+            id: "crash-health-test".to_string(),
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), "echo 'starting up'; exit 7".to_string()],
+            cwd: None,
+            env: HashMap::new(),
+            health_check_pattern: Some("READY".to_string()),
+            health_check_timeout_secs: Some(3),
+            expected_port: None,
+            auto_restart: false,
+            max_restart_attempts: 0,
+        };
+
+        let result = manager.start(config).await;
+        assert!(
+            result.is_err(),
+            "start() should return Err when process crashes during health check wait"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("exited immediately") || err_msg.contains("7"),
+            "Error should mention exit code. Got: {}",
+            err_msg
+        );
+    }
+
+    /// Spawning a nonexistent command should return an error from start().
+    #[tokio::test]
+    async fn test_start_returns_error_for_nonexistent_command() {
+        let manager = ProcessManager::new();
+
+        let config = ProcessConfig {
+            id: "no-such-cmd".to_string(),
+            command: "this_command_surely_does_not_exist_anywhere_12345".to_string(),
+            args: vec![],
+            cwd: None,
+            env: HashMap::new(),
+            health_check_pattern: None,
+            health_check_timeout_secs: None,
+            expected_port: None,
+            auto_restart: false,
+            max_restart_attempts: 0,
+        };
+
+        let result = manager.start(config).await;
+        assert!(
+            result.is_err(),
+            "start() should return Err for nonexistent command"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Failed to spawn"),
+            "Error should mention spawn failure. Got: {}",
+            err_msg
+        );
+    }
+
+    /// After health check timeout, the process status should be HealthCheckFailed
+    /// (not Starting or Running).
+    #[tokio::test]
+    #[cfg(not(target_os = "windows"))]
+    async fn test_health_check_timeout_sets_failed_status() {
+        let manager = ProcessManager::new();
+
+        let config = ProcessConfig {
+            id: "status-check-test".to_string(),
+            command: "sleep".to_string(),
+            args: vec!["60".to_string()],
+            cwd: None,
+            env: HashMap::new(),
+            health_check_pattern: Some("WILL_NEVER_MATCH".to_string()),
+            health_check_timeout_secs: Some(1),
+            expected_port: None,
+            auto_restart: false,
+            max_restart_attempts: 0,
+        };
+
+        // start() returns error, but the process entry still exists
+        let _ = manager.start(config).await;
+
+        // Verify the stored status is HealthCheckFailed
+        let get_result = manager.get("status-check-test").await;
+        assert!(get_result.is_ok());
+        let summary = get_result.unwrap();
+        assert!(
+            matches!(summary.status, ProcessStatus::HealthCheckFailed),
+            "Status should be HealthCheckFailed but was {:?}",
+            summary.status
+        );
+
+        // Cleanup
+        let _ = manager.stop("status-check-test", true).await;
+    }
+
+    /// Process that exits with code 0 immediately (no health check) should
+    /// report crashed status since it didn't stay alive.
+    #[tokio::test]
+    #[cfg(not(target_os = "windows"))]
+    async fn test_start_returns_error_when_process_exits_zero_immediately() {
+        let manager = ProcessManager::new();
+
+        let config = ProcessConfig {
+            id: "exit-zero-test".to_string(),
+            command: "true".to_string(),
+            args: vec![],
+            cwd: None,
+            env: HashMap::new(),
+            health_check_pattern: None,
+            health_check_timeout_secs: None,
+            expected_port: None,
+            auto_restart: false,
+            max_restart_attempts: 0,
+        };
+
+        let result = manager.start(config).await;
+        // Even exit code 0 means the process didn't stay running, which is
+        // a failure for a background process manager.
+        assert!(
+            result.is_err(),
+            "start() should return Err when process exits immediately even with code 0"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("exited immediately"),
+            "Error should mention immediate exit. Got: {}",
+            err_msg
+        );
     }
 }

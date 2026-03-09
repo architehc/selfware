@@ -309,6 +309,75 @@ enum Commands {
     },
 }
 
+/// Resolve the config file path relative to the original working directory.
+///
+/// When `-C <dir>` is used, the process changes its cwd *after* this function
+/// runs.  That way an explicit `--config my.toml` or the implicit
+/// `selfware.toml` default are always resolved against the directory the user
+/// was in when they invoked the command.
+///
+/// Rules:
+/// 1. Explicit `--config` path → expand `~`, then absolutify against `original_cwd`.
+/// 2. No `--config` but `-C` is active → check `original_cwd/selfware.toml`.
+///    If it exists, return its absolute path.  Otherwise return `None` so that
+///    `Config::load` does its normal search (in the new cwd + home dir).
+/// 3. Neither flag → return `None` (normal search).
+fn resolve_config_path(
+    config_flag: Option<&str>,
+    has_workdir: bool,
+    original_cwd: Option<&std::path::Path>,
+) -> Option<String> {
+    if let Some(p) = config_flag {
+        // Expand ~ to home directory
+        let expanded = if let Some(rest) = p.strip_prefix("~/") {
+            match dirs::home_dir() {
+                Some(home) => home.join(rest).to_string_lossy().to_string(),
+                None => {
+                    warn!(
+                        "Could not resolve home directory for config path '{}'; using raw value",
+                        p
+                    );
+                    p.to_string()
+                }
+            }
+        } else {
+            p.to_string()
+        };
+
+        // Make relative paths absolute against the original cwd
+        Some(if std::path::Path::new(&expanded).is_absolute() {
+            expanded
+        } else if let Some(cwd) = original_cwd {
+            cwd.join(&expanded).to_string_lossy().to_string()
+        } else {
+            warn!(
+                "Could not resolve current directory for config path '{}'; using raw value",
+                expanded
+            );
+            expanded
+        })
+    } else if has_workdir {
+        // No explicit --config but -C is being used: check for selfware.toml
+        // in the ORIGINAL directory first.  If found, pass its absolute path so
+        // Config::load doesn't accidentally pick up a different file in the -C
+        // target directory.
+        if let Some(cwd) = original_cwd {
+            let candidate = cwd.join("selfware.toml");
+            if candidate.is_file() {
+                Some(candidate.to_string_lossy().to_string())
+            } else {
+                // Not in original dir — let Config::load do its normal search
+                // (which will look in the -C directory and ~/.config/selfware/).
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
 pub async fn run() -> Result<()> {
     // Initialize telemetry
     init_tracing();
@@ -325,7 +394,21 @@ pub async fn run() -> Result<()> {
         crate::ui::style::set_ascii_mode(true);
     }
 
-    // Change to working directory FIRST (before resolving relative paths)
+    // Capture the original working directory BEFORE -C changes it.
+    // This is needed so that config file paths (both explicit and default
+    // "selfware.toml") are resolved relative to where the user invoked the
+    // command, not relative to the -C target directory.
+    let original_cwd = std::env::current_dir().ok();
+
+    // Resolve config path BEFORE changing directories so that relative paths
+    // (including the implicit "selfware.toml") resolve against the original cwd.
+    let config_path = resolve_config_path(
+        cli.config.as_deref(),
+        cli.workdir.is_some(),
+        original_cwd.as_deref(),
+    );
+
+    // Change to working directory
     if let Some(ref workdir) = cli.workdir {
         std::env::set_current_dir(workdir)
             .map_err(|e| anyhow::anyhow!("Cannot enter garden '{}': {}", workdir, e))?;
@@ -338,40 +421,6 @@ pub async fn run() -> Result<()> {
             );
         }
     }
-
-    // Resolve config path (after -C so relative paths work correctly)
-    let config_path: Option<String> = cli.config.map(|p| {
-        // Expand ~ to home directory
-        let expanded = if let Some(rest) = p.strip_prefix("~/") {
-            match dirs::home_dir() {
-                Some(home) => home.join(rest).to_string_lossy().to_string(),
-                None => {
-                    warn!(
-                        "Could not resolve home directory for config path '{}'; using raw value",
-                        p
-                    );
-                    p.clone()
-                }
-            }
-        } else {
-            p.clone()
-        };
-
-        // Resolve relative paths
-        if std::path::Path::new(&expanded).is_absolute() {
-            expanded
-        } else {
-            std::env::current_dir()
-                .map(|cwd| cwd.join(&expanded).to_string_lossy().to_string())
-                .unwrap_or_else(|err| {
-                    warn!(
-                        "Could not resolve current directory for config path '{}': {}",
-                        expanded, err
-                    );
-                    expanded
-                })
-        }
-    });
 
     let mut config = Config::load(config_path.as_deref())?;
 
@@ -1756,5 +1805,83 @@ mod tests {
         let cli = Cli::try_parse_from(["selfware"]).unwrap();
         // No subcommand → defaults to Chat { yolo: false }
         assert!(cli.command.is_none());
+    }
+
+    // ── resolve_config_path tests ──
+
+    #[test]
+    fn resolve_config_path_no_flags_returns_none() {
+        // No --config, no -C → None (Config::load does normal search)
+        let result = resolve_config_path(None, false, Some(Path::new("/home/user/project")));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn resolve_config_path_explicit_absolute_config() {
+        // --config /etc/selfware.toml → returned as-is regardless of cwd or -C
+        let result = resolve_config_path(
+            Some("/etc/selfware.toml"),
+            false,
+            Some(Path::new("/home/user/project")),
+        );
+        assert_eq!(result.as_deref(), Some("/etc/selfware.toml"));
+    }
+
+    #[test]
+    fn resolve_config_path_explicit_relative_config_uses_original_cwd() {
+        // --config my.toml with original cwd → absolutified against original cwd
+        let result = resolve_config_path(
+            Some("my.toml"),
+            false,
+            Some(Path::new("/home/user/project")),
+        );
+        assert_eq!(result.as_deref(), Some("/home/user/project/my.toml"));
+    }
+
+    #[test]
+    fn resolve_config_path_explicit_relative_config_with_workdir_uses_original_cwd() {
+        // --config my.toml -C /other/dir → absolutified against ORIGINAL cwd, not /other/dir
+        let result = resolve_config_path(
+            Some("my.toml"),
+            true,
+            Some(Path::new("/home/user/project")),
+        );
+        assert_eq!(result.as_deref(), Some("/home/user/project/my.toml"));
+    }
+
+    #[test]
+    fn resolve_config_path_workdir_without_config_checks_original_cwd() {
+        // -C /other/dir (no --config) → checks for selfware.toml in original cwd
+        let tmp = tempfile::tempdir().unwrap();
+        let config_file = tmp.path().join("selfware.toml");
+        std::fs::write(&config_file, "[model]\nname = \"test\"\n").unwrap();
+
+        let result = resolve_config_path(None, true, Some(tmp.path()));
+        assert_eq!(
+            result.as_deref(),
+            Some(config_file.to_str().unwrap()),
+            "should find selfware.toml in original cwd when -C is used"
+        );
+    }
+
+    #[test]
+    fn resolve_config_path_workdir_without_config_no_selfware_toml_returns_none() {
+        // -C /other/dir (no --config), no selfware.toml in original cwd → None
+        let tmp = tempfile::tempdir().unwrap();
+        // Don't create selfware.toml
+
+        let result = resolve_config_path(None, true, Some(tmp.path()));
+        assert!(
+            result.is_none(),
+            "should return None when no selfware.toml in original cwd"
+        );
+    }
+
+    #[test]
+    fn resolve_config_path_no_original_cwd_falls_back_gracefully() {
+        // Edge case: original_cwd is None (couldn't be determined)
+        let result = resolve_config_path(Some("my.toml"), true, None);
+        // Should still return the path, just not absolutified
+        assert_eq!(result.as_deref(), Some("my.toml"));
     }
 }
