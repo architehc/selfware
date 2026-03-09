@@ -12,6 +12,7 @@ pub mod loading_phrases;
 pub mod mascot;
 pub mod spinner;
 pub mod style;
+pub mod task_display;
 pub mod theme;
 
 // TUI and demo modules
