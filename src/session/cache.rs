@@ -23,8 +23,6 @@
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
 
-#![allow(dead_code, unused_imports, unused_variables)]
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
@@ -76,6 +74,7 @@ impl ToolCache {
     }
 
     /// Create a cache with custom TTL
+    #[allow(dead_code)]
     pub fn with_ttl(ttl: Duration) -> Self {
         Self {
             entries: RwLock::new(HashMap::new()),
@@ -173,6 +172,7 @@ impl ToolCache {
     }
 
     /// Invalidate a specific cache entry
+    #[allow(dead_code)]
     pub fn invalidate(&self, tool_name: &str, args: &Value) {
         let key = Self::cache_key(tool_name, args);
         let mut entries = self.entries.write().unwrap_or_else(|poisoned| {
@@ -183,6 +183,7 @@ impl ToolCache {
     }
 
     /// Invalidate all entries for a specific tool
+    #[allow(dead_code)]
     pub fn invalidate_tool(&self, tool_name: &str) {
         let prefix = format!("{}:", tool_name);
         if let Ok(mut entries) = self.entries.write() {
@@ -456,6 +457,71 @@ mod tests {
         assert_eq!(stats.max_entries, 1000);
         assert_eq!(stats.default_ttl_secs, 300); // 5 minutes default
     }
+
+    #[test]
+    fn test_cache_hit_for_file_read() {
+        let cache = ToolCache::new();
+        let args = serde_json::json!({"path": "/tmp/selfware_test_cache_hit.txt"});
+        let value = serde_json::json!({"content": "hello world", "lines": 1});
+
+        // Store in cache
+        cache.set("file_read", &args, value.clone());
+
+        // Verify cache hit returns the same value
+        let hit = cache.get("file_read", &args);
+        assert!(hit.is_some(), "Expected cache hit for file_read");
+        assert_eq!(hit.unwrap(), value);
+
+        // Second hit should also work
+        let hit2 = cache.get("file_read", &args);
+        assert!(hit2.is_some(), "Expected second cache hit for file_read");
+        assert_eq!(hit2.unwrap(), value);
+    }
+
+    #[test]
+    fn test_cache_invalidation_on_file_write() {
+        let cache = ToolCache::new();
+        let path = "/tmp/selfware_test_invalidate.txt";
+
+        // Pre-populate cache with file_read and grep_search entries for the path
+        cache.set(
+            "file_read",
+            &serde_json::json!({"path": path}),
+            serde_json::json!({"content": "original"}),
+        );
+        cache.set(
+            "grep_search",
+            &serde_json::json!({"pattern": "foo", "path": path}),
+            serde_json::json!({"matches": []}),
+        );
+
+        // Verify both are cached
+        assert!(cache.get("file_read", &serde_json::json!({"path": path})).is_some());
+        assert!(
+            cache
+                .get("grep_search", &serde_json::json!({"pattern": "foo", "path": path}))
+                .is_some()
+        );
+
+        // Simulate a file_write invalidation by calling invalidate_path
+        assert!(
+            invalidates_cache("file_write"),
+            "file_write should invalidate cache"
+        );
+        cache.invalidate_path(path);
+
+        // Verify both entries are now gone
+        assert!(
+            cache.get("file_read", &serde_json::json!({"path": path})).is_none(),
+            "file_read cache should be invalidated after file_write"
+        );
+        assert!(
+            cache
+                .get("grep_search", &serde_json::json!({"pattern": "foo", "path": path}))
+                .is_none(),
+            "grep_search cache should be invalidated after file_write"
+        );
+    }
 }
 
 // ============================================================================
@@ -464,6 +530,7 @@ mod tests {
 
 /// Configuration for LLM response caching
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct LlmCacheConfig {
     /// Enable semantic similarity matching
     pub semantic_matching: bool,
@@ -497,6 +564,7 @@ impl Default for LlmCacheConfig {
 
 /// A cached LLM response
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct LlmCacheEntry {
     /// Unique identifier
     pub id: String,
@@ -522,6 +590,7 @@ pub struct LlmCacheEntry {
     pub file_paths: Vec<String>,
 }
 
+#[allow(dead_code)]
 impl LlmCacheEntry {
     /// Calculate the estimated cost of this response
     pub fn estimated_cost(&self, config: &LlmCacheConfig) -> f64 {
@@ -541,6 +610,7 @@ impl LlmCacheEntry {
 }
 
 /// LLM response cache with semantic similarity matching
+#[allow(dead_code)]
 pub struct LlmCache {
     config: LlmCacheConfig,
     entries: RwLock<HashMap<String, LlmCacheEntry>>,
@@ -550,6 +620,7 @@ pub struct LlmCache {
     invalidator: Arc<CacheInvalidator>,
 }
 
+#[allow(dead_code)]
 impl LlmCache {
     /// Create a new LLM cache
     pub fn new(config: LlmCacheConfig) -> Self {
@@ -758,6 +829,7 @@ impl Default for LlmCache {
 // ============================================================================
 
 /// L2-normalize a vector in place.  Zero vectors are left unchanged.
+#[allow(dead_code)]
 fn l2_normalize(v: &mut [f32]) {
     let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 0.0 {
@@ -771,6 +843,7 @@ fn l2_normalize(v: &mut [f32]) {
 ///
 /// When both inputs are already L2-normalized (as stored embeddings are),
 /// this reduces to a simple dot product without any sqrt.
+#[allow(dead_code)]
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
@@ -780,6 +853,7 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Semantic matcher for prompt similarity
+#[allow(dead_code)]
 pub struct SemanticMatcher {
     /// Similarity threshold for matching
     threshold: f32,
@@ -787,6 +861,7 @@ pub struct SemanticMatcher {
     embeddings: RwLock<Vec<(String, Vec<f32>)>>,
 }
 
+#[allow(dead_code)]
 impl SemanticMatcher {
     /// Create a new semantic matcher
     pub fn new(threshold: f32) -> Self {
@@ -856,6 +931,7 @@ impl Default for SemanticMatcher {
 // ============================================================================
 
 /// Tracks API cost savings from cache hits
+#[allow(dead_code)]
 pub struct CostTracker {
     /// Total savings from cache hits (in dollars)
     total_savings: AtomicU64, // Stored as microdollars (1/1,000,000)
@@ -869,6 +945,7 @@ pub struct CostTracker {
 
 /// A cost savings record
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct CostRecord {
     /// Timestamp (Unix seconds)
     pub timestamp: u64,
@@ -878,6 +955,7 @@ pub struct CostRecord {
     pub cumulative: f64,
 }
 
+#[allow(dead_code)]
 impl CostTracker {
     /// Create a new cost tracker
     pub fn new() -> Self {
@@ -994,6 +1072,7 @@ impl Default for CostTracker {
 
 /// Cost tracking summary
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct CostSummary {
     pub total_savings: f64,
     pub hits_with_savings: u64,
@@ -1006,6 +1085,7 @@ pub struct CostSummary {
 // ============================================================================
 
 /// Tracks cache performance analytics
+#[allow(dead_code)]
 pub struct CacheAnalytics {
     /// Total requests
     requests: AtomicU64,
@@ -1021,6 +1101,7 @@ pub struct CacheAnalytics {
 
 /// A hit rate record for trending
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct HitRateRecord {
     /// Timestamp (Unix seconds)
     pub timestamp: u64,
@@ -1030,6 +1111,7 @@ pub struct HitRateRecord {
     pub total_requests: u64,
 }
 
+#[allow(dead_code)]
 impl CacheAnalytics {
     /// Create new analytics tracker
     pub fn new() -> Self {
@@ -1202,6 +1284,7 @@ impl Default for CacheAnalytics {
 
 /// Analytics summary
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct AnalyticsSummary {
     pub total_requests: u64,
     pub hits: u64,
@@ -1212,6 +1295,7 @@ pub struct AnalyticsSummary {
 
 /// Optimization suggestion
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct OptimizationSuggestion {
     pub category: String,
     pub message: String,
@@ -1220,6 +1304,7 @@ pub struct OptimizationSuggestion {
 
 /// Priority level for optimization suggestions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub enum OptimizationPriority {
     Low,
     Medium,
@@ -1231,9 +1316,11 @@ pub enum OptimizationPriority {
 // ============================================================================
 
 /// Maximum number of tracked file paths in the cache invalidator.
+#[allow(dead_code)]
 const MAX_INVALIDATOR_PATHS: usize = 5_000;
 
 /// Context-aware cache invalidator
+#[allow(dead_code)]
 pub struct CacheInvalidator {
     /// File path to cache entry IDs mapping
     path_to_entries: RwLock<HashMap<String, Vec<String>>>,
@@ -1243,6 +1330,7 @@ pub struct CacheInvalidator {
     file_mtimes: RwLock<HashMap<String, u64>>,
 }
 
+#[allow(dead_code)]
 impl CacheInvalidator {
     /// Create a new invalidator
     pub fn new() -> Self {
@@ -1382,6 +1470,7 @@ impl Default for CacheInvalidator {
 // ============================================================================
 
 /// Unified cache manager combining tool and LLM caches
+#[allow(dead_code)]
 pub struct CacheManager {
     /// Tool result cache (exact matching)
     pub tool_cache: ToolCache,
@@ -1391,6 +1480,7 @@ pub struct CacheManager {
     cost_tracker: Arc<CostTracker>,
 }
 
+#[allow(dead_code)]
 impl CacheManager {
     /// Create a new cache manager
     pub fn new(llm_config: LlmCacheConfig) -> Self {
@@ -1440,6 +1530,7 @@ impl Default for CacheManager {
 
 /// Combined cache manager statistics
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CacheManagerStats {
     pub tool_cache: CacheStats,
     pub llm_analytics: AnalyticsSummary,

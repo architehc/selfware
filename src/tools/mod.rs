@@ -25,6 +25,7 @@ pub mod computer;
 pub mod swarm_tool;
 pub mod lsp_tools;
 pub mod vision;
+pub mod page_controller;
 
 use browser::{BrowserEval, BrowserFetch, BrowserLinks, BrowserPdf, BrowserScreenshot};
 use cargo::{CargoCheck, CargoClippy, CargoFmt, CargoTest};
@@ -46,6 +47,7 @@ use search::{GlobFind, GrepSearch, SymbolSearch};
 use shell::ShellExec;
 use pty_shell::PtyShellTool;
 use vision::{VisionAnalyze, VisionCompare};
+use page_controller::PageControlTool;
 
 /// Pagination metadata for truncated tool output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,6 +181,9 @@ impl ToolRegistry {
         registry.register(BrowserPdf);
         registry.register(BrowserEval);
         registry.register(BrowserLinks);
+
+        // Playwright page controller (full browser automation)
+        registry.register(PageControlTool::new());
 
         // Knowledge graph
         registry.register(KnowledgeAdd);

@@ -173,6 +173,10 @@ pub struct Agent {
     audit_logger: Option<crate::safety::audit::AuditLogger>,
     /// Permission store for pre-authorized tool grants
     permission_store: crate::safety::permissions::PermissionStore,
+    /// Tool result cache for read-only operations
+    tool_cache: crate::session::cache::ToolCache,
+    /// Local-first coordinator for response caching and offline support
+    local_first: crate::session::local_first::LocalFirstCoordinator,
 }
 
 impl Agent {
@@ -479,6 +483,8 @@ To call a tool, use this EXACT XML structure:
             plan_mode,
             audit_logger,
             permission_store,
+            tool_cache: crate::session::cache::ToolCache::new(),
+            local_first: crate::session::local_first::LocalFirstCoordinator::new(),
         })
     }
 

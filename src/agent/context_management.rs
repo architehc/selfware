@@ -963,6 +963,53 @@ impl Agent {
             "  {}│{}                                                                    {}│{}",
             patina, reset, patina, reset
         );
+        // Tool cache stats
+        let tc_stats = self.tool_cache.stats();
+        println!(
+            "  {}│{}  {bold}{}◇ TOOL CACHE{}{:<44}    {}│{}",
+            patina, reset, sand, reset, "", patina, reset
+        );
+        println!(
+            "  {}│{}     Entries         {:>8} / {:<8}                          {}│{}",
+            patina, reset, tc_stats.entries, tc_stats.max_entries, patina, reset
+        );
+        println!(
+            "  {}│{}     TTL             {:>8}s                                   {}│{}",
+            patina, reset, tc_stats.default_ttl_secs, patina, reset
+        );
+        println!(
+            "  {}│{}                                                                    {}│{}",
+            patina, reset, patina, reset
+        );
+
+        // Local-first coordinator stats
+        let lf_stats = self.local_first.stats();
+        println!(
+            "  {}│{}  {bold}{}◆ LOCAL-FIRST{}{:<43}    {}│{}",
+            patina, reset, sand, reset, "", patina, reset
+        );
+        println!(
+            "  {}│{}     Cache Entries   {:>8}  (hit rate: {:.1}%)                 {}│{}",
+            patina,
+            reset,
+            lf_stats.cache_stats.entry_count,
+            lf_stats.cache_stats.hit_rate * 100.0,
+            patina,
+            reset
+        );
+        println!(
+            "  {}│{}     Bandwidth Saved {:>8} bytes                              {}│{}",
+            patina, reset, lf_stats.bandwidth_saved_bytes, patina, reset
+        );
+        println!(
+            "  {}│{}     Status          {:>8}                                    {}│{}",
+            patina, reset, lf_stats.offline_status, patina, reset
+        );
+        println!(
+            "  {}│{}                                                                    {}│{}",
+            patina, reset, patina, reset
+        );
+
         println!(
             "  {}│{}  {bold}{}≋ MODE{}{:<50}    {}│{}",
             patina, reset, worn, reset, "", patina, reset

@@ -611,6 +611,31 @@ impl Agent {
             return Ok((false, err.clone(), err));
         };
 
+        // Check ToolCache for cacheable (read-only) tools
+        let is_cacheable = crate::session::cache::is_cacheable(name);
+        if is_cacheable {
+            if let Some(cached_value) = self.tool_cache.get(name, args) {
+                let elapsed = start_time.elapsed().as_millis() as u64;
+                let result_str = serde_json::to_string(&cached_value)?;
+                let summary =
+                    output::semantic_summary(name, args, Some(&result_str), true, elapsed);
+                self.log_tool_call(name, args_str, &result_str, true, start_time, true);
+                debug!("Cache hit for tool '{}' ({}ms)", name, elapsed);
+                return Ok((true, result_str, summary));
+            }
+        }
+
+        // Invalidate cache entries when a mutating tool targets a specific path
+        if crate::session::cache::invalidates_cache(name) {
+            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                self.tool_cache.invalidate_path(path);
+            }
+            // shell_exec and git operations can affect any file — clear all read caches
+            if matches!(name, "shell_exec" | "git_commit" | "git_checkout") {
+                self.tool_cache.clear();
+            }
+        }
+
         // Snapshot file before edit/write for undo support.
         // Use tokio::fs to avoid blocking the async runtime thread.
         if matches!(name, "file_edit" | "file_write" | "file_delete") {
@@ -642,6 +667,17 @@ impl Agent {
                 let summary =
                     output::semantic_summary(name, args, Some(&result_str), true, elapsed);
                 self.log_tool_call(name, args_str, &result_str, true, start_time, true);
+
+                // Store successful cacheable results in ToolCache
+                if is_cacheable {
+                    self.tool_cache.set(name, args, result.clone());
+                }
+
+                // Cache tool results in LocalFirstCoordinator
+                let cache_key =
+                    crate::session::cache::ToolCache::cache_key(name, args);
+                self.local_first
+                    .cache_response(&cache_key, result_str.clone(), result_str.len());
 
                 // Record successful tool usage for learning
                 self.self_improvement.record_tool(

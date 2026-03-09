@@ -273,6 +273,9 @@ enum Commands {
         dry_run: bool,
     },
 
+    /// Run as MCP server (stdio transport) so other AI tools can use Selfware's capabilities
+    McpServer,
+
     /// Start selfware in LSP server mode (for editor extensions)
     Lsp,
 
@@ -1176,6 +1179,10 @@ async fn handle_command(
                 println!("      {} {} ({:?})", status_icon, id, step_result.status);
             }
             println!();
+        }
+
+        Commands::McpServer => {
+            crate::mcp::server::run_mcp_server().await?;
         }
 
         Commands::Lsp => {

@@ -3,8 +3,6 @@
 //! Minimize network usage through aggressive caching, offline capabilities,
 //! edge computing patterns, and sync efficiency.
 
-#![allow(dead_code, unused_imports, unused_variables)]
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Atomic counter for unique IDs
 static CACHE_ENTRY_COUNTER: AtomicU64 = AtomicU64::new(0);
+#[allow(dead_code)]
 static SYNC_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Generate unique cache entry ID
@@ -23,6 +22,7 @@ fn generate_cache_id() -> String {
 }
 
 /// Generate unique sync ID
+#[allow(dead_code)]
 fn generate_sync_id() -> String {
     format!("sync-{}", SYNC_ID_COUNTER.fetch_add(1, Ordering::SeqCst))
 }
@@ -37,6 +37,7 @@ fn current_timestamp() -> u64 {
 
 /// Cache priority level
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[allow(dead_code)]
 pub enum CachePriority {
     /// Low priority - can be evicted first
     Low,
@@ -61,6 +62,7 @@ impl std::fmt::Display for CachePriority {
 
 /// Cache eviction policy
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum EvictionPolicy {
     /// Least Recently Used
     Lru,
@@ -88,6 +90,7 @@ impl std::fmt::Display for EvictionPolicy {
 
 /// A cached entry
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CacheEntry<T> {
     /// Unique identifier
     pub id: String,
@@ -111,6 +114,7 @@ pub struct CacheEntry<T> {
     pub tags: Vec<String>,
 }
 
+#[allow(dead_code)]
 impl<T> CacheEntry<T> {
     /// Create a new cache entry
     pub fn new(key: impl Into<String>, value: T) -> Self {
@@ -199,6 +203,7 @@ impl<T: Clone> Default for LocalCache<T> {
     }
 }
 
+#[allow(dead_code)]
 impl<T: Clone> LocalCache<T> {
     /// Create a new cache
     pub fn new() -> Self {
@@ -396,6 +401,7 @@ impl<T: Clone> LocalCache<T> {
 
 /// Cache statistics
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct CacheStats {
     /// Number of entries
     pub entry_count: usize,
@@ -415,6 +421,7 @@ pub struct CacheStats {
 
 /// Offline mode status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum OfflineStatus {
     /// Online - full connectivity
     Online,
@@ -436,6 +443,7 @@ impl std::fmt::Display for OfflineStatus {
 
 /// Offline capability manager
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct OfflineManager {
     /// Current status
     status: OfflineStatus,
@@ -455,6 +463,7 @@ impl Default for OfflineManager {
     }
 }
 
+#[allow(dead_code)]
 impl OfflineManager {
     /// Create new offline manager
     pub fn new() -> Self {
@@ -539,6 +548,7 @@ impl OfflineManager {
 
 /// A pending operation to sync
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PendingOperation {
     /// Unique identifier
     pub id: String,
@@ -556,6 +566,7 @@ pub struct PendingOperation {
     pub priority: u8,
 }
 
+#[allow(dead_code)]
 impl PendingOperation {
     /// Create a new pending operation
     pub fn new(op_type: OperationType, payload: impl Into<String>) -> Self {
@@ -595,6 +606,7 @@ impl PendingOperation {
 
 /// Operation type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 pub enum OperationType {
     /// Create operation
     Create,
@@ -625,6 +637,7 @@ impl std::fmt::Display for OperationType {
 
 /// Sync strategy
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum SyncStrategy {
     /// Client wins on conflict
     ClientWins,
@@ -652,6 +665,7 @@ impl std::fmt::Display for SyncStrategy {
 
 /// Sync manager for efficient synchronization
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct SyncManager {
     /// Sync strategy
     strategy: SyncStrategy,
@@ -673,6 +687,7 @@ impl Default for SyncManager {
     }
 }
 
+#[allow(dead_code)]
 impl SyncManager {
     /// Create new sync manager
     pub fn new() -> Self {
@@ -767,6 +782,7 @@ impl SyncManager {
 
 /// A sync conflict
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SyncConflict {
     /// Conflict ID
     pub id: String,
@@ -784,6 +800,7 @@ pub struct SyncConflict {
     pub resolution: Option<ConflictResolution>,
 }
 
+#[allow(dead_code)]
 impl SyncConflict {
     /// Create new conflict
     pub fn new(resource_id: impl Into<String>) -> Self {
@@ -815,6 +832,7 @@ impl SyncConflict {
 
 /// Conflict resolution
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ConflictResolution {
     /// Accept local version
     AcceptLocal,
@@ -839,6 +857,7 @@ impl std::fmt::Display for ConflictResolution {
 
 /// Edge computing task
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct EdgeTask {
     /// Task ID
     pub id: String,
@@ -856,6 +875,7 @@ pub struct EdgeTask {
     pub completed_at: Option<u64>,
 }
 
+#[allow(dead_code)]
 impl EdgeTask {
     /// Create new edge task
     pub fn new(task_type: EdgeTaskType, input: impl Into<String>) -> Self {
@@ -887,6 +907,7 @@ impl EdgeTask {
 
 /// Edge task type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum EdgeTaskType {
     /// Text processing
     TextProcessing,
@@ -920,6 +941,7 @@ impl std::fmt::Display for EdgeTaskType {
 
 /// Task status
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum TaskStatus {
     /// Pending
     Pending,
@@ -944,6 +966,7 @@ impl std::fmt::Display for TaskStatus {
 
 /// Local-first coordinator
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct LocalFirstCoordinator {
     /// Cache for responses
     response_cache: LocalCache<String>,
@@ -963,6 +986,7 @@ impl Default for LocalFirstCoordinator {
     }
 }
 
+#[allow(dead_code)]
 impl LocalFirstCoordinator {
     /// Create new coordinator
     pub fn new() -> Self {
@@ -1051,6 +1075,7 @@ impl LocalFirstCoordinator {
 
 /// Local-first statistics
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct LocalFirstStats {
     /// Cache statistics
     pub cache_stats: CacheStats,
@@ -2525,5 +2550,21 @@ mod tests {
         // Come back online
         coord.offline().set_status(OfflineStatus::Online);
         assert_eq!(coord.stats().offline_status, OfflineStatus::Online);
+    }
+
+    #[test]
+    fn test_local_first_coordinator_init_no_panic() {
+        // Verify both new() and Default::default() initialize without panic
+        let coord_new = LocalFirstCoordinator::new();
+        let coord_default = LocalFirstCoordinator::default();
+
+        // Both should have the same initial state
+        let stats_new = coord_new.stats();
+        let stats_default = coord_default.stats();
+
+        assert_eq!(stats_new.cache_stats.entry_count, 0);
+        assert_eq!(stats_default.cache_stats.entry_count, 0);
+        assert_eq!(stats_new.bandwidth_saved_bytes, 0);
+        assert_eq!(stats_default.bandwidth_saved_bytes, 0);
     }
 }

@@ -12,5 +12,4 @@ pub mod edit_history;
 pub mod encryption;
 pub mod local_first;
 
-#[cfg(feature = "cache")]
 pub mod cache;

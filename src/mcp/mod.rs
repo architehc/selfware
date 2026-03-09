@@ -9,6 +9,7 @@
 
 pub mod client;
 pub mod discovery;
+pub mod server;
 pub mod tool_bridge;
 pub mod transport;
 
