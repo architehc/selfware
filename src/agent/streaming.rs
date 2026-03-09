@@ -107,14 +107,11 @@ impl Agent {
             mode_label,
             &self.config.model,
         );
-        // Sticky status bar — disable with SELFWARE_STICKY_BAR=0
-        let sticky = if self.is_interactive()
-            && !std::env::var("SELFWARE_STICKY_BAR").map_or(false, |v| v == "0")
-        {
-            crate::ui::sticky_bar::StickyBar::activate(sticky_state.clone())
-        } else {
-            None
-        };
+        // Sticky bar is tracked for state (tokens, activity, bash count) but
+        // NOT rendered during streaming — cursor positioning breaks with raw
+        // stdout output. The state is used for the post-task summary line.
+        let sticky: Option<crate::ui::sticky_bar::StickyBar> = None;
+        let _ = &sticky_state; // state is still updated by streaming handlers
 
         // Start loading spinner with a random phrase while waiting for first token
         let mut spinner = Some(crate::ui::spinner::TerminalSpinner::start(
@@ -154,13 +151,10 @@ impl Agent {
                 }
             }
 
-            // Refresh sticky bar every 500ms
-            if let Some(ref bar) = sticky {
-                if last_bar_update.elapsed() > tokio::time::Duration::from_millis(500) {
-                    bar.update();
-                    last_bar_update = tokio::time::Instant::now();
-                }
-            }
+            // NOTE: Do not call bar.update() during streaming — cursor
+            // save/restore doesn't work reliably while stdout is actively
+            // printing content and causes the bar to spam every line.
+            // The bar is shown once at the end via bar.finish().
 
             match chunk {
                 StreamChunk::Content(text) => {
@@ -296,6 +290,27 @@ impl Agent {
         // Ensure we end with a newline if we printed content
         if !content.is_empty() || !reasoning.is_empty() {
             println!();
+        }
+
+        // Print post-generation summary (like Claude Code's top bar)
+        {
+            use crate::ui::sticky_bar::{active_bash_count, fmt_elapsed, fmt_tokens};
+            let elapsed = fmt_elapsed(sticky_state.started.elapsed());
+            let tokens = fmt_tokens(sticky_state.tokens.load(std::sync::atomic::Ordering::Relaxed));
+            let think_secs = sticky_state.thinking_secs.load(std::sync::atomic::Ordering::Relaxed);
+
+            let mut parts = vec![elapsed, format!("↓ {} tokens", tokens)];
+            if think_secs > 0 {
+                parts.push(format!("thought for {}s", think_secs));
+            }
+            let bash = active_bash_count();
+            if bash > 0 {
+                parts.push(format!("{} bash", bash));
+            }
+            eprintln!("\x1b[90m  ✱ {} · {}\x1b[0m",
+                sticky_state.activity.lock().map(|a| a.clone()).unwrap_or_default(),
+                parts.join(" · "),
+            );
         }
 
         Ok((

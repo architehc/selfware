@@ -114,7 +114,7 @@ impl StickyState {
 }
 
 /// Format a duration as "Xs" / "Xm Xs" / "Xh Xm"
-fn fmt_elapsed(d: std::time::Duration) -> String {
+pub fn fmt_elapsed(d: std::time::Duration) -> String {
     let secs = d.as_secs();
     if secs < 60 {
         format!("{}s", secs)
@@ -126,7 +126,7 @@ fn fmt_elapsed(d: std::time::Duration) -> String {
 }
 
 /// Format token count compactly: 1.2k, 45.3k, 1.2M
-fn fmt_tokens(n: u64) -> String {
+pub fn fmt_tokens(n: u64) -> String {
     if n >= 1_000_000 {
         format!("{:.1}M", n as f64 / 1_000_000.0)
     } else if n >= 1_000 {
