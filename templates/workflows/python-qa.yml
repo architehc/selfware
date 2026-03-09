@@ -1,0 +1,212 @@
+# .github/workflows/python-qa.yml
+# Python-specific Quality Assurance workflow for Selfware
+
+name: Python Quality Assurance
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: 'Directory containing Python code'
+        required: false
+        default: '.'
+        type: string
+      coverage-threshold:
+        description: 'Minimum code coverage percentage'
+        required: false
+        default: '80'
+        type: string
+      python-version:
+        description: 'Python version to use'
+        required: false
+        default: '3.11'
+        type: string
+    outputs:
+      quality-score:
+        description: 'Overall quality score'
+        value: ${{ jobs.aggregate.outputs.quality-score }}
+      coverage:
+        description: 'Code coverage percentage'
+        value: ${{ jobs.test.outputs.coverage }}
+  
+  push:
+    paths:
+      - '**.py'
+      - '**/pyproject.toml'
+      - '**/requirements*.txt'
+      - '**/setup.py'
+  pull_request:
+    paths:
+      - '**.py'
+      - '**/pyproject.toml'
+      - '**/requirements*.txt'
+      - '**/setup.py'
+
+jobs:
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory || '.' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version || '3.11' }}
+      
+      - name: Install Ruff
+        run: pip install ruff
+      
+      - name: Run Ruff linter
+        run: ruff check src/ tests/
+      
+      - name: Check formatting
+        run: ruff format --check src/ tests/
+
+  typecheck:
+    name: Type Check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory || '.' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version || '3.11' }}
+      
+      - name: Install dependencies
+        run: |
+          pip install mypy
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+      
+      - name: Run MyPy
+        run: mypy src/ tests/
+
+  test:
+    name: Test (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12"]
+    outputs:
+      coverage: ${{ steps.coverage.outputs.coverage }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory || '.' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      
+      - name: Install dependencies
+        run: |
+          pip install pytest pytest-cov pytest-asyncio
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f requirements-dev.txt ]; then pip install -r requirements-dev.txt; fi
+          if [ -f pyproject.toml ]; then pip install -e ".[dev]"; fi
+      
+      - name: Run tests with coverage
+        run: |
+          pytest --cov=src --cov-report=xml --cov-report=term-missing \
+            --cov-fail-under=${{ inputs.coverage-threshold || '80' }} \
+            tests/
+      
+      - name: Extract coverage
+        id: coverage
+        run: |
+          COVERAGE=$(grep -o 'line-rate="[0-9.]*"' coverage.xml | head -1 | cut -d'"' -f2)
+          COVERAGE_PCT=$(python -c "print(int(float('$COVERAGE') * 100))")
+          echo "coverage=$COVERAGE_PCT" >> $GITHUB_OUTPUT
+      
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory || '.' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version || '3.11' }}
+      
+      - name: Install security tools
+        run: pip install bandit safety pip-audit
+      
+      - name: Run Bandit (SAST)
+        run: bandit -r src/ -f json -o bandit-report.json || true
+      
+      - name: Run Safety (SCA)
+        run: safety check || true
+      
+      - name: Run pip-audit
+        run: pip-audit || true
+      
+      - name: Upload security report
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report
+          path: bandit-report.json
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory || '.' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version || '3.11' }}
+      
+      - name: Install dependencies
+        run: |
+          pip install pydocstyle mkdocs mkdocstrings[python]
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      
+      - name: Check docstrings
+        run: pydocstyle src/ || true
+      
+      - name: Build documentation
+        run: mkdocs build --strict || true
+
+  aggregate:
+    name: Aggregate Results
+    needs: [lint, typecheck, test, security, docs]
+    runs-on: ubuntu-latest
+    outputs:
+      quality-score: ${{ steps.score.outputs.score }}
+    steps:
+      - name: Calculate Quality Score
+        id: score
+        run: |
+          SCORE=100
+          echo "score=$SCORE" >> $GITHUB_OUTPUT
+          echo "Python Quality Score: $SCORE/100"

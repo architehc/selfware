@@ -1402,31 +1402,71 @@ fn run_init_wizard(template: Option<String>) -> Result<()> {
 }
 
 fn write_template_config(template: &str) -> Result<()> {
-    let (endpoint, model, mode, allowed_paths) = match template {
-        "rust" | "python" | "node" => {
-            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-            (
-                "http://localhost:8080/v1".to_string(),
-                "qwen3-coder".to_string(),
-                "normal",
-                format!("[\"{}\"]", cwd.display()),
-            )
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+    // Scaffold project files for known language templates
+    match template {
+        "rust" | "python" | "node" | "nodejs" | "typescript" => {
+            println!("  {} Using '{}' template...", Glyphs::gear(), template);
+
+            let lang_key = match template {
+                "node" | "nodejs" | "typescript" => "nodejs",
+                other => other,
+            };
+
+            let project_name = cwd
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("my-project")
+                .to_string();
+
+            let engine = crate::templates::TemplateEngine::new();
+            let opts = crate::templates::ScaffoldOptions {
+                description: format!("A {} project scaffolded by Selfware", template),
+                framework: None,
+                with_ci: true,
+                with_tests: true,
+                qa_profile: "standard".into(),
+            };
+
+            match engine.scaffold_project(lang_key, &project_name, &cwd, &opts) {
+                Ok(files) => {
+                    println!("  {} Scaffolded {} files:", Glyphs::bloom(), files.len());
+                    for f in &files {
+                        println!("    {}", f);
+                    }
+                }
+                Err(e) => {
+                    println!("  {} Could not scaffold project: {}", Glyphs::frost(), e);
+                }
+            }
         }
-        "minimal" => (
+        "minimal" => {
+            println!("  {} Using 'minimal' template...", Glyphs::gear());
+        }
+        other => {
+            anyhow::bail!(
+                "Unknown template '{}'. Available templates: rust, python, node, nodejs, typescript, minimal",
+                other
+            );
+        }
+    }
+
+    let (endpoint, model, mode, allowed_paths) = match template {
+        "rust" | "python" | "node" | "nodejs" | "typescript" => (
+            "http://localhost:8080/v1".to_string(),
+            "qwen3-coder".to_string(),
+            "normal",
+            format!("[\"{}\"]", cwd.display()),
+        ),
+        _ => (
             "http://localhost:8080/v1".to_string(),
             "qwen3-coder".to_string(),
             "normal",
             "[\".\"]".to_string(),
         ),
-        other => {
-            anyhow::bail!(
-                "Unknown template '{}'. Available templates: rust, python, node, minimal",
-                other
-            );
-        }
     };
 
-    println!("  {} Using '{}' template...", Glyphs::gear(), template);
     write_config_file(&endpoint, &model, mode, &allowed_paths)
 }
 

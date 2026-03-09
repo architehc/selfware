@@ -1,0 +1,170 @@
+# Python Project Template for Selfware Agentic Generation
+# Copy this template when generating new Python projects
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "{{project_name}}"
+version = "0.1.0"
+description = "{{project_description}}"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Selfware Agent", email = "agent@selfware.local"}
+]
+keywords = ["{{keywords}}"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    # Add runtime dependencies here
+]
+
+[project.optional-dependencies]
+dev = [
+    # Testing
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "pytest-asyncio>=0.23",
+    "pytest-xdist>=3.5",
+    "hypothesis>=6.100",
+    "factory-boy>=3.3",
+    "responses>=0.25",
+    "freezegun>=1.5",
+    "moto>=5.0",
+    
+    # Linting & Formatting
+    "ruff>=0.6.0",
+    "mypy>=1.10",
+    
+    # Security
+    "bandit>=1.7",
+    "safety>=3.0",
+    "pip-audit>=2.7",
+    
+    # Documentation
+    "mkdocs>=1.6",
+    "mkdocstrings[python]>=0.25",
+    "pydocstyle>=6.3",
+    
+    # Performance
+    "pytest-benchmark>=4.0",
+    "scalene>=1.5",
+]
+
+[project.urls]
+Homepage = "{{project_url}}"
+Repository = "{{repository_url}}"
+Documentation = "{{docs_url}}"
+
+[project.scripts]
+{{project_name}} = "{{module_name}}.cli:main"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src"]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # Pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "W",    # pycodestyle warnings
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "SIM",  # flake8-simplify
+    "ARG",  # flake8-unused-arguments
+    "PTH",  # flake8-use-pathlib
+    "ERA",  # eradicate
+    "PL",   # Pylint
+]
+ignore = [
+    "E501",  # Line length handled by formatter
+    "SIM117", # Multiple with statements
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+show_error_codes = true
+show_column_numbers = true
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/test_*",
+    "*/__main__.py",
+    "*/cli.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+precision = 2
+fail_under = 80
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+skips = ["B101"]  # Skip assert warnings in non-test code
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/{{module_name}}"]

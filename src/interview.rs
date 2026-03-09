@@ -274,8 +274,10 @@ fn analyze_task(task: &str) -> TaskHints {
     // naive substring check.  We look for the pattern surrounded by
     // non-alphabetic characters (or at string boundaries).
     if !hints.mentioned_languages.contains(&"Go".to_string()) {
-        let go_re = regex::Regex::new(r"(?i)\bgo\b").unwrap();
-        if go_re.is_match(&lower) {
+        use std::sync::LazyLock;
+        static GO_WORD_RE: LazyLock<regex::Regex> =
+            LazyLock::new(|| regex::Regex::new(r"(?i)\bgo\b").expect("invalid go regex"));
+        if GO_WORD_RE.is_match(&lower) {
             hints.mentioned_languages.push("Go".to_string());
         }
     }

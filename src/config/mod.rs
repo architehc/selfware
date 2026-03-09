@@ -598,10 +598,6 @@ fn default_token_budget() -> usize {
     500000
 }
 fn default_allowed_paths() -> Vec<String> {
-    #[cfg(test)]
-    if std::env::var("SELFWARE_TEST_MODE").is_ok() {
-        return vec!["/**".to_string()];
-    }
     vec!["./**".to_string()]
 }
 fn default_denied_paths() -> Vec<String> {

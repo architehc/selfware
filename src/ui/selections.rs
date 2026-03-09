@@ -198,8 +198,13 @@ fn score_task(task: &str) -> TaskScores {
         }
     }
     // Word-boundary check for "go"
-    if regex::Regex::new(r"(?i)\bgo\b").is_ok_and(|re| re.is_match(&lower)) {
-        s.go_gin += 2.0;
+    {
+        use std::sync::LazyLock;
+        static GO_RE: LazyLock<regex::Regex> =
+            LazyLock::new(|| regex::Regex::new(r"(?i)\bgo\b").expect("invalid go regex"));
+        if GO_RE.is_match(&lower) {
+            s.go_gin += 2.0;
+        }
     }
 
     // API / web signals boost all templates, but especially Rust + Go for
@@ -344,12 +349,13 @@ fn score_task(task: &str) -> TaskScores {
         s.redis += 3.0;
     }
     // Use word-boundary check for "sql" to avoid matching "nosql".
-    let sql_word = regex::Regex::new(r"(?i)\bsql\b").ok();
-    if lower.contains("relational")
-        || sql_word.as_ref().is_some_and(|re| re.is_match(&lower))
-        || lower.contains("postgres")
     {
-        s.postgresql += 3.0;
+        use std::sync::LazyLock;
+        static SQL_RE: LazyLock<regex::Regex> =
+            LazyLock::new(|| regex::Regex::new(r"(?i)\bsql\b").expect("invalid sql regex"));
+        if lower.contains("relational") || SQL_RE.is_match(&lower) || lower.contains("postgres") {
+            s.postgresql += 3.0;
+        }
     }
 
     if !needs_db

@@ -1127,48 +1127,51 @@ impl CodeChunker {
 
     /// Extract symbol name from Rust code
     fn extract_rust_symbol(&self, content: &str, chunk_type: ChunkType) -> Option<String> {
+        use std::sync::LazyLock;
+
+        static SYM_FN_RE: LazyLock<regex::Regex> =
+            LazyLock::new(|| regex::Regex::new(r"fn\s+(\w+)").expect("invalid fn regex"));
+        static SYM_STRUCT_RE: LazyLock<regex::Regex> =
+            LazyLock::new(|| regex::Regex::new(r"struct\s+(\w+)").expect("invalid struct regex"));
+        static SYM_ENUM_RE: LazyLock<regex::Regex> =
+            LazyLock::new(|| regex::Regex::new(r"enum\s+(\w+)").expect("invalid enum regex"));
+        static SYM_TRAIT_RE: LazyLock<regex::Regex> =
+            LazyLock::new(|| regex::Regex::new(r"trait\s+(\w+)").expect("invalid trait regex"));
+        static SYM_IMPL_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+            regex::Regex::new(r"impl(?:<[^>]+>)?\s+(?:(\w+)|(?:\w+)\s+for\s+(\w+))")
+                .expect("invalid impl regex")
+        });
+        static SYM_MOD_RE: LazyLock<regex::Regex> =
+            LazyLock::new(|| regex::Regex::new(r"mod\s+(\w+)").expect("invalid mod regex"));
+
         let first_line = content.lines().next()?;
 
         match chunk_type {
-            ChunkType::Function => {
-                let re = regex::Regex::new(r"fn\s+(\w+)").ok()?;
-                re.captures(first_line)
-                    .and_then(|c| c.get(1))
+            ChunkType::Function => SYM_FN_RE
+                .captures(first_line)
+                .and_then(|c| c.get(1))
+                .map(|m| m.as_str().to_string()),
+            ChunkType::Struct => SYM_STRUCT_RE
+                .captures(first_line)
+                .and_then(|c| c.get(1))
+                .map(|m| m.as_str().to_string()),
+            ChunkType::Enum => SYM_ENUM_RE
+                .captures(first_line)
+                .and_then(|c| c.get(1))
+                .map(|m| m.as_str().to_string()),
+            ChunkType::Trait => SYM_TRAIT_RE
+                .captures(first_line)
+                .and_then(|c| c.get(1))
+                .map(|m| m.as_str().to_string()),
+            ChunkType::Impl => SYM_IMPL_RE.captures(first_line).and_then(|c| {
+                c.get(1)
+                    .or_else(|| c.get(2))
                     .map(|m| m.as_str().to_string())
-            }
-            ChunkType::Struct => {
-                let re = regex::Regex::new(r"struct\s+(\w+)").ok()?;
-                re.captures(first_line)
-                    .and_then(|c| c.get(1))
-                    .map(|m| m.as_str().to_string())
-            }
-            ChunkType::Enum => {
-                let re = regex::Regex::new(r"enum\s+(\w+)").ok()?;
-                re.captures(first_line)
-                    .and_then(|c| c.get(1))
-                    .map(|m| m.as_str().to_string())
-            }
-            ChunkType::Trait => {
-                let re = regex::Regex::new(r"trait\s+(\w+)").ok()?;
-                re.captures(first_line)
-                    .and_then(|c| c.get(1))
-                    .map(|m| m.as_str().to_string())
-            }
-            ChunkType::Impl => {
-                let re = regex::Regex::new(r"impl(?:<[^>]+>)?\s+(?:(\w+)|(?:\w+)\s+for\s+(\w+))")
-                    .ok()?;
-                re.captures(first_line).and_then(|c| {
-                    c.get(1)
-                        .or_else(|| c.get(2))
-                        .map(|m| m.as_str().to_string())
-                })
-            }
-            ChunkType::Module => {
-                let re = regex::Regex::new(r"mod\s+(\w+)").ok()?;
-                re.captures(first_line)
-                    .and_then(|c| c.get(1))
-                    .map(|m| m.as_str().to_string())
-            }
+            }),
+            ChunkType::Module => SYM_MOD_RE
+                .captures(first_line)
+                .and_then(|c| c.get(1))
+                .map(|m| m.as_str().to_string()),
             _ => None,
         }
     }
@@ -1708,6 +1711,158 @@ pub struct CollectionStats {
     pub chunk_count: usize,
     pub file_count: usize,
     pub scope: CollectionScope,
+}
+
+// ---------------------------------------------------------------------------
+// BoundedVectorStore — capacity-limited wrapper with FIFO eviction
+// ---------------------------------------------------------------------------
+
+/// Default maximum number of items across all collections in a bounded store.
+pub const DEFAULT_MAX_ITEMS: usize = 10_000;
+
+/// A capacity-limited wrapper around [`VectorStore`] that evicts the oldest
+/// items (FIFO order) when the total number of chunks exceeds `max_items`.
+///
+/// This prevents unbounded memory growth in long-running processes that
+/// continuously index new files without explicitly pruning old data.
+pub struct BoundedVectorStore {
+    /// The underlying store that does the real work.
+    inner: VectorStore,
+    /// Maximum total chunks allowed across all collections.
+    max_items: usize,
+    /// Tracks insertion order for FIFO eviction.
+    /// Each entry is `(collection_name, chunk_id)`.
+    insertion_order: std::sync::Mutex<std::collections::VecDeque<(String, String)>>,
+}
+
+impl BoundedVectorStore {
+    /// Create a new bounded store wrapping the given `VectorStore`.
+    pub fn new(inner: VectorStore, max_items: usize) -> Self {
+        Self {
+            inner,
+            max_items,
+            insertion_order: std::sync::Mutex::new(std::collections::VecDeque::new()),
+        }
+    }
+
+    /// Create with the default capacity ([`DEFAULT_MAX_ITEMS`]).
+    pub fn with_default_capacity(inner: VectorStore) -> Self {
+        Self::new(inner, DEFAULT_MAX_ITEMS)
+    }
+
+    /// Current total chunk count across all collections.
+    pub fn len(&self) -> usize {
+        self.inner.stats().total_chunks
+    }
+
+    /// Whether the store is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Maximum capacity.
+    pub fn max_items(&self) -> usize {
+        self.max_items
+    }
+
+    /// Clear all collections and the insertion-order tracker.
+    pub fn clear(&mut self) {
+        let names: Vec<String> = self
+            .inner
+            .list_collections()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for name in names {
+            self.inner.delete_collection(&name);
+        }
+        if let Ok(mut order) = self.insertion_order.lock() {
+            order.clear();
+        }
+    }
+
+    /// Evict the oldest items until total count is below `max_items`.
+    fn evict_if_needed(&mut self) {
+        let mut current = self.len();
+        if current <= self.max_items {
+            return;
+        }
+
+        let mut order = self
+            .insertion_order
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        while current > self.max_items {
+            if let Some((collection_name, chunk_id)) = order.pop_front() {
+                // Remove from the collection
+                if let Some(collection) = self.inner.collections.get_mut(&collection_name) {
+                    if collection.remove_chunk(&chunk_id).is_some() {
+                        // Also remove from the vector index
+                        if let Some(index) = self.inner.indices.get_mut(&collection_name) {
+                            index.remove(&chunk_id);
+                        }
+                        current -= 1;
+                    }
+                }
+            } else {
+                // No more tracked items; nothing to evict
+                break;
+            }
+        }
+    }
+
+    /// Index a file, evicting oldest items if the store exceeds capacity.
+    pub async fn index_file(&mut self, collection_name: &str, file_path: &Path) -> Result<usize> {
+        let count = self.inner.index_file(collection_name, file_path).await?;
+
+        // Record insertion order for the newly added chunks
+        if let Some(collection) = self.inner.get_collection(collection_name) {
+            let mut order = self
+                .insertion_order
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            // The last `count` chunks in the collection are the newly added ones.
+            let chunks = collection.chunks();
+            let start = chunks.len().saturating_sub(count);
+            for chunk in &chunks[start..] {
+                order.push_back((collection_name.to_string(), chunk.id.clone()));
+            }
+        }
+
+        self.evict_if_needed();
+        Ok(count)
+    }
+
+    /// Get a reference to the inner `VectorStore`.
+    pub fn inner(&self) -> &VectorStore {
+        &self.inner
+    }
+
+    /// Get a mutable reference to the inner `VectorStore`.
+    pub fn inner_mut(&mut self) -> &mut VectorStore {
+        &mut self.inner
+    }
+
+    /// Delegate: create or get a collection.
+    pub fn collection(&mut self, name: &str, scope: CollectionScope) -> &mut VectorCollection {
+        self.inner.collection(name, scope)
+    }
+
+    /// Delegate: search across a collection.
+    pub async fn search(
+        &self,
+        collection_name: &str,
+        query: &str,
+        k: usize,
+        filter: Option<&SearchFilter>,
+    ) -> Result<Vec<SearchResult>> {
+        self.inner.search(collection_name, query, k, filter).await
+    }
+
+    /// Delegate: get store statistics.
+    pub fn stats(&self) -> VectorStoreStats {
+        self.inner.stats()
+    }
 }
 
 #[cfg(test)]
@@ -2574,5 +2729,152 @@ pub fn calculate_product(a: i32, b: i32) -> i32 {
 
         let index = store.indices.get("project").unwrap();
         assert_eq!(index.check_health(), IndexHealth::Healthy);
+    }
+
+    // ── Regex caching tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_cached_extract_rust_symbol_fn() {
+        let chunker = CodeChunker::default();
+        // Verify cached regexes produce the same results as before
+        assert_eq!(
+            chunker.extract_rust_symbol("pub fn hello() {}", ChunkType::Function),
+            Some("hello".to_string())
+        );
+        assert_eq!(
+            chunker.extract_rust_symbol("fn world() {}", ChunkType::Function),
+            Some("world".to_string())
+        );
+        assert_eq!(
+            chunker.extract_rust_symbol("pub struct Foo {", ChunkType::Function),
+            None, // no "fn" keyword
+        );
+    }
+
+    #[test]
+    fn test_cached_extract_rust_symbol_all_types() {
+        let chunker = CodeChunker::default();
+
+        assert_eq!(
+            chunker.extract_rust_symbol("pub struct MyStruct {", ChunkType::Struct),
+            Some("MyStruct".to_string())
+        );
+        assert_eq!(
+            chunker.extract_rust_symbol("enum Color {", ChunkType::Enum),
+            Some("Color".to_string())
+        );
+        assert_eq!(
+            chunker.extract_rust_symbol("pub trait Display {", ChunkType::Trait),
+            Some("Display".to_string())
+        );
+        assert_eq!(
+            chunker.extract_rust_symbol("impl<T> MyStruct {", ChunkType::Impl),
+            Some("MyStruct".to_string())
+        );
+        // The regex matches the first word after `impl`, which is the trait name
+        // in `impl Trait for Type` form. This matches the original behavior.
+        assert_eq!(
+            chunker.extract_rust_symbol("impl Display for MyStruct {", ChunkType::Impl),
+            Some("Display".to_string())
+        );
+        assert_eq!(
+            chunker.extract_rust_symbol("mod utils {", ChunkType::Module),
+            Some("utils".to_string())
+        );
+        assert_eq!(
+            chunker.extract_rust_symbol("// comment", ChunkType::Comment),
+            None,
+        );
+    }
+
+    // ── BoundedVectorStore tests ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_bounded_vector_store_eviction_at_capacity() {
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let inner = VectorStore::new(provider);
+        // Very small capacity to trigger eviction quickly
+        let mut bounded = BoundedVectorStore::new(inner, 3);
+
+        bounded.collection("test", CollectionScope::Project);
+
+        let dir = tempdir().unwrap();
+
+        // Index several small files. Each file should produce at least 1 chunk.
+        for i in 0..6 {
+            let file_path = dir.path().join(format!("file{}.rs", i));
+            std::fs::write(
+                &file_path,
+                format!("pub fn func_{}() {{ println!(\"hello\"); }}", i),
+            )
+            .unwrap();
+            bounded.index_file("test", &file_path).await.unwrap();
+        }
+
+        // The store should not exceed max_items
+        assert!(
+            bounded.len() <= 3,
+            "Store has {} items but max is 3",
+            bounded.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bounded_vector_store_stays_within_bounds() {
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let inner = VectorStore::new(provider);
+        let mut bounded = BoundedVectorStore::new(inner, 5);
+
+        bounded.collection("coll", CollectionScope::Session);
+
+        let dir = tempdir().unwrap();
+
+        // Insert many files
+        for i in 0..20 {
+            let file_path = dir.path().join(format!("mod{}.rs", i));
+            std::fs::write(
+                &file_path,
+                format!("pub fn handler_{}() {{ let x = {}; }}", i, i * 42),
+            )
+            .unwrap();
+            bounded.index_file("coll", &file_path).await.unwrap();
+
+            // After each insertion, the store must not exceed max_items
+            assert!(
+                bounded.len() <= 5,
+                "After inserting file {}, store has {} items (max 5)",
+                i,
+                bounded.len()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bounded_vector_store_clear() {
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let inner = VectorStore::new(provider);
+        let mut bounded = BoundedVectorStore::new(inner, 100);
+
+        bounded.collection("proj", CollectionScope::Project);
+
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("code.rs");
+        std::fs::write(&file_path, "pub fn example() { let _ = 1 + 2; }").unwrap();
+        bounded.index_file("proj", &file_path).await.unwrap();
+
+        assert!(!bounded.is_empty());
+
+        bounded.clear();
+        assert!(bounded.is_empty());
+        assert_eq!(bounded.len(), 0);
+    }
+
+    #[test]
+    fn test_bounded_vector_store_default_capacity() {
+        let provider = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let inner = VectorStore::new(provider);
+        let bounded = BoundedVectorStore::with_default_capacity(inner);
+        assert_eq!(bounded.max_items(), DEFAULT_MAX_ITEMS);
+        assert!(bounded.is_empty());
     }
 }

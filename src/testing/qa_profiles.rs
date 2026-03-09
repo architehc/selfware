@@ -134,6 +134,54 @@ pub struct QaConfig {
     pub test_retry_iterations: u32,
 }
 
+impl QaConfig {
+    /// Load QA configuration from the YAML schema file.
+    ///
+    /// Reads the `selfware-qa-schema.yaml` (embedded or from `path`) and
+    /// converts the named profile into a `QaConfig`.
+    pub fn from_schema(path: Option<&std::path::Path>, profile_name: &str) -> anyhow::Result<Self> {
+        let schema = crate::templates::load_qa_schema_profile(path, profile_name)?;
+        let profile = match profile_name {
+            "strict" => QaProfile::Strict,
+            "minimal" => QaProfile::Minimal,
+            _ => QaProfile::Standard,
+        };
+
+        // Extract auto_fix and retry iterations from feedback_loops if present
+        let auto_fix = schema
+            .qa_profile
+            .feedback_loops
+            .as_ref()
+            .and_then(|fl| fl.auto_fix.as_ref())
+            .and_then(|af| af.get("max_iterations"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(default_auto_fix_iterations() as u64) as u32;
+
+        let test_retry = schema
+            .qa_profile
+            .feedback_loops
+            .as_ref()
+            .and_then(|fl| fl.retry_with_context.as_ref())
+            .and_then(|rc| rc.get("max_iterations"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(default_test_retry_iterations() as u64) as u32;
+
+        Ok(Self {
+            profile,
+            auto_fix_iterations: auto_fix,
+            test_retry_iterations: test_retry,
+        })
+    }
+}
+
+impl QaWeights {
+    /// Load weights from the YAML schema for a given profile name.
+    pub fn from_schema(path: Option<&std::path::Path>, profile_name: &str) -> anyhow::Result<Self> {
+        let schema = crate::templates::load_qa_schema_profile(path, profile_name)?;
+        Ok(crate::templates::qa_schema_to_weights(&schema))
+    }
+}
+
 fn default_auto_fix_iterations() -> u32 {
     3
 }

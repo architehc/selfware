@@ -110,6 +110,7 @@ pub mod memory;
 pub mod output;
 #[cfg(feature = "resilience")]
 pub mod self_healing;
+pub mod templates;
 pub mod token_count;
 pub mod tokens;
 pub mod tool_parser;

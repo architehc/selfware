@@ -199,6 +199,15 @@ mod tests {
         Arc::new(ApiClient::new(&config).expect("ApiClient::new should succeed with defaults"))
     }
 
+    /// Create a permissive `SafetyConfig` for tests that need to access temp dirs.
+    /// This replaces the old `SELFWARE_TEST_MODE` env-var bypass with explicit config injection.
+    fn permissive_safety_config() -> SafetyConfig {
+        SafetyConfig {
+            allowed_paths: vec!["/**".to_string()],
+            ..SafetyConfig::default()
+        }
+    }
+
     // ── Construction ─────────────────────────────────────────────────
 
     #[test]
@@ -324,8 +333,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_rejects_start_line_zero() {
-        std::env::set_var("SELFWARE_TEST_MODE", "1");
-        let tool = FileFimEdit::new(test_client());
+        let tool = FileFimEdit::with_safety_config(test_client(), permissive_safety_config());
         let (_tmp, path) = temp_file_with_lines(&["line1", "line2", "line3"]);
 
         let args = serde_json::json!({
@@ -347,8 +355,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_rejects_end_line_before_start_line() {
-        std::env::set_var("SELFWARE_TEST_MODE", "1");
-        let tool = FileFimEdit::new(test_client());
+        let tool = FileFimEdit::with_safety_config(test_client(), permissive_safety_config());
         let (_tmp, path) = temp_file_with_lines(&["line1", "line2", "line3"]);
 
         let args = serde_json::json!({
@@ -371,8 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_rejects_lines_beyond_file_length() {
-        std::env::set_var("SELFWARE_TEST_MODE", "1");
-        let tool = FileFimEdit::new(test_client());
+        let tool = FileFimEdit::with_safety_config(test_client(), permissive_safety_config());
         let (_tmp, path) = temp_file_with_lines(&["only_one_line"]);
 
         let args = serde_json::json!({
@@ -398,8 +404,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_rejects_start_line_beyond_file_length() {
-        std::env::set_var("SELFWARE_TEST_MODE", "1");
-        let tool = FileFimEdit::new(test_client());
+        let tool = FileFimEdit::with_safety_config(test_client(), permissive_safety_config());
         let (_tmp, path) = temp_file_with_lines(&["a", "b"]);
 
         let args = serde_json::json!({
@@ -461,8 +466,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_rejects_missing_instruction() {
-        std::env::set_var("SELFWARE_TEST_MODE", "1");
-        let tool = FileFimEdit::new(test_client());
+        let tool = FileFimEdit::with_safety_config(test_client(), permissive_safety_config());
         let (_tmp, path) = temp_file_with_lines(&["line1", "line2"]);
 
         let args = serde_json::json!({

@@ -37,3 +37,9 @@ Thumbs.db
 selfware-local.toml
 .env
 .env.local
+
+# Kimi review zips (not part of source)
+*.zip
+
+# Coverage XML
+cobertura.xml

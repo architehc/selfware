@@ -84,11 +84,32 @@ protected_branches = ["main", "master", "production"]
 require_confirmation = ["git push", "rm"]
 ```
 
+### Audit Logging
+- Every tool call is logged to JSONL files in `~/.selfware/audit/`
+- Safety blocks are logged with the blocked tool and reason
+- Session start/end events are tracked
+- Logs include args hash (not raw args) for privacy
+
+### Permission Grants
+- Pre-authorized tool permissions with time-based expiry
+- Pattern matching on tool names and resource paths
+- Configurable in TOML under `[safety] permissions`
+- Expired grants are automatically cleaned up
+
+### Computer Control Safety
+- Rate limited to 10 actions/second
+- Dangerous key combos blocked (Ctrl+Alt+Delete, Cmd+Q, Alt+F4)
+- First use per session requires explicit confirmation
+
 ## Known Limitations
 
-1. **Shell command validation** uses regex-based pattern matching with obfuscation detection - while significantly more robust than simple string matching, extremely sophisticated obfuscation may still bypass it
-2. **TOCTOU** (Time-of-Check-Time-of-Use) race conditions are mitigated by symlink chain validation but cannot be completely eliminated
-3. **LLM output sanitization** is best-effort - malicious prompts may produce unexpected tool calls
+1. **Shell command validation** uses regex-based pattern matching with obfuscation detection — while significantly more robust than simple string matching, extremely sophisticated obfuscation may still bypass it
+2. **TOCTOU** (Time-of-Check-Time-of-Use) race conditions are mitigated by symlink chain validation and `O_NOFOLLOW` but cannot be completely eliminated in all code paths
+3. **LLM output sanitization** is best-effort — malicious prompts may produce unexpected tool calls
+4. **The agent runs with the same filesystem permissions as the user** — it cannot access files the user cannot access, but it CAN access all files the user can
+5. **YOLO mode disables confirmation prompts** — use only in trusted, isolated environments
+6. **LLM-generated code is not guaranteed to be secure** — always review generated code before deploying to production
+7. **FIM (Fill-in-the-Middle) editing** constructs prompts from file content — adversarial file content could potentially influence the edit instruction
 
 ## Security Enhancements (v0.1.0)
 

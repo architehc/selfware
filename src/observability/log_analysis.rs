@@ -417,29 +417,35 @@ impl PatternDetector {
 
     /// Extract template from message (replace variable parts)
     fn extract_template(&self, message: &str) -> String {
+        use std::sync::LazyLock;
+
+        static NUM_RE: LazyLock<regex::Regex> =
+            LazyLock::new(|| regex::Regex::new(r"\d+").expect("invalid number regex"));
+        static UUID_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+            regex::Regex::new(
+                r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+            )
+            .expect("invalid UUID regex")
+        });
+        static IP_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+            regex::Regex::new(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}").expect("invalid IP regex")
+        });
+        static PATH_RE: LazyLock<regex::Regex> =
+            LazyLock::new(|| regex::Regex::new(r"/[\w/.-]+").expect("invalid path regex"));
+
         let mut template = message.to_string();
 
         // Replace numbers
-        template = regex::Regex::new(r"\d+")
-            .map(|re| re.replace_all(&template, "<NUM>").to_string())
-            .unwrap_or(template);
+        template = NUM_RE.replace_all(&template, "<NUM>").to_string();
 
         // Replace UUIDs
-        template = regex::Regex::new(
-            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
-        )
-        .map(|re| re.replace_all(&template, "<UUID>").to_string())
-        .unwrap_or(template);
+        template = UUID_RE.replace_all(&template, "<UUID>").to_string();
 
         // Replace IP addresses
-        template = regex::Regex::new(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}")
-            .map(|re| re.replace_all(&template, "<IP>").to_string())
-            .unwrap_or(template);
+        template = IP_RE.replace_all(&template, "<IP>").to_string();
 
         // Replace paths
-        template = regex::Regex::new(r"/[\w/.-]+")
-            .map(|re| re.replace_all(&template, "<PATH>").to_string())
-            .unwrap_or(template);
+        template = PATH_RE.replace_all(&template, "<PATH>").to_string();
 
         template
     }

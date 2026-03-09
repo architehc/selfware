@@ -582,4 +582,34 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("null bytes"));
     }
+
+    /// Verify the SELFWARE_TEST_MODE env-var bypass is gone (issue #59).
+    /// Setting the env var must NOT cause denied paths to be allowed.
+    #[test]
+    fn test_no_test_mode_bypass() {
+        // SAFETY: This test is single-threaded w.r.t. this env var. We set
+        // and remove it within the same test to avoid leaking state.
+        unsafe {
+            std::env::set_var("SELFWARE_TEST_MODE", "1");
+        }
+
+        let config = make_config(vec![], vec!["**/.env"]);
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd);
+
+        // Even with SELFWARE_TEST_MODE set, denied paths must still be denied.
+        let result = validator.validate(".env");
+        assert!(
+            result.is_err(),
+            "SELFWARE_TEST_MODE must not bypass path validation"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("denied pattern"),
+            "Expected 'denied pattern' error"
+        );
+
+        unsafe {
+            std::env::remove_var("SELFWARE_TEST_MODE");
+        }
+    }
 }
