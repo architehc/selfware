@@ -114,9 +114,20 @@ impl Agent {
         let _ = &sticky_state; // state is still updated by streaming handlers
 
         // Start loading spinner with a random phrase while waiting for first token
-        let mut spinner = Some(crate::ui::spinner::TerminalSpinner::start(
-            crate::ui::loading_phrases::random_phrase(),
-        ));
+        let initial_phrase = crate::ui::loading_phrases::random_phrase();
+        let tui_active = crate::output::is_tui_active();
+        // Track whether the TUI spinner is logically active (to avoid
+        // sending SpinnerUpdate/SpinnerStop after it has already stopped).
+        let mut tui_spinner_active = false;
+        let mut spinner = if tui_active {
+            self.emit_event(AgentEvent::SpinnerStart {
+                message: initial_phrase.to_string(),
+            });
+            tui_spinner_active = true;
+            None
+        } else {
+            Some(crate::ui::spinner::TerminalSpinner::start(initial_phrase))
+        };
         let mut phrase_rotation = tokio::time::Instant::now();
         let mut last_bar_update = tokio::time::Instant::now();
 
@@ -145,7 +156,12 @@ impl Agent {
                         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                     }
                 } => {
-                    drop(spinner.take());
+                    if tui_active && tui_spinner_active {
+                        self.emit_event(AgentEvent::SpinnerStop);
+                        tui_spinner_active = false;
+                    } else {
+                        drop(spinner.take());
+                    }
                     break;
                 }
                 result = rx.recv() => {
@@ -159,7 +175,15 @@ impl Agent {
             let chunk = chunk_result?;
 
             // Rotate loading phrase every 3 seconds while spinner is active
-            if let Some(ref s) = spinner {
+            if tui_active {
+                if tui_spinner_active && phrase_rotation.elapsed() > tokio::time::Duration::from_secs(3) {
+                    let new_phrase = crate::ui::loading_phrases::random_phrase();
+                    self.emit_event(AgentEvent::SpinnerUpdate {
+                        message: new_phrase.to_string(),
+                    });
+                    phrase_rotation = tokio::time::Instant::now();
+                }
+            } else if let Some(ref s) = spinner {
                 if phrase_rotation.elapsed() > tokio::time::Duration::from_secs(3) {
                     s.set_message(crate::ui::loading_phrases::random_phrase());
                     phrase_rotation = tokio::time::Instant::now();
@@ -174,7 +198,10 @@ impl Agent {
             match chunk {
                 StreamChunk::Content(text) => {
                     // Stop spinner on first content
-                    if let Some(s) = spinner.take() {
+                    if tui_active && tui_spinner_active {
+                        self.emit_event(AgentEvent::SpinnerStop);
+                        tui_spinner_active = false;
+                    } else if let Some(s) = spinner.take() {
                         drop(s);
                     }
                     if in_reasoning {
@@ -184,7 +211,9 @@ impl Agent {
                             sticky_state.started.elapsed().as_secs(),
                             std::sync::atomic::Ordering::Relaxed,
                         );
-                        if !output::is_compact() {
+                        if tui_active {
+                            self.emit_event(AgentEvent::ThinkingEnd);
+                        } else if !output::is_compact() {
                             println!();
                         }
                     }
@@ -206,12 +235,19 @@ impl Agent {
                                 let is_think = tag_idx >= 2; // <think> and <thinking>
                                 if !is_think {
                                     if let Some(fname) = extract_display_name(block) {
-                                        print!(
-                                            "  {} {}...",
-                                            "🔧".dimmed(),
-                                            fname.bright_cyan()
-                                        );
-                                        io::stdout().flush().ok();
+                                        if tui_active {
+                                            self.emit_event(AgentEvent::ToolProgress {
+                                                name: fname,
+                                                status: "parsing".into(),
+                                            });
+                                        } else {
+                                            print!(
+                                                "  {} {}...",
+                                                "🔧".dimmed(),
+                                                fname.bright_cyan()
+                                            );
+                                            io::stdout().flush().ok();
+                                        }
                                     }
                                 }
                                 // For <think> blocks, optionally show as dimmed reasoning
@@ -235,11 +271,17 @@ impl Agent {
                             if let Some((start_pos, tag_idx)) =
                                 find_earliest_open_tag(&display_buf)
                             {
-                                // Print everything before the tag
+                                // Emit/print everything before the tag
                                 let before = &display_buf[..start_pos];
                                 if !before.is_empty() {
-                                    print!("{}", before);
-                                    io::stdout().flush().ok();
+                                    if tui_active {
+                                        self.emit_event(AgentEvent::AssistantDelta {
+                                            text: before.to_string(),
+                                        });
+                                    } else {
+                                        print!("{}", before);
+                                        io::stdout().flush().ok();
+                                    }
                                 }
                                 display_buf = display_buf[start_pos..].to_string();
                                 suppressed_tag_idx = Some(tag_idx);
@@ -247,10 +289,16 @@ impl Agent {
                                 // Partial opening tag at end — buffer it
                                 break;
                             } else {
-                                // No tags — print everything
+                                // No tags — emit/print everything
                                 if !display_buf.is_empty() {
-                                    print!("{}", display_buf);
-                                    io::stdout().flush().ok();
+                                    if tui_active {
+                                        self.emit_event(AgentEvent::AssistantDelta {
+                                            text: display_buf.clone(),
+                                        });
+                                    } else {
+                                        print!("{}", display_buf);
+                                        io::stdout().flush().ok();
+                                    }
                                 }
                                 display_buf.clear();
                                 break;
@@ -260,12 +308,22 @@ impl Agent {
                 }
                 StreamChunk::Reasoning(text) => {
                     // Stop spinner on first reasoning
-                    if let Some(s) = spinner.take() {
+                    if tui_active && tui_spinner_active {
+                        self.emit_event(AgentEvent::SpinnerStop);
+                        tui_spinner_active = false;
+                    } else if let Some(s) = spinner.take() {
                         drop(s);
                     }
                     sticky_state.is_thinking.store(true, std::sync::atomic::Ordering::Relaxed);
                     sticky_state.set_activity("Thinking...");
-                    if !output::is_compact() {
+                    if tui_active {
+                        if !in_reasoning {
+                            in_reasoning = true;
+                        }
+                        self.emit_event(AgentEvent::ThinkingDelta {
+                            text: text.clone(),
+                        });
+                    } else if !output::is_compact() {
                         if !in_reasoning {
                             in_reasoning = true;
                             output::thinking_prefix();
@@ -298,34 +356,23 @@ impl Agent {
 
         // Flush any remaining display buffer (non-suppressed text)
         if !display_buf.is_empty() && suppressed_tag_idx.is_none() {
-            print!("{}", display_buf);
-            io::stdout().flush().ok();
+            if tui_active {
+                self.emit_event(AgentEvent::AssistantDelta {
+                    text: display_buf.clone(),
+                });
+            } else {
+                print!("{}", display_buf);
+                io::stdout().flush().ok();
+            }
         }
 
-        // Ensure we end with a newline if we printed content
-        if !content.is_empty() || !reasoning.is_empty() {
-            println!();
-        }
-
-        // Print post-generation summary (like Claude Code's top bar)
-        {
-            use crate::ui::sticky_bar::{active_bash_count, fmt_elapsed, fmt_tokens};
-            let elapsed = fmt_elapsed(sticky_state.started.elapsed());
-            let tokens = fmt_tokens(sticky_state.tokens.load(std::sync::atomic::Ordering::Relaxed));
-            let think_secs = sticky_state.thinking_secs.load(std::sync::atomic::Ordering::Relaxed);
-
-            let mut parts = vec![elapsed, format!("↓ {} tokens", tokens)];
-            if think_secs > 0 {
-                parts.push(format!("thought for {}s", think_secs));
+        if !tui_active {
+            // Ensure we end with a newline if we printed content
+            if !content.is_empty() || !reasoning.is_empty() {
+                println!();
             }
-            let bash = active_bash_count();
-            if bash > 0 {
-                parts.push(format!("{} bash", bash));
-            }
-            eprintln!("\x1b[90m  ✱ {} · {}\x1b[0m",
-                sticky_state.activity.lock().map(|a| a.clone()).unwrap_or_default(),
-                parts.join(" · "),
-            );
+
+            // No per-call summary — chat_streaming runs multiple times per task.
         }
 
         Ok((

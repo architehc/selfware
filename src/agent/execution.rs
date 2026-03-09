@@ -232,9 +232,9 @@ impl Agent {
             .current_checkpoint
             .as_ref()
             .map(|cp| {
-                // If there are no tool calls at all, don't bypass (let the normal gate logic decide)
+                // If there are no tool calls at all, this is a text-only response — skip cargo
                 if cp.tool_calls.is_empty() {
-                    return false;
+                    return true;
                 }
                 cp.tool_calls.iter().all(|tc| {
                     Self::NON_RUST_TOOL_PREFIXES
