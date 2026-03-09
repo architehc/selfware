@@ -16,7 +16,7 @@
       \|     |/
 ```
 
-An **agentic coding harness** for local LLMs that runs entirely on your hardware. 54 tools, multi-agent swarm, evolution engine, TUI dashboard, and a fox mascot — all local-first, no cloud required.
+An **agentic coding harness** for local LLMs that runs entirely on your hardware. 70+ tools, multi-agent swarm, evolution engine, hooks, MCP integration, LSP intelligence, ZED extension, TUI dashboard, and a fox mascot — all local-first, no cloud required.
 
 > **TL;DR** — Point it at any OpenAI-compatible endpoint (vLLM, Ollama, llama.cpp, LM Studio), give it a task, and watch it autonomously read, plan, edit, test, and commit code. Then let the evolution engine improve itself.
 
@@ -437,7 +437,7 @@ Enable **KV cache quantization** (set to Q4) to fit larger context windows in li
 
 ## Features
 
-### 54 Built-in Tools
+### 70+ Built-in Tools
 
 Selfware gives the LLM a full toolkit for autonomous coding:
 
@@ -448,9 +448,14 @@ Selfware gives the LLM a full toolkit for autonomous coding:
 | **Cargo Workshop** | Test, check, clippy, fmt, build | `cargo_test`, `cargo_check`, `cargo_clippy`, `cargo_fmt` |
 | **Code Foraging** | Grep, glob, symbol search | `grep_search`, `glob_find`, `symbol_search` |
 | **Shell** | Execute commands with safety checks | `shell_exec` |
+| **PTY Shell** | Persistent interactive sessions | `pty_shell` |
 | **Analysis** | AST parsing, complexity, BM25 | `code_analysis`, `bm25_search` |
 | **Knowledge** | Web fetch, documentation lookup | `web_fetch`, `knowledge_query` |
 | **FIM Editing** | Fill-in-the-Middle AI code replacement | `file_fim_edit` |
+| **Computer Control** | Mouse, keyboard, screen, window management | `computer_mouse`, `computer_keyboard`, `computer_screen`, `computer_window` |
+| **LSP** | Semantic code intelligence | `lsp_goto_definition`, `lsp_find_references`, `lsp_document_symbols`, `lsp_hover` |
+| **Browser Automation** | 28-action Playwright controller | `page_control` |
+| **MCP Server** | Expose selfware tools to other AI systems | `selfware mcp-server` |
 
 ### Multi-Agent Swarm
 
@@ -520,6 +525,64 @@ Status messages use garden metaphors:
 - **GROW** — Progress, on the right track
 - **WILT** — Warning, needs attention
 - **FROST** — Error, needs warmth
+
+### Hooks System
+
+Event-driven automation with three hook points: **PreToolUse**, **PostToolUse**, and **Stop**. Built-in presets for auto-commit, auto-format, and lint-on-edit. Configure hooks in `selfware.toml` or toggle them at runtime with `/hooks`.
+
+```toml
+[hooks]
+enabled = true
+presets = ["auto-commit", "auto-format", "lint-on-edit"]
+```
+
+### MCP Integration
+
+Selfware supports the **Model Context Protocol** as both client and server. Connect to external MCP servers (GitHub, Playwright, databases) to extend the agent's capabilities, or expose selfware's own tools to other AI systems via `selfware mcp-server`.
+
+```toml
+[mcp]
+servers = [
+    { name = "github", command = "npx", args = ["-y", "@modelcontextprotocol/server-github"] },
+    { name = "playwright", command = "npx", args = ["-y", "@playwright/mcp-server"] },
+]
+```
+
+### LSP Integration
+
+Semantic code intelligence via language servers (rust-analyzer, pyright, tsserver, gopls). Go-to-definition, find-references, document-symbols, and hover information are all available as agent tools, giving the LLM deep understanding of code structure.
+
+### Doctor Mode
+
+`selfware doctor` checks 30+ system dependencies (git, cargo, rustc, node, python, docker, etc.) and reports what is available. `selfware llm-doctor` analyzes your LLM backend, model configuration, template setup, and gives optimization recommendations.
+
+### Interview Mode
+
+Structured pre-task questions (language, framework, scope, testing preference) with smart defaults and auto-detection. Launch with `selfware chat --interview` to guide the agent before it begins work.
+
+### Claude Code-like UI
+
+ESC to interrupt generation, fixed input line for typing anytime, work queue with delayed execution (`@5m run tests`), and full input history. The interactive experience is designed to feel responsive even with slow local models.
+
+### Visual Verification
+
+VLM-powered screenshot analysis for UI testing. The agent can capture screenshots and use a vision-language model to verify that UI changes look correct.
+
+### Active Selections
+
+Guided wizard with recommendations for project template, architecture, database, testing framework, and deployment strategy. The agent walks you through choices with opinionated defaults.
+
+### Swarm Visualization
+
+Terminal panels showing agent status, consensus log, and activity timeline for multi-agent swarm sessions. See what each agent is doing in real time.
+
+### Inline Diff Viewer
+
+Colored unified and side-by-side diffs with word-level highlighting before applying edits. Review every change the agent proposes before it touches your code.
+
+### ZED Extension
+
+IDE integration via the ZED editor extension (WASM-based). Use selfware directly from ZED with full tool access.
 
 ---
 
@@ -741,6 +804,9 @@ bash system_tests/projecte2e/run_full_sab.sh
 | `selfware init` | | Setup wizard |
 | `selfware evolve` | | Run evolution engine* |
 | `selfware improve` | | Self-improvement pass* |
+| `selfware doctor` | | System dependency check |
+| `selfware mcp-server` | | Run as MCP server |
+| `selfware lsp` | | Run as LSP server (stub) |
 | `selfware demo` | | Run animated demo** |
 | `selfware dashboard` | | Launch TUI dashboard** |
 
@@ -761,6 +827,9 @@ bash system_tests/projecte2e/run_full_sab.sh
 | `-v, --verbose` | Detailed tool output |
 | `--show-tokens` | Display token usage after each response |
 | `--ascii` | ASCII-only output (no emoji) |
+| `--plan` | Plan mode (read-only, no edits) |
+| `--resume-session <name>` | Resume a named session |
+| `--interview` | Pre-task interview mode |
 | `--no-color` | Disable colored output |
 
 ### Environment Variables
@@ -776,6 +845,18 @@ bash system_tests/projecte2e/run_full_sab.sh
 | `SELFWARE_DEBUG` | Enable debug logging | Disabled |
 | `SELFWARE_ASCII` | Force ASCII-only mode | Disabled |
 | `NO_COLOR` | Disable colors (standard) | Disabled |
+
+### Interactive Commands
+
+During a chat session, use slash commands to control the agent:
+
+| Command | Description |
+|---------|-------------|
+| `/plan` | Toggle plan mode (read-only, no edits) |
+| `/think` | Toggle extended thinking |
+| `/hooks` | Toggle hook presets on/off |
+| `/queue` | View and manage the work queue |
+| `/interview` | Run the pre-task interview |
 
 ---
 
@@ -799,13 +880,22 @@ Model Speed          Timeout Setting
 ```
 src/
 ├── agent/          Core agent logic, checkpointing, execution
-├── tools/          54 tool implementations (file, git, cargo, search, shell, FIM)
+├── tools/          70+ tool implementations (file, git, cargo, search, shell, FIM, computer, LSP, browser)
 ├── api/            LLM client with timeout, retry, streaming
 ├── ui/             Terminal aesthetic (themes, animations, banners, fox mascot)
-│   └── tui/        Full ratatui dashboard (garden view, swarm widgets, particles)
+│   ├── tui/        Full ratatui dashboard (garden view, swarm widgets, particles)
+│   ├── task_display.rs   Task progress display
+│   ├── diff_viewer.rs    Inline colored diff viewer (unified + side-by-side)
+│   ├── input_handler.rs  Claude Code-like input handling (ESC, history, queue)
+│   ├── selections.rs     Active selection wizard
+│   └── swarm_viz.rs      Swarm visualization panels
 ├── analysis/       Code analysis, BM25 search, vector store
 ├── cognitive/      PDVR cycle, working/episodic memory, RAG, token budget
 ├── config/         Configuration management (TOML + env + CLI)
+├── hooks/          Event-driven hook system (PreToolUse, PostToolUse, Stop)
+├── mcp/            MCP client + server (JSON-RPC 2.0, stdio transport)
+├── lsp/            LSP client (rust-analyzer, pyright, tsserver, gopls)
+├── computer/       Desktop automation (mouse, keyboard, screen capture, window management)
 ├── devops/         Container support, process manager
 ├── evolution/      Recursive self-improvement engine (feature-gated)
 │   ├── daemon.rs   Main evolution loop + LLM hypothesis generation
@@ -814,13 +904,19 @@ src/
 │   └── tournament.rs  Parallel hypothesis evaluation
 ├── observability/  OpenTelemetry tracing, Prometheus metrics
 ├── orchestration/  Multi-agent swarm, planning, workflows
-├── safety/         Path validation, command filtering, sandboxing
+├── safety/         Path validation, command filtering, sandboxing, JSONL audit logging
 ├── self_healing/   Error classification, recovery, exponential backoff
 ├── session/        Checkpoint persistence
-├── testing/        Verification, contract testing, workflow DSL
+├── testing/        Verification, contract testing, workflow DSL, multi-language QA
+├── doctor.rs       System dependency diagnostics (30+ checks)
+├── llm_doctor.rs   LLM configuration diagnostics and optimization
+├── interview.rs    Pre-task interview with smart defaults
 ├── memory.rs       Memory management
 ├── tool_parser.rs  Robust multi-format XML parser
 └── token_count.rs  Token estimation
+
+zed-extension/      ZED editor extension (WASM-based)
+docs/               User documentation (8 guides)
 ```
 
 ---
@@ -830,7 +926,7 @@ src/
 ### Run Tests
 
 ```bash
-# All tests (~5,200 tests)
+# All tests (6,000+ tests)
 cargo test --all-features
 
 # Quick unit tests only
@@ -851,9 +947,9 @@ cargo test --features integration
 
 | Metric | Value |
 |--------|-------|
-| **Total Tests** | ~5,200 |
-| **Line Coverage** | ~82% |
-| **Test Targets** | lib (4,784) + external (254) + integration (124) + doc (1) + property (5) |
+| **Total Tests** | 6,000+ |
+| **Line Coverage** | ~75% |
+| **Test Targets** | lib + external + integration + doc + property |
 
 ### Code Quality
 
@@ -862,6 +958,23 @@ cargo clippy --all-features -- -D warnings
 cargo fmt -- --check
 cargo llvm-cov --lib --all-features --summary-only
 ```
+
+---
+
+## Documentation
+
+Full guides are available in the [`docs/`](docs/) directory:
+
+| Guide | Description |
+|-------|-------------|
+| [Getting Started](docs/GETTING_STARTED.md) | Installation, first run, basic usage |
+| [Configuration](docs/CONFIGURATION.md) | All config options, TOML reference |
+| [Tools Reference](docs/TOOLS_REFERENCE.md) | Complete tool catalog with examples |
+| [Interactive Commands](docs/INTERACTIVE_COMMANDS.md) | Slash commands and shortcuts |
+| [Hooks](docs/HOOKS.md) | Event-driven automation setup |
+| [MCP](docs/MCP.md) | MCP client and server configuration |
+| [Doctor](docs/DOCTOR.md) | System and LLM diagnostics |
+| [ZED Extension](docs/ZED_EXTENSION.md) | IDE integration via ZED |
 
 ---
 

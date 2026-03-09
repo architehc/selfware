@@ -1,6 +1,9 @@
 # MCP Integration Guide
 
-Selfware supports the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) to connect to external tool servers. MCP servers expose tools that selfware can use alongside its built-in tools.
+Selfware supports the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) both as a **client** and as a **server**:
+
+- **Client mode** (default) -- Connect to external MCP servers to extend selfware with additional tools.
+- **Server mode** (`selfware mcp-server`) -- Expose selfware's 70+ built-in tools and project resources to other AI clients.
 
 ## How It Works
 
@@ -178,6 +181,45 @@ args = ["-m", "my_mcp_server"]
 env = { MY_API_KEY = "..." }
 init_timeout_secs = 15
 ```
+
+## MCP Server Mode
+
+Selfware can run as an MCP server itself, exposing all 70+ built-in tools and project resources to other AI clients via the Model Context Protocol.
+
+### Starting the Server
+
+```bash
+selfware mcp-server
+```
+
+The server communicates over stdio using Content-Length framed JSON-RPC 2.0 (the same framing as LSP). It implements the MCP protocol version `2024-11-05` and responds to `initialize`, `tools/list`, and `tools/call` methods.
+
+### Use Case
+
+Run selfware as a tool backend for another AI application. For example, configure selfware as an MCP server in Claude Desktop, Cursor, or any MCP-compatible AI client:
+
+```json
+{
+  "mcpServers": {
+    "selfware": {
+      "command": "selfware",
+      "args": ["mcp-server"]
+    }
+  }
+}
+```
+
+This gives the other AI client access to selfware's full tool suite: file operations, git, cargo, shell, browser automation, computer control, knowledge graph, and more.
+
+### How It Works
+
+1. The external AI client spawns `selfware mcp-server` as a child process
+2. The client sends an `initialize` request over stdin
+3. Selfware responds with its capabilities and server info
+4. The client calls `tools/list` to discover all available tools
+5. The client invokes tools via `tools/call` with the appropriate parameters
+
+Tracing and log output is sent to stderr so it does not interfere with the JSON-RPC protocol on stdout.
 
 ## Troubleshooting
 

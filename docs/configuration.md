@@ -377,6 +377,28 @@ cognitive = []
 config_keys = []
 ```
 
+## Feature Flags (Cargo)
+
+Selfware uses Cargo feature flags to gate optional modules. Enable them with `cargo install selfware --features <flag>` or `cargo build --features <flag>`.
+
+| Feature | Description |
+|---------|-------------|
+| `extras` | Convenience flag that enables all optional modules below |
+| `tui` | TUI dashboard mode with animations and demos |
+| `workflows` | Workflow automation and parallel execution |
+| `resilience` | Error recovery and self-healing |
+| `execution-modes` | Auto-edit, yolo, daemon modes |
+| `cache` | Response caching |
+| `log-analysis` | Log file analysis tools |
+| `tokens` | Token counting and budget tracking |
+| `self-improvement` | Evolution and self-improvement daemon |
+| `hot-reload` | Hot-reload config on file change |
+| `vlm-bench` | Vision LLM benchmarking |
+| `system-tests` | System-level E2E tests (require a live LLM endpoint; not included in `extras`) |
+| `integration` | Integration tests (not included in `extras`) |
+
+The `system-tests` feature is intended for manual testing against a live backend. It is not enabled by default or by `extras` because it requires a running LLM endpoint.
+
 ## Environment Variables
 
 All environment variables override their corresponding config file values.

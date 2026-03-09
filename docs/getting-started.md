@@ -20,8 +20,17 @@ cargo install --path .
 
 ```bash
 selfware --version
+```
+
+### Run doctor first
+
+Before doing anything else, run the system doctor to verify all dependencies are available and your LLM backend is reachable:
+
+```bash
 selfware doctor
 ```
+
+This checks core tools (rustc, cargo, git), optional language runtimes, browser automation, computer control, and runs the [LLM Doctor](doctor.md) to validate your backend configuration. Fix any issues it reports before proceeding.
 
 ## First Run
 
@@ -41,6 +50,13 @@ Or run a named task:
 
 ```bash
 selfware run "Add error handling to src/main.rs"
+```
+
+Or start interview mode to answer a few questions before the agent begins (language, framework, testing strategy, etc.):
+
+```bash
+selfware chat
+> /interview
 ```
 
 ## Configuration
@@ -170,6 +186,7 @@ This checks:
 | `selfware journal` | `selfware j` | Browse task history |
 | `selfware status` | | Show agent statistics |
 | `selfware lsp` | | Start LSP server mode |
+| `selfware mcp-server` | | Run as MCP server (expose tools to other AI clients) |
 | `selfware workflow <file>` | `selfware w <file>` | Execute a YAML workflow |
 
 ## CLI Flags
@@ -206,4 +223,5 @@ This checks:
 - [Tool Reference](tools.md) -- available tools
 - [Interactive Commands](interactive-commands.md) -- slash commands
 - [Hooks](hooks.md) -- event-driven automation
-- [MCP Integration](mcp.md) -- external tool servers
+- [MCP Integration](mcp.md) -- external tool servers and MCP server mode
+- [Doctor & Troubleshooting](doctor.md) -- system diagnostics and LLM doctor

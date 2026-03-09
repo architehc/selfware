@@ -1,6 +1,6 @@
 # Tool Reference
 
-Selfware has 60+ built-in tools organized by category. The agent selects and invokes tools automatically based on the task. You can list all registered tools in interactive mode with `/tools`.
+Selfware has 70+ built-in tools organized by category. The agent selects and invokes tools automatically based on the task. You can list all registered tools in interactive mode with `/tools`. Additional tools can be added at runtime via [MCP servers](mcp.md).
 
 ## File Operations
 
@@ -264,6 +264,44 @@ Extract all links from a web page.
 
 **Parameters:**
 - `url` (string, required) -- URL to extract links from
+
+### `page_control`
+
+Full Playwright-based browser automation with 28 actions. Spawns a companion Node.js process that communicates over NDJSON. Falls back to the existing `browser_*` fetch tools if Playwright is unavailable. Supports multi-tab browsing with up to 5 concurrent pages.
+
+**Parameters:**
+- `action` (string, required) -- one of the 28 supported actions (see below)
+- `selector` (string) -- CSS selector for interaction actions
+- `value` (string) -- value for type/fill/select actions
+- `url` (string) -- URL for `goto` action
+- `key` (string) -- key for `press` action
+- `attribute` (string) -- attribute name for `attribute` action
+- `script` (string) -- JavaScript for `evaluate` / `evaluate_handle` actions
+- `tab_index` (number) -- tab index for `switch_tab` / `close_tab`
+- `timeout_ms` (number) -- per-action timeout in milliseconds (default: 30000)
+
+**Supported actions:**
+
+| Category | Actions |
+|----------|---------|
+| Navigation | `goto`, `back`, `forward`, `reload`, `wait_for` |
+| Interaction | `click`, `type`, `fill`, `select`, `check`, `uncheck`, `hover`, `press` |
+| Content extraction | `text`, `html`, `attribute`, `value`, `count`, `visible` |
+| Page info | `title`, `url`, `screenshot`, `pdf` |
+| JavaScript | `evaluate`, `evaluate_handle` |
+| Multi-tab | `new_tab`, `switch_tab`, `close_tab`, `list_tabs` |
+| Lifecycle | `shutdown` |
+
+**Example:**
+```json
+{ "action": "goto", "url": "https://example.com" }
+```
+```json
+{ "action": "click", "selector": "#submit-button" }
+```
+```json
+{ "action": "fill", "selector": "input[name=email]", "value": "user@example.com" }
+```
 
 ---
 

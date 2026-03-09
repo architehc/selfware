@@ -71,16 +71,36 @@ Sessions persist across restarts. You can also resume from the CLI:
 selfware --resume-session my-session
 ```
 
-## Message Queue
+## Work Queue
 
-Queue messages to be processed after the current task completes:
+Queue messages to be processed after the current task completes. The queue supports delayed execution and priority levels.
 
-| Command | Description |
-|---------|-------------|
-| `/queue <message>` | Enqueue a message |
-| `/queue list` | Show queued messages |
-| `/queue clear` | Clear all queued messages |
-| `/queue drop <n>` | Remove message by index |
+| Command | Alias | Description |
+|---------|-------|-------------|
+| `/queue` | `/q` | Show all queued items |
+| `/queue clear` | `/q clear` | Clear all queued items |
+| `/queue next` | `/q next` | Peek at the next item |
+
+### Delayed Execution
+
+Prefix a message with `@<duration>` to delay its execution:
+
+```
+@5m run tests
+@30s check the build
+@2h deploy to staging
+```
+
+Supported units: `s` (seconds), `m` (minutes), `h` (hours). Delayed items become eligible for execution after the specified duration elapses.
+
+### Priority Queue
+
+Prefix a message with `!` to mark it as high-priority. High-priority items are processed before normal items:
+
+```
+!fix this compilation error
+!run the failing test
+```
 
 ## Code Analysis
 
@@ -90,6 +110,7 @@ Queue messages to be processed after the current task completes:
 | `/review <file>` | Review a specific code file |
 | `/plan <task>` | Create a task plan (reasoning only) |
 | `/swarm <task>` | Run task with multi-agent swarm |
+| `/interview` | Start interview mode -- answer structured questions (language, framework, testing strategy, project type) before the agent begins a task |
 
 ## Mode & Display Controls
 
