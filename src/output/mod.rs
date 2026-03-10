@@ -7,6 +7,7 @@
 //! - `show_mascot`: Display ASCII fox mascot during key moments
 
 use colored::*;
+use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Global output mode flags (set once at startup)
@@ -638,28 +639,40 @@ pub(crate) fn thinking(text: &str, inline: bool) {
 
 /// Print thinking prefix (for streaming)
 pub(crate) fn thinking_prefix() {
+    if is_tui_active() {
+        return;
+    }
     if !is_compact() {
-        print!("{} ", "Thinking:".dimmed());
+        print!("\r\x1b[2K{} ", "Thinking:".dimmed());
+        io::stdout().flush().ok();
     }
 }
 
 /// Print intent detection message
 pub(crate) fn intent_without_action() {
+    if is_tui_active() {
+        return;
+    }
     if !is_compact() {
-        println!(
-            "{}",
+        print!(
+            "\r\x1b[2K{}\n",
             "🔄 Model described intent but didn't act - prompting for action...".bright_yellow()
         );
+        io::stdout().flush().ok();
     }
 }
 
 /// Print final answer
 pub(crate) fn final_answer(content: &str) {
-    if is_compact() {
-        println!("{}", content);
-    } else {
-        println!("{} {}", "Final answer:".bright_green(), content);
+    if is_tui_active() {
+        return;
     }
+    if is_compact() {
+        print!("\r\x1b[2K{}\n", content);
+    } else {
+        print!("\r\x1b[2K{} {}\n", "Final answer:".bright_green(), content);
+    }
+    io::stdout().flush().ok();
 }
 
 /// Print task completed message
@@ -908,8 +921,8 @@ impl TaskProgress {
                     .map(|e| format!(" ETA: {}", e.cyan()))
                     .unwrap_or_default();
 
-                println!(
-                    "{} [{}/{}] {} [{}] {}%{}",
+                print!(
+                    "\r\x1b[2K{} [{}/{}] {} [{}] {}%{}\n",
                     "📊".bright_blue(),
                     (self.current_phase + 1).to_string().bright_white(),
                     self.phases.len().to_string().dimmed(),
@@ -918,6 +931,7 @@ impl TaskProgress {
                     pct.to_string().bright_cyan(),
                     eta_str
                 );
+                io::stdout().flush().ok();
             }
         }
     }
@@ -925,15 +939,19 @@ impl TaskProgress {
 
 /// Print step announcement (used by agent)
 pub(crate) fn step_start(step: usize, name: &str) {
+    if is_tui_active() {
+        return;
+    }
     if is_compact() {
-        print!("[Step {}] ", step);
+        print!("\r\x1b[2K[Step {}] ", step);
     } else {
-        println!(
-            "{} {}...",
+        print!(
+            "\r\x1b[2K{} {}...\n",
             format!("📝 Step {}", step).bright_blue(),
             name.bright_white()
         );
     }
+    io::stdout().flush().ok();
 }
 
 /// Print phase transition
