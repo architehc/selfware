@@ -722,7 +722,7 @@ async fn test_llm_tool_calling() {
             let elapsed = start.elapsed();
             let msg = &resp.choices[0].message;
             let text = msg.content.text();
-            let has_tool_call = msg.tool_calls.as_ref().map_or(false, |tc| !tc.is_empty());
+            let has_tool_call = msg.tool_calls.as_ref().is_some_and(|tc| !tc.is_empty());
             let mentions_tool =
                 text.contains("file_read") || text.contains("<tool>") || text.contains("\"name\"");
 
@@ -781,7 +781,7 @@ async fn test_llm_code_generation_rust() {
                 .trim()
                 .strip_prefix("```rust")
                 .or_else(|| raw_text.trim().strip_prefix("```"))
-                .unwrap_or(&raw_text)
+                .unwrap_or(raw_text)
                 .trim_end_matches("```")
                 .trim();
 
@@ -862,7 +862,7 @@ async fn test_llm_code_generation_python() {
                 .trim()
                 .strip_prefix("```python")
                 .or_else(|| raw_text.trim().strip_prefix("```"))
-                .unwrap_or(&raw_text)
+                .unwrap_or(raw_text)
                 .trim_end_matches("```")
                 .trim();
 
@@ -974,7 +974,7 @@ async fn test_llm_multi_step_task() {
                 .trim()
                 .strip_prefix("```rust")
                 .or_else(|| text.trim().strip_prefix("```"))
-                .unwrap_or(&text)
+                .unwrap_or(text)
                 .trim_end_matches("```")
                 .trim();
             fs::write(&src, code).unwrap();

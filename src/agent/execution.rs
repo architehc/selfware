@@ -588,6 +588,11 @@ impl Agent {
             return Ok(true);
         }
 
+        // When TUI is active, auto-approve — the TUI can't show stdin prompts
+        if self.has_tui_renderer() {
+            return Ok(true);
+        }
+
         use std::io::{self, Write};
 
         let args_preview: String = args_str.chars().take(100).collect();

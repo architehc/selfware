@@ -520,7 +520,7 @@ impl MultiAgentChat {
 
             let input = input.trim();
 
-            if input == "exit" || input == "quit" {
+            if matches!(input, "exit" | "quit" | "/exit" | "/quit" | "q" | "/q") {
                 break;
             }
 

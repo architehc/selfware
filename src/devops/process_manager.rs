@@ -2154,17 +2154,29 @@ mod tests {
         // Bind to port 0 to get an OS-assigned free port, then release it and
         // verify is_port_available() agrees it's free.  This avoids hardcoded
         // port collisions when many tests run in parallel.
+        //
+        // Note: There is an inherent TOCTOU race between dropping the listener
+        // and probing the port.  We retry a few times to tolerate OS timing.
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0u16))
             .await
             .expect("Should bind to ephemeral port");
         let port = listener.local_addr().unwrap().port();
         drop(listener); // release port
 
-        let result = is_port_available(port).await;
-        // Port was just released, so it should be available (barring a race)
+        // Give the OS a moment to fully release the socket
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        let mut available = false;
+        for _ in 0..3 {
+            if is_port_available(port).await {
+                available = true;
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
         assert!(
-            result,
-            "Recently released port {} should be available",
+            available,
+            "Recently released port {} should be available after retries",
             port
         );
     }

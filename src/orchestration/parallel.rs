@@ -227,16 +227,27 @@ impl ParallelExecutor {
         let (parallel_refs, sequential_refs) = self.analyze_calls(&parsed_calls);
 
         // Find the actual calls with their IDs
+        // Use index-based matching instead of raw_text to avoid duplicate
+        // calls with identical text leaking between groups.
+        let parallel_indices: std::collections::HashSet<usize> = parsed_calls
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| parallel_refs.iter().any(|p| std::ptr::eq(*c, p)))
+            .map(|(i, _)| i)
+            .collect();
+
         let parallel_calls: Vec<_> = calls
             .iter()
-            .filter(|(_, c)| parallel_refs.iter().any(|p| p.raw_text == c.raw_text))
-            .cloned()
+            .enumerate()
+            .filter(|(i, _)| parallel_indices.contains(i))
+            .map(|(_, c)| c.clone())
             .collect();
 
         let sequential_calls: Vec<_> = calls
             .iter()
-            .filter(|(_, c)| sequential_refs.iter().any(|s| s.raw_text == c.raw_text))
-            .cloned()
+            .enumerate()
+            .filter(|(i, _)| !parallel_indices.contains(i))
+            .map(|(_, c)| c.clone())
             .collect();
 
         let mut results = Vec::new();

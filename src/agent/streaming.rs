@@ -22,7 +22,7 @@ fn find_earliest_open_tag(buf: &str) -> Option<(usize, usize)> {
     let mut best: Option<(usize, usize)> = None;
     for (i, &(open, _)) in SUPPRESSED_TAGS.iter().enumerate() {
         if let Some(pos) = buf.find(open) {
-            if best.map_or(true, |(b, _)| pos < b) {
+            if best.is_none() || best.is_some_and(|(b, _)| pos < b) {
                 best = Some((pos, i));
             }
         }
@@ -110,8 +110,7 @@ impl Agent {
         // Sticky bar is tracked for state (tokens, activity, bash count) but
         // NOT rendered during streaming — cursor positioning breaks with raw
         // stdout output. The state is used for the post-task summary line.
-        let sticky: Option<crate::ui::sticky_bar::StickyBar> = None;
-        let _ = &sticky_state; // state is still updated by streaming handlers
+        let _sticky: Option<crate::ui::sticky_bar::StickyBar> = None;
 
         // Start loading spinner with a random phrase while waiting for first token
         let initial_phrase = crate::ui::loading_phrases::random_phrase();
@@ -129,7 +128,7 @@ impl Agent {
             Some(crate::ui::spinner::TerminalSpinner::start(initial_phrase))
         };
         let mut phrase_rotation = tokio::time::Instant::now();
-        let mut last_bar_update = tokio::time::Instant::now();
+        let _last_bar_update = tokio::time::Instant::now();
 
         let stream = self.client.chat_stream(messages, tools, thinking).await?;
 
@@ -158,7 +157,7 @@ impl Agent {
                 } => {
                     if tui_active && tui_spinner_active {
                         self.emit_event(AgentEvent::SpinnerStop);
-                        tui_spinner_active = false;
+                        // tui_spinner_active stays true here — the break exits the loop
                     } else {
                         drop(spinner.take());
                     }

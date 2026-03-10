@@ -44,6 +44,12 @@ pub fn active_bash_count() -> u64 {
 /// RAII guard that increments on creation and decrements on drop.
 pub struct BashGuard;
 
+impl Default for BashGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BashGuard {
     pub fn new() -> Self {
         bash_started();
@@ -251,7 +257,7 @@ impl StickyBar {
 
         let w = terminal::size().map(|(w, _)| w as usize).unwrap_or(self.width as usize);
         let bottom = render_bottom(&self.state, w);
-        let top = render_top(&self.state, w);
+        let _top = render_top(&self.state, w);
 
         // Overwrite a single line on stderr with the combined status
         let mut err = io::stderr().lock();

@@ -6,6 +6,16 @@ use super::*;
 
 use super::tui_events::AgentEvent;
 
+/// Print only when TUI is NOT active (avoids writing to stdout while
+/// ratatui owns the alternate screen).
+macro_rules! cli_println {
+    ($($arg:tt)*) => {
+        if !crate::output::is_tui_active() {
+            println!($($arg)*);
+        }
+    };
+}
+
 impl Agent {
     pub async fn run_task(&mut self, task: &str) -> Result<()> {
         // Reset loop state so queued tasks don't inherit the previous
@@ -17,7 +27,7 @@ impl Agent {
         let ctrl_c_handle = tokio::spawn(async move {
             if let Ok(()) = tokio::signal::ctrl_c().await {
                 cancel_token.store(true, std::sync::atomic::Ordering::Relaxed);
-                println!("\n🦊 Received shutdown signal. Gracefully stopping agent and saving checkpoint...");
+                cli_println!("\n🦊 Received shutdown signal. Gracefully stopping agent and saving checkpoint...");
             }
         });
 
@@ -34,8 +44,8 @@ impl Agent {
             message: "Starting task...".to_string(),
         });
 
-        println!("{}", "🦊 Selfware starting task...".bright_cyan());
-        println!("Task: {}", task.bright_white());
+        cli_println!("{}", "🦊 Selfware starting task...".bright_cyan());
+        cli_println!("Task: {}", task.bright_white());
 
         // Initialize checkpoint if not resuming
         if self.current_checkpoint.is_none() {
@@ -91,7 +101,7 @@ impl Agent {
             self.trim_message_history();
 
             if self.is_cancelled() {
-                println!("{}", "\n⚡ Interrupted".bright_yellow());
+                cli_println!("{}", "\n⚡ Interrupted".bright_yellow());
                 self.messages
                     .push(Message::user("[Task interrupted by user]"));
                 self.record_task_outcome(
@@ -307,7 +317,7 @@ impl Agent {
                         message: "Recovering from error...".to_string(),
                     });
 
-                    println!("{} {}", "⚠️ Recovering from error:".bright_red(), error);
+                    cli_println!("{} {}", "⚠️ Recovering from error:".bright_red(), error);
 
                     #[cfg(feature = "resilience")]
                     let mut recovered = false;
@@ -364,7 +374,7 @@ impl Agent {
                         message: format!("Task failed: {}", reason),
                     });
 
-                    println!("{} {}", "❌ Task failed:".bright_red(), reason);
+                    cli_println!("{} {}", "❌ Task failed:".bright_red(), reason);
                     self.record_task_outcome(&task_description, Outcome::Failure, Some(&reason));
                     if let Err(e) = self.fail_checkpoint(&reason) {
                         warn!("Failed to save failed checkpoint: {}", e);
@@ -392,13 +402,13 @@ impl Agent {
         let mut agents = swarm.list_agents();
         agents.sort_by_key(|a| std::cmp::Reverse(a.role.priority()));
 
-        println!(
+        cli_println!(
             "{} Swarm initialized: {} agents",
             "🐝".bright_cyan(),
             agents.len()
         );
         for agent in &agents {
-            println!(
+            cli_println!(
                 "  {} {} ({})",
                 "→".bright_black(),
                 agent.name.bright_white(),
@@ -440,7 +450,7 @@ impl Agent {
             }
         }
 
-        println!(
+        cli_println!(
             "{} Queued {} phases for orchestrated execution",
             "🐝".bright_cyan(),
             phases.len()
@@ -476,7 +486,7 @@ impl Agent {
                 .map(|r| r.name())
                 .unwrap_or("General");
 
-            println!(
+            cli_println!(
                 "\n{} Phase {}/{}: {} ({})",
                 "🐝".bright_cyan(),
                 phase_num,
@@ -518,7 +528,7 @@ impl Agent {
 
         // Print swarm statistics
         let stats = swarm.stats();
-        println!(
+        cli_println!(
             "\n{} Swarm complete: {} agents, avg trust {:.0}%",
             "🐝".bright_green(),
             stats.total_agents,
@@ -672,7 +682,7 @@ impl Agent {
             self.trim_message_history();
 
             if self.is_cancelled() {
-                println!("{}", "\n⚡ Interrupted".bright_yellow());
+                cli_println!("{}", "\n⚡ Interrupted".bright_yellow());
                 self.messages
                     .push(Message::user("[Task interrupted by user]"));
                 self.record_task_outcome(
@@ -687,7 +697,7 @@ impl Agent {
                 AgentState::Planning => {
                     let _span = enter_agent_step("Planning", 0);
                     record_state_transition("Resume", "Planning");
-                    println!("{}", "📋 Planning...".bright_yellow());
+                    cli_println!("{}", "📋 Planning...".bright_yellow());
                     self.cognitive_state.set_phase(CyclePhase::Plan);
 
                     if let Err(e) = self.plan().await {
@@ -711,7 +721,7 @@ impl Agent {
                 }
                 AgentState::Executing { step } => {
                     let _span = enter_agent_step("Executing", step);
-                    println!(
+                    cli_println!(
                         "{} Executing...",
                         format!("📝 Step {}", step + 1).bright_blue()
                     );
@@ -786,7 +796,7 @@ impl Agent {
                 AgentState::ErrorRecovery { error } => {
                     let _span = enter_agent_step("ErrorRecovery", self.loop_control.current_step());
 
-                    println!("{} {}", "⚠️ Recovering from error:".bright_red(), error);
+                    cli_println!("{} {}", "⚠️ Recovering from error:".bright_red(), error);
 
                     #[cfg(feature = "resilience")]
                     let mut recovered = false;
@@ -836,7 +846,7 @@ impl Agent {
                 }
                 AgentState::Failed { reason } => {
                     record_state_transition("Executing", "Failed");
-                    println!("{} {}", "❌ Task failed:".bright_red(), reason);
+                    cli_println!("{} {}", "❌ Task failed:".bright_red(), reason);
                     self.record_task_outcome(&task_description, Outcome::Failure, Some(&reason));
                     if let Err(e) = self.fail_checkpoint(&reason) {
                         warn!("Failed to save failed checkpoint: {}", e);

@@ -56,8 +56,8 @@ pub struct TerminalSpinner {
 impl TerminalSpinner {
     /// Start a new spinner with the given message
     pub fn start(message: &str) -> Self {
-        // Skip in compact mode, non-terminal, or dumb terminal
-        if output::is_compact() || !io::stdout().is_terminal() || !supports_ansi() {
+        // Skip when TUI owns the terminal, in compact mode, non-terminal, or dumb terminal
+        if output::is_tui_active() || output::is_compact() || !io::stdout().is_terminal() || !supports_ansi() {
             return Self {
                 stop_signal: Arc::new(AtomicBool::new(true)),
                 message_tx: watch::channel(String::new()).0,
@@ -135,7 +135,7 @@ impl TerminalSpinner {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
-        if !output::is_compact() && io::stdout().is_terminal() {
+        if !output::is_tui_active() && !output::is_compact() && io::stdout().is_terminal() {
             let elapsed = self.start_time.elapsed().as_secs_f64();
             print!("\r\x1b[2K");
             println!("  {} {} ({:.1}s)", icon, message, elapsed);

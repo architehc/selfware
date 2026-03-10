@@ -536,6 +536,10 @@ pub async fn run() -> Result<()> {
             let shared_state = crate::ui::tui::SharedDashboardState::default();
             let model = config.model.clone();
 
+            // Suppress ALL direct stdout/stderr from the agent — the TUI
+            // owns the terminal and renders from events only.
+            crate::output::set_tui_active(true);
+
             // Run TUI in a separate thread
             let tui_handle = std::thread::spawn(move || {
                 crate::ui::tui::run_tui_dashboard_with_events(
@@ -562,6 +566,8 @@ pub async fn run() -> Result<()> {
                     _ => break,
                 }
             }
+
+            crate::output::set_tui_active(false);
 
             // Cleanup: join the TUI thread without blocking the async runtime
             tokio::task::block_in_place(|| {
