@@ -223,7 +223,7 @@ fn render_bottom(state: &StickyState, width: usize) -> String {
 /// A sticky bar handle.  While this is alive, the top and bottom rows of the
 /// terminal are pinned and all output scrolls between them.
 ///
-/// Call [`update()`] periodically (e.g. on each streaming chunk) to refresh
+/// Call `update()` periodically (e.g. on each streaming chunk) to refresh
 /// the displayed information.  On [`drop`], the scrolling region is reset.
 pub struct StickyBar {
     state: StickyState,
