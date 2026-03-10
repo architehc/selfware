@@ -53,6 +53,8 @@ COPY src ./src
 COPY tests ./tests
 COPY benches ./benches
 COPY examples ./examples
+COPY templates ./templates
+COPY selfware-qa-schema.yaml ./selfware-qa-schema.yaml
 
 # Touch source files to ensure cargo rebuilds with actual code
 RUN touch src/main.rs src/lib.rs
