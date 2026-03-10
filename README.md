@@ -1,5 +1,7 @@
 # Selfware
 
+<iframe src="https://github.com/sponsors/architehc/button" title="Sponsor architehc" height="32" width="114" style="border: 0; border-radius: 6px;"></iframe>
+
 [![CI](https://github.com/architehc/selfware/actions/workflows/ci.yml/badge.svg)](https://github.com/architehc/selfware/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/selfware)](https://crates.io/crates/selfware)
 [![Docs.rs](https://docs.rs/selfware/badge.svg)](https://docs.rs/selfware)
