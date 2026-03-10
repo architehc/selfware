@@ -205,12 +205,12 @@ impl Agent {
     /// These tools indicate non-Rust tasks (browser automation, vision analysis,
     /// desktop control, web fetching, etc.) where `cargo check` is meaningless.
     const NON_RUST_TOOL_PREFIXES: &'static [&'static str] = &[
-        "browser_",        // browser_fetch, browser_screenshot, browser_pdf, browser_eval, browser_links
-        "vision_",         // vision_analyze, vision_compare
-        "computer_",       // computer_mouse, computer_keyboard, computer_screen, computer_window
-        "screen_capture",  // screen_capture
-        "page_control",    // page_control (screenshot, click, type, scroll, etc.)
-        "http_request",    // http_request
+        "browser_",  // browser_fetch, browser_screenshot, browser_pdf, browser_eval, browser_links
+        "vision_",   // vision_analyze, vision_compare
+        "computer_", // computer_mouse, computer_keyboard, computer_screen, computer_window
+        "screen_capture", // screen_capture
+        "page_control", // page_control (screenshot, click, type, scroll, etc.)
+        "http_request", // http_request
     ];
 
     /// Returns true if the current task appears to be a non-Rust task that should
@@ -223,7 +223,10 @@ impl Agent {
         // Condition 1: No Cargo.toml in working directory → not a Rust project
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         if !cwd.join("Cargo.toml").exists() {
-            debug!("Completion gate: no Cargo.toml found in {:?}, skipping cargo verification", cwd);
+            debug!(
+                "Completion gate: no Cargo.toml found in {:?}, skipping cargo verification",
+                cwd
+            );
             return true;
         }
 
@@ -245,7 +248,9 @@ impl Agent {
             .unwrap_or(false);
 
         if all_non_rust {
-            debug!("Completion gate: all tool calls are non-Rust tools, skipping cargo verification");
+            debug!(
+                "Completion gate: all tool calls are non-Rust tools, skipping cargo verification"
+            );
         }
         all_non_rust
     }

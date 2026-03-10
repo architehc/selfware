@@ -1149,7 +1149,11 @@ mod tests {
         let config = AgentConfig::default();
         assert_eq!(config.max_iterations, 100);
         assert_eq!(config.step_timeout_secs, 300);
-        assert_eq!(config.token_budget, default_max_tokens(), "defaults to max_tokens");
+        assert_eq!(
+            config.token_budget,
+            default_max_tokens(),
+            "defaults to max_tokens"
+        );
     }
 
     #[test]
@@ -1699,7 +1703,11 @@ mod tests {
         assert!((default_temperature() - 1.0).abs() < f32::EPSILON);
         assert_eq!(default_max_iterations(), 100);
         assert_eq!(default_step_timeout(), 300);
-        assert_eq!(default_token_budget(), 0, "sentinel value, resolved from max_tokens at load");
+        assert_eq!(
+            default_token_budget(),
+            0,
+            "sentinel value, resolved from max_tokens at load"
+        );
         assert_eq!(default_allowed_paths(), vec!["./**".to_string()]);
         assert_eq!(
             default_protected_branches(),

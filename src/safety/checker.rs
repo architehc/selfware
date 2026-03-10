@@ -2560,7 +2560,10 @@ mod tests {
         let config = SafetyConfig::default();
         let checker = SafetyChecker::new(&config);
 
-        let call = create_test_call("computer_mouse", r#"{"action": "click", "x": 100, "y": 200}"#);
+        let call = create_test_call(
+            "computer_mouse",
+            r#"{"action": "click", "x": 100, "y": 200}"#,
+        );
         assert!(checker.check_tool_call(&call).is_ok());
     }
 
@@ -2569,7 +2572,10 @@ mod tests {
         let config = SafetyConfig::default();
         let checker = SafetyChecker::new(&config);
 
-        let call = create_test_call("computer_keyboard", r#"{"action": "type", "text": "hello"}"#);
+        let call = create_test_call(
+            "computer_keyboard",
+            r#"{"action": "type", "text": "hello"}"#,
+        );
         assert!(checker.check_tool_call(&call).is_ok());
     }
 
@@ -2578,7 +2584,10 @@ mod tests {
         let config = SafetyConfig::default();
         let checker = SafetyChecker::new(&config);
 
-        let call = create_test_call("page_control", r##"{"action": "click", "selector": "#btn"}"##);
+        let call = create_test_call(
+            "page_control",
+            r##"{"action": "click", "selector": "#btn"}"##,
+        );
         assert!(checker.check_tool_call(&call).is_ok());
     }
 
@@ -2627,10 +2636,7 @@ mod tests {
         let config = SafetyConfig::default();
         let checker = SafetyChecker::new(&config);
 
-        let call = create_test_call(
-            "vision_analyze",
-            r#"{"image_path": "./screenshot.png"}"#,
-        );
+        let call = create_test_call("vision_analyze", r#"{"image_path": "./screenshot.png"}"#);
         assert!(checker.check_tool_call(&call).is_ok());
 
         let call = create_test_call(

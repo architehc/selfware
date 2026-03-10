@@ -232,7 +232,10 @@ impl DashboardState {
                 self.status_message = "Ready".to_string();
             }
             TuiEvent::InputQueued { message, position } => {
-                self.log(LogLevel::Info, &format!("Queued ({}): {}", position, message));
+                self.log(
+                    LogLevel::Info,
+                    &format!("Queued ({}): {}", position, message),
+                );
             }
         }
     }

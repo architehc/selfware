@@ -770,7 +770,10 @@ mod tests {
                 "command": "this_binary_does_not_exist_xyz_12345"
             }))
             .await;
-        assert!(result.is_err(), "Starting a nonexistent command should return Err");
+        assert!(
+            result.is_err(),
+            "Starting a nonexistent command should return Err"
+        );
         assert!(result.unwrap_err().to_string().contains("Failed to spawn"));
     }
 

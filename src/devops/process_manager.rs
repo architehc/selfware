@@ -443,10 +443,7 @@ impl ProcessManager {
                 );
             }
             ProcessStatus::Stopped => {
-                anyhow::bail!(
-                    "Process '{}' was stopped before it could become ready",
-                    id
-                );
+                anyhow::bail!("Process '{}' was stopped before it could become ready", id);
             }
             _ => Ok(summary),
         }
@@ -500,16 +497,16 @@ impl ProcessManager {
                     }
 
                     // Wait up to 3 seconds for graceful exit, then force kill
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(3),
-                        child.wait(),
-                    )
-                    .await
+                    match tokio::time::timeout(std::time::Duration::from_secs(3), child.wait())
+                        .await
                     {
                         Ok(_) => {} // Process exited
                         Err(_) => {
                             // Timeout — force kill and reap
-                            warn!("Process '{}' did not exit after SIGTERM, sending SIGKILL", id);
+                            warn!(
+                                "Process '{}' did not exit after SIGTERM, sending SIGKILL",
+                                id
+                            );
                             let _ = child.kill().await;
                             let _ = child.wait().await;
                         }

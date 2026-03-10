@@ -103,10 +103,7 @@ impl Agent {
             crate::config::ExecutionMode::Yolo => "YOLO",
             crate::config::ExecutionMode::Daemon => "daemon",
         };
-        let sticky_state = crate::ui::sticky_bar::StickyState::new(
-            mode_label,
-            &self.config.model,
-        );
+        let sticky_state = crate::ui::sticky_bar::StickyState::new(mode_label, &self.config.model);
         // Sticky bar is tracked for state (tokens, activity, bash count) but
         // NOT rendered during streaming — cursor positioning breaks with raw
         // stdout output. The state is used for the post-task summary line.
@@ -175,7 +172,9 @@ impl Agent {
 
             // Rotate loading phrase every 3 seconds while spinner is active
             if tui_active {
-                if tui_spinner_active && phrase_rotation.elapsed() > tokio::time::Duration::from_secs(3) {
+                if tui_spinner_active
+                    && phrase_rotation.elapsed() > tokio::time::Duration::from_secs(3)
+                {
                     let new_phrase = crate::ui::loading_phrases::random_phrase();
                     self.emit_event(AgentEvent::SpinnerUpdate {
                         message: new_phrase.to_string(),
@@ -209,7 +208,9 @@ impl Agent {
                     }
                     if in_reasoning {
                         in_reasoning = false;
-                        sticky_state.is_thinking.store(false, std::sync::atomic::Ordering::Relaxed);
+                        sticky_state
+                            .is_thinking
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
                         sticky_state.thinking_secs.store(
                             sticky_state.started.elapsed().as_secs(),
                             std::sync::atomic::Ordering::Relaxed,
@@ -257,8 +258,8 @@ impl Agent {
                                 if is_think && !output::is_compact() {
                                     // Extract inner text, strip the open/close tags
                                     let (open, _) = SUPPRESSED_TAGS[tag_idx];
-                                    let inner = &block
-                                        [open.len()..block.len().saturating_sub(close.len())];
+                                    let inner =
+                                        &block[open.len()..block.len().saturating_sub(close.len())];
                                     let trimmed = inner.trim();
                                     if !trimmed.is_empty() {
                                         reasoning.push_str(trimmed);
@@ -271,8 +272,7 @@ impl Agent {
                             }
                         } else {
                             // Look for the earliest opening suppressed tag
-                            if let Some((start_pos, tag_idx)) =
-                                find_earliest_open_tag(&display_buf)
+                            if let Some((start_pos, tag_idx)) = find_earliest_open_tag(&display_buf)
                             {
                                 // Emit/print everything before the tag
                                 let before = &display_buf[..start_pos];
@@ -320,15 +320,15 @@ impl Agent {
                     } else if let Some(s) = spinner.take() {
                         drop(s);
                     }
-                    sticky_state.is_thinking.store(true, std::sync::atomic::Ordering::Relaxed);
+                    sticky_state
+                        .is_thinking
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
                     sticky_state.set_activity("Thinking...");
                     if tui_active {
                         if !in_reasoning {
                             in_reasoning = true;
                         }
-                        self.emit_event(AgentEvent::ThinkingDelta {
-                            text: text.clone(),
-                        });
+                        self.emit_event(AgentEvent::ThinkingDelta { text: text.clone() });
                     } else if !output::is_compact() {
                         if !in_reasoning {
                             in_reasoning = true;
@@ -635,19 +635,13 @@ mod tests {
     #[test]
     fn extract_display_name_from_tool_block() {
         let xml = "<tool>\n<name>file_write</name>\n<arguments>{}</arguments>\n</tool>";
-        assert_eq!(
-            extract_display_name(xml),
-            Some("file_write".to_string())
-        );
+        assert_eq!(extract_display_name(xml), Some("file_write".to_string()));
     }
 
     #[test]
     fn extract_display_name_from_function_block() {
         let xml = r#"<tool_call><function=shell_exec>{"cmd":"ls"}</function></tool_call>"#;
-        assert_eq!(
-            extract_display_name(xml),
-            Some("shell_exec".to_string())
-        );
+        assert_eq!(extract_display_name(xml), Some("shell_exec".to_string()));
     }
 
     #[test]
@@ -659,12 +653,7 @@ mod tests {
     #[test]
     fn suppressed_tags_covers_all_local_model_formats() {
         // Ensure all common local model XML formats are covered
-        let formats = [
-            "<tool_call>",
-            "<tool>",
-            "<think>",
-            "<thinking>",
-        ];
+        let formats = ["<tool_call>", "<tool>", "<think>", "<thinking>"];
         for fmt in &formats {
             assert!(
                 SUPPRESSED_TAGS.iter().any(|(open, _)| open == fmt),

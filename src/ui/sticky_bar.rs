@@ -144,11 +144,7 @@ pub fn fmt_tokens(n: u64) -> String {
 
 /// Render the top bar content string (no ANSI cursor movement).
 fn render_top(state: &StickyState, width: usize) -> String {
-    let activity = state
-        .activity
-        .lock()
-        .map(|a| a.clone())
-        .unwrap_or_default();
+    let activity = state.activity.lock().map(|a| a.clone()).unwrap_or_default();
     let elapsed = fmt_elapsed(state.started.elapsed());
     let tokens = fmt_tokens(state.tokens.load(Ordering::Relaxed));
 
@@ -201,7 +197,11 @@ fn render_bottom(state: &StickyState, width: usize) -> String {
 
     // Active background processes
     if procs > 0 {
-        parts.push(format!("{} process{}", procs, if procs == 1 { "" } else { "es" }));
+        parts.push(format!(
+            "{} process{}",
+            procs,
+            if procs == 1 { "" } else { "es" }
+        ));
     }
 
     // Queued messages
@@ -255,7 +255,9 @@ impl StickyBar {
             .active_bash
             .store(active_bash_count(), Ordering::Relaxed);
 
-        let w = terminal::size().map(|(w, _)| w as usize).unwrap_or(self.width as usize);
+        let w = terminal::size()
+            .map(|(w, _)| w as usize)
+            .unwrap_or(self.width as usize);
         let bottom = render_bottom(&self.state, w);
         let _top = render_top(&self.state, w);
 
@@ -266,7 +268,8 @@ impl StickyBar {
             err,
             "\x1b7\x1b[{};1H\x1b[48;5;236m\x1b[38;5;245m{}\x1b[0m\x1b8",
             self.height, bottom
-        ).ok();
+        )
+        .ok();
         err.flush().ok();
     }
 
@@ -276,7 +279,9 @@ impl StickyBar {
             .active_bash
             .store(active_bash_count(), Ordering::Relaxed);
 
-        let w = terminal::size().map(|(w, _)| w as usize).unwrap_or(self.width as usize);
+        let w = terminal::size()
+            .map(|(w, _)| w as usize)
+            .unwrap_or(self.width as usize);
         let top = render_top(&self.state, w);
 
         // Clear the bottom bar we've been overwriting
@@ -360,7 +365,10 @@ mod tests {
         let state = StickyState::new("normal", "qwen3.5");
         state.set_activity("Planning...");
         let top = render_top(&state, 80);
-        assert!(top.contains("Planning..."), "top bar should contain activity");
+        assert!(
+            top.contains("Planning..."),
+            "top bar should contain activity"
+        );
         assert!(top.contains("tokens"), "top bar should mention tokens");
     }
 
@@ -368,7 +376,10 @@ mod tests {
     fn render_top_contains_elapsed() {
         let state = StickyState::new("normal", "qwen3.5");
         let top = render_top(&state, 80);
-        assert!(top.contains("0s") || top.contains("1s"), "should show elapsed time");
+        assert!(
+            top.contains("0s") || top.contains("1s"),
+            "should show elapsed time"
+        );
     }
 
     #[test]
@@ -384,14 +395,20 @@ mod tests {
         let state = StickyState::new("normal", "qwen3.5");
         state.thinking_secs.store(5, Ordering::Relaxed);
         let top = render_top(&state, 120);
-        assert!(top.contains("thought for 5s"), "should show completed thinking duration");
+        assert!(
+            top.contains("thought for 5s"),
+            "should show completed thinking duration"
+        );
     }
 
     #[test]
     fn render_bottom_normal_mode() {
         let state = StickyState::new("normal", "qwen3.5");
         let bottom = render_bottom(&state, 80);
-        assert!(bottom.contains("confirm mode"), "normal mode should say confirm");
+        assert!(
+            bottom.contains("confirm mode"),
+            "normal mode should say confirm"
+        );
         assert!(bottom.contains("esc to interrupt"));
     }
 
@@ -399,7 +416,10 @@ mod tests {
     fn render_bottom_yolo_mode() {
         let state = StickyState::new("YOLO", "qwen3.5");
         let bottom = render_bottom(&state, 80);
-        assert!(bottom.contains("auto-approve on"), "YOLO should say auto-approve");
+        assert!(
+            bottom.contains("auto-approve on"),
+            "YOLO should say auto-approve"
+        );
     }
 
     #[test]

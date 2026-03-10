@@ -117,9 +117,7 @@ impl EventEmitter for TuiEmitter {
             AgentEvent::AssistantDelta { text } => TuiEvent::AssistantDelta { text },
             AgentEvent::ThinkingDelta { text } => TuiEvent::ThinkingDelta { text },
             AgentEvent::ThinkingEnd => TuiEvent::ThinkingEnd,
-            AgentEvent::ToolProgress { name, status } => {
-                TuiEvent::ToolProgress { name, status }
-            }
+            AgentEvent::ToolProgress { name, status } => TuiEvent::ToolProgress { name, status },
             AgentEvent::SpinnerStart { message } => TuiEvent::SpinnerStart { message },
             AgentEvent::SpinnerUpdate { message } => TuiEvent::SpinnerUpdate { message },
             AgentEvent::SpinnerStop => TuiEvent::SpinnerStop,

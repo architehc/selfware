@@ -44,7 +44,10 @@ impl EscListenerGuard {
         // Give the blocking thread up to 200 ms to clean up raw mode.
         let _ = tokio::time::timeout(std::time::Duration::from_millis(200), self.handle).await;
         // Drain any queued messages
-        self.queued.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
+        self.queued
+            .lock()
+            .map(|mut q| std::mem::take(&mut *q))
+            .unwrap_or_default()
     }
 }
 
@@ -58,10 +61,7 @@ impl EscListenerGuard {
 /// - A prompt hint `▸ ` is shown when the user starts typing
 ///
 /// Terminal raw mode is always restored before the thread returns.
-fn spawn_esc_listener(
-    cancel_token: Arc<AtomicBool>,
-    paused: Arc<AtomicBool>,
-) -> EscListenerGuard {
+fn spawn_esc_listener(cancel_token: Arc<AtomicBool>, paused: Arc<AtomicBool>) -> EscListenerGuard {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_clone = Arc::clone(&stop);
     let queued: InputQueue = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -112,7 +112,9 @@ fn spawn_esc_listener(
 
             if let Some(read_result) = event_result {
                 match read_result {
-                    Ok(Event::Key(KeyEvent { code, modifiers, .. })) => {
+                    Ok(Event::Key(KeyEvent {
+                        code, modifiers, ..
+                    })) => {
                         match code {
                             KeyCode::Esc => {
                                 // ESC always cancels generation
@@ -123,9 +125,8 @@ fn spawn_esc_listener(
                                 input_buf.clear();
                                 showing_prompt = false;
                                 cancel_token.store(true, Ordering::Relaxed);
-                                let _ = std::io::stderr().write_all(
-                                    b"\r\n\x1b[33m[ESC] Cancelling...\x1b[0m\r\n",
-                                );
+                                let _ = std::io::stderr()
+                                    .write_all(b"\r\n\x1b[33m[ESC] Cancelling...\x1b[0m\r\n");
                                 break;
                             }
                             KeyCode::Enter => {
@@ -156,10 +157,8 @@ fn spawn_esc_listener(
                             KeyCode::Backspace => {
                                 if input_buf.pop().is_some() {
                                     // Redraw prompt
-                                    let prompt = format!(
-                                        "\r\x1b[2K\x1b[90m  ▸ \x1b[0m{}",
-                                        input_buf
-                                    );
+                                    let prompt =
+                                        format!("\r\x1b[2K\x1b[90m  ▸ \x1b[0m{}", input_buf);
                                     let _ = std::io::stderr().write_all(prompt.as_bytes());
                                     let _ = std::io::stderr().flush();
                                     if input_buf.is_empty() {
@@ -169,13 +168,10 @@ fn spawn_esc_listener(
                                     }
                                 }
                             }
-                            KeyCode::Char('c')
-                                if modifiers.contains(KeyModifiers::CONTROL) =>
-                            {
+                            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                                 cancel_token.store(true, Ordering::Relaxed);
-                                let _ = std::io::stderr().write_all(
-                                    b"\r\n\x1b[33m[Ctrl+C] Cancelling...\x1b[0m\r\n",
-                                );
+                                let _ = std::io::stderr()
+                                    .write_all(b"\r\n\x1b[33m[Ctrl+C] Cancelling...\x1b[0m\r\n");
                                 break;
                             }
                             KeyCode::Up => {
@@ -187,10 +183,8 @@ fn spawn_esc_listener(
                                 if let Some(msg) = popped {
                                     input_buf = msg;
                                     showing_prompt = true;
-                                    let prompt = format!(
-                                        "\r\x1b[2K\x1b[90m  ▸ \x1b[0m{}",
-                                        input_buf
-                                    );
+                                    let prompt =
+                                        format!("\r\x1b[2K\x1b[90m  ▸ \x1b[0m{}", input_buf);
                                     let _ = std::io::stderr().write_all(prompt.as_bytes());
                                     let _ = std::io::stderr().flush();
                                 }
@@ -198,16 +192,14 @@ fn spawn_esc_listener(
                             KeyCode::Char(c) => {
                                 if !showing_prompt {
                                     // Show the inline prompt on first keypress
-                                    let _ = std::io::stderr().write_all(
-                                        b"\r\x1b[2K\x1b[90m  \xe2\x96\xb8 \x1b[0m",
-                                    );
+                                    let _ = std::io::stderr()
+                                        .write_all(b"\r\x1b[2K\x1b[90m  \xe2\x96\xb8 \x1b[0m");
                                     showing_prompt = true;
                                 }
                                 input_buf.push(c);
                                 // Echo the character
-                                let _ = std::io::stderr().write_all(
-                                    c.encode_utf8(&mut [0; 4]).as_bytes(),
-                                );
+                                let _ = std::io::stderr()
+                                    .write_all(c.encode_utf8(&mut [0; 4]).as_bytes());
                                 let _ = std::io::stderr().flush();
                             }
                             _ => {}
@@ -228,7 +220,11 @@ fn spawn_esc_listener(
         let _ = terminal::disable_raw_mode();
     });
 
-    EscListenerGuard { stop, handle, queued }
+    EscListenerGuard {
+        stop,
+        handle,
+        queued,
+    }
 }
 
 impl Agent {
@@ -2208,8 +2204,19 @@ mod tests {
             assert!(is_exit_command(input), "'{}' should trigger exit", input);
         }
 
-        for input in &["exiting", "quitting", "EXIT", "exit now", "query", "/question"] {
-            assert!(!is_exit_command(input), "'{}' should NOT trigger exit", input);
+        for input in &[
+            "exiting",
+            "quitting",
+            "EXIT",
+            "exit now",
+            "query",
+            "/question",
+        ] {
+            assert!(
+                !is_exit_command(input),
+                "'{}' should NOT trigger exit",
+                input
+            );
         }
     }
 

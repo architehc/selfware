@@ -57,7 +57,11 @@ impl TerminalSpinner {
     /// Start a new spinner with the given message
     pub fn start(message: &str) -> Self {
         // Skip when TUI owns the terminal, in compact mode, non-terminal, or dumb terminal
-        if output::is_tui_active() || output::is_compact() || !io::stdout().is_terminal() || !supports_ansi() {
+        if output::is_tui_active()
+            || output::is_compact()
+            || !io::stdout().is_terminal()
+            || !supports_ansi()
+        {
             return Self {
                 stop_signal: Arc::new(AtomicBool::new(true)),
                 message_tx: watch::channel(String::new()).0,

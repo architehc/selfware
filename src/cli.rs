@@ -1847,11 +1847,8 @@ mod tests {
     #[test]
     fn resolve_config_path_explicit_relative_config_with_workdir_uses_original_cwd() {
         // --config my.toml -C /other/dir → absolutified against ORIGINAL cwd, not /other/dir
-        let result = resolve_config_path(
-            Some("my.toml"),
-            true,
-            Some(Path::new("/home/user/project")),
-        );
+        let result =
+            resolve_config_path(Some("my.toml"), true, Some(Path::new("/home/user/project")));
         assert_eq!(result.as_deref(), Some("/home/user/project/my.toml"));
     }
 
