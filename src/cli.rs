@@ -1834,6 +1834,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))] // Uses Unix paths
     fn resolve_config_path_explicit_relative_config_uses_original_cwd() {
         // --config my.toml with original cwd → absolutified against original cwd
         let result = resolve_config_path(
@@ -1845,6 +1846,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))] // Uses Unix paths
     fn resolve_config_path_explicit_relative_config_with_workdir_uses_original_cwd() {
         // --config my.toml -C /other/dir → absolutified against ORIGINAL cwd, not /other/dir
         let result =
