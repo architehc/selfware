@@ -246,7 +246,7 @@ impl Agent {
                                             });
                                         } else {
                                             print!(
-                                                "  {} {}...",
+                                                "\r\n  {} {}...",
                                                 "🔧".dimmed(),
                                                 fname.bright_cyan()
                                             );
@@ -283,7 +283,9 @@ impl Agent {
                                             text: before.to_string(),
                                         });
                                     } else {
-                                        print!("{}", before);
+                                        // Replace \n with \r\n so every newline resets to col 0
+                                        let safe = before.replace('\n', "\r\n");
+                                        print!("{}", safe);
                                         io::stdout().flush().ok();
                                     }
                                 }
@@ -300,7 +302,8 @@ impl Agent {
                                             text: display_buf.clone(),
                                         });
                                     } else {
-                                        print!("{}", display_buf);
+                                        let safe = display_buf.replace('\n', "\r\n");
+                                        print!("{}", safe);
                                         io::stdout().flush().ok();
                                     }
                                 }
@@ -365,7 +368,8 @@ impl Agent {
                     text: display_buf.clone(),
                 });
             } else {
-                print!("{}", display_buf);
+                let safe = display_buf.replace('\n', "\r\n");
+                print!("{}", safe);
                 io::stdout().flush().ok();
             }
         }

@@ -620,20 +620,25 @@ pub(crate) fn thinking(text: &str, inline: bool) {
         return;
     }
 
+    // Replace \n with \r\n so newlines in thinking text reset to column 0
+    let safe = text.replace('\n', "\r\n");
     if inline {
         if is_verbose() {
-            print!("{}", text.bright_black());
+            print!("{}", safe.bright_black());
         } else {
-            print!("{}", text.dimmed());
+            print!("{}", safe.dimmed());
         }
+        io::stdout().flush().ok();
     } else if is_verbose() {
-        println!(
-            "{} {}",
+        print!(
+            "\r\x1b[2K{} {}\r\n",
             "💭 Thinking:".bright_magenta(),
-            text.bright_black()
+            safe.bright_black()
         );
+        io::stdout().flush().ok();
     } else {
-        println!("{} {}", "Thinking:".dimmed(), text.dimmed());
+        print!("\r\x1b[2K{} {}\r\n", "Thinking:".dimmed(), safe.dimmed());
+        io::stdout().flush().ok();
     }
 }
 
