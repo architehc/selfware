@@ -689,21 +689,30 @@ pub(crate) fn task_completed() {
 
 /// Print verification report
 pub(crate) fn verification_report(report: &str, passed: bool) {
+    if is_tui_active() {
+        return;
+    }
+    // Replace \n with \r\n for proper column reset
+    let safe = report.replace('\n', "\r\n");
     if is_verbose() {
         // Full report in verbose mode
-        println!("{}", report);
+        print!("{}\r\n", safe);
+        io::stdout().flush().ok();
     } else if !is_compact() {
         // Summary in normal mode
         if passed {
-            println!("{}", "✓ Verification passed".bright_green());
+            print!("\r\x1b[2K{}\r\n", "✓ Verification passed".bright_green());
+            io::stdout().flush().ok();
         } else {
             // Always show failures
-            println!("{}", report);
+            print!("{}\r\n", safe);
+            io::stdout().flush().ok();
         }
     } else {
         // Compact: only show failures
         if !passed {
-            println!("{}", report);
+            print!("{}\r\n", safe);
+            io::stdout().flush().ok();
         }
     }
 }
