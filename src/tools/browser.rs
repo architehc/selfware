@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use regex::Regex;
 use serde_json::{json, Value};
 use std::net::{IpAddr, ToSocketAddrs};
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::LazyLock;
 use tokio::process::Command;
@@ -39,16 +40,12 @@ struct PinnedTarget {
 
 /// Detect available browser for automation
 async fn detect_browser() -> Result<BrowserType> {
+    if playwright_runtime_available().await {
+        return Ok(BrowserType::Playwright);
+    }
+
     // Try Chrome/Chromium first
-    for browser in &[
-        "google-chrome",
-        "google-chrome-stable",
-        "chromium",
-        "chromium-browser",
-        "/usr/bin/google-chrome",
-        "/usr/bin/chromium",
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    ] {
+    for browser in chrome_candidates() {
         if Command::new(browser)
             .arg("--version")
             .stdout(Stdio::null())
@@ -60,19 +57,6 @@ async fn detect_browser() -> Result<BrowserType> {
         {
             return Ok(BrowserType::Chrome(browser.to_string()));
         }
-    }
-
-    // Try playwright only when the Node runtime can actually require the module.
-    if Command::new("node")
-        .args(["-e", "require('playwright'); console.log('playwright-ok')"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
-        return Ok(BrowserType::Playwright);
     }
 
     // Fallback to curl
@@ -91,6 +75,87 @@ async fn detect_browser() -> Result<BrowserType> {
     Err(anyhow::anyhow!(
         "No browser automation tool found. Install Chrome, Chromium, or Playwright."
     ))
+}
+
+fn chrome_candidates() -> &'static [&'static str] {
+    &[
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium",
+        "chromium-browser",
+        "/usr/bin/google-chrome",
+        "/usr/bin/chromium",
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    ]
+}
+
+fn playwright_chromium_executable() -> Option<String> {
+    for env_key in [
+        "SELFWARE_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH",
+        "SELFWARE_CHROME_EXECUTABLE_PATH",
+    ] {
+        if let Ok(path) = std::env::var(env_key) {
+            if Path::new(&path).exists() {
+                return Some(path);
+            }
+        }
+    }
+
+    chrome_candidates()
+        .iter()
+        .find(|candidate| Path::new(candidate).exists())
+        .map(|candidate| (*candidate).to_string())
+}
+
+fn configure_playwright_command(cmd: &mut Command) {
+    if let Ok(node_path) = std::env::var("SELFWARE_PLAYWRIGHT_NODE_PATH") {
+        let merged = match std::env::var("NODE_PATH") {
+            Ok(existing) if !existing.is_empty() => format!("{}:{}", node_path, existing),
+            _ => node_path,
+        };
+        cmd.env("NODE_PATH", merged);
+    }
+
+    if let Some(executable) = playwright_chromium_executable() {
+        cmd.env("SELFWARE_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", executable);
+    }
+}
+
+async fn playwright_runtime_available() -> bool {
+    let mut cmd = Command::new("node");
+    configure_playwright_command(&mut cmd);
+    cmd.args([
+        "-e",
+        "try { require('playwright'); console.log('playwright-ok'); } catch (_) { try { require('playwright-core'); console.log('playwright-core-ok'); } catch (err) { process.exit(1); } }",
+    ])
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
+
+    cmd.status()
+        .await
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn playwright_launch_prelude(extra_args: &str) -> String {
+    format!(
+        r#"
+const fs = require('fs');
+let pw;
+try {{
+    pw = require('playwright');
+}} catch (_) {{
+    pw = require('playwright-core');
+}}
+const executablePath = process.env.SELFWARE_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+const launchOptions = {{ headless: true, args: {} }};
+if (executablePath && fs.existsSync(executablePath)) {{
+    launchOptions.executablePath = executablePath;
+}}
+const browser = await pw.chromium.launch(launchOptions);
+"#,
+        extra_args
+    )
 }
 
 // ============================================================================
@@ -283,11 +348,11 @@ async fn fetch_with_playwright(
             escape_js_string(&target.resolver_rule)
         )
     };
+    let launch_prelude = playwright_launch_prelude(&launch_args);
     let script = format!(
         r#"
-const {{ chromium }} = require('playwright');
 (async () => {{
-    const browser = await chromium.launch({{ headless: true, args: {} }});
+    {}
     const context = await browser.newContext({{
         {}
     }});
@@ -298,13 +363,14 @@ const {{ chromium }} = require('playwright');
     await browser.close();
 }})();
 "#,
-        launch_args,
+        launch_prelude,
         ua_option,
         safe_url,
         timeout_secs * 1000
     );
 
     let mut cmd = Command::new("node");
+    configure_playwright_command(&mut cmd);
     cmd.arg("-e");
     cmd.arg(&script);
     cmd.stdout(Stdio::piped());
@@ -529,11 +595,11 @@ impl Tool for BrowserScreenshot {
                         escape_js_string(&pinned_target.resolver_rule)
                     )
                 };
+                let launch_prelude = playwright_launch_prelude(&launch_args);
                 let script = format!(
                     r#"
-const {{ chromium }} = require('playwright');
 (async () => {{
-    const browser = await chromium.launch({{ headless: true, args: {} }});
+    {}
     const page = await browser.newPage({{ viewport: {{ width: {}, height: {} }} }});
     await page.goto('{}', {{ timeout: {} }});
     await page.screenshot({{ path: '{}', fullPage: {} }});
@@ -541,7 +607,7 @@ const {{ chromium }} = require('playwright');
     console.log('Screenshot saved');
 }})();
 "#,
-                    launch_args,
+                    launch_prelude,
                     width,
                     height,
                     safe_url,
@@ -551,6 +617,7 @@ const {{ chromium }} = require('playwright');
                 );
 
                 let mut cmd = Command::new("node");
+                configure_playwright_command(&mut cmd);
                 cmd.arg("-e");
                 cmd.arg(&script);
                 cmd.stdout(Stdio::piped());
@@ -699,7 +766,72 @@ impl Tool for BrowserPdf {
                     "stderr": if stderr.is_empty() { None } else { Some(truncate_output(&stderr, 500)) }
                 }))
             }
-            _ => Err(anyhow::anyhow!("PDF generation requires Chrome/Chromium")),
+            BrowserType::Playwright => {
+                let safe_url = escape_js_string(&pinned_target.url);
+                let safe_output_path = escape_js_string(output_path);
+                let launch_args = if pinned_target.host_is_ip {
+                    "[]".to_string()
+                } else {
+                    format!(
+                        "['--host-resolver-rules={}']",
+                        escape_js_string(&pinned_target.resolver_rule)
+                    )
+                };
+                let launch_prelude = playwright_launch_prelude(&launch_args);
+                let script = format!(
+                    r#"
+(async () => {{
+    {}
+    const page = await browser.newPage();
+    await page.goto('{}', {{ timeout: {} }});
+    await page.pdf({{ path: '{}', format: 'A4' }});
+    await browser.close();
+    console.log('PDF saved');
+}})();
+"#,
+                    launch_prelude,
+                    safe_url,
+                    timeout_secs * 1000,
+                    safe_output_path
+                );
+
+                let mut cmd = Command::new("node");
+                configure_playwright_command(&mut cmd);
+                cmd.arg("-e");
+                cmd.arg(&script);
+                cmd.stdout(Stdio::piped());
+                cmd.stderr(Stdio::piped());
+
+                let output = tokio::time::timeout(
+                    std::time::Duration::from_secs(timeout_secs + 10),
+                    cmd.output(),
+                )
+                .await
+                .context("PDF generation timed out")?
+                .context("Failed to generate PDF")?;
+
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                let file_exists = tokio::fs::metadata(output_path).await.is_ok();
+                let file_size = if file_exists {
+                    tokio::fs::metadata(output_path).await.ok().map(|m| m.len())
+                } else {
+                    None
+                };
+
+                Ok(json!({
+                    "success": output.status.success() && file_exists,
+                    "browser": "playwright",
+                    "url": pinned_target.url,
+                    "resolved_ip": pinned_target.ip.to_string(),
+                    "output_path": output_path,
+                    "file_exists": file_exists,
+                    "file_size": file_size,
+                    "stderr": if stderr.is_empty() { None } else { Some(truncate_output(&stderr, 500)) }
+                }))
+            }
+            BrowserType::Curl => Err(anyhow::anyhow!(
+                "PDF generation requires Chrome or Playwright. Curl cannot generate PDFs."
+            )),
         }
     }
 }
@@ -777,12 +909,12 @@ impl Tool for BrowserEval {
                         escape_js_string(&pinned_target.resolver_rule)
                     )
                 };
+                let launch_prelude = playwright_launch_prelude(&launch_args);
 
                 let node_script = format!(
                     r#"
-const {{ chromium }} = require('playwright');
 (async () => {{
-    const browser = await chromium.launch({{ headless: true, args: {} }});
+    {}
     const page = await browser.newPage();
     await page.goto('{}', {{ timeout: {} }});
     const userScript = {};
@@ -793,13 +925,14 @@ const {{ chromium }} = require('playwright');
     await browser.close();
 }})();
 "#,
-                    launch_args,
+                    launch_prelude,
                     safe_url,
                     timeout_secs * 1000,
                     script_json
                 );
 
                 let mut cmd = Command::new("node");
+                configure_playwright_command(&mut cmd);
                 cmd.arg("-e");
                 cmd.arg(&node_script);
                 cmd.stdout(Stdio::piped());

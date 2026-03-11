@@ -116,6 +116,24 @@ impl PlaywrightBridge {
         if let Ok(val) = std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK") {
             cmd.env("SELFWARE_ALLOW_PRIVATE_NETWORK", val);
         }
+        if let Ok(val) = std::env::var("SELFWARE_PLAYWRIGHT_NODE_PATH") {
+            let merged = match std::env::var("NODE_PATH") {
+                Ok(existing) if !existing.is_empty() => format!("{}:{}", val, existing),
+                _ => val,
+            };
+            cmd.env("NODE_PATH", merged);
+        }
+        for key in [
+            "SELFWARE_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH",
+            "SELFWARE_CHROME_EXECUTABLE_PATH",
+        ] {
+            if let Ok(val) = std::env::var(key) {
+                cmd.env(key, val);
+            }
+        }
+        if let Ok(workspace_root) = std::env::current_dir() {
+            cmd.env("SELFWARE_WORKSPACE_ROOT", workspace_root);
+        }
 
         let mut child = cmd
             .spawn()

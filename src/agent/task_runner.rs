@@ -22,6 +22,7 @@ impl Agent {
         // task's iteration counter and hit the max-iterations limit.
         self.loop_control.reset_for_task();
         self.clear_failed_tool_attempts();
+        self.clear_task_state_memory();
         self.reset_no_action_prompt_state();
         let task_description = task.to_string();
 

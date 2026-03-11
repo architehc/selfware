@@ -15,6 +15,8 @@
 //   - The "shutdown" action closes everything and exits.
 
 const readline = require('readline');
+const fs = require('fs');
+const path = require('path');
 
 let browser = null;
 let context = null;
@@ -45,11 +47,34 @@ async function ensureBrowser() {
       throw new Error('Playwright not installed. Run: npm install playwright');
     }
   }
-  browser = await pw.chromium.launch({ headless: true });
+  const executablePath =
+    process.env.SELFWARE_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH ||
+    process.env.SELFWARE_CHROME_EXECUTABLE_PATH;
+  const launchOptions = { headless: true };
+  if (executablePath && fs.existsSync(executablePath)) {
+    launchOptions.executablePath = executablePath;
+  }
+  browser = await pw.chromium.launch(launchOptions);
   context = await browser.newContext();
   const page = await context.newPage();
   pages = [page];
   currentTabIndex = 0;
+}
+
+function workspaceRoot() {
+  return process.env.SELFWARE_WORKSPACE_ROOT || process.cwd();
+}
+
+function isWorkspaceFileUrl(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'file:') return false;
+    const targetPath = path.resolve(decodeURIComponent(parsed.pathname));
+    const root = path.resolve(workspaceRoot());
+    return targetPath === root || targetPath.startsWith(root + path.sep);
+  } catch (_) {
+    return false;
+  }
 }
 
 function currentPage() {
@@ -72,19 +97,26 @@ async function enforceNavRateLimit() {
 function validateUrl(url) {
   if (!url || typeof url !== 'string') throw new Error('URL is required');
   const parsed = new URL(url);
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:' && parsed.protocol !== 'data:') {
-    // Allow data: for blank pages; block file:// etc.
-    if (parsed.protocol === 'file:') {
-      throw new Error('file:// URLs are blocked for security');
+  if (parsed.protocol === 'file:') {
+    if (!isWorkspaceFileUrl(url)) {
+      throw new Error('file:// URLs are allowed only inside the current workspace');
     }
+    return;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:' && parsed.protocol !== 'data:') {
+    throw new Error(`Unsupported URL scheme: ${parsed.protocol}`);
   }
   // Block common private IPs unless SELFWARE_ALLOW_PRIVATE_NETWORK=1
   if (process.env.SELFWARE_ALLOW_PRIVATE_NETWORK !== '1') {
     const host = parsed.hostname;
-    if (host === 'localhost' || host === '127.0.0.1' || host === '::1' ||
+    if (
+        (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0.0.0.0') ||
         host.startsWith('10.') || host.startsWith('192.168.') ||
         /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
-        host === '0.0.0.0' || host === '169.254.' || host.startsWith('169.254.')) {
+        host.startsWith('169.254.')) {
+      if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '0.0.0.0') {
+        return;
+      }
       throw new Error(`Blocked request to private/internal address: ${host}`);
     }
   }

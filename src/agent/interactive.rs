@@ -127,9 +127,7 @@ where
         }
 
         if let Some(current) = coalesced.last_mut() {
-            let within_window = msg
-                .queued_at
-                .saturating_duration_since(current.queued_at)
+            let within_window = msg.queued_at.saturating_duration_since(current.queued_at)
                 <= INTERACTIVE_QUEUE_COALESCE_WINDOW;
             if current.origin == PendingMessageOrigin::InteractiveQueue
                 && msg.origin == PendingMessageOrigin::InteractiveQueue
@@ -1112,6 +1110,11 @@ impl Agent {
                 continue;
             }
 
+            if input == "/debug state" {
+                self.print_task_state_debug();
+                continue;
+            }
+
             if input == "/debug-log" {
                 self.print_session_debug_log();
                 continue;
@@ -1267,11 +1270,7 @@ impl Agent {
                     println!("{} Queued messages ({}):", "📋".bright_cyan(), msgs.len());
                     for (i, msg) in msgs.iter().enumerate() {
                         let preview = preview_with_ellipsis(&msg.content, QUEUE_LIST_PREVIEW_BYTES);
-                        println!(
-                            "  {}. {}",
-                            i + 1,
-                            preview,
-                        );
+                        println!("  {}. {}", i + 1, preview,);
                     }
                 }
                 continue;
@@ -1813,9 +1812,7 @@ impl Agent {
     async fn drain_pending_messages(&mut self) {
         while let Some(mut queued) = self.pending_messages.pop_front() {
             while let Some(next) = self.pending_messages.front() {
-                let within_window = next
-                    .queued_at
-                    .saturating_duration_since(queued.queued_at)
+                let within_window = next.queued_at.saturating_duration_since(queued.queued_at)
                     <= INTERACTIVE_QUEUE_COALESCE_WINDOW;
                 if queued.origin == PendingMessageOrigin::InteractiveQueue
                     && next.origin == PendingMessageOrigin::InteractiveQueue
@@ -1931,6 +1928,8 @@ impl Agent {
             println!("  Last tool summary: {}", last.summary);
         }
 
+        self.print_task_state_summary();
+
         println!();
     }
 
@@ -1992,6 +1991,45 @@ impl Agent {
         );
         print_debug_args_block(&call.arguments);
         print_debug_result_block(call.result.as_deref(), full);
+    }
+
+    fn print_task_state_summary(&self) {
+        println!("  Task State");
+        println!(
+            "    tracked_files={} stale_files={} task_notes={}",
+            self.file_read_state.len(),
+            self.stale_files.len(),
+            self.task_state_notes.len()
+        );
+
+        if !self.file_read_state.is_empty() {
+            for (path, state) in self.file_read_state.iter().take(10) {
+                println!(
+                    "    - {} ({} lines, unchanged_reads={})",
+                    path, state.total_lines, state.unchanged_read_count
+                );
+            }
+        }
+
+        if !self.stale_files.is_empty() {
+            for path in self.stale_files.iter().take(10) {
+                println!("    * stale: {}", path);
+            }
+        }
+
+        if !self.task_state_notes.is_empty() {
+            println!("    Recent notes:");
+            for note in self.task_state_notes.iter().rev().take(5).rev() {
+                println!("      {}", note);
+            }
+        }
+    }
+
+    fn print_task_state_debug(&self) {
+        println!();
+        println!("  {} Task State", ">>".bright_cyan());
+        self.print_task_state_summary();
+        println!();
     }
 
     /// Copy text to clipboard using system clipboard tools.
@@ -2105,6 +2143,7 @@ impl Agent {
                 println!("  /debug          - Show current task debug state");
                 println!("  /debug full     - Show full args/results for the current task");
                 println!("  /debug tool <n> - Show one tool call with full details");
+                println!("  /debug state    - Show task-state memory");
                 println!("  /debug-log      - Show the persistent session log");
                 println!("  /debug-log full - Show full recent session log entries");
                 println!("  /analyze <path> - Analyze codebase at path");
@@ -2170,6 +2209,11 @@ impl Agent {
                     Ok(idx) => self.print_execution_debug_tool_detail(idx),
                     Err(_) => println!("{} Usage: /debug tool <number>", "ℹ".bright_yellow()),
                 }
+                continue;
+            }
+
+            if input == "/debug state" {
+                self.print_task_state_debug();
                 continue;
             }
 
@@ -2270,11 +2314,7 @@ impl Agent {
                     println!("{} Queued messages ({}):", "📋".bright_cyan(), msgs.len());
                     for (i, msg) in msgs.iter().enumerate() {
                         let preview = preview_with_ellipsis(&msg.content, QUEUE_LIST_PREVIEW_BYTES);
-                        println!(
-                            "  {}. {}",
-                            i + 1,
-                            preview,
-                        );
+                        println!("  {}. {}", i + 1, preview,);
                     }
                 }
                 continue;
@@ -2699,11 +2739,7 @@ mod tests {
     fn coalesces_interactive_queue_bursts_into_one_message() {
         let start = Instant::now();
         let messages = vec![
-            PendingMessage::new(
-                "line one",
-                PendingMessageOrigin::InteractiveQueue,
-                start,
-            ),
+            PendingMessage::new("line one", PendingMessageOrigin::InteractiveQueue, start),
             PendingMessage::new(
                 "line two",
                 PendingMessageOrigin::InteractiveQueue,

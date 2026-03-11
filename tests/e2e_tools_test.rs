@@ -1,12 +1,16 @@
 //! E2E test for all tools on a test project
 
+use once_cell::sync::Lazy;
 use selfware::api::types::{ToolCall, ToolFunction};
 use selfware::safety::SafetyChecker;
 use selfware::tools::ToolRegistry;
+use std::env;
 use std::fs;
+use std::path::Path;
 use tempfile::{tempdir, NamedTempFile};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 
 const PNG_1X1_RED: &[u8] = &[
     0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
@@ -14,6 +18,26 @@ const PNG_1X1_RED: &[u8] = &[
     0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8, 0xCF, 0xC0, 0xF0,
     0x1F, 0x00, 0x05, 0x00, 0x01, 0xFF, 0x89, 0x99, 0x3D, 0x1D, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
     0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+];
+
+static BROWSER_ENV_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+const BROWSER_ENV_KEYS: &[&str] = &[
+    "SELFWARE_BROWSER_NO_SANDBOX",
+    "SELFWARE_PLAYWRIGHT_NODE_PATH",
+    "SELFWARE_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH",
+    "SELFWARE_CHROME_EXECUTABLE_PATH",
+    "SELFWARE_WORKSPACE_ROOT",
+];
+
+const CHROME_CANDIDATES: &[&str] = &[
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium",
+    "chromium-browser",
+    "/usr/bin/google-chrome",
+    "/usr/bin/chromium",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 ];
 
 fn make_tool_call(name: &str, arguments: String) -> ToolCall {
@@ -55,6 +79,103 @@ async fn spawn_static_response_server(
     });
 
     (handle, format!("http://127.0.0.1:{}", addr.port()))
+}
+
+struct EnvRestore {
+    prior: Vec<(&'static str, Option<String>)>,
+}
+
+impl EnvRestore {
+    fn capture(keys: &[&'static str]) -> Self {
+        let prior = keys.iter().map(|key| (*key, env::var(key).ok())).collect();
+        Self { prior }
+    }
+
+    fn set_var(&mut self, key: &'static str, value: impl Into<String>) {
+        env::set_var(key, value.into());
+    }
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        for (key, value) in self.prior.drain(..) {
+            if let Some(value) = value {
+                env::set_var(key, value);
+            } else {
+                env::remove_var(key);
+            }
+        }
+    }
+}
+
+fn find_chrome_executable() -> Option<String> {
+    for candidate in CHROME_CANDIDATES {
+        if Path::new(candidate).exists() {
+            return Some((*candidate).to_string());
+        }
+        let Ok(output) = std::process::Command::new(candidate)
+            .arg("--version")
+            .output()
+        else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        if let Ok(which_output) = std::process::Command::new("which").arg(candidate).output() {
+            if which_output.status.success() {
+                let resolved = String::from_utf8_lossy(&which_output.stdout)
+                    .trim()
+                    .to_string();
+                if !resolved.is_empty() && Path::new(&resolved).exists() {
+                    return Some(resolved);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn playwright_runtime_ready() -> bool {
+    let mut cmd = std::process::Command::new("node");
+    if let Ok(node_path) = env::var("SELFWARE_PLAYWRIGHT_NODE_PATH") {
+        let merged = match env::var("NODE_PATH") {
+            Ok(existing) if !existing.is_empty() => format!("{}:{}", node_path, existing),
+            _ => node_path,
+        };
+        cmd.env("NODE_PATH", merged);
+    }
+    cmd.args([
+        "-e",
+        "try { require('playwright'); process.exit(0); } catch (_) { try { require('playwright-core'); process.exit(0); } catch (_) { process.exit(1); } }",
+    ]);
+    cmd.status().map(|status| status.success()).unwrap_or(false)
+}
+
+fn is_missing_browser_runtime_message(message: &str) -> bool {
+    message.contains("No browser automation tool found")
+        || message.contains("Playwright runtime unavailable")
+        || message.contains("Playwright not installed")
+        || message.contains("requires Chrome or Playwright")
+        || message.contains("requires Chrome/Chromium")
+        || message.contains("Failed to spawn playwright-bridge")
+}
+
+fn maybe_skip_browser_error(error: anyhow::Error) -> Option<()> {
+    if is_missing_browser_runtime_message(&error.to_string()) {
+        eprintln!("skipping browser E2E test: {}", error);
+        Some(())
+    } else {
+        None
+    }
+}
+
+fn maybe_skip_page_control_result(result: &serde_json::Value) -> bool {
+    result["success"].as_bool() == Some(false)
+        && result["error"]
+            .as_str()
+            .is_some_and(is_missing_browser_runtime_message)
 }
 
 #[tokio::test]
@@ -381,6 +502,218 @@ async fn test_e2e_localhost_http_and_browser_fetch_round_trip() {
         .contains("local chart"));
 
     server.abort();
+}
+
+#[tokio::test]
+async fn test_e2e_browser_screenshot_round_trip() {
+    let _env_lock = BROWSER_ENV_LOCK.lock().await;
+    let mut env_restore = EnvRestore::capture(BROWSER_ENV_KEYS);
+    env_restore.set_var("SELFWARE_BROWSER_NO_SANDBOX", "1");
+    if let Some(chrome_path) = find_chrome_executable() {
+        env_restore.set_var("SELFWARE_CHROME_EXECUTABLE_PATH", chrome_path);
+    }
+
+    let body = "<html><head><title>chart shot</title></head><body><main style='width:100%;height:100%;background:#f5e7d8'><h1>chart shot</h1></main></body></html>".to_string();
+    let (server, base_url) = spawn_static_response_server(body, "text/html").await;
+    let url = format!("{}/chart.html", base_url);
+    let output_dir = tempdir().unwrap();
+    let output_path = output_dir.path().join("chart-shot.png");
+
+    let registry = ToolRegistry::new();
+    let screenshot = registry.get("browser_screenshot").unwrap();
+    let result = screenshot
+        .execute(serde_json::json!({
+            "url": url,
+            "output_path": output_path.to_str().unwrap(),
+            "width": 1280,
+            "height": 720,
+            "timeout_secs": 10
+        }))
+        .await;
+
+    let result = match result {
+        Ok(result) => result,
+        Err(err) => {
+            server.abort();
+            if maybe_skip_browser_error(err).is_some() {
+                return;
+            }
+            panic!("browser_screenshot failed");
+        }
+    };
+
+    assert_eq!(result["success"].as_bool(), Some(true));
+    assert_eq!(result["file_exists"].as_bool(), Some(true));
+    assert!(fs::metadata(&output_path).unwrap().len() > 0);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_e2e_browser_pdf_round_trip() {
+    let _env_lock = BROWSER_ENV_LOCK.lock().await;
+    let mut env_restore = EnvRestore::capture(BROWSER_ENV_KEYS);
+    env_restore.set_var("SELFWARE_BROWSER_NO_SANDBOX", "1");
+    if let Some(chrome_path) = find_chrome_executable() {
+        env_restore.set_var("SELFWARE_CHROME_EXECUTABLE_PATH", &chrome_path);
+        env_restore.set_var("SELFWARE_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", &chrome_path);
+    }
+
+    let body = "<html><head><title>chart pdf</title></head><body><article><h1>chart pdf</h1><p>pdf smoke</p></article></body></html>".to_string();
+    let (server, base_url) = spawn_static_response_server(body, "text/html").await;
+    let url = format!("{}/chart.html", base_url);
+    let output_dir = tempdir().unwrap();
+    let output_path = output_dir.path().join("chart.pdf");
+
+    let registry = ToolRegistry::new();
+    let pdf = registry.get("browser_pdf").unwrap();
+    let result = pdf
+        .execute(serde_json::json!({
+            "url": url,
+            "output_path": output_path.to_str().unwrap(),
+            "timeout_secs": 10
+        }))
+        .await;
+
+    let result = match result {
+        Ok(result) => result,
+        Err(err) => {
+            server.abort();
+            if maybe_skip_browser_error(err).is_some() {
+                return;
+            }
+            panic!("browser_pdf failed");
+        }
+    };
+
+    assert_eq!(result["success"].as_bool(), Some(true));
+    assert_eq!(result["file_exists"].as_bool(), Some(true));
+    assert!(fs::metadata(&output_path).unwrap().len() > 0);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_e2e_browser_eval_round_trip() {
+    let _env_lock = BROWSER_ENV_LOCK.lock().await;
+    let Some(chrome_path) = find_chrome_executable() else {
+        eprintln!("skipping browser_eval E2E test: Chrome not available");
+        return;
+    };
+    if !playwright_runtime_ready() {
+        eprintln!("skipping browser_eval E2E test: Playwright runtime unavailable");
+        return;
+    }
+    let mut env_restore = EnvRestore::capture(BROWSER_ENV_KEYS);
+    env_restore.set_var("SELFWARE_BROWSER_NO_SANDBOX", "1");
+    env_restore.set_var("SELFWARE_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", chrome_path);
+
+    let body =
+        "<html><head><title>chart eval</title></head><body><div id='value'>42</div></body></html>"
+            .to_string();
+    let (server, base_url) = spawn_static_response_server(body, "text/html").await;
+    let url = format!("{}/chart.html", base_url);
+
+    let registry = ToolRegistry::new();
+    let browser_eval = registry.get("browser_eval").unwrap();
+    let result = browser_eval
+        .execute(serde_json::json!({
+            "url": url,
+            "script": "return document.querySelector('#value').textContent;",
+            "timeout_secs": 10
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["success"].as_bool(), Some(true));
+    assert_eq!(result["browser"].as_str(), Some("playwright"));
+    assert_eq!(result["result"].as_str(), Some("42"));
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_e2e_page_control_local_file_round_trip() {
+    let _env_lock = BROWSER_ENV_LOCK.lock().await;
+    let Some(chrome_path) = find_chrome_executable() else {
+        eprintln!("skipping page_control E2E test: Chrome not available");
+        return;
+    };
+    if !playwright_runtime_ready() {
+        eprintln!("skipping page_control E2E test: Playwright runtime unavailable");
+        return;
+    }
+    let mut env_restore = EnvRestore::capture(BROWSER_ENV_KEYS);
+    env_restore.set_var("SELFWARE_BROWSER_NO_SANDBOX", "1");
+    env_restore.set_var("SELFWARE_PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", chrome_path);
+    env_restore.set_var(
+        "SELFWARE_WORKSPACE_ROOT",
+        std::env::current_dir().unwrap().display().to_string(),
+    );
+
+    let html = "<html><head><title>Chart Control</title></head><body><main><h1 id='headline'>Chart Control</h1><p>page control smoke</p></main></body></html>";
+    let workspace_dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let workspace_file = workspace_dir.path().join("chart-control.html");
+    fs::write(&workspace_file, html).unwrap();
+    let file_url = format!("file://{}", workspace_file.display());
+    let output_dir = tempdir().unwrap();
+    let screenshot_path = output_dir.path().join("page-control.png");
+
+    let registry = ToolRegistry::new();
+    let page_control = registry.get("page_control").unwrap();
+
+    let goto = page_control
+        .execute(serde_json::json!({
+            "action": "goto",
+            "url": file_url,
+            "timeout_ms": 10_000
+        }))
+        .await
+        .unwrap();
+    if maybe_skip_page_control_result(&goto) {
+        return;
+    }
+    assert_eq!(goto["success"].as_bool(), Some(true));
+
+    let text = page_control
+        .execute(serde_json::json!({
+            "action": "text",
+            "selector": "#headline"
+        }))
+        .await
+        .unwrap();
+    assert_eq!(text["success"].as_bool(), Some(true));
+    assert_eq!(text["result"]["text"].as_str(), Some("Chart Control"));
+
+    let current_url = page_control
+        .execute(serde_json::json!({
+            "action": "url"
+        }))
+        .await
+        .unwrap();
+    assert_eq!(current_url["success"].as_bool(), Some(true));
+    assert!(current_url["result"]["url"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("file://"));
+
+    let screenshot = page_control
+        .execute(serde_json::json!({
+            "action": "screenshot",
+            "path": screenshot_path.to_str().unwrap()
+        }))
+        .await
+        .unwrap();
+    assert_eq!(screenshot["success"].as_bool(), Some(true));
+    assert!(fs::metadata(&screenshot_path).unwrap().len() > 0);
+
+    let shutdown = page_control
+        .execute(serde_json::json!({
+            "action": "shutdown"
+        }))
+        .await
+        .unwrap();
+    assert_eq!(shutdown["success"].as_bool(), Some(true));
 }
 
 #[tokio::test]

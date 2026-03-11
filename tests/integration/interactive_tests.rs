@@ -222,8 +222,10 @@ fn test_interactive_debug_command_without_checkpoint() {
 #[test]
 #[cfg(feature = "integration")]
 fn test_interactive_extended_debug_commands_without_checkpoint() {
-    let (stdout, stderr, _code) =
-        run_interactive("/debug full\n/debug tool 1\n/debug-log full\nexit\n", 30);
+    let (stdout, stderr, _code) = run_interactive(
+        "/debug full\n/debug tool 1\n/debug state\n/debug-log full\nexit\n",
+        30,
+    );
     let combined = format!("{}{}", stdout, stderr);
 
     assert!(
@@ -241,6 +243,12 @@ fn test_interactive_extended_debug_commands_without_checkpoint() {
     assert!(
         combined.contains("Session Debug Log"),
         "Should show session log output. stdout: {}, stderr: {}",
+        stdout,
+        stderr
+    );
+    assert!(
+        combined.contains("Task State"),
+        "Should show task-state debug output. stdout: {}, stderr: {}",
         stdout,
         stderr
     );

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -118,6 +118,15 @@ struct FailedToolAttempt {
     error_preview: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileReadState {
+    content_hash: u64,
+    total_lines: usize,
+    unchanged_read_count: u32,
+}
+
+const TASK_STATE_NOTE_LIMIT: usize = 16;
+
 /// Core agent that orchestrates LLM reasoning with tool execution.
 ///
 /// The agent maintains conversation state, manages tool calls through a safety
@@ -148,6 +157,10 @@ pub struct Agent {
     context_files: Vec<String>,
     /// Files modified since last loaded into context (need refresh)
     stale_files: HashSet<String>,
+    /// Per-file read state used to detect redundant unchanged rereads.
+    file_read_state: HashMap<String, FileReadState>,
+    /// Recent task-state notes surfaced in debug output.
+    task_state_notes: VecDeque<String>,
     /// Last time a checkpoint was persisted to disk
     last_checkpoint_persisted_at: Instant,
     /// Tool call count at last persisted checkpoint
@@ -491,6 +504,8 @@ To call a tool, use this EXACT XML structure:
             error_analyzer,
             context_files: Vec::new(),
             stale_files: HashSet::new(),
+            file_read_state: HashMap::new(),
+            task_state_notes: VecDeque::new(),
             last_checkpoint_persisted_at: Instant::now(),
             last_checkpoint_tool_calls: 0,
             checkpoint_persisted_once: false,

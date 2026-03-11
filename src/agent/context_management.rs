@@ -514,6 +514,8 @@ impl Agent {
         self.messages.retain(|m| m.role == "system");
         self.memory.clear();
         self.context_files.clear();
+        self.stale_files.clear();
+        self.clear_task_state_memory();
     }
 
     /// Load files matching pattern into context

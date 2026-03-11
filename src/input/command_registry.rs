@@ -162,6 +162,11 @@ pub static COMMANDS: &[CommandEntry] = &[
         category: CommandCategory::Tools,
     },
     CommandEntry {
+        name: "/debug state",
+        description: "Show task-state memory for the current task",
+        category: CommandCategory::Tools,
+    },
+    CommandEntry {
         name: "/debug-log",
         description: "Show the persistent session execution log",
         category: CommandCategory::Tools,
@@ -865,6 +870,7 @@ mod tests {
             "/debug",
             "/debug full",
             "/debug tool",
+            "/debug state",
             "/debug-log",
             "/debug-log full",
             "/tools",

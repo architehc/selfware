@@ -109,6 +109,21 @@ fn normalize_no_action_content(content: &str) -> String {
 }
 
 impl Agent {
+    fn push_task_state_note(&mut self, note: String) {
+        if self.task_state_notes.back() == Some(&note) {
+            return;
+        }
+        if self.task_state_notes.len() == TASK_STATE_NOTE_LIMIT {
+            self.task_state_notes.pop_front();
+        }
+        self.task_state_notes.push_back(note);
+    }
+
+    pub(super) fn clear_task_state_memory(&mut self) {
+        self.file_read_state.clear();
+        self.task_state_notes.clear();
+    }
+
     fn remember_failed_tool(&mut self, tool_name: &str, error: &str) {
         let error_preview = truncate_chars(error, TOOL_FAILURE_HINT_PREVIEW_CHARS);
         self.pending_failure_hint = Some(format!(
@@ -184,6 +199,91 @@ impl Agent {
 
     pub(super) fn clear_failed_tool_attempts(&mut self) {
         self.recent_failed_tool_attempts.clear();
+    }
+
+    fn track_task_state_after_tool(
+        &mut self,
+        name: &str,
+        args: &Value,
+        result: &str,
+        success: bool,
+    ) {
+        if !success {
+            return;
+        }
+
+        let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
+            return;
+        };
+        let path_str = path.to_string();
+
+        match name {
+            "file_read" => {
+                let Ok(json) = serde_json::from_str::<Value>(result) else {
+                    return;
+                };
+                let Some(content) = json.get("content").and_then(|v| v.as_str()) else {
+                    return;
+                };
+                let total_lines = json
+                    .get("total_lines")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                let content_hash = hash_text_signature(content);
+
+                let mut unchanged_count = 0;
+                if let Some(state) = self.file_read_state.get_mut(&path_str) {
+                    if state.content_hash == content_hash && !self.stale_files.contains(&path_str) {
+                        state.unchanged_read_count += 1;
+                        unchanged_count = state.unchanged_read_count;
+                    } else {
+                        state.content_hash = content_hash;
+                        state.total_lines = total_lines;
+                        state.unchanged_read_count = 0;
+                    }
+                } else {
+                    self.file_read_state.insert(
+                        path_str.clone(),
+                        FileReadState {
+                            content_hash,
+                            total_lines,
+                            unchanged_read_count: 0,
+                        },
+                    );
+                }
+
+                if unchanged_count > 0 {
+                    self.push_task_state_note(format!(
+                        "Reread unchanged file `{}` ({}x consecutive unchanged reads)",
+                        path_str,
+                        unchanged_count + 1
+                    ));
+                }
+
+                if unchanged_count >= 1 {
+                    self.pending_failure_hint = Some(format!(
+                        "You have reread unchanged file `{}` {} times in this task. Unless something outside the agent changed it, use the content already in context or make the edit now instead of reading it again.",
+                        path_str,
+                        unchanged_count + 1
+                    ));
+                }
+            }
+            "file_write" | "file_edit" => {
+                self.file_read_state.remove(&path_str);
+                self.push_task_state_note(format!(
+                    "Marked `{}` as changed; future rereads should expect new content",
+                    path_str
+                ));
+            }
+            "file_delete" => {
+                self.file_read_state.remove(&path_str);
+                self.push_task_state_note(format!(
+                    "Removed deleted file `{}` from task-state tracking",
+                    path_str
+                ));
+            }
+            _ => {}
+        }
     }
 
     pub(super) fn reset_no_action_prompt_state(&mut self) {
@@ -750,6 +850,8 @@ impl Agent {
             } else {
                 self.record_failed_tool_attempt(&name, &args_str, "execution", &result);
             }
+
+            self.track_task_state_after_tool(&name, &args, &result, success);
 
             // Track file operations for context management
             if success {
@@ -4342,6 +4444,84 @@ mod tests {
             "Expected Cargo.toml in context_files: {:?}",
             agent.context_files
         );
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_redundant_unchanged_file_reads_update_task_state_memory() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let batch: Vec<CollectedToolCall> = vec![
+            (
+                "file_read".to_string(),
+                r#"{"path":"./Cargo.toml"}"#.to_string(),
+                None,
+            ),
+            (
+                "file_read".to_string(),
+                r#"{"path":"./Cargo.toml"}"#.to_string(),
+                None,
+            ),
+        ];
+
+        agent.execute_tool_batch(batch).await.unwrap();
+
+        let state = agent
+            .file_read_state
+            .get("./Cargo.toml")
+            .expect("expected Cargo.toml file state");
+        assert_eq!(state.unchanged_read_count, 1);
+        assert!(agent
+            .task_state_notes
+            .iter()
+            .any(|note| { note.contains("Reread unchanged file `./Cargo.toml`") }));
+        assert!(agent
+            .pending_failure_hint
+            .as_deref()
+            .is_some_and(|hint| { hint.contains("reread unchanged file `./Cargo.toml`") }));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_file_edit_clears_task_state_for_modified_file() {
+        use std::fs;
+        use tempfile::NamedTempFile;
+
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let temp = NamedTempFile::new_in(std::env::current_dir().unwrap()).unwrap();
+        fs::write(temp.path(), "hello world\n").unwrap();
+        let path = temp.path().display().to_string();
+
+        let batch: Vec<CollectedToolCall> = vec![
+            (
+                "file_read".to_string(),
+                format!(r#"{{"path":"{}"}}"#, path),
+                None,
+            ),
+            (
+                "file_edit".to_string(),
+                format!(
+                    r#"{{"path":"{}","old_str":"hello world","new_str":"hello rust"}}"#,
+                    path
+                ),
+                None,
+            ),
+        ];
+
+        agent.execute_tool_batch(batch).await.unwrap();
+
+        assert!(!agent.file_read_state.contains_key(&path));
+        assert!(agent
+            .task_state_notes
+            .iter()
+            .any(|note| note.contains("Marked") && note.contains(&path)));
 
         server.stop().await;
     }
