@@ -513,7 +513,11 @@ To call a tool, use this EXACT XML structure:
             esc_paused: Arc::new(AtomicBool::new(false)),
         };
 
+        let reconcile_report = crate::tools::process::reconcile_managed_processes(true).await;
+        let inventory = crate::tools::process::process_inventory(5).await;
         agent.log_session_start_event();
+        agent.log_process_reconcile_event("session_start", reconcile_report);
+        agent.log_process_inventory_event("session_start", inventory);
         Ok(agent)
     }
 

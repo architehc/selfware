@@ -5,7 +5,8 @@
 
 use super::Tool;
 use crate::process_manager::{
-    find_available_port, is_port_available, port_info, ProcessConfig, ProcessManager,
+    find_available_port, is_port_available, port_info, ProcessConfig, ProcessInventory,
+    ProcessManager, ProcessReconcileReport,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -513,8 +514,12 @@ impl Tool for PortCheck {
 /// Call this when the interactive loop exits to ensure cleanup.
 pub async fn cleanup_all_processes() {
     let manager = PROCESS_MANAGER.read().await;
+    let reconcile_before = manager.reconcile(false).await;
     let stopped = manager.stop_all().await;
+    let reconcile_after = manager.reconcile(true).await;
     let released_reservations = manager.clear_port_reservations().await;
+    let orphaned = reconcile_before.orphaned_entries + reconcile_after.orphaned_entries;
+    let removed_inactive = reconcile_after.removed_inactive;
     if stopped > 0 {
         println!(
             "Stopped {} background process{}",
@@ -529,6 +534,35 @@ pub async fn cleanup_all_processes() {
             if released_reservations == 1 { "" } else { "s" }
         );
     }
+    if orphaned > 0 {
+        println!(
+            "Reconciled {} orphaned process entr{}",
+            orphaned,
+            if orphaned == 1 { "y" } else { "ies" }
+        );
+    }
+    if removed_inactive > 0 {
+        println!(
+            "Pruned {} inactive process entr{}",
+            removed_inactive,
+            if removed_inactive == 1 { "y" } else { "ies" }
+        );
+    }
+}
+
+pub async fn reconcile_managed_processes(prune_inactive: bool) -> ProcessReconcileReport {
+    let manager = PROCESS_MANAGER.read().await;
+    manager.reconcile(prune_inactive).await
+}
+
+pub async fn process_inventory(log_lines: usize) -> ProcessInventory {
+    let manager = PROCESS_MANAGER.read().await;
+    manager.inventory(log_lines).await
+}
+
+pub fn try_process_inventory(log_lines: usize) -> Option<ProcessInventory> {
+    let manager = PROCESS_MANAGER.try_read().ok()?;
+    manager.try_inventory(log_lines)
 }
 
 #[cfg(test)]
@@ -785,6 +819,53 @@ mod tests {
         assert!(!manager.has_reserved_port(port).await);
 
         let _ = manager.stop("test-reserved-port-tool", true).await;
+    }
+
+    #[tokio::test]
+    async fn test_process_inventory_reports_running_processes() {
+        let tool = ProcessStart;
+        let _ = tool
+            .execute(serde_json::json!({
+                "id": "test-inventory-tool",
+                "command": "sleep",
+                "args": ["60"]
+            }))
+            .await
+            .unwrap();
+
+        let inventory = process_inventory(5).await;
+        assert!(inventory
+            .processes
+            .iter()
+            .any(|proc| proc.id == "test-inventory-tool"));
+        assert!(inventory.running >= 1);
+
+        let manager = PROCESS_MANAGER.read().await;
+        let _ = manager.stop("test-inventory-tool", true).await;
+    }
+
+    #[tokio::test]
+    async fn test_reconcile_managed_processes_prunes_stopped_entries() {
+        let tool = ProcessStart;
+        tool.execute(serde_json::json!({
+            "id": "stale-global-entry",
+            "command": "sleep",
+            "args": ["60"]
+        }))
+        .await
+        .unwrap();
+
+        let manager = PROCESS_MANAGER.read().await;
+        let _ = manager.stop("stale-global-entry", true).await;
+        drop(manager);
+
+        let report = reconcile_managed_processes(true).await;
+        assert!(report.removed_inactive >= 1);
+        let inventory = process_inventory(5).await;
+        assert!(!inventory
+            .processes
+            .iter()
+            .any(|proc| proc.id == "stale-global-entry"));
     }
 
     #[tokio::test]

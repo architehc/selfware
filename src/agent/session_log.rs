@@ -25,6 +25,8 @@ pub enum SessionEventType {
     TurnEnd,
     ContextTrim,
     ContextCompression,
+    ProcessInventory,
+    ProcessReconcile,
     ToolCall,
     ToolValidationFailed,
 }
@@ -229,6 +231,8 @@ fn session_event_label(kind: &SessionEventType) -> &'static str {
         SessionEventType::TurnEnd => "turn_end",
         SessionEventType::ContextTrim => "context_trim",
         SessionEventType::ContextCompression => "context_compression",
+        SessionEventType::ProcessInventory => "process_inventory",
+        SessionEventType::ProcessReconcile => "process_reconcile",
         SessionEventType::ToolCall => "tool_call",
         SessionEventType::ToolValidationFailed => "tool_validation_failed",
     }
@@ -269,6 +273,77 @@ impl Agent {
                 "cwd": cwd,
                 "model": self.config.model,
                 "execution_mode": format!("{:?}", self.execution_mode()),
+            })),
+        });
+    }
+
+    pub(super) fn log_process_inventory_event(
+        &self,
+        stage: &str,
+        inventory: crate::process_manager::ProcessInventory,
+    ) {
+        let Some(logger) = &self.session_logger else {
+            return;
+        };
+
+        logger.log(SessionLogEvent {
+            timestamp: Utc::now(),
+            session_id: String::new(),
+            event_type: SessionEventType::ProcessInventory,
+            task_id: self
+                .current_checkpoint
+                .as_ref()
+                .map(|cp| cp.task_id.clone()),
+            tool_name: None,
+            input: Some(stage.to_string()),
+            arguments: None,
+            result: None,
+            success: Some(true),
+            duration_ms: None,
+            details: Some(json!({
+                "stage": stage,
+                "total": inventory.total,
+                "running": inventory.running,
+                "starting": inventory.starting,
+                "restarting": inventory.restarting,
+                "inactive": inventory.inactive,
+                "reserved_ports": inventory.reserved_ports,
+                "processes": inventory.processes,
+            })),
+        });
+    }
+
+    pub(super) fn log_process_reconcile_event(
+        &self,
+        stage: &str,
+        report: crate::process_manager::ProcessReconcileReport,
+    ) {
+        let Some(logger) = &self.session_logger else {
+            return;
+        };
+
+        logger.log(SessionLogEvent {
+            timestamp: Utc::now(),
+            session_id: String::new(),
+            event_type: SessionEventType::ProcessReconcile,
+            task_id: self
+                .current_checkpoint
+                .as_ref()
+                .map(|cp| cp.task_id.clone()),
+            tool_name: None,
+            input: Some(stage.to_string()),
+            arguments: None,
+            result: None,
+            success: Some(true),
+            duration_ms: None,
+            details: Some(json!({
+                "stage": stage,
+                "scanned": report.scanned,
+                "orphaned_entries": report.orphaned_entries,
+                "exited_processes": report.exited_processes,
+                "handles_cleared": report.handles_cleared,
+                "removed_inactive": report.removed_inactive,
+                "reserved_ports": report.reserved_ports,
             })),
         });
     }
@@ -625,6 +700,32 @@ impl Agent {
                 }
             }
         }
+
+        if let Some(inventory) = crate::tools::process::try_process_inventory(5) {
+            println!("  Current Managed Processes");
+            println!(
+                "    total={} running={} starting={} restarting={} inactive={}",
+                inventory.total,
+                inventory.running,
+                inventory.starting,
+                inventory.restarting,
+                inventory.inactive
+            );
+            if inventory.reserved_ports.is_empty() {
+                println!("    reserved_ports: none");
+            } else {
+                println!("    reserved_ports: {:?}", inventory.reserved_ports);
+            }
+            for process in inventory.processes {
+                println!(
+                    "    - {} {:?} pid={:?} port={:?}",
+                    process.id, process.status, process.pid, process.expected_port
+                );
+            }
+        } else {
+            println!("  Current Managed Processes");
+            println!("    <inventory unavailable>");
+        }
         println!();
     }
 }
@@ -640,6 +741,7 @@ impl Drop for Agent {
             logger.log_session_end();
         }
         if let Some(logger) = &self.session_logger {
+            let process_inventory = crate::tools::process::try_process_inventory(5);
             logger.log(SessionLogEvent {
                 timestamp: Utc::now(),
                 session_id: String::new(),
@@ -659,6 +761,7 @@ impl Drop for Agent {
                     "memory_entries": self.memory.len(),
                     "estimated_tokens": self.memory.total_tokens(),
                     "pending_messages": self.pending_messages.len(),
+                    "process_inventory": process_inventory,
                 })),
             });
         }

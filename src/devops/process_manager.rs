@@ -124,6 +124,27 @@ pub struct ProcessSummary {
     pub recent_logs: Vec<LogLine>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProcessInventory {
+    pub total: usize,
+    pub running: usize,
+    pub starting: usize,
+    pub restarting: usize,
+    pub inactive: usize,
+    pub reserved_ports: Vec<u16>,
+    pub processes: Vec<ProcessSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ProcessReconcileReport {
+    pub scanned: usize,
+    pub orphaned_entries: usize,
+    pub exited_processes: usize,
+    pub handles_cleared: usize,
+    pub removed_inactive: usize,
+    pub reserved_ports: usize,
+}
+
 impl ManagedProcess {
     fn new(config: ProcessConfig) -> Self {
         Self {
@@ -304,6 +325,155 @@ impl ProcessManager {
         let count = reservations.len();
         reservations.clear();
         count
+    }
+
+    pub async fn inventory(&self, log_lines: usize) -> ProcessInventory {
+        self.cleanup_stale_port_reservations().await;
+        let processes = self.processes.read().await;
+        let mut inventory = ProcessInventory {
+            total: processes.len(),
+            processes: processes
+                .values()
+                .map(|p| p.to_summary(log_lines))
+                .collect(),
+            ..Default::default()
+        };
+        inventory.processes.sort_by(|a, b| a.id.cmp(&b.id));
+
+        for process in &inventory.processes {
+            match process.status {
+                ProcessStatus::Running => inventory.running += 1,
+                ProcessStatus::Starting => inventory.starting += 1,
+                ProcessStatus::Restarting { .. } => inventory.restarting += 1,
+                ProcessStatus::Stopped
+                | ProcessStatus::HealthCheckFailed
+                | ProcessStatus::Crashed { .. } => inventory.inactive += 1,
+            }
+        }
+
+        let reservations = self.port_reservations.lock().await;
+        inventory.reserved_ports = reservations.keys().copied().collect();
+        inventory.reserved_ports.sort_unstable();
+        inventory
+    }
+
+    pub fn try_inventory(&self, log_lines: usize) -> Option<ProcessInventory> {
+        let processes = self.processes.try_read().ok()?;
+        let reservations = self.port_reservations.try_lock().ok()?;
+
+        let mut inventory = ProcessInventory {
+            total: processes.len(),
+            processes: processes
+                .values()
+                .map(|p| p.to_summary(log_lines))
+                .collect(),
+            ..Default::default()
+        };
+        inventory.processes.sort_by(|a, b| a.id.cmp(&b.id));
+
+        for process in &inventory.processes {
+            match process.status {
+                ProcessStatus::Running => inventory.running += 1,
+                ProcessStatus::Starting => inventory.starting += 1,
+                ProcessStatus::Restarting { .. } => inventory.restarting += 1,
+                ProcessStatus::Stopped
+                | ProcessStatus::HealthCheckFailed
+                | ProcessStatus::Crashed { .. } => inventory.inactive += 1,
+            }
+        }
+
+        inventory.reserved_ports = reservations.keys().copied().collect();
+        inventory.reserved_ports.sort_unstable();
+        Some(inventory)
+    }
+
+    pub async fn reconcile(&self, prune_inactive: bool) -> ProcessReconcileReport {
+        self.cleanup_stale_port_reservations().await;
+
+        let ids: Vec<String> = {
+            let processes = self.processes.read().await;
+            processes.keys().cloned().collect()
+        };
+
+        let mut report = ProcessReconcileReport {
+            scanned: ids.len(),
+            reserved_ports: self.port_reservations.lock().await.len(),
+            ..Default::default()
+        };
+
+        for id in ids {
+            let child_handle = {
+                let processes = self.processes.read().await;
+                processes
+                    .get(&id)
+                    .and_then(|proc| proc.child_handle.clone())
+            };
+
+            let mut observed_exit_code = None;
+            let mut cleared_handle = false;
+            let mut missing_running_handle = false;
+
+            if let Some(handle) = child_handle {
+                let mut child_guard = handle.write().await;
+                if let Some(child) = child_guard.as_mut() {
+                    if let Some(status) = child.try_wait().ok().flatten() {
+                        observed_exit_code = Some(status.code());
+                        *child_guard = None;
+                        cleared_handle = true;
+                    }
+                } else {
+                    missing_running_handle = true;
+                }
+            } else {
+                missing_running_handle = true;
+            }
+
+            let mut processes = self.processes.write().await;
+            if let Some(proc) = processes.get_mut(&id) {
+                if let Some(exit_code) = observed_exit_code {
+                    report.exited_processes += 1;
+                    if cleared_handle {
+                        report.handles_cleared += 1;
+                    }
+                    proc.child_handle = None;
+                    proc.pid = None;
+                    if !matches!(
+                        proc.status,
+                        ProcessStatus::Stopped | ProcessStatus::HealthCheckFailed
+                    ) {
+                        proc.status = ProcessStatus::Crashed { exit_code };
+                    }
+                } else if missing_running_handle
+                    && matches!(
+                        proc.status,
+                        ProcessStatus::Running
+                            | ProcessStatus::Starting
+                            | ProcessStatus::Restarting { .. }
+                    )
+                {
+                    report.orphaned_entries += 1;
+                    proc.child_handle = None;
+                    proc.pid = None;
+                    proc.status = ProcessStatus::Crashed { exit_code: None };
+                }
+            }
+        }
+
+        if prune_inactive {
+            let mut processes = self.processes.write().await;
+            let before = processes.len();
+            processes.retain(|_, proc| {
+                matches!(
+                    proc.status,
+                    ProcessStatus::Running
+                        | ProcessStatus::Starting
+                        | ProcessStatus::Restarting { .. }
+                )
+            });
+            report.removed_inactive = before.saturating_sub(processes.len());
+        }
+
+        report
     }
 
     /// Start a new managed process
@@ -2012,6 +2182,85 @@ mod tests {
         let manager = ProcessManager::default();
         let list = manager.list().await;
         assert!(list.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_process_manager_reconcile_marks_orphaned_running_entry() {
+        let manager = ProcessManager::new();
+
+        let config = ProcessConfig {
+            id: "orphaned".to_string(),
+            command: "sleep".to_string(),
+            args: vec!["60".to_string()],
+            cwd: None,
+            env: HashMap::new(),
+            health_check_pattern: None,
+            health_check_timeout_secs: None,
+            expected_port: None,
+            auto_restart: false,
+            max_restart_attempts: 0,
+        };
+
+        let mut proc = ManagedProcess::new(config);
+        proc.status = ProcessStatus::Running;
+        proc.pid = Some(4242);
+
+        manager
+            .processes
+            .write()
+            .await
+            .insert("orphaned".to_string(), proc);
+
+        let report = manager.reconcile(false).await;
+        assert_eq!(report.orphaned_entries, 1);
+
+        let summary = manager.get("orphaned").await.unwrap();
+        assert!(matches!(
+            summary.status,
+            ProcessStatus::Crashed { exit_code: None }
+        ));
+        assert!(summary.pid.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_process_manager_reconcile_prunes_inactive_entries() {
+        let manager = ProcessManager::new();
+
+        let mut proc = ManagedProcess::new(ProcessConfig {
+            id: "stopped-entry".to_string(),
+            command: "sleep".to_string(),
+            args: vec!["60".to_string()],
+            cwd: None,
+            env: HashMap::new(),
+            health_check_pattern: None,
+            health_check_timeout_secs: None,
+            expected_port: None,
+            auto_restart: false,
+            max_restart_attempts: 0,
+        });
+        proc.status = ProcessStatus::Stopped;
+
+        manager
+            .processes
+            .write()
+            .await
+            .insert("stopped-entry".to_string(), proc);
+
+        let report = manager.reconcile(true).await;
+        assert_eq!(report.removed_inactive, 1);
+        assert!(manager.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_process_manager_inventory_includes_reserved_ports() {
+        let manager = ProcessManager::new();
+        let port = manager.reserve_available_port(56201, 56300).await.unwrap();
+
+        let inventory = manager.inventory(5).await;
+        assert_eq!(inventory.total, 0);
+        assert_eq!(inventory.reserved_ports, vec![port]);
+
+        assert!(manager.release_reserved_port(port).await);
     }
 
     #[tokio::test(start_paused = true)]
