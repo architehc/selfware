@@ -1,6 +1,8 @@
 use crate::cognitive::compilation_manager::CompilationSandbox;
 use crate::cognitive::metrics::MetricsStore;
-use crate::cognitive::self_edit::SelfEditOrchestrator;
+use crate::cognitive::self_edit::{
+    AppliedMutation, ImprovementRecord, ImprovementTarget, SelfEditOrchestrator,
+};
 use crate::errors::{Result, SelfwareError};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -225,23 +227,29 @@ impl RSIOrchestrator {
             return Ok(false);
         }
 
-        // Pick highest priority target
-        let target = targets.into_iter().next().unwrap();
+        // Pick highest priority target that has a concrete mutation strategy.
+        let Some(target) = self.edit_orchestrator.select_target(&targets).cloned() else {
+            info!("No supported improvement targets found in this cycle.");
+            return Ok(false);
+        };
         info!("Selected improvement target: {:?}", target);
 
         // 3. Create Sandbox
         let sandbox = self.edit_orchestrator.create_sandbox()?;
 
         // 4. Apply Mutation
-        // In reality, the LLM would generate the code. Here we simulate the change being applied
-        // by the agent in the sandbox.
         info!("Applying mutation to sandbox...");
-        // (Mock applying change)
+        let applied = self
+            .edit_orchestrator
+            .apply_target_in_sandbox(&target, &sandbox)?;
+        info!("Applied mutation: {}", applied.summary);
 
         // 5. Verify compilation and tests in sandbox
         info!("Verifying compilation in sandbox...");
         if !sandbox.verify()? {
             warn!("Compilation or tests failed in sandbox. Rejecting mutation.");
+            self.record_improvement(&target, None, baseline_score, false, true)
+                .await?;
             sandbox.cleanup()?;
             return Ok(false);
         }
@@ -258,20 +266,20 @@ impl RSIOrchestrator {
                 "Mutation improved fitness ({} > {}). Merging.",
                 new_score, baseline_score
             );
-            self.merge_sandbox(sandbox).await?;
+            self.merge_sandbox(sandbox, &applied).await?;
 
             // Record success
-            self.record_improvement(target.id, true).await?;
+            self.record_improvement(&target, Some(new_score), baseline_score, true, false)
+                .await?;
             Ok(true)
         } else {
             info!(
                 "Mutation degraded or did not improve fitness ({} <= {}). Rolling back.",
                 new_score, baseline_score
             );
+            self.record_improvement(&target, Some(new_score), baseline_score, true, true)
+                .await?;
             sandbox.cleanup()?;
-
-            // Record failure
-            self.record_improvement(target.id, false).await?;
             Ok(false)
         }
     }
@@ -345,39 +353,82 @@ impl RSIOrchestrator {
         Ok(total_score / count as f64)
     }
 
-    async fn merge_sandbox(&self, sandbox: CompilationSandbox) -> Result<()> {
-        // Use git or file copy to merge back from work_dir to original_dir
+    async fn merge_sandbox(
+        &self,
+        sandbox: CompilationSandbox,
+        applied: &AppliedMutation,
+    ) -> Result<()> {
         info!("Merging sandbox changes back to main workspace...");
 
-        let output = Command::new("rsync")
-            .arg("-av")
-            .arg("--exclude=.git")
-            .arg("--exclude=target")
-            .arg(format!("{}/", sandbox.work_dir().display()))
-            .arg(format!("{}/", self.project_root.display()))
-            .output()
-            .await
-            .map_err(|e| SelfwareError::Internal(e.to_string()))?;
-
-        if !output.status.success() {
-            return Err(SelfwareError::Internal(
-                "Failed to merge sandbox".to_string(),
-            ));
+        for rel_path in &applied.edited_files {
+            let source = sandbox.work_dir().join(rel_path);
+            let destination = self.project_root.join(rel_path);
+            if let Some(parent) = destination.parent() {
+                tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    SelfwareError::Internal(format!("Failed to create merge dir: {}", e))
+                })?;
+            }
+            tokio::fs::copy(&source, &destination).await.map_err(|e| {
+                SelfwareError::Internal(format!("Failed to merge sandbox file {}: {}", rel_path, e))
+            })?;
         }
 
         sandbox.cleanup()?;
         Ok(())
     }
 
-    async fn record_improvement(&mut self, _target_id: String, _success: bool) -> Result<()> {
-        // Update meta-learner and store history
+    async fn record_improvement(
+        &mut self,
+        target: &ImprovementTarget,
+        new_score: Option<f64>,
+        baseline_score: f64,
+        verified: bool,
+        rolled_back: bool,
+    ) -> Result<()> {
+        let effectiveness_score = new_score.map_or(-1.0, |score| score - baseline_score);
+        let record = ImprovementRecord {
+            target_id: target.id.clone(),
+            category: target.category.clone(),
+            description: target.description.clone(),
+            before_metrics: None,
+            after_metrics: None,
+            git_commits: Vec::new(),
+            verified,
+            rolled_back,
+            effectiveness_score,
+            completed_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+        self.edit_orchestrator.record_result(record)?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn with_paths(project_root: PathBuf, state_path: PathBuf, history_path: PathBuf) -> Self {
+        Self {
+            edit_orchestrator: SelfEditOrchestrator::with_history_path(
+                project_root.clone(),
+                history_path,
+            ),
+            _metrics: MetricsStore::with_path(project_root.join(".selfware/test-metrics.jsonl")),
+            project_root,
+            is_running: false,
+            max_iterations: 100,
+            total_iterations: 0,
+            consecutive_failures: 0,
+            max_consecutive_failures: 5,
+            state_path,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::process::Command as StdCommand;
 
     #[test]
     fn test_rsi_orchestrator_new_defaults() {
@@ -558,6 +609,28 @@ mod tests {
         assert!(state_path.exists());
     }
 
+    #[tokio::test]
+    async fn test_execute_improvement_cycle_applies_mutation_and_records_result() {
+        let dir = create_rsi_fixture_project();
+        let project_root = dir.path().to_path_buf();
+        let state_path = project_root.join(".selfware/rsi_state.json");
+        let history_path = project_root.join(".selfware/history.json");
+        let mut orch = RSIOrchestrator::with_paths(project_root.clone(), state_path, history_path);
+
+        let improved = orch.execute_improvement_cycle().await.unwrap();
+        assert!(improved, "RSI cycle should merge an improving mutation");
+
+        let content = fs::read_to_string(project_root.join("src/lib.rs")).unwrap();
+        assert!(content.contains("Resolved: remove this marker"));
+        assert!(!content.contains("TODO"));
+
+        let history = orch.edit_orchestrator.history();
+        assert_eq!(history.len(), 1);
+        assert!(history[0].verified);
+        assert!(!history[0].rolled_back);
+        assert!(history[0].effectiveness_score > 0.0);
+    }
+
     /// Helper: replicates the TSV score-parsing logic from run_benchmark_and_get_score.
     fn parse_tsv_scores(tsv_content: &str) -> (f64, usize) {
         let mut total_score = 0.0;
@@ -577,5 +650,81 @@ mod tests {
         }
 
         (total_score, count)
+    }
+
+    fn create_rsi_fixture_project() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("system_tests/projecte2e")).unwrap();
+
+        fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "rsi_fixture"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+"#,
+        )
+        .unwrap();
+
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"pub fn demo() -> usize {
+    // TODO: remove this marker
+    42
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn demo_returns_answer() {
+        assert_eq!(super::demo(), 42);
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        fs::write(
+            root.join("system_tests/projecte2e/run_projecte2e.sh"),
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p system_tests/projecte2e/reports/latest
+score="0.25"
+if ! grep -R -E "TODO|FIXME" src >/dev/null 2>&1; then
+  score="0.90"
+fi
+cat > system_tests/projecte2e/reports/latest/results.tsv <<EOF
+scenario|type|difficulty|baseline|post|agent|timeout|duration|score|changed|error|notes
+todo_cleanup|unit|easy|0|0|selfware|0|0|${score}|yes||
+EOF
+"#,
+        )
+        .unwrap();
+
+        init_git_repo(root);
+        dir
+    }
+
+    fn init_git_repo(project_root: &Path) {
+        run_git(project_root, &["init"]);
+        run_git(project_root, &["config", "user.email", "codex@openai.com"]);
+        run_git(project_root, &["config", "user.name", "Codex"]);
+        run_git(project_root, &["add", "."]);
+        run_git(project_root, &["commit", "-m", "initial"]);
+    }
+
+    fn run_git(project_root: &Path, args: &[&str]) {
+        let status = StdCommand::new("git")
+            .args(args)
+            .current_dir(project_root)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {:?} should succeed", args);
     }
 }

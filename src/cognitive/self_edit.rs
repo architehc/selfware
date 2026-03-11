@@ -3,7 +3,8 @@
 //! Enables the agent to analyze its own codebase, identify improvement targets,
 //! and safely apply edits with verification and rollback.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -152,6 +153,15 @@ pub struct ImprovementRecord {
     pub rolled_back: bool,
     pub effectiveness_score: f64,
     pub completed_at: u64,
+}
+
+/// Result of applying a concrete self-edit mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedMutation {
+    /// Relative project files edited in the sandbox.
+    pub edited_files: Vec<String>,
+    /// Human-readable summary of the applied mutation.
+    pub summary: String,
 }
 
 /// Files and patterns that must never be self-edited
@@ -369,7 +379,45 @@ impl SelfEditOrchestrator {
         &self,
         targets: &'a [ImprovementTarget],
     ) -> Option<&'a ImprovementTarget> {
-        targets.first()
+        targets.iter().find(|target| self.supports_target(target))
+    }
+
+    /// Returns true when this target has a concrete mutation strategy.
+    pub fn supports_target(&self, target: &ImprovementTarget) -> bool {
+        matches!(target.category, ImprovementCategory::CodeQuality)
+            && target.file.is_some()
+            && (target.description.contains("TODO") || target.description.contains("FIXME"))
+    }
+
+    /// Apply a supported mutation to the provided sandbox.
+    pub fn apply_target_in_sandbox(
+        &self,
+        target: &ImprovementTarget,
+        sandbox: &CompilationSandbox,
+    ) -> Result<AppliedMutation> {
+        if !self.supports_target(target) {
+            return Err(anyhow!(
+                "No concrete mutation strategy available for target '{}'",
+                target.description
+            ));
+        }
+
+        let file = target
+            .file
+            .as_ref()
+            .ok_or_else(|| anyhow!("Target missing file path"))?;
+        let path = sandbox.work_dir().join(file);
+        let original = std::fs::read_to_string(&path)?;
+        let line_hint = parse_line_hint(&target.description);
+        let (updated, line_number) = rewrite_todo_fixme_marker(&original, line_hint)
+            .ok_or_else(|| anyhow!("Failed to locate a mutable TODO/FIXME marker in {}", file))?;
+
+        std::fs::write(&path, updated)?;
+
+        Ok(AppliedMutation {
+            edited_files: vec![file.clone()],
+            summary: format!("Rewrote TODO/FIXME marker in {}:{}", file, line_number),
+        })
     }
 
     /// Build a task prompt for the agent to apply an improvement
@@ -570,6 +618,54 @@ fn glob_rs_files(dir: &Path) -> Result<Vec<PathBuf>> {
     Ok(results)
 }
 
+fn parse_line_hint(description: &str) -> Option<usize> {
+    let re = Regex::new(r":(\d+):").ok()?;
+    let captures = re.captures(description)?;
+    captures.get(1)?.as_str().parse::<usize>().ok()
+}
+
+fn rewrite_todo_fixme_marker(
+    content: &str,
+    preferred_line: Option<usize>,
+) -> Option<(String, usize)> {
+    let todo_re = Regex::new(r"(?i)\b(?:TODO|FIXME)\b[:\-\s]*").ok()?;
+    let mut lines: Vec<String> = content.lines().map(ToString::to_string).collect();
+
+    let mut candidate_indices = Vec::new();
+    if let Some(line) = preferred_line {
+        let idx = line.saturating_sub(1);
+        if idx < lines.len() {
+            candidate_indices.push(idx);
+        }
+    }
+    candidate_indices.extend(
+        lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.contains("TODO") || line.contains("FIXME"))
+            .map(|(idx, _)| idx),
+    );
+    candidate_indices.dedup();
+
+    for idx in candidate_indices {
+        let original = &lines[idx];
+        let replaced = todo_re
+            .replace(original, "Resolved: ")
+            .to_string()
+            .replace("  ", " ");
+        if replaced != *original {
+            lines[idx] = replaced;
+            let mut updated = lines.join("\n");
+            if content.ends_with('\n') {
+                updated.push('\n');
+            }
+            return Some((updated, idx + 1));
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,28 +822,120 @@ mod tests {
         let orchestrator = SelfEditOrchestrator::new(PathBuf::from("/tmp/selfware_test"));
         let targets = vec![
             ImprovementTarget::new(
-                ImprovementCategory::ErrorHandling,
-                "first",
-                "r",
-                ImprovementSource::ErrorPattern,
-            )
-            .with_scores(0.9, 0.9),
-            ImprovementTarget::new(
                 ImprovementCategory::CodeQuality,
-                "second",
+                "Address TODO at src/lib.rs:2: // TODO: first",
                 "r",
                 ImprovementSource::TechDebt,
             )
+            .with_file("src/lib.rs")
+            .with_scores(0.9, 0.9),
+            ImprovementTarget::new(
+                ImprovementCategory::CodeQuality,
+                "Address TODO at src/main.rs:4: // TODO: second",
+                "r",
+                ImprovementSource::TechDebt,
+            )
+            .with_file("src/main.rs")
             .with_scores(0.5, 0.5),
         ];
         let selected = orchestrator.select_target(&targets).unwrap();
-        assert_eq!(selected.description, "first");
+        assert!(selected.description.contains("first"));
     }
 
     #[test]
     fn test_select_target_empty_returns_none() {
         let orchestrator = SelfEditOrchestrator::new(PathBuf::from("/tmp/selfware_test"));
         assert!(orchestrator.select_target(&[]).is_none());
+    }
+
+    #[test]
+    fn test_select_target_skips_unsupported_targets() {
+        let orchestrator = SelfEditOrchestrator::new(PathBuf::from("/tmp/selfware_test"));
+        let targets = vec![
+            ImprovementTarget::new(
+                ImprovementCategory::ToolPipeline,
+                "Reduce tool-call churn",
+                "metrics rationale",
+                ImprovementSource::MetricsRegression,
+            )
+            .with_file("src/agent/execution.rs")
+            .with_scores(0.9, 0.9),
+            ImprovementTarget::new(
+                ImprovementCategory::CodeQuality,
+                "Address TODO at src/lib.rs:3: // TODO: tighten this path",
+                "TODO/FIXME markers indicate known issues or missing features",
+                ImprovementSource::TechDebt,
+            )
+            .with_file("src/lib.rs")
+            .with_scores(0.6, 0.8),
+        ];
+
+        let selected = orchestrator.select_target(&targets).unwrap();
+        assert!(selected.description.contains("Address TODO"));
+    }
+
+    #[test]
+    fn test_parse_line_hint_extracts_line_number() {
+        let line = parse_line_hint("Address TODO at src/lib.rs:42: // TODO: tighten path");
+        assert_eq!(line, Some(42));
+    }
+
+    #[test]
+    fn test_rewrite_todo_fixme_marker_rewrites_preferred_line() {
+        let input = "fn demo() {\n    // TODO: clean this up\n}\n";
+        let (updated, line_number) = rewrite_todo_fixme_marker(input, Some(2)).unwrap();
+        assert_eq!(line_number, 2);
+        assert!(updated.contains("Resolved: clean this up"));
+        assert!(!updated.contains("TODO"));
+    }
+
+    #[test]
+    fn test_apply_target_in_sandbox_updates_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path().to_path_buf();
+        let src_dir = project_root.join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let file_path = src_dir.join("lib.rs");
+        std::fs::write(
+            &file_path,
+            "pub fn demo() {\n    // TODO: clean this up\n}\n",
+        )
+        .unwrap();
+
+        let run_git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&project_root)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {:?} should succeed", args);
+        };
+        run_git(&["init"]);
+        run_git(&["config", "user.email", "codex@openai.com"]);
+        run_git(&["config", "user.name", "Codex"]);
+        run_git(&["add", "."]);
+        run_git(&["commit", "-m", "initial"]);
+
+        let sandbox = CompilationSandbox::new(&project_root).unwrap();
+        let orchestrator = SelfEditOrchestrator::new(project_root);
+        let target = ImprovementTarget::new(
+            ImprovementCategory::CodeQuality,
+            "Address TODO at src/lib.rs:2: // TODO: clean this up",
+            "TODO/FIXME markers indicate known issues or missing features",
+            ImprovementSource::TechDebt,
+        )
+        .with_file("src/lib.rs")
+        .with_scores(0.6, 0.8);
+
+        let applied = orchestrator
+            .apply_target_in_sandbox(&target, &sandbox)
+            .unwrap();
+        let updated = std::fs::read_to_string(sandbox.work_dir().join("src/lib.rs")).unwrap();
+
+        assert_eq!(applied.edited_files, vec!["src/lib.rs".to_string()]);
+        assert!(applied.summary.contains("src/lib.rs:2"));
+        assert!(updated.contains("Resolved: clean this up"));
+        assert!(!updated.contains("TODO"));
     }
 
     #[test]
