@@ -11,7 +11,7 @@
 //! This is the first line of defense; YOLO mode provides additional controls.
 
 use crate::api::types::ToolCall;
-use crate::config::SafetyConfig;
+use crate::config::{is_local_endpoint, SafetyConfig};
 #[cfg(test)]
 use crate::safety::path_validator::normalize_path as normalize_path_impl;
 use crate::safety::path_validator::PathValidator;
@@ -22,6 +22,12 @@ use regex::Regex;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::LazyLock;
+
+#[derive(Clone, Copy, Default)]
+struct UrlSafetyOptions {
+    allow_file_scheme: bool,
+    allow_localhost: bool,
+}
 
 /// Guards against dangerous tool calls by validating commands, paths, and content.
 ///
@@ -216,7 +222,7 @@ impl SafetyChecker {
             "vision_analyze" | "vision_compare" => {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
                 if let Some(endpoint) = args.get("endpoint").and_then(|v| v.as_str()) {
-                    self.check_url_ssrf(endpoint)?;
+                    self.check_vision_endpoint_url(endpoint)?;
                 }
                 for key in &["image_path", "image_a", "image_b"] {
                     if let Some(p) = args.get(*key).and_then(|v| v.as_str()) {
@@ -246,7 +252,7 @@ impl SafetyChecker {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
                 // Check URL for SSRF on navigation actions
                 if let Some(url) = args.get("url").and_then(|v| v.as_str()) {
-                    self.check_url_ssrf(url)?;
+                    self.check_page_control_url(url)?;
                 }
                 // Check output path for screenshot/pdf actions
                 if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
@@ -463,10 +469,58 @@ impl SafetyChecker {
     /// Checks both plain-text hostnames and common IP encoding bypass
     /// techniques (hex, octal, decimal integer forms).
     fn check_url_ssrf(&self, url: &str) -> Result<()> {
+        self.check_url_ssrf_with_options(
+            url,
+            UrlSafetyOptions::default(),
+            std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1",
+        )
+    }
+
+    fn check_page_control_url(&self, url: &str) -> Result<()> {
+        if url.starts_with("file://") {
+            let parsed = url::Url::parse(url)?;
+            let path = parsed
+                .to_file_path()
+                .map_err(|_| anyhow::anyhow!("file:// URL must point to a local absolute path"))?;
+            let path_str = path.to_string_lossy();
+            self.check_path(path_str.as_ref())?;
+            return Ok(());
+        }
+
+        self.check_url_ssrf_with_options(
+            url,
+            UrlSafetyOptions {
+                allow_file_scheme: false,
+                allow_localhost: true,
+            },
+            std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1",
+        )
+    }
+
+    fn check_vision_endpoint_url(&self, url: &str) -> Result<()> {
+        self.check_url_ssrf_with_options(
+            url,
+            UrlSafetyOptions {
+                allow_file_scheme: false,
+                allow_localhost: true,
+            },
+            std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1",
+        )
+    }
+
+    fn check_url_ssrf_with_options(
+        &self,
+        url: &str,
+        options: UrlSafetyOptions,
+        allow_private: bool,
+    ) -> Result<()> {
         let lower = url.to_lowercase();
 
         // Block dangerous URI schemes that can leak local files or probe services
         for scheme in &["file:", "gopher:", "dict:", "ftp:"] {
+            if *scheme == "file:" && options.allow_file_scheme && lower.starts_with("file:") {
+                return Ok(());
+            }
             if lower.starts_with(scheme) {
                 anyhow::bail!(
                     "Blocked request: only http/https schemes are allowed (got {})",
@@ -526,6 +580,9 @@ impl SafetyChecker {
         // We still block IP literals pointing at private/internal ranges here,
         // since those don't require DNS resolution to validate.
         if let Ok(parsed) = url::Url::parse(url) {
+            if options.allow_localhost && is_local_endpoint(url) {
+                return Ok(());
+            }
             if let Some(host) = parsed.host_str() {
                 if let Ok(ip) = host.parse::<std::net::IpAddr>() {
                     match ip {
@@ -533,6 +590,9 @@ impl SafetyChecker {
                             let octets = v4.octets();
                             // Loopback (127.0.0.0/8)
                             if octets[0] == 127 {
+                                if options.allow_localhost {
+                                    return Ok(());
+                                }
                                 anyhow::bail!("Blocked request to loopback address: {}", ip);
                             }
                             // Private networks: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
@@ -540,27 +600,45 @@ impl SafetyChecker {
                                 || (octets[0] == 172 && (octets[1] & 0xf0) == 16)
                                 || (octets[0] == 192 && octets[1] == 168)
                             {
+                                if allow_private {
+                                    return Ok(());
+                                }
                                 anyhow::bail!("Blocked request to private network address: {}", ip);
                             }
                             // Unspecified (0.0.0.0)
                             if v4.is_unspecified() {
+                                if options.allow_localhost {
+                                    return Ok(());
+                                }
                                 anyhow::bail!("Blocked request to unspecified address: {}", ip);
                             }
                         }
                         std::net::IpAddr::V6(v6) => {
                             if v6.is_loopback() {
+                                if options.allow_localhost {
+                                    return Ok(());
+                                }
                                 anyhow::bail!("Blocked request to loopback address: {}", ip);
                             }
                             let segs = v6.segments();
                             // Link-local (fe80::/10)
                             if segs[0] & 0xffc0 == 0xfe80 {
+                                if allow_private {
+                                    return Ok(());
+                                }
                                 anyhow::bail!("Blocked request to link-local address: {}", ip);
                             }
                             // Unique local (fc00::/7)
                             if segs[0] & 0xfe00 == 0xfc00 {
+                                if allow_private {
+                                    return Ok(());
+                                }
                                 anyhow::bail!("Blocked request to private network address: {}", ip);
                             }
                             if v6.is_unspecified() {
+                                if options.allow_localhost {
+                                    return Ok(());
+                                }
                                 anyhow::bail!("Blocked request to unspecified address: {}", ip);
                             }
                         }
@@ -976,6 +1054,8 @@ impl reqwest::dns::Resolve for PinnedDnsResolver {
 mod tests {
     use super::*;
     use crate::api::types::{ToolCall, ToolFunction};
+    use std::fs;
+    use tempfile::tempdir;
 
     fn create_test_call(name: &str, args: &str) -> ToolCall {
         ToolCall {
@@ -2464,7 +2544,7 @@ mod tests {
     }
 
     #[test]
-    fn test_vision_compare_localhost_blocked() {
+    fn test_vision_compare_localhost_allowed() {
         let config = SafetyConfig::default();
         let checker = SafetyChecker::new(&config);
 
@@ -2472,7 +2552,39 @@ mod tests {
             "vision_compare",
             r#"{"endpoint": "http://127.0.0.1:8080", "image_a": "./a.png", "image_b": "./b.png"}"#,
         );
-        assert!(checker.check_tool_call(&call).is_err());
+        assert!(checker.check_tool_call(&call).is_ok());
+    }
+
+    #[test]
+    fn test_vision_private_network_remains_blocked_without_opt_in() {
+        let config = SafetyConfig::default();
+        let checker = SafetyChecker::new(&config);
+
+        let result = checker.check_url_ssrf_with_options(
+            "http://192.168.1.170:1234/v1",
+            UrlSafetyOptions {
+                allow_file_scheme: false,
+                allow_localhost: true,
+            },
+            false,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_vision_private_network_allowed_with_opt_in() {
+        let config = SafetyConfig::default();
+        let checker = SafetyChecker::new(&config);
+
+        let result = checker.check_url_ssrf_with_options(
+            "http://192.168.1.170:1234/v1",
+            UrlSafetyOptions {
+                allow_file_scheme: false,
+                allow_localhost: true,
+            },
+            true,
+        );
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -2482,6 +2594,53 @@ mod tests {
 
         let call = create_test_call("http_request", r#"{"url": "file:///etc/passwd"}"#);
         assert!(checker.check_tool_call(&call).is_err());
+    }
+
+    #[test]
+    fn test_page_control_workspace_file_url_allowed() {
+        let workspace = tempdir().unwrap();
+        let file = workspace.path().join("chart.html");
+        fs::write(&file, "<html><body>ok</body></html>").unwrap();
+
+        let config = SafetyConfig::default();
+        let checker = SafetyChecker::with_working_dir(&config, workspace.path().to_path_buf());
+        let url = format!("file://{}", file.display());
+        let call = create_test_call(
+            "page_control",
+            &format!(r#"{{"action":"goto","url":"{}"}}"#, url),
+        );
+
+        assert!(checker.check_tool_call(&call).is_ok());
+    }
+
+    #[test]
+    fn test_page_control_file_url_outside_workspace_blocked() {
+        let workspace = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let file = outside.path().join("secret.html");
+        fs::write(&file, "<html><body>nope</body></html>").unwrap();
+
+        let config = SafetyConfig::default();
+        let checker = SafetyChecker::with_working_dir(&config, workspace.path().to_path_buf());
+        let url = format!("file://{}", file.display());
+        let call = create_test_call(
+            "page_control",
+            &format!(r#"{{"action":"goto","url":"{}"}}"#, url),
+        );
+
+        assert!(checker.check_tool_call(&call).is_err());
+    }
+
+    #[test]
+    fn test_page_control_localhost_allowed() {
+        let config = SafetyConfig::default();
+        let checker = SafetyChecker::new(&config);
+        let call = create_test_call(
+            "page_control",
+            r#"{"action":"goto","url":"http://localhost:8888/chart.html"}"#,
+        );
+
+        assert!(checker.check_tool_call(&call).is_ok());
     }
 
     #[test]

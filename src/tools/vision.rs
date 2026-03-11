@@ -53,7 +53,7 @@ impl Tool for VisionAnalyze {
                 },
                 "endpoint": {
                     "type": "string",
-                    "description": "Vision model API endpoint (e.g. 'http://192.168.1.170:1234/v1'). Required."
+                    "description": "Vision model API endpoint (e.g. 'http://localhost:1234/v1'). Required. Localhost is allowed by default; set SELFWARE_ALLOW_PRIVATE_NETWORK=1 for private LAN hosts."
                 },
                 "model": {
                     "type": "string",
@@ -173,7 +173,7 @@ impl Tool for VisionCompare {
                 },
                 "endpoint": {
                     "type": "string",
-                    "description": "Optional vision model endpoint for semantic comparison"
+                    "description": "Optional vision model endpoint for semantic comparison. Localhost is allowed by default; set SELFWARE_ALLOW_PRIVATE_NETWORK=1 for private LAN hosts."
                 },
                 "model": {
                     "type": "string",

@@ -1,8 +1,21 @@
 //! E2E test for all tools on a test project
 
+use selfware::api::types::{ToolCall, ToolFunction};
+use selfware::safety::SafetyChecker;
 use selfware::tools::ToolRegistry;
 use std::fs;
-use tempfile::tempdir;
+use tempfile::{tempdir, NamedTempFile};
+
+fn make_tool_call(name: &str, arguments: String) -> ToolCall {
+    ToolCall {
+        id: "test".to_string(),
+        call_type: "function".to_string(),
+        function: ToolFunction {
+            name: name.to_string(),
+            arguments,
+        },
+    }
+}
 
 #[tokio::test]
 async fn test_e2e_file_tools() {
@@ -228,4 +241,48 @@ async fn test_e2e_all_tools_registered() {
         tool_names.len(),
         tool_names
     );
+}
+
+#[test]
+fn test_e2e_safety_allows_local_page_control_targets() {
+    let checker = SafetyChecker::new(&selfware::config::SafetyConfig::default());
+
+    let workspace_file = NamedTempFile::new_in(std::env::current_dir().unwrap()).unwrap();
+    fs::write(workspace_file.path(), "<html><body>ok</body></html>").unwrap();
+    let file_url = format!("file://{}", workspace_file.path().display());
+
+    let file_call = make_tool_call(
+        "page_control",
+        format!(r#"{{"action":"goto","url":"{}"}}"#, file_url),
+    );
+    assert!(checker.check_tool_call(&file_call).is_ok());
+
+    let localhost_call = make_tool_call(
+        "page_control",
+        r#"{"action":"goto","url":"http://localhost:8888/chart.html"}"#.to_string(),
+    );
+    assert!(checker.check_tool_call(&localhost_call).is_ok());
+}
+
+#[test]
+fn test_e2e_safety_blocks_untrusted_local_artifacts() {
+    let checker = SafetyChecker::new(&selfware::config::SafetyConfig::default());
+
+    let outside = tempdir().unwrap();
+    let outside_file = outside.path().join("secret.html");
+    fs::write(&outside_file, "<html><body>blocked</body></html>").unwrap();
+    let outside_call = make_tool_call(
+        "page_control",
+        format!(
+            r#"{{"action":"goto","url":"file://{}"}}"#,
+            outside_file.display()
+        ),
+    );
+    assert!(checker.check_tool_call(&outside_call).is_err());
+
+    let private_vision = make_tool_call(
+        "vision_analyze",
+        r#"{"endpoint":"http://192.168.1.170:1234/v1","prompt":"test","model":"vlm"}"#.to_string(),
+    );
+    assert!(checker.check_tool_call(&private_vision).is_err());
 }

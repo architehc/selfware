@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::{IpAddr, ToSocketAddrs};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -24,6 +24,7 @@ use tokio::sync::{oneshot, Mutex};
 use tracing::{debug, info, warn};
 
 use super::Tool;
+use crate::config::is_local_endpoint;
 
 // ============================================================================
 // Constants
@@ -320,22 +321,36 @@ impl PlaywrightBridge {
 // ============================================================================
 
 /// Validate a URL for safety before sending it to the bridge.
-/// Blocks file:// URLs and private network addresses (unless overridden).
+/// Allows workspace-local file:// URLs and localhost, while still blocking
+/// arbitrary private-network targets unless explicitly overridden.
 fn validate_url(url: &str) -> Result<()> {
+    validate_url_with_allow_private(
+        url,
+        std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1",
+    )
+}
+
+fn validate_url_with_allow_private(url: &str, allow_private: bool) -> Result<()> {
     let parsed = url::Url::parse(url).context("Invalid URL")?;
+
+    if parsed.scheme() == "file" {
+        return validate_file_url(&parsed);
+    }
 
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
         bail!(
-            "Only http:// and https:// URLs are allowed, got {}://",
+            "Only http://, https://, and workspace file:// URLs are allowed, got {}://",
             parsed.scheme()
         );
+    }
+
+    if is_local_endpoint(url) {
+        return Ok(());
     }
 
     let host = parsed
         .host_str()
         .ok_or_else(|| anyhow::anyhow!("URL must have a host"))?;
-
-    let allow_private = std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1";
 
     if !allow_private {
         // Check for literal private IPs
@@ -368,6 +383,37 @@ fn validate_url(url: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn validate_file_url(parsed: &url::Url) -> Result<()> {
+    let path = parsed
+        .to_file_path()
+        .map_err(|_| anyhow::anyhow!("file:// URL must point to a local absolute path"))?;
+
+    let workspace_root = std::env::current_dir()
+        .context("Failed to determine current workspace directory")?
+        .canonicalize()
+        .context("Failed to canonicalize current workspace directory")?;
+
+    let target = canonicalize_existing_path(&path)?;
+
+    if !target.starts_with(&workspace_root) {
+        bail!(
+            "Blocked file:// URL outside workspace: {}",
+            target.display()
+        );
+    }
+
+    Ok(())
+}
+
+fn canonicalize_existing_path(path: &Path) -> Result<PathBuf> {
+    if !path.exists() {
+        bail!("file:// target does not exist: {}", path.display());
+    }
+
+    path.canonicalize()
+        .with_context(|| format!("Failed to canonicalize {}", path.display()))
 }
 
 fn is_private_ip(ip: &IpAddr) -> bool {
@@ -648,6 +694,8 @@ impl Tool for PageControlTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::{tempdir, NamedTempFile};
 
     #[test]
     fn test_page_control_tool_name() {
@@ -744,21 +792,41 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_url_blocks_file() {
-        let result = validate_url("file:///etc/passwd");
+    fn test_validate_url_allows_workspace_file() {
+        let workspace_file = NamedTempFile::new_in(std::env::current_dir().unwrap()).unwrap();
+        fs::write(workspace_file.path(), "<html><body>ok</body></html>").unwrap();
+        let url = format!("file://{}", workspace_file.path().display());
+
+        let result = validate_url(&url);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_url_blocks_file_outside_workspace() {
+        let outside = tempdir().unwrap();
+        let file = outside.path().join("external.html");
+        fs::write(&file, "<html><body>blocked</body></html>").unwrap();
+
+        let result = validate_url(&format!("file://{}", file.display()));
         assert!(result.is_err());
     }
 
     #[test]
     fn test_validate_url_blocks_private_ip() {
-        let result = validate_url("http://127.0.0.1/test");
+        let result = validate_url("http://192.168.1.10/test");
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_validate_url_blocks_localhost() {
+    fn test_validate_url_allows_localhost() {
         let result = validate_url("http://localhost/test");
-        assert!(result.is_err());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_url_private_ip_allowed_with_opt_in() {
+        let result = validate_url_with_allow_private("http://192.168.1.10/test", true);
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -780,9 +848,9 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_url_blocks_zero_ip() {
+    fn test_validate_url_allows_zero_ip_binding() {
         let result = validate_url("http://0.0.0.0/");
-        assert!(result.is_err());
+        assert!(result.is_ok());
     }
 
     #[test]
