@@ -333,19 +333,32 @@ impl ProcessManager {
                 if start.elapsed() > timeout {
                     warn!("Health check timeout for process '{}'", id);
 
-                    // Check if the process already exited
-                    let exit_code = {
+                    let (exit_code, timed_out_while_running) = {
                         let mut child_guard = child_handle.write().await;
-                        if let Some(ref mut child) = *child_guard {
-                            child.try_wait().ok().flatten().and_then(|s| s.code())
+                        if let Some(mut child) = child_guard.take() {
+                            if let Some(status) = child.try_wait().ok().flatten() {
+                                (status.code(), false)
+                            } else {
+                                warn!(
+                                    "Process '{}' failed health check and will be terminated",
+                                    id
+                                );
+                                let _ = child.kill().await;
+                                let exit_code = child.wait().await.ok().and_then(|s| s.code());
+                                (exit_code, true)
+                            }
                         } else {
-                            None
+                            (None, false)
                         }
                     };
 
                     let mut processes = self.processes.write().await;
                     if let Some(proc) = processes.get_mut(&id) {
-                        if let Some(code) = exit_code {
+                        proc.child_handle = None;
+                        proc.pid = None;
+                        if timed_out_while_running {
+                            proc.status = ProcessStatus::HealthCheckFailed;
+                        } else if let Some(code) = exit_code {
                             proc.status = ProcessStatus::Crashed {
                                 exit_code: Some(code),
                             };

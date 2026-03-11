@@ -32,6 +32,8 @@ pub fn is_tui_active() -> bool {
 static TOTAL_PROMPT_TOKENS: AtomicU64 = AtomicU64::new(0);
 static TOTAL_COMPLETION_TOKENS: AtomicU64 = AtomicU64::new(0);
 
+const SHELL_SUMMARY_PREVIEW_CHARS: usize = 120;
+
 /// Initialize output modes from config
 pub(crate) fn init(compact: bool, verbose: bool, show_tokens: bool) {
     COMPACT_MODE.store(compact, Ordering::SeqCst);
@@ -179,10 +181,10 @@ pub(crate) fn semantic_summary(
         // === Shell ===
         "shell_exec" => {
             let cmd = extract_command(args).unwrap_or("?");
-            let short_cmd = if cmd.chars().count() > 40 {
+            let short_cmd = if cmd.chars().count() > SHELL_SUMMARY_PREVIEW_CHARS {
                 &cmd[..cmd
                     .char_indices()
-                    .nth(40)
+                    .nth(SHELL_SUMMARY_PREVIEW_CHARS)
                     .map(|(i, _)| i)
                     .unwrap_or(cmd.len())]
             } else {
@@ -561,8 +563,10 @@ pub(crate) fn tool_activity_message(name: &str, args: &serde_json::Value) -> Str
             "Running {}...",
             extract_command(args)
                 .map(|c| {
-                    if c.chars().count() > 40 {
-                        c.chars().take(40).collect::<String>()
+                    if c.chars().count() > SHELL_SUMMARY_PREVIEW_CHARS {
+                        c.chars()
+                            .take(SHELL_SUMMARY_PREVIEW_CHARS)
+                            .collect::<String>()
                     } else {
                         c.to_string()
                     }

@@ -147,6 +147,11 @@ pub static COMMANDS: &[CommandEntry] = &[
         category: CommandCategory::Tools,
     },
     CommandEntry {
+        name: "/debug",
+        description: "Show current task tool history and recent errors",
+        category: CommandCategory::Tools,
+    },
+    CommandEntry {
         name: "/tools",
         description: "List available tools",
         category: CommandCategory::Tools,
@@ -350,6 +355,7 @@ mod tests {
             "/clear",
             "/theme",
             "/last",
+            "/debug",
             "/tools",
             "/analyze",
             "/review",
@@ -835,6 +841,7 @@ mod tests {
     fn test_tools_commands_are_in_tools_category() {
         let tools_commands = [
             "/last",
+            "/debug",
             "/tools",
             "/analyze",
             "/review",

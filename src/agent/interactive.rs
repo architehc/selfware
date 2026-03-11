@@ -1,8 +1,9 @@
 use anyhow::Result;
 use colored::*;
+use std::io::Write;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::*;
 
@@ -23,8 +24,130 @@ fn safe_truncate(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+const QUEUE_NOTICE_PREVIEW_BYTES: usize = 120;
+const QUEUE_LIST_PREVIEW_BYTES: usize = 120;
+const QUEUE_DROP_PREVIEW_BYTES: usize = 80;
+const QUEUE_DRAIN_PREVIEW_BYTES: usize = 120;
+const TOOL_DEBUG_RESULT_PREVIEW_LINES: usize = 20;
+const INTERACTIVE_QUEUE_COALESCE_WINDOW: Duration = Duration::from_millis(150);
+
+fn strip_trailing_submission_newlines(s: &str) -> &str {
+    s.trim_end_matches(['\r', '\n'])
+}
+
+fn is_effectively_empty_message(s: &str) -> bool {
+    s.trim().is_empty()
+}
+
+fn flatten_preview_text(s: &str) -> String {
+    let mut flattened = String::with_capacity(s.len());
+    let mut last_was_space = false;
+
+    for ch in s.chars() {
+        let mapped = match ch {
+            '\r' | '\n' | '\t' => ' ',
+            _ => ch,
+        };
+
+        if mapped.is_whitespace() {
+            if !last_was_space {
+                flattened.push(' ');
+                last_was_space = true;
+            }
+        } else {
+            flattened.push(mapped);
+            last_was_space = false;
+        }
+    }
+
+    flattened.trim().to_string()
+}
+
+fn preview_with_ellipsis(s: &str, max_bytes: usize) -> String {
+    let flattened = flatten_preview_text(s);
+    let preview = safe_truncate(&flattened, max_bytes);
+    if flattened.len() > preview.len() {
+        format!("{}...", preview)
+    } else {
+        preview.to_string()
+    }
+}
+
+fn print_debug_args_block(args: &str) {
+    println!("     Args:");
+    if args.is_empty() {
+        println!("       <none>");
+        return;
+    }
+
+    for line in args.lines() {
+        println!("       {}", line);
+    }
+}
+
+fn print_debug_result_block(result: Option<&str>) {
+    println!("     Result:");
+    let Some(result) = result else {
+        println!("       <none>");
+        return;
+    };
+
+    let lines: Vec<&str> = result.lines().collect();
+    let show = lines.len().min(TOOL_DEBUG_RESULT_PREVIEW_LINES);
+    for line in &lines[..show] {
+        println!("       {}", line);
+    }
+    if lines.len() > show {
+        println!("       ... ({} more lines)", lines.len() - show);
+    }
+}
+
+fn render_inline_queue_prompt(input: &str) {
+    use std::io::Write;
+
+    let preview = preview_with_ellipsis(input, QUEUE_NOTICE_PREVIEW_BYTES);
+    let prompt = format!("\r\x1b[2K\x1b[90m  ▸ \x1b[0m{}", preview);
+    let _ = std::io::stderr().write_all(prompt.as_bytes());
+    let _ = std::io::stderr().flush();
+}
+
+fn coalesce_pending_messages<I>(messages: I) -> Vec<PendingMessage>
+where
+    I: IntoIterator<Item = PendingMessage>,
+{
+    let mut coalesced: Vec<PendingMessage> = Vec::new();
+
+    for msg in messages {
+        if is_effectively_empty_message(&msg.content) {
+            continue;
+        }
+
+        if let Some(current) = coalesced.last_mut() {
+            let within_window = msg
+                .queued_at
+                .saturating_duration_since(current.queued_at)
+                <= INTERACTIVE_QUEUE_COALESCE_WINDOW;
+            if current.origin == PendingMessageOrigin::InteractiveQueue
+                && msg.origin == PendingMessageOrigin::InteractiveQueue
+                && within_window
+            {
+                if !current.content.is_empty() {
+                    current.content.push('\n');
+                }
+                current.content.push_str(&msg.content);
+                current.queued_at = msg.queued_at;
+                continue;
+            }
+        }
+
+        coalesced.push(msg);
+    }
+
+    coalesced
+}
+
 /// Shared queue for messages typed during generation.
-type InputQueue = Arc<std::sync::Mutex<Vec<String>>>;
+type InputQueue = Arc<std::sync::Mutex<Vec<PendingMessage>>>;
 
 /// Handle returned by [`spawn_input_listener`] so the caller can signal the
 /// listener to stop and wait for terminal raw-mode to be restored.
@@ -38,7 +161,7 @@ struct EscListenerGuard {
 impl EscListenerGuard {
     /// Signal the background listener to exit and wait (briefly) for it to
     /// restore terminal raw-mode before returning control to reedline.
-    async fn stop(self) -> Vec<String> {
+    async fn stop(self) -> Vec<PendingMessage> {
         use std::sync::atomic::Ordering;
         self.stop.store(true, Ordering::Relaxed);
         // Give the blocking thread up to 200 ms to clean up raw mode.
@@ -70,7 +193,6 @@ fn spawn_esc_listener(cancel_token: Arc<AtomicBool>, paused: Arc<AtomicBool>) ->
     let handle = tokio::task::spawn_blocking(move || {
         use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
         use crossterm::terminal;
-        use std::io::Write;
         use std::sync::atomic::Ordering;
         use std::time::Duration;
 
@@ -131,19 +253,24 @@ fn spawn_esc_listener(cancel_token: Arc<AtomicBool>, paused: Arc<AtomicBool>) ->
                             }
                             KeyCode::Enter => {
                                 if !input_buf.is_empty() {
-                                    let msg = input_buf.trim().to_string();
+                                    let msg =
+                                        strip_trailing_submission_newlines(&input_buf).to_string();
                                     input_buf.clear();
                                     showing_prompt = false;
-                                    if !msg.is_empty() {
+                                    if !is_effectively_empty_message(&msg) {
                                         let count = {
                                             let mut q = queued_clone.lock().unwrap();
-                                            q.push(msg.clone());
+                                            q.push(PendingMessage::new(
+                                                msg.clone(),
+                                                PendingMessageOrigin::InteractiveQueue,
+                                                Instant::now(),
+                                            ));
                                             q.len()
                                         };
                                         // Show confirmation
                                         let notice = format!(
                                             "\r\x1b[2K\x1b[36m  ▸ Queued: \x1b[0m{}\x1b[90m ({})\x1b[0m\r\n",
-                                            safe_truncate(&msg, 50),
+                                            preview_with_ellipsis(&msg, QUEUE_NOTICE_PREVIEW_BYTES),
                                             count,
                                         );
                                         let _ = std::io::stderr().write_all(notice.as_bytes());
@@ -156,11 +283,7 @@ fn spawn_esc_listener(cancel_token: Arc<AtomicBool>, paused: Arc<AtomicBool>) ->
                             }
                             KeyCode::Backspace => {
                                 if input_buf.pop().is_some() {
-                                    // Redraw prompt
-                                    let prompt =
-                                        format!("\r\x1b[2K\x1b[90m  ▸ \x1b[0m{}", input_buf);
-                                    let _ = std::io::stderr().write_all(prompt.as_bytes());
-                                    let _ = std::io::stderr().flush();
+                                    render_inline_queue_prompt(&input_buf);
                                     if input_buf.is_empty() {
                                         let _ = std::io::stderr().write_all(b"\r\x1b[2K");
                                         let _ = std::io::stderr().flush();
@@ -181,12 +304,9 @@ fn spawn_esc_listener(cancel_token: Arc<AtomicBool>, paused: Arc<AtomicBool>) ->
                                     q.pop()
                                 };
                                 if let Some(msg) = popped {
-                                    input_buf = msg;
+                                    input_buf = msg.content;
                                     showing_prompt = true;
-                                    let prompt =
-                                        format!("\r\x1b[2K\x1b[90m  ▸ \x1b[0m{}", input_buf);
-                                    let _ = std::io::stderr().write_all(prompt.as_bytes());
-                                    let _ = std::io::stderr().flush();
+                                    render_inline_queue_prompt(&input_buf);
                                 }
                             }
                             KeyCode::Char(c) => {
@@ -197,13 +317,19 @@ fn spawn_esc_listener(cancel_token: Arc<AtomicBool>, paused: Arc<AtomicBool>) ->
                                     showing_prompt = true;
                                 }
                                 input_buf.push(c);
-                                // Echo the character
-                                let _ = std::io::stderr()
-                                    .write_all(c.encode_utf8(&mut [0; 4]).as_bytes());
-                                let _ = std::io::stderr().flush();
+                                render_inline_queue_prompt(&input_buf);
                             }
                             _ => {}
                         }
+                    }
+                    Ok(Event::Paste(text)) => {
+                        if !showing_prompt {
+                            let _ = std::io::stderr()
+                                .write_all(b"\r\x1b[2K\x1b[90m  \xe2\x96\xb8 \x1b[0m");
+                            showing_prompt = true;
+                        }
+                        input_buf.push_str(&text);
+                        render_inline_queue_prompt(&input_buf);
                     }
                     Ok(_) => {}
                     Err(_) => break,
@@ -964,6 +1090,11 @@ impl Agent {
                 continue;
             }
 
+            if input == "/debug" {
+                self.print_execution_debug();
+                continue;
+            }
+
             if input == "/config" {
                 println!();
                 println!("  {} Current Configuration", "⚙".bright_cyan());
@@ -1108,12 +1239,11 @@ impl Agent {
                 } else {
                     println!("{} Queued messages ({}):", "📋".bright_cyan(), msgs.len());
                     for (i, msg) in msgs.iter().enumerate() {
-                        let preview = safe_truncate(msg, 60);
+                        let preview = preview_with_ellipsis(&msg.content, QUEUE_LIST_PREVIEW_BYTES);
                         println!(
-                            "  {}. {}{}",
+                            "  {}. {}",
                             i + 1,
                             preview,
-                            if msg.len() > 60 { "..." } else { "" }
                         );
                     }
                 }
@@ -1135,14 +1265,14 @@ impl Agent {
                 if let Ok(idx) = idx_str.trim().parse::<usize>() {
                     let idx = idx.saturating_sub(1); // 1-based to 0-based
                     if idx < self.pending_messages.len() {
-                        let removed = self.pending_messages.remove(idx).unwrap_or_default();
-                        let preview = safe_truncate(&removed, 40);
+                        let removed = self.pending_messages.remove(idx).unwrap();
+                        let preview =
+                            preview_with_ellipsis(&removed.content, QUEUE_DROP_PREVIEW_BYTES);
                         println!(
-                            "{} Removed message {}: {}{}",
+                            "{} Removed message {}: {}",
                             "📋".bright_cyan(),
                             idx + 1,
                             preview,
-                            if removed.len() > 40 { "..." } else { "" }
                         );
                     } else {
                         println!(
@@ -1625,10 +1755,10 @@ impl Agent {
     async fn run_task_with_queue(&mut self, task: &str) -> Result<()> {
         let esc_guard = spawn_esc_listener(self.cancel_token(), self.esc_pause_token());
         let result = self.run_task(task).await;
-        let queued = esc_guard.stop().await;
+        let queued = coalesce_pending_messages(esc_guard.stop().await);
         // Add messages typed during generation to the pending queue
         for msg in queued {
-            self.enqueue_pending_message(&msg);
+            self.enqueue_pending_message_entry(msg);
         }
         self.after_task_run().await;
         result
@@ -1637,9 +1767,9 @@ impl Agent {
     async fn run_swarm_with_queue(&mut self, task: &str) -> Result<()> {
         let esc_guard = spawn_esc_listener(self.cancel_token(), self.esc_pause_token());
         let result = self.run_swarm_task(task).await;
-        let queued = esc_guard.stop().await;
+        let queued = coalesce_pending_messages(esc_guard.stop().await);
         for msg in queued {
-            self.enqueue_pending_message(&msg);
+            self.enqueue_pending_message_entry(msg);
         }
         self.after_task_run().await;
         result
@@ -1654,20 +1784,35 @@ impl Agent {
     }
 
     async fn drain_pending_messages(&mut self) {
-        while let Some(queued) = self.pending_messages.pop_front() {
-            let queued = queued.trim().to_string();
-            if queued.is_empty() {
+        while let Some(mut queued) = self.pending_messages.pop_front() {
+            while let Some(next) = self.pending_messages.front() {
+                let within_window = next
+                    .queued_at
+                    .saturating_duration_since(queued.queued_at)
+                    <= INTERACTIVE_QUEUE_COALESCE_WINDOW;
+                if queued.origin == PendingMessageOrigin::InteractiveQueue
+                    && next.origin == PendingMessageOrigin::InteractiveQueue
+                    && within_window
+                {
+                    let next = self.pending_messages.pop_front().unwrap();
+                    if !queued.content.is_empty() {
+                        queued.content.push('\n');
+                    }
+                    queued.content.push_str(&next.content);
+                    queued.queued_at = next.queued_at;
+                    continue;
+                }
+                break;
+            }
+
+            if is_effectively_empty_message(&queued.content) {
                 continue;
             }
 
-            let preview = if queued.chars().count() > 60 {
-                format!("{}...", queued.chars().take(57).collect::<String>())
-            } else {
-                queued.clone()
-            };
+            let preview = preview_with_ellipsis(&queued.content, QUEUE_DRAIN_PREVIEW_BYTES);
             println!("{} Queued: {}", "📨".bright_cyan(), preview);
 
-            if let Err(e) = self.run_task(&queued).await {
+            if let Err(e) = self.run_task(&queued.content).await {
                 println!("{} Error: {}", "❌".bright_red(), e);
             }
 
@@ -1679,7 +1824,7 @@ impl Agent {
         }
     }
 
-    fn enqueue_pending_message(&mut self, msg: &str) {
+    fn enqueue_pending_message_entry(&mut self, msg: PendingMessage) {
         if self.pending_messages.len() >= MAX_PENDING_MESSAGES {
             let _ = self.pending_messages.pop_front();
             println!(
@@ -1688,7 +1833,89 @@ impl Agent {
                 MAX_PENDING_MESSAGES
             );
         }
-        self.pending_messages.push_back(msg.to_string());
+        self.pending_messages.push_back(msg);
+    }
+
+    fn enqueue_pending_message(&mut self, msg: &str) {
+        self.enqueue_pending_message_entry(PendingMessage::new(
+            msg.to_string(),
+            PendingMessageOrigin::ManualQueue,
+            Instant::now(),
+        ));
+    }
+
+    fn print_execution_debug(&self) {
+        println!();
+        println!("  {} Execution Debug", ">>".bright_cyan());
+
+        if let Some(checkpoint) = &self.current_checkpoint {
+            println!("  Task:   {}", checkpoint.task_description.bright_white());
+            println!("  Task ID: {}", checkpoint.task_id.dimmed());
+            println!(
+                "  Status: {:?} | step {} | {} tool call(s) | {} error(s)",
+                checkpoint.status,
+                checkpoint.current_step,
+                checkpoint.tool_calls.len(),
+                checkpoint.errors.len()
+            );
+
+            if checkpoint.tool_calls.is_empty() {
+                println!("  No tool calls captured for this task yet.");
+            } else {
+                let total = checkpoint.tool_calls.len();
+                let start = total.saturating_sub(10);
+                println!("  Showing tool calls {}-{} of {}", start + 1, total, total);
+
+                for (index, call) in checkpoint.tool_calls.iter().enumerate().skip(start) {
+                    let status = if call.success {
+                        "success".bright_green()
+                    } else {
+                        "failed".bright_red()
+                    };
+                    let duration = call
+                        .duration_ms
+                        .map(|ms| format!("{}ms", ms))
+                        .unwrap_or_else(|| "n/a".to_string());
+
+                    println!(
+                        "  {}. {} {} ({}) at {}",
+                        index + 1,
+                        call.tool_name.bright_white(),
+                        status,
+                        duration.dimmed(),
+                        call.timestamp.format("%H:%M:%S").to_string().dimmed()
+                    );
+                    print_debug_args_block(&call.arguments);
+                    print_debug_result_block(call.result.as_deref());
+                }
+            }
+
+            if !checkpoint.errors.is_empty() {
+                println!("  Recent errors:");
+                for error in checkpoint.errors.iter().rev().take(5).rev() {
+                    let recovered = if error.recovered {
+                        "recovered".bright_green()
+                    } else {
+                        "unrecovered".bright_red()
+                    };
+                    println!(
+                        "    step {} | {} | {}",
+                        error.step,
+                        recovered,
+                        error.timestamp.format("%H:%M:%S").to_string().dimmed()
+                    );
+                    println!("      {}", error.error);
+                }
+            }
+        } else {
+            println!("  No active checkpoint/tool history for this session.");
+        }
+
+        if let Some(last) = crate::agent::last_tool::retrieve() {
+            println!("  Last tool summary: {}", last.summary);
+        }
+
+        println!();
     }
 
     /// Copy text to clipboard using system clipboard tools.
@@ -1932,12 +2159,11 @@ impl Agent {
                 } else {
                     println!("{} Queued messages ({}):", "📋".bright_cyan(), msgs.len());
                     for (i, msg) in msgs.iter().enumerate() {
-                        let preview = safe_truncate(msg, 60);
+                        let preview = preview_with_ellipsis(&msg.content, QUEUE_LIST_PREVIEW_BYTES);
                         println!(
-                            "  {}. {}{}",
+                            "  {}. {}",
                             i + 1,
                             preview,
-                            if msg.len() > 60 { "..." } else { "" }
                         );
                     }
                 }
@@ -1959,14 +2185,14 @@ impl Agent {
                 if let Ok(idx) = idx_str.trim().parse::<usize>() {
                     let idx = idx.saturating_sub(1); // 1-based to 0-based
                     if idx < self.pending_messages.len() {
-                        let removed = self.pending_messages.remove(idx).unwrap_or_default();
-                        let preview = safe_truncate(&removed, 40);
+                        let removed = self.pending_messages.remove(idx).unwrap();
+                        let preview =
+                            preview_with_ellipsis(&removed.content, QUEUE_DROP_PREVIEW_BYTES);
                         println!(
-                            "{} Removed message {}: {}{}",
+                            "{} Removed message {}: {}",
                             "📋".bright_cyan(),
                             idx + 1,
                             preview,
-                            if removed.len() > 40 { "..." } else { "" }
                         );
                     } else {
                         println!(
@@ -2104,6 +2330,7 @@ mod tests {
             "/cost",
             "/model",
             "/last",
+            "/debug",
             "/compact",
             "/verbose",
             "/config",
@@ -2252,22 +2479,13 @@ mod tests {
 
     #[test]
     fn queued_message_preview_truncation() {
-        // The drain_pending_messages method truncates preview at 60 chars
         let short_msg = "Short message";
-        let preview = if short_msg.chars().count() > 60 {
-            format!("{}...", short_msg.chars().take(57).collect::<String>())
-        } else {
-            short_msg.to_string()
-        };
+        let preview = preview_with_ellipsis(short_msg, QUEUE_DRAIN_PREVIEW_BYTES);
         assert_eq!(preview, "Short message");
 
-        let long_msg = "a".repeat(100);
-        let preview = if long_msg.chars().count() > 60 {
-            format!("{}...", long_msg.chars().take(57).collect::<String>())
-        } else {
-            long_msg.clone()
-        };
-        assert_eq!(preview.len(), 60); // 57 chars + "..."
+        let long_msg = "a".repeat(200);
+        let preview = preview_with_ellipsis(&long_msg, QUEUE_DRAIN_PREVIEW_BYTES);
+        assert!(preview.len() <= QUEUE_DRAIN_PREVIEW_BYTES + 3);
         assert!(preview.ends_with("..."));
     }
 
@@ -2321,71 +2539,97 @@ mod tests {
 
     #[test]
     fn queue_list_preview_truncation() {
-        // The /queue list handler truncates at 60 chars using safe_truncate
         let short = "Short message";
-        let preview = safe_truncate(short, 60);
-        let suffix = if short.len() > 60 { "..." } else { "" };
-        assert_eq!(format!("{}{}", preview, suffix), "Short message");
+        let preview = preview_with_ellipsis(short, QUEUE_LIST_PREVIEW_BYTES);
+        assert_eq!(preview, "Short message");
 
-        let long = "x".repeat(100);
-        let preview = safe_truncate(&long, 60);
-        let suffix = if long.len() > 60 { "..." } else { "" };
-        assert_eq!(preview.len(), 60);
-        assert_eq!(suffix, "...");
+        let long = "x".repeat(200);
+        let preview = preview_with_ellipsis(&long, QUEUE_LIST_PREVIEW_BYTES);
+        assert!(preview.len() <= QUEUE_LIST_PREVIEW_BYTES + 3);
+        assert!(preview.ends_with("..."));
 
-        // Multi-byte: emoji at boundary should not panic
         let emoji_str = "Hello 🦊 world! This is a test with emoji 🌸 and more text here...";
-        let preview = safe_truncate(emoji_str, 60);
-        assert!(preview.len() <= 60);
-        assert!(preview.is_char_boundary(preview.len()));
+        let preview = preview_with_ellipsis(emoji_str, QUEUE_LIST_PREVIEW_BYTES);
+        assert!(preview.len() <= QUEUE_LIST_PREVIEW_BYTES + 3);
     }
 
     #[test]
     fn queue_drop_preview_truncation() {
-        // The /queue drop handler truncates at 40 chars using safe_truncate
         let short = "Short task";
-        let preview = safe_truncate(short, 40);
-        let suffix = if short.len() > 40 { "..." } else { "" };
-        assert_eq!(format!("{}{}", preview, suffix), "Short task");
+        let preview = preview_with_ellipsis(short, QUEUE_DROP_PREVIEW_BYTES);
+        assert_eq!(preview, "Short task");
 
-        let long = "y".repeat(80);
-        let preview = safe_truncate(&long, 40);
-        let suffix = if long.len() > 40 { "..." } else { "" };
-        assert_eq!(preview.len(), 40);
-        assert_eq!(suffix, "...");
+        let long = "y".repeat(120);
+        let preview = preview_with_ellipsis(&long, QUEUE_DROP_PREVIEW_BYTES);
+        assert!(preview.len() <= QUEUE_DROP_PREVIEW_BYTES + 3);
+        assert!(preview.ends_with("..."));
 
-        // Multi-byte: emoji at boundary should not panic
         let emoji_str = "🦊🌸🌿❄️🥀 abcdefghij 🦊🌸🌿❄️🥀";
-        let preview = safe_truncate(emoji_str, 40);
-        assert!(preview.len() <= 40);
-        assert!(preview.is_char_boundary(preview.len()));
+        let preview = preview_with_ellipsis(emoji_str, QUEUE_DROP_PREVIEW_BYTES);
+        assert!(preview.len() <= QUEUE_DROP_PREVIEW_BYTES + 3);
+    }
+
+    #[test]
+    fn coalesces_interactive_queue_bursts_into_one_message() {
+        let start = Instant::now();
+        let messages = vec![
+            PendingMessage::new(
+                "line one",
+                PendingMessageOrigin::InteractiveQueue,
+                start,
+            ),
+            PendingMessage::new(
+                "line two",
+                PendingMessageOrigin::InteractiveQueue,
+                start + Duration::from_millis(25),
+            ),
+            PendingMessage::new(
+                "manual follow-up",
+                PendingMessageOrigin::ManualQueue,
+                start + Duration::from_millis(30),
+            ),
+        ];
+
+        let coalesced = coalesce_pending_messages(messages);
+        assert_eq!(coalesced.len(), 2);
+        assert_eq!(coalesced[0].content, "line one\nline two");
+        assert_eq!(coalesced[1].content, "manual follow-up");
     }
 
     #[test]
     fn queue_vecdeque_operations() {
-        // Verify VecDeque operations used by queue management commands
         use std::collections::VecDeque;
 
-        let mut queue: VecDeque<String> = VecDeque::new();
+        let now = Instant::now();
+        let mut queue: VecDeque<PendingMessage> = VecDeque::new();
 
-        // Enqueue
-        queue.push_back("task one".to_string());
-        queue.push_back("task two".to_string());
-        queue.push_back("task three".to_string());
+        queue.push_back(PendingMessage::new(
+            "task one",
+            PendingMessageOrigin::ManualQueue,
+            now,
+        ));
+        queue.push_back(PendingMessage::new(
+            "task two",
+            PendingMessageOrigin::ManualQueue,
+            now,
+        ));
+        queue.push_back(PendingMessage::new(
+            "task three",
+            PendingMessageOrigin::ManualQueue,
+            now,
+        ));
         assert_eq!(queue.len(), 3);
 
-        // List (iter + enumerate)
-        let items: Vec<(usize, &String)> = queue.iter().enumerate().collect();
+        let items: Vec<(usize, &PendingMessage)> = queue.iter().enumerate().collect();
         assert_eq!(items.len(), 3);
         assert_eq!(items[0].0, 0);
-        assert_eq!(items[0].1, "task one");
+        assert_eq!(items[0].1.content, "task one");
 
-        // Drop by index (remove)
         let removed = queue.remove(1).unwrap();
-        assert_eq!(removed, "task two");
+        assert_eq!(removed.content, "task two");
         assert_eq!(queue.len(), 2);
-        assert_eq!(queue[0], "task one");
-        assert_eq!(queue[1], "task three");
+        assert_eq!(queue[0].content, "task one");
+        assert_eq!(queue[1].content, "task three");
 
         // Clear
         let count = queue.len();

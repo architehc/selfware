@@ -157,7 +157,7 @@ pub struct Agent {
     /// Cancellation token set by Ctrl+C while a task is running
     cancelled: Arc<AtomicBool>,
     /// Messages queued for sequential execution
-    pending_messages: VecDeque<String>,
+    pending_messages: VecDeque<PendingMessage>,
     /// Maximum total estimated tokens for the message history.
     /// When exceeded, oldest non-system messages are removed.
     max_context_tokens: usize,
@@ -172,6 +172,8 @@ pub struct Agent {
     plan_mode: bool,
     /// Audit logger for JSONL tool execution logging
     audit_logger: Option<crate::safety::audit::AuditLogger>,
+    /// One-shot reminder injected after a failed tool call.
+    pending_failure_hint: Option<String>,
     /// Permission store for pre-authorized tool grants
     permission_store: crate::safety::permissions::PermissionStore,
     /// Tool result cache for read-only operations
@@ -487,6 +489,7 @@ To call a tool, use this EXACT XML structure:
             hook_registry,
             plan_mode,
             audit_logger,
+            pending_failure_hint: None,
             permission_store,
             tool_cache: crate::session::cache::ToolCache::new(),
             local_first: crate::session::local_first::LocalFirstCoordinator::new(),
@@ -683,6 +686,33 @@ To call a tool, use this EXACT XML structure:
         let count = self.messages.len();
         info!("Resumed named session '{}' with {} messages", name, count);
         Ok(count)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PendingMessageOrigin {
+    InteractiveQueue,
+    ManualQueue,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct PendingMessage {
+    pub content: String,
+    pub queued_at: Instant,
+    pub origin: PendingMessageOrigin,
+}
+
+impl PendingMessage {
+    pub(super) fn new(
+        content: impl Into<String>,
+        origin: PendingMessageOrigin,
+        queued_at: Instant,
+    ) -> Self {
+        Self {
+            content: content.into(),
+            queued_at,
+            origin,
+        }
     }
 }
 

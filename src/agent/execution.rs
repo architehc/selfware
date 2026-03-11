@@ -69,7 +69,27 @@ struct AssistantStepResponse {
 
 type CollectedToolCall = (String, String, Option<String>);
 
+const TOOL_CONFIRM_ARGS_PREVIEW_CHARS: usize = 240;
+const TOOL_FAILURE_HINT_PREVIEW_CHARS: usize = 400;
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    let collected: String = s.chars().take(max_chars).collect();
+    if s.chars().count() > max_chars {
+        format!("{}...", collected)
+    } else {
+        collected
+    }
+}
+
 impl Agent {
+    fn remember_failed_tool(&mut self, tool_name: &str, error: &str) {
+        let error_preview = truncate_chars(error, TOOL_FAILURE_HINT_PREVIEW_CHARS);
+        self.pending_failure_hint = Some(format!(
+            "Warning: the previous tool call `{}` failed. Do not claim success, observation, or completion unless a later tool actually confirms it. Failure details: {}",
+            tool_name, error_preview
+        ));
+    }
+
     /// Execute a step with tool call logging for checkpoints
     /// If `use_last_message` is true, process tool calls from the last assistant message
     /// instead of making a new API call (used after planning phase)
@@ -413,6 +433,7 @@ impl Agent {
                 }
                 self.push_tool_result_message(use_native_fc, &call_id, &name, false, &error_msg);
                 self.log_tool_call(&name, &args_str, &error_msg, false, start_time, false);
+                self.remember_failed_tool(&name, &error_msg);
                 let duration_ms = start_time.elapsed().as_millis() as u64;
                 self.self_improvement.record_tool(
                     &name,
@@ -545,6 +566,9 @@ impl Agent {
             }
 
             self.push_tool_result_message(use_native_fc, &call_id, &name, success, &result);
+            if !success {
+                self.remember_failed_tool(&name, &result);
+            }
 
             // Fire PostToolUse hooks (e.g., auto-format, lint, auto-commit)
             let post_ctx = HookContext::post_tool(&name, &args_str, success, &result);
@@ -600,8 +624,8 @@ impl Agent {
 
         use std::io::{self, Write};
 
-        let args_preview: String = args_str.chars().take(100).collect();
-        let args_display = if args_str.len() > 100 {
+        let args_preview: String = args_str.chars().take(TOOL_CONFIRM_ARGS_PREVIEW_CHARS).collect();
+        let args_display = if args_str.chars().count() > TOOL_CONFIRM_ARGS_PREVIEW_CHARS {
             format!("{}...", args_preview)
         } else {
             args_preview
@@ -677,6 +701,7 @@ impl Agent {
                 println!("{} {}", "✗".bright_red(), err);
                 self.push_tool_result_message(use_native_fc, call_id, name, false, &err);
                 self.log_tool_call(name, args_str, &err, false, start_time, false);
+                self.remember_failed_tool(name, &err);
                 let duration_ms = start_time.elapsed().as_millis() as u64;
                 self.self_improvement.record_tool(
                     name,
@@ -1024,17 +1049,26 @@ impl Agent {
         }
 
         let mut request_messages = self.messages.clone();
+        let mut system_hints = Vec::new();
         if let Some(learning_hint) = self.build_learning_hint(self.learning_context()) {
+            system_hints.push(learning_hint);
+        }
+        if let Some(failure_hint) = self.pending_failure_hint.take() {
+            system_hints.push(failure_hint);
+        }
+
+        if !system_hints.is_empty() {
+            let merged_hints = system_hints.join("\n\n");
             // Merge into existing system message to maintain OpenAI message ordering
             // (system messages must precede all user/assistant/tool messages)
             if let Some(first) = request_messages.first_mut() {
                 if first.role == "system" {
-                    first.content = format!("{}\n\n{}", first.content, learning_hint).into();
+                    first.content = format!("{}\n\n{}", first.content, merged_hints).into();
                 } else {
-                    request_messages.insert(0, Message::system(learning_hint));
+                    request_messages.insert(0, Message::system(merged_hints));
                 }
             } else {
-                request_messages.insert(0, Message::system(learning_hint));
+                request_messages.insert(0, Message::system(merged_hints));
             }
         }
 

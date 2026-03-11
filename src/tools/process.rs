@@ -824,10 +824,16 @@ mod tests {
             err_msg
         );
 
-        // Cleanup: stop the process that's still running
-        let stop_tool = ProcessStop;
-        let _ = stop_tool
-            .execute(serde_json::json!({"id": "test-health-timeout-tool", "force": true}))
-            .await;
+        let manager = PROCESS_MANAGER.read().await;
+        let summary = manager.get("test-health-timeout-tool").await.unwrap();
+        assert!(
+            matches!(summary.status, crate::process_manager::ProcessStatus::HealthCheckFailed),
+            "Expected health check failure status, got {:?}",
+            summary.status
+        );
+        assert!(
+            summary.pid.is_none(),
+            "Timed-out process should have been reaped"
+        );
     }
 }
