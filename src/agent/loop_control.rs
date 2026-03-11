@@ -80,6 +80,16 @@ impl AgentLoop {
         self.iteration
     }
 
+    pub fn current_state_label(&self) -> &'static str {
+        match self.state {
+            AgentState::Planning => "planning",
+            AgentState::Executing { .. } => "executing",
+            AgentState::ErrorRecovery { .. } => "error_recovery",
+            AgentState::Completed => "completed",
+            AgentState::Failed { .. } => "failed",
+        }
+    }
+
     /// Restore loop progress from persisted state.
     pub fn restore_progress(&mut self, step: usize, iteration: usize) {
         self.current_step = step;

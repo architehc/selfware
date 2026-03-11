@@ -1234,7 +1234,9 @@ impl Agent {
         &mut self,
         use_last_message: bool,
     ) -> Result<AssistantStepResponse> {
+        let turn_start = std::time::Instant::now();
         let mut native_tool_calls: Option<Vec<crate::api::types::ToolCall>> = None;
+        self.log_turn_start_event("assistant_step", use_last_message, self.messages.len());
 
         if use_last_message {
             let last_msg = self
@@ -1250,11 +1252,26 @@ impl Agent {
             if self.config.agent.native_function_calling {
                 native_tool_calls = last_msg.tool_calls.clone();
             }
-            return Ok(AssistantStepResponse {
+            let response = AssistantStepResponse {
                 content: last_msg.content.text().to_string(),
                 reasoning_content: last_msg.reasoning_content.clone(),
                 native_tool_calls,
-            });
+            };
+            self.log_turn_end_event(
+                "assistant_step",
+                true,
+                true,
+                turn_start.elapsed().as_millis() as u64,
+                None,
+                serde_json::json!({
+                    "content_chars": response.content.len(),
+                    "reasoning_chars": response.reasoning_content.as_ref().map(|r| r.len()).unwrap_or(0),
+                    "native_tool_calls": response.native_tool_calls.as_ref().map(|calls| calls.len()).unwrap_or(0),
+                    "message_count": self.messages.len(),
+                    "estimated_message_tokens": self.estimate_messages_tokens(),
+                }),
+            );
+            return Ok(response);
         }
 
         // Hard-truncate message history to stay within context window before
@@ -1262,15 +1279,43 @@ impl Agent {
         // compression is skipped or fails.
         self.trim_message_history();
 
+        let compression_threshold = self.compressor.compression_threshold();
+        let before_compression_messages = self.messages.len();
+        let before_compression_tokens = self.compressor.estimate_tokens(&self.messages);
         if self.compressor.should_compress(&self.messages) {
             info!("Context compression triggered");
             match self.compressor.compress(&self.client, &self.messages).await {
                 Ok(compressed) => {
                     self.messages = compressed;
+                    self.log_context_compression_event(
+                        super::session_log::ContextCompressionLogDetails {
+                            strategy: "summary",
+                            success: true,
+                            before_messages: before_compression_messages,
+                            after_messages: self.messages.len(),
+                            before_tokens: before_compression_tokens,
+                            after_tokens: self.compressor.estimate_tokens(&self.messages),
+                            threshold: compression_threshold,
+                            error: None,
+                        },
+                    );
                 }
                 Err(e) => {
                     warn!("Compression failed, using hard limit: {}", e);
                     self.messages = self.compressor.hard_compress(&self.messages);
+                    let error_text = e.to_string();
+                    self.log_context_compression_event(
+                        super::session_log::ContextCompressionLogDetails {
+                            strategy: "hard_fallback",
+                            success: false,
+                            before_messages: before_compression_messages,
+                            after_messages: self.messages.len(),
+                            before_tokens: before_compression_tokens,
+                            after_tokens: self.compressor.estimate_tokens(&self.messages),
+                            threshold: compression_threshold,
+                            error: Some(&error_text),
+                        },
+                    );
                 }
             }
         }
@@ -1333,7 +1378,24 @@ impl Agent {
                                 "Streaming failed: {}. Non-streaming fallback request also failed",
                                 stream_err
                             )
-                        })?;
+                        });
+                    let response = match response {
+                        Ok(response) => response,
+                        Err(e) => {
+                            self.log_turn_end_event(
+                                "assistant_step",
+                                false,
+                                false,
+                                turn_start.elapsed().as_millis() as u64,
+                                Some(e.to_string()),
+                                serde_json::json!({
+                                    "message_count": self.messages.len(),
+                                    "estimated_message_tokens": self.estimate_messages_tokens(),
+                                }),
+                            );
+                            return Err(e);
+                        }
+                    };
 
                     let choice = response
                         .choices
@@ -1373,7 +1435,24 @@ impl Agent {
             let response = self
                 .client
                 .chat(request_messages, self.api_tools(), ThinkingMode::Enabled)
-                .await?;
+                .await;
+            let response = match response {
+                Ok(response) => response,
+                Err(e) => {
+                    self.log_turn_end_event(
+                        "assistant_step",
+                        false,
+                        false,
+                        turn_start.elapsed().as_millis() as u64,
+                        Some(e.to_string()),
+                        serde_json::json!({
+                            "message_count": self.messages.len(),
+                            "estimated_message_tokens": self.estimate_messages_tokens(),
+                        }),
+                    );
+                    return Err(e);
+                }
+            };
 
             let choice = response
                 .choices
@@ -1426,11 +1505,26 @@ impl Agent {
             name: None,
         });
 
-        Ok(AssistantStepResponse {
+        let response = AssistantStepResponse {
             content,
             reasoning_content: reasoning,
             native_tool_calls,
-        })
+        };
+        self.log_turn_end_event(
+            "assistant_step",
+            false,
+            true,
+            turn_start.elapsed().as_millis() as u64,
+            None,
+            serde_json::json!({
+                "content_chars": response.content.len(),
+                "reasoning_chars": response.reasoning_content.as_ref().map(|r| r.len()).unwrap_or(0),
+                "native_tool_calls": response.native_tool_calls.as_ref().map(|calls| calls.len()).unwrap_or(0),
+                "message_count": self.messages.len(),
+                "estimated_message_tokens": self.estimate_messages_tokens(),
+            }),
+        );
+        Ok(response)
     }
 
     fn collect_tool_calls(
@@ -1533,6 +1627,8 @@ impl Agent {
     pub(super) async fn plan(&mut self) -> Result<bool> {
         // Tools are embedded in system prompt - see WORKAROUND comment in Agent::new()
         debug!("Sending planning request to model...");
+        let turn_start = std::time::Instant::now();
+        self.log_turn_start_event("planning", false, self.messages.len());
         self.trim_message_history();
         let mut request_messages = self.messages.clone();
         if let Some(learning_hint) = self.build_learning_hint(self.learning_context()) {
@@ -1550,7 +1646,24 @@ impl Agent {
         let response = self
             .client
             .chat(request_messages, self.api_tools(), ThinkingMode::Enabled)
-            .await?;
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(e) => {
+                self.log_turn_end_event(
+                    "planning",
+                    false,
+                    false,
+                    turn_start.elapsed().as_millis() as u64,
+                    Some(e.to_string()),
+                    serde_json::json!({
+                        "message_count": self.messages.len(),
+                        "estimated_message_tokens": self.estimate_messages_tokens(),
+                    }),
+                );
+                return Err(e);
+            }
+        };
 
         let choice = response
             .choices
@@ -1611,6 +1724,21 @@ impl Agent {
             name: None,
         });
 
+        self.log_turn_end_event(
+            "planning",
+            false,
+            true,
+            turn_start.elapsed().as_millis() as u64,
+            None,
+            serde_json::json!({
+                "content_chars": content.len(),
+                "has_tool_calls": has_tool_calls,
+                "native_tool_calls": self.messages.last().and_then(|m| m.tool_calls.as_ref()).map(|calls| calls.len()).unwrap_or(0),
+                "message_count": self.messages.len(),
+                "estimated_message_tokens": self.estimate_messages_tokens(),
+            }),
+        );
+
         // Return whether there are tool calls to execute
         Ok(has_tool_calls)
     }
@@ -1622,6 +1750,7 @@ mod tests {
     use crate::api::types::{ToolCall as ApiToolCall, ToolFunction};
     use crate::testing::mock_api::MockLlmServer;
     use crate::tool_parser::parse_tool_calls;
+    use tempfile::tempdir;
 
     // =========================================================================
     // Helper: mirrors should_prompt_for_action logic for standalone testing
@@ -3732,6 +3861,9 @@ mod tests {
 
         let config = test_config(format!("{}/v1", server.url()));
         let mut agent = Agent::new(config).await.unwrap();
+        let dir = tempdir().unwrap();
+        agent.session_logger =
+            super::session_log::new_test_session_logger("turn-log", dir.path().to_path_buf());
 
         agent.messages.push(Message {
             role: "assistant".to_string(),
@@ -3750,6 +3882,60 @@ mod tests {
             resp.reasoning_content.as_deref(),
             Some("Thinking deeply...")
         );
+
+        let events = agent.session_logger.as_ref().unwrap().recent_events(10);
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == super::session_log::SessionEventType::TurnStart));
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == super::session_log::SessionEventType::TurnEnd));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_get_response_logs_context_compression_event() {
+        let server = MockLlmServer::builder()
+            .with_response("compressed ok")
+            .build()
+            .await;
+
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.max_tokens = 200;
+        let mut agent = Agent::new(config).await.unwrap();
+        let dir = tempdir().unwrap();
+        agent.session_logger = super::session_log::new_test_session_logger(
+            "compression-log",
+            dir.path().to_path_buf(),
+        );
+
+        for i in 0..10 {
+            agent.messages.push(Message::user(format!(
+                "previous turn {} {}",
+                i,
+                "x".repeat(250)
+            )));
+            agent.messages.push(Message::assistant(format!(
+                "assistant turn {} {}",
+                i,
+                "y".repeat(250)
+            )));
+        }
+
+        let response = agent.get_assistant_step_response(false).await;
+        assert!(response.is_ok());
+
+        let events = agent.session_logger.as_ref().unwrap().recent_events(20);
+        let compression = events.iter().find(|event| {
+            event.event_type == super::session_log::SessionEventType::ContextCompression
+        });
+        assert!(compression.is_some(), "expected context compression event");
+        assert_eq!(compression.unwrap().success, Some(true));
 
         server.stop().await;
     }

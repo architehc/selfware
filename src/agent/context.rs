@@ -49,6 +49,10 @@ impl ContextCompressor {
             .sum()
     }
 
+    pub fn compression_threshold(&self) -> usize {
+        self.compression_threshold
+    }
+
     pub async fn compress(&self, client: &ApiClient, messages: &[Message]) -> Result<Vec<Message>> {
         if messages.len() <= self.min_messages_to_keep + 1 {
             warn!("Too few messages to compress, returning as-is");

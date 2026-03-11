@@ -24,6 +24,7 @@ impl Agent {
         if total <= self.max_context_tokens {
             return;
         }
+        let before_messages = self.messages.len();
 
         // Collect per-message token counts once (O(N)) instead of recomputing
         // every iteration.
@@ -57,6 +58,19 @@ impl Agent {
             idx += 1;
             k
         });
+
+        let after_messages = self.messages.len();
+        let after_tokens = self.estimate_messages_tokens();
+        let removed_messages = before_messages.saturating_sub(after_messages);
+        if removed_messages > 0 {
+            self.log_context_trim_event(
+                before_messages,
+                after_messages,
+                total,
+                after_tokens,
+                removed_messages,
+            );
+        }
     }
 
     /// Estimate total tokens from accumulated messages (the actual context sent to API)
@@ -1142,6 +1156,7 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::testing::mock_api::MockLlmServer;
+    use tempfile::tempdir;
 
     /// Build a minimal Agent backed by a mock LLM server.
     async fn make_test_agent(server: &MockLlmServer) -> Agent {
@@ -1683,6 +1698,42 @@ mod tests {
             "trim_message_history should reduce token usage; before={} after={}",
             before_tokens,
             after_tokens
+        );
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_trim_message_history_logs_context_trim_event() {
+        let server = MockLlmServer::builder().with_response("ok").build().await;
+        let mut agent = make_test_agent(&server).await;
+        let dir = tempdir().unwrap();
+        agent.session_logger =
+            super::session_log::new_test_session_logger("trim-log", dir.path().to_path_buf());
+
+        for i in 0..6 {
+            agent
+                .messages
+                .push(Message::user(format!("message {} {}", i, "x".repeat(200))));
+        }
+
+        let before = agent.estimate_messages_tokens();
+        agent.max_context_tokens = before / 2;
+        agent.trim_message_history();
+
+        let events = agent.session_logger.as_ref().unwrap().recent_events(10);
+        let trim = events
+            .iter()
+            .find(|event| event.event_type == super::session_log::SessionEventType::ContextTrim)
+            .expect("expected context trim event");
+        assert_eq!(trim.success, Some(true));
+        assert!(
+            trim.details
+                .as_ref()
+                .and_then(|d| d.get("removed_messages"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0)
+                > 0
         );
 
         server.stop().await;

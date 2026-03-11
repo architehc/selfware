@@ -21,6 +21,10 @@ pub enum SessionEventType {
     SessionEnd,
     TaskStart,
     TaskEnd,
+    TurnStart,
+    TurnEnd,
+    ContextTrim,
+    ContextCompression,
     ToolCall,
     ToolValidationFailed,
 }
@@ -46,6 +50,17 @@ pub struct SessionLogEvent {
     pub duration_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
+}
+
+pub(super) struct ContextCompressionLogDetails<'a> {
+    pub strategy: &'a str,
+    pub success: bool,
+    pub before_messages: usize,
+    pub after_messages: usize,
+    pub before_tokens: usize,
+    pub after_tokens: usize,
+    pub threshold: usize,
+    pub error: Option<&'a str>,
 }
 
 pub struct SessionLogger {
@@ -210,6 +225,10 @@ fn session_event_label(kind: &SessionEventType) -> &'static str {
         SessionEventType::SessionEnd => "session_end",
         SessionEventType::TaskStart => "task_start",
         SessionEventType::TaskEnd => "task_end",
+        SessionEventType::TurnStart => "turn_start",
+        SessionEventType::TurnEnd => "turn_end",
+        SessionEventType::ContextTrim => "context_trim",
+        SessionEventType::ContextCompression => "context_compression",
         SessionEventType::ToolCall => "tool_call",
         SessionEventType::ToolValidationFailed => "tool_validation_failed",
     }
@@ -353,6 +372,166 @@ impl Agent {
         });
     }
 
+    pub(super) fn log_turn_start_event(
+        &self,
+        phase: &str,
+        use_last_message: bool,
+        request_message_count: usize,
+    ) {
+        let Some(logger) = &self.session_logger else {
+            return;
+        };
+
+        logger.log(SessionLogEvent {
+            timestamp: Utc::now(),
+            session_id: String::new(),
+            event_type: SessionEventType::TurnStart,
+            task_id: self
+                .current_checkpoint
+                .as_ref()
+                .map(|cp| cp.task_id.clone()),
+            tool_name: None,
+            input: None,
+            arguments: None,
+            result: None,
+            success: None,
+            duration_ms: None,
+            details: Some(json!({
+                "phase": phase,
+                "loop_state": self.loop_control.current_state_label(),
+                "use_last_message": use_last_message,
+                "request_message_count": request_message_count,
+                "message_count": self.messages.len(),
+                "estimated_message_tokens": self.estimate_messages_tokens(),
+                "memory_tokens": self.memory.total_tokens(),
+                "context_window": self.memory.context_window(),
+                "max_context_tokens": self.max_context_tokens,
+                "pending_messages": self.pending_messages.len(),
+                "context_files": self.context_files.len(),
+                "current_step": self.loop_control.current_step(),
+                "current_iteration": self.loop_control.current_iteration(),
+            })),
+        });
+    }
+
+    pub(super) fn log_turn_end_event(
+        &self,
+        phase: &str,
+        use_last_message: bool,
+        success: bool,
+        duration_ms: u64,
+        result: Option<String>,
+        details: serde_json::Value,
+    ) {
+        let Some(logger) = &self.session_logger else {
+            return;
+        };
+
+        let mut details = details;
+        if let Some(obj) = details.as_object_mut() {
+            obj.insert("phase".to_string(), json!(phase));
+            obj.insert(
+                "loop_state".to_string(),
+                json!(self.loop_control.current_state_label()),
+            );
+            obj.insert("use_last_message".to_string(), json!(use_last_message));
+            obj.insert(
+                "current_step".to_string(),
+                json!(self.loop_control.current_step()),
+            );
+            obj.insert(
+                "current_iteration".to_string(),
+                json!(self.loop_control.current_iteration()),
+            );
+        }
+
+        logger.log(SessionLogEvent {
+            timestamp: Utc::now(),
+            session_id: String::new(),
+            event_type: SessionEventType::TurnEnd,
+            task_id: self
+                .current_checkpoint
+                .as_ref()
+                .map(|cp| cp.task_id.clone()),
+            tool_name: None,
+            input: None,
+            arguments: None,
+            result,
+            success: Some(success),
+            duration_ms: Some(duration_ms),
+            details: Some(details),
+        });
+    }
+
+    pub(super) fn log_context_trim_event(
+        &self,
+        before_messages: usize,
+        after_messages: usize,
+        before_tokens: usize,
+        after_tokens: usize,
+        removed_messages: usize,
+    ) {
+        let Some(logger) = &self.session_logger else {
+            return;
+        };
+
+        logger.log(SessionLogEvent {
+            timestamp: Utc::now(),
+            session_id: String::new(),
+            event_type: SessionEventType::ContextTrim,
+            task_id: self
+                .current_checkpoint
+                .as_ref()
+                .map(|cp| cp.task_id.clone()),
+            tool_name: None,
+            input: None,
+            arguments: None,
+            result: None,
+            success: Some(true),
+            duration_ms: None,
+            details: Some(json!({
+                "loop_state": self.loop_control.current_state_label(),
+                "before_messages": before_messages,
+                "after_messages": after_messages,
+                "before_tokens": before_tokens,
+                "after_tokens": after_tokens,
+                "removed_messages": removed_messages,
+                "max_context_tokens": self.max_context_tokens,
+            })),
+        });
+    }
+
+    pub(super) fn log_context_compression_event(&self, details: ContextCompressionLogDetails<'_>) {
+        let Some(logger) = &self.session_logger else {
+            return;
+        };
+
+        logger.log(SessionLogEvent {
+            timestamp: Utc::now(),
+            session_id: String::new(),
+            event_type: SessionEventType::ContextCompression,
+            task_id: self
+                .current_checkpoint
+                .as_ref()
+                .map(|cp| cp.task_id.clone()),
+            tool_name: None,
+            input: None,
+            arguments: None,
+            result: details.error.map(ToOwned::to_owned),
+            success: Some(details.success),
+            duration_ms: None,
+            details: Some(json!({
+                "strategy": details.strategy,
+                "loop_state": self.loop_control.current_state_label(),
+                "before_messages": details.before_messages,
+                "after_messages": details.after_messages,
+                "before_tokens": details.before_tokens,
+                "after_tokens": details.after_tokens,
+                "compression_threshold": details.threshold,
+            })),
+        });
+    }
+
     pub(super) fn log_session_tool_call_event(
         &self,
         tool_name: &str,
@@ -448,6 +627,11 @@ impl Agent {
         }
         println!();
     }
+}
+
+#[cfg(test)]
+pub(super) fn new_test_session_logger(session_id: &str, dir: PathBuf) -> Option<SessionLogger> {
+    SessionLogger::new_in(session_id, dir)
 }
 
 impl Drop for Agent {
