@@ -61,18 +61,47 @@ enum ProjectType {
     Generic,
 }
 
-/// Detect the project type from marker files in the working directory.
+fn find_project_root_with_markers(
+    start: &std::path::Path,
+    markers: &[&str],
+) -> Option<std::path::PathBuf> {
+    start.ancestors().find_map(|ancestor| {
+        markers
+            .iter()
+            .any(|marker| ancestor.join(marker).exists())
+            .then(|| ancestor.to_path_buf())
+    })
+}
+
+pub(super) fn current_project_root() -> std::path::PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    find_project_root_with_markers(
+        &cwd,
+        &[
+            "Cargo.toml",
+            "package.json",
+            "pyproject.toml",
+            "setup.py",
+            "requirements.txt",
+            "go.mod",
+        ],
+    )
+    .unwrap_or(cwd)
+}
+
+/// Detect the project type from marker files in the working directory or its ancestors.
 fn detect_project_type() -> ProjectType {
-    if std::path::Path::new("Cargo.toml").exists() {
+    let root = current_project_root();
+    if root.join("Cargo.toml").exists() {
         ProjectType::Rust
-    } else if std::path::Path::new("package.json").exists() {
+    } else if root.join("package.json").exists() {
         ProjectType::Node
-    } else if std::path::Path::new("pyproject.toml").exists()
-        || std::path::Path::new("setup.py").exists()
-        || std::path::Path::new("requirements.txt").exists()
+    } else if root.join("pyproject.toml").exists()
+        || root.join("setup.py").exists()
+        || root.join("requirements.txt").exists()
     {
         ProjectType::Python
-    } else if std::path::Path::new("go.mod").exists() {
+    } else if root.join("go.mod").exists() {
         ProjectType::Go
     } else {
         ProjectType::Generic
@@ -122,6 +151,7 @@ struct FailedToolAttempt {
 struct FileReadState {
     content_hash: u64,
     total_lines: usize,
+    last_modified: Option<u64>,
     unchanged_read_count: u32,
 }
 
@@ -401,7 +431,7 @@ To call a tool, use this EXACT XML structure:
         let checkpoint_manager = CheckpointManager::default_path().ok();
 
         // Initialize verification gate with project root
-        let project_root = std::env::current_dir().unwrap_or_else(|_| ".".into());
+        let project_root = current_project_root();
         let verification_gate = VerificationGate::new(&project_root, VerificationConfig::fast());
 
         // Initialize error analyzer

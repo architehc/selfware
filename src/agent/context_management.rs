@@ -10,6 +10,23 @@ impl Agent {
     // Context Management
     // =========================================================================
 
+    fn is_critical_context_message(message: &Message) -> bool {
+        if message.role == "tool" {
+            return true;
+        }
+
+        let text = message.content.text();
+        message.role == "user"
+            && (text.contains("<tool_result>")
+                || text.contains("STUCK LOOP DETECTED")
+                || text.contains("NO ACTION LOOP DETECTED")
+                || text.contains("NO ACTION DETECTED AGAIN")
+                || text.contains("Your tool call was malformed")
+                || text.contains("RETRY SUPPRESSED")
+                || text.contains("TOOL INPUT RECOVERY")
+                || text.contains("Repeated unchanged reread blocked"))
+    }
+
     /// Trim the message history so total estimated tokens stay within
     /// `max_context_tokens`. Removes the oldest non-system messages first.
     pub(super) fn trim_message_history(&mut self) {
@@ -36,16 +53,36 @@ impl Agent {
                     + m.content.image_count() * crate::tokens::DEFAULT_IMAGE_TOKEN_ESTIMATE
             })
             .collect();
+        let pinned_critical: std::collections::HashSet<usize> = self
+            .messages
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, message)| Self::is_critical_context_message(message))
+            .take(5)
+            .map(|(idx, _)| idx)
+            .collect();
 
         // Walk non-system messages oldest-first and mark them for removal until
-        // the total fits within budget.
+        // the total fits within budget. Prefer removing non-critical messages
+        // first so recent tool results and failure guidance survive trimming.
         let mut remaining = total;
         let mut keep = vec![true; self.messages.len()];
         for (i, tokens) in token_counts.iter().enumerate() {
             if remaining <= self.max_context_tokens {
                 break;
             }
-            if self.messages[i].role != "system" {
+            if self.messages[i].role != "system" && !pinned_critical.contains(&i) {
+                keep[i] = false;
+                remaining -= tokens;
+            }
+        }
+
+        for (i, tokens) in token_counts.iter().enumerate() {
+            if remaining <= self.max_context_tokens {
+                break;
+            }
+            if self.messages[i].role != "system" && keep[i] {
                 keep[i] = false;
                 remaining -= tokens;
             }
@@ -1860,6 +1897,48 @@ mod tests {
             "the most recent message should be kept; remaining: {:?}",
             contents
         );
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_trim_message_history_preserves_recent_critical_tool_message() {
+        let server = MockLlmServer::builder().with_response("ok").build().await;
+        let mut agent = make_test_agent(&server).await;
+
+        let filler = "x".repeat(120);
+        agent
+            .messages
+            .push(Message::user(format!("older filler {}", filler)));
+        agent.messages.push(Message::tool(
+            r#"{"content":"critical tool result"}"#,
+            "call_1",
+        ));
+        agent
+            .messages
+            .push(Message::user(format!("newer filler {}", filler)));
+        agent
+            .messages
+            .push(Message::assistant(format!("latest filler {}", filler)));
+
+        let system_tokens: usize = agent
+            .messages
+            .iter()
+            .filter(|m| m.role == "system")
+            .map(|m| crate::token_count::estimate_tokens_with_overhead(m.content.text(), 4))
+            .sum();
+        let tool_tokens =
+            crate::token_count::estimate_tokens_with_overhead(agent.messages[2].content.text(), 4);
+        agent.max_context_tokens = system_tokens + tool_tokens + 50;
+
+        agent.trim_message_history();
+
+        assert!(agent.messages.iter().any(|message| message.role == "tool"
+            && message.content.text().contains("critical tool result")));
+        assert!(!agent
+            .messages
+            .iter()
+            .any(|message| message.content.text().contains("older filler")));
 
         server.stop().await;
     }

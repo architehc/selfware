@@ -108,6 +108,27 @@ fn normalize_no_action_content(content: &str) -> String {
         .to_lowercase()
 }
 
+fn looks_like_malformed_tool_xml(content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let has_tool_tag = trimmed.contains("<tool");
+    let has_tool_close = trimmed.contains("</tool>");
+    let has_valid_tool_shape = has_tool_tag
+        && has_tool_close
+        && trimmed.contains("<name>")
+        && trimmed.contains("</name>")
+        && trimmed.contains("<arguments>")
+        && trimmed.contains("</arguments>");
+
+    (has_tool_tag && !has_valid_tool_shape)
+        || trimmed.contains("<function=")
+        || trimmed.contains("<name=")
+        || trimmed.contains("<parameter=")
+}
+
 impl Agent {
     fn push_task_state_note(&mut self, note: String) {
         if self.task_state_notes.back() == Some(&note) {
@@ -201,6 +222,57 @@ impl Agent {
         self.recent_failed_tool_attempts.clear();
     }
 
+    fn maybe_block_redundant_reread(
+        &mut self,
+        name: &str,
+        args_str: &str,
+        args: &Value,
+        call_id: &str,
+        use_native_fc: bool,
+        start_time: std::time::Instant,
+    ) -> bool {
+        if name != "file_read" {
+            return false;
+        }
+
+        let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
+            return false;
+        };
+        let Some(state) = self.file_read_state.get(path) else {
+            return false;
+        };
+        if state.unchanged_read_count < 1 || self.stale_files.contains(path) {
+            return false;
+        }
+
+        let current_mtime = std::fs::metadata(path)
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs());
+
+        if current_mtime != state.last_modified {
+            return false;
+        }
+
+        let err = format!(
+            "Repeated unchanged reread blocked: `{}` has already been read unchanged {} times in this task. Use the content already in context or make the edit now instead of reading it again.",
+            path,
+            state.unchanged_read_count + 1
+        );
+        self.push_task_state_note(format!(
+            "Blocked redundant reread of `{}` after {} unchanged reads",
+            path,
+            state.unchanged_read_count + 1
+        ));
+        self.pending_failure_hint = Some(err.clone());
+        self.push_tool_result_message(use_native_fc, call_id, name, false, &err);
+        self.log_tool_call(name, args_str, &err, false, start_time, false);
+        self.remember_failed_tool(name, &err);
+        self.record_failed_tool_attempt(name, args_str, "task_state", &err);
+        true
+    }
+
     fn track_task_state_after_tool(
         &mut self,
         name: &str,
@@ -230,15 +302,24 @@ impl Agent {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as usize;
                 let content_hash = hash_text_signature(content);
+                let last_modified = std::fs::metadata(&path_str)
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok())
+                    .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_secs());
 
                 let mut unchanged_count = 0;
                 if let Some(state) = self.file_read_state.get_mut(&path_str) {
-                    if state.content_hash == content_hash && !self.stale_files.contains(&path_str) {
+                    if state.content_hash == content_hash
+                        && state.last_modified == last_modified
+                        && !self.stale_files.contains(&path_str)
+                    {
                         state.unchanged_read_count += 1;
                         unchanged_count = state.unchanged_read_count;
                     } else {
                         state.content_hash = content_hash;
                         state.total_lines = total_lines;
+                        state.last_modified = last_modified;
                         state.unchanged_read_count = 0;
                     }
                 } else {
@@ -247,6 +328,7 @@ impl Agent {
                         FileReadState {
                             content_hash,
                             total_lines,
+                            last_modified,
                             unchanged_read_count: 0,
                         },
                     );
@@ -464,9 +546,7 @@ impl Agent {
             return false;
         }
 
-        let markers = ["<tool", "<function", "tool_name", "tool_call", "<name="];
-        let has_markers = markers.iter().any(|m| content.contains(m));
-        if !has_markers {
+        if !looks_like_malformed_tool_xml(content) {
             return false;
         }
 
@@ -512,12 +592,10 @@ impl Agent {
     /// 2. **Only non-Rust tools used** — the task exclusively used browser, vision,
     ///    computer-control, or web tools with no file-write or cargo activity.
     fn should_skip_cargo_verification(&self) -> bool {
-        // Condition 1: No Cargo.toml in working directory → not a Rust project
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        if !cwd.join("Cargo.toml").exists() {
+        // Condition 1: No Cargo.toml in the project root or its ancestors → not a Rust project
+        if !super::current_project_root().join("Cargo.toml").exists() {
             debug!(
-                "Completion gate: no Cargo.toml found in {:?}, skipping cargo verification",
-                cwd
+                "Completion gate: no Cargo.toml found in project ancestors, skipping cargo verification"
             );
             return true;
         }
@@ -758,6 +836,22 @@ impl Agent {
                 };
 
             if !self.validate_tool_args(
+                &name,
+                &args_str,
+                &args,
+                &call_id,
+                use_native_fc,
+                start_time,
+            ) {
+                self.emit_event(AgentEvent::ToolCompleted {
+                    name: name.clone(),
+                    success: false,
+                    duration_ms: start_time.elapsed().as_millis() as u64,
+                });
+                continue;
+            }
+
+            if self.maybe_block_redundant_reread(
                 &name,
                 &args_str,
                 &args,
@@ -2381,7 +2475,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_detect_malformed_detects_tool_name_marker() {
+    async fn test_detect_malformed_ignores_plain_tool_name_text() {
         let server = MockLlmServer::builder().with_response("done").build().await;
         let config = test_config(format!("{}/v1", server.url()));
         let mut agent = Agent::new(config).await.unwrap();
@@ -2389,13 +2483,13 @@ mod tests {
         let tool_calls: Vec<CollectedToolCall> = vec![];
         let result = agent.detect_and_correct_malformed_tools("tool_name: file_read", &tool_calls);
 
-        assert!(result);
+        assert!(!result);
 
         server.stop().await;
     }
 
     #[tokio::test]
-    async fn test_detect_malformed_detects_tool_call_marker() {
+    async fn test_detect_malformed_ignores_plain_tool_call_text() {
         let server = MockLlmServer::builder().with_response("done").build().await;
         let config = test_config(format!("{}/v1", server.url()));
         let mut agent = Agent::new(config).await.unwrap();
@@ -2404,7 +2498,7 @@ mod tests {
         let result = agent
             .detect_and_correct_malformed_tools("I'll use tool_call to read the file", &tool_calls);
 
-        assert!(result);
+        assert!(!result);
 
         server.stop().await;
     }
@@ -2863,6 +2957,54 @@ mod tests {
         );
         assert!(msg.contains("step"));
 
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_rust_subdirectory_does_not_bypass_cargo_verification() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.agent.min_completion_steps = 0;
+        config.agent.require_verification_before_completion = true;
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"subdir-test\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let nested = tmp.path().join("crates").join("worker");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&nested).unwrap();
+
+        let mut agent = Agent::new(config).await.unwrap();
+        let mut checkpoint = crate::checkpoint::TaskCheckpoint::new(
+            "rust-subdir".to_string(),
+            "edit a rust file".to_string(),
+        );
+        checkpoint.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "file_edit".to_string(),
+            arguments: r#"{"path":"src/lib.rs","old_str":"a","new_str":"b"}"#.to_string(),
+            result: Some("ok".to_string()),
+            success: true,
+            duration_ms: Some(25),
+        });
+        agent.current_checkpoint = Some(checkpoint);
+
+        let result = agent.check_completion_gate();
+        assert!(
+            result
+                .as_deref()
+                .is_some_and(|message| message.contains("cargo_check")
+                    || message.contains("verification tool")),
+            "Rust subdirectory should still require cargo verification, got: {:?}",
+            result
+        );
+
+        std::env::set_current_dir(original_dir).unwrap();
         server.stop().await;
     }
 
@@ -4482,6 +4624,56 @@ mod tests {
             .pending_failure_hint
             .as_deref()
             .is_some_and(|hint| { hint.contains("reread unchanged file `./Cargo.toml`") }));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_third_unchanged_file_read_is_blocked() {
+        use std::fs;
+        use tempfile::NamedTempFile;
+
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let temp = NamedTempFile::new_in(std::env::current_dir().unwrap()).unwrap();
+        fs::write(temp.path(), "hello world\n").unwrap();
+        let path = temp.path().display().to_string();
+
+        let batch: Vec<CollectedToolCall> = vec![
+            (
+                "file_read".to_string(),
+                format!(r#"{{"path":"{}"}}"#, path),
+                None,
+            ),
+            (
+                "file_read".to_string(),
+                format!(r#"{{"path":"{}"}}"#, path),
+                None,
+            ),
+            (
+                "file_read".to_string(),
+                format!(r#"{{"path":"{}"}}"#, path),
+                None,
+            ),
+        ];
+
+        agent.execute_tool_batch(batch).await.unwrap();
+
+        let state = agent
+            .file_read_state
+            .get(&path)
+            .expect("expected tracked file state");
+        assert_eq!(state.unchanged_read_count, 1);
+        assert!(agent
+            .recent_failed_tool_attempts
+            .back()
+            .is_some_and(|attempt| attempt.failure_kind == "task_state"));
+        assert!(agent.messages.last().is_some_and(|message| message
+            .content
+            .text()
+            .contains("Repeated unchanged reread blocked")));
 
         server.stop().await;
     }
