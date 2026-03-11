@@ -204,7 +204,7 @@ impl SessionLogger {
     }
 }
 
-fn print_log_text_block(label: &str, text: Option<&str>) {
+fn print_log_text_block(label: &str, text: Option<&str>, full: bool) {
     println!("     {}:", label);
     let Some(text) = text else {
         println!("       <none>");
@@ -212,11 +212,15 @@ fn print_log_text_block(label: &str, text: Option<&str>) {
     };
 
     let lines: Vec<&str> = text.lines().collect();
-    let show = lines.len().min(DEBUG_LOG_PREVIEW_LINES);
+    let show = if full {
+        lines.len()
+    } else {
+        lines.len().min(DEBUG_LOG_PREVIEW_LINES)
+    };
     for line in &lines[..show] {
         println!("       {}", line);
     }
-    if lines.len() > show {
+    if !full && lines.len() > show {
         println!("       ... ({} more lines)", lines.len() - show);
     }
 }
@@ -641,6 +645,10 @@ impl Agent {
     }
 
     pub(super) fn print_session_debug_log(&self) {
+        self.print_session_debug_log_with_options(false);
+    }
+
+    pub(super) fn print_session_debug_log_with_options(&self, full: bool) {
         println!();
         println!("  {} Session Debug Log", ">>".bright_cyan());
         let Some(logger) = &self.session_logger else {
@@ -663,7 +671,14 @@ impl Agent {
         if events.is_empty() {
             println!("  No session log events recorded yet.");
         } else {
-            println!("  Showing {} recent event(s)", events.len());
+            if full {
+                println!(
+                    "  Showing {} recent event(s) with full details",
+                    events.len()
+                );
+            } else {
+                println!("  Showing {} recent event(s)", events.len());
+            }
             for (index, event) in events.iter().enumerate() {
                 let status = match event.success {
                     Some(true) => "success".bright_green(),
@@ -686,9 +701,9 @@ impl Agent {
                 if let Some(duration_ms) = event.duration_ms {
                     println!("     Duration: {}ms", duration_ms);
                 }
-                print_log_text_block("Input", event.input.as_deref());
-                print_log_text_block("Args", event.arguments.as_deref());
-                print_log_text_block("Result", event.result.as_deref());
+                print_log_text_block("Input", event.input.as_deref(), full);
+                print_log_text_block("Args", event.arguments.as_deref(), full);
+                print_log_text_block("Result", event.result.as_deref(), full);
                 if let Some(details) = &event.details {
                     println!("     Details:");
                     for line in serde_json::to_string_pretty(details)

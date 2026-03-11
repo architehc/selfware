@@ -85,7 +85,7 @@ fn print_debug_args_block(args: &str) {
     }
 }
 
-fn print_debug_result_block(result: Option<&str>) {
+fn print_debug_result_block(result: Option<&str>, full: bool) {
     println!("     Result:");
     let Some(result) = result else {
         println!("       <none>");
@@ -93,11 +93,15 @@ fn print_debug_result_block(result: Option<&str>) {
     };
 
     let lines: Vec<&str> = result.lines().collect();
-    let show = lines.len().min(TOOL_DEBUG_RESULT_PREVIEW_LINES);
+    let show = if full {
+        lines.len()
+    } else {
+        lines.len().min(TOOL_DEBUG_RESULT_PREVIEW_LINES)
+    };
     for line in &lines[..show] {
         println!("       {}", line);
     }
-    if lines.len() > show {
+    if !full && lines.len() > show {
         println!("       ... ({} more lines)", lines.len() - show);
     }
 }
@@ -1095,8 +1099,26 @@ impl Agent {
                 continue;
             }
 
+            if input == "/debug full" {
+                self.print_execution_debug_with_options(true);
+                continue;
+            }
+
+            if let Some(idx_str) = input.strip_prefix("/debug tool ") {
+                match idx_str.trim().parse::<usize>() {
+                    Ok(idx) => self.print_execution_debug_tool_detail(idx),
+                    Err(_) => println!("{} Usage: /debug tool <number>", "ℹ".bright_yellow()),
+                }
+                continue;
+            }
+
             if input == "/debug-log" {
                 self.print_session_debug_log();
+                continue;
+            }
+
+            if input == "/debug-log full" {
+                self.print_session_debug_log_with_options(true);
                 continue;
             }
 
@@ -1850,6 +1872,10 @@ impl Agent {
     }
 
     fn print_execution_debug(&self) {
+        self.print_execution_debug_with_options(false);
+    }
+
+    fn print_execution_debug_with_options(&self, full: bool) {
         println!();
         println!("  {} Execution Debug", ">>".bright_cyan());
 
@@ -1868,30 +1894,15 @@ impl Agent {
                 println!("  No tool calls captured for this task yet.");
             } else {
                 let total = checkpoint.tool_calls.len();
-                let start = total.saturating_sub(10);
-                println!("  Showing tool calls {}-{} of {}", start + 1, total, total);
+                let start = if full { 0 } else { total.saturating_sub(10) };
+                if full {
+                    println!("  Showing all {} tool call(s) with full details", total);
+                } else {
+                    println!("  Showing tool calls {}-{} of {}", start + 1, total, total);
+                }
 
                 for (index, call) in checkpoint.tool_calls.iter().enumerate().skip(start) {
-                    let status = if call.success {
-                        "success".bright_green()
-                    } else {
-                        "failed".bright_red()
-                    };
-                    let duration = call
-                        .duration_ms
-                        .map(|ms| format!("{}ms", ms))
-                        .unwrap_or_else(|| "n/a".to_string());
-
-                    println!(
-                        "  {}. {} {} ({}) at {}",
-                        index + 1,
-                        call.tool_name.bright_white(),
-                        status,
-                        duration.dimmed(),
-                        call.timestamp.format("%H:%M:%S").to_string().dimmed()
-                    );
-                    print_debug_args_block(&call.arguments);
-                    print_debug_result_block(call.result.as_deref());
+                    self.print_execution_debug_tool_call(index, call, full);
                 }
             }
 
@@ -1921,6 +1932,66 @@ impl Agent {
         }
 
         println!();
+    }
+
+    fn print_execution_debug_tool_detail(&self, one_based_index: usize) {
+        println!();
+        println!("  {} Execution Debug Detail", ">>".bright_cyan());
+
+        let Some(checkpoint) = &self.current_checkpoint else {
+            println!("  No active checkpoint/tool history for this session.");
+            println!();
+            return;
+        };
+
+        if checkpoint.tool_calls.is_empty() {
+            println!("  No tool calls captured for this task yet.");
+            println!();
+            return;
+        }
+
+        let Some((index, call)) = one_based_index
+            .checked_sub(1)
+            .and_then(|idx| checkpoint.tool_calls.get(idx).map(|call| (idx, call)))
+        else {
+            println!(
+                "  {} Invalid tool call number. Use /debug to list available entries.",
+                "ℹ".bright_yellow()
+            );
+            println!();
+            return;
+        };
+
+        self.print_execution_debug_tool_call(index, call, true);
+        println!();
+    }
+
+    fn print_execution_debug_tool_call(
+        &self,
+        index: usize,
+        call: &crate::checkpoint::ToolCallLog,
+        full: bool,
+    ) {
+        let status = if call.success {
+            "success".bright_green()
+        } else {
+            "failed".bright_red()
+        };
+        let duration = call
+            .duration_ms
+            .map(|ms| format!("{}ms", ms))
+            .unwrap_or_else(|| "n/a".to_string());
+
+        println!(
+            "  {}. {} {} ({}) at {}",
+            index + 1,
+            call.tool_name.bright_white(),
+            status,
+            duration.dimmed(),
+            call.timestamp.format("%H:%M:%S").to_string().dimmed()
+        );
+        print_debug_args_block(&call.arguments);
+        print_debug_result_block(call.result.as_deref(), full);
     }
 
     /// Copy text to clipboard using system clipboard tools.
@@ -2032,7 +2103,10 @@ impl Agent {
                 println!("  /tools          - List available tools");
                 println!("  /last           - Show the last tool output");
                 println!("  /debug          - Show current task debug state");
+                println!("  /debug full     - Show full args/results for the current task");
+                println!("  /debug tool <n> - Show one tool call with full details");
                 println!("  /debug-log      - Show the persistent session log");
+                println!("  /debug-log full - Show full recent session log entries");
                 println!("  /analyze <path> - Analyze codebase at path");
                 println!("  /review <file>  - Review code in file");
                 println!("  /plan <task>    - Create a plan for a task");
@@ -2086,8 +2160,26 @@ impl Agent {
                 continue;
             }
 
+            if input == "/debug full" {
+                self.print_execution_debug_with_options(true);
+                continue;
+            }
+
+            if let Some(idx_str) = input.strip_prefix("/debug tool ") {
+                match idx_str.trim().parse::<usize>() {
+                    Ok(idx) => self.print_execution_debug_tool_detail(idx),
+                    Err(_) => println!("{} Usage: /debug tool <number>", "ℹ".bright_yellow()),
+                }
+                continue;
+            }
+
             if input == "/debug-log" {
                 self.print_session_debug_log();
+                continue;
+            }
+
+            if input == "/debug-log full" {
+                self.print_session_debug_log_with_options(true);
                 continue;
             }
 

@@ -13,6 +13,7 @@ use std::sync::LazyLock;
 use tokio::process::Command;
 
 use super::Tool;
+use crate::config::is_local_endpoint;
 
 // ============================================================================
 // Browser Detection
@@ -61,9 +62,9 @@ async fn detect_browser() -> Result<BrowserType> {
         }
     }
 
-    // Try playwright
-    if Command::new("npx")
-        .args(["playwright", "--version"])
+    // Try playwright only when the Node runtime can actually require the module.
+    if Command::new("node")
+        .args(["-e", "require('playwright'); console.log('playwright-ok')"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -106,7 +107,8 @@ impl Tool for BrowserFetch {
     }
 
     fn description(&self) -> &str {
-        "Fetch a web page and return its HTML content (uses headless browser or curl)"
+        "Fetch a web page and return its HTML content (uses headless browser or curl). \
+         Localhost/loopback URLs are allowed by default; set SELFWARE_ALLOW_PRIVATE_NETWORK=1 for private LAN hosts."
     }
 
     fn schema(&self) -> Value {
@@ -932,6 +934,7 @@ fn resolve_and_pin_target(url: &str) -> Result<PinnedTarget> {
     let port = parsed.port_or_known_default().unwrap_or(80);
     let host_is_ip = host.parse::<IpAddr>().is_ok();
     let allow_private = std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1";
+    let allow_localhost = is_local_endpoint(url) || is_trusted_local_browser_host(&host);
 
     let ip = if let Ok(ip) = host.parse::<IpAddr>() {
         ip
@@ -945,7 +948,10 @@ fn resolve_and_pin_target(url: &str) -> Result<PinnedTarget> {
             anyhow::bail!("Host {} did not resolve to any addresses", host);
         }
 
-        if !allow_private && addrs.iter().any(|addr| is_private_network_ip(&addr.ip())) {
+        if !allow_private
+            && !allow_localhost
+            && addrs.iter().any(|addr| is_private_network_ip(&addr.ip()))
+        {
             anyhow::bail!(
                 "DNS rebinding blocked: {} resolves to private/internal address",
                 host
@@ -955,7 +961,7 @@ fn resolve_and_pin_target(url: &str) -> Result<PinnedTarget> {
         addrs[0].ip()
     };
 
-    if !allow_private && is_private_network_ip(&ip) {
+    if !allow_private && !allow_localhost && is_private_network_ip(&ip) {
         anyhow::bail!(
             "Blocked request to private/internal network address: {}",
             ip
@@ -977,6 +983,12 @@ fn resolve_and_pin_target(url: &str) -> Result<PinnedTarget> {
         host_is_ip,
         resolver_rule: format!("MAP {} {},EXCLUDE localhost", host, ip),
     })
+}
+
+fn is_trusted_local_browser_host(host: &str) -> bool {
+    let bare_host = host.trim_start_matches('[').trim_end_matches(']');
+    matches!(bare_host, "localhost" | "127.0.0.1" | "::1" | "0.0.0.0")
+        || bare_host.ends_with(".localhost")
 }
 
 fn is_private_network_ip(ip: &IpAddr) -> bool {
@@ -1112,8 +1124,22 @@ mod tests {
 
     #[test]
     fn test_resolve_and_pin_target_blocks_private_ip() {
-        let result = resolve_and_pin_target("http://127.0.0.1/test");
+        let result = resolve_and_pin_target("http://192.168.1.10/test");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_resolve_and_pin_target_allows_localhost() {
+        let pinned = resolve_and_pin_target("http://localhost/test").unwrap();
+        assert_eq!(pinned.host, "localhost");
+        assert!(is_private_network_ip(&pinned.ip));
+    }
+
+    #[test]
+    fn test_resolve_and_pin_target_allows_loopback_ip() {
+        let pinned = resolve_and_pin_target("http://127.0.0.1/test").unwrap();
+        assert_eq!(pinned.ip.to_string(), "127.0.0.1");
+        assert!(pinned.host_is_ip);
     }
 
     #[test]

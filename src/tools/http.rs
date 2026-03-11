@@ -1,6 +1,7 @@
 //! HTTP request tool for web/API interactions
 
 use super::Tool;
+use crate::config::is_local_endpoint;
 use crate::safety::{is_private_or_internal, PinnedDnsResolver};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -14,6 +15,12 @@ use std::time::Duration;
 
 pub struct HttpRequest;
 
+#[derive(Debug, Clone, Copy)]
+struct HttpTargetPolicy {
+    allow_localhost: bool,
+    allow_private: bool,
+}
+
 #[async_trait]
 impl Tool for HttpRequest {
     fn name(&self) -> &str {
@@ -22,7 +29,8 @@ impl Tool for HttpRequest {
 
     fn description(&self) -> &str {
         "Make HTTP requests to APIs or web endpoints. Supports GET, POST, PUT, DELETE methods. \
-         Use for fetching documentation, calling APIs, or testing endpoints."
+         Use for fetching documentation, calling APIs, or testing endpoints. \
+         Localhost/loopback URLs are allowed by default; set SELFWARE_ALLOW_PRIVATE_NETWORK=1 for private LAN hosts."
     }
 
     fn schema(&self) -> Value {
@@ -97,39 +105,23 @@ impl Tool for HttpRequest {
         // Validate URL
         let url = reqwest::Url::parse(&args.url).context("Invalid URL")?;
 
-        // Block potentially dangerous URLs
-        if url.scheme() != "http" && url.scheme() != "https" {
-            anyhow::bail!("Only HTTP and HTTPS URLs are allowed");
-        }
+        let allow_private =
+            std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1";
+        let policy = validate_http_request_target(&url, allow_private)?;
 
         // SSRF protection: use PinnedDnsResolver to resolve DNS once and reject
         // private/internal IPs at resolution time. This prevents DNS rebinding
         // attacks where a hostname resolves to a public IP during validation but
         // to a private IP (e.g., 169.254.169.254) during the actual connection.
-        let allow_private =
-            std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1";
 
         let builder = Client::builder()
             .timeout(Duration::from_secs(args.timeout_secs))
-            .dns_resolver(Arc::new(PinnedDnsResolver::new(allow_private)));
+            .dns_resolver(Arc::new(PinnedDnsResolver::new(
+                policy.allow_private || policy.allow_localhost,
+            )));
 
-        // For IP-literal URLs, also check at parse time (no DNS involved)
         if let Some(host) = url.host_str() {
-            if let Ok(ip) = host
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .parse::<std::net::IpAddr>()
-            {
-                if is_private_or_internal(ip) && !allow_private {
-                    anyhow::bail!(
-                        "Blocked request to private/internal network address: {}. \
-                         Set SELFWARE_ALLOW_PRIVATE_NETWORK=1 to allow.",
-                        host
-                    );
-                }
-            }
-
-            if is_private_network_host(host) && allow_private {
+            if is_private_network_host(host) && policy.allow_private && !policy.allow_localhost {
                 tracing::warn!(
                     "Allowing request to private network (SELFWARE_ALLOW_PRIVATE_NETWORK=1): {}",
                     host
@@ -147,7 +139,10 @@ impl Tool for HttpRequest {
                     // DNS-level protection for redirects is handled by PinnedDnsResolver,
                     // which will reject any resolution to a private IP.
                     if let Some(host) = attempt.url().host_str().map(|h| h.to_owned()) {
-                        if !allow_private && is_private_network_host(&host) {
+                        if !policy.allow_private
+                            && !is_trusted_local_network_host(&host)
+                            && is_private_network_host(&host)
+                        {
                             return attempt
                                 .error("Blocked redirect to private/internal network address");
                         }
@@ -256,6 +251,45 @@ fn is_private_network_host(host: &str) -> bool {
         return is_private_or_internal(ip);
     }
     false
+}
+
+fn is_trusted_local_network_host(host: &str) -> bool {
+    let bare_host = host.trim_start_matches('[').trim_end_matches(']');
+    matches!(bare_host, "localhost" | "127.0.0.1" | "::1" | "0.0.0.0")
+        || bare_host.ends_with(".localhost")
+}
+
+fn validate_http_request_target(
+    url: &reqwest::Url,
+    allow_private: bool,
+) -> Result<HttpTargetPolicy> {
+    if url.scheme() != "http" && url.scheme() != "https" {
+        anyhow::bail!("Only HTTP and HTTPS URLs are allowed");
+    }
+
+    let allow_localhost = is_local_endpoint(url.as_str())
+        || url.host_str().is_some_and(is_trusted_local_network_host);
+
+    if let Some(host) = url.host_str() {
+        if let Ok(ip) = host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<IpAddr>()
+        {
+            if is_private_or_internal(ip) && !(allow_private || allow_localhost) {
+                anyhow::bail!(
+                    "Blocked request to private/internal network address: {}. \
+                     Set SELFWARE_ALLOW_PRIVATE_NETWORK=1 to allow.",
+                    host
+                );
+            }
+        }
+    }
+
+    Ok(HttpTargetPolicy {
+        allow_localhost,
+        allow_private,
+    })
 }
 
 #[cfg(test)]
@@ -369,5 +403,22 @@ mod tests {
             }))
             .await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_http_request_target_allows_localhost() {
+        let url = reqwest::Url::parse("http://localhost:8888/health").unwrap();
+        let policy = validate_http_request_target(&url, false).unwrap();
+        assert!(policy.allow_localhost);
+        assert!(!policy.allow_private);
+    }
+
+    #[test]
+    fn test_validate_http_request_target_blocks_private_lan_without_opt_in() {
+        let url = reqwest::Url::parse("http://192.168.1.10:8000/health").unwrap();
+        let error = validate_http_request_target(&url, false).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Blocked request to private/internal network address"));
     }
 }

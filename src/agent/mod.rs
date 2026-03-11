@@ -187,6 +187,10 @@ pub struct Agent {
     session_logger: Option<session_log::SessionLogger>,
     /// One-shot reminder injected after a failed tool call.
     pending_failure_hint: Option<String>,
+    /// Consecutive turns where the model described intent but emitted no tool call.
+    consecutive_no_action_prompts: usize,
+    /// Hash of the most recent no-action assistant content used for loop detection.
+    last_no_action_prompt_hash: Option<u64>,
     /// Permission store for pre-authorized tool grants
     permission_store: crate::safety::permissions::PermissionStore,
     /// Tool result cache for read-only operations
@@ -506,6 +510,8 @@ To call a tool, use this EXACT XML structure:
             audit_logger,
             session_logger,
             pending_failure_hint: None,
+            consecutive_no_action_prompts: 0,
+            last_no_action_prompt_hash: None,
             permission_store,
             tool_cache: crate::session::cache::ToolCache::new(),
             local_first: crate::session::local_first::LocalFirstCoordinator::new(),

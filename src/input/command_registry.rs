@@ -152,8 +152,23 @@ pub static COMMANDS: &[CommandEntry] = &[
         category: CommandCategory::Tools,
     },
     CommandEntry {
+        name: "/debug full",
+        description: "Show full args/results for the current task",
+        category: CommandCategory::Tools,
+    },
+    CommandEntry {
+        name: "/debug tool",
+        description: "Show one tool call with full details",
+        category: CommandCategory::Tools,
+    },
+    CommandEntry {
         name: "/debug-log",
         description: "Show the persistent session execution log",
+        category: CommandCategory::Tools,
+    },
+    CommandEntry {
+        name: "/debug-log full",
+        description: "Show full recent session log entries",
         category: CommandCategory::Tools,
     },
     CommandEntry {
@@ -848,7 +863,10 @@ mod tests {
         let tools_commands = [
             "/last",
             "/debug",
+            "/debug full",
+            "/debug tool",
             "/debug-log",
+            "/debug-log full",
             "/tools",
             "/analyze",
             "/review",

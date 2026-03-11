@@ -143,17 +143,23 @@ impl SafetyChecker {
                 }
             }
             // HTTP/browser URL tools — block SSRF to cloud metadata endpoints
-            "http_request" | "browser_fetch" | "browser_links" => {
+            "http_request" => {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
                 if let Some(url) = args.get("url").and_then(|v| v.as_str()) {
-                    self.check_url_ssrf(url)?;
+                    self.check_http_request_url(url)?;
+                }
+            }
+            "browser_fetch" | "browser_links" => {
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+                if let Some(url) = args.get("url").and_then(|v| v.as_str()) {
+                    self.check_browser_url(url)?;
                 }
             }
             // Browser screenshot/PDF tools — check both URL (SSRF) and output_path (path policy)
             "browser_screenshot" | "browser_pdf" => {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
                 if let Some(url) = args.get("url").and_then(|v| v.as_str()) {
-                    self.check_url_ssrf(url)?;
+                    self.check_browser_url(url)?;
                 }
                 if let Some(output_path) = args.get("output_path").and_then(|v| v.as_str()) {
                     self.check_path(output_path)?;
@@ -170,7 +176,7 @@ impl SafetyChecker {
             "browser_eval" => {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
                 if let Some(url) = args.get("url").and_then(|v| v.as_str()) {
-                    self.check_url_ssrf(url)?;
+                    self.check_browser_url(url)?;
                 }
                 if let Some(code) = args
                     .get("code")
@@ -468,10 +474,33 @@ impl SafetyChecker {
     ///
     /// Checks both plain-text hostnames and common IP encoding bypass
     /// techniques (hex, octal, decimal integer forms).
+    #[allow(dead_code)]
     fn check_url_ssrf(&self, url: &str) -> Result<()> {
         self.check_url_ssrf_with_options(
             url,
             UrlSafetyOptions::default(),
+            std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1",
+        )
+    }
+
+    fn check_http_request_url(&self, url: &str) -> Result<()> {
+        self.check_url_ssrf_with_options(
+            url,
+            UrlSafetyOptions {
+                allow_file_scheme: false,
+                allow_localhost: true,
+            },
+            std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1",
+        )
+    }
+
+    fn check_browser_url(&self, url: &str) -> Result<()> {
+        self.check_url_ssrf_with_options(
+            url,
+            UrlSafetyOptions {
+                allow_file_scheme: false,
+                allow_localhost: true,
+            },
             std::env::var("SELFWARE_ALLOW_PRIVATE_NETWORK").unwrap_or_default() == "1",
         )
     }
@@ -2638,6 +2667,27 @@ mod tests {
         let call = create_test_call(
             "page_control",
             r#"{"action":"goto","url":"http://localhost:8888/chart.html"}"#,
+        );
+
+        assert!(checker.check_tool_call(&call).is_ok());
+    }
+
+    #[test]
+    fn test_http_request_localhost_allowed() {
+        let config = SafetyConfig::default();
+        let checker = SafetyChecker::new(&config);
+        let call = create_test_call("http_request", r#"{"url":"http://localhost:8888/health"}"#);
+
+        assert!(checker.check_tool_call(&call).is_ok());
+    }
+
+    #[test]
+    fn test_browser_fetch_localhost_allowed() {
+        let config = SafetyConfig::default();
+        let checker = SafetyChecker::new(&config);
+        let call = create_test_call(
+            "browser_fetch",
+            r#"{"url":"http://127.0.0.1:8888/index.html"}"#,
         );
 
         assert!(checker.check_tool_call(&call).is_ok());

@@ -94,6 +94,20 @@ fn hash_tool_args(args_str: &str) -> u64 {
     hasher.finish()
 }
 
+fn hash_text_signature(text: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn normalize_no_action_content(content: &str) -> String {
+    content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
 impl Agent {
     fn remember_failed_tool(&mut self, tool_name: &str, error: &str) {
         let error_preview = truncate_chars(error, TOOL_FAILURE_HINT_PREVIEW_CHARS);
@@ -170,6 +184,35 @@ impl Agent {
 
     pub(super) fn clear_failed_tool_attempts(&mut self) {
         self.recent_failed_tool_attempts.clear();
+    }
+
+    pub(super) fn reset_no_action_prompt_state(&mut self) {
+        self.consecutive_no_action_prompts = 0;
+        self.last_no_action_prompt_hash = None;
+    }
+
+    fn no_action_failure_context(&self) -> Option<String> {
+        self.recent_failed_tool_attempts.back().map(|failure| {
+            format!(
+                " Most recent concrete failure: tool `{}` hit {} ({})",
+                failure.tool_name, failure.failure_kind, failure.error_preview
+            )
+        })
+    }
+
+    fn build_no_action_prompt_message(&self) -> String {
+        let failure_context = self.no_action_failure_context().unwrap_or_default();
+        match self.consecutive_no_action_prompts {
+            0 | 1 => "Please use the appropriate tools to take action now. Don't just describe what you'll do - actually execute the tools.".to_string(),
+            2 => format!(
+                "NO ACTION DETECTED AGAIN: your previous response described intent but still did not use any tool. Emit a valid tool call now. If a tool is blocked or unavailable, explicitly name the blocker and choose a different tool or strategy instead of repeating the plan.{}",
+                failure_context
+            ),
+            _ => format!(
+                "NO ACTION LOOP DETECTED: you have now responded multiple times with intent but no tool call. Your next response must do exactly one of these: (1) emit a valid tool call, (2) explicitly state the concrete blocker from prior evidence and choose a different strategy, or (3) give a final answer only if the task genuinely requires no tool. Do not restate the plan.{}",
+                failure_context
+            ),
+        }
     }
 
     fn suppress_repeated_failed_tool_retry(
@@ -305,6 +348,7 @@ impl Agent {
             return Ok(false);
         }
 
+        self.reset_no_action_prompt_state();
         self.execute_tool_batch(tool_calls).await?;
         Ok(false)
     }
@@ -506,14 +550,26 @@ impl Agent {
         use_last_message: bool,
     ) -> bool {
         if !self.should_prompt_for_action(content, has_no_tool_calls, use_last_message) {
+            self.reset_no_action_prompt_state();
             return false;
         }
 
-        info!("Detected intent without action, prompting model to use tools");
+        let normalized = normalize_no_action_content(content);
+        let signature = hash_text_signature(&normalized);
+        if self.last_no_action_prompt_hash == Some(signature) {
+            self.consecutive_no_action_prompts += 1;
+        } else {
+            self.consecutive_no_action_prompts = 1;
+            self.last_no_action_prompt_hash = Some(signature);
+        }
+
+        let correction = self.build_no_action_prompt_message();
+        info!(
+            "Detected intent without action, prompting model to use tools (count={})",
+            self.consecutive_no_action_prompts
+        );
         output::intent_without_action();
-        self.messages.push(Message::user(
-            "Please use the appropriate tools to take action now. Don't just describe what you'll do - actually execute the tools."
-        ));
+        self.messages.push(Message::user(correction));
         true
     }
 
@@ -1841,6 +1897,67 @@ mod tests {
         assert!(should_prompt_for_action("LET ME check", true, false));
         assert!(should_prompt_for_action("STARTING now", true, false));
         assert!(should_prompt_for_action("BEGIN BY reading", true, false));
+    }
+
+    #[tokio::test]
+    async fn test_maybe_prompt_for_action_escalates_after_repeated_no_action_turns() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+
+        assert!(agent.maybe_prompt_for_action("Let me inspect the file", true, false));
+        assert!(agent
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .text()
+            .contains("Please use the appropriate tools"));
+
+        assert!(agent.maybe_prompt_for_action("Let me inspect the file", true, false));
+        assert!(agent
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .text()
+            .contains("NO ACTION DETECTED AGAIN"));
+
+        assert!(agent.maybe_prompt_for_action("Let me inspect the file", true, false));
+        assert!(agent
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .text()
+            .contains("NO ACTION LOOP DETECTED"));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_maybe_prompt_for_action_resets_after_non_intent_response() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+
+        assert!(agent.maybe_prompt_for_action("Let me inspect the file", true, false));
+        assert!(agent.maybe_prompt_for_action("Let me inspect the file", true, false));
+        assert_eq!(agent.consecutive_no_action_prompts, 2);
+
+        assert!(!agent.maybe_prompt_for_action("Here is the result.", true, false));
+        assert_eq!(agent.consecutive_no_action_prompts, 0);
+
+        assert!(agent.maybe_prompt_for_action("Let me inspect the file", true, false));
+        assert!(agent
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .text()
+            .contains("Please use the appropriate tools"));
+
+        server.stop().await;
     }
 
     // =========================================================================
