@@ -65,6 +65,8 @@ impl Agent {
         outcome: Outcome,
         error: Option<&str>,
     ) {
+        self.log_task_outcome_event(task_prompt, outcome, error);
+
         let task_type = Self::infer_task_type(task_prompt);
         self.self_improvement.record_prompt(
             task_prompt,

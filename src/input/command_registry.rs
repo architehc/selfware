@@ -152,6 +152,11 @@ pub static COMMANDS: &[CommandEntry] = &[
         category: CommandCategory::Tools,
     },
     CommandEntry {
+        name: "/debug-log",
+        description: "Show the persistent session execution log",
+        category: CommandCategory::Tools,
+    },
+    CommandEntry {
         name: "/tools",
         description: "List available tools",
         category: CommandCategory::Tools,
@@ -356,6 +361,7 @@ mod tests {
             "/theme",
             "/last",
             "/debug",
+            "/debug-log",
             "/tools",
             "/analyze",
             "/review",
@@ -842,6 +848,7 @@ mod tests {
         let tools_commands = [
             "/last",
             "/debug",
+            "/debug-log",
             "/tools",
             "/analyze",
             "/review",

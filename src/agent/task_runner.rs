@@ -52,6 +52,7 @@ impl Agent {
             let task_id = uuid::Uuid::new_v4().to_string();
             self.current_checkpoint = Some(TaskCheckpoint::new(task_id, task.to_string()));
         }
+        self.log_task_start_event(task);
         let learning_session_id = self
             .current_checkpoint
             .as_ref()

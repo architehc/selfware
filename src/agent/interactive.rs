@@ -1095,6 +1095,11 @@ impl Agent {
                 continue;
             }
 
+            if input == "/debug-log" {
+                self.print_session_debug_log();
+                continue;
+            }
+
             if input == "/config" {
                 println!();
                 println!("  {} Current Configuration", "⚙".bright_cyan());
@@ -2025,6 +2030,9 @@ impl Agent {
                 println!("  /memory         - Show memory statistics");
                 println!("  /clear          - Clear conversation history");
                 println!("  /tools          - List available tools");
+                println!("  /last           - Show the last tool output");
+                println!("  /debug          - Show current task debug state");
+                println!("  /debug-log      - Show the persistent session log");
                 println!("  /analyze <path> - Analyze codebase at path");
                 println!("  /review <file>  - Review code in file");
                 println!("  /plan <task>    - Create a plan for a task");
@@ -2075,6 +2083,11 @@ impl Agent {
 
             if input == "/debug" {
                 self.print_execution_debug();
+                continue;
+            }
+
+            if input == "/debug-log" {
+                self.print_session_debug_log();
                 continue;
             }
 
@@ -2336,6 +2349,7 @@ mod tests {
             "/model",
             "/last",
             "/debug",
+            "/debug-log",
             "/compact",
             "/verbose",
             "/config",

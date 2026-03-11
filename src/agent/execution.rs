@@ -701,6 +701,13 @@ impl Agent {
                 println!("{} {}", "✗".bright_red(), err);
                 self.push_tool_result_message(use_native_fc, call_id, name, false, &err);
                 self.log_tool_call(name, args_str, &err, false, start_time, false);
+                self.log_tool_validation_failure_event(
+                    name,
+                    args_str,
+                    &err,
+                    call_id,
+                    use_native_fc,
+                );
                 self.remember_failed_tool(name, &err);
                 let duration_ms = start_time.elapsed().as_millis() as u64;
                 self.self_improvement.record_tool(
@@ -986,6 +993,16 @@ impl Agent {
         start_time: std::time::Instant,
         truncate_result: bool,
     ) {
+        let duration_ms = start_time.elapsed().as_millis() as u64;
+        self.log_session_tool_call_event(
+            tool_name,
+            arguments,
+            result,
+            success,
+            duration_ms,
+            truncate_result,
+        );
+
         if let Some(ref mut checkpoint) = self.current_checkpoint {
             let logged_result = if truncate_result {
                 result.chars().take(1000).collect()
@@ -998,7 +1015,7 @@ impl Agent {
                 arguments: arguments.to_string(),
                 result: Some(logged_result),
                 success,
-                duration_ms: Some(start_time.elapsed().as_millis() as u64),
+                duration_ms: Some(duration_ms),
             });
         }
     }

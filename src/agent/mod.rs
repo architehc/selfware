@@ -37,6 +37,7 @@ pub mod last_tool;
 mod learning;
 pub mod loop_control;
 pub mod planning;
+mod session_log;
 mod streaming;
 mod task_runner;
 pub mod tui_events;
@@ -172,6 +173,8 @@ pub struct Agent {
     plan_mode: bool,
     /// Audit logger for JSONL tool execution logging
     audit_logger: Option<crate::safety::audit::AuditLogger>,
+    /// Persistent per-session execution log with raw args/results
+    session_logger: Option<session_log::SessionLogger>,
     /// One-shot reminder injected after a failed tool call.
     pending_failure_hint: Option<String>,
     /// Permission store for pre-authorized tool grants
@@ -438,6 +441,7 @@ To call a tool, use this EXACT XML structure:
         // Initialize audit logger (writes JSONL events to ~/.selfware/audit/)
         let session_id = uuid::Uuid::new_v4().to_string();
         let audit_logger = crate::safety::audit::AuditLogger::new(&session_id);
+        let session_logger = session_log::SessionLogger::new(&session_id);
         if let Some(ref logger) = audit_logger {
             logger.log_session_start();
         }
@@ -455,7 +459,7 @@ To call a tool, use this EXACT XML structure:
 
         info!("Agent initialized with cognitive state, verification gate, and error analyzer");
 
-        Ok(Self {
+        let agent = Self {
             client,
             tools,
             memory,
@@ -489,13 +493,17 @@ To call a tool, use this EXACT XML structure:
             hook_registry,
             plan_mode,
             audit_logger,
+            session_logger,
             pending_failure_hint: None,
             permission_store,
             tool_cache: crate::session::cache::ToolCache::new(),
             local_first: crate::session::local_first::LocalFirstCoordinator::new(),
             governor: ConcurrencyGovernor::with_defaults(),
             esc_paused: Arc::new(AtomicBool::new(false)),
-        })
+        };
+
+        agent.log_session_start_event();
+        Ok(agent)
     }
 
     /// Set the TUI event sender for real-time updates
