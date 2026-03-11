@@ -197,6 +197,76 @@ fn test_interactive_tools_command() {
     );
 }
 
+/// Test the /debug command when there is no active task history yet
+#[test]
+#[cfg(feature = "integration")]
+fn test_interactive_debug_command_without_checkpoint() {
+    let (stdout, stderr, _code) = run_interactive("/debug\nexit\n", 30);
+    let combined = format!("{}{}", stdout, stderr);
+
+    assert!(
+        combined.contains("Execution Debug"),
+        "Should show debug header. stdout: {}, stderr: {}",
+        stdout,
+        stderr
+    );
+    assert!(
+        combined.contains("No active checkpoint/tool history for this session."),
+        "Should explain there is no task history yet. stdout: {}, stderr: {}",
+        stdout,
+        stderr
+    );
+}
+
+/// Test queue management commands in interactive mode
+#[test]
+#[cfg(feature = "integration")]
+fn test_interactive_queue_commands() {
+    let input = concat!(
+        "/queue first queued task\n",
+        "/queue second queued task\n",
+        "/queue list\n",
+        "/queue drop 1\n",
+        "/queue list\n",
+        "/queue clear\n",
+        "/queue list\n",
+        "exit\n"
+    );
+    let (stdout, stderr, _code) = run_interactive(input, 30);
+    let combined = format!("{}{}", stdout, stderr);
+
+    assert!(
+        combined.contains("Queued (1 pending)") && combined.contains("Queued (2 pending)"),
+        "Should acknowledge queued messages. stdout: {}, stderr: {}",
+        stdout,
+        stderr
+    );
+    assert!(
+        combined.contains("Queued messages (2):"),
+        "Should list both queued messages. stdout: {}, stderr: {}",
+        stdout,
+        stderr
+    );
+    assert!(
+        combined.contains("Removed message 1: first queued task"),
+        "Should drop the first queued message. stdout: {}, stderr: {}",
+        stdout,
+        stderr
+    );
+    assert!(
+        combined.contains("Queued messages (1):") && combined.contains("second queued task"),
+        "Should keep the remaining queued message after drop. stdout: {}, stderr: {}",
+        stdout,
+        stderr
+    );
+    assert!(
+        combined.contains("Cleared 1 queued message(s).") && combined.contains("Queue is empty."),
+        "Should clear the queue and report empty state. stdout: {}, stderr: {}",
+        stdout,
+        stderr
+    );
+}
+
 /// Test exit command
 #[test]
 #[cfg(feature = "integration")]

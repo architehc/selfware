@@ -2073,6 +2073,11 @@ impl Agent {
                 continue;
             }
 
+            if input == "/debug" {
+                self.print_execution_debug();
+                continue;
+            }
+
             if input.starts_with("/review ") {
                 let Some(file_path) = input.strip_prefix("/review ").map(str::trim) else {
                     println!("{} Usage: /review <file>", "ℹ".bright_yellow());
@@ -2487,6 +2492,21 @@ mod tests {
         let preview = preview_with_ellipsis(&long_msg, QUEUE_DRAIN_PREVIEW_BYTES);
         assert!(preview.len() <= QUEUE_DRAIN_PREVIEW_BYTES + 3);
         assert!(preview.ends_with("..."));
+    }
+
+    #[test]
+    fn strip_trailing_submission_newlines_preserves_multiline_content() {
+        let pasted = "def chart():\n    return 42\n\n";
+        assert_eq!(
+            strip_trailing_submission_newlines(pasted),
+            "def chart():\n    return 42"
+        );
+
+        let carriage_return = "line one\r\nline two\r\n";
+        assert_eq!(
+            strip_trailing_submission_newlines(carriage_return),
+            "line one\r\nline two"
+        );
     }
 
     // ── Queue management subcommand routing ──
