@@ -71,6 +71,8 @@ type CollectedToolCall = (String, String, Option<String>);
 
 const TOOL_CONFIRM_ARGS_PREVIEW_CHARS: usize = 240;
 const TOOL_FAILURE_HINT_PREVIEW_CHARS: usize = 400;
+const TOOL_INPUT_FAILURE_WINDOW_SIZE: usize = 8;
+const TOOL_INPUT_FAILURE_REPEAT_THRESHOLD: usize = 2;
 
 fn truncate_chars(s: &str, max_chars: usize) -> String {
     let collected: String = s.chars().take(max_chars).collect();
@@ -81,6 +83,18 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
     }
 }
 
+fn canonicalize_tool_args(args_str: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(args_str)
+        .and_then(|value| serde_json::to_string(&value))
+        .unwrap_or_else(|_| args_str.to_string())
+}
+
+fn hash_tool_args(args_str: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    canonicalize_tool_args(args_str).hash(&mut hasher);
+    hasher.finish()
+}
+
 impl Agent {
     fn remember_failed_tool(&mut self, tool_name: &str, error: &str) {
         let error_preview = truncate_chars(error, TOOL_FAILURE_HINT_PREVIEW_CHARS);
@@ -88,6 +102,89 @@ impl Agent {
             "Warning: the previous tool call `{}` failed. Do not claim success, observation, or completion unless a later tool actually confirms it. Failure details: {}",
             tool_name, error_preview
         ));
+    }
+
+    fn build_tool_input_recovery_message(
+        &self,
+        tool_name: &str,
+        failure_kind: &'static str,
+        error: &str,
+    ) -> String {
+        let schema_hint = self
+            .tools
+            .get(tool_name)
+            .and_then(|tool| {
+                let required: Vec<String> = tool
+                    .schema()
+                    .get("required")
+                    .and_then(|value| value.as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|value| value.as_str())
+                    .map(|field| format!("`{}`", field))
+                    .collect();
+                (!required.is_empty())
+                    .then(|| format!(" Required top-level fields: {}.", required.join(", ")))
+            })
+            .unwrap_or_default();
+
+        let guidance = if failure_kind == "parsing" {
+            "The arguments must be valid JSON before the tool can run."
+        } else {
+            "The arguments do not satisfy the tool schema yet."
+        };
+        let error_preview = truncate_chars(error, TOOL_FAILURE_HINT_PREVIEW_CHARS);
+
+        format!(
+            "TOOL INPUT RECOVERY: You retried `{}` with the same {} more than once. Stop repeating the same broken payload. {}{} Last error: {}",
+            tool_name,
+            if failure_kind == "parsing" {
+                "malformed JSON arguments"
+            } else {
+                "schema-invalid arguments"
+            },
+            guidance,
+            schema_hint,
+            error_preview
+        )
+    }
+
+    fn record_tool_input_failure(
+        &mut self,
+        tool_name: &str,
+        args_str: &str,
+        failure_kind: &'static str,
+        error: &str,
+    ) {
+        let sig = (
+            tool_name.to_string(),
+            hash_tool_args(args_str),
+            failure_kind,
+        );
+        self.recent_tool_input_failures.push_back(sig.clone());
+        if self.recent_tool_input_failures.len() > TOOL_INPUT_FAILURE_WINDOW_SIZE {
+            self.recent_tool_input_failures.pop_front();
+        }
+
+        let repeat_count = self
+            .recent_tool_input_failures
+            .iter()
+            .filter(|existing| **existing == sig)
+            .count();
+
+        if repeat_count < TOOL_INPUT_FAILURE_REPEAT_THRESHOLD {
+            return;
+        }
+
+        let recovery_msg = self.build_tool_input_recovery_message(tool_name, failure_kind, error);
+        warn!(
+            "Repeated {} failure for tool '{}', injecting recovery hint",
+            failure_kind, tool_name
+        );
+        self.pending_failure_hint = Some(recovery_msg.clone());
+        self.messages.push(Message::user(recovery_msg));
+        self.recent_tool_input_failures
+            .retain(|existing| *existing != sig);
     }
 
     /// Execute a step with tool call logging for checkpoints
@@ -335,15 +432,7 @@ impl Agent {
         const WINDOW_SIZE: usize = 10;
 
         for (name, args_str, _) in tool_calls {
-            // Normalize JSON args to canonical form so semantically identical
-            // calls with different whitespace produce the same hash.
-            let canonical_args = serde_json::from_str::<serde_json::Value>(args_str)
-                .and_then(|v| serde_json::to_string(&v))
-                .unwrap_or_else(|_| args_str.to_string());
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            canonical_args.hash(&mut hasher);
-            let args_hash = hasher.finish();
-            let sig = (name.clone(), args_hash);
+            let sig = (name.clone(), hash_tool_args(args_str));
 
             self.recent_tool_calls.push_back(sig.clone());
             if self.recent_tool_calls.len() > WINDOW_SIZE {
@@ -743,6 +832,7 @@ impl Agent {
                     name,
                     None,
                 );
+                self.record_tool_input_failure(name, args_str, "parsing", &err);
                 None
             }
         }
@@ -791,6 +881,7 @@ impl Agent {
                     name,
                     None,
                 );
+                self.record_tool_input_failure(name, args_str, "validation", &err);
                 false
             }
         }
@@ -3283,6 +3374,86 @@ mod tests {
         );
 
         assert!(ok);
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_repeated_parse_failures_inject_recovery_message() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let start = std::time::Instant::now();
+        let first = agent.parse_tool_args("shell_exec", "{broken", "call_1", false, start);
+        assert!(first.is_none());
+        assert!(!agent
+            .messages
+            .iter()
+            .any(|msg| msg.content.text().contains("TOOL INPUT RECOVERY")));
+
+        let second_start = std::time::Instant::now();
+        let second = agent.parse_tool_args("shell_exec", "{broken", "call_2", false, second_start);
+        assert!(second.is_none());
+
+        let recovery = agent
+            .messages
+            .iter()
+            .rev()
+            .find(|msg| msg.role == "user" && msg.content.text().contains("TOOL INPUT RECOVERY"))
+            .expect("expected repeated parse recovery message");
+        assert!(recovery.content.text().contains("valid JSON"));
+        assert!(recovery.content.text().contains("`command`"));
+        assert!(agent.pending_failure_hint.as_deref().is_some_and(|hint| {
+            hint.contains("TOOL INPUT RECOVERY") && hint.contains("valid JSON")
+        }));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_repeated_validation_failures_inject_recovery_message() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let start = std::time::Instant::now();
+        let first = agent.validate_tool_args(
+            "shell_exec",
+            "{}",
+            &serde_json::json!({}),
+            "call_1",
+            false,
+            start,
+        );
+        assert!(!first);
+        assert!(!agent
+            .messages
+            .iter()
+            .any(|msg| msg.content.text().contains("TOOL INPUT RECOVERY")));
+
+        let second_start = std::time::Instant::now();
+        let second = agent.validate_tool_args(
+            "shell_exec",
+            "{}",
+            &serde_json::json!({}),
+            "call_2",
+            false,
+            second_start,
+        );
+        assert!(!second);
+
+        let recovery = agent
+            .messages
+            .iter()
+            .rev()
+            .find(|msg| msg.role == "user" && msg.content.text().contains("TOOL INPUT RECOVERY"))
+            .expect("expected repeated validation recovery message");
+        assert!(recovery.content.text().contains("schema-invalid arguments"));
+        assert!(recovery.content.text().contains("`command`"));
+        assert!(agent.pending_failure_hint.as_deref().is_some_and(|hint| {
+            hint.contains("TOOL INPUT RECOVERY") && hint.contains("schema-invalid arguments")
+        }));
 
         server.stop().await;
     }

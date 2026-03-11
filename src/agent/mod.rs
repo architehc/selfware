@@ -167,6 +167,8 @@ pub struct Agent {
     self_healing: SelfHealingEngine,
     /// Recent tool call signatures for repetition detection (name, args_hash)
     recent_tool_calls: VecDeque<(String, u64)>,
+    /// Recent parse/schema failures for identical tool inputs (name, args_hash, kind)
+    recent_tool_input_failures: VecDeque<(String, u64, &'static str)>,
     /// Hook registry for event-driven automation
     hook_registry: HookRegistry,
     /// Plan mode: propose tool calls without executing them
@@ -490,6 +492,7 @@ To call a tool, use this EXACT XML structure:
             #[cfg(feature = "resilience")]
             self_healing,
             recent_tool_calls: VecDeque::new(),
+            recent_tool_input_failures: VecDeque::new(),
             hook_registry,
             plan_mode,
             audit_logger,

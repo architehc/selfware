@@ -222,6 +222,53 @@ async fn test_agent_run_task_streaming_fallback_to_non_streaming() {
     server.stop().await;
 }
 
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_agent_run_task_repeated_invalid_tool_calls_inject_recovery_hint() {
+    let server = MockLlmServer::builder()
+        .with_response(
+            r#"<tool>
+<name>shell_exec</name>
+<arguments>{}</arguments>
+</tool>"#,
+        )
+        .with_response(
+            r#"<tool>
+<name>shell_exec</name>
+<arguments>{}</arguments>
+</tool>"#,
+        )
+        .with_response("Recovered and completed without repeating the bad tool call.")
+        .build()
+        .await;
+
+    let config = mock_agent_config(format!("{}/v1", server.url()), false);
+    let mut agent = Agent::new(config).await.unwrap();
+
+    let result = agent.run_task("Run a shell command correctly").await;
+    assert!(
+        result.is_ok(),
+        "run_task should recover after repeated invalid tool calls: {:?}",
+        result.err()
+    );
+    assert!(agent
+        .last_assistant_response
+        .contains("Recovered and completed"));
+    assert!(
+        agent.messages.iter().any(|message| {
+            message.role == "user"
+                && message.content.text().contains("TOOL INPUT RECOVERY")
+                && message.content.text().contains("`command`")
+        }),
+        "agent should inject a repeated invalid tool call recovery hint"
+    );
+
+    server.stop().await;
+}
+
 #[test]
 fn test_tool_call_parsing_xml_format() {
     let content = r#"
