@@ -1533,6 +1533,78 @@ fn test_all_tools_have_valid_schemas() {
 }
 
 #[test]
+fn test_schema_validator_rejects_missing_required_fields_for_core_tools() {
+    let registry = ToolRegistry::new();
+
+    let shell = registry.get("shell_exec").unwrap();
+    let shell_err = selfware::tools::validate_tool_arguments_schema(
+        shell.name(),
+        &shell.schema(),
+        &serde_json::json!({}),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(shell_err.contains("command"));
+
+    let process = registry.get("process_start").unwrap();
+    let process_err = selfware::tools::validate_tool_arguments_schema(
+        process.name(),
+        &process.schema(),
+        &serde_json::json!({}),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(process_err.contains("id"));
+    assert!(process_err.contains("command"));
+
+    let file_write = registry.get("file_write").unwrap();
+    let file_err = selfware::tools::validate_tool_arguments_schema(
+        file_write.name(),
+        &file_write.schema(),
+        &serde_json::json!({"path": "/tmp/out.txt"}),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(file_err.contains("content"));
+}
+
+#[test]
+fn test_schema_validator_matches_registry_required_fields() {
+    let registry = ToolRegistry::new();
+
+    for tool in registry.list() {
+        let schema = tool.schema();
+        let required = schema
+            .get("required")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        if required.is_empty() {
+            continue;
+        }
+
+        let err = selfware::tools::validate_tool_arguments_schema(
+            tool.name(),
+            &schema,
+            &serde_json::json!({}),
+        )
+        .unwrap_err()
+        .to_string();
+
+        for field in required.iter().filter_map(|value| value.as_str()) {
+            assert!(
+                err.contains(field),
+                "Validator error for '{}' should mention missing field '{}', got: {}",
+                tool.name(),
+                field,
+                err
+            );
+        }
+    }
+}
+
+#[test]
 fn test_all_tools_have_descriptions() {
     let registry = ToolRegistry::new();
     let tools = registry.list();

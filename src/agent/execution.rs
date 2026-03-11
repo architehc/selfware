@@ -452,6 +452,35 @@ impl Agent {
                 continue;
             }
 
+            let args =
+                match self.parse_tool_args(&name, &args_str, &call_id, use_native_fc, start_time) {
+                    Some(args) => args,
+                    None => {
+                        self.emit_event(AgentEvent::ToolCompleted {
+                            name: name.clone(),
+                            success: false,
+                            duration_ms: start_time.elapsed().as_millis() as u64,
+                        });
+                        continue;
+                    }
+                };
+
+            if !self.validate_tool_args(
+                &name,
+                &args_str,
+                &args,
+                &call_id,
+                use_native_fc,
+                start_time,
+            ) {
+                self.emit_event(AgentEvent::ToolCompleted {
+                    name: name.clone(),
+                    success: false,
+                    duration_ms: start_time.elapsed().as_millis() as u64,
+                });
+                continue;
+            }
+
             if !self.confirm_tool_execution(&name, &args_str, &call_id, use_native_fc)? {
                 continue;
             }
@@ -466,19 +495,6 @@ impl Agent {
             }
 
             self.emit_event(AgentEvent::ToolStarted { name: name.clone() });
-
-            let args =
-                match self.parse_tool_args(&name, &args_str, &call_id, use_native_fc, start_time) {
-                    Some(args) => args,
-                    None => {
-                        self.emit_event(AgentEvent::ToolCompleted {
-                            name: name.clone(),
-                            success: false,
-                            duration_ms: start_time.elapsed().as_millis() as u64,
-                        });
-                        continue;
-                    }
-                };
 
             let activity = output::tool_activity_message(&name, &args);
             let spinner = crate::ui::spinner::TerminalSpinner::start(&activity);
@@ -624,7 +640,10 @@ impl Agent {
 
         use std::io::{self, Write};
 
-        let args_preview: String = args_str.chars().take(TOOL_CONFIRM_ARGS_PREVIEW_CHARS).collect();
+        let args_preview: String = args_str
+            .chars()
+            .take(TOOL_CONFIRM_ARGS_PREVIEW_CHARS)
+            .collect();
         let args_display = if args_str.chars().count() > TOOL_CONFIRM_ARGS_PREVIEW_CHARS {
             format!("{}...", args_preview)
         } else {
@@ -725,6 +744,54 @@ impl Agent {
                     None,
                 );
                 None
+            }
+        }
+    }
+
+    fn validate_tool_args(
+        &mut self,
+        name: &str,
+        args_str: &str,
+        args: &Value,
+        call_id: &str,
+        use_native_fc: bool,
+        start_time: std::time::Instant,
+    ) -> bool {
+        let Some(tool) = self.tools.get(name) else {
+            return true;
+        };
+
+        match crate::tools::validate_tool_arguments_schema(name, &tool.schema(), args) {
+            Ok(()) => true,
+            Err(e) => {
+                let err = e.to_string();
+                println!("{} {}", "✗".bright_red(), err);
+                self.push_tool_result_message(use_native_fc, call_id, name, false, &err);
+                self.log_tool_call(name, args_str, &err, false, start_time, false);
+                self.log_tool_validation_failure_event(
+                    name,
+                    args_str,
+                    &err,
+                    call_id,
+                    use_native_fc,
+                );
+                self.remember_failed_tool(name, &err);
+                let duration_ms = start_time.elapsed().as_millis() as u64;
+                self.self_improvement.record_tool(
+                    name,
+                    self.learning_context(),
+                    Outcome::Failure,
+                    duration_ms,
+                    Some(err.clone()),
+                );
+                self.self_improvement.record_error(
+                    &err,
+                    "validation",
+                    self.learning_context(),
+                    name,
+                    None,
+                );
+                false
             }
         }
     }
@@ -3167,6 +3234,55 @@ mod tests {
         assert!(result.is_some());
         let args = result.unwrap();
         assert!(args.as_object().unwrap().is_empty());
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_validate_tool_args_rejects_missing_required_field() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+        let initial_len = agent.messages.len();
+
+        let start = std::time::Instant::now();
+        let ok = agent.validate_tool_args(
+            "shell_exec",
+            "{}",
+            &serde_json::json!({}),
+            "call_1",
+            false,
+            start,
+        );
+
+        assert!(!ok);
+        assert!(agent.messages.len() > initial_len);
+        let last = agent.messages.last().unwrap();
+        assert!(last
+            .content
+            .text()
+            .contains("missing required field(s): command"));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_validate_tool_args_accepts_valid_payload() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let start = std::time::Instant::now();
+        let ok = agent.validate_tool_args(
+            "shell_exec",
+            r#"{"command":"echo hi"}"#,
+            &serde_json::json!({"command":"echo hi"}),
+            "call_1",
+            false,
+            start,
+        );
+
+        assert!(ok);
 
         server.stop().await;
     }

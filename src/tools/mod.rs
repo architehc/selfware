@@ -82,6 +82,44 @@ pub fn truncate_with_pagination(
     (page, info)
 }
 
+/// Validate tool arguments against the top-level JSON schema contract exposed to the model.
+///
+/// This is intentionally conservative: it enforces that object-shaped tool schemas
+/// receive JSON objects and that all top-level `required` fields are present and
+/// non-null before execution begins.
+pub fn validate_tool_arguments_schema(tool_name: &str, schema: &Value, args: &Value) -> Result<()> {
+    if schema.get("type").and_then(|v| v.as_str()) == Some("object") && !args.is_object() {
+        anyhow::bail!(
+            "Schema validation failed for tool '{}': expected JSON object arguments",
+            tool_name
+        );
+    }
+
+    let Some(required) = schema.get("required").and_then(|v| v.as_array()) else {
+        return Ok(());
+    };
+
+    let Some(args_obj) = args.as_object() else {
+        return Ok(());
+    };
+
+    let missing: Vec<&str> = required
+        .iter()
+        .filter_map(|value| value.as_str())
+        .filter(|field| args_obj.get(*field).is_none_or(|value| value.is_null()))
+        .collect();
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "Schema validation failed for tool '{}': missing required field(s): {}",
+            tool_name,
+            missing.join(", ")
+        );
+    }
+}
+
 /// A tool that can be executed by the agent. Each tool has a name, description,
 /// JSON schema for its arguments, and an async `execute` method. Tools are
 /// registered in a [`ToolRegistry`] and invoked by name during agent execution.
@@ -328,6 +366,42 @@ mod tests {
 
         assert_eq!(tool.name(), "shell_exec");
         assert!(tool.description().contains("Execute"));
+    }
+
+    #[test]
+    fn test_schema_validator_rejects_non_object_args() {
+        let registry = ToolRegistry::new();
+        let tool = registry.get("shell_exec").unwrap();
+
+        let err =
+            validate_tool_arguments_schema(tool.name(), &tool.schema(), &serde_json::json!("ls"))
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("expected JSON object arguments"));
+    }
+
+    #[test]
+    fn test_schema_validator_rejects_missing_required_fields() {
+        let registry = ToolRegistry::new();
+        let tool = registry.get("process_start").unwrap();
+
+        let err =
+            validate_tool_arguments_schema(tool.name(), &tool.schema(), &serde_json::json!({}))
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("missing required field(s): id, command"));
+    }
+
+    #[test]
+    fn test_schema_validator_accepts_required_fields_present() {
+        let registry = ToolRegistry::new();
+        let tool = registry.get("file_write").unwrap();
+
+        let args = serde_json::json!({
+            "path": "/tmp/example.txt",
+            "content": "hello"
+        });
+        validate_tool_arguments_schema(tool.name(), &tool.schema(), &args).unwrap();
     }
 
     #[test]
