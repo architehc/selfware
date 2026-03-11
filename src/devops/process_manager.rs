@@ -20,9 +20,10 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 /// Maximum number of log lines to keep per process
@@ -33,6 +34,8 @@ const MAX_LOG_LINE_LEN: usize = 10_240;
 
 /// Default health check timeout in seconds
 const HEALTH_CHECK_TIMEOUT_SECS: u64 = 60;
+/// How long a reserved port is kept before being released automatically.
+const PORT_RESERVATION_TTL: Duration = Duration::from_secs(30);
 
 /// Process status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -47,7 +50,7 @@ pub enum ProcessStatus {
 }
 
 /// Configuration for starting a managed process
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProcessConfig {
     /// Unique identifier for this process
     pub id: String,
@@ -70,6 +73,11 @@ pub struct ProcessConfig {
     pub auto_restart: bool,
     /// Maximum restart attempts (0 = unlimited)
     pub max_restart_attempts: u32,
+}
+
+struct PortReservation {
+    listener: tokio::net::TcpListener,
+    reserved_at: Instant,
 }
 
 /// A managed background process
@@ -183,13 +191,119 @@ impl ManagedProcess {
 /// Manager for background processes
 pub struct ProcessManager {
     processes: Arc<RwLock<HashMap<String, ManagedProcess>>>,
+    port_reservations: Arc<Mutex<HashMap<u16, PortReservation>>>,
 }
 
 impl ProcessManager {
     pub fn new() -> Self {
         Self {
             processes: Arc::new(RwLock::new(HashMap::new())),
+            port_reservations: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    async fn cleanup_stale_port_reservations(&self) {
+        let mut reservations = self.port_reservations.lock().await;
+        reservations.retain(|port, reservation| {
+            let keep = reservation.reserved_at.elapsed() <= PORT_RESERVATION_TTL;
+            if !keep {
+                warn!(
+                    "Dropping stale reserved port {} after {:?}",
+                    port, PORT_RESERVATION_TTL
+                );
+            }
+            keep
+        });
+    }
+
+    pub async fn has_reserved_port(&self, port: u16) -> bool {
+        self.cleanup_stale_port_reservations().await;
+        let reservations = self.port_reservations.lock().await;
+        reservations.contains_key(&port)
+    }
+
+    pub async fn reserve_port(&self, port: u16) -> Result<u16> {
+        self.cleanup_stale_port_reservations().await;
+
+        {
+            let reservations = self.port_reservations.lock().await;
+            if reservations.contains_key(&port) {
+                anyhow::bail!("Port {} is already reserved by selfware", port);
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .with_context(|| format!("Port {} is already in use", port))?;
+
+        let mut reservations = self.port_reservations.lock().await;
+        if reservations.contains_key(&port) {
+            drop(listener);
+            anyhow::bail!("Port {} is already reserved by selfware", port);
+        }
+
+        reservations.insert(
+            port,
+            PortReservation {
+                listener,
+                reserved_at: Instant::now(),
+            },
+        );
+        Ok(port)
+    }
+
+    pub async fn reserve_available_port(&self, start: u16, end: u16) -> Result<u16> {
+        self.cleanup_stale_port_reservations().await;
+
+        for port in start..=end {
+            {
+                let reservations = self.port_reservations.lock().await;
+                if reservations.contains_key(&port) {
+                    continue;
+                }
+            }
+
+            let Ok(listener) = tokio::net::TcpListener::bind(("127.0.0.1", port)).await else {
+                continue;
+            };
+
+            let mut reservations = self.port_reservations.lock().await;
+            if reservations.contains_key(&port) {
+                drop(listener);
+                continue;
+            }
+
+            reservations.insert(
+                port,
+                PortReservation {
+                    listener,
+                    reserved_at: Instant::now(),
+                },
+            );
+            return Ok(port);
+        }
+
+        anyhow::bail!("No available ports found in range {}-{}", start, end)
+    }
+
+    async fn take_reserved_port(&self, port: u16) -> Option<tokio::net::TcpListener> {
+        self.cleanup_stale_port_reservations().await;
+        let mut reservations = self.port_reservations.lock().await;
+        reservations
+            .remove(&port)
+            .map(|reservation| reservation.listener)
+    }
+
+    pub async fn release_reserved_port(&self, port: u16) -> bool {
+        let mut reservations = self.port_reservations.lock().await;
+        reservations.remove(&port).is_some()
+    }
+
+    pub async fn clear_port_reservations(&self) -> usize {
+        let mut reservations = self.port_reservations.lock().await;
+        let count = reservations.len();
+        reservations.clear();
+        count
     }
 
     /// Start a new managed process
@@ -202,16 +316,31 @@ impl ProcessManager {
             if let Some(existing) = processes.get(&id) {
                 if matches!(
                     existing.status,
-                    ProcessStatus::Running | ProcessStatus::Starting
+                    ProcessStatus::Running
+                        | ProcessStatus::Starting
+                        | ProcessStatus::Restarting { .. }
                 ) {
-                    anyhow::bail!("Process '{}' is already running", id);
+                    if existing.config == config {
+                        info!("Reusing existing managed process '{}'", id);
+                        return Ok(existing.to_summary(50));
+                    }
+                    anyhow::bail!(
+                        "Process '{}' is already running with a different configuration",
+                        id
+                    );
                 }
             }
         }
 
+        let reserved_port_listener = if let Some(port) = config.expected_port {
+            self.take_reserved_port(port).await
+        } else {
+            None
+        };
+
         // Check port availability if specified
         if let Some(port) = config.expected_port {
-            if !is_port_available(port).await {
+            if reserved_port_listener.is_none() && !is_port_available(port).await {
                 anyhow::bail!("Port {} is already in use", port);
             }
         }
@@ -247,6 +376,10 @@ impl ProcessManager {
             "Starting process '{}': {} {:?}",
             id, config.command, config.args
         );
+
+        // Release the reservation at the last possible moment before spawning the child
+        // so the process can bind to the port immediately.
+        drop(reserved_port_listener);
 
         let child = cmd.spawn().with_context(|| {
             format!(
@@ -1223,7 +1356,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn test_process_manager_duplicate_start() {
+    async fn test_process_manager_duplicate_start_reuses_matching_config() {
         let manager = ProcessManager::new();
 
         let config = ProcessConfig {
@@ -1239,15 +1372,87 @@ mod tests {
             max_restart_attempts: 0,
         };
 
-        let _ = manager.start(config.clone()).await;
+        let first = manager.start(config.clone()).await.unwrap();
 
         // Try to start again with same ID
-        let result = manager.start(config).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("already running"));
+        let second = manager.start(config).await.unwrap();
+        assert_eq!(first.id, second.id);
+        assert_eq!(first.pid, second.pid);
 
         // Cleanup
         let _ = manager.stop("dup-test", true).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_process_manager_duplicate_start_different_config_errors() {
+        let manager = ProcessManager::new();
+
+        let config = ProcessConfig {
+            id: "dup-config-test".to_string(),
+            command: "sleep".to_string(),
+            args: vec!["60".to_string()],
+            cwd: None,
+            env: HashMap::new(),
+            health_check_pattern: None,
+            health_check_timeout_secs: None,
+            expected_port: None,
+            auto_restart: false,
+            max_restart_attempts: 0,
+        };
+
+        let _ = manager.start(config.clone()).await.unwrap();
+
+        let mut changed = config;
+        changed.args = vec!["30".to_string()];
+
+        let result = manager.start(changed).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("different configuration"));
+
+        let _ = manager.stop("dup-config-test", true).await;
+    }
+
+    #[tokio::test]
+    async fn test_port_reservation_round_trip() {
+        let manager = ProcessManager::new();
+        let port = manager.reserve_available_port(55000, 55100).await.unwrap();
+        assert!(manager.has_reserved_port(port).await);
+        assert!(!is_port_available(port).await);
+
+        let released = manager.release_reserved_port(port).await;
+        assert!(released);
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        assert!(is_port_available(port).await);
+    }
+
+    #[tokio::test]
+    async fn test_start_consumes_matching_port_reservation() {
+        let manager = ProcessManager::new();
+        let port = manager.reserve_available_port(55101, 55200).await.unwrap();
+        assert!(manager.has_reserved_port(port).await);
+
+        let config = ProcessConfig {
+            id: "reserved-port-start-test".to_string(),
+            command: "sleep".to_string(),
+            args: vec!["60".to_string()],
+            cwd: None,
+            env: HashMap::new(),
+            health_check_pattern: None,
+            health_check_timeout_secs: None,
+            expected_port: Some(port),
+            auto_restart: false,
+            max_restart_attempts: 0,
+        };
+
+        let summary = manager.start(config).await.unwrap();
+        assert_eq!(summary.expected_port, Some(port));
+        assert!(!manager.has_reserved_port(port).await);
+
+        let _ = manager.stop("reserved-port-start-test", true).await;
     }
 
     #[tokio::test]

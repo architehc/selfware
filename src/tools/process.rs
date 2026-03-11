@@ -35,6 +35,7 @@ impl Tool for ProcessStart {
 
     fn description(&self) -> &str {
         "Start a background process (e.g., dev server, file watcher). The process persists across agent steps. \
+         If the same id is already running with the same configuration, the existing process is reused. \
          Use health_check_pattern to wait for readiness (e.g., 'Ready on http' for Next.js, 'Compiled successfully' for webpack)."
     }
 
@@ -386,7 +387,7 @@ impl Tool for PortCheck {
     }
 
     fn description(&self) -> &str {
-        "Check port availability and find open ports. Use before starting servers to avoid conflicts."
+        "Check port availability and find open ports. Use reserve=true to hold a port for a later process_start call and reduce races."
     }
 
     fn schema(&self) -> Value {
@@ -401,6 +402,11 @@ impl Tool for PortCheck {
                     "type": "boolean",
                     "default": false,
                     "description": "Find an available port in the range"
+                },
+                "reserve": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Reserve the checked/found port until process_start consumes it or cleanup runs"
                 },
                 "range_start": {
                     "type": "integer",
@@ -423,6 +429,10 @@ impl Tool for PortCheck {
             .get("find_available")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let reserve = args
+            .get("reserve")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         let range_start = args
             .get("range_start")
@@ -434,7 +444,20 @@ impl Tool for PortCheck {
             .and_then(|v| v.as_u64())
             .unwrap_or(9000) as u16;
 
+        let manager = PROCESS_MANAGER.read().await;
+
         if let Some(port) = specific_port {
+            if reserve {
+                manager.reserve_port(port).await?;
+                return Ok(serde_json::json!({
+                    "port": port,
+                    "available": true,
+                    "reserved": true,
+                    "reservation_ttl_secs": 30
+                }));
+            }
+
+            let reserved = manager.has_reserved_port(port).await;
             let available = is_port_available(port).await;
             let info = if !available {
                 port_info(port).await
@@ -445,15 +468,25 @@ impl Tool for PortCheck {
             return Ok(serde_json::json!({
                 "port": port,
                 "available": available,
+                "reserved": reserved,
                 "process_info": info
             }));
         }
 
         if find_available {
-            let port = find_available_port(range_start, range_end).await;
+            let port = if reserve {
+                Some(
+                    manager
+                        .reserve_available_port(range_start, range_end)
+                        .await?,
+                )
+            } else {
+                find_available_port(range_start, range_end).await
+            };
             return Ok(serde_json::json!({
                 "available_port": port,
-                "range_searched": format!("{}-{}", range_start, range_end)
+                "range_searched": format!("{}-{}", range_start, range_end),
+                "reserved": reserve
             }));
         }
 
@@ -481,11 +514,19 @@ impl Tool for PortCheck {
 pub async fn cleanup_all_processes() {
     let manager = PROCESS_MANAGER.read().await;
     let stopped = manager.stop_all().await;
+    let released_reservations = manager.clear_port_reservations().await;
     if stopped > 0 {
         println!(
             "Stopped {} background process{}",
             stopped,
             if stopped == 1 { "" } else { "es" }
+        );
+    }
+    if released_reservations > 0 {
+        println!(
+            "Released {} port reservation{}",
+            released_reservations,
+            if released_reservations == 1 { "" } else { "s" }
         );
     }
 }
@@ -617,6 +658,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_port_check_find_available_with_reservation() {
+        let tool = PortCheck;
+        let result = tool
+            .execute(serde_json::json!({
+                "find_available": true,
+                "reserve": true,
+                "range_start": 56000,
+                "range_end": 56100
+            }))
+            .await;
+        assert!(result.is_ok());
+
+        let output = result.unwrap();
+        let port = output["available_port"].as_u64().unwrap() as u16;
+        assert_eq!(output["reserved"].as_bool(), Some(true));
+        assert!(!is_port_available(port).await);
+
+        let manager = PROCESS_MANAGER.read().await;
+        assert!(manager.release_reserved_port(port).await);
+    }
+
+    #[tokio::test]
     async fn test_process_start_echo() {
         let tool = ProcessStart;
         let result = tool
@@ -692,6 +755,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_process_start_consumes_reserved_port() {
+        let port = {
+            let manager = PROCESS_MANAGER.read().await;
+            manager.reserve_available_port(56101, 56200).await.unwrap()
+        };
+        assert!(!is_port_available(port).await);
+
+        let tool = ProcessStart;
+        let result = tool
+            .execute(serde_json::json!({
+                "id": "test-reserved-port-tool",
+                "command": "sleep",
+                "args": ["60"],
+                "expected_port": port
+            }))
+            .await;
+        assert!(
+            result.is_ok(),
+            "process_start should consume selfware reservation instead of rejecting the port"
+        );
+
+        let manager = PROCESS_MANAGER.read().await;
+        let summary = manager.get("test-reserved-port-tool").await.unwrap();
+        assert_eq!(summary.expected_port, Some(port));
+        assert!(!manager.has_reserved_port(port).await);
+
+        let _ = manager.stop("test-reserved-port-tool", true).await;
     }
 
     #[tokio::test]
@@ -827,7 +920,10 @@ mod tests {
         let manager = PROCESS_MANAGER.read().await;
         let summary = manager.get("test-health-timeout-tool").await.unwrap();
         assert!(
-            matches!(summary.status, crate::process_manager::ProcessStatus::HealthCheckFailed),
+            matches!(
+                summary.status,
+                crate::process_manager::ProcessStatus::HealthCheckFailed
+            ),
             "Expected health check failure status, got {:?}",
             summary.status
         );
