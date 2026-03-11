@@ -13,6 +13,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 use crate::api::types::Message;
+use crate::bm25::BM25Index;
 use crate::token_count::estimate_tokens_with_overhead;
 #[cfg(test)]
 use crate::vector_store::MockEmbeddingProvider;
@@ -858,6 +859,13 @@ impl SemanticMemory {
             Ok(c) => c,
             Err(_) => return Ok(()), // Skip binary files
         };
+        let last_modified = tokio::fs::metadata(path)
+            .await
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or_else(current_timestamp_secs);
 
         let token_count = estimate_tokens_with_overhead(&content, 0);
 
@@ -874,7 +882,7 @@ impl SemanticMemory {
             path: path.to_string_lossy().to_string(),
             content: file_content,
             token_count,
-            last_modified: 0, // TODO: Get actual modified time
+            last_modified,
         };
 
         self.total_tokens += token_count;
@@ -908,24 +916,61 @@ impl SemanticMemory {
         max_tokens: usize,
         _include_related: bool,
     ) -> Result<CodeContext> {
-        // Simple keyword-based retrieval for now
-        // TODO: Implement semantic search with embeddings
+        // Use a synchronous BM25 index over paths + content until embeddings are
+        // wired into this retrieval path.
+        let mut index = BM25Index::new();
+        index.add_batch(
+            self.files
+                .values()
+                .map(|file| (file.path.clone(), Self::searchable_text(file))),
+        );
 
         let query_lower = query.to_lowercase();
         let keywords: Vec<&str> = query_lower.split_whitespace().collect();
-
-        let mut scored_files: Vec<(String, f32, usize)> = self
+        let max_last_modified = self
             .files
-            .iter()
-            .map(|(path, file)| {
-                let path_lower = path.to_lowercase();
-                let score = keywords.iter().filter(|k| path_lower.contains(*k)).count() as f32;
-                (path.clone(), score, file.token_count)
+            .values()
+            .map(|file| file.last_modified)
+            .max()
+            .unwrap_or(0);
+
+        let mut scored_files: Vec<(String, f32, usize)> = index
+            .search(query, self.files.len())
+            .into_iter()
+            .filter_map(|result| {
+                self.files.get(&result.id).map(|file| {
+                    let path_bonus = Self::path_keyword_bonus(&keywords, &file.path);
+                    let recency_bonus = if max_last_modified > 0 {
+                        (file.last_modified as f32 / max_last_modified as f32) * 0.05
+                    } else {
+                        0.0
+                    };
+                    (
+                        result.id,
+                        result.score + path_bonus + recency_bonus,
+                        file.token_count,
+                    )
+                })
             })
-            .filter(|(_, score, _)| *score > 0.0)
             .collect();
 
-        scored_files.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored_files.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    let a_modified = self
+                        .files
+                        .get(&a.0)
+                        .map(|file| file.last_modified)
+                        .unwrap_or(0);
+                    let b_modified = self
+                        .files
+                        .get(&b.0)
+                        .map(|file| file.last_modified)
+                        .unwrap_or(0);
+                    b_modified.cmp(&a_modified)
+                })
+        });
 
         let mut context = CodeContext {
             files: Vec::new(),
@@ -938,15 +983,7 @@ impl SemanticMemory {
             }
 
             if let Some(file) = self.files.get(&path) {
-                let content = match &file.content {
-                    FileContent::Full(c) => c.clone(),
-                    FileContent::Chunked(chunks) => chunks
-                        .iter()
-                        .map(|c| c.content.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                    FileContent::Summary(s) => s.clone(),
-                };
+                let content = Self::render_content(file);
 
                 context.files.push(FileContextEntry {
                     path: path.clone(),
@@ -958,6 +995,31 @@ impl SemanticMemory {
         }
 
         Ok(context)
+    }
+
+    fn render_content(file: &IndexedFile) -> String {
+        match &file.content {
+            FileContent::Full(content) => content.clone(),
+            FileContent::Chunked(chunks) => chunks
+                .iter()
+                .map(|chunk| chunk.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            FileContent::Summary(summary) => summary.clone(),
+        }
+    }
+
+    fn searchable_text(file: &IndexedFile) -> String {
+        format!("{} {}", file.path, Self::render_content(file))
+    }
+
+    fn path_keyword_bonus(keywords: &[&str], path: &str) -> f32 {
+        let path_lower = path.to_lowercase();
+        keywords
+            .iter()
+            .filter(|keyword| path_lower.contains(**keyword))
+            .count() as f32
+            * 0.5
     }
 
     fn is_source_file(path: &std::path::Path) -> bool {
@@ -1922,6 +1984,40 @@ mod tests {
     }
 
     #[test]
+    fn test_semantic_memory_retrieve_code_context_matches_file_content() {
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut sm = SemanticMemory::new(700_000, embedding);
+
+        sm.files.insert(
+            "src/alpha.rs".to_string(),
+            IndexedFile {
+                path: "src/alpha.rs".to_string(),
+                content: FileContent::Full(
+                    "fn rank_results() { let semantic_signal = true; }".to_string(),
+                ),
+                token_count: 50,
+                last_modified: 0,
+            },
+        );
+        sm.files.insert(
+            "src/unrelated.rs".to_string(),
+            IndexedFile {
+                path: "src/unrelated.rs".to_string(),
+                content: FileContent::Full("fn helper() {}".to_string()),
+                token_count: 40,
+                last_modified: 0,
+            },
+        );
+
+        let ctx = sm
+            .retrieve_code_context("semantic signal", 100_000, false)
+            .unwrap();
+        assert_eq!(ctx.files.len(), 1);
+        assert_eq!(ctx.files[0].path, "src/alpha.rs");
+        assert!(ctx.files[0].relevance_score > 0.0);
+    }
+
+    #[test]
     fn test_semantic_memory_retrieve_code_context_respects_max_tokens() {
         let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
         let mut sm = SemanticMemory::new(700_000, embedding);
@@ -2162,6 +2258,24 @@ mod tests {
                 FileContent::Chunked(_) | FileContent::Summary(_) => {}
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_semantic_memory_index_file_sets_last_modified() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_path = tmp.path().join("tracked.rs");
+        tokio::fs::write(&file_path, "fn tracked() {}")
+            .await
+            .unwrap();
+
+        let embedding = Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()));
+        let mut sm = SemanticMemory::new(700_000, embedding);
+        sm.index_file(&file_path).await.unwrap();
+
+        let indexed = sm
+            .get_file(&file_path.to_string_lossy())
+            .expect("file should be indexed");
+        assert!(indexed.last_modified > 0);
     }
 
     // ========================================================================
