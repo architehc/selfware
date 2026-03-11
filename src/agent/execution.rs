@@ -71,8 +71,7 @@ type CollectedToolCall = (String, String, Option<String>);
 
 const TOOL_CONFIRM_ARGS_PREVIEW_CHARS: usize = 240;
 const TOOL_FAILURE_HINT_PREVIEW_CHARS: usize = 400;
-const TOOL_INPUT_FAILURE_WINDOW_SIZE: usize = 8;
-const TOOL_INPUT_FAILURE_REPEAT_THRESHOLD: usize = 2;
+const FAILED_TOOL_ATTEMPT_WINDOW_SIZE: usize = 16;
 
 fn truncate_chars(s: &str, max_chars: usize) -> String {
     let collected: String = s.chars().take(max_chars).collect();
@@ -104,15 +103,10 @@ impl Agent {
         ));
     }
 
-    fn build_tool_input_recovery_message(
-        &self,
-        tool_name: &str,
-        failure_kind: &'static str,
-        error: &str,
-    ) -> String {
+    fn build_failed_tool_retry_suppressed_message(&self, failure: &FailedToolAttempt) -> String {
         let schema_hint = self
             .tools
-            .get(tool_name)
+            .get(&failure.tool_name)
             .and_then(|tool| {
                 let required: Vec<String> = tool
                     .schema()
@@ -128,63 +122,100 @@ impl Agent {
             })
             .unwrap_or_default();
 
-        let guidance = if failure_kind == "parsing" {
-            "The arguments must be valid JSON before the tool can run."
-        } else {
-            "The arguments do not satisfy the tool schema yet."
-        };
-        let error_preview = truncate_chars(error, TOOL_FAILURE_HINT_PREVIEW_CHARS);
-
-        format!(
-            "TOOL INPUT RECOVERY: You retried `{}` with the same {} more than once. Stop repeating the same broken payload. {}{} Last error: {}",
-            tool_name,
-            if failure_kind == "parsing" {
-                "malformed JSON arguments"
-            } else {
-                "schema-invalid arguments"
-            },
-            guidance,
-            schema_hint,
-            error_preview
-        )
+        match failure.failure_kind {
+            "parsing" => format!(
+                "RETRY SUPPRESSED: `{}` with these exact arguments already failed because the arguments were not valid JSON.{} Change the JSON before retrying. Last error: {}",
+                failure.tool_name, schema_hint, failure.error_preview
+            ),
+            "validation" => format!(
+                "RETRY SUPPRESSED: `{}` with these exact arguments already failed schema validation.{} Change the arguments before retrying. Last error: {}",
+                failure.tool_name, schema_hint, failure.error_preview
+            ),
+            "safety" => format!(
+                "RETRY SUPPRESSED: `{}` with these exact arguments already failed the safety check. Change the tool or arguments before retrying. Last error: {}",
+                failure.tool_name, failure.error_preview
+            ),
+            other => format!(
+                "RETRY SUPPRESSED: `{}` with these exact arguments already failed due to {}. Do not rerun it until a different successful tool call changes the situation or you change the inputs. Last error: {}",
+                failure.tool_name, other, failure.error_preview
+            ),
+        }
     }
 
-    fn record_tool_input_failure(
+    fn record_failed_tool_attempt(
         &mut self,
         tool_name: &str,
         args_str: &str,
         failure_kind: &'static str,
         error: &str,
     ) {
-        let sig = (
-            tool_name.to_string(),
-            hash_tool_args(args_str),
-            failure_kind,
-        );
-        self.recent_tool_input_failures.push_back(sig.clone());
-        if self.recent_tool_input_failures.len() > TOOL_INPUT_FAILURE_WINDOW_SIZE {
-            self.recent_tool_input_failures.pop_front();
+        let args_hash = hash_tool_args(args_str);
+        let error_preview = truncate_chars(error, TOOL_FAILURE_HINT_PREVIEW_CHARS);
+        self.recent_failed_tool_attempts.retain(|existing| {
+            !(existing.tool_name == tool_name
+                && existing.args_hash == args_hash
+                && existing.failure_kind == failure_kind)
+        });
+        self.recent_failed_tool_attempts
+            .push_back(FailedToolAttempt {
+                tool_name: tool_name.to_string(),
+                args_hash,
+                failure_kind,
+                error_preview,
+            });
+        if self.recent_failed_tool_attempts.len() > FAILED_TOOL_ATTEMPT_WINDOW_SIZE {
+            self.recent_failed_tool_attempts.pop_front();
         }
+    }
 
-        let repeat_count = self
-            .recent_tool_input_failures
+    pub(super) fn clear_failed_tool_attempts(&mut self) {
+        self.recent_failed_tool_attempts.clear();
+    }
+
+    fn suppress_repeated_failed_tool_retry(
+        &mut self,
+        tool_name: &str,
+        args_str: &str,
+        call_id: &str,
+        use_native_fc: bool,
+        start_time: std::time::Instant,
+    ) -> bool {
+        let args_hash = hash_tool_args(args_str);
+        let Some(failure) = self
+            .recent_failed_tool_attempts
             .iter()
-            .filter(|existing| **existing == sig)
-            .count();
+            .rev()
+            .find(|attempt| attempt.tool_name == tool_name && attempt.args_hash == args_hash)
+            .cloned()
+        else {
+            return false;
+        };
 
-        if repeat_count < TOOL_INPUT_FAILURE_REPEAT_THRESHOLD {
-            return;
-        }
-
-        let recovery_msg = self.build_tool_input_recovery_message(tool_name, failure_kind, error);
+        let err = self.build_failed_tool_retry_suppressed_message(&failure);
         warn!(
-            "Repeated {} failure for tool '{}', injecting recovery hint",
-            failure_kind, tool_name
+            "Suppressing repeated failed tool call for '{}' after prior {} failure",
+            tool_name, failure.failure_kind
         );
-        self.pending_failure_hint = Some(recovery_msg.clone());
-        self.messages.push(Message::user(recovery_msg));
-        self.recent_tool_input_failures
-            .retain(|existing| *existing != sig);
+        println!("{} {}", "✗".bright_red(), err);
+        self.push_tool_result_message(use_native_fc, call_id, tool_name, false, &err);
+        self.log_tool_call(tool_name, args_str, &err, false, start_time, false);
+        self.remember_failed_tool(tool_name, &err);
+        let duration_ms = start_time.elapsed().as_millis() as u64;
+        self.self_improvement.record_tool(
+            tool_name,
+            self.learning_context(),
+            Outcome::Failure,
+            duration_ms,
+            Some(err.clone()),
+        );
+        self.self_improvement.record_error(
+            &err,
+            "retry_suppressed",
+            self.learning_context(),
+            tool_name,
+            None,
+        );
+        true
     }
 
     /// Execute a step with tool call logging for checkpoints
@@ -511,6 +542,21 @@ impl Agent {
             let (call_id, use_native_fc, fake_call) =
                 self.build_tool_call_context(&name, &args_str, tool_call_id);
 
+            if self.suppress_repeated_failed_tool_retry(
+                &name,
+                &args_str,
+                &call_id,
+                use_native_fc,
+                start_time,
+            ) {
+                self.emit_event(AgentEvent::ToolCompleted {
+                    name: name.clone(),
+                    success: false,
+                    duration_ms: start_time.elapsed().as_millis() as u64,
+                });
+                continue;
+            }
+
             if let Err(e) = self.safety.check_tool_call(&fake_call) {
                 let error_msg = format!("Safety check failed: {}", e);
                 let spinner = crate::ui::spinner::TerminalSpinner::start(&error_msg);
@@ -538,6 +584,7 @@ impl Agent {
                     &name,
                     None,
                 );
+                self.record_failed_tool_attempt(&name, &args_str, "safety", &error_msg);
                 continue;
             }
 
@@ -641,6 +688,11 @@ impl Agent {
                     &name,
                     None,
                 );
+            }
+            if success {
+                self.clear_failed_tool_attempts();
+            } else {
+                self.record_failed_tool_attempt(&name, &args_str, "execution", &result);
             }
 
             // Track file operations for context management
@@ -832,7 +884,7 @@ impl Agent {
                     name,
                     None,
                 );
-                self.record_tool_input_failure(name, args_str, "parsing", &err);
+                self.record_failed_tool_attempt(name, args_str, "parsing", &err);
                 None
             }
         }
@@ -881,7 +933,7 @@ impl Agent {
                     name,
                     None,
                 );
-                self.record_tool_input_failure(name, args_str, "validation", &err);
+                self.record_failed_tool_attempt(name, args_str, "validation", &err);
                 false
             }
         }
@@ -3379,7 +3431,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_repeated_parse_failures_inject_recovery_message() {
+    async fn test_repeated_parse_failure_is_suppressed_before_reexecution() {
         let server = MockLlmServer::builder().with_response("done").build().await;
         let config = test_config(format!("{}/v1", server.url()));
         let mut agent = Agent::new(config).await.unwrap();
@@ -3387,32 +3439,30 @@ mod tests {
         let start = std::time::Instant::now();
         let first = agent.parse_tool_args("shell_exec", "{broken", "call_1", false, start);
         assert!(first.is_none());
-        assert!(!agent
-            .messages
-            .iter()
-            .any(|msg| msg.content.text().contains("TOOL INPUT RECOVERY")));
 
         let second_start = std::time::Instant::now();
-        let second = agent.parse_tool_args("shell_exec", "{broken", "call_2", false, second_start);
-        assert!(second.is_none());
+        let suppressed = agent.suppress_repeated_failed_tool_retry(
+            "shell_exec",
+            "{broken",
+            "call_2",
+            false,
+            second_start,
+        );
+        assert!(suppressed);
 
-        let recovery = agent
-            .messages
-            .iter()
-            .rev()
-            .find(|msg| msg.role == "user" && msg.content.text().contains("TOOL INPUT RECOVERY"))
-            .expect("expected repeated parse recovery message");
+        let recovery = agent.messages.last().expect("expected suppression result");
+        assert!(recovery.content.text().contains("RETRY SUPPRESSED"));
         assert!(recovery.content.text().contains("valid JSON"));
         assert!(recovery.content.text().contains("`command`"));
         assert!(agent.pending_failure_hint.as_deref().is_some_and(|hint| {
-            hint.contains("TOOL INPUT RECOVERY") && hint.contains("valid JSON")
+            hint.contains("RETRY SUPPRESSED") && hint.contains("valid JSON")
         }));
 
         server.stop().await;
     }
 
     #[tokio::test]
-    async fn test_repeated_validation_failures_inject_recovery_message() {
+    async fn test_repeated_validation_failure_is_suppressed_before_reexecution() {
         let server = MockLlmServer::builder().with_response("done").build().await;
         let config = test_config(format!("{}/v1", server.url()));
         let mut agent = Agent::new(config).await.unwrap();
@@ -3427,33 +3477,65 @@ mod tests {
             start,
         );
         assert!(!first);
-        assert!(!agent
-            .messages
-            .iter()
-            .any(|msg| msg.content.text().contains("TOOL INPUT RECOVERY")));
 
         let second_start = std::time::Instant::now();
-        let second = agent.validate_tool_args(
+        let suppressed = agent.suppress_repeated_failed_tool_retry(
             "shell_exec",
             "{}",
-            &serde_json::json!({}),
             "call_2",
             false,
             second_start,
         );
-        assert!(!second);
+        assert!(suppressed);
 
-        let recovery = agent
-            .messages
-            .iter()
-            .rev()
-            .find(|msg| msg.role == "user" && msg.content.text().contains("TOOL INPUT RECOVERY"))
-            .expect("expected repeated validation recovery message");
-        assert!(recovery.content.text().contains("schema-invalid arguments"));
+        let recovery = agent.messages.last().expect("expected suppression result");
+        assert!(recovery.content.text().contains("RETRY SUPPRESSED"));
+        assert!(recovery.content.text().contains("schema validation"));
         assert!(recovery.content.text().contains("`command`"));
         assert!(agent.pending_failure_hint.as_deref().is_some_and(|hint| {
-            hint.contains("TOOL INPUT RECOVERY") && hint.contains("schema-invalid arguments")
+            hint.contains("RETRY SUPPRESSED") && hint.contains("schema validation")
         }));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_successful_different_tool_clears_failed_tool_suppression_window() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let batch: Vec<CollectedToolCall> = vec![
+            ("shell_exec".to_string(), "{}".to_string(), None),
+            ("git_status".to_string(), "{}".to_string(), None),
+            ("shell_exec".to_string(), "{}".to_string(), None),
+        ];
+
+        agent.execute_tool_batch(batch).await.unwrap();
+
+        let validation_failures = agent
+            .messages
+            .iter()
+            .filter(|msg| {
+                msg.content
+                    .text()
+                    .contains("missing required field(s): command")
+            })
+            .count();
+        let suppressed_retries = agent
+            .messages
+            .iter()
+            .filter(|msg| msg.content.text().contains("RETRY SUPPRESSED"))
+            .count();
+
+        assert!(
+            validation_failures >= 2,
+            "expected the same invalid tool to run again after a different successful tool"
+        );
+        assert_eq!(
+            suppressed_retries, 0,
+            "successful different tool should clear retry suppression"
+        );
 
         server.stop().await;
     }

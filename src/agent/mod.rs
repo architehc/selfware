@@ -110,6 +110,14 @@ fn verification_instructions(pt: ProjectType) -> (&'static str, &'static str, &'
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FailedToolAttempt {
+    tool_name: String,
+    args_hash: u64,
+    failure_kind: &'static str,
+    error_preview: String,
+}
+
 /// Core agent that orchestrates LLM reasoning with tool execution.
 ///
 /// The agent maintains conversation state, manages tool calls through a safety
@@ -167,8 +175,8 @@ pub struct Agent {
     self_healing: SelfHealingEngine,
     /// Recent tool call signatures for repetition detection (name, args_hash)
     recent_tool_calls: VecDeque<(String, u64)>,
-    /// Recent parse/schema failures for identical tool inputs (name, args_hash, kind)
-    recent_tool_input_failures: VecDeque<(String, u64, &'static str)>,
+    /// Failed tool attempts in the current recovery window.
+    recent_failed_tool_attempts: VecDeque<FailedToolAttempt>,
     /// Hook registry for event-driven automation
     hook_registry: HookRegistry,
     /// Plan mode: propose tool calls without executing them
@@ -492,7 +500,7 @@ To call a tool, use this EXACT XML structure:
             #[cfg(feature = "resilience")]
             self_healing,
             recent_tool_calls: VecDeque::new(),
-            recent_tool_input_failures: VecDeque::new(),
+            recent_failed_tool_attempts: VecDeque::new(),
             hook_registry,
             plan_mode,
             audit_logger,

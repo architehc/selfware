@@ -227,7 +227,7 @@ async fn test_agent_run_task_streaming_fallback_to_non_streaming() {
     target_os = "windows",
     ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
 )]
-async fn test_agent_run_task_repeated_invalid_tool_calls_inject_recovery_hint() {
+async fn test_agent_run_task_repeated_invalid_tool_calls_are_suppressed() {
     let server = MockLlmServer::builder()
         .with_response(
             r#"<tool>
@@ -260,10 +260,10 @@ async fn test_agent_run_task_repeated_invalid_tool_calls_inject_recovery_hint() 
     assert!(
         agent.messages.iter().any(|message| {
             message.role == "user"
-                && message.content.text().contains("TOOL INPUT RECOVERY")
+                && message.content.text().contains("RETRY SUPPRESSED")
                 && message.content.text().contains("`command`")
         }),
-        "agent should inject a repeated invalid tool call recovery hint"
+        "agent should suppress the repeated invalid tool call"
     );
 
     server.stop().await;

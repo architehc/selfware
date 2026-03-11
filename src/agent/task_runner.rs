@@ -21,6 +21,7 @@ impl Agent {
         // Reset loop state so queued tasks don't inherit the previous
         // task's iteration counter and hit the max-iterations limit.
         self.loop_control.reset_for_task();
+        self.clear_failed_tool_attempts();
         let task_description = task.to_string();
 
         let cancel_token = self.cancel_token();
