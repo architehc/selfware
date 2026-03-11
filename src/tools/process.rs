@@ -37,7 +37,8 @@ impl Tool for ProcessStart {
     fn description(&self) -> &str {
         "Start a background process (e.g., dev server, file watcher). The process persists across agent steps. \
          If the same id is already running with the same configuration, the existing process is reused. \
-         Use health_check_pattern to wait for readiness (e.g., 'Ready on http' for Next.js, 'Compiled successfully' for webpack)."
+         Use health_check_pattern to wait for readiness (e.g., 'Ready on http' for Next.js, 'Compiled successfully' for webpack). \
+         When expected_port is provided, selfware automatically reserves that port until the child is spawned."
     }
 
     fn schema(&self) -> Value {
@@ -819,6 +820,36 @@ mod tests {
         assert!(!manager.has_reserved_port(port).await);
 
         let _ = manager.stop("test-reserved-port-tool", true).await;
+    }
+
+    #[tokio::test]
+    async fn test_process_start_auto_reserves_expected_port_without_prior_reservation() {
+        let probe_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = probe_listener.local_addr().unwrap().port();
+        drop(probe_listener);
+
+        let tool = ProcessStart;
+        let result = tool
+            .execute(serde_json::json!({
+                "id": "test-auto-reserved-port-tool",
+                "command": "sleep",
+                "args": ["60"],
+                "expected_port": port
+            }))
+            .await;
+        assert!(
+            result.is_ok(),
+            "process_start should automatically reserve a free expected_port before spawn"
+        );
+
+        let manager = PROCESS_MANAGER.read().await;
+        let summary = manager.get("test-auto-reserved-port-tool").await.unwrap();
+        assert_eq!(summary.expected_port, Some(port));
+        assert!(!manager.has_reserved_port(port).await);
+
+        let _ = manager.stop("test-auto-reserved-port-tool", true).await;
     }
 
     #[tokio::test]

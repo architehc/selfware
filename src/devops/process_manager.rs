@@ -307,6 +307,17 @@ impl ProcessManager {
         anyhow::bail!("No available ports found in range {}-{}", start, end)
     }
 
+    async fn acquire_startup_port_listener(&self, port: u16) -> Result<tokio::net::TcpListener> {
+        if let Some(listener) = self.take_reserved_port(port).await {
+            return Ok(listener);
+        }
+
+        self.reserve_port(port).await?;
+        self.take_reserved_port(port)
+            .await
+            .context("Reserved port disappeared before process start")
+    }
+
     async fn take_reserved_port(&self, port: u16) -> Option<tokio::net::TcpListener> {
         self.cleanup_stale_port_reservations().await;
         let mut reservations = self.port_reservations.lock().await;
@@ -502,19 +513,6 @@ impl ProcessManager {
             }
         }
 
-        let reserved_port_listener = if let Some(port) = config.expected_port {
-            self.take_reserved_port(port).await
-        } else {
-            None
-        };
-
-        // Check port availability if specified
-        if let Some(port) = config.expected_port {
-            if reserved_port_listener.is_none() && !is_port_available(port).await {
-                anyhow::bail!("Port {} is already in use", port);
-            }
-        }
-
         let health_pattern = config
             .health_check_pattern
             .as_ref()
@@ -525,6 +523,11 @@ impl ProcessManager {
         let health_timeout = config
             .health_check_timeout_secs
             .unwrap_or(HEALTH_CHECK_TIMEOUT_SECS);
+
+        let reserved_port_listener = match config.expected_port {
+            Some(port) => Some(self.acquire_startup_port_listener(port).await?),
+            None => None,
+        };
 
         // Build the command
         let mut cmd = Command::new(&config.command);
@@ -1623,6 +1626,49 @@ mod tests {
         assert!(!manager.has_reserved_port(port).await);
 
         let _ = manager.stop("reserved-port-start-test", true).await;
+    }
+
+    #[tokio::test]
+    async fn test_acquire_startup_port_listener_auto_reserves_unreserved_port() {
+        let manager = ProcessManager::new();
+        let (probe_listener, port) = bind_available_port().await.unwrap();
+        drop(probe_listener);
+
+        let startup_listener = manager.acquire_startup_port_listener(port).await.unwrap();
+        assert!(!manager.has_reserved_port(port).await);
+        assert!(!is_port_available(port).await);
+
+        drop(startup_listener);
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        assert!(is_port_available(port).await);
+    }
+
+    #[tokio::test]
+    async fn test_invalid_health_check_regex_preserves_existing_port_reservation() {
+        let manager = ProcessManager::new();
+        let port = manager.reserve_available_port(55201, 55300).await.unwrap();
+        assert!(manager.has_reserved_port(port).await);
+
+        let config = ProcessConfig {
+            id: "invalid-regex-reservation-test".to_string(),
+            command: "sleep".to_string(),
+            args: vec!["1".to_string()],
+            cwd: None,
+            env: HashMap::new(),
+            health_check_pattern: Some("(".to_string()),
+            health_check_timeout_secs: None,
+            expected_port: Some(port),
+            auto_restart: false,
+            max_restart_attempts: 0,
+        };
+
+        let error = manager.start(config).await.unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Invalid health check regex pattern"));
+        assert!(manager.has_reserved_port(port).await);
+
+        assert!(manager.release_reserved_port(port).await);
     }
 
     #[tokio::test]
