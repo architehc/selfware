@@ -21,19 +21,23 @@ use crate::tool_parser::parse_tool_calls;
 /// is active on another thread.
 fn read_line_pausing_esc(
     esc_paused: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    esc_pause_ack: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> std::io::Result<String> {
     use std::sync::atomic::Ordering;
 
     // Signal the ESC listener to pause and release raw mode
     esc_paused.store(true, Ordering::Release);
-    // Give the listener thread time to actually disable raw mode
-    std::thread::sleep(std::time::Duration::from_millis(80));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+    while !esc_pause_ack.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
 
     let mut response = String::new();
     let result = std::io::stdin().read_line(&mut response);
 
     // Unpause — the listener will re-enter raw mode on its own
     esc_paused.store(false, Ordering::Release);
+    esc_pause_ack.store(false, Ordering::Release);
 
     result.map(|_| response)
 }
@@ -127,6 +131,26 @@ fn looks_like_malformed_tool_xml(content: &str) -> bool {
         || trimmed.contains("<function=")
         || trimmed.contains("<name=")
         || trimmed.contains("<parameter=")
+}
+
+fn detect_oscillating_pair(
+    recent_tool_calls: &std::collections::VecDeque<(String, u64)>,
+) -> Option<((String, u64), (String, u64))> {
+    if recent_tool_calls.len() < 4 {
+        return None;
+    }
+
+    let window: Vec<_> = recent_tool_calls.iter().rev().take(4).cloned().collect();
+    let latest = &window[0];
+    let previous = &window[1];
+    let older = &window[2];
+    let oldest = &window[3];
+
+    if latest == older && previous == oldest && latest != previous {
+        Some((oldest.clone(), older.clone()))
+    } else {
+        None
+    }
 }
 
 impl Agent {
@@ -717,6 +741,25 @@ impl Agent {
                     name, repeat_count
                 ));
             }
+
+            if let Some((first, second)) = detect_oscillating_pair(&self.recent_tool_calls) {
+                warn!(
+                    "Oscillation loop detected between '{}' and '{}'",
+                    first.0, second.0
+                );
+                self.cognitive_state.episodic_memory.what_failed(
+                    "oscillation_loop",
+                    &format!(
+                        "Stuck oscillating between {} and {} with identical recent signatures",
+                        first.0, second.0
+                    ),
+                );
+                self.recent_tool_calls.clear();
+                return Some(format!(
+                    "OSCILLATION LOOP DETECTED: you are alternating between `{}` and `{}` with the same recent inputs (A -> B -> A -> B). This is not making progress. Stop repeating the pair and choose a different approach: reread only if new evidence is needed, edit the file using the content already in context, or switch to a different tool/strategy.",
+                    first.0, second.0
+                ));
+            }
         }
         None
     }
@@ -1062,7 +1105,7 @@ impl Agent {
         );
         io::stdout().flush().ok();
 
-        let response = read_line_pausing_esc(&self.esc_paused);
+        let response = read_line_pausing_esc(&self.esc_paused, &self.esc_pause_ack);
         if let Ok(response) = response {
             let response = response.trim().to_lowercase();
             match response.as_str() {
@@ -3112,6 +3155,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_repetition_detects_simple_abab_oscillation() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let call_a: Vec<CollectedToolCall> = vec![(
+            "file_read".to_string(),
+            r#"{"path":"a.rs"}"#.to_string(),
+            None,
+        )];
+        let call_b: Vec<CollectedToolCall> = vec![(
+            "grep_search".to_string(),
+            r#"{"query":"foo"}"#.to_string(),
+            None,
+        )];
+
+        assert!(agent.detect_repetition(&call_a).is_none());
+        assert!(agent.detect_repetition(&call_b).is_none());
+        assert!(agent.detect_repetition(&call_a).is_none());
+
+        let result = agent.detect_repetition(&call_b);
+        assert!(result.is_some());
+        let msg = result.unwrap();
+        assert!(msg.contains("OSCILLATION LOOP DETECTED"));
+        assert!(msg.contains("file_read"));
+        assert!(msg.contains("grep_search"));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
     async fn test_repetition_no_loop_with_different_args() {
         let server = MockLlmServer::builder().with_response("done").build().await;
         let config = test_config(format!("{}/v1", server.url()));
@@ -4768,7 +4842,9 @@ mod tests {
         use std::sync::atomic::Ordering;
 
         let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ack = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let paused_clone = std::sync::Arc::clone(&paused);
+        let ack_clone = std::sync::Arc::clone(&ack);
 
         // Spawn a watcher that records whether paused was ever set
         let was_paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -4777,6 +4853,7 @@ mod tests {
         let watcher = std::thread::spawn(move || {
             for _ in 0..100 {
                 if paused_clone.load(Ordering::Acquire) {
+                    ack_clone.store(true, Ordering::Release);
                     was_paused_clone.store(true, Ordering::Relaxed);
                     break;
                 }
@@ -4786,12 +4863,16 @@ mod tests {
 
         // Simulate stdin by piping — read_line will return an error or empty
         // in a non-interactive test, but the pause flag behavior is what we test.
-        let _ = read_line_pausing_esc(&paused);
+        let _ = read_line_pausing_esc(&paused, &ack);
 
         // After return, paused must be cleared
         assert!(
             !paused.load(Ordering::Acquire),
             "esc_paused must be false after read_line_pausing_esc returns"
+        );
+        assert!(
+            !ack.load(Ordering::Acquire),
+            "esc_pause_ack must be reset after read_line_pausing_esc returns"
         );
 
         let _ = watcher.join();
@@ -4805,13 +4886,18 @@ mod tests {
         use std::sync::atomic::Ordering;
 
         let paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ack = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         // Call in non-interactive context (stdin is not a tty in tests)
-        let _ = read_line_pausing_esc(&paused);
+        let _ = read_line_pausing_esc(&paused, &ack);
 
         assert!(
             !paused.load(Ordering::Acquire),
             "esc_paused must always be cleared, even if read_line fails"
+        );
+        assert!(
+            !ack.load(Ordering::Acquire),
+            "esc_pause_ack must always be cleared, even if read_line fails"
         );
     }
 }

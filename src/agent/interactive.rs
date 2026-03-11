@@ -186,7 +186,11 @@ impl EscListenerGuard {
 /// - A prompt hint `▸ ` is shown when the user starts typing
 ///
 /// Terminal raw mode is always restored before the thread returns.
-fn spawn_esc_listener(cancel_token: Arc<AtomicBool>, paused: Arc<AtomicBool>) -> EscListenerGuard {
+fn spawn_esc_listener(
+    cancel_token: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+    pause_ack: Arc<AtomicBool>,
+) -> EscListenerGuard {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_clone = Arc::clone(&stop);
     let queued: InputQueue = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -209,9 +213,11 @@ fn spawn_esc_listener(cancel_token: Arc<AtomicBool>, paused: Arc<AtomicBool>) ->
 
             // When paused (confirmation prompt active), just sleep.
             if paused.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(50));
+                pause_ack.store(true, Ordering::Release);
+                std::thread::sleep(Duration::from_millis(10));
                 continue;
             }
+            pause_ack.store(false, Ordering::Release);
 
             // Enter raw mode briefly to poll for key events, then exit so
             // stdout prints work normally (raw mode turns \n into LF-only,
@@ -345,6 +351,7 @@ fn spawn_esc_listener(cancel_token: Arc<AtomicBool>, paused: Arc<AtomicBool>) ->
             let _ = std::io::stderr().flush();
         }
 
+        pause_ack.store(false, Ordering::Release);
         let _ = terminal::disable_raw_mode();
     });
 
@@ -1779,7 +1786,11 @@ impl Agent {
     }
 
     async fn run_task_with_queue(&mut self, task: &str) -> Result<()> {
-        let esc_guard = spawn_esc_listener(self.cancel_token(), self.esc_pause_token());
+        let esc_guard = spawn_esc_listener(
+            self.cancel_token(),
+            self.esc_pause_token(),
+            self.esc_pause_ack_token(),
+        );
         let result = self.run_task(task).await;
         let queued = coalesce_pending_messages(esc_guard.stop().await);
         // Add messages typed during generation to the pending queue
@@ -1791,7 +1802,11 @@ impl Agent {
     }
 
     async fn run_swarm_with_queue(&mut self, task: &str) -> Result<()> {
-        let esc_guard = spawn_esc_listener(self.cancel_token(), self.esc_pause_token());
+        let esc_guard = spawn_esc_listener(
+            self.cancel_token(),
+            self.esc_pause_token(),
+            self.esc_pause_ack_token(),
+        );
         let result = self.run_swarm_task(task).await;
         let queued = coalesce_pending_messages(esc_guard.stop().await);
         for msg in queued {
@@ -2806,7 +2821,8 @@ mod tests {
     async fn esc_listener_stops_cleanly() {
         let cancel = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
-        let guard = spawn_esc_listener(cancel, paused);
+        let ack = Arc::new(AtomicBool::new(false));
+        let guard = spawn_esc_listener(cancel, paused, ack);
         // Should stop without hanging
         guard.stop().await;
     }
@@ -2815,7 +2831,8 @@ mod tests {
     async fn esc_listener_stops_when_cancelled() {
         let cancel = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
-        let guard = spawn_esc_listener(Arc::clone(&cancel), paused);
+        let ack = Arc::new(AtomicBool::new(false));
+        let guard = spawn_esc_listener(Arc::clone(&cancel), paused, ack);
         cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         guard.stop().await;
     }
@@ -2825,15 +2842,18 @@ mod tests {
         use std::sync::atomic::Ordering;
         let cancel = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
-        let guard = spawn_esc_listener(Arc::clone(&cancel), Arc::clone(&paused));
+        let ack = Arc::new(AtomicBool::new(false));
+        let guard = spawn_esc_listener(Arc::clone(&cancel), Arc::clone(&paused), Arc::clone(&ack));
 
         // Pause — the listener should yield raw mode
         paused.store(true, Ordering::Release);
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(ack.load(Ordering::Acquire));
 
         // Unpause — the listener should re-enter raw mode
         paused.store(false, Ordering::Release);
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(!ack.load(Ordering::Acquire));
 
         // Clean stop
         guard.stop().await;
@@ -2844,11 +2864,13 @@ mod tests {
         use std::sync::atomic::Ordering;
         let cancel = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
-        let guard = spawn_esc_listener(Arc::clone(&cancel), Arc::clone(&paused));
+        let ack = Arc::new(AtomicBool::new(false));
+        let guard = spawn_esc_listener(Arc::clone(&cancel), Arc::clone(&paused), Arc::clone(&ack));
 
         // Pause then immediately stop — must not hang
         paused.store(true, Ordering::Release);
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(ack.load(Ordering::Acquire));
         guard.stop().await;
     }
 
@@ -2857,10 +2879,12 @@ mod tests {
         use std::sync::atomic::Ordering;
         let cancel = Arc::new(AtomicBool::new(false));
         let paused = Arc::new(AtomicBool::new(false));
-        let guard = spawn_esc_listener(Arc::clone(&cancel), Arc::clone(&paused));
+        let ack = Arc::new(AtomicBool::new(false));
+        let guard = spawn_esc_listener(Arc::clone(&cancel), Arc::clone(&paused), Arc::clone(&ack));
 
         paused.store(true, Ordering::Release);
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(ack.load(Ordering::Acquire));
         cancel.store(true, Ordering::Relaxed);
         guard.stop().await;
     }

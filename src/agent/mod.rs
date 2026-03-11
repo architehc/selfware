@@ -244,6 +244,8 @@ pub struct Agent {
     governor: ConcurrencyGovernor,
     /// Pause flag for the ESC listener — set when a confirmation prompt needs stdin
     esc_paused: Arc<AtomicBool>,
+    /// Acknowledgement from the ESC listener that it observed the pause flag.
+    esc_pause_ack: Arc<AtomicBool>,
 }
 
 impl Agent {
@@ -562,6 +564,7 @@ To call a tool, use this EXACT XML structure:
             local_first: crate::session::local_first::LocalFirstCoordinator::new(),
             governor: ConcurrencyGovernor::with_defaults(),
             esc_paused: Arc::new(AtomicBool::new(false)),
+            esc_pause_ack: Arc::new(AtomicBool::new(false)),
         };
 
         let reconcile_report = crate::tools::process::reconcile_managed_processes(true).await;
@@ -705,6 +708,11 @@ To call a tool, use this EXACT XML structure:
     /// Shared pause flag for the ESC listener — used by confirmation prompts.
     pub(crate) fn esc_pause_token(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.esc_paused)
+    }
+
+    /// Shared acknowledgement flag from the ESC listener pause handshake.
+    pub(crate) fn esc_pause_ack_token(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.esc_pause_ack)
     }
 
     /// True when the current task should stop as soon as possible.
