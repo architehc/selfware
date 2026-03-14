@@ -6,5 +6,7 @@
 //! typescript-language-server, gopls) over JSON-RPC 2.0 / stdio.
 
 pub mod client;
+pub mod server;
 
 pub use client::LspClient;
+pub use server::run_lsp_server;

@@ -5,7 +5,18 @@ version = "0.1.0"
 schema_version = 1
 authors = ["Architech <hello@selfware.design>"]
 repository = "https://github.com/architehc/selfware"
+capabilities = [{ kind = "process:exec", command = "*", args = ["**"] }]
+
+[lib]
+kind = "Rust"
+version = "0.7.0"
 
 [language_servers.selfware]
 language = "Rust"
 languages = ["Rust", "Python", "TypeScript", "JavaScript", "Go"]
+
+[context_servers.selfware]
+
+[slash_commands.selfware-graph]
+description = "Render a local Selfware code graph for the current worktree"
+requires_argument = false

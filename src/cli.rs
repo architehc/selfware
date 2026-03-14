@@ -133,6 +133,17 @@ pub enum OutputFormat {
     Json,
 }
 
+/// Output format for `selfware graph`
+#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
+pub enum GraphFormat {
+    #[default]
+    Ascii,
+    Mermaid,
+    Dot,
+    Json,
+    Plantuml,
+}
+
 /// Demo scenario selection for `selfware demo`
 #[cfg(feature = "tui")]
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -197,6 +208,29 @@ enum Commands {
         /// Path to visualize
         #[arg(default_value = ".")]
         path: String,
+    },
+
+    /// Explore the workspace as a code knowledge graph
+    Graph {
+        /// Workspace path to index
+        #[arg(default_value = ".")]
+        path: String,
+
+        /// Focus the graph on a symbol or file path fragment
+        #[arg(long)]
+        focus: Option<String>,
+
+        /// Neighborhood depth around the focus node
+        #[arg(long, default_value_t = 2)]
+        depth: usize,
+
+        /// Maximum number of nodes to include in the rendered subgraph
+        #[arg(long, default_value_t = 48)]
+        max_nodes: usize,
+
+        /// Output format
+        #[arg(long, value_enum, default_value = "ascii")]
+        format: GraphFormat,
     },
 
     /// Run an animated multi-agent demo scenario
@@ -700,6 +734,38 @@ async fn handle_command(
             // Build garden visualization
             let garden = ui::garden::build_garden_from_path(&path)?;
             println!("{}", garden.render());
+        }
+
+        Commands::Graph {
+            path,
+            focus,
+            depth,
+            max_nodes,
+            format,
+        } => {
+            if !quiet {
+                println!("{}", render_header(ctx));
+                println!(
+                    "{} {} at {}...\n",
+                    Glyphs::tree(),
+                    "Tracing the code graph".craftsman_voice(),
+                    path.as_str().path_local()
+                );
+            }
+
+            let mut options = crate::analysis::workspace_graph::WorkspaceGraphOptions::new(&path);
+            options.focus = focus.clone();
+            options.neighborhood_depth = depth;
+            options.max_nodes = max_nodes;
+
+            let graph = crate::analysis::workspace_graph::build_workspace_graph(&options)?;
+            let summary = crate::analysis::workspace_graph::summarize_graph(&graph);
+            let rendered = crate::analysis::code_graph::GraphRenderer::new()
+                .with_direction("LR")
+                .cluster()
+                .render(&graph, graph_format_to_output_format(format));
+
+            println!("{}", render_graph_output(&graph.name, focus.as_deref(), &summary, format, &rendered));
         }
 
         #[cfg(feature = "tui")]
@@ -1267,10 +1333,7 @@ async fn handle_command(
         }
 
         Commands::Lsp => {
-            eprintln!("LSP server mode not yet implemented.");
-            eprintln!("This subcommand will start selfware as a Language Server Protocol server");
-            eprintln!("for editor integrations (ZED, VS Code, Neovim, etc.).");
-            std::process::exit(1);
+            crate::lsp::run_lsp_server().await?;
         }
 
         Commands::Doctor => {
@@ -1289,6 +1352,51 @@ async fn handle_command(
     }
 
     Ok(())
+}
+
+fn graph_format_to_output_format(format: GraphFormat) -> crate::analysis::code_graph::OutputFormat {
+    match format {
+        GraphFormat::Ascii => crate::analysis::code_graph::OutputFormat::Ascii,
+        GraphFormat::Mermaid => crate::analysis::code_graph::OutputFormat::Mermaid,
+        GraphFormat::Dot => crate::analysis::code_graph::OutputFormat::Dot,
+        GraphFormat::Json => crate::analysis::code_graph::OutputFormat::Json,
+        GraphFormat::Plantuml => crate::analysis::code_graph::OutputFormat::PlantUml,
+    }
+}
+
+fn render_graph_output(
+    graph_name: &str,
+    focus: Option<&str>,
+    summary: &crate::analysis::workspace_graph::WorkspaceGraphSummary,
+    format: GraphFormat,
+    rendered: &str,
+) -> String {
+    let focus_line = focus
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("Focus: {}\n", value))
+        .unwrap_or_default();
+
+    let summary_text = format!(
+        "Workspace Graph: {}\n{}Nodes: {} | Edges: {} | Files: {} | Functions: {} | Types: {} | Imports: {} | Type deps: {} | Cycles: {}\n",
+        graph_name,
+        focus_line,
+        summary.node_count,
+        summary.edge_count,
+        summary.file_count,
+        summary.function_count,
+        summary.type_count,
+        summary.import_edges,
+        summary.dependency_edges,
+        summary.cycle_count,
+    );
+
+    match format {
+        GraphFormat::Ascii => format!("{}\n{}", summary_text, rendered),
+        GraphFormat::Mermaid => format!("{summary_text}\n```mermaid\n{rendered}\n```"),
+        GraphFormat::Dot => format!("{summary_text}\n```dot\n{rendered}\n```"),
+        GraphFormat::Json => format!("{summary_text}\n```json\n{rendered}\n```"),
+        GraphFormat::Plantuml => format!("{summary_text}\n```plantuml\n{rendered}\n```"),
+    }
 }
 
 #[cfg(feature = "tui")]

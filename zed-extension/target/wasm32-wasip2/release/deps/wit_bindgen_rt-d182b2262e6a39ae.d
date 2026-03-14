@@ -1,0 +1,10 @@
+/Users/ivo/selfware/zed-extension/target/wasm32-wasip2/release/deps/wit_bindgen_rt-d182b2262e6a39ae.d: /Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/lib.rs /Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/async_support.rs /Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/async_support/future_support.rs /Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/async_support/stream_support.rs
+
+/Users/ivo/selfware/zed-extension/target/wasm32-wasip2/release/deps/libwit_bindgen_rt-d182b2262e6a39ae.rlib: /Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/lib.rs /Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/async_support.rs /Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/async_support/future_support.rs /Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/async_support/stream_support.rs
+
+/Users/ivo/selfware/zed-extension/target/wasm32-wasip2/release/deps/libwit_bindgen_rt-d182b2262e6a39ae.rmeta: /Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/lib.rs /Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/async_support.rs /Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/async_support/future_support.rs /Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/async_support/stream_support.rs
+
+/Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/lib.rs:
+/Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/async_support.rs:
+/Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/async_support/future_support.rs:
+/Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/async_support/stream_support.rs:

@@ -12,3 +12,4 @@ pub mod bm25;
 pub mod code_graph;
 pub mod tech_debt;
 pub mod vector_store;
+pub mod workspace_graph;

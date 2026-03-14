@@ -676,6 +676,8 @@ pub struct Swarm {
     consensus_threshold: f32,
     /// Task queue
     task_queue: Vec<SwarmTask>,
+    /// Tasks currently in progress
+    active_tasks: HashMap<String, SwarmTask>,
     /// Timeout for pending decisions (seconds)
     decision_timeout_secs: u64,
     /// Optional shared resource pressure for task gating

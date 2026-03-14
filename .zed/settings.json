@@ -1,0 +1,68 @@
+{
+  "languages": {
+    "Rust": {
+      "language_servers": ["rust-analyzer", "selfware"],
+      "document_symbols": "on",
+      "document_folding_ranges": "on"
+    }
+  },
+  "language_models": {
+    "openai_compatible": {
+      "Selfware": {
+        "api_url": "https://crazyshit.ngrok.io/v1",
+        "available_models": [
+          {
+            "name": "Qwen/Qwen3-Coder-Next-FP8",
+            "display_name": "Qwen3 Coder Next FP8",
+            "max_tokens": 262144,
+            "capabilities": {
+              "tools": true,
+              "images": false,
+              "parallel_tool_calls": false,
+              "prompt_cache_key": false,
+              "chat_completions": true
+            }
+          }
+        ]
+      }
+    }
+  },
+  "context_servers": {
+    "Selfware": {
+      "command": "/Users/ivo/selfware/.zed/selfware-mcp-wrapper.sh",
+      "args": ["mcp-server"],
+      "env": {
+        "SELFWARE_ENDPOINT": "https://crazyshit.ngrok.io/v1",
+        "SELFWARE_MODEL": "Qwen/Qwen3-Coder-Next-FP8",
+        "NO_COLOR": "1",
+        "RUST_LOG": "error"
+      }
+    },
+    "selfware": {
+      "command": {
+        "path": "/Users/ivo/selfware/.zed/selfware-mcp-wrapper.sh",
+        "arguments": ["mcp-server"],
+        "env": {
+          "SELFWARE_ENDPOINT": "https://crazyshit.ngrok.io/v1",
+          "SELFWARE_MODEL": "Qwen/Qwen3-Coder-Next-FP8",
+          "NO_COLOR": "1",
+          "RUST_LOG": "error"
+        }
+      },
+      "settings": {
+        "endpoint": "https://crazyshit.ngrok.io/v1",
+        "model": "Qwen/Qwen3-Coder-Next-FP8",
+        "binary_path": "/Users/ivo/selfware/target/debug/selfware"
+      }
+    }
+  },
+  "lsp": {
+    "selfware": {
+      "settings": {
+        "endpoint": "https://crazyshit.ngrok.io/v1",
+        "model": "Qwen/Qwen3-Coder-Next-FP8",
+        "binary_path": "/Users/ivo/selfware/target/debug/selfware"
+      }
+    }
+  }
+}

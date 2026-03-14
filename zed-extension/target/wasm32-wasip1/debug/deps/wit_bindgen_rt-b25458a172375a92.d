@@ -1,0 +1,9 @@
+/Users/ivo/selfware/zed-extension/target/wasm32-wasip1/debug/deps/wit_bindgen_rt-b25458a172375a92.d: /Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/lib.rs /Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/cabi_realloc.rs /Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/async_support.rs /Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/async_support/future_support.rs /Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/async_support/stream_support.rs
+
+/Users/ivo/selfware/zed-extension/target/wasm32-wasip1/debug/deps/libwit_bindgen_rt-b25458a172375a92.rmeta: /Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/lib.rs /Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/cabi_realloc.rs /Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/async_support.rs /Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/async_support/future_support.rs /Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/async_support/stream_support.rs
+
+/Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/lib.rs:
+/Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/cabi_realloc.rs:
+/Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/async_support.rs:
+/Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/async_support/future_support.rs:
+/Users/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wit-bindgen-rt-0.41.0/src/async_support/stream_support.rs:

@@ -1,58 +1,166 @@
-//! Selfware ZED Extension
+//! Selfware Zed Extension
 //!
-//! Provides AI-powered coding assistance inside the ZED editor by starting
-//! `selfware lsp` as a language server process. Communication happens over
-//! the LSP protocol (JSON-RPC over stdio).
-//!
-//! # Capabilities
-//! - Language server integration for Rust, Python, TypeScript, JavaScript, Go
-//! - Inline completions and suggestions
-//! - Code actions: fix, refactor, explain, generate tests
-//! - Context menu items: "Ask Selfware", "Explain Code", "Generate Tests"
+//! Starts `selfware lsp` for editor navigation and exposes `/selfware-graph`
+//! in the Assistant for workspace graph exploration.
 
-use zed_extension_api::{self as zed, serde_json, settings::LspSettings, LanguageServerId, Result};
+use zed_extension_api::{
+    self as zed, process, serde_json,
+    settings::{ContextServerSettings, LspSettings},
+    ContextServerConfiguration, ContextServerId, LanguageServerId, Project, Result,
+    SlashCommand, SlashCommandArgumentCompletion, SlashCommandOutput, SlashCommandOutputSection,
+    Worktree,
+};
 
-/// Main extension struct holding runtime state.
+const SELFWARE_CONTEXT_SERVER_ID: &str = "selfware";
+const SELFWARE_SERVER_ID: &str = "selfware";
+const GRAPH_COMMAND: &str = "selfware-graph";
+const DEFAULT_GRAPH_FORMAT: &str = "mermaid";
+
 struct SelfwareExtension {
-    /// Cached path to the selfware binary (resolved on first use).
     cached_binary_path: Option<String>,
+    cached_worktree_root: Option<String>,
 }
 
 impl SelfwareExtension {
-    /// Create a new extension instance.
     fn new() -> Self {
         Self {
             cached_binary_path: None,
+            cached_worktree_root: None,
         }
     }
 
-    /// Locate the `selfware` binary on the system PATH or in common install
-    /// locations. Returns the path string or an error if not found.
-    fn find_selfware_binary(&mut self) -> std::result::Result<String, String> {
-        // Return cached path if we already resolved it.
-        if let Some(ref path) = self.cached_binary_path {
+    fn resolve_binary(
+        &mut self,
+        worktree: &Worktree,
+        settings: Option<&serde_json::Value>,
+    ) -> std::result::Result<String, String> {
+        let root = worktree.root_path();
+        if self.cached_worktree_root.as_deref() != Some(&root) {
+            self.cached_worktree_root = Some(root.clone());
+            self.cached_binary_path = None;
+        }
+
+        if let Some(path) = settings
+            .and_then(serde_json::Value::as_object)
+            .and_then(|config| config.get("binary_path"))
+            .and_then(|value| value.as_str())
+        {
+            self.cached_binary_path = Some(path.to_string());
+            return Ok(path.to_string());
+        }
+
+        if let Some(path) = &self.cached_binary_path {
             return Ok(path.clone());
         }
 
-        // Try common locations in order of preference.
         let candidates = [
-            // Cargo install default
-            "selfware",
-            // Explicit paths users might have
-            "/usr/local/bin/selfware",
-            "/opt/homebrew/bin/selfware",
+            worktree.which("selfware"),
+            Some(format!("{root}/target/debug/selfware")),
+            Some(format!("{root}/target/release/selfware")),
+            Some("selfware".to_string()),
         ];
 
-        for candidate in &candidates {
-            // For bare command names, rely on PATH resolution at spawn time.
-            // For absolute paths, we can check existence but WASM doesn't have
-            // std::fs — so we just store the first candidate and let the LSP
-            // client report a spawn failure if it doesn't exist.
-            self.cached_binary_path = Some(candidate.to_string());
-            return Ok(candidate.to_string());
+        for candidate in candidates.into_iter().flatten() {
+            self.cached_binary_path = Some(candidate.clone());
+            return Ok(candidate);
         }
 
-        Err("Could not find the selfware binary. Install it with: cargo install selfware".into())
+        Err("Could not find the selfware binary. Build the repo or install `selfware` on PATH.".into())
+    }
+
+    fn resolve_project_binary(
+        &mut self,
+        command_path: Option<&str>,
+        settings: Option<&serde_json::Value>,
+    ) -> std::result::Result<String, String> {
+        if let Some(path) = command_path {
+            self.cached_binary_path = Some(path.to_string());
+            return Ok(path.to_string());
+        }
+
+        if let Some(path) = binary_path_from_settings(settings) {
+            self.cached_binary_path = Some(path.clone());
+            return Ok(path);
+        }
+
+        if let Some(path) = &self.cached_binary_path {
+            return Ok(path.clone());
+        }
+
+        Ok("selfware".to_string())
+    }
+
+    fn graph_output(
+        &mut self,
+        args: Vec<String>,
+        worktree: &Worktree,
+    ) -> std::result::Result<SlashCommandOutput, String> {
+        let settings = LspSettings::for_worktree(SELFWARE_SERVER_ID, worktree)
+            .ok()
+            .and_then(|s| s.settings);
+        let binary = self.resolve_binary(worktree, settings.as_ref())?;
+
+        let (format, focus) = parse_graph_args(args);
+        let mut command = process::Command::new(binary)
+            .arg("--quiet")
+            .arg("--no-color")
+            .arg("--ascii")
+            .arg("graph")
+            .arg(worktree.root_path())
+            .arg("--format")
+            .arg(format)
+            .arg("--max-nodes")
+            .arg("40")
+            .env("RUST_LOG", "error")
+            .env("NO_COLOR", "1");
+
+        if !focus.is_empty() {
+            command = command.arg("--focus").arg(focus.clone());
+        }
+
+        let output = command.output()?;
+        let status = output.status.unwrap_or(-1);
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+        if status != 0 {
+            let details = if stderr.is_empty() { stdout } else { stderr };
+            return Err(format!("selfware graph failed: {details}"));
+        }
+
+        if stdout.is_empty() {
+            return Err("selfware graph returned no output".into());
+        }
+
+        let label = if focus.is_empty() {
+            "Workspace Graph".to_string()
+        } else {
+            format!("Graph: {focus}")
+        };
+
+        Ok(SlashCommandOutput {
+            text: stdout.clone(),
+            sections: vec![SlashCommandOutputSection {
+                range: (0..stdout.len()).into(),
+                label,
+            }],
+        })
+    }
+
+    fn base_env(settings: Option<&serde_json::Value>) -> Vec<(String, String)> {
+        let mut env = vec![
+            ("RUST_LOG".to_string(), "error".to_string()),
+            ("NO_COLOR".to_string(), "1".to_string()),
+        ];
+
+        if let Some(endpoint) = endpoint_from_settings(settings) {
+            push_env_if_missing(&mut env, "SELFWARE_ENDPOINT", endpoint);
+        }
+        if let Some(model) = model_from_settings(settings) {
+            push_env_if_missing(&mut env, "SELFWARE_MODEL", model);
+        }
+
+        env
     }
 }
 
@@ -66,23 +174,11 @@ impl zed::Extension for SelfwareExtension {
         language_server_id: &LanguageServerId,
         worktree: &zed::Worktree,
     ) -> Result<zed::Command> {
-        let binary = self.find_selfware_binary().map_err(|e| e.to_string())?;
-
-        // Read user settings to pass as environment variables.
         let settings = LspSettings::for_worktree(language_server_id.as_ref(), worktree)
             .ok()
             .and_then(|s| s.settings);
-
-        let mut env = Vec::new();
-
-        if let Some(ref settings) = settings {
-            if let Some(endpoint) = settings.get("endpoint").and_then(|v| v.as_str()) {
-                env.push(("SELFWARE_ENDPOINT".to_string(), endpoint.to_string()));
-            }
-            if let Some(model) = settings.get("model").and_then(|v| v.as_str()) {
-                env.push(("SELFWARE_MODEL".to_string(), model.to_string()));
-            }
-        }
+        let binary = self.resolve_binary(worktree, settings.as_ref())?;
+        let env = SelfwareExtension::base_env(settings.as_ref());
 
         Ok(zed::Command {
             command: binary,
@@ -104,73 +200,222 @@ impl zed::Extension for SelfwareExtension {
             .as_ref()
             .and_then(|s| s.get("endpoint"))
             .and_then(|v| v.as_str())
-            .unwrap_or("http://localhost:8000/v1")
-            .to_string();
+            .unwrap_or("http://localhost:8000/v1");
 
         let model = settings
             .as_ref()
             .and_then(|s| s.get("model"))
             .and_then(|v| v.as_str())
-            .unwrap_or("Qwen/Qwen3-Coder-Next-FP8")
-            .to_string();
-
-        let auto_suggest = settings
-            .as_ref()
-            .and_then(|s| s.get("auto_suggest"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
-        let inline_completions = settings
-            .as_ref()
-            .and_then(|s| s.get("inline_completions"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
+            .unwrap_or("Qwen/Qwen3-Coder-Next-FP8");
 
         Ok(Some(serde_json::json!({
             "endpoint": endpoint,
-            "model": model,
-            "auto_suggest": auto_suggest,
-            "inline_completions": inline_completions,
-            "capabilities": {
-                "code_actions": [
-                    {
-                        "id": "selfware.fix",
-                        "title": "Fix with Selfware",
-                        "kind": "quickfix"
-                    },
-                    {
-                        "id": "selfware.refactor",
-                        "title": "Refactor with Selfware",
-                        "kind": "refactor"
-                    },
-                    {
-                        "id": "selfware.explain",
-                        "title": "Explain Code",
-                        "kind": "source"
-                    },
-                    {
-                        "id": "selfware.generate_tests",
-                        "title": "Generate Tests",
-                        "kind": "source"
-                    }
-                ],
-                "context_menu": [
-                    {
-                        "id": "selfware.ask",
-                        "label": "Ask Selfware"
-                    },
-                    {
-                        "id": "selfware.explain",
-                        "label": "Explain Code"
-                    },
-                    {
-                        "id": "selfware.generate_tests",
-                        "label": "Generate Tests"
-                    }
-                ]
-            }
+            "model": model
         })))
     }
+
+    fn context_server_command(
+        &mut self,
+        context_server_id: &ContextServerId,
+        project: &Project,
+    ) -> Result<zed::Command> {
+        if context_server_id.as_ref() != SELFWARE_CONTEXT_SERVER_ID {
+            return Err(format!(
+                "unsupported context server '{}'",
+                context_server_id.as_ref()
+            ));
+        }
+
+        let settings = ContextServerSettings::for_project(context_server_id.as_ref(), project).ok();
+        let command_settings = settings.as_ref().and_then(|s| s.command.as_ref());
+        let server_settings = settings.as_ref().and_then(|s| s.settings.as_ref());
+        let binary = self.resolve_project_binary(
+            command_settings.and_then(|command| command.path.as_deref()),
+            server_settings,
+        )?;
+
+        let args = command_settings
+            .and_then(|command| command.arguments.clone())
+            .filter(|args| !args.is_empty())
+            .unwrap_or_else(|| vec!["mcp-server".to_string()]);
+
+        let mut env = command_settings
+            .and_then(|command| command.env.clone())
+            .map(|env| env.into_iter().collect::<Vec<_>>())
+            .unwrap_or_default();
+
+        for (key, value) in SelfwareExtension::base_env(server_settings) {
+            push_env_if_missing(&mut env, &key, value);
+        }
+
+        Ok(zed::Command {
+            command: binary,
+            args,
+            env,
+        })
+    }
+
+    fn context_server_configuration(
+        &mut self,
+        context_server_id: &ContextServerId,
+        _project: &Project,
+    ) -> Result<Option<ContextServerConfiguration>> {
+        if context_server_id.as_ref() != SELFWARE_CONTEXT_SERVER_ID {
+            return Ok(None);
+        }
+
+        Ok(Some(ContextServerConfiguration {
+            installation_instructions:
+                "Build `selfware` locally or point `context_servers.selfware.command.path` at the binary.".to_string(),
+            settings_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "endpoint": {
+                        "type": "string",
+                        "description": "OpenAI-compatible base URL for Selfware model-backed tools."
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Model ID used by the Selfware MCP server."
+                    },
+                    "binary_path": {
+                        "type": "string",
+                        "description": "Optional path to the `selfware` binary if you are not overriding command.path."
+                    }
+                },
+                "additionalProperties": false
+            })
+            .to_string(),
+            default_settings: serde_json::json!({
+                "endpoint": "http://localhost:8000/v1",
+                "model": "Qwen/Qwen3-Coder-Next-FP8"
+            })
+            .to_string(),
+        }))
+    }
+
+    fn complete_slash_command_argument(
+        &self,
+        command: SlashCommand,
+        args: Vec<String>,
+    ) -> Result<Vec<SlashCommandArgumentCompletion>, String> {
+        if command.name != GRAPH_COMMAND || !args.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        Ok(vec![
+            SlashCommandArgumentCompletion {
+                label: "mermaid whole workspace".to_string(),
+                new_text: "mermaid".to_string(),
+                run_command: true,
+            },
+            SlashCommandArgumentCompletion {
+                label: "mermaid src/lib.rs".to_string(),
+                new_text: "mermaid src/lib.rs".to_string(),
+                run_command: true,
+            },
+            SlashCommandArgumentCompletion {
+                label: "mermaid knowledge_graph".to_string(),
+                new_text: "mermaid knowledge_graph".to_string(),
+                run_command: true,
+            },
+            SlashCommandArgumentCompletion {
+                label: "ascii knowledge_graph".to_string(),
+                new_text: "ascii knowledge_graph".to_string(),
+                run_command: true,
+            },
+        ])
+    }
+
+    fn run_slash_command(
+        &self,
+        command: SlashCommand,
+        args: Vec<String>,
+        worktree: Option<&Worktree>,
+    ) -> Result<SlashCommandOutput, String> {
+        if command.name != GRAPH_COMMAND {
+            return Err(format!("unsupported slash command '{}'", command.name));
+        }
+
+        let Some(worktree) = worktree else {
+            return Err("selfware-graph requires an open worktree".into());
+        };
+
+        let mut extension = SelfwareExtension {
+            cached_binary_path: self.cached_binary_path.clone(),
+            cached_worktree_root: self.cached_worktree_root.clone(),
+        };
+        extension.graph_output(args, worktree)
+    }
+}
+
+fn parse_graph_args(args: Vec<String>) -> (&'static str, String) {
+    let mut parts = args
+        .join(" ")
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+
+    if parts.is_empty() {
+        return (DEFAULT_GRAPH_FORMAT, String::new());
+    }
+
+    let format = match parts.first().map(|value| value.as_str()) {
+        Some("ascii") => {
+            parts.remove(0);
+            "ascii"
+        }
+        Some("mermaid") => {
+            parts.remove(0);
+            "mermaid"
+        }
+        Some("dot") => {
+            parts.remove(0);
+            "dot"
+        }
+        Some("json") => {
+            parts.remove(0);
+            "json"
+        }
+        Some("plantuml") => {
+            parts.remove(0);
+            "plantuml"
+        }
+        _ => DEFAULT_GRAPH_FORMAT,
+    };
+
+    (format, parts.join(" "))
+}
+
+fn binary_path_from_settings(settings: Option<&serde_json::Value>) -> Option<String> {
+    settings
+        .and_then(serde_json::Value::as_object)
+        .and_then(|config| config.get("binary_path"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+fn endpoint_from_settings(settings: Option<&serde_json::Value>) -> Option<String> {
+    settings
+        .and_then(serde_json::Value::as_object)
+        .and_then(|config| config.get("endpoint"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+fn model_from_settings(settings: Option<&serde_json::Value>) -> Option<String> {
+    settings
+        .and_then(serde_json::Value::as_object)
+        .and_then(|config| config.get("model"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+fn push_env_if_missing(env: &mut Vec<(String, String)>, key: &str, value: String) {
+    if env.iter().any(|(existing, _)| existing == key) {
+        return;
+    }
+    env.push((key.to_string(), value));
 }
 
 zed::register_extension!(SelfwareExtension);
