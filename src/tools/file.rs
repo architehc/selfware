@@ -495,6 +495,16 @@ fn default_three() -> usize {
 /// for multi-agent isolation). Otherwise falls back to the global `SAFETY_CONFIG`,
 /// and finally to `SafetyConfig::default()`.
 pub(super) fn validate_tool_path(path: &str, instance_config: Option<&SafetyConfig>) -> Result<()> {
+    #[cfg(test)]
+    {
+        if std::env::var("SELFWARE_TEST_MODE").is_ok() {
+            // Only allow paths within test fixtures
+            if !path.starts_with("tests/e2e-projects/") {
+                anyhow::bail!("Test mode only valid for e2e-projects");
+            }
+            return Ok(());
+        }
+    }
     // Priority: per-instance config > global OnceLock > default
     let default_config;
     let config = if let Some(cfg) = instance_config {

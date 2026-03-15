@@ -76,47 +76,50 @@ tokio::fs::write(&global_memory_path, content).await?;
 
 ---
 
-### 3. Fix FIM Instruction Injection
+### 3. ✅ FIXED: FIM Instruction Injection
 
-**File:** `src/tools/fim.rs` ~line 94
+**File:** `src/tools/fim.rs` lines 15-77 (sanitize function), line 143 (usage)
 
-**Current (BAD):**
+**Status:** FIXED ✓ - Comprehensive sanitization implemented
+
+**Implementation:**
 ```rust
-let prompt = format!(
-    "<|fim_prefix|>{}
-// Instruction: {}
-<|fim_suffix|>{}
-<|fim_middle|>",
-    prefix, instruction, suffix
-);
-```
-
-**Fix:**
-```rust
-// Sanitize instruction to prevent prompt injection
-fn sanitize_fim_instruction(s: &str) -> String {
-    s.replace("<|", "")
-     .replace("|>", "")
-     .replace("// Instruction:", "")
-     .trim()
-     .to_string()
+/// Sanitize a user-provided FIM instruction to prevent prompt injection.
+fn sanitize_fim_instruction(raw: &str) -> String {
+    // Step 1: Remove FIM / special model tokens
+    let fim_tokens: &[&str] = &[
+        "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>",
+        "<|endoftext|>", "<|file_separator|>",
+        "<|im_start|>", "<|im_end|>", "<|pad|>",
+    ];
+    // Case-insensitive regex replacement...
+    
+    // Step 2: Remove injection patterns
+    let injection_patterns: &[&str] = &[
+        r"(?i)ignore\s+(all\s+)?previous",
+        r"(?i)disregard\s+(all\s+)?(previous\s+)?instructions?",
+        r"(?i)system\s*:",
+        r"(?i)new\s+instructions?\s*:",
+    ];
+    
+    // Step 3: Truncate to max length
+    // Safely handles multi-byte characters
 }
-
-let sanitized = sanitize_fim_instruction(&args.instruction);
-let prompt = format!(
-    "<|fim_prefix|>{}
-<|fim_suffix|>{}
-<|fim_middle|>",
-    prefix, suffix
-);
-// Pass instruction via separate field if API supports it
 ```
+
+**Used in execute():**
+```rust
+let instruction = sanitize_fim_instruction(raw_instruction);
+```
+
+**Tests:** 10+ comprehensive tests covering FIM tokens, injection patterns, truncation, and edge cases - all passing.
 
 ---
 
+
 ## 🟡 HIGH: Fix These Next
 
-### 4. Add Validation for Critical Config Fields
+### 3. Add Validation for Critical Config Fields
 
 **File:** `src/config/mod.rs` in `validate()` method
 
@@ -269,7 +272,7 @@ binary_size_mb: measure_binary_size().await?,
 - [ ] Fix blocking I/O in `execution.rs`
 - [ ] Fix blocking I/O in `checkpointing.rs`
 - [ ] Fix test mode bypass in `file.rs`
-- [ ] Fix FIM injection in `fim.rs`
+- [x] Fix FIM injection in `fim.rs` (COMPLETED - see `sanitize_fim_instruction` function)
 - [ ] Add config validation
 - [ ] Add API spawning limits
 - [ ] Fix token cache contention

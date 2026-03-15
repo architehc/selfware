@@ -756,6 +756,7 @@ impl Swarm {
             conflict_strategy: ConflictStrategy::default(),
             consensus_threshold: 0.6,
             task_queue: Vec::new(),
+            active_tasks: HashMap::new(),
             decision_timeout_secs: 300,
             resource_pressure: None,
         }
