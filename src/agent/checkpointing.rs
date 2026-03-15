@@ -296,13 +296,13 @@ impl Agent {
             );
         }
 
-        // Save global episodic memory — offloaded to a background thread
+        // Save global episodic memory — using tokio::fs for async I/O
         // to avoid blocking the Tokio executor on synchronous filesystem I/O.
         let data_dir = dirs::data_local_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("selfware");
 
-        // Serialize in the main thread (cheap), write to disk in background (slow I/O)
+        // Serialize in the main thread (cheap), write to disk asynchronously (slow I/O)
         let memory_content = serde_json::to_string_pretty(&self.cognitive_state.episodic_memory)?;
 
         let engine_path = data_dir.join("improvement_engine.json");
@@ -313,16 +313,16 @@ impl Agent {
             info!("Saved self-improvement engine state");
         }
 
-        let bg_data_dir = data_dir.clone();
-        std::thread::spawn(move || {
-            let memory_path = bg_data_dir.join("global_episodic_memory.json");
+        let memory_path = data_dir.join("global_episodic_memory.json");
+        let content = memory_content;
+        tokio::spawn(async move {
             if let Some(parent) = memory_path.parent() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
+                if let Err(e) = tokio::fs::create_dir_all(parent).await {
                     tracing::warn!("Failed to create episodic memory dir: {}", e);
                     return;
                 }
             }
-            if let Err(e) = std::fs::write(&memory_path, memory_content) {
+            if let Err(e) = tokio::fs::write(&memory_path, content).await {
                 tracing::warn!("Failed to write episodic memory: {}", e);
             } else {
                 tracing::info!("Saved global episodic memory (background)");

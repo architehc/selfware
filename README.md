@@ -350,32 +350,42 @@ python -m sglang.launch_server \
   --host 0.0.0.0
 ```
 
-**Dual RTX 4090 — Qwen3-VL-30B-A3B (vision + tool calling):**
+**Dual RTX 4090 — Qwen3.5-27B-FP8 (hybrid Mamba/Attention, vLLM):**
 
 ```bash
-python -m sglang.launch_server \
-  --model-path Qwen/Qwen3-VL-30B-A3B-Thinking-FP8 \
-  --trust-remote-code \
+# Qwen3.5-27B-FP8 on 2x RTX 4090 (46 GB total)
+# Hybrid Gated Attention + Gated DeltaNet architecture, 131K context, ~24 tok/s
+export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+export NCCL_P2P_DISABLE=1  # WSL2 workaround
+export NCCL_IB_DISABLE=1
+export NCCL_SHM_DISABLE=0
+
+vllm serve Qwen/Qwen3.5-27B-FP8 \
   --tensor-parallel-size 2 \
-  --enable-multimodal \
-  --context-length 131072 \
-  --attention-backend flashinfer \
-  --mem-fraction-static 0.85 \
-  --max-running-requests 32 \
-  --chunked-prefill-size 8192 \
-  --max-prefill-tokens 65536 \
-  --kv-cache-dtype fp8_e5m2 \
-  --disable-custom-all-reduce \
-  --cuda-graph-max-bs 32 \
+  --kv-cache-dtype fp8 \
+  --gpu-memory-utilization 0.90 \
+  --max-model-len 131072 \
+  --max-num-seqs 6 \
+  --mamba-cache-dtype float16 \
+  --enable-prefix-caching \
   --reasoning-parser qwen3 \
-  --tool-call-parser qwen \
-  --port 8000 \
-  --host 0.0.0.0
+  --enable-auto-tool-choice \
+  --tool-call-parser qwen3_coder \
+  --served-model-name qwen3.5-27b \
+  --trust-remote-code \
+  --host 0.0.0.0 \
+  --port 8000
 ```
 
-> **Tip:** When using SGLang with tool calling, set `native_function_calling = true` in your `selfware.toml`. This uses OpenAI-compatible function calling instead of XML parsing, which is more reliable with small models.
+> **Notes:**
+> - FP8 weights (~27 GB) + fp8 KV cache gives ~1.94x concurrency at 131K context
+> - `--mamba-cache-dtype float16` reduces SSM state memory for the hybrid DeltaNet layers
+> - For 262K context, set `--max-model-len 262144` (concurrency drops to ~1x)
+> - Decode throughput: ~24 tok/s per request on 2x RTX 4090
 
-### vLLM
+> **Tip:** When using vLLM with tool calling, set `native_function_calling = true` in your `selfware.toml`. Selfware supports both `reasoning_content` (SGLang/llama.cpp) and `reasoning` (vLLM) response fields.
+
+### vLLM (single GPU)
 
 ```bash
 vllm serve Qwen/Qwen3.5-4B --port 8000 --tensor-parallel-size 1 \
