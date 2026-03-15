@@ -1218,14 +1218,19 @@ mod tests {
     }
 
     #[test]
-    fn test_safety_allows_unknown_tool_with_error_log() {
-        // Unknown tools are still allowed (dynamic plugin tools have arbitrary names)
-        // but now logged at error level to surface unregistered tools.
+    fn test_safety_blocks_unknown_tool() {
+        // Unknown/unregistered tools must be blocked to prevent
+        // untrusted code from bypassing safety checks.
         let config = SafetyConfig::default();
         let checker = SafetyChecker::new(&config);
 
         let call = create_test_call("unknown_tool", r#"{"arg": "value"}"#);
-        assert!(checker.check_tool_call(&call).is_ok());
+        let result = checker.check_tool_call(&call);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("Unregistered tool"),
+            "Error should mention unregistered tool"
+        );
     }
 
     #[test]
@@ -1284,19 +1289,33 @@ mod tests {
     }
 
     #[test]
-    fn test_check_path_allows_when_no_allowed_paths_configured() {
+    fn test_check_path_restricts_to_workdir_when_no_allowed_paths() {
         let config = SafetyConfig {
-            allowed_paths: vec![], // Empty = allow all
+            allowed_paths: vec![], // Empty = restrict to working directory
             denied_paths: vec![],
             ..Default::default()
         };
         let checker = SafetyChecker::new(&config);
 
+        // Paths outside working directory should be blocked
         let call = create_test_call(
             "file_write",
             r#"{"path": "/any/path/at/all.txt", "content": ""}"#,
         );
-        assert!(checker.check_tool_call(&call).is_ok());
+        assert!(
+            checker.check_tool_call(&call).is_err(),
+            "Paths outside working directory should be blocked when allowed_paths is empty"
+        );
+
+        // Paths inside working directory should be allowed
+        let call_local = create_test_call(
+            "file_write",
+            r#"{"path": "src/main.rs", "content": ""}"#,
+        );
+        assert!(
+            checker.check_tool_call(&call_local).is_ok(),
+            "Paths inside working directory should be allowed"
+        );
     }
 
     // Additional edge case tests for improved coverage
