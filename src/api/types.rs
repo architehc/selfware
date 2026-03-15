@@ -1,4 +1,14 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Custom deserializer that treats JSON `null` as an empty `MessageContent::Text("")`.
+/// vLLM returns `"content": null` when reasoning mode consumes all tokens.
+fn deserialize_nullable_content<'de, D>(deserializer: D) -> Result<MessageContent, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt = Option::<MessageContent>::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_else(|| MessageContent::Text(String::new())))
+}
 
 /// Message content that can be either plain text or a sequence of multimodal
 /// blocks (text + images).  Serializes as a plain JSON string for `Text` and
@@ -205,8 +215,15 @@ pub struct ImageUrl {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
+    #[serde(default, deserialize_with = "deserialize_nullable_content")]
     pub content: MessageContent,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Reasoning content — accepts both `reasoning_content` (OpenAI/SGLang)
+    /// and `reasoning` (vLLM) field names.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "reasoning"
+    )]
     pub reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
@@ -342,7 +359,7 @@ pub struct ChatResponse {
 pub struct Choice {
     pub index: usize,
     pub message: Message,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "reasoning")]
     pub reasoning_content: Option<String>,
     pub finish_reason: Option<String>,
 }
@@ -379,7 +396,7 @@ pub struct MessageDelta {
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "reasoning")]
     pub reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallDelta>>,

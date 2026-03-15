@@ -398,9 +398,12 @@ fn parse_sse_event(event: &str, accumulator: &mut ToolCallAccumulator) -> Vec<St
                     }
                 }
 
-                // Extract reasoning content
+                // Extract reasoning content (supports both "reasoning_content"
+                // from OpenAI/SGLang and "reasoning" from vLLM)
                 if let Some(reasoning) = delta
-                    .and_then(|d| d.get("reasoning_content"))
+                    .and_then(|d| {
+                        d.get("reasoning_content").or_else(|| d.get("reasoning"))
+                    })
                     .and_then(|c| c.as_str())
                 {
                     if !reasoning.is_empty() {
