@@ -1,0 +1,13 @@
+endpoint = "http://localhost:8000/v1"
+model = "qwen3.5-27b"
+max_tokens = 32768
+
+[safety]
+allowed_paths = ["./**", "~/**"]
+denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
+
+[agent]
+max_iterations = 80
+step_timeout_secs = 600
+native_function_calling = true
+token_budget = 32768

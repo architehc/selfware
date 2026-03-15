@@ -27,12 +27,15 @@ fn generate_sync_id() -> String {
     format!("sync-{}", SYNC_ID_COUNTER.fetch_add(1, Ordering::SeqCst))
 }
 
-/// Get current timestamp
+/// Get current timestamp in seconds.
+///
+/// All TTL and interval comparisons in this module use seconds,
+/// so this must return seconds (not milliseconds).
 fn current_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as u64
+        .as_secs()
 }
 
 /// Cache priority level

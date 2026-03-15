@@ -271,7 +271,12 @@ impl SafetyChecker {
             }
             unknown => {
                 tracing::error!(
-                    "Safety checker: unregistered tool '{}' — add to checker.rs dispatch. Allowing with caution.",
+                    "Safety checker: unregistered tool '{}' blocked — add to checker.rs dispatch if legitimate.",
+                    unknown
+                );
+                anyhow::bail!(
+                    "Unregistered tool '{}' blocked by safety checker. \
+                     Register it in checker.rs to allow execution.",
                     unknown
                 );
             }
