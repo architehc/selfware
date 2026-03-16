@@ -389,6 +389,24 @@ To call a tool, use this EXACT XML structure:
 - <name=tool_name> - WRONG
 - Any format other than <name>tool_name</name> - WRONG
 
+## CRITICAL: ACTION VS DESCRIPTION
+
+❌ WRONG: "I'll run cargo_check to verify the code."
+❌ WRONG: "Let me check the files for you."
+❌ WRONG: "I will read the directory structure."
+
+✅ CORRECT: <tool>
+<name>cargo_check</name>
+<arguments>{{}}</arguments>
+</tool>
+
+✅ CORRECT: <tool>
+<name>directory_tree</name>
+<arguments>{{"path": "./src", "max_depth": 3}}</arguments>
+</tool>
+
+**DO NOT describe what you will do. JUST OUTPUT THE TOOL XML IMMEDIATELY.**
+
 ## MANDATORY WORKFLOW
 1. PLAN: Understand what needs to change — read relevant files first
 2. IMPLEMENT: Make code changes using file_edit or file_write

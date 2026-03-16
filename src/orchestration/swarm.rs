@@ -927,7 +927,11 @@ impl Swarm {
 
     /// Get a specific task
     pub fn get_task(&self, id: &str) -> Option<&SwarmTask> {
-        self.task_queue.iter().find(|t| t.id == id)
+        // Check active_tasks first (tasks that have been popped from queue)
+        self.active_tasks.get(id).or_else(|| {
+            // Fall back to checking the queue
+            self.task_queue.iter().find(|t| t.id == id)
+        })
     }
 
     /// Handle conflict
@@ -1005,13 +1009,19 @@ impl Swarm {
     }
 
     /// Get next task (highest priority)
+    /// Moves the task from the queue to active_tasks
     pub fn next_task(&mut self) -> Option<SwarmTask> {
-        self.task_queue.pop()
+        self.task_queue.pop().map(|task| {
+            let task_id = task.id.clone();
+            self.active_tasks.insert(task_id, task.clone());
+            task
+        })
     }
 
     /// Assign task to agents
+    /// Operates on active_tasks (tasks that have been popped from the queue)
     pub fn assign_task(&mut self, task_id: &str) -> Vec<String> {
-        let task = match self.task_queue.iter_mut().find(|t| t.id == task_id) {
+        let task = match self.active_tasks.get_mut(task_id) {
             Some(t) => t,
             None => return Vec::new(),
         };
@@ -1046,8 +1056,9 @@ impl Swarm {
     }
 
     /// Complete task for an agent
+    /// Operates on active_tasks (tasks that have been popped from the queue)
     pub fn complete_task(&mut self, task_id: &str, agent_id: &str, result: impl Into<String>) {
-        if let Some(task) = self.task_queue.iter_mut().find(|t| t.id == task_id) {
+        if let Some(task) = self.active_tasks.get_mut(task_id) {
             task.results.insert(agent_id.to_string(), result.into());
 
             // Check if all agents have submitted results — done atomically
@@ -2583,6 +2594,9 @@ mod tests {
         let task_id = task.id.clone();
         swarm.queue_task(task).unwrap();
 
+        // Move task from queue to active_tasks
+        let _ = swarm.next_task();
+
         let assigned = swarm.assign_task(&task_id);
         assert_eq!(assigned.len(), 2);
         assert!(assigned.contains(&coder_id));
@@ -2620,6 +2634,9 @@ mod tests {
         let task_id = task.id.clone();
         swarm.queue_task(task).unwrap();
 
+        // Move task from queue to active_tasks
+        let _ = swarm.next_task();
+
         let assigned = swarm.assign_task(&task_id);
         assert!(assigned.is_empty());
     }
@@ -2634,6 +2651,9 @@ mod tests {
         let task = SwarmTask::new("Build it").with_role(AgentRole::Coder);
         let task_id = task.id.clone();
         swarm.queue_task(task).unwrap();
+
+        // Move task from queue to active_tasks
+        let _ = swarm.next_task();
 
         let assigned = swarm.assign_task(&task_id);
         assert_eq!(assigned.len(), 1);
@@ -2662,6 +2682,10 @@ mod tests {
             .with_role(AgentRole::Coder);
         let task_id = task.id.clone();
         swarm.queue_task(task).unwrap();
+
+        // Move task from queue to active_tasks
+        let _ = swarm.next_task();
+
         swarm.assign_task(&task_id);
 
         // Only one agent completes
@@ -3017,6 +3041,9 @@ mod tests {
         let task = SwarmTask::new("Pick best").with_role(AgentRole::Coder);
         let task_id = task.id.clone();
         swarm.queue_task(task).unwrap();
+
+        // Move task from queue to active_tasks
+        let _ = swarm.next_task();
 
         let assigned = swarm.assign_task(&task_id);
         assert_eq!(assigned.len(), 1);

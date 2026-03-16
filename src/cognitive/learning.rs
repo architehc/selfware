@@ -4,10 +4,15 @@
 //! generation, and quiz generation from code for testing understanding.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Maximum number of explanations to keep in history
+const MAX_EXPLANATION_HISTORY: usize = 1000;
+/// Maximum number of patterns to keep in concept extractor
+const MAX_CONCEPT_PATTERNS: usize = 500;
 
 static CONCEPT_COUNTER: AtomicU64 = AtomicU64::new(1);
 static QUIZ_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -124,8 +129,10 @@ pub struct CodeExplainer {
     pub config: ExplainModeConfig,
     /// Known concepts for context
     known_concepts: Vec<String>,
-    /// Explanation history
-    history: Vec<CodeExplanation>,
+    /// Explanation history (bounded with LRU eviction)
+    history: VecDeque<CodeExplanation>,
+    /// Maximum history entries
+    max_history: usize,
 }
 
 impl CodeExplainer {
@@ -133,7 +140,18 @@ impl CodeExplainer {
         Self {
             config: ExplainModeConfig::default(),
             known_concepts: Vec::new(),
-            history: Vec::new(),
+            history: VecDeque::with_capacity(MAX_EXPLANATION_HISTORY),
+            max_history: MAX_EXPLANATION_HISTORY,
+        }
+    }
+
+    /// Create a new explainer with custom max history size
+    pub fn with_max_history(max_history: usize) -> Self {
+        Self {
+            config: ExplainModeConfig::default(),
+            known_concepts: Vec::new(),
+            history: VecDeque::with_capacity(max_history.min(MAX_EXPLANATION_HISTORY)),
+            max_history: max_history.min(MAX_EXPLANATION_HISTORY),
         }
     }
 
@@ -181,7 +199,11 @@ impl CodeExplainer {
             level: self.config.level,
         };
 
-        self.history.push(explanation.clone());
+        // Add to history with LRU eviction
+        if self.history.len() >= self.max_history {
+            self.history.pop_front();
+        }
+        self.history.push_back(explanation.clone());
         explanation
     }
 
@@ -338,8 +360,18 @@ impl CodeExplainer {
         ]
     }
 
-    pub fn history(&self) -> &[CodeExplanation] {
-        &self.history
+    pub fn history(&self) -> Vec<&CodeExplanation> {
+        self.history.iter().collect()
+    }
+
+    /// Get history size and capacity
+    pub fn history_stats(&self) -> (usize, usize) {
+        (self.history.len(), self.max_history)
+    }
+
+    /// Clear explanation history
+    pub fn clear_history(&mut self) {
+        self.history.clear();
     }
 }
 
@@ -382,8 +414,8 @@ pub struct Concept {
     pub examples: Vec<String>,
     /// Files where this concept appears
     pub occurrences: Vec<PathBuf>,
-    /// Occurrence count
-    pub occurrence_count: u32,
+    /// Occurrence count (u64 to prevent overflow)
+    pub occurrence_count: u64,
 }
 
 impl Concept {
@@ -422,7 +454,12 @@ impl Concept {
 
     pub fn record_occurrence(&mut self, file: impl Into<PathBuf>) {
         self.occurrences.push(file.into());
-        self.occurrence_count += 1;
+        self.occurrence_count = self.occurrence_count.saturating_add(1);
+    }
+
+    /// Get occurrence count as u64
+    pub fn get_occurrence_count(&self) -> u64 {
+        self.occurrence_count
     }
 }
 
@@ -583,8 +620,10 @@ impl Curriculum {
 /// Concept extractor
 #[derive(Debug, Clone)]
 pub struct ConceptExtractor {
-    /// Known concept patterns
+    /// Known concept patterns (bounded size)
     patterns: HashMap<String, ConceptPattern>,
+    /// Maximum number of patterns
+    max_patterns: usize,
 }
 
 /// Pattern for detecting concepts
@@ -603,7 +642,18 @@ pub struct ConceptPattern {
 impl ConceptExtractor {
     pub fn new() -> Self {
         let mut extractor = Self {
-            patterns: HashMap::new(),
+            patterns: HashMap::with_capacity(MAX_CONCEPT_PATTERNS),
+            max_patterns: MAX_CONCEPT_PATTERNS,
+        };
+        extractor.add_default_patterns();
+        extractor
+    }
+
+    /// Create a new extractor with custom max patterns
+    pub fn with_max_patterns(max_patterns: usize) -> Self {
+        let mut extractor = Self {
+            patterns: HashMap::with_capacity(max_patterns.min(MAX_CONCEPT_PATTERNS)),
+            max_patterns: max_patterns.min(MAX_CONCEPT_PATTERNS),
         };
         extractor.add_default_patterns();
         extractor

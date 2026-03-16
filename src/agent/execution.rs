@@ -412,13 +412,13 @@ impl Agent {
     fn build_no_action_prompt_message(&self) -> String {
         let failure_context = self.no_action_failure_context().unwrap_or_default();
         match self.consecutive_no_action_prompts {
-            0 | 1 => "Please use the appropriate tools to take action now. Don't just describe what you'll do - actually execute the tools.".to_string(),
+            0 | 1 => "OUTPUT A TOOL NOW - Use this exact format:\n<tool>\n<name>TOOL_NAME</name>\n<arguments>{JSON_ARGS}</arguments>\n</tool>\n\nDO NOT say 'I will' - just output the XML tool block immediately.".to_string(),
             2 => format!(
-                "NO ACTION DETECTED AGAIN: your previous response described intent but still did not use any tool. Emit a valid tool call now. If a tool is blocked or unavailable, explicitly name the blocker and choose a different tool or strategy instead of repeating the plan.{}",
+                "STILL NO TOOL OUTPUT. You must output a tool in this exact XML format:\n<tool>\n<name>TOOL_NAME</name>\n<arguments>{{JSON_ARGS}}</arguments>\n</tool>\n\nDO NOT DESCRIBE - JUST OUTPUT THE XML BLOCK NOW.{}",
                 failure_context
             ),
             _ => format!(
-                "NO ACTION LOOP DETECTED: you have now responded multiple times with intent but no tool call. Your next response must do exactly one of these: (1) emit a valid tool call, (2) explicitly state the concrete blocker from prior evidence and choose a different strategy, or (3) give a final answer only if the task genuinely requires no tool. Do not restate the plan.{}",
+                "LOOP DETECTED - You keep describing intent but not outputting tools. STOP describing and OUTPUT the tool XML immediately:\n<tool>\n<name>TOOL_NAME</name>\n<arguments>{{JSON_ARGS}}</arguments>\n</tool>\n\nExecute ONE tool now or state why you cannot.{}",
                 failure_context
             ),
         }

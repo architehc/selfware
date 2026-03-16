@@ -590,8 +590,8 @@ pub struct LlmCacheEntry {
     pub output_tokens: u32,
     /// Cache creation timestamp (Unix seconds)
     pub created_at: u64,
-    /// Number of times this cache entry was hit
-    pub hit_count: u32,
+    /// Number of times this cache entry was hit (u64 to prevent overflow)
+    pub hit_count: u64,
     /// Context hash for invalidation
     pub context_hash: u64,
     /// Associated file paths (for invalidation)
@@ -642,7 +642,7 @@ impl LlmCache {
         }
     }
 
-    /// Look up a cached response by semantic similarity
+    /// Look up a cached response by semantic similarity (if enabled)
     pub fn lookup(
         &self,
         _prompt: &str,
@@ -650,6 +650,12 @@ impl LlmCache {
         context_hash: u64,
     ) -> Option<LlmCacheEntry> {
         self.analytics.record_request();
+
+        // Skip semantic matching if disabled in config
+        if !self.config.semantic_matching {
+            self.analytics.record_miss();
+            return None;
+        }
 
         // Check invalidation first
         if self.invalidator.should_invalidate(context_hash) {
@@ -689,8 +695,12 @@ impl LlmCache {
 
                 // Record hit
                 self.analytics.record_hit();
-                self.cost_tracker
-                    .record_savings(entry.estimated_cost(&self.config));
+                
+                // Record cost savings only if tracking is enabled
+                if self.config.track_costs {
+                    self.cost_tracker
+                        .record_savings(entry.estimated_cost(&self.config));
+                }
 
                 return Some(entry.clone());
             }
@@ -947,8 +957,10 @@ pub struct CostTracker {
     hits_with_savings: AtomicU64,
     /// Total API calls that would have been made
     total_calls_avoided: AtomicU64,
-    /// Cost history for trending
+    /// Cost history for trending (bounded)
     history: RwLock<VecDeque<CostRecord>>,
+    /// Maximum history entries
+    max_history: usize,
 }
 
 /// A cost savings record
@@ -965,13 +977,22 @@ pub struct CostRecord {
 
 #[allow(dead_code)]
 impl CostTracker {
+    /// Maximum number of cost history records to keep
+    const DEFAULT_MAX_HISTORY: usize = 1000;
+
     /// Create a new cost tracker
     pub fn new() -> Self {
+        Self::with_capacity(Self::DEFAULT_MAX_HISTORY)
+    }
+
+    /// Create a new cost tracker with custom history capacity
+    pub fn with_capacity(max_history: usize) -> Self {
         Self {
             total_savings: AtomicU64::new(0),
             hits_with_savings: AtomicU64::new(0),
             total_calls_avoided: AtomicU64::new(0),
-            history: RwLock::new(VecDeque::with_capacity(1000)),
+            history: RwLock::new(VecDeque::with_capacity(max_history)),
+            max_history,
         }
     }
 
@@ -1002,8 +1023,8 @@ impl CostTracker {
                 cumulative,
             });
 
-            // Keep only last 1000 records
-            while history.len() > 1000 {
+            // Keep only last N records (bounded)
+            while history.len() > self.max_history {
                 history.pop_front();
             }
         }

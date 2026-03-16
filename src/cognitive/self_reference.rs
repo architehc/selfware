@@ -4,15 +4,20 @@
 //! This is the foundation for recursive self-improvement.
 
 use anyhow::{anyhow, Result};
+use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::cognitive::memory_hierarchy::{CodeContext, FileContent, IndexedFile, SemanticMemory};
 use crate::token_count::estimate_tokens_with_overhead;
+
+/// Maximum number of entries in the code cache
+const CODE_CACHE_SIZE: usize = 1000;
 
 /// System for agent self-reference and self-improvement
 pub struct SelfReferenceSystem {
@@ -20,8 +25,8 @@ pub struct SelfReferenceSystem {
     semantic: Arc<RwLock<SemanticMemory>>,
     /// Current self-model
     self_model: SelfModel,
-    /// Cache of frequently accessed code
-    code_cache: HashMap<String, CachedCode>,
+    /// Cache of frequently accessed code (LRU eviction) - wrapped for thread-safe mutation
+    code_cache: std::sync::Mutex<LruCache<String, CachedCode>>,
     /// Recent modifications to self
     recent_modifications: VecDeque<CodeModification>,
     /// Maximum modifications to track
@@ -248,7 +253,9 @@ impl SelfReferenceSystem {
         Self {
             semantic,
             self_model: SelfModel::default(),
-            code_cache: HashMap::new(),
+            code_cache: std::sync::Mutex::new(LruCache::new(
+                NonZeroUsize::new(CODE_CACHE_SIZE).unwrap(),
+            )),
             recent_modifications: VecDeque::new(),
             max_modifications: 100,
             _selfware_path: selfware_path,
@@ -660,10 +667,16 @@ impl SelfReferenceSystem {
         module_path: &str,
         options: &SourceRetrievalOptions,
     ) -> Result<String> {
-        // Check cache first
-        if let Some(cached) = self.code_cache.get(module_path) {
-            debug!("Cache hit for {}", module_path);
-            return Ok(cached.content.clone());
+        // Check cache first (requires mutable access to update LRU order)
+        {
+            let mut cache = self.code_cache.lock().unwrap_or_else(|poisoned| {
+                warn!("Code cache lock poisoned, recovering");
+                poisoned.into_inner()
+            });
+            if let Some(cached) = cache.get(module_path) {
+                debug!("Cache hit for {}", module_path);
+                return Ok(cached.content.clone());
+            }
         }
 
         let semantic = self.semantic.read().await;
@@ -898,6 +911,15 @@ impl SelfReferenceSystem {
     pub fn get_recent_modifications(&self) -> &VecDeque<CodeModification> {
         &self.recent_modifications
     }
+
+    /// Get code cache stats
+    pub fn code_cache_stats(&self) -> (usize, usize) {
+        let cache = self.code_cache.lock().unwrap_or_else(|poisoned| {
+            warn!("Code cache lock poisoned, recovering");
+            poisoned.into_inner()
+        });
+        (cache.len(), CODE_CACHE_SIZE)
+    }
 }
 
 impl ModificationType {
@@ -997,7 +1019,8 @@ mod tests {
         assert!(model.modules.is_empty());
         assert!(model.capabilities.is_empty());
         assert!(sys.get_recent_modifications().is_empty());
-        assert!(sys.code_cache.is_empty());
+        assert!(sys.code_cache.lock().unwrap().is_empty());
+        assert_eq!(sys.code_cache_stats().1, CODE_CACHE_SIZE);
     }
 
     // ========================================================================
@@ -2674,7 +2697,7 @@ mod tests {
     #[test]
     fn test_self_reference_system_code_cache_starts_empty() {
         let sys = make_self_reference_system();
-        assert!(sys.code_cache.is_empty());
+        assert!(sys.code_cache.lock().unwrap().is_empty());
     }
 
     #[test]
