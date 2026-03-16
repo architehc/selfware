@@ -34,24 +34,35 @@ fn canonicalize_message_order(messages: &mut Vec<Message>) {
         .map(|(i, _)| i)
         .collect();
 
-    if sys_indices.len() <= 1 {
-        return; // Zero or one system message – nothing to merge.
+    if sys_indices.len() > 1 {
+        // Build the merged content from all system messages (preserving order).
+        let merged_content: String = sys_indices
+            .iter()
+            .map(|&i| messages[i].content.to_string())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        // Remove all system messages in reverse index order to keep indices valid.
+        for &i in sys_indices.iter().rev() {
+            messages.remove(i);
+        }
+
+        // Insert the single merged system message at position 0.
+        messages.insert(0, Message::system(merged_content));
     }
 
-    // Build the merged content from all system messages (preserving order).
-    let merged_content: String = sys_indices
-        .iter()
-        .map(|&i| messages[i].content.to_string())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-
-    // Remove all system messages in reverse index order to keep indices valid.
-    for &i in sys_indices.iter().rev() {
-        messages.remove(i);
+    // Some backends (e.g. vLLM with Qwen chat templates) require at least one
+    // user message. If none exists (can happen during agentic tool-call loops),
+    // inject a minimal user message after the system message to prevent 400 errors.
+    let has_user = messages.iter().any(|m| m.role == "user");
+    if !has_user {
+        let insert_pos = if messages.first().map(|m| m.role.as_str()) == Some("system") {
+            1
+        } else {
+            0
+        };
+        messages.insert(insert_pos, Message::user("Continue with the task."));
     }
-
-    // Insert the single merged system message at position 0.
-    messages.insert(0, Message::system(merged_content));
 }
 
 /// Trait abstraction over the LLM API client, enabling test mocking.
@@ -3411,17 +3422,20 @@ mod tests {
             Message::system("s3".to_string()),
         ];
         canonicalize_message_order(&mut msgs);
-        // All merged into one
-        assert_eq!(msgs.len(), 1);
+        // All merged into one system + injected user message
+        assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].role, "system");
         assert_eq!(msgs[0].content, "s1\n\ns2\n\ns3");
+        assert_eq!(msgs[1].role, "user");
     }
 
     #[test]
     fn test_canonicalize_empty() {
         let mut msgs: Vec<Message> = vec![];
         canonicalize_message_order(&mut msgs);
-        assert!(msgs.is_empty());
+        // Injected user message when none exists
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, "user");
     }
 
     #[test]
@@ -3473,8 +3487,10 @@ mod tests {
     fn test_canonicalize_single_system_message() {
         let mut msgs = vec![Message::system("only".to_string())];
         canonicalize_message_order(&mut msgs);
-        assert_eq!(msgs.len(), 1);
+        // System message preserved + injected user message
+        assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0].content, "only");
+        assert_eq!(msgs[1].role, "user");
     }
 
     #[test]
