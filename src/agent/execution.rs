@@ -658,6 +658,23 @@ impl Agent {
         let step_count = self.loop_control.current_step();
         let min_steps = self.config.agent.min_completion_steps;
 
+        // CRITICAL: Must have executed at least one tool call to complete
+        // Prevents "empty" completions where model just talks without acting
+        let has_executed_any_tool = self
+            .current_checkpoint
+            .as_ref()
+            .map(|cp| cp.tool_calls.iter().any(|tc| tc.success))
+            .unwrap_or(false);
+        
+        if !has_executed_any_tool {
+            return Some(
+                "You have not executed any tools yet. You must use at least one tool \
+                 (file_read, file_write, cargo_check, shell_exec, etc.) to make progress \
+                 before completing the task. Stop describing and execute a tool now."
+                    .to_string()
+            );
+        }
+
         if step_count < min_steps {
             // Tailor the message: don't mention cargo for non-Rust tasks
             let verification_hint = if self.should_skip_cargo_verification() {

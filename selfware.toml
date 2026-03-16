@@ -11,10 +11,10 @@ denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
 
 
 [agent]
-max_iterations = 5000
-step_timeout_secs = 600
+max_iterations = 500
+step_timeout_secs = 900
 # Enable native function calling (requires backend support like sglang --tool-call-parser)
-native_function_calling = true
+native_function_calling = false
 token_budget = 262144
 
 [continuous_work]
@@ -25,7 +25,7 @@ auto_recovery = true
 max_recovery_attempts = 3
 
 [retry]
-max_retries = 5
+max_retries = 50
 base_delay_ms = 1000
 max_delay_ms = 60000
 
@@ -74,4 +74,4 @@ cognitive = [
 ]
 
 # Config keys the agent may tune
-config_keys = ["temperature", "max_tokens", "token_budget"]
+config_keys = ["`temperature", "max_tokens", "token_budget"]

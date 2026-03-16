@@ -74,16 +74,23 @@ fn load_or_create_salt() -> Result<Vec<u8>> {
 
 /// Derive a 256-bit encryption key from a password using PBKDF2-HMAC-SHA256
 /// with a per-installation random salt.
-fn derive_key(password: &str) -> [u8; 32] {
-    let salt = load_or_create_salt().unwrap_or_else(|_| {
-        tracing::warn!("Failed to persist salt. Using an ephemeral random salt for this session.");
-        let mut fallback = [0u8; 32];
-        rand::rng().fill_bytes(&mut fallback);
-        fallback.to_vec()
-    });
+/// 
+/// # Security Note
+/// This function requires persistent salt storage. If the salt cannot be
+/// persisted, encryption would become non-deterministic and data would be
+/// unrecoverable after restart. In such cases, we fail loudly rather than
+/// silently using an ephemeral salt.
+fn derive_key(password: &str) -> Result<[u8; 32]> {
+    let salt = load_or_create_salt().map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to load or create encryption salt: {}. \
+             Encryption requires persistent salt storage.",
+            e
+        )
+    })?;
     let mut key = [0u8; 32];
     pbkdf2::pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt, KDF_ITERATIONS, &mut key);
-    key
+    Ok(key)
 }
 
 use zeroize::Zeroize;
@@ -115,9 +122,12 @@ impl EncryptionManager {
     /// Convenience wrapper around [`new_instance`](Self::new_instance)
     /// that derives a 256-bit key via PBKDF2-HMAC-SHA256 with the
     /// installation salt.
-    pub fn new_from_password(password: &str) -> Self {
-        let key = derive_key(password);
-        Self::new_instance(key)
+    /// 
+    /// # Errors
+    /// Returns an error if the salt cannot be loaded or created.
+    pub fn new_from_password(password: &str) -> Result<Self> {
+        let key = derive_key(password)?;
+        Ok(Self::new_instance(key))
     }
 
     /// Initialize the global encryption manager with a password.
@@ -126,7 +136,7 @@ impl EncryptionManager {
     /// [`new_from_password`](Self::new_from_password) or
     /// [`new_instance`](Self::new_instance).
     pub fn init(password: &str) -> Result<()> {
-        let key = derive_key(password);
+        let key = derive_key(password)?;
 
         let manager = EncryptionManager { key };
         INSTANCE
@@ -209,7 +219,7 @@ impl EncryptionManager {
     /// Create an EncryptionManager directly (test only, bypasses OnceLock)
     #[cfg(test)]
     pub fn new_for_test(password: &str) -> Self {
-        Self::new_from_password(password)
+        Self::new_from_password(password).expect("Failed to create test encryption manager")
     }
 }
 
@@ -292,7 +302,7 @@ mod tests {
 
     #[test]
     fn new_from_password_roundtrip() {
-        let mgr = EncryptionManager::new_from_password("session-password-xyz");
+        let mgr = EncryptionManager::new_from_password("session-password-xyz").unwrap();
         let plaintext = b"multi-agent data";
         let encrypted = mgr.encrypt(plaintext).unwrap();
         let decrypted = mgr.decrypt(&encrypted).unwrap();
@@ -301,8 +311,8 @@ mod tests {
 
     #[test]
     fn different_instances_have_different_keys() {
-        let mgr_a = EncryptionManager::new_from_password("password-a");
-        let mgr_b = EncryptionManager::new_from_password("password-b");
+        let mgr_a = EncryptionManager::new_from_password("password-a").unwrap();
+        let mgr_b = EncryptionManager::new_from_password("password-b").unwrap();
         let encrypted = mgr_a.encrypt(b"secret").unwrap();
         // mgr_b should not be able to decrypt data encrypted by mgr_a
         let result = mgr_b.decrypt(&encrypted);

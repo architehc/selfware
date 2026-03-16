@@ -785,6 +785,32 @@ impl ConceptExtractor {
 
         curriculum
     }
+
+    /// Add a custom pattern (with eviction if at capacity)
+    pub fn add_pattern(&mut self, id: impl Into<String>, pattern: ConceptPattern) {
+        let id = id.into();
+        
+        // Evict oldest entry if at capacity and this is a new pattern
+        if self.patterns.len() >= self.max_patterns && !self.patterns.contains_key(&id) {
+            // Remove an arbitrary entry (HashMap doesn't have ordering)
+            if let Some(first_key) = self.patterns.keys().next().cloned() {
+                self.patterns.remove(&first_key);
+            }
+        }
+        
+        self.patterns.insert(id, pattern);
+    }
+
+    /// Get pattern count and capacity
+    pub fn pattern_stats(&self) -> (usize, usize) {
+        (self.patterns.len(), self.max_patterns)
+    }
+
+    /// Clear all custom patterns, keeping only defaults
+    pub fn clear_custom_patterns(&mut self) {
+        self.patterns.clear();
+        self.add_default_patterns();
+    }
 }
 
 impl Default for ConceptExtractor {

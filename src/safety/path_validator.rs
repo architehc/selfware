@@ -177,24 +177,23 @@ impl PathValidator {
         };
         let canonical_str = strip_unc_prefix(&canonical.to_string_lossy());
 
-        // Strict path traversal check
-        if path.contains("..") {
-            let original_parent = self
-                .working_dir
-                .canonicalize()
-                .unwrap_or_else(|_| self.working_dir.clone());
+        // Strict path traversal check - ALWAYS validate canonical path is within boundaries
+        // This catches: ".." traversal, absolute paths outside allowed areas, and symlink escapes
+        let original_parent = self
+            .working_dir
+            .canonicalize()
+            .unwrap_or_else(|_| self.working_dir.clone());
 
-            // The resolved path must be within allowed boundaries
-            let is_within_working_dir = canonical.starts_with(&original_parent);
-            let is_explicitly_allowed = self.is_path_in_allowed_list(&canonical_str, path)?;
+        // The resolved path must be within allowed boundaries
+        let is_within_working_dir = canonical.starts_with(&original_parent);
+        let is_explicitly_allowed = self.is_path_in_allowed_list(&canonical_str, path)?;
 
-            if !is_within_working_dir && !is_explicitly_allowed {
-                anyhow::bail!(
-                    "Path traversal detected: {} resolves to {}",
-                    path,
-                    canonical_str
-                );
-            }
+        if !is_within_working_dir && !is_explicitly_allowed {
+            anyhow::bail!(
+                "Path traversal detected: '{}' resolves to '{}' which is outside allowed boundaries",
+                path,
+                canonical_str
+            );
         }
 
         // Check against denied patterns using both original and canonical paths.
