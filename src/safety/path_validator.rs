@@ -222,9 +222,26 @@ impl PathValidator {
             }
         }
 
-        if !self.config.allowed_paths.is_empty()
-            && !self.is_path_in_allowed_list(&canonical_str, path)?
-        {
+        if self.config.allowed_paths.is_empty() {
+            // No allowed_paths configured: restrict to working directory
+            // to prevent unrestricted filesystem access.
+            let working_dir_canonical = self
+                .working_dir
+                .canonicalize()
+                .unwrap_or_else(|_| self.working_dir.clone());
+            if !canonical.starts_with(&working_dir_canonical) {
+                tracing::warn!(
+                    "No allowed_paths configured — restricting to working directory. \
+                     Path '{}' is outside '{}'",
+                    canonical_str,
+                    working_dir_canonical.display()
+                );
+                anyhow::bail!(
+                    "Path '{}' is outside working directory and no allowed_paths configured",
+                    canonical_str
+                );
+            }
+        } else if !self.is_path_in_allowed_list(&canonical_str, path)? {
             anyhow::bail!("Path not in allowed list: {}", canonical_str);
         }
 
