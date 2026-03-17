@@ -799,13 +799,25 @@ impl Agent {
             }
 
             if input == "/compress" {
-                match self.compress_context().await {
-                    Ok(saved) => {
-                        if saved > 0 {
-                            println!("{} Saved {} tokens", "✓".bright_green(), saved);
-                        }
-                    }
-                    Err(e) => println!("{} Compression error: {}", "❌".bright_red(), e),
+                // Parse optional strategy argument
+                let strategy = if input.contains("aggressive") {
+                    crate::agent::context_compression::CompressionStrategy::Aggressive
+                } else if input.contains("conservative") {
+                    crate::agent::context_compression::CompressionStrategy::Conservative
+                } else {
+                    crate::agent::context_compression::CompressionStrategy::Moderate
+                };
+                
+                let result = self.compress_context(strategy);
+                if result.success {
+                    println!(
+                        "{} Saved {} tokens (removed {} messages)",
+                        "✓".bright_green(),
+                        result.saved_tokens,
+                        result.removed_messages
+                    );
+                } else {
+                    println!("{} No compression needed", "ℹ️".bright_cyan());
                 }
                 continue;
             }

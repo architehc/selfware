@@ -1110,46 +1110,6 @@ impl Agent {
         );
         println!();
     }
-
-    /// Compress context to reduce token usage
-    pub(super) async fn compress_context(&mut self) -> Result<usize> {
-        let before = self.compressor.estimate_tokens(&self.messages);
-
-        if !self.compressor.should_compress(&self.messages) {
-            println!(
-                "{} Context is within limits, no compression needed",
-                "ℹ️".bright_cyan()
-            );
-            return Ok(0);
-        }
-
-        println!("{} Compressing context...", "🗜️".bright_cyan());
-
-        self.messages = self
-            .compressor
-            .compress(&self.client, &self.messages)
-            .await?;
-
-        let after = self.compressor.estimate_tokens(&self.messages);
-        let saved = before.saturating_sub(after);
-        let pct = if before > 0 {
-            saved as f64 / before as f64 * 100.0
-        } else {
-            0.0
-        };
-
-        println!(
-            "{} Compressed: {} → {} tokens ({:.1}% reduction)",
-            "✓".bright_green(),
-            before.to_string().bright_yellow(),
-            after.to_string().bright_green(),
-            pct
-        );
-
-        Ok(saved)
-    }
-
-    /// Enhance cargo check/clippy errors with analyzer suggestions
     pub(super) fn enhance_cargo_errors(&self, result_str: &str) -> String {
         // Try to parse the result and extract errors
         if let Ok(result) = serde_json::from_str::<Value>(result_str) {

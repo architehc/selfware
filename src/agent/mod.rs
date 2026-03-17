@@ -31,6 +31,7 @@ use crate::verification::{VerificationConfig, VerificationGate};
 mod checkpointing;
 pub mod context;
 mod context_management;
+mod context_compression;
 mod execution;
 mod interactive;
 pub mod last_tool;
