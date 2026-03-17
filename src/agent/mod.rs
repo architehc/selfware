@@ -237,8 +237,8 @@ pub struct Agent {
     last_no_action_prompt_hash: Option<u64>,
     /// Permission store for pre-authorized tool grants
     permission_store: crate::safety::permissions::PermissionStore,
-    /// Tool result cache for read-only operations
-    tool_cache: crate::session::cache::ToolCache,
+    /// Unified cache manager for tool and LLM response caching
+    cache_manager: crate::session::cache::CacheManager,
     /// Local-first coordinator for response caching and offline support
     local_first: crate::session::local_first::LocalFirstCoordinator,
     /// Concurrency governor for limiting concurrent streams and tool executions
@@ -579,7 +579,7 @@ To call a tool, use this EXACT XML structure:
             consecutive_no_action_prompts: 0,
             last_no_action_prompt_hash: None,
             permission_store,
-            tool_cache: crate::session::cache::ToolCache::new(),
+            cache_manager: crate::session::cache::CacheManager::default(),
             local_first: crate::session::local_first::LocalFirstCoordinator::new(),
             governor: ConcurrencyGovernor::with_defaults(),
             esc_paused: Arc::new(AtomicBool::new(false)),

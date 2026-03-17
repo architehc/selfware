@@ -1270,7 +1270,7 @@ impl Agent {
         // Check ToolCache for cacheable (read-only) tools
         let is_cacheable = crate::session::cache::is_cacheable(name);
         if is_cacheable {
-            if let Some(cached_value) = self.tool_cache.get(name, args) {
+            if let Some(cached_value) = self.cache_manager.tool_cache.get(name, args) {
                 let elapsed = start_time.elapsed().as_millis() as u64;
                 let result_str = serde_json::to_string(&cached_value)?;
                 let summary =
@@ -1284,11 +1284,11 @@ impl Agent {
         // Invalidate cache entries when a mutating tool targets a specific path
         if crate::session::cache::invalidates_cache(name) {
             if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                self.tool_cache.invalidate_path(path);
+                self.cache_manager.tool_cache.invalidate_path(path);
             }
             // shell_exec and git operations can affect any file — clear all read caches
             if matches!(name, "shell_exec" | "git_commit" | "git_checkout") {
-                self.tool_cache.clear();
+                self.cache_manager.tool_cache.clear();
             }
         }
 
@@ -1343,7 +1343,7 @@ impl Agent {
 
                 // Store successful cacheable results in ToolCache
                 if is_cacheable {
-                    self.tool_cache.set(name, args, result.clone());
+                    self.cache_manager.tool_cache.set(name, args, result.clone());
                 }
 
                 // Cache tool results in LocalFirstCoordinator

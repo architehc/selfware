@@ -84,7 +84,18 @@ impl SessionLogger {
             .join("selfware")
             .join("session_logs");
 
-        if let Err(e) = std::fs::create_dir_all(&dir) {
+        // Use blocking thread for initial directory creation during static initialization
+        let dir_clone = dir.clone();
+        let result = std::thread::spawn(move || {
+            std::fs::create_dir_all(&dir_clone)
+        })
+        .join()
+        .unwrap_or_else(|_| Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Thread panicked during directory creation"
+        )));
+
+        if let Err(e) = result {
             warn!("Failed to create session log directory {:?}: {}", dir, e);
             return None;
         }

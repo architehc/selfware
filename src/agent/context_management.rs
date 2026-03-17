@@ -1017,7 +1017,7 @@ impl Agent {
             patina, reset, patina, reset
         );
         // Tool cache stats
-        let tc_stats = self.tool_cache.stats();
+        let tc_stats = self.cache_manager.tool_cache.stats();
         println!(
             "  {}│{}  {bold}{}◇ TOOL CACHE{}{:<44}    {}│{}",
             patina, reset, sand, reset, "", patina, reset
