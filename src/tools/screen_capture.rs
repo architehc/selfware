@@ -120,8 +120,10 @@ impl Tool for ScreenCapture {
 
         // Either save to file or return base64
         if let Some(path) = output_path {
-            std::fs::write(path, &png_bytes)
-                .with_context(|| format!("Failed to write screenshot to {}", path))?;
+            tokio::task::block_in_place(|| {
+                std::fs::write(path, &png_bytes)
+                    .with_context(|| format!("Failed to write screenshot to {}", path))
+            })?;
             Ok(json!({
                 "success": true,
                 "target": target,

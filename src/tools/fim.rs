@@ -1,4 +1,4 @@
-use super::file::validate_tool_path;
+use super::file::{resolve_safety_config, validate_tool_path};
 use super::Tool;
 use crate::api::ApiClient;
 use crate::config::SafetyConfig;
@@ -143,7 +143,8 @@ impl Tool for FileFimEdit {
         let instruction = sanitize_fim_instruction(raw_instruction);
 
         // Validate path safety BEFORE any file I/O
-        validate_tool_path(path, self.safety_config.as_ref())?;
+        let safety = resolve_safety_config(self.safety_config.as_ref());
+        validate_tool_path(path, &safety)?;
 
         let content = fs::read_to_string(path).await?;
         let lines: Vec<&str> = content.lines().collect();

@@ -674,9 +674,9 @@ pub struct Swarm {
     conflict_strategy: ConflictStrategy,
     /// Minimum consensus threshold (0.0 - 1.0)
     consensus_threshold: f32,
-    /// Task queue
+    /// Task queue (pending tasks waiting to be executed)
     task_queue: Vec<SwarmTask>,
-    /// Tasks currently in progress
+    /// Active and completed tasks (tasks that have been popped from queue)
     active_tasks: HashMap<String, SwarmTask>,
     /// Timeout for pending decisions (seconds)
     decision_timeout_secs: u64,
@@ -925,9 +925,9 @@ impl Swarm {
         self.task_queue.iter().collect()
     }
 
-    /// Get a specific task
+    /// Get a specific task (checks both queued and active tasks)
     pub fn get_task(&self, id: &str) -> Option<&SwarmTask> {
-        self.task_queue.iter().find(|t| t.id == id)
+        self.active_tasks.get(id).or_else(|| self.task_queue.iter().find(|t| t.id == id))
     }
 
     /// Handle conflict
@@ -1005,15 +1005,36 @@ impl Swarm {
     }
 
     /// Get next task (highest priority)
-    pub fn next_task(&mut self) -> Option<SwarmTask> {
-        self.task_queue.pop()
+    /// Moves the task from the queue to active_tasks
+    pub fn next_task(&mut self) -> Option<String> {
+        let task = self.task_queue.pop()?;
+        let task_id = task.id.clone();
+        // Move task to active_tasks so it can be assigned and completed
+        self.active_tasks.insert(task_id.clone(), task);
+        Some(task_id)
     }
 
     /// Assign task to agents
+    /// If the task is still in the queue (not yet moved to active_tasks),
+    /// it will be moved automatically before assignment.
     pub fn assign_task(&mut self, task_id: &str) -> Vec<String> {
-        let task = match self.task_queue.iter_mut().find(|t| t.id == task_id) {
+        // Ensure the task is in active_tasks (move from queue if needed)
+        if !self.active_tasks.contains_key(task_id) {
+            if let Some(index) = self.task_queue.iter().position(|t| t.id == *task_id) {
+                let task = self.task_queue.remove(index);
+                self.active_tasks.insert(task_id.to_string(), task);
+            } else {
+                tracing::warn!("Task {} not found in active tasks or queue", task_id);
+                return Vec::new();
+            }
+        }
+        
+        let task = match self.active_tasks.get_mut(task_id) {
             Some(t) => t,
-            None => return Vec::new(),
+            None => {
+                tracing::error!("Task {} disappeared after queue check", task_id);
+                return Vec::new();
+            }
         };
 
         let mut assigned = Vec::new();
@@ -1047,21 +1068,27 @@ impl Swarm {
 
     /// Complete task for an agent
     pub fn complete_task(&mut self, task_id: &str, agent_id: &str, result: impl Into<String>) {
-        if let Some(task) = self.task_queue.iter_mut().find(|t| t.id == task_id) {
-            task.results.insert(agent_id.to_string(), result.into());
-
-            // Check if all agents have submitted results — done atomically
-            // within the same mutable borrow to avoid inconsistent state
-            let all_done = task.results.len() >= task.assigned_agents.len();
-            if all_done {
-                task.status = TaskStatus::Completed;
+        let task = match self.active_tasks.get_mut(task_id) {
+            Some(t) => t,
+            None => {
+                tracing::warn!("Task {} not found in active tasks during completion", task_id);
+                return;
             }
+        };
+        
+        task.results.insert(agent_id.to_string(), result.into());
 
-            // Update agent status only when task was found, keeping both
-            // operations together so they succeed or fail as a unit
-            if let Some(agent) = self.agents.get_mut(agent_id) {
-                agent.complete_task(true);
-            }
+        // Check if all agents have submitted results — done atomically
+        // within the same mutable borrow to avoid inconsistent state
+        let all_done = task.results.len() >= task.assigned_agents.len();
+        if all_done {
+            task.status = TaskStatus::Completed;
+        }
+
+        // Update agent status only when task was found, keeping both
+        // operations together so they succeed or fail as a unit
+        if let Some(agent) = self.agents.get_mut(agent_id) {
+            agent.complete_task(true);
         }
     }
 
@@ -1408,7 +1435,8 @@ mod tests {
             .unwrap();
 
         // Higher priority should come first
-        let task = swarm.next_task().unwrap();
+        let task_id = swarm.next_task().unwrap();
+        let task = swarm.get_task(&task_id).unwrap();
         assert_eq!(task.priority, 8);
     }
 
@@ -1632,7 +1660,8 @@ mod tests {
         swarm.queue_task(review_task).unwrap();
 
         // Get highest priority task
-        let task = swarm.next_task().unwrap();
+        let task_id = swarm.next_task().unwrap();
+        let task = swarm.get_task(&task_id).unwrap();
         assert_eq!(task.priority, 8);
         assert!(task.description.contains("Implement"));
 
@@ -2772,11 +2801,14 @@ mod tests {
             .unwrap();
 
         // pop() returns from the end; sorted ascending, so highest is last
-        let t1 = swarm.next_task().unwrap();
+        let t1_id = swarm.next_task().unwrap();
+        let t1 = swarm.get_task(&t1_id).unwrap();
         assert_eq!(t1.priority, 10);
-        let t2 = swarm.next_task().unwrap();
+        let t2_id = swarm.next_task().unwrap();
+        let t2 = swarm.get_task(&t2_id).unwrap();
         assert_eq!(t2.priority, 5);
-        let t3 = swarm.next_task().unwrap();
+        let t3_id = swarm.next_task().unwrap();
+        let t3 = swarm.get_task(&t3_id).unwrap();
         assert_eq!(t3.priority, 1);
     }
 

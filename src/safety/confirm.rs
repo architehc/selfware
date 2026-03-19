@@ -174,7 +174,10 @@ pub fn prompt_confirmation(operation: &DestructiveOperation) -> io::Result<Confi
     io::stderr().flush()?;
 
     let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
+    // Use block_in_place to prevent blocking the async runtime
+    tokio::task::block_in_place(|| {
+        io::stdin().read_line(&mut input)
+    })?;
 
     let input = input.trim().to_lowercase();
 

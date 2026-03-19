@@ -7,7 +7,7 @@
 use super::{wrap_chat_message, CommandPalette, TuiPalette};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::Style,
+    style::{Modifier, Style},
     text::Span,
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame,
@@ -224,10 +224,24 @@ impl App {
 
     /// Render chat messages
     fn render_messages(&self, frame: &mut Frame, area: Rect) {
+        // Messages pane is "focused" when we're not in palette or other overlay modes
+        let is_focused = self.state == AppState::Chatting || self.state == AppState::RunningTask;
+        let border_style = if is_focused {
+            TuiPalette::border_style()
+        } else {
+            TuiPalette::muted_style()
+        };
+
+        let title = if is_focused {
+            " Messages ".into()
+        } else {
+            format!(" Messages [{}] ", self.state_label())
+        };
+
         let inner = Block::default()
             .borders(Borders::ALL)
-            .border_style(TuiPalette::border_style())
-            .title(" Messages ");
+            .border_style(border_style)
+            .title(Span::styled(title, border_style));
 
         let inner_area = inner.inner(area);
         frame.render_widget(inner, area);
@@ -265,47 +279,92 @@ impl App {
 
     /// Render input area
     fn render_input(&self, frame: &mut Frame, area: Rect) {
+        let is_focused = self.state == AppState::Chatting;
+        let border_style = if is_focused {
+            Style::default()
+                .fg(TuiPalette::AMBER)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            TuiPalette::muted_style()
+        };
+
+        let title = if is_focused {
+            " Input ".into()
+        } else {
+            format!(" Input [{}] ", self.state_label())
+        };
+
         let input_block = Block::default()
             .borders(Borders::ALL)
-            .border_style(if self.state == AppState::Chatting {
-                TuiPalette::title_style()
-            } else {
-                TuiPalette::muted_style()
-            })
-            .title(" Input (Ctrl+P for palette) ");
+            .border_style(border_style)
+            .title(Span::styled(title, border_style));
 
         let inner = input_block.inner(area);
         frame.render_widget(input_block, area);
 
-        let input_text = Paragraph::new(format!("❯ {}", self.input))
-            .style(Style::default().fg(TuiPalette::PARCHMENT));
+        let input_text = if is_focused {
+            Paragraph::new(format!("❯ {}", self.input))
+                .style(Style::default().fg(TuiPalette::PARCHMENT))
+        } else {
+            Paragraph::new(" — ".to_string())
+                .style(TuiPalette::muted_style())
+        };
         frame.render_widget(input_text, inner);
 
-        // Show cursor
-        if self.state == AppState::Chatting {
+        // Show cursor only when focused
+        if is_focused {
             frame.set_cursor_position((inner.x + 2 + self.cursor as u16, inner.y));
+        }
+    }
+
+    /// Get a short label for the current state
+    fn state_label(&self) -> &'static str {
+        match self.state {
+            AppState::Chatting => "chat",
+            AppState::RunningTask => "task",
+            AppState::Palette => "palette",
+            AppState::FileBrowser => "files",
+            AppState::Help => "help",
+            AppState::Confirming(_) => "confirm",
         }
     }
 
     /// Render status bar
     fn render_status_bar(&self, frame: &mut Frame, area: Rect) {
-        let status_style = if self.connected {
-            TuiPalette::success_style()
+        use ratatui::text::Line;
+        use ratatui::text::Span;
+
+        let connection_status = if self.connected {
+            Span::styled("●", TuiPalette::success_style())
         } else {
-            TuiPalette::error_style()
+            Span::styled("○", TuiPalette::error_style())
         };
 
-        let connection_status = if self.connected { "●" } else { "○" };
+        // Build status bar based on current state
+        let help_hint = match self.state {
+            AppState::Chatting => {
+                "Ctrl+P: palette │ Enter: send │ ↑/↓: scroll │ Ctrl+C: quit"
+            }
+            AppState::Palette => {
+                "↑/↓: navigate │ Enter: select │ Esc: close │ Type: filter"
+            }
+            AppState::RunningTask => "Task running... │ Esc: cancel (if possible)",
+            AppState::Confirming(_) => "y: yes │ n: no │ Enter: confirm │ Esc: cancel",
+            _ => "Esc: back │ Ctrl+C: quit",
+        };
 
-        let status_text = format!(
-            " {} {} │ {} │ {} messages │ Ctrl+C to quit ",
+        let status_line = Line::from(vec![
             connection_status,
-            self.model,
-            self.status,
-            self.messages.len()
-        );
+            Span::raw(format!(" {} │ ", self.model)),
+            Span::styled(format!("{} │ ", self.status), TuiPalette::muted_style()),
+            Span::styled(
+                format!("{} msgs │ ", self.messages.len()),
+                TuiPalette::muted_style(),
+            ),
+            Span::raw(help_hint),
+        ]);
 
-        let status = Paragraph::new(status_text).style(status_style);
+        let status = Paragraph::new(status_line);
         frame.render_widget(status, area);
     }
 
@@ -397,11 +456,53 @@ impl App {
     }
 
     /// Handle escape key
+    ///
+    /// Esc behavior hierarchy:
+    /// 1. If palette is open -> close palette and reset it
+    /// 2. If confirming -> cancel confirmation
+    /// 3. If running task -> cancel/close task view
+    /// 4. If file browser -> close file browser
+    /// 5. If help -> close help
+    /// 6. If chatting with input -> clear input
+    /// 7. If chatting (clean state) -> show exit confirmation
     pub fn on_escape(&mut self) {
         match self.state {
-            AppState::Palette => self.state = AppState::Chatting,
-            AppState::Confirming(_) => self.state = AppState::Chatting,
-            _ => {}
+            AppState::Palette => {
+                self.palette.reset();
+                self.state = AppState::Chatting;
+                self.status = "Command palette closed".into();
+            }
+            AppState::Confirming(_) => {
+                self.state = AppState::Chatting;
+                self.status = "Cancelled".into();
+            }
+            AppState::RunningTask => {
+                self.task_progress = None;
+                self.state = AppState::Chatting;
+                self.status = "Task view closed".into();
+            }
+            AppState::FileBrowser => {
+                self.state = AppState::Chatting;
+                self.status = "File browser closed".into();
+            }
+            AppState::Help => {
+                self.state = AppState::Chatting;
+                self.status = "Help closed".into();
+            }
+            AppState::Chatting => {
+                if !self.input.is_empty() {
+                    // First escape clears input
+                    self.input.clear();
+                    self.cursor = 0;
+                    self.status = "Input cleared".into();
+                } else {
+                    // Clean state - show exit confirmation
+                    self.state = AppState::Confirming(
+                        "Press Enter to exit, Esc to cancel".into()
+                    );
+                    self.status = "Exit?".into();
+                }
+            }
         }
     }
 
@@ -676,12 +777,80 @@ mod tests {
     }
 
     #[test]
-    fn test_on_escape_from_chatting() {
+    fn test_on_escape_from_chatting_shows_confirmation() {
         let mut app = App::new("test");
         app.state = AppState::Chatting;
 
         app.on_escape();
-        assert_eq!(app.state, AppState::Chatting); // No change
+        // When in clean Chatting state, Esc shows exit confirmation
+        assert!(matches!(app.state, AppState::Confirming(_)));
+    }
+
+    #[test]
+    fn test_on_escape_from_chatting_clears_input() {
+        let mut app = App::new("test");
+        app.state = AppState::Chatting;
+        app.input = "some text".into();
+        app.cursor = 9;
+
+        app.on_escape();
+        // First escape clears input
+        assert_eq!(app.state, AppState::Chatting);
+        assert!(app.input.is_empty());
+        assert_eq!(app.cursor, 0);
+    }
+
+    #[test]
+    fn test_on_escape_closes_help() {
+        let mut app = App::new("test");
+        app.state = AppState::Help;
+
+        app.on_escape();
+        assert_eq!(app.state, AppState::Chatting);
+    }
+
+    #[test]
+    fn test_on_escape_closes_file_browser() {
+        let mut app = App::new("test");
+        app.state = AppState::FileBrowser;
+
+        app.on_escape();
+        assert_eq!(app.state, AppState::Chatting);
+    }
+
+    #[test]
+    fn test_on_escape_cancels_task() {
+        let mut app = App::new("test");
+        app.state = AppState::RunningTask;
+        app.task_progress = Some(TaskProgress {
+            description: "Test task".into(),
+            current_step: 1,
+            total_steps: None,
+            current_action: "Testing".into(),
+            elapsed_secs: 0,
+        });
+
+        app.on_escape();
+        assert_eq!(app.state, AppState::Chatting);
+        assert!(app.task_progress.is_none());
+    }
+
+    #[test]
+    fn test_on_escape_resets_palette() {
+        let mut app = App::new("test");
+        app.state = AppState::Palette;
+        // Type some text in the palette
+        app.palette.on_char('t');
+        app.palette.on_char('e');
+        app.palette.on_char('s');
+        app.palette.on_char('t');
+
+        app.on_escape();
+        // Should return to chatting state
+        assert_eq!(app.state, AppState::Chatting);
+        // Palette is reset (we verify by checking it works correctly when reopened)
+        app.toggle_palette();
+        assert_eq!(app.state, AppState::Palette);
     }
 
     #[test]

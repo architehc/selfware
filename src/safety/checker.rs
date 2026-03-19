@@ -374,8 +374,26 @@ impl SafetyChecker {
             anyhow::bail!("Dangerous command blocked: base64-encoded command execution");
         }
 
+        // Check for hex-encoded command execution (xxd, printf with hex escapes)
+        if HEX_EXEC_PATTERN.is_match(&normalized) || HEX_EXEC_PATTERN.is_match(&dequoted) {
+            anyhow::bail!("Dangerous command blocked: hex-encoded command execution");
+        }
+
+        // Check for other encoding/obfuscation execution patterns
+        if ENCODED_EXEC_PATTERN.is_match(&normalized) || ENCODED_EXEC_PATTERN.is_match(&dequoted) {
+            anyhow::bail!("Dangerous command blocked: encoded command execution");
+        }
+
         // Check for shell variable substitution that might hide dangerous commands
         if SUSPICIOUS_SUBSTITUTION_PATTERN.is_match(&normalized) {
+            // Block standalone variable expansion commands like `${FUNC}` or `$VAR`
+            // which could execute arbitrary code when expanded
+            if STANDING_VARIABLE_EXEC_PATTERN.is_match(&normalized) {
+                anyhow::bail!(
+                    "Dangerous command blocked: standalone variable expansion command"
+                );
+            }
+
             // Block indirect execution where the command itself is sourced from
             // a variable/function expansion (e.g., `${FUNC}`).
             let trimmed = normalized.trim_start();
@@ -812,13 +830,34 @@ static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLo
 // Pattern to detect base64-encoded command execution
 static BASE64_EXEC_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     // Match: echo <base64> | base64 -d | sh  (and variants)
-    Regex::new(r#"base64\s+(-[a-z]+\s+)*(-d|--decode).*\|\s*(sh|bash|zsh|perl|python)"#)
+    Regex::new(r#"(base64\s+(-[a-z]+\s+)*(-d|--decode)|base64\s+-d|--decode\s+<|base64\s+<<<).*\|\s*(sh|bash|zsh|perl|python|exec|ruby)"#)
         .expect("Invalid regex")
 });
 
-// Pattern to detect suspicious shell variable substitution
+// Pattern to detect hex-encoded command execution (xxd, printf with hex escapes)
+static HEX_EXEC_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    // Match: xxd -r -p | sh, printf '\xXX' | sh, etc.
+    Regex::new(r#"(xxd\s+-r|-r\s+xxd|printf\s+.*\\x[0-9a-fA-F]{2}.*\|\s*(sh|bash|zsh|perl|python|ruby))"#)
+        .expect("Invalid regex")
+});
+
+// Pattern to detect other encoding/obfuscation execution patterns
+static ENCODED_EXEC_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    // Match: uudecode, zcat|base64|sh, gunzip|base64|sh, etc.
+    Regex::new(r#"(uudecode|gunzip|zcat|gzip\s+-d)\s+.*\|\s*(base64|sh|bash|zsh|perl|python)"#)
+        .expect("Invalid regex")
+});
+
+// Pattern to detect suspicious shell variable substitution used for command injection
 static SUSPICIOUS_SUBSTITUTION_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"\$['"][^'"]*['"]|\$\{[^}]+\}|\$[a-zA-Z_][a-zA-Z0-9_]*"#).expect("Invalid regex")
+});
+
+// Pattern to detect standalone variable execution (blocking commands like ${FUNC})
+static STANDING_VARIABLE_EXEC_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    // Match commands that are purely variable expansion, which could hide malicious code
+    Regex::new(r#"^\s*\$\s*\{?\s*[A-Za-z_][A-Za-z0-9_]*\s*\}?\s*$"#)
+        .expect("Invalid regex")
 });
 
 /// Normalize a shell command to handle common obfuscation techniques.
@@ -1817,6 +1856,71 @@ mod tests {
     }
 
     #[test]
+    fn test_security_blocks_hex_encoded_command() {
+        let config = SafetyConfig::default();
+        let checker = SafetyChecker::new(&config);
+
+        // xxd hex decode piped to shell
+        let call = create_test_call(
+            "shell_exec",
+            r#"{"command": "xxd -r -p < encoded.txt | bash"}"#,
+        );
+        assert!(checker.check_tool_call(&call).is_err());
+    }
+
+    #[test]
+    fn test_security_blocks_printf_hex_exec() {
+        let config = SafetyConfig::default();
+        let checker = SafetyChecker::new(&config);
+
+        // printf with hex escapes piped to shell
+        let call = create_test_call(
+            "shell_exec",
+            r#"{"command": "printf '\x72\x6d\x20-rf\x20/' | bash"}"#,
+        );
+        assert!(checker.check_tool_call(&call).is_err());
+    }
+
+    #[test]
+    fn test_security_blocks_uudecode_exec() {
+        let config = SafetyConfig::default();
+        let checker = SafetyChecker::new(&config);
+
+        // uudecode piped to shell
+        let call = create_test_call(
+            "shell_exec",
+            r#"{"command": "uudecode file.txt | sh"}"#,
+        );
+        assert!(checker.check_tool_call(&call).is_err());
+    }
+
+    #[test]
+    fn test_security_blocks_gzip_base64_exec() {
+        let config = SafetyConfig::default();
+        let checker = SafetyChecker::new(&config);
+
+        // gunzip piped to base64 then shell
+        let call = create_test_call(
+            "shell_exec",
+            r#"{"command": "gunzip < file.gz | base64 -d | bash"}"#,
+        );
+        assert!(checker.check_tool_call(&call).is_err());
+    }
+
+    #[test]
+    fn test_security_blocks_base64_heredoc_exec() {
+        let config = SafetyConfig::default();
+        let checker = SafetyChecker::new(&config);
+
+        // base64 with heredoc syntax
+        let call = create_test_call(
+            "shell_exec",
+            r#"{"command": "base64 -d <<< 'cm0gLXJmIC8=' | bash"}"#,
+        );
+        assert!(checker.check_tool_call(&call).is_err());
+    }
+
+    #[test]
     fn test_security_allows_safe_curl_to_file() {
         let config = SafetyConfig::default();
         let checker = SafetyChecker::new(&config);
@@ -2300,6 +2404,26 @@ mod tests {
         assert!(
             SUSPICIOUS_SUBSTITUTION_PATTERN.is_match("echo ${PATH}"),
             "suspicious substitution pattern should match ${{...}}"
+        );
+
+        // Test hex exec pattern
+        assert!(
+            HEX_EXEC_PATTERN.is_match("xxd -r -p < encoded.txt | bash"),
+            "hex exec pattern should match xxd -r -p"
+        );
+        assert!(
+            HEX_EXEC_PATTERN.is_match("printf '\\x72\\x6d' | bash"),
+            "hex exec pattern should match printf with hex escapes"
+        );
+
+        // Test encoded exec pattern
+        assert!(
+            ENCODED_EXEC_PATTERN.is_match("uudecode file | bash"),
+            "encoded exec pattern should match uudecode"
+        );
+        assert!(
+            ENCODED_EXEC_PATTERN.is_match("gunzip < file | base64 | sh"),
+            "encoded exec pattern should match gunzip pipe base64"
         );
     }
 

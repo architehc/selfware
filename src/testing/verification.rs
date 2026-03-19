@@ -189,6 +189,10 @@ pub struct VerificationGate {
     config: VerificationConfig,
     project_root: PathBuf,
     last_results: Option<VerificationReport>,
+    /// Cache of file hashes to detect changes and skip redundant verification
+    file_hash_cache: std::collections::HashMap<String, u64>,
+    /// Last verification timestamp for cache TTL
+    last_verification_time: Option<std::time::Instant>,
 }
 
 impl VerificationGate {
@@ -197,6 +201,61 @@ impl VerificationGate {
             config,
             project_root: project_root.as_ref().to_path_buf(),
             last_results: None,
+            file_hash_cache: std::collections::HashMap::new(),
+            last_verification_time: None,
+        }
+    }
+
+    /// Compute hash for a file's content
+    fn compute_file_hash(&self, path: &str) -> Option<u64> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher;
+        use std::io::Read;
+
+        let full_path = self.project_root.join(path);
+        let mut file = std::fs::File::open(full_path).ok()?;
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents).ok()?;
+
+        let mut hasher = DefaultHasher::new();
+        hasher.write(&contents);
+        Some(hasher.finish())
+    }
+
+    /// Check if files have changed since last verification
+    fn have_files_changed(&self, files: &[String]) -> bool {
+        // If no previous verification, files are considered changed
+        if self.file_hash_cache.is_empty() {
+            return true;
+        }
+
+        for file in files {
+            let current_hash = match self.compute_file_hash(file) {
+                Some(h) => h,
+                None => return true, // Can't read file, assume changed
+            };
+
+            match self.file_hash_cache.get(file) {
+                Some(cached_hash) if *cached_hash == current_hash => {
+                    // File unchanged
+                    continue;
+                }
+                _ => {
+                    // File changed or not in cache
+                    return true;
+                }
+            }
+        }
+
+        false // All files unchanged
+    }
+
+    /// Update file hash cache with current hashes
+    fn update_file_cache(&mut self, files: &[String]) {
+        for file in files {
+            if let Some(hash) = self.compute_file_hash(file) {
+                self.file_hash_cache.insert(file.clone(), hash);
+            }
         }
     }
 
@@ -230,6 +289,27 @@ impl VerificationGate {
                     "No code files changed, verification skipped".to_string()
                 ],
             });
+        }
+
+        // Check if files have actually changed (cache optimization)
+        if !self.have_files_changed(&files_to_check) {
+            // Return cached result if available
+            if let Some(ref last_report) = self.last_results {
+                if last_report.overall_passed {
+                    return Ok(VerificationReport {
+                        triggered_by: format!("{} (cached)", trigger),
+                        timestamp: chrono::Utc::now(),
+                        total_duration_ms: 0,
+                        checks: last_report.checks.clone(),
+                        overall_passed: true,
+                        affected_files: changed_files.to_vec(),
+                        side_effects: vec![],
+                        suggested_next_steps: vec![
+                            "Files unchanged - using cached verification results".to_string()
+                        ],
+                    });
+                }
+            }
         }
 
         // Detect if any Rust files changed
@@ -344,6 +424,11 @@ impl VerificationGate {
         };
 
         self.last_results = Some(report.clone());
+        
+        // Update file hash cache for future change detection
+        self.update_file_cache(&report.affected_files);
+        self.last_verification_time = Some(std::time::Instant::now());
+        
         Ok(report)
     }
 
@@ -424,16 +509,43 @@ impl VerificationGate {
         })
     }
 
-    /// Run cargo test
+    /// Run cargo test with timeout to prevent getting stuck
     async fn run_cargo_test(&self) -> Result<CheckResult> {
         let start = Instant::now();
-
-        let output = Command::new("cargo")
+        
+        // Apply timeout from config (default 5 minutes)
+        let timeout_secs = self.config.check_timeout_secs.max(60); // At least 60 seconds
+        let timeout_duration = tokio::time::Duration::from_secs(timeout_secs);
+        
+        let command_future = Command::new("cargo")
             .args(["test", "--no-fail-fast"])
             .current_dir(&self.project_root)
-            .output()
-            .await
-            .context("Failed to run cargo test")?;
+            .output();
+        
+        let output = match tokio::time::timeout(timeout_duration, command_future).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => {
+                // Timeout - return a graceful error
+                return Ok(CheckResult {
+                    check_type: CheckType::Test,
+                    passed: false,
+                    duration_ms: timeout_duration.as_millis() as u64,
+                    output: format!("Tests timed out after {} seconds", timeout_secs),
+                    errors: vec![VerificationError {
+                        file: "N/A".to_string(),
+                        line: None,
+                        column: None,
+                        message: format!("cargo test exceeded {}s timeout", timeout_secs),
+                        code: Some("TIMEOUT".to_string()),
+                        severity: ErrorSeverity::Error,
+                        suggestion: Some("Tests took too long. Run manually with `cargo test` or increase check_timeout_secs in config".to_string()),
+                    }],
+                    warnings: vec!["Tests were cancelled due to timeout. Press Ctrl+C to exit if stuck.".to_string()],
+                    suggestions: vec!["Consider running tests manually or increasing timeout".to_string()],
+                });
+            }
+        };
 
         let duration = start.elapsed().as_millis() as u64;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2605,5 +2717,65 @@ mod tests {
         assert!(display.contains("Step one"));
         assert!(display.contains("Step two"));
         assert!(display.contains("Step three"));
+    }
+
+    #[test]
+    fn test_file_hash_cache_detects_changes() {
+        let config = VerificationConfig::default();
+        let mut gate = VerificationGate::new(".", config);
+
+        // Initially, cache is empty, so files should be considered changed
+        assert!(gate.have_files_changed(&["src/lib.rs".to_string()]));
+
+        // Simulate a verification by updating the cache
+        // Note: We can't actually read files in this test, so we'll manually populate
+        gate.file_hash_cache.insert("src/lib.rs".to_string(), 12345u64);
+
+        // Now if we check the same file with same hash, it should not be changed
+        // But since we can't actually compute the hash, we'll just test the logic
+        // The real hash won't match 12345, so it will still report changed
+        assert!(gate.have_files_changed(&["src/lib.rs".to_string()]));
+    }
+
+    #[test]
+    fn test_file_hash_cache_empty_returns_changed() {
+        let config = VerificationConfig::default();
+        let gate = VerificationGate::new(".", config);
+
+        // Empty cache should always return true (files changed)
+        assert!(gate.have_files_changed(&["src/main.rs".to_string()]));
+        assert!(gate.have_files_changed(&["Cargo.toml".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn test_verify_change_uses_cache_on_unchanged_files() {
+        let config = VerificationConfig {
+            check_on_edit: false,
+            test_on_edit: false,
+            lint_on_edit: false,
+            format_on_edit: false,
+            ..Default::default()
+        };
+        let mut gate = VerificationGate::new(".", config);
+
+        // First verification with a file
+        let report1 = gate
+            .verify_change(&["src/lib.rs".to_string()], "first")
+            .await
+            .unwrap();
+
+        // Verify the file hash was cached
+        assert!(gate.file_hash_cache.contains_key("src/lib.rs"));
+
+        // Second verification with same file (will detect as changed because
+        // we can't actually read the file in this test, but the cache mechanism is tested)
+        let report2 = gate
+            .verify_change(&["src/lib.rs".to_string()], "second")
+            .await
+            .unwrap();
+
+        // Both should pass
+        assert!(report1.overall_passed);
+        assert!(report2.overall_passed);
     }
 }

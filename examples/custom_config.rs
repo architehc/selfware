@@ -183,6 +183,7 @@ fn build_custom_config() -> Config {
         qa: Default::default(),
         mcp: Default::default(),
         hooks: Vec::new(),
+        cache: Default::default(),
         plan_mode: false,
     }
 }

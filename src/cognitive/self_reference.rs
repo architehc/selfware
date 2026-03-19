@@ -7,9 +7,10 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 use tracing::{debug, info};
+use lru::LruCache;
 
 use crate::cognitive::memory_hierarchy::{CodeContext, FileContent, IndexedFile, SemanticMemory};
 use crate::token_count::estimate_tokens_with_overhead;
@@ -20,8 +21,8 @@ pub struct SelfReferenceSystem {
     semantic: Arc<RwLock<SemanticMemory>>,
     /// Current self-model
     self_model: SelfModel,
-    /// Cache of frequently accessed code
-    code_cache: HashMap<String, CachedCode>,
+    /// Cache of frequently accessed code (LRU with bounded size)
+    code_cache: Mutex<LruCache<String, CachedCode>>,
     /// Recent modifications to self
     recent_modifications: VecDeque<CodeModification>,
     /// Maximum modifications to track
@@ -245,10 +246,11 @@ impl Default for SourceRetrievalOptions {
 impl SelfReferenceSystem {
     /// Create new self-reference system
     pub fn new(semantic: Arc<RwLock<SemanticMemory>>, selfware_path: PathBuf) -> Self {
+        use std::num::NonZeroUsize;
         Self {
             semantic,
             self_model: SelfModel::default(),
-            code_cache: HashMap::new(),
+            code_cache: Mutex::new(LruCache::new(NonZeroUsize::new(1000).unwrap())), // Max 1000 entries
             recent_modifications: VecDeque::new(),
             max_modifications: 100,
             _selfware_path: selfware_path,
@@ -660,12 +662,15 @@ impl SelfReferenceSystem {
         module_path: &str,
         options: &SourceRetrievalOptions,
     ) -> Result<String> {
-        // Check cache first
-        if let Some(cached) = self.code_cache.get(module_path) {
-            debug!("Cache hit for {}", module_path);
-            return Ok(cached.content.clone());
+        // Check cache first - LruCache::get requires mutable borrow
+        {
+            let mut cache = self.code_cache.lock().unwrap();
+            if let Some(cached) = cache.get(module_path) {
+                debug!("Cache hit for {}", module_path);
+                return Ok(cached.content.clone());
+            }
         }
-
+        
         let semantic = self.semantic.read().await;
 
         // Get main file
@@ -692,6 +697,21 @@ impl SelfReferenceSystem {
         let tokens = estimate_tokens_with_overhead(&content, 0);
         if tokens > options.max_tokens {
             content = self.truncate_to_tokens(&content, options.max_tokens);
+        }
+
+        // Store in cache
+        let cached_code = CachedCode {
+            content: content.clone(),
+            token_count: tokens,
+            cached_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            access_count: 0,
+        };
+        {
+            let mut cache = self.code_cache.lock().unwrap();
+            cache.put(module_path.to_string(), cached_code);
         }
 
         Ok(content)
@@ -997,7 +1017,7 @@ mod tests {
         assert!(model.modules.is_empty());
         assert!(model.capabilities.is_empty());
         assert!(sys.get_recent_modifications().is_empty());
-        assert!(sys.code_cache.is_empty());
+        assert!(sys.code_cache.lock().unwrap().is_empty());
     }
 
     // ========================================================================
@@ -2674,7 +2694,7 @@ mod tests {
     #[test]
     fn test_self_reference_system_code_cache_starts_empty() {
         let sys = make_self_reference_system();
-        assert!(sys.code_cache.is_empty());
+        assert_eq!(sys.code_cache.lock().unwrap().len(), 0);
     }
 
     #[test]

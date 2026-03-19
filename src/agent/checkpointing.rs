@@ -54,7 +54,7 @@ impl Agent {
             // Backward-compatible restore for legacy checkpoints.
             for _ in 0..checkpoint.current_step {
                 restored_loop.next_state(); // consumes one iteration
-                restored_loop.increment_step();
+                restored_loop.increment_step().map_err(anyhow::Error::from)?;
             }
             restored_loop.set_state(AgentState::Executing {
                 step: checkpoint.current_step,

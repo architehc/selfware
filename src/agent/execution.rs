@@ -1,25 +1,21 @@
-use std::hash::{Hash, Hasher};
-
 use anyhow::{Context, Result};
-use chrono::Utc;
 use colored::*;
-use serde_json::Value;
 use tracing::{debug, info, warn};
 
 use super::*;
 use crate::api::ThinkingMode;
-use crate::checkpoint::ToolCallLog;
-use crate::cognitive::self_improvement::Outcome;
-use crate::cognitive::CyclePhase;
 use crate::errors::AgentError;
-use crate::hooks::{HookAction, HookContext};
+use crate::hooks::HookContext;
 use crate::tool_parser::parse_tool_calls;
+
+// Re-export items used by this module from sibling modules
+pub(super) use super::recovery::ActionPrompt;
 
 /// Read a line from stdin, temporarily pausing the ESC listener so it yields
 /// raw mode and stops competing for stdin events.  This prevents the deadlock
 /// where `io::stdin().read_line()` blocks forever because crossterm raw mode
 /// is active on another thread.
-async fn read_line_pausing_esc(
+pub(super) async fn read_line_pausing_esc(
     esc_paused: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     esc_pause_ack: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> std::io::Result<String> {
@@ -46,7 +42,7 @@ async fn read_line_pausing_esc(
 }
 
 /// Try to extract a `base64_png` field from a JSON tool result string.
-fn try_extract_base64_png(result: &str) -> Option<String> {
+pub(super) fn try_extract_base64_png(result: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(result)
         .ok()?
         .get("base64_png")?
@@ -56,7 +52,7 @@ fn try_extract_base64_png(result: &str) -> Option<String> {
 
 /// Build a text summary of a JSON tool result by removing the large `base64_png`
 /// blob and adding an `"image_attached": true` marker.
-fn build_image_result_summary(result: &str) -> String {
+pub(super) fn build_image_result_summary(result: &str) -> String {
     if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(result) {
         if let Some(obj) = v.as_object_mut() {
             obj.remove("base64_png");
@@ -68,408 +64,20 @@ fn build_image_result_summary(result: &str) -> String {
     }
 }
 
-struct AssistantStepResponse {
-    content: String,
-    reasoning_content: Option<String>,
-    native_tool_calls: Option<Vec<crate::api::types::ToolCall>>,
+pub(super) struct AssistantStepResponse {
+    pub content: String,
+    pub reasoning_content: Option<String>,
+    pub native_tool_calls: Option<Vec<crate::api::types::ToolCall>>,
+    /// Characters of actual content (excludes think blocks).
+    #[allow(dead_code)]
+    pub content_chars: usize,
+    /// Characters inside think/reasoning blocks.
+    pub reasoning_chars: usize,
 }
 
-type CollectedToolCall = (String, String, Option<String>);
-
-const TOOL_CONFIRM_ARGS_PREVIEW_CHARS: usize = 240;
-const TOOL_FAILURE_HINT_PREVIEW_CHARS: usize = 400;
-const FAILED_TOOL_ATTEMPT_WINDOW_SIZE: usize = 16;
-
-fn truncate_chars(s: &str, max_chars: usize) -> String {
-    let collected: String = s.chars().take(max_chars).collect();
-    if s.chars().count() > max_chars {
-        format!("{}...", collected)
-    } else {
-        collected
-    }
-}
-
-fn canonicalize_tool_args(args_str: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(args_str)
-        .and_then(|value| serde_json::to_string(&value))
-        .unwrap_or_else(|_| args_str.to_string())
-}
-
-fn hash_tool_args(args_str: &str) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    canonicalize_tool_args(args_str).hash(&mut hasher);
-    hasher.finish()
-}
-
-fn hash_text_signature(text: &str) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn normalize_no_action_content(content: &str) -> String {
-    content
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
-}
-
-fn looks_like_malformed_tool_xml(content: &str) -> bool {
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-
-    let has_tool_tag = trimmed.contains("<tool");
-    let has_tool_close = trimmed.contains("</tool>");
-    let has_valid_tool_shape = has_tool_tag
-        && has_tool_close
-        && trimmed.contains("<name>")
-        && trimmed.contains("</name>")
-        && trimmed.contains("<arguments>")
-        && trimmed.contains("</arguments>");
-
-    (has_tool_tag && !has_valid_tool_shape)
-        || trimmed.contains("<function=")
-        || trimmed.contains("<name=")
-        || trimmed.contains("<parameter=")
-}
-
-fn detect_oscillating_pair(
-    recent_tool_calls: &std::collections::VecDeque<(String, u64)>,
-) -> Option<((String, u64), (String, u64))> {
-    if recent_tool_calls.len() < 4 {
-        return None;
-    }
-
-    let window: Vec<_> = recent_tool_calls.iter().rev().take(4).cloned().collect();
-    let latest = &window[0];
-    let previous = &window[1];
-    let older = &window[2];
-    let oldest = &window[3];
-
-    if latest == older && previous == oldest && latest != previous {
-        Some((oldest.clone(), older.clone()))
-    } else {
-        None
-    }
-}
+pub(super) type CollectedToolCall = (String, String, Option<String>);
 
 impl Agent {
-    fn push_task_state_note(&mut self, note: String) {
-        if self.task_state_notes.back() == Some(&note) {
-            return;
-        }
-        if self.task_state_notes.len() == TASK_STATE_NOTE_LIMIT {
-            self.task_state_notes.pop_front();
-        }
-        self.task_state_notes.push_back(note);
-    }
-
-    pub(super) fn clear_task_state_memory(&mut self) {
-        self.file_read_state.clear();
-        self.task_state_notes.clear();
-    }
-
-    fn remember_failed_tool(&mut self, tool_name: &str, error: &str) {
-        let error_preview = truncate_chars(error, TOOL_FAILURE_HINT_PREVIEW_CHARS);
-        self.pending_failure_hint = Some(format!(
-            "Warning: the previous tool call `{}` failed. Do not claim success, observation, or completion unless a later tool actually confirms it. Failure details: {}",
-            tool_name, error_preview
-        ));
-    }
-
-    fn build_failed_tool_retry_suppressed_message(&self, failure: &FailedToolAttempt) -> String {
-        let schema_hint = self
-            .tools
-            .get(&failure.tool_name)
-            .and_then(|tool| {
-                let required: Vec<String> = tool
-                    .schema()
-                    .get("required")
-                    .and_then(|value| value.as_array())
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|value| value.as_str())
-                    .map(|field| format!("`{}`", field))
-                    .collect();
-                (!required.is_empty())
-                    .then(|| format!(" Required top-level fields: {}.", required.join(", ")))
-            })
-            .unwrap_or_default();
-
-        match failure.failure_kind {
-            "parsing" => format!(
-                "RETRY SUPPRESSED: `{}` with these exact arguments already failed because the arguments were not valid JSON.{} Change the JSON before retrying. Last error: {}",
-                failure.tool_name, schema_hint, failure.error_preview
-            ),
-            "validation" => format!(
-                "RETRY SUPPRESSED: `{}` with these exact arguments already failed schema validation.{} Change the arguments before retrying. Last error: {}",
-                failure.tool_name, schema_hint, failure.error_preview
-            ),
-            "safety" => format!(
-                "RETRY SUPPRESSED: `{}` with these exact arguments already failed the safety check. Change the tool or arguments before retrying. Last error: {}",
-                failure.tool_name, failure.error_preview
-            ),
-            other => format!(
-                "RETRY SUPPRESSED: `{}` with these exact arguments already failed due to {}. Do not rerun it until a different successful tool call changes the situation or you change the inputs. Last error: {}",
-                failure.tool_name, other, failure.error_preview
-            ),
-        }
-    }
-
-    fn record_failed_tool_attempt(
-        &mut self,
-        tool_name: &str,
-        args_str: &str,
-        failure_kind: &'static str,
-        error: &str,
-    ) {
-        let args_hash = hash_tool_args(args_str);
-        let error_preview = truncate_chars(error, TOOL_FAILURE_HINT_PREVIEW_CHARS);
-        self.recent_failed_tool_attempts.retain(|existing| {
-            !(existing.tool_name == tool_name
-                && existing.args_hash == args_hash
-                && existing.failure_kind == failure_kind)
-        });
-        self.recent_failed_tool_attempts
-            .push_back(FailedToolAttempt {
-                tool_name: tool_name.to_string(),
-                args_hash,
-                failure_kind,
-                error_preview,
-            });
-        if self.recent_failed_tool_attempts.len() > FAILED_TOOL_ATTEMPT_WINDOW_SIZE {
-            self.recent_failed_tool_attempts.pop_front();
-        }
-    }
-
-    pub(super) fn clear_failed_tool_attempts(&mut self) {
-        self.recent_failed_tool_attempts.clear();
-    }
-
-    fn maybe_block_redundant_reread(
-        &mut self,
-        name: &str,
-        args_str: &str,
-        args: &Value,
-        call_id: &str,
-        use_native_fc: bool,
-        start_time: std::time::Instant,
-    ) -> bool {
-        if name != "file_read" {
-            return false;
-        }
-
-        let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
-            return false;
-        };
-        let Some(state) = self.file_read_state.get(path) else {
-            return false;
-        };
-        if state.unchanged_read_count < 1 || self.stale_files.contains(path) {
-            return false;
-        }
-
-        let current_mtime = std::fs::metadata(path)
-            .ok()
-            .and_then(|metadata| metadata.modified().ok())
-            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|duration| duration.as_secs());
-
-        if current_mtime != state.last_modified {
-            return false;
-        }
-
-        let err = format!(
-            "Repeated unchanged reread blocked: `{}` has already been read unchanged {} times in this task. Use the content already in context or make the edit now instead of reading it again.",
-            path,
-            state.unchanged_read_count + 1
-        );
-        self.push_task_state_note(format!(
-            "Blocked redundant reread of `{}` after {} unchanged reads",
-            path,
-            state.unchanged_read_count + 1
-        ));
-        self.pending_failure_hint = Some(err.clone());
-        self.push_tool_result_message(use_native_fc, call_id, name, false, &err);
-        self.log_tool_call(name, args_str, &err, false, start_time, false);
-        self.remember_failed_tool(name, &err);
-        self.record_failed_tool_attempt(name, args_str, "task_state", &err);
-        true
-    }
-
-    fn track_task_state_after_tool(
-        &mut self,
-        name: &str,
-        args: &Value,
-        result: &str,
-        success: bool,
-    ) {
-        if !success {
-            return;
-        }
-
-        let Some(path) = args.get("path").and_then(|v| v.as_str()) else {
-            return;
-        };
-        let path_str = path.to_string();
-
-        match name {
-            "file_read" => {
-                let Ok(json) = serde_json::from_str::<Value>(result) else {
-                    return;
-                };
-                let Some(content) = json.get("content").and_then(|v| v.as_str()) else {
-                    return;
-                };
-                let total_lines = json
-                    .get("total_lines")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize;
-                let content_hash = hash_text_signature(content);
-                let last_modified = std::fs::metadata(&path_str)
-                    .ok()
-                    .and_then(|metadata| metadata.modified().ok())
-                    .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|duration| duration.as_secs());
-
-                let mut unchanged_count = 0;
-                if let Some(state) = self.file_read_state.get_mut(&path_str) {
-                    if state.content_hash == content_hash
-                        && state.last_modified == last_modified
-                        && !self.stale_files.contains(&path_str)
-                    {
-                        state.unchanged_read_count += 1;
-                        unchanged_count = state.unchanged_read_count;
-                    } else {
-                        state.content_hash = content_hash;
-                        state.total_lines = total_lines;
-                        state.last_modified = last_modified;
-                        state.unchanged_read_count = 0;
-                    }
-                } else {
-                    self.file_read_state.insert(
-                        path_str.clone(),
-                        FileReadState {
-                            content_hash,
-                            total_lines,
-                            last_modified,
-                            unchanged_read_count: 0,
-                        },
-                    );
-                }
-
-                if unchanged_count > 0 {
-                    self.push_task_state_note(format!(
-                        "Reread unchanged file `{}` ({}x consecutive unchanged reads)",
-                        path_str,
-                        unchanged_count + 1
-                    ));
-                }
-
-                if unchanged_count >= 1 {
-                    self.pending_failure_hint = Some(format!(
-                        "You have reread unchanged file `{}` {} times in this task. Unless something outside the agent changed it, use the content already in context or make the edit now instead of reading it again.",
-                        path_str,
-                        unchanged_count + 1
-                    ));
-                }
-            }
-            "file_write" | "file_edit" => {
-                self.file_read_state.remove(&path_str);
-                self.push_task_state_note(format!(
-                    "Marked `{}` as changed; future rereads should expect new content",
-                    path_str
-                ));
-            }
-            "file_delete" => {
-                self.file_read_state.remove(&path_str);
-                self.push_task_state_note(format!(
-                    "Removed deleted file `{}` from task-state tracking",
-                    path_str
-                ));
-            }
-            _ => {}
-        }
-    }
-
-    pub(super) fn reset_no_action_prompt_state(&mut self) {
-        self.consecutive_no_action_prompts = 0;
-        self.last_no_action_prompt_hash = None;
-    }
-
-    fn no_action_failure_context(&self) -> Option<String> {
-        self.recent_failed_tool_attempts.back().map(|failure| {
-            format!(
-                " Most recent concrete failure: tool `{}` hit {} ({})",
-                failure.tool_name, failure.failure_kind, failure.error_preview
-            )
-        })
-    }
-
-    fn build_no_action_prompt_message(&self) -> String {
-        let failure_context = self.no_action_failure_context().unwrap_or_default();
-        match self.consecutive_no_action_prompts {
-            0 | 1 => "Please use the appropriate tools to take action now. Don't just describe what you'll do - actually execute the tools.".to_string(),
-            2 => format!(
-                "NO ACTION DETECTED AGAIN: your previous response described intent but still did not use any tool. Emit a valid tool call now. If a tool is blocked or unavailable, explicitly name the blocker and choose a different tool or strategy instead of repeating the plan.{}",
-                failure_context
-            ),
-            _ => format!(
-                "NO ACTION LOOP DETECTED: you have now responded multiple times with intent but no tool call. Your next response must do exactly one of these: (1) emit a valid tool call, (2) explicitly state the concrete blocker from prior evidence and choose a different strategy, or (3) give a final answer only if the task genuinely requires no tool. Do not restate the plan.{}",
-                failure_context
-            ),
-        }
-    }
-
-    fn suppress_repeated_failed_tool_retry(
-        &mut self,
-        tool_name: &str,
-        args_str: &str,
-        call_id: &str,
-        use_native_fc: bool,
-        start_time: std::time::Instant,
-    ) -> bool {
-        let args_hash = hash_tool_args(args_str);
-        let Some(failure) = self
-            .recent_failed_tool_attempts
-            .iter()
-            .rev()
-            .find(|attempt| attempt.tool_name == tool_name && attempt.args_hash == args_hash)
-            .cloned()
-        else {
-            return false;
-        };
-
-        let err = self.build_failed_tool_retry_suppressed_message(&failure);
-        warn!(
-            "Suppressing repeated failed tool call for '{}' after prior {} failure",
-            tool_name, failure.failure_kind
-        );
-        println!("{} {}", "✗".bright_red(), err);
-        self.push_tool_result_message(use_native_fc, call_id, tool_name, false, &err);
-        self.log_tool_call(tool_name, args_str, &err, false, start_time, false);
-        self.remember_failed_tool(tool_name, &err);
-        let duration_ms = start_time.elapsed().as_millis() as u64;
-        self.self_improvement.record_tool(
-            tool_name,
-            self.learning_context(),
-            Outcome::Failure,
-            duration_ms,
-            Some(err.clone()),
-        );
-        self.self_improvement.record_error(
-            &err,
-            "retry_suppressed",
-            self.learning_context(),
-            tool_name,
-            None,
-        );
-        true
-    }
-
     /// Execute a step with tool call logging for checkpoints
     /// If `use_last_message` is true, process tool calls from the last assistant message
     /// instead of making a new API call (used after planning phase)
@@ -493,6 +101,8 @@ impl Agent {
     async fn execute_step_internal(&mut self, use_last_message: bool) -> Result<bool> {
         let response = self.get_assistant_step_response(use_last_message).await?;
         let content = response.content;
+        let reasoning_chars = response.reasoning_chars;
+
         let tool_calls = self.collect_tool_calls(
             &content,
             response.reasoning_content.as_deref(),
@@ -506,15 +116,53 @@ impl Agent {
             return Ok(false);
         }
 
-        if self.maybe_prompt_for_action(&content, tool_calls.is_empty(), use_last_message) {
-            return Ok(false);
+        match self.maybe_prompt_for_action(&content, tool_calls.is_empty(), use_last_message, reasoning_chars) {
+            Ok(ActionPrompt::Corrected) => return Ok(false),
+            Ok(ActionPrompt::NotNeeded) => {}
+            Ok(ActionPrompt::ForceFallback) => {
+                // The model repeatedly described intent without calling tools.
+                // Try to extract what the model wanted to do and execute it,
+                // or fall back to a useful discovery action.
+                let (tool_name, tool_args) = self.pick_smart_fallback(&content);
+                info!("Smart fallback: {} {}", tool_name, tool_args);
+                let fallback: Vec<CollectedToolCall> = vec![(
+                    tool_name.clone(),
+                    tool_args,
+                    None,
+                )];
+                self.execute_tool_batch(fallback).await?;
+                self.messages.push(crate::api::types::Message::user(format!(
+                    "<selfware_system_directive>\n\
+                     A `{}` was executed automatically because you did not call any tool.\n\
+                     Use the result above to choose your next action. Call a tool now.\n\
+                     </selfware_system_directive>",
+                    tool_name
+                )));
+                return Ok(false);
+            }
+            Err(error_msg) => {
+                return Err(AgentError::TaskFailed { message: error_msg }.into());
+            }
         }
 
         if tool_calls.is_empty() {
+            // Reject confused meta-reasoning before treating as completion
+            if super::verification::is_confused_response(&content) {
+                info!("Rejected confused meta-reasoning response");
+                self.messages.push(crate::api::types::Message::user(
+                    "<selfware_system_directive>\n\
+                     Your response contained framework self-reference instead of a task result. \
+                     Focus on the original task.\n\
+                     </selfware_system_directive>"
+                        .to_string(),
+                ));
+                return Ok(false);
+            }
+
             // Check completion gate before accepting task as done
             if let Some(gate_msg) = self.check_completion_gate() {
                 info!("Completion gate rejected: {}", gate_msg);
-                self.messages.push(Message::user(gate_msg));
+                self.messages.push(crate::api::types::Message::user(gate_msg));
                 return Ok(false);
             }
 
@@ -542,7 +190,7 @@ impl Agent {
                 ));
             }
             output::final_answer(&plan_summary);
-            self.messages.push(Message::user(
+            self.messages.push(crate::api::types::Message::user(
                 "The above tool calls were proposed but NOT executed (plan mode is active). \
                  Review the plan and confirm, or adjust.",
             ));
@@ -553,7 +201,7 @@ impl Agent {
         // Detect repetition loops before executing
         if let Some(loop_msg) = self.detect_repetition(&tool_calls) {
             info!("Repetition loop detected, injecting correction");
-            self.messages.push(Message::user(loop_msg));
+            self.messages.push(crate::api::types::Message::user(loop_msg));
             return Ok(false);
         }
 
@@ -562,976 +210,12 @@ impl Agent {
         Ok(false)
     }
 
-    /// Detect malformed tool call attempts and push a correction message.
-    /// Returns `true` if malformed markers were found and a correction was injected.
-    fn detect_and_correct_malformed_tools(
-        &mut self,
-        content: &str,
-        tool_calls: &[CollectedToolCall],
-    ) -> bool {
-        if !tool_calls.is_empty() {
-            return false;
-        }
-
-        if !looks_like_malformed_tool_xml(content) {
-            return false;
-        }
-
-        warn!(
-            "Detected malformed tool call attempt, injecting correction. Preview: {}",
-            &content.chars().take(500).collect::<String>()
-        );
-
-        self.cognitive_state.episodic_memory.what_failed(
-            "tool_format",
-            "Malformed tool call detected — model used wrong XML format",
-        );
-
-        self.messages.push(Message::user(
-            "Your tool call was malformed and could not be parsed. You MUST use this EXACT format:\n\n\
-             <tool>\n<name>TOOL_NAME</name>\n<arguments>{\"key\": \"value\"}</arguments>\n</tool>\n\n\
-             Common mistakes to avoid:\n\
-             - Do NOT use <function=name> or <name=name> — use <name>TOOL_NAME</name>\n\
-             - Do NOT use <parameter=key> tags — use a JSON object inside <arguments>\n\
-             - Arguments MUST be valid JSON\n\n\
-             Please retry your intended action using the correct format."
-        ));
-
-        true
-    }
-
-    /// Tool categories that inherently bypass the Rust/cargo verification gate.
-    /// These tools indicate non-Rust tasks (browser automation, vision analysis,
-    /// desktop control, web fetching, etc.) where `cargo check` is meaningless.
-    const NON_RUST_TOOL_PREFIXES: &'static [&'static str] = &[
-        "browser_",  // browser_fetch, browser_screenshot, browser_pdf, browser_eval, browser_links
-        "vision_",   // vision_analyze, vision_compare
-        "computer_", // computer_mouse, computer_keyboard, computer_screen, computer_window
-        "screen_capture", // screen_capture
-        "page_control", // page_control (screenshot, click, type, scroll, etc.)
-        "http_request", // http_request
-    ];
-
-    /// Returns true if the current task appears to be a non-Rust task that should
-    /// bypass cargo-based verification.  Two conditions trigger the bypass:
-    ///
-    /// 1. **No Cargo.toml** in the working directory — there is no Rust project to verify.
-    /// 2. **Only non-Rust tools used** — the task exclusively used browser, vision,
-    ///    computer-control, or web tools with no file-write or cargo activity.
-    fn should_skip_cargo_verification(&self) -> bool {
-        // Condition 1: No Cargo.toml in the project root or its ancestors → not a Rust project
-        if !super::current_project_root().join("Cargo.toml").exists() {
-            debug!(
-                "Completion gate: no Cargo.toml found in project ancestors, skipping cargo verification"
-            );
-            return true;
-        }
-
-        // Condition 2: Every tool call in the checkpoint is a non-Rust tool
-        let all_non_rust = self
-            .current_checkpoint
-            .as_ref()
-            .map(|cp| {
-                // If there are no tool calls at all, this is a text-only response — skip cargo
-                if cp.tool_calls.is_empty() {
-                    return true;
-                }
-                cp.tool_calls.iter().all(|tc| {
-                    Self::NON_RUST_TOOL_PREFIXES
-                        .iter()
-                        .any(|prefix| tc.tool_name.starts_with(prefix))
-                })
-            })
-            .unwrap_or(false);
-
-        if all_non_rust {
-            debug!(
-                "Completion gate: all tool calls are non-Rust tools, skipping cargo verification"
-            );
-        }
-        all_non_rust
-    }
-
-    /// Check whether the agent has done enough work to accept completion.
-    /// Returns `None` to accept, or `Some(message)` to reject with instructions.
-    fn check_completion_gate(&self) -> Option<String> {
-        let step_count = self.loop_control.current_step();
-        let min_steps = self.config.agent.min_completion_steps;
-
-        if step_count < min_steps {
-            // Tailor the message: don't mention cargo for non-Rust tasks
-            let verification_hint = if self.should_skip_cargo_verification() {
-                "Continue working: review your results and ensure the task is fully complete."
-            } else {
-                "Continue working: verify your changes compile with cargo_check and pass tests with cargo_test."
-            };
-            return Some(format!(
-                "You are trying to complete the task after only {} step(s), but at least {} are required. \
-                 You have a large budget — do not rush. {}",
-                step_count, min_steps, verification_hint
-            ));
-        }
-
-        if self.config.agent.require_verification_before_completion {
-            // Skip cargo verification entirely for non-Rust tasks
-            if self.should_skip_cargo_verification() {
-                debug!("Completion gate: bypassing cargo verification for non-Rust task");
-                return None;
-            }
-
-            let has_verification = self
-                .current_checkpoint
-                .as_ref()
-                .map(|cp| {
-                    cp.tool_calls.iter().any(|tc| {
-                        tc.success
-                            && matches!(
-                                tc.tool_name.as_str(),
-                                "cargo_check" | "cargo_test" | "cargo_clippy"
-                            )
-                    })
-                })
-                .unwrap_or(false);
-
-            if !has_verification {
-                return Some(
-                    "You must run at least one verification tool (cargo_check, cargo_test, or cargo_clippy) \
-                     successfully before completing the task. Please verify your work now."
-                        .to_string(),
-                );
-            }
-        }
-
-        None
-    }
-
-    /// Track tool calls and detect repetition loops.
-    /// Returns `Some(message)` if the same tool+args has been called too many times recently.
-    fn detect_repetition(&mut self, tool_calls: &[CollectedToolCall]) -> Option<String> {
-        const MAX_REPEATS: usize = 3;
-        const WINDOW_SIZE: usize = 10;
-
-        for (name, args_str, _) in tool_calls {
-            let sig = (name.clone(), hash_tool_args(args_str));
-
-            self.recent_tool_calls.push_back(sig.clone());
-            if self.recent_tool_calls.len() > WINDOW_SIZE {
-                self.recent_tool_calls.pop_front();
-            }
-
-            let repeat_count = self.recent_tool_calls.iter().filter(|s| **s == sig).count();
-
-            if repeat_count >= MAX_REPEATS {
-                warn!(
-                    "Repetition loop detected: {} called {} times in last {} calls",
-                    name, repeat_count, WINDOW_SIZE
-                );
-                self.cognitive_state.episodic_memory.what_failed(
-                    "repetition_loop",
-                    &format!(
-                        "Stuck in loop: {} called {} times with identical args",
-                        name, repeat_count
-                    ),
-                );
-                self.recent_tool_calls.clear();
-                return Some(format!(
-                    "STUCK LOOP DETECTED: You have called `{}` {} times with the exact same arguments. \
-                     This is not making progress. STOP and try a DIFFERENT approach:\n\
-                     - If file_edit fails with 'old_str not found', re-read the file first to see current content\n\
-                     - If file_write keeps writing the same content, your output is wrong — re-read the test expectations\n\
-                     - If file_read keeps reading the same file, you already have the content — make your edit now\n\
-                     - Consider using a completely different tool or strategy",
-                    name, repeat_count
-                ));
-            }
-
-            if let Some((first, second)) = detect_oscillating_pair(&self.recent_tool_calls) {
-                warn!(
-                    "Oscillation loop detected between '{}' and '{}'",
-                    first.0, second.0
-                );
-                self.cognitive_state.episodic_memory.what_failed(
-                    "oscillation_loop",
-                    &format!(
-                        "Stuck oscillating between {} and {} with identical recent signatures",
-                        first.0, second.0
-                    ),
-                );
-                self.recent_tool_calls.clear();
-                return Some(format!(
-                    "OSCILLATION LOOP DETECTED: you are alternating between `{}` and `{}` with the same recent inputs (A -> B -> A -> B). This is not making progress. Stop repeating the pair and choose a different approach: reread only if new evidence is needed, edit the file using the content already in context, or switch to a different tool/strategy.",
-                    first.0, second.0
-                ));
-            }
-        }
-        None
-    }
-
-    fn maybe_prompt_for_action(
-        &mut self,
-        content: &str,
-        has_no_tool_calls: bool,
-        use_last_message: bool,
-    ) -> bool {
-        if !self.should_prompt_for_action(content, has_no_tool_calls, use_last_message) {
-            self.reset_no_action_prompt_state();
-            return false;
-        }
-
-        let normalized = normalize_no_action_content(content);
-        let signature = hash_text_signature(&normalized);
-        if self.last_no_action_prompt_hash == Some(signature) {
-            self.consecutive_no_action_prompts += 1;
-        } else {
-            self.consecutive_no_action_prompts = 1;
-            self.last_no_action_prompt_hash = Some(signature);
-        }
-
-        let correction = self.build_no_action_prompt_message();
-        info!(
-            "Detected intent without action, prompting model to use tools (count={})",
-            self.consecutive_no_action_prompts
-        );
-        output::intent_without_action();
-        self.messages.push(Message::user(correction));
-        true
-    }
-
-    async fn execute_tool_batch(&mut self, tool_calls: Vec<CollectedToolCall>) -> Result<()> {
-        for (name, args_str, tool_call_id) in tool_calls {
-            if self.is_cancelled() {
-                break;
-            }
-
-            let start_time = std::time::Instant::now();
-            if let Some(warning) = self
-                .self_improvement
-                .check_for_errors(&name, self.learning_context())
-                .into_iter()
-                .next()
-                .filter(|w| w.likelihood >= 0.7)
-            {
-                warn!(
-                    "Self-improvement warning before {}: potential {} pattern ({}%)",
-                    name,
-                    warning.error_type,
-                    (warning.likelihood * 100.0) as u32
-                );
-            }
-
-            let (call_id, use_native_fc, fake_call) =
-                self.build_tool_call_context(&name, &args_str, tool_call_id);
-
-            if self.suppress_repeated_failed_tool_retry(
-                &name,
-                &args_str,
-                &call_id,
-                use_native_fc,
-                start_time,
-            ) {
-                self.emit_event(AgentEvent::ToolCompleted {
-                    name: name.clone(),
-                    success: false,
-                    duration_ms: start_time.elapsed().as_millis() as u64,
-                });
-                continue;
-            }
-
-            if let Err(e) = self.safety.check_tool_call(&fake_call) {
-                let error_msg = format!("Safety check failed: {}", e);
-                let spinner = crate::ui::spinner::TerminalSpinner::start(&error_msg);
-                spinner.stop_error(&error_msg);
-                output::safety_blocked(&error_msg);
-                // Audit: log safety block
-                if let Some(ref logger) = self.audit_logger {
-                    logger.log_safety_block(&name, &error_msg);
-                }
-                self.push_tool_result_message(use_native_fc, &call_id, &name, false, &error_msg);
-                self.log_tool_call(&name, &args_str, &error_msg, false, start_time, false);
-                self.remember_failed_tool(&name, &error_msg);
-                let duration_ms = start_time.elapsed().as_millis() as u64;
-                self.self_improvement.record_tool(
-                    &name,
-                    self.learning_context(),
-                    Outcome::Failure,
-                    duration_ms,
-                    Some(error_msg.clone()),
-                );
-                self.self_improvement.record_error(
-                    &error_msg,
-                    "safety",
-                    self.learning_context(),
-                    &name,
-                    None,
-                );
-                self.record_failed_tool_attempt(&name, &args_str, "safety", &error_msg);
-                continue;
-            }
-
-            let args =
-                match self.parse_tool_args(&name, &args_str, &call_id, use_native_fc, start_time) {
-                    Some(args) => args,
-                    None => {
-                        self.emit_event(AgentEvent::ToolCompleted {
-                            name: name.clone(),
-                            success: false,
-                            duration_ms: start_time.elapsed().as_millis() as u64,
-                        });
-                        continue;
-                    }
-                };
-
-            if !self.validate_tool_args(
-                &name,
-                &args_str,
-                &args,
-                &call_id,
-                use_native_fc,
-                start_time,
-            ) {
-                self.emit_event(AgentEvent::ToolCompleted {
-                    name: name.clone(),
-                    success: false,
-                    duration_ms: start_time.elapsed().as_millis() as u64,
-                });
-                continue;
-            }
-
-            if self.maybe_block_redundant_reread(
-                &name,
-                &args_str,
-                &args,
-                &call_id,
-                use_native_fc,
-                start_time,
-            ) {
-                self.emit_event(AgentEvent::ToolCompleted {
-                    name: name.clone(),
-                    success: false,
-                    duration_ms: start_time.elapsed().as_millis() as u64,
-                });
-                continue;
-            }
-
-            if !self.confirm_tool_execution(&name, &args_str, &call_id, use_native_fc).await? {
-                continue;
-            }
-
-            // Fire PreToolUse hooks (may skip execution)
-            let pre_ctx = HookContext::pre_tool(&name, &args_str);
-            if let HookAction::Skip { reason } = self.hook_registry.fire(&pre_ctx).await {
-                let skip_msg = format!("Tool skipped by PreToolUse hook: {}", reason);
-                info!("{}", skip_msg);
-                self.push_tool_result_message(use_native_fc, &call_id, &name, false, &skip_msg);
-                continue;
-            }
-
-            self.emit_event(AgentEvent::ToolStarted { name: name.clone() });
-
-            let activity = output::tool_activity_message(&name, &args);
-            let spinner = crate::ui::spinner::TerminalSpinner::start(&activity);
-            let (success, result, summary) = self
-                .execute_single_tool(&name, &args_str, &args, start_time)
-                .await?;
-
-            let duration_ms = start_time.elapsed().as_millis() as u64;
-            self.emit_event(AgentEvent::ToolCompleted {
-                name: name.clone(),
-                success,
-                duration_ms,
-            });
-
-            if success {
-                spinner.stop_success(&summary);
-            } else {
-                spinner.stop_error(&summary);
-            }
-
-            // Store for progressive disclosure via /last
-            {
-                let exit_code = serde_json::from_str::<serde_json::Value>(&result)
-                    .ok()
-                    .and_then(|v| v.get("exit_code").and_then(|c| c.as_i64()))
-                    .map(|c| c as i32);
-                crate::agent::last_tool::store(crate::agent::last_tool::LastToolOutput {
-                    tool_name: name.clone(),
-                    summary: summary.clone(),
-                    full_output: result.clone(),
-                    success,
-                    exit_code,
-                    duration_ms,
-                });
-            }
-
-            let tool_outcome = if success {
-                Outcome::Success
-            } else {
-                Outcome::Failure
-            };
-            let tool_error = (!success).then(|| result.clone());
-            self.self_improvement.record_tool(
-                &name,
-                self.learning_context(),
-                tool_outcome,
-                duration_ms,
-                tool_error.clone(),
-            );
-            if let Some(error_text) = tool_error {
-                self.self_improvement.record_error(
-                    &error_text,
-                    Self::classify_error_type(&error_text),
-                    self.learning_context(),
-                    &name,
-                    None,
-                );
-            }
-            if success {
-                self.clear_failed_tool_attempts();
-            } else {
-                self.record_failed_tool_attempt(&name, &args_str, "execution", &result);
-            }
-
-            self.track_task_state_after_tool(&name, &args, &result, success);
-
-            // Track file operations for context management
-            if success {
-                if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                    let path_str = path.to_string();
-                    match name.as_str() {
-                        "file_read" => {
-                            if self.context_files.len() < 500
-                                && !self.context_files.contains(&path_str)
-                            {
-                                self.context_files.push(path_str);
-                            }
-                        }
-                        "file_delete" => {
-                            // Remove deleted files from context tracking entirely
-                            self.context_files.retain(|p| p != &path_str);
-                            self.stale_files.remove(&path_str);
-                        }
-                        "file_write" | "file_edit" => {
-                            if self.stale_files.len() < 500 {
-                                self.stale_files.insert(path_str);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            self.push_tool_result_message(use_native_fc, &call_id, &name, success, &result);
-            if !success {
-                self.remember_failed_tool(&name, &result);
-            }
-
-            // Fire PostToolUse hooks (e.g., auto-format, lint, auto-commit)
-            let post_ctx = HookContext::post_tool(&name, &args_str, success, &result);
-            self.hook_registry.fire(&post_ctx).await;
-
-            // Audit: log tool execution
-            if let Some(ref logger) = self.audit_logger {
-                use std::hash::{Hash, Hasher};
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                args_str.hash(&mut hasher);
-                let args_hash = format!("{:x}", hasher.finish());
-                logger.log_tool_execution(&name, &args_hash, success, duration_ms, None);
-            }
-        }
-
-        Ok(())
-    }
-
-    fn build_tool_call_context(
-        &self,
-        name: &str,
-        args_str: &str,
-        tool_call_id: Option<String>,
-    ) -> (String, bool, crate::api::types::ToolCall) {
-        let use_native_fc = self.config.agent.native_function_calling && tool_call_id.is_some();
-        let call_id = tool_call_id.unwrap_or_else(|| format!("call_{}", uuid::Uuid::new_v4()));
-        let fake_call = crate::api::types::ToolCall {
-            id: call_id.clone(),
-            call_type: "function".to_string(),
-            function: crate::api::types::ToolFunction {
-                name: name.to_string(),
-                arguments: args_str.to_string(),
-            },
-        };
-        (call_id, use_native_fc, fake_call)
-    }
-
-    async fn confirm_tool_execution(
-        &mut self,
-        name: &str,
-        args_str: &str,
-        call_id: &str,
-        use_native_fc: bool,
-    ) -> Result<bool> {
-        if !self.needs_confirmation(name) {
-            return Ok(true);
-        }
-
-        // When TUI is active, auto-approve — the TUI can't show stdin prompts
-        if self.has_tui_renderer() {
-            return Ok(true);
-        }
-
-        use tokio::io::AsyncWriteExt;
-
-        let args_preview: String = args_str
-            .chars()
-            .take(TOOL_CONFIRM_ARGS_PREVIEW_CHARS)
-            .collect();
-        let args_display = if args_str.chars().count() > TOOL_CONFIRM_ARGS_PREVIEW_CHARS {
-            format!("{}...", args_preview)
-        } else {
-            args_preview
-        };
-
-        if !self.is_interactive() {
-            return Err(AgentError::ConfirmationRequired {
-                tool_name: name.to_string(),
-            }
-            .into());
-        }
-
-        println!(
-            "{} Tool: {} Args: {}",
-            "⚠️".bright_yellow(),
-            name.bright_cyan(),
-            args_display.bright_white()
-        );
-        print!(
-            "{}",
-            "Execute? [y/N/s(bypass permissions)]: ".bright_yellow()
-        );
-        let _ = tokio::io::stdout().flush().await;
-
-        let response = read_line_pausing_esc(&self.esc_paused, &self.esc_pause_ack).await;
-        if let Ok(response) = response {
-            let response = response.trim().to_lowercase();
-            match response.as_str() {
-                "y" | "yes" => return Ok(true),
-                "s" | "skip" => {
-                    self.set_execution_mode(crate::config::ExecutionMode::Yolo);
-                    println!(
-                        "{} Switched to YOLO mode for this session",
-                        "⚡".bright_yellow()
-                    );
-                    return Ok(true);
-                }
-                _ => {}
-            }
-        }
-
-        let skip_msg = "Tool execution skipped by user";
-        println!("{} {}", "⏭️".bright_yellow(), skip_msg);
-        if use_native_fc {
-            self.messages.push(Message::tool(
-                serde_json::json!({"skipped": skip_msg}).to_string(),
-                call_id,
-            ));
-        } else {
-            self.messages.push(Message::user(format!(
-                "<tool_result><skipped>{}</skipped></tool_result>",
-                skip_msg
-            )));
-        }
-        Ok(false)
-    }
-
-    fn parse_tool_args(
-        &mut self,
-        name: &str,
-        args_str: &str,
-        call_id: &str,
-        use_native_fc: bool,
-        start_time: std::time::Instant,
-    ) -> Option<Value> {
-        match serde_json::from_str(args_str) {
-            Ok(args) => {
-                debug!("Tool arguments: {}", args);
-                Some(args)
-            }
-            Err(e) => {
-                let err = format!("Invalid JSON arguments: {}", e);
-                println!("{} {}", "✗".bright_red(), err);
-                self.push_tool_result_message(use_native_fc, call_id, name, false, &err);
-                self.log_tool_call(name, args_str, &err, false, start_time, false);
-                self.log_tool_validation_failure_event(
-                    name,
-                    args_str,
-                    &err,
-                    call_id,
-                    use_native_fc,
-                );
-                self.remember_failed_tool(name, &err);
-                let duration_ms = start_time.elapsed().as_millis() as u64;
-                self.self_improvement.record_tool(
-                    name,
-                    self.learning_context(),
-                    Outcome::Failure,
-                    duration_ms,
-                    Some(err.clone()),
-                );
-                self.self_improvement.record_error(
-                    &err,
-                    "parsing",
-                    self.learning_context(),
-                    name,
-                    None,
-                );
-                self.record_failed_tool_attempt(name, args_str, "parsing", &err);
-                None
-            }
-        }
-    }
-
-    fn validate_tool_args(
-        &mut self,
-        name: &str,
-        args_str: &str,
-        args: &Value,
-        call_id: &str,
-        use_native_fc: bool,
-        start_time: std::time::Instant,
-    ) -> bool {
-        let Some(tool) = self.tools.get(name) else {
-            return true;
-        };
-
-        match crate::tools::validate_tool_arguments_schema(name, &tool.schema(), args) {
-            Ok(()) => true,
-            Err(e) => {
-                let err = e.to_string();
-                println!("{} {}", "✗".bright_red(), err);
-                self.push_tool_result_message(use_native_fc, call_id, name, false, &err);
-                self.log_tool_call(name, args_str, &err, false, start_time, false);
-                self.log_tool_validation_failure_event(
-                    name,
-                    args_str,
-                    &err,
-                    call_id,
-                    use_native_fc,
-                );
-                self.remember_failed_tool(name, &err);
-                let duration_ms = start_time.elapsed().as_millis() as u64;
-                self.self_improvement.record_tool(
-                    name,
-                    self.learning_context(),
-                    Outcome::Failure,
-                    duration_ms,
-                    Some(err.clone()),
-                );
-                self.self_improvement.record_error(
-                    &err,
-                    "validation",
-                    self.learning_context(),
-                    name,
-                    None,
-                );
-                self.record_failed_tool_attempt(name, args_str, "validation", &err);
-                false
-            }
-        }
-    }
-
-    async fn execute_single_tool(
-        &mut self,
-        name: &str,
-        args_str: &str,
-        args: &Value,
-        start_time: std::time::Instant,
-    ) -> Result<(bool, String, String)> {
-        let Some(tool) = self.tools.get(name) else {
-            let err = format!("Unknown tool: {}", name);
-            self.log_tool_call(name, args_str, &err, false, start_time, false);
-            return Ok((false, err.clone(), err));
-        };
-
-        // Check ToolCache for cacheable (read-only) tools
-        let is_cacheable = crate::session::cache::is_cacheable(name);
-        if is_cacheable {
-            if let Some(cached_value) = self.tool_cache.get(name, args) {
-                let elapsed = start_time.elapsed().as_millis() as u64;
-                let result_str = serde_json::to_string(&cached_value)?;
-                let summary =
-                    output::semantic_summary(name, args, Some(&result_str), true, elapsed);
-                self.log_tool_call(name, args_str, &result_str, true, start_time, true);
-                debug!("Cache hit for tool '{}' ({}ms)", name, elapsed);
-                return Ok((true, result_str, summary));
-            }
-        }
-
-        // Invalidate cache entries when a mutating tool targets a specific path
-        if crate::session::cache::invalidates_cache(name) {
-            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                self.tool_cache.invalidate_path(path);
-            }
-            // shell_exec and git operations can affect any file — clear all read caches
-            if matches!(name, "shell_exec" | "git_commit" | "git_checkout") {
-                self.tool_cache.clear();
-            }
-        }
-
-        // Snapshot file before edit/write for undo support.
-        // Use tokio::fs to avoid blocking the async runtime thread.
-        if matches!(name, "file_edit" | "file_write" | "file_delete") {
-            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                if let Ok(content) = tokio::fs::read_to_string(path).await {
-                    use crate::session::edit_history::{EditAction, FileSnapshot};
-                    let snapshot = FileSnapshot::new(std::path::PathBuf::from(path), content);
-                    let action = EditAction::FileEdit {
-                        path: std::path::PathBuf::from(path),
-                        tool: name.to_string(),
-                    };
-                    self.edit_history.create_checkpoint(action);
-                    self.edit_history.add_file_to_current(snapshot);
-                }
-            }
-        }
-
-        // Acquire concurrency governor permit before executing the tool.
-        // The permit is held for the duration of execution and released on drop.
-        let _tool_permit = self
-            .governor
-            .acquire_tool()
-            .await
-            .map_err(|e| anyhow::anyhow!("concurrency governor error: {}", e))?;
-
-        // Track bash/shell commands for the sticky status bar.
-        // The guard decrements on drop regardless of how execution exits.
-        let is_bash = matches!(name, "shell_exec" | "pty_shell");
-        let _bash_guard: Option<crate::ui::sticky_bar::BashGuard> = if is_bash {
-            Some(crate::ui::sticky_bar::BashGuard::new())
-        } else {
-            None
-        };
-
-        let timeout_secs = self.config.agent.step_timeout_secs.max(1);
-        let execution = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
-            tool.execute(args.clone()),
-        )
-        .await;
-
-        match execution {
-            Ok(Ok(result)) => {
-                let elapsed = start_time.elapsed().as_millis() as u64;
-                let result_str = serde_json::to_string(&result)?;
-                let summary =
-                    output::semantic_summary(name, args, Some(&result_str), true, elapsed);
-                self.log_tool_call(name, args_str, &result_str, true, start_time, true);
-
-                // Store successful cacheable results in ToolCache
-                if is_cacheable {
-                    self.tool_cache.set(name, args, result.clone());
-                }
-
-                // Cache tool results in LocalFirstCoordinator
-                let cache_key = crate::session::cache::ToolCache::cache_key(name, args);
-                self.local_first
-                    .cache_response(&cache_key, result_str.clone(), result_str.len());
-
-                // Record successful tool usage for learning
-                self.self_improvement.record_tool(
-                    name,
-                    self.learning_context(),
-                    Outcome::Success,
-                    elapsed,
-                    None,
-                );
-
-                let verification_result = self.maybe_verify_file_change(name, args).await;
-                let enhanced_result = self.maybe_enhance_tool_result(name, &result_str);
-                let final_result = match verification_result {
-                    Some(ver_msg) => format!("{}{}", enhanced_result, ver_msg),
-                    None => enhanced_result,
-                };
-                Ok((true, final_result, summary))
-            }
-            Ok(Err(e)) => {
-                let elapsed = start_time.elapsed().as_millis() as u64;
-                let summary =
-                    output::semantic_summary(name, args, Some(&e.to_string()), false, elapsed);
-                self.log_tool_call(name, args_str, &e.to_string(), false, start_time, false);
-                self.cognitive_state
-                    .episodic_memory
-                    .what_failed(name, &e.to_string());
-
-                // Record failed tool usage for learning
-                self.self_improvement.record_tool(
-                    name,
-                    self.learning_context(),
-                    Outcome::Failure,
-                    elapsed,
-                    Some(e.to_string()),
-                );
-
-                Ok((false, e.to_string(), summary))
-            }
-            Err(_) => {
-                let elapsed = start_time.elapsed().as_millis() as u64;
-                let err = format!("Tool '{}' timed out after {}s", name, timeout_secs);
-                let summary = output::semantic_summary(name, args, Some(&err), false, elapsed);
-                self.log_tool_call(name, args_str, &err, false, start_time, false);
-                self.cognitive_state.episodic_memory.what_failed(name, &err);
-                self.self_improvement.record_tool(
-                    name,
-                    self.learning_context(),
-                    Outcome::Failure,
-                    elapsed,
-                    Some(err.clone()),
-                );
-                Ok((false, err, summary))
-            }
-        }
-    }
-
-    async fn maybe_verify_file_change(&mut self, tool_name: &str, args: &Value) -> Option<String> {
-        if !matches!(tool_name, "file_edit" | "file_write") {
-            return None;
-        }
-
-        let path = args.get("path").and_then(|v| v.as_str())?;
-        info!("Running verification after {} on {}", tool_name, path);
-        self.cognitive_state.set_phase(CyclePhase::Verify);
-        let spinner = crate::ui::spinner::TerminalSpinner::start("Verifying...");
-
-        match self
-            .verification_gate
-            .verify_change(&[path.to_string()], &format!("{}:{}", tool_name, path))
-            .await
-        {
-            Ok(report) => {
-                if report.overall_passed {
-                    spinner.stop_success("Verification passed");
-                    self.cognitive_state.episodic_memory.what_worked(
-                        tool_name,
-                        &format!("{} on {} passed verification", tool_name, path),
-                    );
-                    if output::is_verbose() {
-                        output::verification_report(&format!("{}", report), true);
-                    }
-                    None
-                } else {
-                    spinner.stop_error("Verification failed");
-                    self.cognitive_state.episodic_memory.what_failed(
-                        tool_name,
-                        &format!("{} on {} failed verification", tool_name, path),
-                    );
-                    output::verification_report(&format!("{}", report), false);
-                    Some(format!(
-                        "\n\n<verification_failed>\n{}\n</verification_failed>",
-                        report
-                    ))
-                }
-            }
-            Err(e) => {
-                spinner.stop_error("Verification failed to run");
-                warn!("Verification failed to run: {}", e);
-                None
-            }
-        }
-    }
-
-    fn maybe_enhance_tool_result(&self, name: &str, result_str: &str) -> String {
-        if name == "cargo_check" && result_str.contains("\"success\":false") {
-            self.enhance_cargo_errors(result_str)
-        } else {
-            result_str.to_string()
-        }
-    }
-
-    fn push_tool_result_message(
-        &mut self,
-        use_native_fc: bool,
-        call_id: &str,
-        _tool_name: &str,
-        success: bool,
-        result: &str,
-    ) {
-        // Detect base64_png in successful tool results and promote to multimodal
-        if success {
-            if let Some(base64_png) = try_extract_base64_png(result) {
-                let summary = build_image_result_summary(result);
-                let content =
-                    crate::api::types::MessageContent::from_text(&summary).with_image(&base64_png);
-                if use_native_fc {
-                    // For native FC, create a tool message with multimodal content
-                    self.messages.push(crate::api::types::Message {
-                        role: "tool".to_string(),
-                        content,
-                        reasoning_content: None,
-                        tool_calls: None,
-                        tool_call_id: Some(call_id.to_string()),
-                        name: None,
-                    });
-                } else {
-                    self.messages.push(Message::user_multimodal(content));
-                }
-                return;
-            }
-        }
-
-        if use_native_fc {
-            let result_json = if success {
-                result.to_string()
-            } else {
-                serde_json::json!({"error": result}).to_string()
-            };
-            self.messages.push(Message::tool(result_json, call_id));
-        } else {
-            let formatted = if success {
-                format!("<tool_result>{}</tool_result>", result)
-            } else {
-                format!("<tool_result><error>{}</error></tool_result>", result)
-            };
-            self.messages.push(Message::user(formatted));
-        }
-    }
-
-    fn log_tool_call(
-        &mut self,
-        tool_name: &str,
-        arguments: &str,
-        result: &str,
-        success: bool,
-        start_time: std::time::Instant,
-        truncate_result: bool,
-    ) {
-        let duration_ms = start_time.elapsed().as_millis() as u64;
-        self.log_session_tool_call_event(
-            tool_name,
-            arguments,
-            result,
-            success,
-            duration_ms,
-            truncate_result,
-        );
-
-        if let Some(ref mut checkpoint) = self.current_checkpoint {
-            let logged_result = if truncate_result {
-                result.chars().take(1000).collect()
-            } else {
-                result.to_string()
-            };
-            checkpoint.log_tool_call(ToolCallLog {
-                timestamp: Utc::now(),
-                tool_name: tool_name.to_string(),
-                arguments: arguments.to_string(),
-                result: Some(logged_result),
-                success,
-                duration_ms: Some(duration_ms),
-            });
-        }
-    }
-
     async fn get_assistant_step_response(
         &mut self,
         use_last_message: bool,
     ) -> Result<AssistantStepResponse> {
+        use crate::api::types::Message;
+
         let turn_start = std::time::Instant::now();
         let mut native_tool_calls: Option<Vec<crate::api::types::ToolCall>> = None;
         self.log_turn_start_event("assistant_step", use_last_message, self.messages.len());
@@ -1550,9 +234,13 @@ impl Agent {
             if self.config.agent.native_function_calling {
                 native_tool_calls = last_msg.tool_calls.clone();
             }
+            let content_text = last_msg.content.text().to_string();
+            let reasoning_clone = last_msg.reasoning_content.clone();
             let response = AssistantStepResponse {
-                content: last_msg.content.text().to_string(),
-                reasoning_content: last_msg.reasoning_content.clone(),
+                content_chars: content_text.len(),
+                reasoning_chars: reasoning_clone.as_ref().map(|r| r.len()).unwrap_or(0),
+                content: content_text,
+                reasoning_content: reasoning_clone,
                 native_tool_calls,
             };
             self.log_turn_end_event(
@@ -1570,6 +258,12 @@ impl Agent {
                 }),
             );
             return Ok(response);
+        }
+
+        // Auto-optimize context: downgrade stale files (>120s since last access).
+        let optimized = self.context_map.auto_optimize(120);
+        if optimized > 0 {
+            debug!("Context auto-optimized: freed {} tokens", optimized);
         }
 
         // Hard-truncate message history to stay within context window before
@@ -1627,6 +321,11 @@ impl Agent {
             system_hints.push(failure_hint);
         }
 
+        // Inject context map awareness: L1 tree in system prompt, boundary before recent.
+        if self.context_map.file_count() > 0 {
+            system_hints.push(self.context_map.render_tree());
+        }
+
         if !system_hints.is_empty() {
             let merged_hints = system_hints.join("\n\n");
             // Merge into existing system message to maintain OpenAI message ordering
@@ -1640,6 +339,16 @@ impl Agent {
             } else {
                 request_messages.insert(0, Message::system(merged_hints));
             }
+        }
+
+        // RoPE-aware: inject context boundary marker before recent messages.
+        // This exploits the recency effect — model sees boundary and knows
+        // everything above is reference, everything below is active task.
+        if self.context_map.file_count() > 0 && request_messages.len() > 8 {
+            let boundary = self.context_map.render_boundary();
+            // Insert 6 messages from the end (before the recent window).
+            let insert_pos = request_messages.len().saturating_sub(6);
+            request_messages.insert(insert_pos, Message::user(boundary));
         }
 
         let (content, reasoning) = if self.config.agent.streaming {
@@ -1722,7 +431,7 @@ impl Agent {
                         warn!("Fallback model returned empty content!");
                     }
                     if let Some(ref r) = reasoning {
-                        println!("{} {}", "Thinking:".dimmed(), r.dimmed());
+                        cli_println!("{} {}", "Thinking:".dimmed(), r.dimmed());
                         debug!("Fallback reasoning ({} chars): {}", r.len(), r);
                     }
 
@@ -1777,9 +486,9 @@ impl Agent {
             );
 
             if std::env::var("SELFWARE_DEBUG").is_ok() {
-                println!("{}", "=== DEBUG: Raw Model Response ===".bright_magenta());
-                println!("{}", content);
-                println!("{}", "=== END DEBUG ===".bright_magenta());
+                cli_println!("{}", "=== DEBUG: Raw Model Response ===".bright_magenta());
+                cli_println!("{}", content);
+                cli_println!("{}", "=== END DEBUG ===".bright_magenta());
             }
 
             if content.is_empty() {
@@ -1787,14 +496,14 @@ impl Agent {
             }
 
             if let Some(ref r) = reasoning {
-                println!("{} {}", "Thinking:".dimmed(), r.dimmed());
+                cli_println!("{} {}", "Thinking:".dimmed(), r.dimmed());
                 debug!("Reasoning content ({} chars): {}", r.len(), r);
             }
 
             (content, reasoning)
         };
 
-        self.messages.push(Message {
+        self.messages.push(crate::api::types::Message {
             role: "assistant".to_string(),
             content: content.clone().into(),
             reasoning_content: reasoning.clone(),
@@ -1804,6 +513,8 @@ impl Agent {
         });
 
         let response = AssistantStepResponse {
+            content_chars: content.len(),
+            reasoning_chars: reasoning.as_ref().map(|r| r.len()).unwrap_or(0),
             content,
             reasoning_content: reasoning,
             native_tool_calls,
@@ -1825,7 +536,7 @@ impl Agent {
         Ok(response)
     }
 
-    pub(super) fn message_has_tool_calls(&self, assistant_msg: &Message) -> bool {
+    pub(super) fn message_has_tool_calls(&self, assistant_msg: &crate::api::types::Message) -> bool {
         if self.config.agent.native_function_calling
             && assistant_msg
                 .tool_calls
@@ -1917,27 +628,11 @@ impl Agent {
         tool_calls
     }
 
-    fn should_prompt_for_action(
-        &self,
-        content: &str,
-        has_no_tool_calls: bool,
-        use_last_message: bool,
-    ) -> bool {
-        if !has_no_tool_calls || use_last_message || content.len() >= 1000 {
-            return false;
-        }
-
-        let intent_phrases = [
-            "let me", "i'll ", "i will", "let's", "first,", "starting", "begin by", "going to",
-            "need to", "start by", "help you",
-        ];
-        let content_lower = content.to_lowercase();
-        intent_phrases.iter().any(|p| content_lower.contains(p))
-    }
-
     /// Plan phase - returns true if model wants to execute tools (should continue to execution)
     /// This now combines planning with initial tool extraction to avoid double API calls
     pub(super) async fn plan(&mut self) -> Result<bool> {
+        use crate::api::types::Message;
+
         // Tools are embedded in system prompt - see WORKAROUND comment in Agent::new()
         debug!("Sending planning request to model...");
         let turn_start = std::time::Instant::now();
@@ -2066,7 +761,10 @@ mod tests {
     use crate::api::types::{ToolCall as ApiToolCall, ToolFunction};
     use crate::testing::mock_api::MockLlmServer;
     use crate::tool_parser::parse_tool_calls;
+    use crate::checkpoint::ToolCallLog;
+    use chrono::Utc;
     use tempfile::tempdir;
+    use std::hash::{Hash, Hasher};
 
     // =========================================================================
     // Helper: mirrors should_prompt_for_action logic for standalone testing
@@ -2075,16 +773,31 @@ mod tests {
         content: &str,
         has_no_tool_calls: bool,
         use_last_message: bool,
+        reasoning_chars: usize,
     ) -> bool {
-        if !has_no_tool_calls || use_last_message || content.len() >= 1000 {
+        if !has_no_tool_calls || use_last_message {
             return false;
         }
+
+        let effective_content = super::recovery::strip_think_blocks(content);
+        let effective_len = effective_content.len();
+
+        let total_output = effective_len + reasoning_chars;
+        if total_output > 0 && effective_len > 500 {
+            let think_ratio = reasoning_chars as f64 / total_output as f64;
+            if think_ratio < 0.8 {
+                return false;
+            }
+        } else if effective_len >= 1000 {
+            return false;
+        }
+
         let intent_phrases = [
             "let me", "i'll ", "i will", "let's", "first,", "starting", "begin by", "going to",
             "need to", "start by", "help you",
         ];
-        let content_lower = content.to_lowercase();
-        intent_phrases.iter().any(|p| content_lower.contains(p))
+        let lower = effective_content.to_lowercase();
+        intent_phrases.iter().any(|p| lower.contains(p))
     }
 
     // =========================================================================
@@ -2096,67 +809,108 @@ mod tests {
         assert!(should_prompt_for_action(
             "Let me check the file",
             true,
-            false
+            false,
+            0
         ));
         assert!(should_prompt_for_action(
             "I'll fix that bug now",
             true,
-            false
+            false,
+            0
         ));
         assert!(should_prompt_for_action(
             "I will refactor the module",
             true,
-            false
+            false,
+            0
         ));
         assert!(should_prompt_for_action(
             "Let's start by reading the code",
             true,
-            false
+            false,
+            0
         ));
         assert!(should_prompt_for_action(
             "First, I need to understand",
             true,
-            false
+            false,
+            0
         ));
         assert!(should_prompt_for_action(
             "Going to investigate",
             true,
-            false
+            false,
+            0
         ));
     }
 
     #[test]
     fn test_should_not_prompt_when_tool_calls_exist() {
         // has_no_tool_calls = false means there ARE tool calls
-        assert!(!should_prompt_for_action("Let me check", false, false));
+        assert!(!should_prompt_for_action("Let me check", false, false, 0));
     }
 
     #[test]
     fn test_should_not_prompt_when_using_last_message() {
-        assert!(!should_prompt_for_action("Let me check", true, true));
+        assert!(!should_prompt_for_action("Let me check", true, true, 0));
     }
 
     #[test]
     fn test_should_not_prompt_for_long_content() {
         let long_content = format!("Let me {}", "x".repeat(1000));
-        assert!(!should_prompt_for_action(&long_content, true, false));
+        assert!(!should_prompt_for_action(&long_content, true, false, 0));
     }
 
     #[test]
     fn test_should_not_prompt_for_plain_response() {
-        assert!(!should_prompt_for_action("The answer is 42.", true, false));
+        assert!(!should_prompt_for_action("The answer is 42.", true, false, 0));
         assert!(!should_prompt_for_action(
             "Here is the result.",
             true,
-            false
+            false,
+            0
         ));
     }
 
     #[test]
     fn test_should_prompt_case_insensitive() {
-        assert!(should_prompt_for_action("LET ME check", true, false));
-        assert!(should_prompt_for_action("STARTING now", true, false));
-        assert!(should_prompt_for_action("BEGIN BY reading", true, false));
+        assert!(should_prompt_for_action("LET ME check", true, false, 0));
+        assert!(should_prompt_for_action("STARTING now", true, false, 0));
+        assert!(should_prompt_for_action("BEGIN BY reading", true, false, 0));
+    }
+
+    #[test]
+    fn test_should_prompt_think_dominated_response() {
+        // Short intent content + huge think block = should still detect intent
+        let content = "Let me check the file structure";
+        let reasoning_chars = 5000; // Simulates large think block
+        assert!(should_prompt_for_action(content, true, false, reasoning_chars));
+    }
+
+    #[test]
+    fn test_should_prompt_genuine_long_response() {
+        // 600 chars of real content with low think ratio = genuine response
+        let content = format!("Here is a detailed analysis: {}", "x".repeat(570));
+        assert!(!should_prompt_for_action(&content, true, false, 100));
+    }
+
+    #[test]
+    fn test_is_confused_response() {
+        // Two or more framework markers = confused
+        assert!(super::verification::is_confused_response(
+            "The should_prompt_for_action function checks ActionPrompt:: variants"
+        ));
+        assert!(super::verification::is_confused_response(
+            "Looking at build_no_action_prompt_message and </think> blocks"
+        ));
+        // Only one marker = not confused
+        assert!(!super::verification::is_confused_response(
+            "The function uses ActionPrompt to decide"
+        ));
+        // No markers = not confused
+        assert!(!super::verification::is_confused_response(
+            "Here is the code review summary"
+        ));
     }
 
     #[tokio::test]
@@ -2165,32 +919,24 @@ mod tests {
         let config = test_config(format!("{}/v1", server.url()));
         let mut agent = Agent::new(config).await.unwrap();
 
-        assert!(agent.maybe_prompt_for_action("Let me inspect the file", true, false));
-        assert!(agent
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .text()
-            .contains("Please use the appropriate tools"));
+        // First two attempts return Corrected with escalating text
+        assert!(matches!(
+            agent.maybe_prompt_for_action("Let me inspect the file", true, false, 0).unwrap(),
+            ActionPrompt::Corrected
+        ));
+        assert!(agent.messages.last().unwrap().content.text().contains("selfware_system_directive"));
 
-        assert!(agent.maybe_prompt_for_action("Let me inspect the file", true, false));
-        assert!(agent
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .text()
-            .contains("NO ACTION DETECTED AGAIN"));
+        assert!(matches!(
+            agent.maybe_prompt_for_action("Let me inspect the file", true, false, 0).unwrap(),
+            ActionPrompt::Corrected
+        ));
+        assert!(agent.messages.last().unwrap().content.text().contains("Attempt 2"));
 
-        assert!(agent.maybe_prompt_for_action("Let me inspect the file", true, false));
-        assert!(agent
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .text()
-            .contains("NO ACTION LOOP DETECTED"));
+        // Third attempt triggers ForceFallback instead of another text correction
+        assert!(matches!(
+            agent.maybe_prompt_for_action("Let me inspect the file", true, false, 0).unwrap(),
+            ActionPrompt::ForceFallback
+        ));
 
         server.stop().await;
     }
@@ -2201,22 +947,61 @@ mod tests {
         let config = test_config(format!("{}/v1", server.url()));
         let mut agent = Agent::new(config).await.unwrap();
 
-        assert!(agent.maybe_prompt_for_action("Let me inspect the file", true, false));
-        assert!(agent.maybe_prompt_for_action("Let me inspect the file", true, false));
+        assert!(matches!(
+            agent.maybe_prompt_for_action("Let me inspect the file", true, false, 0).unwrap(),
+            ActionPrompt::Corrected
+        ));
+        assert!(matches!(
+            agent.maybe_prompt_for_action("Let me inspect the file", true, false, 0).unwrap(),
+            ActionPrompt::Corrected
+        ));
         assert_eq!(agent.consecutive_no_action_prompts, 2);
 
-        assert!(!agent.maybe_prompt_for_action("Here is the result.", true, false));
+        assert!(matches!(
+            agent.maybe_prompt_for_action("Here is the result.", true, false, 0).unwrap(),
+            ActionPrompt::NotNeeded
+        ));
         assert_eq!(agent.consecutive_no_action_prompts, 0);
 
-        assert!(agent.maybe_prompt_for_action("Let me inspect the file", true, false));
-        assert!(agent
-            .messages
-            .last()
-            .unwrap()
-            .content
-            .text()
-            .contains("Please use the appropriate tools"));
+        assert!(matches!(
+            agent.maybe_prompt_for_action("Let me inspect the file", true, false, 0).unwrap(),
+            ActionPrompt::Corrected
+        ));
+        assert!(agent.messages.last().unwrap().content.text().contains("selfware_system_directive"));
 
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_total_no_action_counter_survives_consecutive_resets() {
+        // Simulates the cycling pattern: intent → correction → non-intent (resets
+        // consecutive counter) → intent again → ... The lifetime counter should
+        // still accumulate and eventually abort.
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+
+        for cycle in 0..6 {
+            // Two intent prompts (consecutive counter goes to 2)
+            let _ = agent.maybe_prompt_for_action("Let me check", true, false, 0);
+            let _ = agent.maybe_prompt_for_action("Let me check", true, false, 0);
+            // One non-intent response resets the consecutive counter
+            let _ = agent.maybe_prompt_for_action("Here is the result.", true, false, 0);
+            assert_eq!(
+                agent.consecutive_no_action_prompts, 0,
+                "consecutive should reset on non-intent response (cycle {})",
+                cycle
+            );
+        }
+        // 6 cycles * 2 intent prompts = 12 total, which equals MAX_TOTAL_NO_ACTION_PROMPTS
+        assert_eq!(agent.total_no_action_prompts, 12);
+
+        // The next intent prompt should trigger the lifetime abort
+        let result = agent.maybe_prompt_for_action("Let me try again", true, false, 0);
+        assert!(
+            result.is_err(),
+            "should abort after exceeding lifetime no-action limit"
+        );
         server.stop().await;
     }
 
@@ -3368,6 +2153,7 @@ mod tests {
 
         // But three identical raw strings DO trigger detection
         agent.recent_tool_calls.clear();
+        agent.recent_tool_batches.clear();
         assert!(agent.detect_repetition(&raw1).is_none());
         assert!(agent.detect_repetition(&raw1).is_none());
         let result = agent.detect_repetition(&raw1);
@@ -4321,7 +3107,7 @@ mod tests {
         agent.session_logger =
             super::session_log::new_test_session_logger("turn-log", dir.path().to_path_buf());
 
-        agent.messages.push(Message {
+        agent.messages.push(crate::api::types::Message {
             role: "assistant".to_string(),
             content: "Previously generated content.".to_string().into(),
             reasoning_content: Some("Thinking deeply...".to_string()),
@@ -4371,12 +3157,12 @@ mod tests {
         );
 
         for i in 0..10 {
-            agent.messages.push(Message::user(format!(
+            agent.messages.push(crate::api::types::Message::user(format!(
                 "previous turn {} {}",
                 i,
                 "x".repeat(250)
             )));
-            agent.messages.push(Message::assistant(format!(
+            agent.messages.push(crate::api::types::Message::assistant(format!(
                 "assistant turn {} {}",
                 i,
                 "y".repeat(250)
@@ -4559,7 +3345,8 @@ mod tests {
         assert!(should_prompt_for_action(
             "I need to check this",
             true,
-            false
+            false,
+            0
         ));
     }
 
@@ -4568,7 +3355,8 @@ mod tests {
         assert!(should_prompt_for_action(
             "start by reading the file",
             true,
-            false
+            false,
+            0
         ));
     }
 
@@ -4577,27 +3365,38 @@ mod tests {
         assert!(should_prompt_for_action(
             "I can help you with that",
             true,
-            false
+            false,
+            0
         ));
     }
 
     #[test]
     fn test_should_not_prompt_empty_content() {
-        assert!(!should_prompt_for_action("", true, false));
+        assert!(!should_prompt_for_action("", true, false, 0));
     }
 
     #[test]
     fn test_should_not_prompt_exactly_1000_chars() {
+        // 1000 chars of real content with no reasoning = genuine (passes > 500 check)
         let content = "let me ".to_string() + &"x".repeat(993);
         assert_eq!(content.len(), 1000);
-        assert!(!should_prompt_for_action(&content, true, false));
+        assert!(!should_prompt_for_action(&content, true, false, 0));
     }
 
     #[test]
-    fn test_should_prompt_999_chars() {
-        let content = "let me ".to_string() + &"x".repeat(992);
-        assert_eq!(content.len(), 999);
-        assert!(should_prompt_for_action(&content, true, false));
+    fn test_should_not_prompt_501_chars_no_reasoning() {
+        // 501+ chars of real content with no reasoning = genuine response
+        let content = "let me ".to_string() + &"x".repeat(494);
+        assert_eq!(content.len(), 501);
+        assert!(!should_prompt_for_action(&content, true, false, 0));
+    }
+
+    #[test]
+    fn test_should_prompt_499_chars_with_intent() {
+        // Under 500 chars with intent phrase = should prompt
+        let content = "let me ".to_string() + &"x".repeat(492);
+        assert_eq!(content.len(), 499);
+        assert!(should_prompt_for_action(&content, true, false, 0));
     }
 
     #[test]
@@ -4620,7 +3419,7 @@ mod tests {
 
         for (phrase, expected) in phrases {
             assert_eq!(
-                should_prompt_for_action(phrase, true, false),
+                should_prompt_for_action(phrase, true, false, 0),
                 expected,
                 "Failed for phrase: {:?}",
                 phrase
@@ -4657,12 +3456,14 @@ mod tests {
         ignore = "mock TCP server unreliable on Windows CI"
     )]
     async fn test_file_read_adds_to_context_files() {
+        // Use CARGO_MANIFEST_DIR for cwd-independent test (fix #7: test determinism)
+        let cargo_toml_path = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
         let server = MockLlmServer::builder()
             .with_response(
-                r#"<tool>
-<name>file_read</name>
-<arguments>{"path":"./Cargo.toml"}</arguments>
-</tool>"#,
+                &format!(
+                    "<tool>\n<name>file_read</name>\n<arguments>{{\"path\":\"{}\"}}</arguments>\n</tool>",
+                    cargo_toml_path
+                ),
             )
             .with_response("Done reading.")
             .build()
@@ -4675,11 +3476,11 @@ mod tests {
 
         assert!(
             agent
-                .context_files
+                .file_tracker.context_files
                 .iter()
                 .any(|p| p.ends_with("Cargo.toml")),
             "Expected Cargo.toml in context_files: {:?}",
-            agent.context_files
+            agent.file_tracker.context_files
         );
 
         server.stop().await;
@@ -4690,16 +3491,17 @@ mod tests {
         let server = MockLlmServer::builder().with_response("done").build().await;
         let config = test_config(format!("{}/v1", server.url()));
         let mut agent = Agent::new(config).await.unwrap();
+        let cargo_toml_path = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
 
         let batch: Vec<CollectedToolCall> = vec![
             (
                 "file_read".to_string(),
-                r#"{"path":"./Cargo.toml"}"#.to_string(),
+                format!(r#"{{"path":"{}"}}"#, cargo_toml_path),
                 None,
             ),
             (
                 "file_read".to_string(),
-                r#"{"path":"./Cargo.toml"}"#.to_string(),
+                format!(r#"{{"path":"{}"}}"#, cargo_toml_path),
                 None,
             ),
         ];
@@ -4707,18 +3509,20 @@ mod tests {
         agent.execute_tool_batch(batch).await.unwrap();
 
         let state = agent
-            .file_read_state
-            .get("./Cargo.toml")
+            .file_tracker.read_state
+            .get(&cargo_toml_path)
             .expect("expected Cargo.toml file state");
         assert_eq!(state.unchanged_read_count, 1);
         assert!(agent
             .task_state_notes
             .iter()
-            .any(|note| { note.contains("Reread unchanged file `./Cargo.toml`") }));
+            .any(|note| { note.contains(&format!("Reread unchanged file `{}`", cargo_toml_path)) }));
         assert!(agent
             .pending_failure_hint
             .as_deref()
-            .is_some_and(|hint| { hint.contains("reread unchanged file `./Cargo.toml`") }));
+            .is_some_and(|hint| {
+                hint.contains(&format!("reread unchanged file `{}`", cargo_toml_path))
+            }));
 
         server.stop().await;
     }
@@ -4757,7 +3561,7 @@ mod tests {
         agent.execute_tool_batch(batch).await.unwrap();
 
         let state = agent
-            .file_read_state
+            .file_tracker.read_state
             .get(&path)
             .expect("expected tracked file state");
         assert_eq!(state.unchanged_read_count, 1);
@@ -4804,7 +3608,7 @@ mod tests {
 
         agent.execute_tool_batch(batch).await.unwrap();
 
-        assert!(!agent.file_read_state.contains_key(&path));
+        assert!(!agent.file_tracker.read_state.contains_key(&path));
         assert!(agent
             .task_state_notes
             .iter()
@@ -4856,7 +3660,7 @@ mod tests {
         server.stop().await;
     }
 
-    // ── read_line_pausing_esc tests ──
+    // -- read_line_pausing_esc tests --
 
     // NOTE: These tests are marked as `#[ignore]` because they interact with stdin,
     // which blocks indefinitely in test environments (non-TTY). Run with `--ignored`

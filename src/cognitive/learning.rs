@@ -124,8 +124,10 @@ pub struct CodeExplainer {
     pub config: ExplainModeConfig,
     /// Known concepts for context
     known_concepts: Vec<String>,
-    /// Explanation history
+    /// Explanation history (bounded with LRU eviction)
     history: Vec<CodeExplanation>,
+    /// Maximum history size to prevent unbounded growth
+    max_history: usize,
 }
 
 impl CodeExplainer {
@@ -134,6 +136,7 @@ impl CodeExplainer {
             config: ExplainModeConfig::default(),
             known_concepts: Vec::new(),
             history: Vec::new(),
+            max_history: 100, // Limit history to 100 entries
         }
     }
 
@@ -182,6 +185,12 @@ impl CodeExplainer {
         };
 
         self.history.push(explanation.clone());
+        
+        // Enforce max_history limit with LRU eviction (remove oldest entries)
+        while self.history.len() > self.max_history {
+            self.history.remove(0);
+        }
+        
         explanation
     }
 
@@ -1196,6 +1205,27 @@ fn main() {
 
         assert!(!explanation.explanation.is_empty());
         assert!(!explanation.line_explanations.is_empty());
+    }
+
+    #[test]
+    fn test_code_explainer_history_limit() {
+        let mut explainer = CodeExplainer::new();
+
+        // Explain more than max_history times (default is 100)
+        for i in 0..150 {
+            let code = format!("fn test_{}() {{ }}", i);
+            explainer.explain(&code);
+        }
+
+        // History should be limited to max_history
+        assert_eq!(explainer.history.len(), 100);
+        
+        // The oldest entries should have been evicted
+        // The first explanation in history should be test_50 (indices 50-149)
+        assert!(explainer.history[0].code.contains("test_50"));
+        
+        // The most recent should be test_149
+        assert!(explainer.history[99].code.contains("test_149"));
     }
 
     #[test]

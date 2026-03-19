@@ -9,6 +9,7 @@ pub mod browser;
 pub mod cargo;
 pub mod computer;
 pub mod container;
+pub mod context;
 pub mod file;
 pub mod fim;
 pub mod git;
@@ -16,6 +17,7 @@ pub mod git;
 pub mod hot_reload;
 pub mod http;
 pub mod knowledge;
+pub mod net_policy;
 pub mod lsp_tools;
 pub mod package;
 pub mod page_controller;
@@ -37,8 +39,8 @@ use file::{DirectoryTree, FileDelete, FileEdit, FileRead, FileWrite};
 use git::{GitCheckpoint, GitCommit, GitDiff, GitPush, GitStatus};
 use http::HttpRequest;
 use knowledge::{
-    KnowledgeAdd, KnowledgeClear, KnowledgeExport, KnowledgeQuery, KnowledgeRelate,
-    KnowledgeRemove, KnowledgeStats as KnowledgeStatsTool,
+    KnowledgeAdd, KnowledgeAutoExtract, KnowledgeClear, KnowledgeExport, KnowledgeQuery,
+    KnowledgeRelate, KnowledgeRemove, KnowledgeStats as KnowledgeStatsTool,
 };
 use package::{NpmInstall, NpmRun, NpmScripts, PipFreeze, PipInstall, PipList, YarnInstall};
 use page_controller::PageControlTool;
@@ -80,6 +82,38 @@ pub fn truncate_with_pagination(
         has_more: consumed < total_chars,
     };
     (page, info)
+}
+
+pub(crate) const DANGEROUS_SHELL_PATTERNS: &[&str] =
+    &["/dev/tcp/", "/dev/udp/", "| bash -i", "| sh -i", "mkfifo /tmp"];
+
+pub(crate) fn find_dangerous_shell_pattern(command: &str) -> Option<&'static str> {
+    let normalized = command
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    DANGEROUS_SHELL_PATTERNS
+        .iter()
+        .find(|pattern| normalized.contains(**pattern))
+        .copied()
+}
+
+pub(crate) fn truncate_output(output: &str, max_len: usize) -> String {
+    if output.len() <= max_len {
+        return output.to_string();
+    }
+
+    let mut end = max_len;
+    while end > 0 && !output.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    format!(
+        "{}... [truncated, {} total chars]",
+        &output[..end],
+        output.len()
+    )
 }
 
 /// Validate tool arguments against the top-level JSON schema contract exposed to the model.
@@ -225,6 +259,7 @@ impl ToolRegistry {
 
         // Knowledge graph
         registry.register(KnowledgeAdd);
+        registry.register(KnowledgeAutoExtract);
         registry.register(KnowledgeRelate);
         registry.register(KnowledgeQuery);
         registry.register(KnowledgeStatsTool);
@@ -232,8 +267,12 @@ impl ToolRegistry {
         registry.register(KnowledgeRemove);
         registry.register(KnowledgeExport);
 
-        // Swarm orchestration
-        registry.register(swarm_tool::SwarmDispatchTool::new());
+        // Swarm orchestration — intentionally NOT registered as an LLM-invocable tool.
+        // Swarm dispatch is exposed via the `/swarm` CLI command, which calls
+        // `run_swarm_task` directly.  Registering it here would let the model
+        // spawn sub-agents autonomously, which we want gated behind explicit
+        // user invocation.
+        // registry.register(swarm_tool::SwarmDispatchTool::new());
 
         // Computer control (mouse, keyboard, screen, window)
         registry.register(computer::ComputerMouseTool);

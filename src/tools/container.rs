@@ -1342,15 +1342,7 @@ impl Tool for ComposeDown {
 
 /// Truncate output to max length
 fn truncate_output(output: &str, max_len: usize) -> String {
-    if output.len() <= max_len {
-        output.to_string()
-    } else {
-        format!(
-            "{}... [truncated, {} total chars]",
-            &output[..max_len],
-            output.len()
-        )
-    }
+    super::truncate_output(output, max_len)
 }
 
 /// Parse build output for image ID

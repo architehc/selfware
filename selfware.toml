@@ -2,7 +2,7 @@
 # You can set this via environment variable SELFWARE_ENDPOINT or in your config
 endpoint = "http://localhost:8000/v1"
 model = "qwen3.5-27b"
-max_tokens = 32768
+max_tokens = 81920 #output
 
 # Safety section is nested - that part was correct
 [safety]
@@ -15,19 +15,20 @@ max_iterations = 5000
 step_timeout_secs = 600
 # Enable native function calling (requires backend support like sglang --tool-call-parser)
 native_function_calling = true
-token_budget = 262144
+token_budget = 900000 #safe 900k < 1M 
+token_safety_margin = 5000
 
 [continuous_work]
 enabled = true
 checkpoint_interval_tools = 10
 checkpoint_interval_secs = 300
 auto_recovery = true
-max_recovery_attempts = 3
+max_recovery_attempts = 6
 
 [retry]
-max_retries = 5
+max_retries = 8
 base_delay_ms = 1000
-max_delay_ms = 60000
+max_delay_ms = 70000
 
 [evolution]
 # Source files the evolution daemon is allowed to mutate

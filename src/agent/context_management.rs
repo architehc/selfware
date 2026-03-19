@@ -21,6 +21,10 @@ impl Agent {
                 || text.contains("STUCK LOOP DETECTED")
                 || text.contains("NO ACTION LOOP DETECTED")
                 || text.contains("NO ACTION DETECTED AGAIN")
+                || text.contains("selfware_system_directive")
+                || text.contains("Use a tool NOW")
+                || text.contains("FAILURE #")
+                || text.contains("Attempt ")
                 || text.contains("Your tool call was malformed")
                 || text.contains("RETRY SUPPRESSED")
                 || text.contains("TOOL INPUT RECOVERY")
@@ -30,13 +34,11 @@ impl Agent {
     /// Trim the message history so total estimated tokens stay within
     /// `max_context_tokens`. Removes the oldest non-system messages first.
     pub(super) fn trim_message_history(&mut self) {
+        use super::context::estimate_message_tokens;
         let total: usize = self
             .messages
             .iter()
-            .map(|m| {
-                crate::token_count::estimate_tokens_with_overhead(&m.content.text_all(), 4)
-                    + m.content.image_count() * crate::tokens::DEFAULT_IMAGE_TOKEN_ESTIMATE
-            })
+            .map(|m| estimate_message_tokens(m))
             .sum();
         if total <= self.max_context_tokens {
             return;
@@ -48,10 +50,7 @@ impl Agent {
         let token_counts: Vec<usize> = self
             .messages
             .iter()
-            .map(|m| {
-                crate::token_count::estimate_tokens_with_overhead(&m.content.text_all(), 4)
-                    + m.content.image_count() * crate::tokens::DEFAULT_IMAGE_TOKEN_ESTIMATE
-            })
+            .map(|m| estimate_message_tokens(m))
             .collect();
         let pinned_critical: std::collections::HashSet<usize> = self
             .messages
@@ -108,6 +107,150 @@ impl Agent {
                 removed_messages,
             );
         }
+    }
+
+    /// Walk the project directory and register all files at L1 in the context map.
+    pub(super) fn build_l1_project_tree(&mut self) {
+        use walkdir::WalkDir;
+
+        let root = super::current_project_root();
+        let mut count = 0usize;
+        for entry in WalkDir::new(&root)
+            .max_depth(10)
+            .into_iter()
+            .filter_entry(|e| {
+                let name = e.file_name().to_string_lossy();
+                // Skip common non-source directories.
+                !matches!(
+                    name.as_ref(),
+                    ".git" | "target" | "node_modules" | ".venv" | "__pycache__" | ".mypy_cache"
+                )
+            })
+        {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry
+                .path()
+                .strip_prefix(&root)
+                .unwrap_or(entry.path())
+                .to_path_buf();
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            self.context_map.register_tree_entry(path, size);
+            count += 1;
+        }
+        tracing::info!(
+            "L1 project tree: {} files registered, {} tokens",
+            count,
+            self.context_map.total_tokens()
+        );
+    }
+
+    /// For Review modality: auto-load L2 skeletons for all source files
+    /// so the model can see the codebase structure without reading every file.
+    pub(super) fn auto_load_skeletons_for_review(&mut self) {
+        use super::context_map::{extract_rust_skeleton, ContextLevel};
+
+        let root = super::current_project_root();
+        let files_at_tree: Vec<std::path::PathBuf> = self
+            .context_map
+            .files_at_level(ContextLevel::Tree)
+            .iter()
+            .filter(|p| {
+                p.to_string_lossy().ends_with(".rs")
+            })
+            .map(|p| p.to_path_buf())
+            .collect();
+
+        let mut loaded = 0usize;
+        for path in files_at_tree {
+            // Check budget before loading.
+            let estimate = self.context_map.can_load(&path, ContextLevel::Skeleton);
+            if !estimate.fits {
+                tracing::info!(
+                    "Skeleton budget exhausted after {} files ({:.0}% used)",
+                    loaded,
+                    estimate.usage_pct * 100.0
+                );
+                break;
+            }
+
+            let full_path = root.join(&path);
+            let content = match std::fs::read_to_string(&full_path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            let skeleton = extract_rust_skeleton(&path, &content);
+            if skeleton.items.is_empty() {
+                continue;
+            }
+            self.context_map.load_skeleton(&path, skeleton);
+            loaded += 1;
+        }
+
+        // Inject the skeletons as a message so the model can actually see them.
+        // This is the critical step — without this, skeletons are tracked internally
+        // but invisible to the LLM.
+        if loaded > 0 {
+            let mut skeleton_text = format!(
+                "## Codebase Overview ({} files, L2 skeletons)\n\
+                 Below are function/struct/trait signatures for all Rust source files.\n\
+                 Use `context_focus` or `file_read` to see full content of specific files.\n\n",
+                loaded
+            );
+            // Collect all loaded skeletons and render them.
+            let skeleton_paths: Vec<std::path::PathBuf> = self
+                .context_map
+                .files_at_level(ContextLevel::Skeleton)
+                .iter()
+                .map(|p| p.to_path_buf())
+                .collect();
+            for path in &skeleton_paths {
+                if let Some(skel) = self.context_map.skeleton(path) {
+                    skeleton_text.push_str(&skel.render());
+                    skeleton_text.push('\n');
+                }
+            }
+            self.messages
+                .push(crate::api::types::Message::user(skeleton_text));
+        }
+
+        let stats = self.context_map.stats();
+        tracing::info!(
+            "Review mode: loaded {} skeletons ({} tokens, {:.0}% of budget)",
+            stats.l2_count,
+            stats.l2_tokens,
+            self.context_map.usage_fraction() * 100.0
+        );
+    }
+
+    /// Track a file_read in the context map at L3 (full content).
+    pub(super) fn track_file_read_in_context_map(&mut self, path: &str, content: &str) {
+        use std::path::Path;
+        let p = Path::new(path);
+        // Estimate before loading.
+        let estimate = self
+            .context_map
+            .can_load(p, super::context_map::ContextLevel::Full);
+        if !estimate.fits {
+            // Auto-compress to make room.
+            let needed = estimate.estimated_tokens.saturating_sub(
+                self.context_map.remaining(),
+            );
+            let freed = self.context_map.compress_to_fit(needed);
+            tracing::debug!(
+                "Auto-compressed {} tokens to fit {} (needed {})",
+                freed,
+                path,
+                needed
+            );
+        }
+        self.context_map.load_full(p, content.to_string());
     }
 
     /// Estimate total tokens from accumulated messages (the actual context sent to API)
@@ -283,7 +426,7 @@ impl Agent {
         let messages = self.messages.len();
         let memory_entries = self.memory.len();
         let available = window.saturating_sub(tokens);
-        let files_loaded = self.context_files.len();
+        let files_loaded = self.file_tracker.context_files.len();
 
         // Build progress bar with gradient effect
         let bar_width = 32;
@@ -449,11 +592,11 @@ impl Agent {
         );
 
         // Show tracked context files if any
-        if !self.context_files.is_empty() {
+        if !self.file_tracker.context_files.is_empty() {
             println!();
             println!("  {}📄 Context Files:{}", patina_light, reset);
             let mut total_file_tokens = 0usize;
-            for path_str in &self.context_files {
+            for path_str in &self.file_tracker.context_files {
                 let file_tokens = self
                     .messages
                     .iter()
@@ -463,7 +606,7 @@ impl Agent {
                     .map(|m| crate::token_count::estimate_tokens_with_overhead(m.content.text(), 4))
                     .unwrap_or(0);
                 total_file_tokens += file_tokens;
-                let is_stale = self.stale_files.contains(path_str);
+                let is_stale = self.file_tracker.stale_files.contains(path_str);
                 let stale_marker = if is_stale {
                     format!("  {}⟳ modified{}", coral, reset)
                 } else {
@@ -479,7 +622,7 @@ impl Agent {
             println!(
                 "  {}Total: {} files, {:.1}k tokens{}",
                 aged,
-                self.context_files.len(),
+                self.file_tracker.context_files.len(),
                 total_k,
                 reset
             );
@@ -499,20 +642,20 @@ impl Agent {
     /// Refresh any stale files that are in context
     /// Returns the number of files refreshed
     pub(super) async fn refresh_stale_context_files(&mut self) -> usize {
-        if self.stale_files.is_empty() {
+        if self.file_tracker.stale_files.is_empty() {
             return 0;
         }
 
         // Find which stale files are in our context
         let stale_in_context: Vec<String> = self
-            .context_files
+            .file_tracker.context_files
             .iter()
-            .filter(|f| self.stale_files.contains(f.as_str()))
+            .filter(|f| self.file_tracker.stale_files.contains(f.as_str()))
             .cloned()
             .collect();
 
         if stale_in_context.is_empty() {
-            self.stale_files.clear();
+            self.file_tracker.stale_files.clear();
             return 0;
         }
 
@@ -540,7 +683,7 @@ impl Agent {
 
         // Clear the stale set for refreshed files
         for path_str in &stale_in_context {
-            self.stale_files.remove(path_str);
+            self.file_tracker.stale_files.remove(path_str);
         }
 
         refreshed
@@ -550,8 +693,8 @@ impl Agent {
     pub(super) fn clear_context(&mut self) {
         self.messages.retain(|m| m.role == "system");
         self.memory.clear();
-        self.context_files.clear();
-        self.stale_files.clear();
+        self.file_tracker.context_files.clear();
+        self.file_tracker.stale_files.clear();
         self.clear_task_state_memory();
     }
 
@@ -666,10 +809,10 @@ impl Agent {
 
                     // Add to context files tracking (bounded to prevent memory exhaustion)
                     const MAX_CONTEXT_FILES: usize = 10_000;
-                    if !self.context_files.contains(&path_str)
-                        && self.context_files.len() < MAX_CONTEXT_FILES
+                    if !self.file_tracker.context_files.contains(&path_str)
+                        && self.file_tracker.context_files.len() < MAX_CONTEXT_FILES
                     {
-                        self.context_files.push(path_str.clone());
+                        self.file_tracker.context_files.push(path_str.clone());
                     }
 
                     // Add as user message with file content
@@ -710,7 +853,7 @@ impl Agent {
 
     /// Reload previously loaded context files
     pub(super) async fn reload_context(&mut self) -> Result<usize> {
-        let files = self.context_files.clone();
+        let files = self.file_tracker.context_files.clone();
         if files.is_empty() {
             println!(
                 "{} No files previously loaded. Use '/ctx load <pattern>' first.",
@@ -736,7 +879,7 @@ impl Agent {
         }
 
         // Clear stale tracking since we just refreshed everything
-        self.stale_files.clear();
+        self.file_tracker.stale_files.clear();
 
         Ok(loaded)
     }
@@ -1004,7 +1147,7 @@ impl Agent {
             "  {}│{}     Files Loaded    {:>8}                                    {}│{}",
             patina,
             reset,
-            self.context_files.len(),
+            self.file_tracker.context_files.len(),
             patina,
             reset
         );
@@ -1017,7 +1160,7 @@ impl Agent {
             patina, reset, patina, reset
         );
         // Tool cache stats
-        let tc_stats = self.tool_cache.stats();
+        let tc_stats = self.cache_manager.tool_cache.stats();
         println!(
             "  {}│{}  {bold}{}◇ TOOL CACHE{}{:<44}    {}│{}",
             patina, reset, sand, reset, "", patina, reset
@@ -1036,7 +1179,7 @@ impl Agent {
         );
 
         // Local-first coordinator stats
-        let lf_stats = self.local_first.stats();
+        let lf_stats = self.cache_manager.local_first.stats();
         println!(
             "  {}│{}  {bold}{}◆ LOCAL-FIRST{}{:<43}    {}│{}",
             patina, reset, sand, reset, "", patina, reset
@@ -1509,7 +1652,7 @@ mod tests {
         // Inject some user/assistant messages and context files
         agent.messages.push(Message::user("question"));
         agent.messages.push(Message::assistant("answer"));
-        agent.context_files.push("some_file.rs".to_string());
+        agent.file_tracker.context_files.push("some_file.rs".to_string());
 
         agent.clear_context();
 
@@ -1518,7 +1661,7 @@ mod tests {
             "only system messages should remain after clear"
         );
         assert!(
-            agent.context_files.is_empty(),
+            agent.file_tracker.context_files.is_empty(),
             "context_files should be emptied"
         );
 
@@ -2033,7 +2176,7 @@ mod tests {
         agent.messages.clear();
         agent.messages.push(Message::user("no system here"));
         agent.messages.push(Message::assistant("reply"));
-        agent.context_files.push("a.rs".to_string());
+        agent.file_tracker.context_files.push("a.rs".to_string());
 
         agent.clear_context();
 
@@ -2041,7 +2184,7 @@ mod tests {
             agent.messages.is_empty(),
             "when there are no system messages, clear_context should leave an empty list"
         );
-        assert!(agent.context_files.is_empty());
+        assert!(agent.file_tracker.context_files.is_empty());
 
         server.stop().await;
     }
@@ -2078,8 +2221,8 @@ mod tests {
         let server = MockLlmServer::builder().with_response("ok").build().await;
         let mut agent = make_test_agent(&server).await;
 
-        agent.stale_files.insert("stale.rs".to_string());
-        agent.context_files.push("tracked.rs".to_string());
+        agent.file_tracker.stale_files.insert("stale.rs".to_string());
+        agent.file_tracker.context_files.push("tracked.rs".to_string());
         agent.messages.push(Message::user("user"));
 
         agent.clear_context();
@@ -2087,7 +2230,7 @@ mod tests {
         // context_files must be empty; stale_files is cleared by memory.clear()
         // indirectly—but the spec only guarantees context_files.
         assert!(
-            agent.context_files.is_empty(),
+            agent.file_tracker.context_files.is_empty(),
             "context_files must be cleared"
         );
 
@@ -2316,7 +2459,7 @@ mod tests {
         let agent = make_test_agent(&server).await;
 
         assert!(
-            agent.stale_files.is_empty(),
+            agent.file_tracker.stale_files.is_empty(),
             "a fresh agent should have no stale files"
         );
 
@@ -2328,13 +2471,13 @@ mod tests {
         let server = MockLlmServer::builder().with_response("ok").build().await;
         let mut agent = make_test_agent(&server).await;
 
-        agent.stale_files.insert("src/lib.rs".to_string());
+        agent.file_tracker.stale_files.insert("src/lib.rs".to_string());
         assert!(
-            agent.stale_files.contains("src/lib.rs"),
+            agent.file_tracker.stale_files.contains("src/lib.rs"),
             "inserted stale file should be in the stale set"
         );
         assert!(
-            !agent.stale_files.contains("src/main.rs"),
+            !agent.file_tracker.stale_files.contains("src/main.rs"),
             "non-inserted file should not appear in stale set"
         );
 
@@ -2351,7 +2494,7 @@ mod tests {
         let agent = make_test_agent(&server).await;
 
         assert!(
-            agent.context_files.is_empty(),
+            agent.file_tracker.context_files.is_empty(),
             "a fresh agent should have no loaded context files"
         );
 
@@ -2363,13 +2506,13 @@ mod tests {
         let server = MockLlmServer::builder().with_response("ok").build().await;
         let mut agent = make_test_agent(&server).await;
 
-        agent.context_files.push("a.rs".to_string());
-        agent.context_files.push("b.rs".to_string());
-        agent.context_files.push("c.rs".to_string());
+        agent.file_tracker.context_files.push("a.rs".to_string());
+        agent.file_tracker.context_files.push("b.rs".to_string());
+        agent.file_tracker.context_files.push("c.rs".to_string());
 
-        assert_eq!(agent.context_files.len(), 3);
-        assert_eq!(agent.context_files[0], "a.rs");
-        assert_eq!(agent.context_files[2], "c.rs");
+        assert_eq!(agent.file_tracker.context_files.len(), 3);
+        assert_eq!(agent.file_tracker.context_files[0], "a.rs");
+        assert_eq!(agent.file_tracker.context_files[2], "c.rs");
 
         server.stop().await;
     }
@@ -2399,7 +2542,7 @@ mod tests {
         let mut agent = make_test_agent(&server).await;
 
         // Mark a file as stale but don't add it to context_files.
-        agent.stale_files.insert("src/missing.rs".to_string());
+        agent.file_tracker.stale_files.insert("src/missing.rs".to_string());
 
         let refreshed = agent.refresh_stale_context_files().await;
         assert_eq!(
@@ -2408,7 +2551,7 @@ mod tests {
         );
         // stale_files should be cleared even though nothing was in context.
         assert!(
-            agent.stale_files.is_empty(),
+            agent.file_tracker.stale_files.is_empty(),
             "stale_files should be emptied when there are no context-tracked stale files"
         );
 
@@ -2432,8 +2575,8 @@ mod tests {
         agent.messages.push(Message::user(old_content));
 
         // Track the file and mark it stale.
-        agent.context_files.push(path_str.clone());
-        agent.stale_files.insert(path_str.clone());
+        agent.file_tracker.context_files.push(path_str.clone());
+        agent.file_tracker.stale_files.insert(path_str.clone());
 
         // Update the file content.
         std::fs::write(&file_path, "updated content").unwrap();
@@ -2454,7 +2597,7 @@ mod tests {
 
         // The stale set should be empty after refresh.
         assert!(
-            agent.stale_files.is_empty(),
+            agent.file_tracker.stale_files.is_empty(),
             "stale_files should be cleared after successful refresh"
         );
 
@@ -2497,8 +2640,8 @@ mod tests {
         agent
             .messages
             .push(Message::user(format!("{}\nv1 content", file_marker)));
-        agent.context_files.push(path_str.clone());
-        agent.stale_files.insert(path_str.clone());
+        agent.file_tracker.context_files.push(path_str.clone());
+        agent.file_tracker.stale_files.insert(path_str.clone());
 
         // Update the file before reload.
         std::fs::write(&file_path, "v2 content").unwrap();
@@ -2527,7 +2670,7 @@ mod tests {
 
         // stale_files should be cleared after reload.
         assert!(
-            agent.stale_files.is_empty(),
+            agent.file_tracker.stale_files.is_empty(),
             "stale_files should be cleared after reload"
         );
 
@@ -2549,7 +2692,7 @@ mod tests {
         agent.messages.push(Message::assistant("sure, let me look"));
         let file_marker_msg = format!("// FILE: {}\nfn main() {{}}", path_str);
         agent.messages.push(Message::user(file_marker_msg));
-        agent.context_files.push(path_str.clone());
+        agent.file_tracker.context_files.push(path_str.clone());
 
         let loaded = agent.reload_context().await.unwrap();
         assert_eq!(loaded, 1, "one file should be reloaded");

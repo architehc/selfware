@@ -185,7 +185,7 @@ async fn test_agent_run_task_e2e_tool_workflow_with_mock_api() {
     );
     assert!(
         agent
-            .context_files
+            .file_tracker.context_files
             .iter()
             .any(|p| p.ends_with("Cargo.toml")),
         "file_read should add Cargo.toml to context tracking"
@@ -467,8 +467,8 @@ fn test_context_compressor_estimate_tokens() {
     ];
 
     let estimate = compressor.estimate_tokens(&messages);
-    // Should have reasonable estimate (base cost + content)
-    assert!(estimate > 150); // 3 messages * ~50 base minimum
+    // Should have reasonable estimate (overhead + content tokens)
+    assert!(estimate > 10); // 3 messages with short content
     assert!(estimate < 500); // Shouldn't be too high for short messages
 }
 
@@ -485,9 +485,9 @@ fn test_context_compressor_code_content_factor() {
     let code_estimate = compressor.estimate_tokens(&code_msg);
     let text_estimate = compressor.estimate_tokens(&text_msg);
 
-    // Both should have reasonable estimates
-    assert!(code_estimate > 50);
-    assert!(text_estimate > 50);
+    // Both should produce positive estimates
+    assert!(code_estimate > 0);
+    assert!(text_estimate > 0);
 }
 
 #[test]
@@ -704,7 +704,7 @@ fn test_step_increment_updates_state() {
 
     assert_eq!(loop_ctrl.current_step(), 0);
 
-    loop_ctrl.increment_step();
+    loop_ctrl.increment_step().unwrap();
     assert_eq!(loop_ctrl.current_step(), 1);
 
     // State should be updated to Executing with new step

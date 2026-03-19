@@ -686,19 +686,6 @@ Capture a screenshot of the screen, a specific window, or a region. Returns the 
 
 ---
 
-## Swarm
-
-### `swarm_dispatch`
-
-Dispatch a task to a multi-agent swarm for parallel execution. Uses Architect/Coder/Tester/Reviewer orchestration.
-
-**Parameters:**
-- `task` (string, required) -- task description
-- `agents` (number) -- number of parallel agents
-- `strategy` (string) -- orchestration strategy
-
----
-
 ## FIM (Fill-in-the-Middle)
 
 ### `fim_edit`

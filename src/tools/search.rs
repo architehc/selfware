@@ -262,7 +262,8 @@ impl Tool for GrepSearch {
                     break;
                 }
 
-                let content = match std::fs::read_to_string(&file_path) {
+                // Wrap blocking file I/O in block_in_place to avoid blocking the async runtime
+                let content = match tokio::task::block_in_place(|| std::fs::read_to_string(&file_path)) {
                     Ok(c) => c,
                     Err(_) => continue, // Skip binary/unreadable files
                 };
@@ -528,7 +529,8 @@ impl Tool for SymbolSearch {
                     continue;
                 }
 
-                let content = match std::fs::read_to_string(path) {
+                // Wrap blocking file I/O in block_in_place to avoid blocking the async runtime
+                let content = match tokio::task::block_in_place(|| std::fs::read_to_string(path)) {
                     Ok(c) => c,
                     Err(_) => continue,
                 };

@@ -665,34 +665,57 @@ impl LlmCache {
             poisoned.into_inner()
         });
 
-        // Normalize query once; stored embeddings are already normalized.
-        let mut normed_query = embedding.to_vec();
-        l2_normalize(&mut normed_query);
+        // Only perform semantic similarity search if enabled in config
+        if self.config.semantic_matching {
+            // Normalize query once; stored embeddings are already normalized.
+            let mut normed_query = embedding.to_vec();
+            l2_normalize(&mut normed_query);
 
-        // Find best matching entry by semantic similarity
-        let mut best_match: Option<(&str, f32)> = None;
-        for (id, entry_embedding) in embeddings.iter() {
-            let similarity = cosine_similarity(&normed_query, entry_embedding);
-            if similarity >= self.config.similarity_threshold
-                && (best_match.is_none() || similarity > best_match.unwrap().1)
-            {
-                best_match = Some((id.as_str(), similarity));
-            }
-        }
-
-        if let Some((id, _similarity)) = best_match {
-            if let Some(entry) = entries.get(id) {
-                // Check if expired
-                if entry.is_expired(self.config.ttl_secs) {
-                    return None;
+            // Find best matching entry by semantic similarity
+            let mut best_match: Option<(&str, f32)> = None;
+            for (id, entry_embedding) in embeddings.iter() {
+                let similarity = cosine_similarity(&normed_query, entry_embedding);
+                if similarity >= self.config.similarity_threshold
+                    && (best_match.is_none() || similarity > best_match.unwrap().1)
+                {
+                    best_match = Some((id.as_str(), similarity));
                 }
+            }
 
-                // Record hit
-                self.analytics.record_hit();
-                self.cost_tracker
-                    .record_savings(entry.estimated_cost(&self.config));
+            if let Some((id, _similarity)) = best_match {
+                if let Some(entry) = entries.get(id) {
+                    // Check if expired
+                    if entry.is_expired(self.config.ttl_secs) {
+                        return None;
+                    }
 
-                return Some(entry.clone());
+                    // Record hit (if enabled)
+                    self.analytics.record_hit();
+                    if self.config.track_costs {
+                        self.cost_tracker
+                            .record_savings(entry.estimated_cost(&self.config));
+                    }
+
+                    return Some(entry.clone());
+                }
+            }
+        } else {
+            // Without semantic matching, just check if embedding exists by index
+            // This is a fallback for direct lookup
+            if let Some(id) = entries.keys().next() {
+                if let Some(entry) = entries.get(id) {
+                    if entry.is_expired(self.config.ttl_secs) {
+                        return None;
+                    }
+
+                    self.analytics.record_hit();
+                    if self.config.track_costs {
+                        self.cost_tracker
+                            .record_savings(entry.estimated_cost(&self.config));
+                    }
+
+                    return Some(entry.clone());
+                }
             }
         }
 
@@ -1478,7 +1501,6 @@ impl Default for CacheInvalidator {
 // ============================================================================
 
 /// Unified cache manager combining tool and LLM caches
-#[allow(dead_code)]
 pub struct CacheManager {
     /// Tool result cache (exact matching)
     pub tool_cache: ToolCache,
@@ -1486,6 +1508,10 @@ pub struct CacheManager {
     pub llm_cache: LlmCache,
     /// Shared cost tracker
     cost_tracker: Arc<CostTracker>,
+    /// Local-first coordinator for offline support and long-term memory
+    pub local_first: crate::session::local_first::LocalFirstCoordinator,
+    /// Embedding provider for LLM cache similarity matching
+    pub llm_embedding: crate::analysis::vector_store::TfIdfEmbeddingProvider,
 }
 
 #[allow(dead_code)]
@@ -1499,6 +1525,8 @@ impl CacheManager {
             tool_cache: ToolCache::new(),
             llm_cache,
             cost_tracker,
+            local_first: crate::session::local_first::LocalFirstCoordinator::new(),
+            llm_embedding: crate::analysis::vector_store::TfIdfEmbeddingProvider::default(),
         }
     }
 

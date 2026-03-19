@@ -9,7 +9,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use ratatui::{
     layout::Rect,
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     Frame,
@@ -248,14 +248,26 @@ impl CommandPalette {
 
     /// Render the palette
     pub fn render(&self, frame: &mut Frame, area: Rect, _selected_override: usize) {
+        use ratatui::style::Modifier;
+        use ratatui::layout::Alignment;
+
         // Clear background
         frame.render_widget(Clear, area);
 
-        // Create block
+        // Create block with prominent border to indicate modal state
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(TuiPalette::title_style())
-            .title(" 🎯 Command Palette ");
+            .border_style(
+                Style::default()
+                    .fg(TuiPalette::AMBER)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .title(Span::styled(
+                " 🎯 Command Palette ",
+                Style::default()
+                    .fg(TuiPalette::AMBER)
+                    .add_modifier(Modifier::BOLD),
+            ));
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -264,15 +276,21 @@ impl CommandPalette {
             return;
         }
 
-        // Render query input
+        // Render query input with clear focus indicator
         let query_area = Rect::new(inner.x, inner.y, inner.width, 1);
         let query_text = if self.query.is_empty() {
             Paragraph::new("Type to search commands...").style(TuiPalette::muted_style())
         } else {
-            Paragraph::new(format!("❯ {}", self.query))
-                .style(Style::default().fg(TuiPalette::AMBER))
+            Paragraph::new(Line::from(vec![
+                Span::styled("❯ ", Style::default().fg(TuiPalette::AMBER).add_modifier(Modifier::BOLD)),
+                Span::raw(&self.query),
+            ]))
         };
         frame.render_widget(query_text, query_area);
+
+        // Show cursor in palette input
+        let cursor_x = inner.x + 2 + self.query.len() as u16;
+        frame.set_cursor_position((cursor_x.min(inner.x + inner.width - 1), inner.y));
 
         // Render filtered commands
         let list_area = Rect::new(
@@ -317,6 +335,23 @@ impl CommandPalette {
 
         let list = List::new(items);
         frame.render_widget(list, list_area);
+
+        // Render help footer if there's room
+        if inner.height > 5 {
+            let footer_y = inner.y + inner.height - 1;
+            let footer_area = Rect::new(inner.x, footer_y, inner.width, 1);
+            let footer = Paragraph::new(
+                Line::from(vec![
+                    Span::styled("↑/↓: navigate", TuiPalette::muted_style()),
+                    Span::raw(" │ "),
+                    Span::styled("Enter: select", TuiPalette::muted_style()),
+                    Span::raw(" │ "),
+                    Span::styled("Esc: close", TuiPalette::muted_style()),
+                ])
+                .alignment(Alignment::Center),
+            );
+            frame.render_widget(footer, footer_area);
+        }
     }
 }
 

@@ -202,6 +202,10 @@ pub struct Config {
     #[serde(default)]
     pub evolution: EvolutionTomlConfig,
 
+    /// LLM response caching configuration
+    #[serde(default)]
+    pub cache: crate::session::cache::LlmCacheConfig,
+
     /// Named model profiles, keyed by ID (e.g. "coder", "vision").
     /// Populated from `[models.*]` TOML sections.  A `"default"` entry is
     /// auto-generated from the top-level endpoint/model/api_key fields if
@@ -287,6 +291,7 @@ impl std::fmt::Debug for Config {
             .field("retry", &self.retry)
             .field("resources", &self.resources)
             .field("evolution", &self.evolution)
+            .field("cache", &self.cache)
             .field("models", &self.models)
             .field("execution_mode", &self.execution_mode)
             .field("compact_mode", &self.compact_mode)
@@ -518,6 +523,24 @@ pub struct AgentConfig {
     /// computer control, web fetch, etc.) were used during the task.
     #[serde(default = "default_true")]
     pub require_verification_before_completion: bool,
+    /// Fraction of token_budget reserved for content (files, conversation, tool results).
+    /// Compression triggers when content exceeds this fraction.
+    #[serde(default = "default_context_content_ratio")]
+    pub context_content_ratio: f32,
+    /// Fraction of token_budget reserved as compression headroom.
+    /// Ensures compression always has room to work.
+    #[serde(default = "default_context_compression_ratio")]
+    pub context_compression_ratio: f32,
+    /// Fraction of token_budget reserved for model thinking/reasoning blocks.
+    #[serde(default = "default_context_thinking_ratio")]
+    pub context_thinking_ratio: f32,
+    /// Compression detail level: "names", "signatures", or "full".
+    /// Controls how much information is preserved when downgrading context levels.
+    /// - "names": only module/function/struct names (~90% reduction)
+    /// - "signatures": full function signatures and struct field types (~70% reduction)
+    /// - "full": current behavior, summarize everything via LLM (~50% reduction)
+    #[serde(default = "default_compression_detail")]
+    pub compression_detail: String,
 }
 
 impl Default for Config {
@@ -536,6 +559,7 @@ impl Default for Config {
             retry: RetrySettings::default(),
             resources: ResourcesConfig::default(),
             evolution: EvolutionTomlConfig::default(),
+            cache: crate::session::cache::LlmCacheConfig::default(),
             models: HashMap::new(),
             extra_body: None,
             qa: crate::testing::qa_profiles::QaConfig::default(),
@@ -573,6 +597,10 @@ impl Default for AgentConfig {
             streaming: true,
             min_completion_steps: default_min_completion_steps(),
             require_verification_before_completion: true,
+            context_content_ratio: default_context_content_ratio(),
+            context_compression_ratio: default_context_compression_ratio(),
+            context_thinking_ratio: default_context_thinking_ratio(),
+            compression_detail: default_compression_detail(),
         }
     }
 }
@@ -600,6 +628,18 @@ fn default_min_completion_steps() -> usize {
 }
 fn default_token_budget() -> usize {
     0 // sentinel: 0 means "derive from max_tokens at load time"
+}
+fn default_context_content_ratio() -> f32 {
+    0.75
+}
+fn default_context_compression_ratio() -> f32 {
+    0.20
+}
+fn default_context_thinking_ratio() -> f32 {
+    0.05
+}
+fn default_compression_detail() -> String {
+    "signatures".to_string()
 }
 fn default_allowed_paths() -> Vec<String> {
     vec!["./**".to_string()]
@@ -1082,6 +1122,16 @@ impl Config {
             }
         }
 
+        // --- Continuous work recovery settings ---
+        if self.continuous_work.max_recovery_attempts > 10 {
+            bail!("continuous_work.max_recovery_attempts must be <= 10, got: {}", self.continuous_work.max_recovery_attempts);
+        }
+
+        // --- Continuous work checkpoint settings ---
+        if self.continuous_work.checkpoint_interval_tools < 1 {
+            bail!("checkpoint_interval_tools must be >= 1, got: {}", self.continuous_work.checkpoint_interval_tools);
+        }
+
         // --- Glob pattern validation ---
         // Fail fast on invalid patterns instead of deferring to runtime.
         for (label, patterns) in [
@@ -1473,6 +1523,7 @@ mod tests {
                 streaming: true,
                 min_completion_steps: 3,
                 require_verification_before_completion: true,
+                ..Default::default()
             },
             yolo: YoloFileConfig {
                 enabled: true,
@@ -1505,6 +1556,7 @@ mod tests {
             },
             resources: crate::config::ResourcesConfig::default(),
             evolution: EvolutionTomlConfig::default(),
+            cache: crate::session::cache::LlmCacheConfig::default(),
             models: HashMap::new(),
             execution_mode: ExecutionMode::default(),
             compact_mode: false,
@@ -3345,6 +3397,7 @@ model = "explicit-default-model"
             streaming: false,
             min_completion_steps: 7,
             require_verification_before_completion: false,
+            ..Default::default()
         };
         let toml_str = toml::to_string(&config).unwrap();
         let parsed: AgentConfig = toml::from_str(&toml_str).unwrap();

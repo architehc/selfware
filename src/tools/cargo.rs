@@ -1,15 +1,20 @@
 use super::analyzer::ErrorAnalyzer;
 use super::Tool;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::time::Duration;
 use tracing::instrument;
 
 /// Maximum output buffer size from a cargo command (16 MB).
 /// Prevents a runaway cargo process from consuming unlimited memory.
 const MAX_CARGO_OUTPUT_SIZE: usize = 16 * 1024 * 1024;
+
+/// Timeout for cargo commands to prevent indefinite hangs in TUI mode.
+/// This prevents the TUI from getting stuck when cargo commands take too long.
+const CARGO_TIMEOUT_SECS: u64 = 300; // 5 minutes
 
 /// Truncate a byte buffer to a safe maximum size, returning a lossy UTF-8 string.
 /// Truncation happens at a valid UTF-8 boundary to avoid partial characters.
@@ -197,8 +202,23 @@ impl Tool for CargoTest {
         }
 
         cmd.env("RUST_BACKTRACE", "1");
+        cmd.kill_on_drop(true);
 
-        let output = cmd.output().await.context("Failed to execute cargo test")?;
+        let timeout_duration = Duration::from_secs(CARGO_TIMEOUT_SECS);
+        let output_result =
+            tokio::time::timeout(timeout_duration, cmd.output()).await;
+
+        let output = match output_result {
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) => anyhow::bail!("Failed to execute cargo test: {}", e),
+            Err(_) => {
+                anyhow::bail!(
+                    "cargo test timed out after {} seconds",
+                    CARGO_TIMEOUT_SECS
+                )
+            }
+        };
+
         let stdout = safe_truncate_output(&output.stdout, MAX_CARGO_OUTPUT_SIZE);
         let stderr = safe_truncate_output(&output.stderr, MAX_CARGO_OUTPUT_SIZE);
 
@@ -263,6 +283,7 @@ impl Tool for CargoCheck {
         let mut cmd = tokio::process::Command::new("cargo");
         cmd.arg("check");
         cmd.arg("--message-format=json");
+        cmd.kill_on_drop(true);
 
         if args
             .get("all_targets")
@@ -288,10 +309,21 @@ impl Tool for CargoCheck {
             cmd.arg("--release");
         }
 
-        let output = cmd
-            .output()
-            .await
-            .context("Failed to execute cargo check")?;
+        let timeout_duration = Duration::from_secs(CARGO_TIMEOUT_SECS);
+        let output_result =
+            tokio::time::timeout(timeout_duration, cmd.output()).await;
+
+        let output = match output_result {
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) => anyhow::bail!("Failed to execute cargo check: {}", e),
+            Err(_) => {
+                anyhow::bail!(
+                    "cargo check timed out after {} seconds",
+                    CARGO_TIMEOUT_SECS
+                )
+            }
+        };
+
         let stdout = safe_truncate_output(&output.stdout, MAX_CARGO_OUTPUT_SIZE);
         let stderr = safe_truncate_output(&output.stderr, MAX_CARGO_OUTPUT_SIZE);
 
@@ -370,6 +402,7 @@ impl Tool for CargoClippy {
         let mut cmd = tokio::process::Command::new("cargo");
         cmd.arg("clippy");
         cmd.arg("--message-format=json");
+        cmd.kill_on_drop(true);
 
         if args
             .get("all_targets")
@@ -399,10 +432,21 @@ impl Tool for CargoClippy {
             "clippy::expect_used",
         ]);
 
-        let output = cmd
-            .output()
-            .await
-            .context("Failed to execute cargo clippy")?;
+        let timeout_duration = Duration::from_secs(CARGO_TIMEOUT_SECS);
+        let output_result =
+            tokio::time::timeout(timeout_duration, cmd.output()).await;
+
+        let output = match output_result {
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) => anyhow::bail!("Failed to execute cargo clippy: {}", e),
+            Err(_) => {
+                anyhow::bail!(
+                    "cargo clippy timed out after {} seconds",
+                    CARGO_TIMEOUT_SECS
+                )
+            }
+        };
+
         let stdout = safe_truncate_output(&output.stdout, MAX_CARGO_OUTPUT_SIZE);
         let stderr = safe_truncate_output(&output.stderr, MAX_CARGO_OUTPUT_SIZE);
 
@@ -469,6 +513,7 @@ impl Tool for CargoFmt {
     async fn execute(&self, args: Value) -> Result<Value> {
         let mut cmd = tokio::process::Command::new("cargo");
         cmd.arg("fmt");
+        cmd.kill_on_drop(true);
 
         if args.get("all").and_then(|v| v.as_bool()).unwrap_or(true) {
             cmd.arg("--all");
@@ -478,7 +523,20 @@ impl Tool for CargoFmt {
             cmd.arg("--").arg("--check");
         }
 
-        let output = cmd.output().await.context("Failed to execute cargo fmt")?;
+        let timeout_duration = Duration::from_secs(CARGO_TIMEOUT_SECS);
+        let output_result =
+            tokio::time::timeout(timeout_duration, cmd.output()).await;
+
+        let output = match output_result {
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) => anyhow::bail!("Failed to execute cargo fmt: {}", e),
+            Err(_) => {
+                anyhow::bail!(
+                    "cargo fmt timed out after {} seconds",
+                    CARGO_TIMEOUT_SECS
+                )
+            }
+        };
 
         Ok(serde_json::json!({
             "success": output.status.success(),

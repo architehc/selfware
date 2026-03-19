@@ -23,8 +23,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::{oneshot, Mutex};
 use tracing::{debug, info, warn};
 
+use super::net_policy;
 use super::Tool;
-use crate::config::is_local_endpoint;
 
 // ============================================================================
 // Constants
@@ -362,38 +362,28 @@ fn validate_url_with_allow_private(url: &str, allow_private: bool) -> Result<()>
         );
     }
 
-    if is_local_endpoint(url) {
-        return Ok(());
-    }
+    // Delegate http/https validation to the shared net_policy module.
+    // The shared function handles localhost detection, private-IP blocking,
+    // and the allow_private override.
+    net_policy::validate_url_target(&parsed, allow_private)?;
 
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| anyhow::anyhow!("URL must have a host"))?;
-
+    // Additional DNS-rebinding check: resolve the hostname and reject if any
+    // resolved address is private. (The HTTP tool relies on PinnedDnsResolver
+    // for this at connection time; here we do it eagerly since the Playwright
+    // bridge doesn't go through our resolver.)
     if !allow_private {
-        // Check for literal private IPs
-        if let Ok(ip) = host.parse::<IpAddr>() {
-            if is_private_ip(&ip) {
-                bail!("Blocked request to private/internal address: {}", ip);
-            }
-        }
-
-        // Check common private hostnames
-        if host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0" {
-            bail!("Blocked request to private/internal address: {}", host);
-        }
-
-        // DNS resolution check for non-IP hosts
-        if host.parse::<IpAddr>().is_err() {
-            let port = parsed.port_or_known_default().unwrap_or(80);
-            if let Ok(addrs) = (host, port).to_socket_addrs() {
-                for addr in addrs {
-                    if is_private_ip(&addr.ip()) {
-                        bail!(
-                            "DNS rebinding blocked: {} resolves to private address {}",
-                            host,
-                            addr.ip()
-                        );
+        if let Some(host) = parsed.host_str() {
+            if host.parse::<IpAddr>().is_err() && !net_policy::is_private_network_host(host) {
+                let port = parsed.port_or_known_default().unwrap_or(80);
+                if let Ok(addrs) = (host, port).to_socket_addrs() {
+                    for addr in addrs {
+                        if net_policy::is_private_or_internal_ip(&addr.ip()) {
+                            bail!(
+                                "DNS rebinding blocked: {} resolves to private address {}",
+                                host,
+                                addr.ip()
+                            );
+                        }
                     }
                 }
             }
@@ -434,19 +424,7 @@ fn canonicalize_existing_path(path: &Path) -> Result<PathBuf> {
         .with_context(|| format!("Failed to canonicalize {}", path.display()))
 }
 
-fn is_private_ip(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
-        }
-        IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_unique_local()
-                || v6.is_unicast_link_local()
-        }
-    }
-}
+// Private-IP checking is now delegated to `net_policy::is_private_or_internal_ip`.
 
 // ============================================================================
 // PageController Struct
@@ -873,21 +851,43 @@ mod tests {
 
     #[test]
     fn test_is_private_ip_v4() {
-        assert!(is_private_ip(&"127.0.0.1".parse().unwrap()));
-        assert!(is_private_ip(&"10.0.0.1".parse().unwrap()));
-        assert!(is_private_ip(&"192.168.1.1".parse().unwrap()));
-        assert!(is_private_ip(&"172.16.0.1".parse().unwrap()));
-        assert!(is_private_ip(&"169.254.0.1".parse().unwrap()));
-        assert!(is_private_ip(&"0.0.0.0".parse().unwrap()));
-        assert!(!is_private_ip(&"8.8.8.8".parse().unwrap()));
-        assert!(!is_private_ip(&"1.1.1.1".parse().unwrap()));
+        assert!(net_policy::is_private_or_internal_ip(
+            &"127.0.0.1".parse().unwrap()
+        ));
+        assert!(net_policy::is_private_or_internal_ip(
+            &"10.0.0.1".parse().unwrap()
+        ));
+        assert!(net_policy::is_private_or_internal_ip(
+            &"192.168.1.1".parse().unwrap()
+        ));
+        assert!(net_policy::is_private_or_internal_ip(
+            &"172.16.0.1".parse().unwrap()
+        ));
+        assert!(net_policy::is_private_or_internal_ip(
+            &"169.254.0.1".parse().unwrap()
+        ));
+        assert!(net_policy::is_private_or_internal_ip(
+            &"0.0.0.0".parse().unwrap()
+        ));
+        assert!(!net_policy::is_private_or_internal_ip(
+            &"8.8.8.8".parse().unwrap()
+        ));
+        assert!(!net_policy::is_private_or_internal_ip(
+            &"1.1.1.1".parse().unwrap()
+        ));
     }
 
     #[test]
     fn test_is_private_ip_v6() {
-        assert!(is_private_ip(&"::1".parse().unwrap()));
-        assert!(is_private_ip(&"::".parse().unwrap()));
-        assert!(!is_private_ip(&"2606:4700::1111".parse().unwrap()));
+        assert!(net_policy::is_private_or_internal_ip(
+            &"::1".parse().unwrap()
+        ));
+        assert!(net_policy::is_private_or_internal_ip(
+            &"::".parse().unwrap()
+        ));
+        assert!(!net_policy::is_private_or_internal_ip(
+            &"2606:4700::1111".parse().unwrap()
+        ));
     }
 
     #[test]

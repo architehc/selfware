@@ -84,19 +84,17 @@ impl SessionLogger {
             .join("selfware")
             .join("session_logs");
 
-        if let Err(e) = std::fs::create_dir_all(&dir) {
+        // Synchronous file operation in a sync context - acceptable
+        std::fs::create_dir_all(&dir).unwrap_or_else(|e| {
             warn!("Failed to create session log directory {:?}: {}", dir, e);
-            return None;
-        }
+        });
 
         Some(dir)
     }
 
     fn new_in(session_id: &str, dir: PathBuf) -> Option<Self> {
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            warn!("Failed to create session log directory {:?}: {}", dir, e);
-            return None;
-        }
+        // Synchronous file operation in a sync context - acceptable
+        std::fs::create_dir_all(&dir).ok()?;
 
         let path = dir.join(format!("{}.jsonl", session_id));
         let (tx, rx) = mpsc::unbounded_channel();
@@ -136,12 +134,14 @@ impl SessionLogger {
             .unwrap_or_default()
     }
 
+    /// Read recent events from a session log file.
     pub fn read_recent(path: &Path, limit: usize) -> Result<Vec<SessionLogEvent>> {
         if !path.exists() {
             return Ok(Vec::new());
         }
 
         let content = std::fs::read_to_string(path)?;
+
         let mut lines: Vec<&str> = content
             .lines()
             .filter(|line| !line.trim().is_empty())
@@ -376,7 +376,7 @@ impl Agent {
                 "memory_entries": self.memory.len(),
                 "estimated_tokens": self.memory.total_tokens(),
                 "pending_messages": self.pending_messages.len(),
-                "context_files": self.context_files.len(),
+                "context_files": self.file_tracker.context_files.len(),
                 "current_step": self.loop_control.current_step(),
                 "current_iteration": self.loop_control.current_iteration(),
             })),
@@ -486,7 +486,7 @@ impl Agent {
                 "context_window": self.memory.context_window(),
                 "max_context_tokens": self.max_context_tokens,
                 "pending_messages": self.pending_messages.len(),
-                "context_files": self.context_files.len(),
+                "context_files": self.file_tracker.context_files.len(),
                 "current_step": self.loop_control.current_step(),
                 "current_iteration": self.loop_control.current_iteration(),
             })),

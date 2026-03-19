@@ -1,25 +1,21 @@
 //! HTTP request tool for web/API interactions
 
+use super::net_policy::{self, NetworkPolicy};
 use super::Tool;
-use crate::config::is_local_endpoint;
-use crate::safety::{is_private_or_internal, PinnedDnsResolver};
+use crate::safety::PinnedDnsResolver;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 pub struct HttpRequest;
 
-#[derive(Debug, Clone, Copy)]
-struct HttpTargetPolicy {
-    allow_localhost: bool,
-    allow_private: bool,
-}
+/// Thin alias so that call-sites inside this file don't change shape.
+type HttpTargetPolicy = NetworkPolicy;
 
 #[async_trait]
 impl Tool for HttpRequest {
@@ -121,7 +117,7 @@ impl Tool for HttpRequest {
             )));
 
         if let Some(host) = url.host_str() {
-            if is_private_network_host(host) && policy.allow_private && !policy.allow_localhost {
+            if net_policy::is_private_network_host(host) && policy.allow_private && !policy.allow_localhost {
                 tracing::warn!(
                     "Allowing request to private network (SELFWARE_ALLOW_PRIVATE_NETWORK=1): {}",
                     host
@@ -140,8 +136,8 @@ impl Tool for HttpRequest {
                     // which will reject any resolution to a private IP.
                     if let Some(host) = attempt.url().host_str().map(|h| h.to_owned()) {
                         if !policy.allow_private
-                            && !is_trusted_local_network_host(&host)
-                            && is_private_network_host(&host)
+                            && !net_policy::is_trusted_local_network_host(&host)
+                            && net_policy::is_private_network_host(&host)
                         {
                             return attempt
                                 .error("Blocked redirect to private/internal network address");
@@ -237,59 +233,14 @@ impl Tool for HttpRequest {
     }
 }
 
-/// Check whether a hostname or IP belongs to a private/internal network range.
-///
-/// Delegates IP-based checks to `is_private_or_internal` from the safety module
-/// (single source of truth for IP classification). Also handles special hostnames
-/// like "localhost".
-fn is_private_network_host(host: &str) -> bool {
-    if host == "localhost" || host.ends_with(".localhost") {
-        return true;
-    }
-    let bare_host = host.trim_start_matches('[').trim_end_matches(']');
-    if let Ok(ip) = bare_host.parse::<IpAddr>() {
-        return is_private_or_internal(ip);
-    }
-    false
-}
-
-fn is_trusted_local_network_host(host: &str) -> bool {
-    let bare_host = host.trim_start_matches('[').trim_end_matches(']');
-    matches!(bare_host, "localhost" | "127.0.0.1" | "::1" | "0.0.0.0")
-        || bare_host.ends_with(".localhost")
-}
-
+/// Validate the target of an HTTP request, delegating to the shared
+/// `net_policy` module.
 fn validate_http_request_target(
     url: &reqwest::Url,
     allow_private: bool,
 ) -> Result<HttpTargetPolicy> {
-    if url.scheme() != "http" && url.scheme() != "https" {
-        anyhow::bail!("Only HTTP and HTTPS URLs are allowed");
-    }
-
-    let allow_localhost = is_local_endpoint(url.as_str())
-        || url.host_str().is_some_and(is_trusted_local_network_host);
-
-    if let Some(host) = url.host_str() {
-        if let Ok(ip) = host
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .parse::<IpAddr>()
-        {
-            if is_private_or_internal(ip) && !(allow_private || allow_localhost) {
-                anyhow::bail!(
-                    "Blocked request to private/internal network address: {}. \
-                     Set SELFWARE_ALLOW_PRIVATE_NETWORK=1 to allow.",
-                    host
-                );
-            }
-        }
-    }
-
-    Ok(HttpTargetPolicy {
-        allow_localhost,
-        allow_private,
-    })
+    // `url::Url` and `reqwest::Url` are the same type (reqwest re-exports url).
+    net_policy::validate_url_target(url, allow_private)
 }
 
 #[cfg(test)]

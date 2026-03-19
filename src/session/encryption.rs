@@ -72,14 +72,39 @@ fn load_or_create_salt() -> Result<Vec<u8>> {
     Ok(salt)
 }
 
+/// Static holder for ephemeral salt (used when salt file I/O fails).
+/// This ensures salt consistency across multiple key derivation calls within a session.
+static EPHEMERAL_SALT: OnceLock<Vec<u8>> = OnceLock::new();
+
+/// Get or create the per-installation salt.
+///
+/// If salt file I/O fails, uses a session-scoped ephemeral salt stored in
+/// EPHEMERAL_SALT to ensure consistency across multiple key derivation calls.
+fn get_salt() -> Result<Vec<u8>> {
+    // Try to load from file first
+    match load_or_create_salt() {
+        Ok(salt) => Ok(salt),
+        Err(e) => {
+            tracing::warn!("Failed to persist salt: {}. Using ephemeral salt for this session.", e);
+            // Use or create ephemeral salt in memory
+            Ok(EPHEMERAL_SALT
+                .get_or_init(|| {
+                    let mut salt = vec![0u8; SALT_LEN];
+                    rand::rng().fill_bytes(&mut salt);
+                    salt
+                })
+                .clone())
+        }
+    }
+}
+
 /// Derive a 256-bit encryption key from a password using PBKDF2-HMAC-SHA256
 /// with a per-installation random salt.
 fn derive_key(password: &str) -> [u8; 32] {
-    let salt = load_or_create_salt().unwrap_or_else(|_| {
-        tracing::warn!("Failed to persist salt. Using an ephemeral random salt for this session.");
-        let mut fallback = [0u8; 32];
-        rand::rng().fill_bytes(&mut fallback);
-        fallback.to_vec()
+    let salt = get_salt().unwrap_or_else(|_| {
+        // Double-fallback: if everything fails, use a static fallback
+        tracing::error!("All salt sources failed. Using static fallback salt.");
+        vec![0u8; SALT_LEN]
     });
     let mut key = [0u8; 32];
     pbkdf2::pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt, KDF_ITERATIONS, &mut key);

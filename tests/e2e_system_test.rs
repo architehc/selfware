@@ -278,8 +278,6 @@ fn test_tool_registry_has_all_tools() {
         "knowledge_clear",
         "knowledge_remove",
         "knowledge_export",
-        // Swarm
-        "swarm_dispatch",
         // Computer control
         "computer_mouse",
         "computer_keyboard",

@@ -39,15 +39,6 @@ const MIN_COMMAND_INTERVAL: Duration = Duration::from_secs(1);
 /// Maximum command length in characters.
 const MAX_COMMAND_LENGTH: usize = 10_000;
 
-/// Dangerous shell patterns to block (same as shell.rs).
-const DANGEROUS_PATTERNS: &[&str] = &[
-    "/dev/tcp/",
-    "/dev/udp/",
-    "| bash -i",
-    "| sh -i",
-    "mkfifo /tmp",
-];
-
 /// Regex for stripping ANSI escape codes from output.
 static ANSI_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07|\x1b\[.*?[@-~]").unwrap());
@@ -388,15 +379,10 @@ fn strip_ansi(s: &str) -> String {
     ANSI_RE.replace_all(s, "").into_owned()
 }
 
-/// Validate a command against the dangerous-pattern blocklist
-/// (mirrors the checks in `shell.rs`).
+/// Validate a command against the shared dangerous-pattern blocklist.
 fn check_dangerous_patterns(command: &str) -> Result<()> {
-    let lower = command.to_lowercase();
-    let normalized: String = lower.split_whitespace().collect::<Vec<_>>().join(" ");
-    for pattern in DANGEROUS_PATTERNS {
-        if normalized.contains(pattern) {
-            bail!("Blocked potentially dangerous shell pattern: {}", pattern);
-        }
+    if let Some(pattern) = super::find_dangerous_shell_pattern(command) {
+        bail!("Blocked potentially dangerous shell pattern: {}", pattern);
     }
     Ok(())
 }

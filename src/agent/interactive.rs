@@ -425,7 +425,7 @@ impl Agent {
 
         let mut consecutive_errors = 0;
         const MAX_CONSECUTIVE_ERRORS: u32 = 3;
-        let mut last_ctrl_c: Option<Instant> = None;
+        let mut last_ctrl_c: Option<(Instant, u32)> = None; // (timestamp, tap_count)
 
         loop {
             // Check global shutdown flag (e.g. from SIGTERM)
@@ -451,7 +451,9 @@ impl Agent {
             let step = self.loop_control.current_step();
             editor.set_prompt_full_context(&self.config.model, step, ctx_pct);
 
-            let input = match editor.read_line() {
+            // Use block_in_place to prevent blocking the async runtime
+            // while waiting for blocking I/O (stdin read from reedline)
+            let input = match tokio::task::block_in_place(|| editor.read_line()) {
                 Ok(ReadlineResult::Line(line)) => {
                     consecutive_errors = 0;
                     last_ctrl_c = None;
@@ -461,18 +463,47 @@ impl Agent {
                 Ok(ReadlineResult::Interrupt) => {
                     consecutive_errors = 0;
                     self.reset_cancellation();
-                    // Double-tap Ctrl+C to exit
-                    if let Some(last) = last_ctrl_c {
-                        if last.elapsed().as_millis() < 1500 {
-                            println!();
-                            break;
+                    
+                    // Triple-tap Ctrl+C for immediate force quit
+                    // Double-tap for graceful exit
+                    const DOUBLE_TAP_MS: u128 = 3000; // 3 seconds (was 1.5)
+                    const FORCE_QUIT_TAPS: u32 = 3;
+                    
+                    let now = Instant::now();
+                    let tap_count = if let Some((last, count)) = last_ctrl_c {
+                        if now.duration_since(last).as_millis() < DOUBLE_TAP_MS {
+                            count + 1
+                        } else {
+                            1 // Reset if too slow
                         }
+                    } else {
+                        1
+                    };
+                    
+                    last_ctrl_c = Some((now, tap_count));
+                    
+                    if tap_count >= FORCE_QUIT_TAPS {
+                        // Force quit immediately
+                        println!("\n\x1b[1m\x1b[91m⚠️  FORCE QUIT - Exiting immediately\x1b[0m");
+                        std::process::exit(1);
+                    } else if tap_count == 2 {
+                        // Graceful exit on double-tap
+                        println!("\n\x1b[1m\x1b[33m👋 Gracefully exiting... (saving checkpoint if needed)\x1b[0m");
+                        break;
+                    } else {
+                        // First tap - show clear instructions
+                        eprintln!("\n");
+                        eprintln!("╔════════════════════════════════════════════════════════════╗");
+                        eprintln!("║  \x1b[1m\x1b[97mINTERRUPT RECEIVED\x1b[0m                                       ║");
+                        eprintln!("╠════════════════════════════════════════════════════════════╣");
+                        eprintln!("║  Current task cancelled. Options:                          ║");
+                        eprintln!("║                                                            ║");
+                        eprintln!("║  • \x1b[1mCtrl+C again\x1b[0m      → Exit gracefully (within 3s)         ║");
+                        eprintln!("║  • \x1b[1mCtrl+C ×3\x1b[0m         → Force quit immediately              ║");
+                        eprintln!("║  • \x1b[1mType 'exit'\x1b[0m       → Exit at prompt                     ║");
+                        eprintln!("║  • \x1b[1mType a command\x1b[0m    → Continue with new task             ║");
+                        eprintln!("╚════════════════════════════════════════════════════════════╝");
                     }
-                    last_ctrl_c = Some(Instant::now());
-                    println!(
-                        "\n{}",
-                        "Press Ctrl+C again to exit, or type 'exit'".bright_yellow()
-                    );
                     continue;
                 }
                 Ok(ReadlineResult::Eof) => break,
@@ -1054,7 +1085,7 @@ impl Agent {
             }
 
             if input == "/last" {
-                match crate::agent::last_tool::retrieve() {
+                match self.retrieve_last_tool_output() {
                     Some(output) => {
                         println!();
                         println!(
@@ -1765,7 +1796,10 @@ impl Agent {
                 print!("Submit this input? [Y/n] ");
                 std::io::Write::flush(&mut std::io::stdout())?;
                 let mut confirm = String::new();
-                std::io::stdin().read_line(&mut confirm)?;
+                // Use block_in_place to prevent blocking the async runtime
+                tokio::task::block_in_place(|| {
+                    std::io::stdin().read_line(&mut confirm)
+                })?;
                 let confirm = confirm.trim().to_lowercase();
                 if confirm == "n" || confirm == "no" {
                     println!("Input cancelled.");
@@ -1939,7 +1973,7 @@ impl Agent {
             println!("  No active checkpoint/tool history for this session.");
         }
 
-        if let Some(last) = crate::agent::last_tool::retrieve() {
+        if let Some(last) = self.retrieve_last_tool_output() {
             println!("  Last tool summary: {}", last.summary);
         }
 
@@ -1986,6 +2020,7 @@ impl Agent {
         call: &crate::checkpoint::ToolCallLog,
         full: bool,
     ) {
+        let _lock = crate::output::OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let status = if call.success {
             "success".bright_green()
         } else {
@@ -2009,16 +2044,17 @@ impl Agent {
     }
 
     fn print_task_state_summary(&self) {
+        let _lock = crate::output::OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         println!("  Task State");
         println!(
             "    tracked_files={} stale_files={} task_notes={}",
-            self.file_read_state.len(),
-            self.stale_files.len(),
+            self.file_tracker.read_state.len(),
+            self.file_tracker.stale_files.len(),
             self.task_state_notes.len()
         );
 
-        if !self.file_read_state.is_empty() {
-            for (path, state) in self.file_read_state.iter().take(10) {
+        if !self.file_tracker.read_state.is_empty() {
+            for (path, state) in self.file_tracker.read_state.iter().take(10) {
                 println!(
                     "    - {} ({} lines, unchanged_reads={})",
                     path, state.total_lines, state.unchanged_read_count
@@ -2026,8 +2062,8 @@ impl Agent {
             }
         }
 
-        if !self.stale_files.is_empty() {
-            for path in self.stale_files.iter().take(10) {
+        if !self.file_tracker.stale_files.is_empty() {
+            for path in self.file_tracker.stale_files.iter().take(10) {
                 println!("    * stale: {}", path);
             }
         }
@@ -2041,10 +2077,18 @@ impl Agent {
     }
 
     fn print_task_state_debug(&self) {
-        println!();
-        println!("  {} Task State", ">>".bright_cyan());
+        // NOTE: print_task_state_summary acquires OUTPUT_LOCK internally,
+        // so we only lock the surrounding println! calls here.
+        {
+            let _lock = crate::output::OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            println!();
+            println!("  {} Task State", ">>".bright_cyan());
+        }
         self.print_task_state_summary();
-        println!();
+        {
+            let _lock = crate::output::OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            println!();
+        }
     }
 
     /// Copy text to clipboard using system clipboard tools.
@@ -2125,7 +2169,10 @@ impl Agent {
             }
 
             let mut input = String::new();
-            let bytes_read = io::stdin().read_line(&mut input)?;
+            // Use block_in_place to prevent blocking the async runtime
+            let bytes_read = tokio::task::block_in_place(|| {
+                io::stdin().read_line(&mut input)
+            })?;
 
             // EOF detection: read_line returns Ok(0) on EOF
             if bytes_read == 0 {
@@ -2426,7 +2473,10 @@ impl Agent {
                 print!("Submit this input? [Y/n] ");
                 io::stdout().flush()?;
                 let mut confirm = String::new();
-                io::stdin().read_line(&mut confirm)?;
+                // Use block_in_place to prevent blocking the async runtime
+                tokio::task::block_in_place(|| {
+                    io::stdin().read_line(&mut confirm)
+                })?;
                 let confirm = confirm.trim().to_lowercase();
                 if confirm == "n" || confirm == "no" {
                     println!("Input cancelled.");

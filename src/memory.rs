@@ -95,7 +95,7 @@ impl AgentMemory {
 
     /// Get total estimated tokens in memory
     pub fn total_tokens(&self) -> usize {
-        self.entries.iter().map(|e| e.token_estimate).sum()
+        self.total_estimated_tokens()
     }
 
     /// Check if memory is approaching the context window limit

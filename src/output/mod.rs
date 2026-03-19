@@ -9,6 +9,11 @@
 use colored::*;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Mutex;
+
+/// Global output lock to prevent interleaving from concurrent tasks.
+/// All output functions should acquire this lock before printing.
+pub static OUTPUT_LOCK: Mutex<()> = Mutex::new(());
 
 /// Global output mode flags (set once at startup)
 static COMPACT_MODE: AtomicBool = AtomicBool::new(false);
@@ -87,6 +92,7 @@ pub(crate) fn reset_tokens() {
 /// Print token usage summary
 pub(crate) fn print_token_usage(prompt: u64, completion: u64) {
     if should_show_tokens() {
+        let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let total = prompt + completion;
         if is_compact() {
             println!("{}", format!("[{} tokens]", total).dimmed());
@@ -612,6 +618,7 @@ pub(crate) fn tool_activity_message(name: &str, args: &serde_json::Value) -> Str
 
 /// Print safety check failure (always shown)
 pub(crate) fn safety_blocked(message: &str) {
+    let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     println!("{} {}", "🚫".bright_red(), message);
 }
 
@@ -623,6 +630,8 @@ pub(crate) fn thinking(text: &str, inline: bool) {
     if is_compact() {
         return;
     }
+
+    let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     // Replace \n with \r\n so newlines in thinking text reset to column 0
     let safe = text.replace('\n', "\r\n");
@@ -652,6 +661,7 @@ pub(crate) fn thinking_prefix() {
         return;
     }
     if !is_compact() {
+        let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         print!("\r\x1b[2K{} ", "Thinking:".dimmed());
         io::stdout().flush().ok();
     }
@@ -663,6 +673,7 @@ pub(crate) fn intent_without_action() {
         return;
     }
     if !is_compact() {
+        let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         print!(
             "\r\x1b[2K{}\n",
             "🔄 Model described intent but didn't act - prompting for action...".bright_yellow()
@@ -676,6 +687,7 @@ pub(crate) fn final_answer(content: &str) {
     if is_tui_active() {
         return;
     }
+    let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if is_compact() {
         print!("\r\x1b[2K{}\n", content);
     } else {
@@ -687,6 +699,7 @@ pub(crate) fn final_answer(content: &str) {
 /// Print task completed message
 pub(crate) fn task_completed() {
     if !is_compact() {
+        let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         println!("{}", "✅ Task completed successfully!".bright_green());
     }
 }
@@ -696,6 +709,7 @@ pub(crate) fn verification_report(report: &str, passed: bool) {
     if is_tui_active() {
         return;
     }
+    let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Replace \n with \r\n for proper column reset
     let safe = report.replace('\n', "\r\n");
     if is_verbose() {
@@ -724,6 +738,7 @@ pub(crate) fn verification_report(report: &str, passed: bool) {
 /// Print debug output (only in verbose mode or with SELFWARE_DEBUG)
 pub(crate) fn debug_output(label: &str, content: &str) {
     if is_verbose() || std::env::var("SELFWARE_DEBUG").is_ok() {
+        let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         println!("{}", format!("=== DEBUG: {} ===", label).bright_magenta());
         println!("{}", content);
         println!("{}", "=== END DEBUG ===".bright_magenta());
@@ -862,6 +877,7 @@ impl TaskProgress {
 
     /// Print current progress state
     pub(crate) fn print_progress(&self) {
+        let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if is_compact() {
             // Compact: single line with overall progress
             let progress = self.overall_progress();
@@ -960,6 +976,7 @@ pub(crate) fn step_start(step: usize, name: &str) {
     if is_tui_active() {
         return;
     }
+    let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if is_compact() {
         print!("\r\x1b[2K[Step {}] ", step);
     } else {
@@ -975,6 +992,7 @@ pub(crate) fn step_start(step: usize, name: &str) {
 /// Print phase transition
 pub(crate) fn phase_transition(from: &str, to: &str) {
     if is_verbose() {
+        let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         println!(
             "{} {} → {}",
             "🔄".bright_yellow(),
@@ -1511,5 +1529,101 @@ mod tests {
         assert_eq!(extract_path(&empty), None);
         assert_eq!(extract_command(&empty), None);
         assert_eq!(extract_pattern(&empty), None);
+    }
+
+    /// Test that the global OUTPUT_LOCK prevents concurrent output interleaving.
+    ///
+    /// Two threads each write 100 multi-part "lines" to a shared buffer while
+    /// holding the lock.  After both finish we verify that every entry is a
+    /// complete, un-interleaved line belonging to exactly one thread.
+    #[test]
+    fn test_output_lock_prevents_interleaving() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let buffer: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let handles: Vec<_> = (0..2)
+            .map(|thread_id| {
+                let buf = Arc::clone(&buffer);
+                thread::spawn(move || {
+                    for i in 0..100 {
+                        // Acquire the global output lock, build a multi-part
+                        // line, then push the complete line atomically.
+                        let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                        // Simulate a multi-part write that would interleave
+                        // without the lock (prefix + separator + suffix).
+                        let line = format!(
+                            "THREAD_{thread_id}:iter_{i:03}:payload_{val}",
+                            val = thread_id * 1000 + i
+                        );
+                        buf.lock().unwrap().push(line);
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("Thread should complete without panic");
+        }
+
+        let lines = buffer.lock().unwrap();
+        assert_eq!(lines.len(), 200, "Expected 200 entries (100 per thread)");
+
+        for (idx, line) in lines.iter().enumerate() {
+            // Every line must start with exactly one thread prefix and
+            // contain no fragment from the other thread.
+            let is_t0 = line.starts_with("THREAD_0:");
+            let is_t1 = line.starts_with("THREAD_1:");
+            assert!(
+                is_t0 || is_t1,
+                "Line {idx} has unexpected prefix: {line}"
+            );
+            // Ensure no cross-contamination: a THREAD_0 line must not
+            // contain "THREAD_1" anywhere and vice-versa.
+            if is_t0 {
+                assert!(
+                    !line.contains("THREAD_1"),
+                    "Line {idx} from thread 0 contains thread 1 data: {line}"
+                );
+            } else {
+                assert!(
+                    !line.contains("THREAD_0"),
+                    "Line {idx} from thread 1 contains thread 0 data: {line}"
+                );
+            }
+        }
+    }
+
+    /// Test that output functions can be called concurrently without panic.
+    /// This verifies the OUTPUT_LOCK is properly acquired in each function.
+    #[test]
+    fn test_concurrent_output_functions() {
+        use std::thread;
+
+        // Ensure TUI is not active so output functions actually print
+        set_tui_active(false);
+        init(false, false, false); // compact=false, verbose=false, show_tokens=false
+
+        let handles: Vec<_> = (0..5)
+            .map(|i| {
+                thread::spawn(move || {
+                    // Call various output functions that use the lock
+                    for j in 0..10 {
+                        // These should acquire OUTPUT_LOCK internally
+                        thinking(&format!("Thinking from thread {} iter {}", i, j), false);
+                        intent_without_action();
+                        step_start(j + 1, &format!("test_step_{}", i));
+                    }
+                })
+            })
+            .collect();
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().expect("Thread should complete without panic");
+        }
+
+        // If we got here, all output functions properly acquired the lock
     }
 }

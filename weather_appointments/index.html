@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sunny Day Appointments 🌞</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>☀️ Sunny Day Appointments</h1>
+            <p class="subtitle">Plan your outdoor activities for perfect weather days</p>
+        </header>
+
+        <div class="controls">
+            <div class="filter-section">
+                <label for="weather-filter">Weather Type:</label>
+                <select id="weather-filter">
+                    <option value="all">All Good Weather</option>
+                    <option value="sunny">Sunny ☀️</option>
+                    <option value="partly-cloudy">Partly Cloudy ⛅</option>
+                    <option value="clear">Clear Sky 🌟</option>
+                    <option value="warm">Warm Days 🌡️</option>
+                </select>
+            </div>
+            <div class="filter-section">
+                <label for="month-filter">Month:</label>
+                <select id="month-filter">
+                    <option value="all">All Months</option>
+                    <option value="1">January</option>
+                    <option value="2">February</option>
+                    <option value="3">March</option>
+                    <option value="4">April</option>
+                    <option value="5">May</option>
+                    <option value="6">June</option>
+                    <option value="7">July</option>
+                    <option value="8">August</option>
+                    <option value="9">September</option>
+                    <option value="10">October</option>
+                    <option value="11">November</option>
+                    <option value="12">December</option>
+                </select>
+            </div>
+            <button id="add-appointment" class="btn-primary">+ Add Appointment</button>
+        </div>
+
+        <div id="stats" class="stats-panel">
+            <div class="stat-card">
+                <span class="stat-number" id="total-count">0</span>
+                <span class="stat-label">Total Appointments</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-number" id="this-month">0</span>
+                <span class="stat-label">This Month</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-number" id="avg-temp">--°</span>
+                <span class="stat-label">Avg Temperature</span>
+            </div>
+        </div>
+
+        <div id="status-message" class="status-message" style="display: none; text-align: center; padding: 1rem; background: #d4edda; border: 2px solid #28a745; border-radius: 8px; margin-bottom: 1rem; color: #155724; font-weight: 600;">
+        ✅ App is ready! Click "+ Add Appointment" to get started
+    </div>
+    
+    <div id="appointments-container" class="appointments-grid">
+            <!-- Appointments will be dynamically inserted here -->
+        </div>
+
+        <div id="empty-state" class="empty-state hidden">
+            <div class="empty-icon">📅</div>
+            <h3>No Appointments Yet</h3>
+            <p>Click "Add Appointment" to create your first outdoor activity!</p>
+        </div>
+    </div>
+
+    <!-- Modal for adding appointments -->
+    <div id="appointment-modal" class="modal hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Add New Appointment</h2>
+                <button class="close-btn" id="close-modal">&times;</button>
+            </div>
+            <form id="appointment-form">
+                <div class="form-group">
+                    <label for="title">Title *</label>
+                    <input type="text" id="title" required placeholder="e.g., Beach Day, Hiking Trip">
+                </div>
+                <div class="form-group">
+                    <label for="date">Date *</label>
+                    <input type="date" id="date" required>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="time">Time *</label>
+                        <input type="time" id="time" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="duration">Duration (hours) *</label>
+                        <input type="number" id="duration" min="0.5" step="0.5" required placeholder="2">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="weather-type">Weather Type *</label>
+                    <select id="weather-type" required>
+                        <option value="sunny">Sunny ☀️</option>
+                        <option value="partly-cloudy">Partly Cloudy ⛅</option>
+                        <option value="clear">Clear Sky 🌟</option>
+                        <option value="warm">Warm 🌡️</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="temperature">Expected Temperature (°F) *</label>
+                    <input type="number" id="temperature" min="40" max="120" required placeholder="75">
+                </div>
+                <div class="form-group">
+                    <label for="location">Location</label>
+                    <input type="text" id="location" placeholder="e.g., Central Park, Local Beach">
+                </div>
+                <div class="form-group">
+                    <label for="notes">Notes</label>
+                    <textarea id="notes" rows="3" placeholder="Add any additional details..."></textarea>
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="btn-secondary" id="cancel-btn">Cancel</button>
+                    <button type="submit" class="btn-primary">Save Appointment</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

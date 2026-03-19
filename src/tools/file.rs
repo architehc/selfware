@@ -7,30 +7,30 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 use tempfile::NamedTempFile;
 
 /// Global safety configuration set at startup from the user-loaded config.
-/// `validate_tool_path` reads from this so that user-configured `allowed_paths`
-/// (and other safety settings) are respected, rather than always falling back to
-/// `SafetyConfig::default()`.
 ///
-/// NOTE: This global exists for backward compatibility. Prefer using the
-/// per-instance `safety_config` field on tool structs for multi-agent scenarios
-/// where each agent may have a different safety configuration.
-pub(super) static SAFETY_CONFIG: OnceLock<SafetyConfig> = OnceLock::new();
+/// `validate_tool_path` no longer reads this directly — `resolve_safety_config()`
+/// does. The global exists only as the last-resort fallback when a tool lacks
+/// a per-instance config. New tools should always use `with_safety_config()`.
+pub(super) static SAFETY_CONFIG: OnceLock<RwLock<SafetyConfig>> = OnceLock::new();
 
 /// Register the runtime-loaded safety configuration for tool path validation.
 ///
 /// This should be called once during agent initialization (before any file tools
 /// execute) so that `validate_tool_path` honours user settings.
 ///
-/// For multi-agent scenarios where each agent needs a different safety config,
-/// use the per-instance `with_safety_config()` constructor on each tool struct
-/// instead of (or in addition to) this global initializer.
+/// DEPRECATED: For multi-agent scenarios where each agent needs a different
+/// safety config, use the per-instance `with_safety_config()` constructor on
+/// each tool struct instead. This global initializer will be removed once all
+/// call sites are migrated to per-instance configs.
 pub fn init_safety_config(config: &SafetyConfig) {
-    // OnceLock::set returns Err if already set; that's fine -- first writer wins.
-    let _ = SAFETY_CONFIG.set(config.clone());
+    let lock = SAFETY_CONFIG.get_or_init(|| RwLock::new(config.clone()));
+    if let Ok(mut guard) = lock.write() {
+        *guard = config.clone();
+    }
 }
 
 /// Maximum file size for reads (50 MB) to prevent OOM from accidentally reading huge files.
@@ -188,7 +188,8 @@ impl Tool for FileRead {
         }
 
         let args: Args = serde_json::from_value(args)?;
-        validate_tool_path(&args.path, self.safety_config.as_ref())?;
+        let safety = resolve_safety_config(self.safety_config.as_ref());
+        validate_tool_path(&args.path, &safety)?;
         let path = PathBuf::from(&args.path);
 
         // Check file size before reading to prevent OOM on huge files
@@ -257,7 +258,8 @@ impl Tool for FileWrite {
         }
 
         let args: Args = serde_json::from_value(args)?;
-        validate_tool_path(&args.path, self.safety_config.as_ref())?;
+        let safety = resolve_safety_config(self.safety_config.as_ref());
+        validate_tool_path(&args.path, &safety)?;
         let path = PathBuf::from(&args.path);
 
         // Check write size limit to prevent accidentally writing huge files
@@ -325,7 +327,8 @@ impl Tool for FileEdit {
         }
 
         let args: Args = serde_json::from_value(args)?;
-        validate_tool_path(&args.path, self.safety_config.as_ref())?;
+        let safety = resolve_safety_config(self.safety_config.as_ref());
+        validate_tool_path(&args.path, &safety)?;
         let content = tokio::fs::read_to_string(&args.path).await?;
 
         // Check for exactly one match
@@ -381,7 +384,8 @@ impl Tool for FileDelete {
         }
 
         let args: Args = serde_json::from_value(args)?;
-        validate_tool_path(&args.path, self.safety_config.as_ref())?;
+        let safety = resolve_safety_config(self.safety_config.as_ref());
+        validate_tool_path(&args.path, &safety)?;
         let path = PathBuf::from(&args.path);
 
         if !path.exists() {
@@ -435,7 +439,8 @@ impl Tool for DirectoryTree {
         }
 
         let args: Args = serde_json::from_value(args)?;
-        validate_tool_path(&args.path, self.safety_config.as_ref())?;
+        let safety = resolve_safety_config(self.safety_config.as_ref());
+        validate_tool_path(&args.path, &safety)?;
 
         let walk_path = args.path.clone();
         let max_depth = args.max_depth;
@@ -489,35 +494,36 @@ fn default_three() -> usize {
     3
 }
 
+/// Resolve which `SafetyConfig` to use for path validation.
+///
+/// Priority: per-instance config > process-global > default.
+/// Call this at the tool level, then pass the result to `validate_tool_path`.
+/// This keeps the global state lookup at the tool boundary rather than
+/// buried inside the validation function.
+pub(super) fn resolve_safety_config(instance_config: Option<&SafetyConfig>) -> SafetyConfig {
+    if let Some(cfg) = instance_config {
+        return cfg.clone();
+    }
+    SAFETY_CONFIG
+        .get()
+        .and_then(|lock| lock.read().ok().map(|guard| guard.clone()))
+        .unwrap_or_default()
+}
+
 /// Validate that a tool path is safe to access.
 ///
-/// When `instance_config` is `Some`, it takes priority (dependency-injected config
-/// for multi-agent isolation). Otherwise falls back to the global `SAFETY_CONFIG`,
-/// and finally to `SafetyConfig::default()`.
-pub(super) fn validate_tool_path(path: &str, instance_config: Option<&SafetyConfig>) -> Result<()> {
+/// Takes a resolved `&SafetyConfig` — callers should use
+/// `resolve_safety_config()` to pick the right config before calling this.
+pub(super) fn validate_tool_path(path: &str, config: &SafetyConfig) -> Result<()> {
     #[cfg(test)]
     {
         if std::env::var("SELFWARE_TEST_MODE").is_ok() {
-            // Only allow paths within test fixtures
-            if !path.starts_with("tests/e2e-projects/") {
-                anyhow::bail!("Test mode only valid for e2e-projects");
+            if !path.starts_with("tests/e2e-projects/") && !path.starts_with("/tmp/selfware-test-") {
+                anyhow::bail!("Test mode only valid for test fixtures, got: {}", path);
             }
             return Ok(());
         }
     }
-    // Priority: per-instance config > global OnceLock > default
-    let default_config;
-    let config = if let Some(cfg) = instance_config {
-        cfg
-    } else {
-        match SAFETY_CONFIG.get() {
-            Some(cfg) => cfg,
-            None => {
-                default_config = SafetyConfig::default();
-                &default_config
-            }
-        }
-    };
     let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
     PathValidator::new(config, working_dir).validate(path)
 }
@@ -550,11 +556,29 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    fn assert_path_access_rejected(err: anyhow::Error) {
+        let message = err.to_string();
+        assert!(
+            message.contains("Path traversal detected")
+                || message.contains("Path not in allowed list")
+                || message.contains("outside working directory"),
+            "expected a path-access rejection, got: {}",
+            message
+        );
+    }
+
     /// Create a permissive `SafetyConfig` for tests that need to access temp dirs.
     /// This replaces the old `SELFWARE_TEST_MODE` env-var bypass with explicit config injection.
     fn permissive_safety_config() -> SafetyConfig {
         SafetyConfig {
             allowed_paths: vec!["/**".to_string()],
+            ..SafetyConfig::default()
+        }
+    }
+
+    fn restricted_safety_config(root: &Path) -> SafetyConfig {
+        SafetyConfig {
+            allowed_paths: vec![format!("{}/**", root.display())],
             ..SafetyConfig::default()
         }
     }
@@ -1131,26 +1155,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_read_blocks_traversal() {
-        let tool = FileRead::new();
-        let args = serde_json::json!({"path": "../should_not_escape.txt"});
+        let temp_dir = TempDir::new().unwrap();
+        let blocked_path = temp_dir.path().parent().unwrap().join("should_not_escape.txt");
+        let tool = FileRead::with_safety_config(restricted_safety_config(temp_dir.path()));
+        let args = serde_json::json!({"path": blocked_path});
         let result = tool.execute(args).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Path traversal detected"));
+        assert_path_access_rejected(result.unwrap_err());
     }
 
     #[tokio::test]
     async fn test_directory_tree_blocks_traversal() {
-        let tool = DirectoryTree::new();
-        let args = serde_json::json!({"path": "../"});
+        let temp_dir = TempDir::new().unwrap();
+        let blocked_path = temp_dir.path().parent().unwrap();
+        let tool = DirectoryTree::with_safety_config(restricted_safety_config(temp_dir.path()));
+        let args = serde_json::json!({"path": blocked_path});
         let result = tool.execute(args).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Path traversal detected"));
+        assert_path_access_rejected(result.unwrap_err());
     }
 
     // FileDelete tests
@@ -1221,14 +1243,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_delete_blocks_traversal() {
-        let tool = FileDelete::new();
-        let args = serde_json::json!({"path": "../escape.txt"});
+        let temp_dir = TempDir::new().unwrap();
+        let blocked_path = temp_dir.path().parent().unwrap().join("escape.txt");
+        let tool = FileDelete::with_safety_config(restricted_safety_config(temp_dir.path()));
+        let args = serde_json::json!({"path": blocked_path});
         let result = tool.execute(args).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Path traversal detected"));
+        assert_path_access_rejected(result.unwrap_err());
     }
 
     #[tokio::test]

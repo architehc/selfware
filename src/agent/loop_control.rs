@@ -7,6 +7,36 @@ pub enum AgentState {
     Failed { reason: String },
 }
 
+impl AgentState {
+    fn label(&self) -> &'static str {
+        match self {
+            AgentState::Planning => "planning",
+            AgentState::Executing { .. } => "executing",
+            AgentState::ErrorRecovery { .. } => "error_recovery",
+            AgentState::Completed => "completed",
+            AgentState::Failed { .. } => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidStateTransition {
+    from: &'static str,
+    to: &'static str,
+}
+
+impl std::fmt::Display for InvalidStateTransition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "invalid agent state transition from '{}' to '{}'",
+            self.from, self.to
+        )
+    }
+}
+
+impl std::error::Error for InvalidStateTransition {}
+
 pub struct AgentLoop {
     state: AgentState,
     max_iterations: usize,
@@ -61,15 +91,45 @@ impl AgentLoop {
         }
     }
 
-    pub fn set_state(&mut self, state: AgentState) {
-        self.state = state;
+    fn is_valid_transition(current: &AgentState, next: &AgentState) -> bool {
+        match (current, next) {
+            (AgentState::Planning, AgentState::Executing { .. })
+            | (AgentState::Planning, AgentState::ErrorRecovery { .. })
+            | (AgentState::Planning, AgentState::Failed { .. }) => true,
+            (AgentState::Executing { .. }, AgentState::Executing { .. })
+            | (AgentState::Executing { .. }, AgentState::ErrorRecovery { .. })
+            | (AgentState::Executing { .. }, AgentState::Completed)
+            | (AgentState::Executing { .. }, AgentState::Failed { .. }) => true,
+            (AgentState::ErrorRecovery { .. }, AgentState::Executing { .. })
+            | (AgentState::ErrorRecovery { .. }, AgentState::Failed { .. }) => true,
+            _ => false,
+        }
     }
 
-    pub fn increment_step(&mut self) {
+    pub fn transition_to(
+        &mut self,
+        state: AgentState,
+    ) -> std::result::Result<(), InvalidStateTransition> {
+        if !Self::is_valid_transition(&self.state, &state) {
+            return Err(InvalidStateTransition {
+                from: self.state.label(),
+                to: state.label(),
+            });
+        }
+        self.state = state;
+        Ok(())
+    }
+
+    pub fn set_state(&mut self, state: AgentState) {
+        self.transition_to(state)
+            .expect("invalid agent state transition");
+    }
+
+    pub fn increment_step(&mut self) -> std::result::Result<(), InvalidStateTransition> {
         self.current_step += 1;
-        self.state = AgentState::Executing {
+        self.transition_to(AgentState::Executing {
             step: self.current_step,
-        };
+        })
     }
 
     pub fn current_step(&self) -> usize {
@@ -81,13 +141,7 @@ impl AgentLoop {
     }
 
     pub fn current_state_label(&self) -> &'static str {
-        match self.state {
-            AgentState::Planning => "planning",
-            AgentState::Executing { .. } => "executing",
-            AgentState::ErrorRecovery { .. } => "error_recovery",
-            AgentState::Completed => "completed",
-            AgentState::Failed { .. } => "failed",
-        }
+        self.state.label()
     }
 
     /// Restore loop progress from persisted state.
@@ -130,7 +184,9 @@ mod tests {
     #[test]
     fn test_agent_loop_set_state() {
         let mut loop_ctrl = AgentLoop::new(100);
-        loop_ctrl.set_state(AgentState::Executing { step: 0 });
+        loop_ctrl
+            .transition_to(AgentState::Executing { step: 0 })
+            .unwrap();
         let state = loop_ctrl.next_state();
         assert!(matches!(state, Some(AgentState::Executing { step: 0 })));
     }
@@ -139,9 +195,9 @@ mod tests {
     fn test_agent_loop_increment_step() {
         let mut loop_ctrl = AgentLoop::new(100);
         assert_eq!(loop_ctrl.current_step(), 0);
-        loop_ctrl.increment_step();
+        loop_ctrl.increment_step().unwrap();
         assert_eq!(loop_ctrl.current_step(), 1);
-        loop_ctrl.increment_step();
+        loop_ctrl.increment_step().unwrap();
         assert_eq!(loop_ctrl.current_step(), 2);
     }
 
@@ -164,9 +220,11 @@ mod tests {
     #[test]
     fn test_agent_state_error_recovery() {
         let mut loop_ctrl = AgentLoop::new(100);
-        loop_ctrl.set_state(AgentState::ErrorRecovery {
-            error: "Test error".to_string(),
-        });
+        loop_ctrl
+            .transition_to(AgentState::ErrorRecovery {
+                error: "Test error".to_string(),
+            })
+            .unwrap();
 
         let state = loop_ctrl.next_state();
         match state {
@@ -180,9 +238,11 @@ mod tests {
     #[test]
     fn test_agent_state_failed() {
         let mut loop_ctrl = AgentLoop::new(100);
-        loop_ctrl.set_state(AgentState::Failed {
-            reason: "Something went wrong".to_string(),
-        });
+        loop_ctrl
+            .transition_to(AgentState::Failed {
+                reason: "Something went wrong".to_string(),
+            })
+            .unwrap();
 
         let state = loop_ctrl.next_state();
         match state {
@@ -205,7 +265,7 @@ mod tests {
     #[test]
     fn test_increment_step_updates_state() {
         let mut loop_ctrl = AgentLoop::new(100);
-        loop_ctrl.increment_step();
+        loop_ctrl.increment_step().unwrap();
 
         // After increment, state should be Executing with current step
         match &loop_ctrl.state {
@@ -222,8 +282,8 @@ mod tests {
         loop_ctrl.next_state();
         loop_ctrl.next_state();
         loop_ctrl.next_state();
-        loop_ctrl.increment_step();
-        loop_ctrl.increment_step();
+        loop_ctrl.increment_step().unwrap();
+        loop_ctrl.increment_step().unwrap();
 
         assert_eq!(loop_ctrl.iteration, 3);
         assert_eq!(loop_ctrl.current_step(), 2);
@@ -252,6 +312,16 @@ mod tests {
         assert_eq!(loop_ctrl.current_step(), 3);
         assert_eq!(loop_ctrl.current_iteration(), 7);
         assert!(matches!(loop_ctrl.state, AgentState::Executing { step: 3 }));
+    }
+
+    #[test]
+    fn test_invalid_transition_rejected() {
+        let mut loop_ctrl = AgentLoop::new(10);
+        let error = loop_ctrl.transition_to(AgentState::Completed).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid agent state transition from 'planning' to 'completed'"
+        );
     }
 
     #[test]

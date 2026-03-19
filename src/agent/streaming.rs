@@ -1,10 +1,12 @@
 use anyhow::Result;
 use colored::*;
 use tracing::debug;
+use uuid::Uuid;
 
 use super::*;
-
 use super::tui_events::AgentEvent;
+use crate::analysis::vector_store::EmbeddingProvider;
+use crate::session::cache::LlmCacheEntry;
 
 /// All XML tag pairs that local models may emit and should be hidden from
 /// display.  Each entry is `(open_tag, close_tag)`.  The streaming renderer
@@ -86,6 +88,89 @@ impl Agent {
         None
     }
 
+    /// Check LLM cache for a matching previous request
+    /// Returns cached response if found, None otherwise
+    async fn check_llm_cache(
+        &self,
+        messages: &[Message],
+        tools: &Option<Vec<crate::api::types::ToolDefinition>>,
+        thinking: ThinkingMode,
+    ) -> Result<Option<LlmCacheEntry>> {
+        // Generate cache key from messages, tools, and thinking mode
+        let prompt = Self::messages_to_prompt(messages);
+        let _key = format!("{}:{:?}:{:?}", prompt, tools, thinking);
+        
+        // Generate embedding for the prompt
+        let embedding = self.cache_manager.llm_embedding.embed(&prompt).await?;
+        
+        // Look up in cache (context_hash=0 for now)
+        let cached = self.cache_manager.llm_cache.lookup(&prompt, &embedding, 0);
+        
+        Ok(cached)
+    }
+
+    /// Convert messages to a single prompt string for caching
+    fn messages_to_prompt(messages: &[Message]) -> String {
+        messages
+            .iter()
+            .map(|m| format!("[{}]: {}", m.role, m.content))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Cache a response after streaming completes
+    /// 
+    /// This function stores the LLM response in the cache for future reuse,
+    /// using embeddings for semantic matching of similar requests.
+    pub async fn cache_response(
+        &self,
+        messages: &[Message],
+        tools: &Option<Vec<crate::api::types::ToolDefinition>>,
+        thinking: ThinkingMode,
+        content: &str,
+        reasoning: &Option<String>,
+        _tool_calls: &Option<Vec<ToolCall>>,
+    ) {
+        let prompt = Self::messages_to_prompt(messages);
+        let _key = format!("{}:{:?}:{:?}", prompt, tools, thinking);
+        
+        let embedding = match self.cache_manager.llm_embedding.embed(&prompt).await {
+            Ok(e) => e,
+            Err(e) => {
+                debug!("Failed to generate embedding for cache: {}", e);
+                return;
+            }
+        };
+        
+        // Build response text from content and reasoning
+        let mut response = content.to_string();
+        if let Some(reason) = reasoning {
+            if !reason.is_empty() {
+                response.push_str("\n\nReasoning: ");
+                response.push_str(reason);
+            }
+        }
+        
+        let entry = LlmCacheEntry {
+            id: Uuid::new_v4().to_string(),
+            prompt: prompt.clone(),
+            embedding,
+            response,
+            model: self.config.model.clone(),
+            input_tokens: 0, // Would need to track this
+            output_tokens: content.len() as u32, // Approximation
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            hit_count: 0,
+            context_hash: 0,
+            file_paths: vec![],
+        };
+        
+        self.cache_manager.llm_cache.store(entry);
+    }
+
     /// Chat with streaming, displaying output as it arrives
     /// Returns (content, reasoning, tool_calls) tuple
     pub(super) async fn chat_streaming(
@@ -95,6 +180,17 @@ impl Agent {
         thinking: ThinkingMode,
     ) -> Result<(String, Option<String>, Option<Vec<ToolCall>>)> {
         use std::io::{self, Write};
+
+        // --- Cache Integration: Check for cached response before API call ---
+        if let Some(cached) = self.check_llm_cache(&messages, &tools, thinking).await? {
+            debug!("LLM cache hit: returning cached response");
+            // For cached responses, return just the content
+            return Ok((cached.response, None, None));
+        }
+
+        // Clone messages and tools for caching after streaming (they will be moved below)
+        let messages_for_cache = messages.clone();
+        let tools_for_cache = tools.clone();
 
         // Activate the sticky status bar if running interactively
         let mode_label = match self.execution_mode() {
@@ -377,6 +473,22 @@ impl Agent {
             // Ensure we end with a newline if we printed content
             if !content.is_empty() || !reasoning.is_empty() {
                 println!();
+            }
+
+            // Cache the response for long-term memory (using cloned data from before move)
+            if !content.is_empty() {
+                let reasoning_opt: Option<String> = if reasoning.is_empty() { None } else { Some(reasoning.clone()) };
+                let tool_calls_opt: Option<Vec<ToolCall>> = if tool_calls.is_empty() { None } else { Some(tool_calls.clone()) };
+                
+                self.cache_response(
+                    &messages_for_cache,
+                    &tools_for_cache,
+                    thinking,
+                    &content,
+                    &reasoning_opt,
+                    &tool_calls_opt,
+                )
+                .await;
             }
 
             // No per-call summary — chat_streaming runs multiple times per task.

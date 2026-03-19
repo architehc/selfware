@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use futures::StreamExt;
+use once_cell::sync::Lazy;
 use reqwest::Client;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tracing::{debug, warn};
 
 pub mod types;
@@ -12,8 +13,16 @@ use crate::errors::ApiError;
 use crate::supervision::circuit_breaker::{
     CircuitBreaker, CircuitBreakerConfig, CircuitBreakerError,
 };
+use crate::tokens::estimate_messages_tokens;
 use std::sync::Arc;
 use types::*;
+
+/// Semaphore to limit concurrent streaming API tasks to prevent resource exhaustion.
+/// Each streaming response spawns a task, and this semaphore ensures we don't spawn
+/// too many concurrent tasks.
+static STREAM_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(100));
+const DISABLED_THINKING_SYSTEM_MESSAGE: &str =
+    "CRITICAL INSTRUCTION: DO NOT use <think> blocks or any thinking process in your response. Output your final response directly and immediately.";
 
 /// Enforce OpenAI-style message ordering: all system messages must precede
 /// non-system messages. SGLang and other strict backends reject requests
@@ -65,6 +74,33 @@ fn canonicalize_message_order(messages: &mut Vec<Message>) {
     }
 }
 
+fn maybe_prepend_disabled_thinking_instruction(
+    messages: &mut Vec<Message>,
+    thinking: &ThinkingMode,
+) {
+    if matches!(thinking, ThinkingMode::Disabled) {
+        messages.insert(0, Message::system(DISABLED_THINKING_SYSTEM_MESSAGE));
+    }
+}
+
+/// Attach tool definitions to a chat-completion request body.
+///
+/// `tool_choice` is only set when `native_tool_choice` is true, because many
+/// OpenAI-compatible backends (vLLM with Qwen, ollama, llama.cpp) do not
+/// support the `tool_choice` field and will reject the request with a 400.
+fn attach_tools_to_body(
+    body: &mut serde_json::Value,
+    tools: &Option<Vec<ToolDefinition>>,
+    native_tool_choice: bool,
+) {
+    if let Some(tools) = tools {
+        body["tools"] = serde_json::json!(tools);
+        if native_tool_choice {
+            body["tool_choice"] = serde_json::json!("auto");
+        }
+    }
+}
+
 /// Trait abstraction over the LLM API client, enabling test mocking.
 #[async_trait]
 pub trait LlmClient: Send + Sync {
@@ -110,10 +146,22 @@ impl StreamingResponse {
     }
 
     /// Process the stream and send chunks through a channel
+    ///
+    /// Uses a semaphore to limit concurrent streaming tasks and prevent resource exhaustion.
     pub async fn into_channel(self) -> mpsc::Receiver<Result<StreamChunk>> {
         let (tx, rx) = mpsc::channel(32);
 
+        // Spawn the stream processor with a permit to limit concurrent tasks
         tokio::spawn(async move {
+            // Acquire permit at start of task (will wait if limit reached)
+            let _permit = match STREAM_SEMAPHORE.acquire().await {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    // Should not happen with a semaphore, but handle gracefully
+                    let _ = tx.send(Err(anyhow::anyhow!("Stream semaphore error: {}", e))).await;
+                    return;
+                }
+            };
             let mut stream = self.response.bytes_stream();
             let mut buffer = String::new();
             let mut accumulator = ToolCallAccumulator::new();
@@ -613,24 +661,24 @@ impl ApiClient {
         thinking: ThinkingMode,
     ) -> Result<ChatResponse> {
         let mut messages = messages;
-        if let ThinkingMode::Disabled = thinking {
-            let sys_msg = crate::api::types::Message::system("CRITICAL INSTRUCTION: DO NOT use <think> blocks or any thinking process in your response. Output your final response directly and immediately.");
-            messages.insert(0, sys_msg);
-        }
+        maybe_prepend_disabled_thinking_instruction(&mut messages, &thinking);
 
         canonicalize_message_order(&mut messages);
+
+        // Calculate input token estimate and set max_tokens accordingly
+        // max_tokens controls output tokens only, not total context window
+        let input_tokens = estimate_messages_tokens(&messages);
+        let max_tokens = self.config.agent.token_budget.saturating_sub(input_tokens).max(1);
 
         let mut body = serde_json::json!({
             "model": self.config.model,
             "messages": messages,
             "temperature": self.config.temperature,
-            "max_tokens": self.config.max_tokens,
+            "max_tokens": max_tokens,
             "stream": false,
         });
 
-        if let Some(ref tools) = tools {
-            body["tools"] = serde_json::json!(tools);
-        }
+        attach_tools_to_body(&mut body, &tools, self.config.agent.native_function_calling);
 
         if let ThinkingMode::Budget(tokens) = thinking {
             body["thinking"] = serde_json::json!({
@@ -677,24 +725,24 @@ impl ApiClient {
         thinking: ThinkingMode,
     ) -> Result<StreamingResponse> {
         let mut messages = messages;
-        if let ThinkingMode::Disabled = thinking {
-            let sys_msg = crate::api::types::Message::system("CRITICAL INSTRUCTION: DO NOT use <think> blocks or any thinking process in your response. Output your final response directly and immediately.");
-            messages.insert(0, sys_msg);
-        }
+        maybe_prepend_disabled_thinking_instruction(&mut messages, &thinking);
 
         canonicalize_message_order(&mut messages);
+
+        // Calculate input token estimate and set max_tokens accordingly
+        // max_tokens controls output tokens only, not total context window
+        let input_tokens = estimate_messages_tokens(&messages);
+        let max_tokens = self.config.agent.token_budget.saturating_sub(input_tokens).max(1);
 
         let mut body = serde_json::json!({
             "model": self.config.model,
             "messages": messages,
             "temperature": self.config.temperature,
-            "max_tokens": self.config.max_tokens,
+            "max_tokens": max_tokens,
             "stream": true,
         });
 
-        if let Some(ref tools) = tools {
-            body["tools"] = serde_json::json!(tools);
-        }
+        attach_tools_to_body(&mut body, &tools, self.config.agent.native_function_calling);
 
         if let ThinkingMode::Budget(tokens) = thinking {
             body["thinking"] = serde_json::json!({

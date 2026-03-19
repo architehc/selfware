@@ -25,5 +25,6 @@ mod qwen3_tests;
 mod supervision_tests;
 mod test_agent_loop;
 mod tool_tests;
+mod live_context_tests;
 
 pub use helpers::*;

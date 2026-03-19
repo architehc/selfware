@@ -75,7 +75,8 @@ impl ScreenCapture {
             .save(&tmp_path)
             .map_err(|e| anyhow::anyhow!("PNG encoding failed: {}", e))?;
 
-        let png_data = std::fs::read(&tmp_path)?;
+        // Wrap blocking file I/O in block_in_place to avoid blocking the async runtime
+        let png_data = tokio::task::block_in_place(|| std::fs::read(&tmp_path))?;
         use base64::Engine as _;
         let base64_png = base64::engine::general_purpose::STANDARD.encode(&png_data);
 

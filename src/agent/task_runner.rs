@@ -6,16 +6,6 @@ use super::*;
 
 use super::tui_events::AgentEvent;
 
-/// Print only when TUI is NOT active (avoids writing to stdout while
-/// ratatui owns the alternate screen).
-macro_rules! cli_println {
-    ($($arg:tt)*) => {
-        if !crate::output::is_tui_active() {
-            println!($($arg)*);
-        }
-    };
-}
-
 enum PlannedToolExecution {
     NoToolCalls,
     Completed,
@@ -23,11 +13,23 @@ enum PlannedToolExecution {
     Interrupted,
 }
 
+/// Distinguishes fresh task execution from checkpoint resume.
+/// Controls minor behavioral differences (event emission, progress display,
+/// planning transition label) without duplicating the loop body.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LoopMode {
+    NewTask,
+    Resume,
+}
+
 impl Agent {
-    fn transition_from_planning_to_executing(&mut self) {
+    fn set_loop_state(&mut self, state: AgentState) -> Result<()> {
+        self.loop_control.transition_to(state).map_err(Into::into)
+    }
+
+    fn transition_from_planning_to_executing(&mut self) -> Result<()> {
         self.cognitive_state.set_phase(CyclePhase::Do);
-        self.loop_control
-            .set_state(AgentState::Executing { step: 0 });
+        self.set_loop_state(AgentState::Executing { step: 0 })
     }
 
     async fn execute_planned_tool_calls_if_any(
@@ -48,7 +50,7 @@ impl Agent {
             return Ok(PlannedToolExecution::Completed);
         }
 
-        self.loop_control.increment_step();
+        self.loop_control.increment_step()?;
         self.reflect_on_step(step_for_reflection).await;
         Ok(PlannedToolExecution::Continued)
     }
@@ -60,6 +62,7 @@ impl Agent {
         self.clear_failed_tool_attempts();
         self.clear_task_state_memory();
         self.reset_no_action_prompt_state();
+        self.total_no_action_prompts = 0;
         let task_description = task.to_string();
 
         let cancel_token = self.cancel_token();
@@ -118,314 +121,24 @@ impl Agent {
             ],
         );
 
+        // Initialize hierarchical context map: set modality + build L1 tree.
+        self.context_map.set_modality_from_task(&task_description);
+        self.build_l1_project_tree();
+
+        // For Review modality: auto-load L2 skeletons so the model
+        // doesn't need to read 100+ files one by one.
+        if matches!(
+            self.context_map.modality(),
+            Some(super::context_map::ContextModality::Review)
+        ) {
+            self.auto_load_skeletons_for_review();
+        }
+
         let msg = Message::user(task);
         self.memory.add_message(&msg);
         self.messages.push(msg);
 
-        #[cfg(feature = "resilience")]
-        let mut recovery_attempts = 0u32;
-
-        // Initialize multi-phase progress tracker
-        let mut progress = output::TaskProgress::new(&["Planning", "Executing"]);
-        progress.start_phase();
-
-        while let Some(state) = self.loop_control.next_state() {
-            // Inject a system warning when approaching the iteration limit so
-            // the LLM can wrap up gracefully instead of being cut off.
-            if let Some(warning) = self.loop_control.approaching_limit_warning() {
-                self.messages.push(Message::system(warning));
-            }
-
-            // Trim message history before each iteration to stay within
-            // the token budget.
-            self.trim_message_history();
-
-            if self.is_cancelled() {
-                cli_println!("{}", "\n⚡ Interrupted".bright_yellow());
-                self.messages
-                    .push(Message::user("[Task interrupted by user]"));
-                self.record_task_outcome(
-                    &task_description,
-                    Outcome::Abandoned,
-                    Some("Task interrupted by user"),
-                );
-                return Ok(());
-            }
-
-            match state {
-                AgentState::Planning => {
-                    let _span = enter_agent_step("Planning", 0);
-                    record_state_transition("Start", "Planning");
-                    output::phase_transition("Start", "Planning");
-
-                    self.emit_event(AgentEvent::Status {
-                        message: "Planning...".to_string(),
-                    });
-
-                    // Set cognitive state to Plan phase
-                    self.cognitive_state.set_phase(CyclePhase::Plan);
-
-                    // Plan returns true if the response contains tool calls
-                    let has_tool_calls = match self.plan().await {
-                        Ok(has_tool_calls) => has_tool_calls,
-                        Err(e) => {
-                            self.emit_event(AgentEvent::Error {
-                                message: format!("Planning failed: {}", e),
-                            });
-
-                            self.record_task_outcome(
-                                &task_description,
-                                Outcome::Failure,
-                                Some(&e.to_string()),
-                            );
-                            return Err(e);
-                        }
-                    };
-
-                    // Transition to Do phase
-                    record_state_transition("Planning", "Executing");
-                    output::phase_transition("Planning", "Executing");
-
-                    self.emit_event(AgentEvent::Status {
-                        message: "Executing...".to_string(),
-                    });
-                    progress.complete_phase(); // Complete planning phase
-                    self.transition_from_planning_to_executing();
-
-                    if has_tool_calls {
-                        output::step_start(1, "Executing");
-                    }
-                    match self
-                        .execute_planned_tool_calls_if_any(&task_description, has_tool_calls, 1)
-                        .await
-                    {
-                        Ok(PlannedToolExecution::Interrupted) => continue,
-                        Ok(PlannedToolExecution::Completed) => {
-                            record_state_transition("Executing", "Completed");
-                            output::task_completed();
-                            self.record_task_outcome(&task_description, Outcome::Success, None);
-
-                            self.emit_event(AgentEvent::Completed {
-                                message: "Task completed successfully".to_string(),
-                            });
-
-                            if let Err(e) = self.complete_checkpoint() {
-                                warn!("Failed to save completed checkpoint: {}", e);
-                            }
-                            return Ok(());
-                        }
-                        Ok(PlannedToolExecution::Continued) => {
-                            #[cfg(feature = "resilience")]
-                            {
-                                recovery_attempts = 0;
-                            }
-                        }
-                        Ok(PlannedToolExecution::NoToolCalls) => {}
-                        Err(e) => {
-                            warn!("Initial execution failed: {}", e);
-
-                            // Check for confirmation error - these are fatal in non-interactive mode
-                            if is_confirmation_error(&e) {
-                                record_state_transition("Planning", "Failed");
-                                if let Some(ref mut checkpoint) = self.current_checkpoint {
-                                    checkpoint.log_error(0, e.to_string(), false);
-                                }
-                                self.loop_control.set_state(AgentState::Failed {
-                                    reason: e.to_string(),
-                                });
-                                continue;
-                            }
-
-                            self.cognitive_state
-                                .working_memory
-                                .fail_step(1, &e.to_string());
-                            self.cognitive_state
-                                .fail_operational_step(1, &e.to_string());
-                            if let Some(ref mut checkpoint) = self.current_checkpoint {
-                                checkpoint.log_error(0, e.to_string(), true);
-                            }
-                            self.loop_control.set_state(AgentState::ErrorRecovery {
-                                error: e.to_string(),
-                            });
-                        }
-                    }
-
-                    // Save checkpoint after planning
-                    if let Err(e) = self.save_checkpoint(&task_description) {
-                        warn!("Failed to save checkpoint: {}", e);
-                    }
-                }
-                AgentState::Executing { step } => {
-                    let _span = enter_agent_step("Executing", step);
-                    output::step_start(step + 1, "Executing");
-                    if let Some(task_id) =
-                        self.current_checkpoint.as_ref().map(|c| c.task_id.clone())
-                    {
-                        self.cognitive_state.start_operational_step(
-                            &task_id,
-                            step + 1,
-                            &format!("Execution step {}", step + 1),
-                        );
-                    }
-                    // Inject periodic progress/budget-awareness messages
-                    if let Some(progress_msg) = self.build_progress_injection(step) {
-                        self.messages.push(Message::system(progress_msg));
-                    }
-                    // Update progress based on step
-                    let step_progress = ((step + 1) as f64 * 0.1).min(0.9);
-                    progress.update_progress(step_progress);
-                    match self.execute_step_with_logging(&task_description).await {
-                        Ok(completed) => {
-                            if self.is_cancelled() {
-                                continue;
-                            }
-                            #[cfg(feature = "resilience")]
-                            {
-                                recovery_attempts = 0;
-                                self.reset_self_healing_retry();
-                            }
-                            if completed {
-                                record_state_transition("Executing", "Completed");
-                                progress.complete_phase();
-                                output::task_completed();
-                                self.record_task_outcome(&task_description, Outcome::Success, None);
-                                if let Err(e) = self.complete_checkpoint() {
-                                    warn!("Failed to save completed checkpoint: {}", e);
-                                }
-                                return Ok(());
-                            }
-                            self.loop_control.increment_step();
-                            self.reflect_on_step(step + 1).await;
-
-                            // Save checkpoint after each step
-                            if let Err(e) = self.save_checkpoint(&task_description) {
-                                warn!("Failed to save checkpoint: {}", e);
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Step failed: {}", e);
-
-                            self.emit_event(AgentEvent::Error {
-                                message: format!("Step {} failed: {}", step + 1, e),
-                            });
-
-                            // Check for confirmation error - these are fatal in non-interactive mode
-                            if is_confirmation_error(&e) {
-                                record_state_transition("Executing", "Failed");
-                                if let Some(ref mut checkpoint) = self.current_checkpoint {
-                                    checkpoint.log_error(step, e.to_string(), false);
-                                }
-                                self.loop_control.set_state(AgentState::Failed {
-                                    reason: e.to_string(),
-                                });
-                                continue;
-                            }
-
-                            record_state_transition("Executing", "ErrorRecovery");
-
-                            // Record failure in cognitive state
-                            self.cognitive_state
-                                .working_memory
-                                .fail_step(step + 1, &e.to_string());
-                            self.cognitive_state
-                                .fail_operational_step(step + 1, &e.to_string());
-                            self.cognitive_state
-                                .episodic_memory
-                                .what_failed("execution", &e.to_string());
-
-                            // Log error in checkpoint
-                            if let Some(ref mut checkpoint) = self.current_checkpoint {
-                                checkpoint.log_error(step, e.to_string(), true);
-                            }
-                            self.loop_control.set_state(AgentState::ErrorRecovery {
-                                error: e.to_string(),
-                            });
-                        }
-                    }
-                }
-                AgentState::ErrorRecovery { error } => {
-                    let _span = enter_agent_step("ErrorRecovery", self.loop_control.current_step());
-
-                    self.emit_event(AgentEvent::Status {
-                        message: "Recovering from error...".to_string(),
-                    });
-
-                    cli_println!("{} {}", "⚠️ Recovering from error:".bright_red(), error);
-
-                    #[cfg(feature = "resilience")]
-                    let mut recovered = false;
-                    #[cfg(not(feature = "resilience"))]
-                    let recovered = false;
-                    #[cfg(feature = "resilience")]
-                    {
-                        if recovery_attempts < self.config.continuous_work.max_recovery_attempts {
-                            recovery_attempts += 1;
-                            recovered = self.try_self_healing_recovery(&error, "run_task");
-                        } else {
-                            warn!(
-                                "Auto-recovery attempts exhausted ({})",
-                                self.config.continuous_work.max_recovery_attempts
-                            );
-                        }
-                    }
-
-                    if recovered {
-                        record_state_transition("ErrorRecovery", "Executing");
-                        self.loop_control.set_state(AgentState::Executing {
-                            step: self.loop_control.current_step(),
-                        });
-                        continue;
-                    }
-
-                    // Add cognitive context about the error
-                    let cognitive_summary = self.cognitive_state.summary();
-                    self.messages.push(Message::user(format!(
-                        "The previous action failed with error: {}. Please try a different approach.\n\n{}",
-                        error, cognitive_summary
-                    )));
-
-                    record_state_transition("ErrorRecovery", "Executing");
-                    self.loop_control.set_state(AgentState::Executing {
-                        step: self.loop_control.current_step(),
-                    });
-                }
-                AgentState::Completed => {
-                    record_state_transition("Executing", "Completed");
-                    progress.complete_phase();
-                    output::task_completed();
-                    self.record_task_outcome(&task_description, Outcome::Success, None);
-                    if let Err(e) = self.complete_checkpoint() {
-                        warn!("Failed to save completed checkpoint: {}", e);
-                    }
-                    return Ok(());
-                }
-                AgentState::Failed { reason } => {
-                    record_state_transition("Executing", "Failed");
-                    progress.fail_phase();
-
-                    self.emit_event(AgentEvent::Error {
-                        message: format!("Task failed: {}", reason),
-                    });
-
-                    cli_println!("{} {}", "❌ Task failed:".bright_red(), reason);
-                    self.record_task_outcome(&task_description, Outcome::Failure, Some(&reason));
-                    if let Err(e) = self.fail_checkpoint(&reason) {
-                        warn!("Failed to save failed checkpoint: {}", e);
-                    }
-                    anyhow::bail!("Agent failed: {}", reason);
-                }
-            }
-
-            // Iteration tracking is handled by loop_control.next_state()
-            // which increments and checks max_iterations each loop turn.
-        }
-
-        self.record_task_outcome(
-            &task_description,
-            Outcome::Partial,
-            Some("Execution stopped before completion"),
-        );
-        Ok(())
+        self.run_execution_loop(&task_description, LoopMode::NewTask).await
     }
 
     pub(super) async fn run_swarm_task(&mut self, task: &str) -> Result<()> {
@@ -493,9 +206,18 @@ impl Agent {
         // Each phase uses the specialist agent's system prompt to guide
         // the LLM, then records the result back into the swarm.
         let mut phase_num = 0usize;
-        while let Some(sub_task) = swarm.next_task() {
+        while let Some(task_id) = swarm.next_task() {
             phase_num += 1;
-            let task_id = sub_task.id.clone();
+            
+            // Get the task details from active_tasks
+            let sub_task = match swarm.get_task(&task_id) {
+                Some(t) => t.clone(),
+                None => {
+                    warn!("Task {} not found after next_task()", task_id);
+                    break;
+                }
+            };
+            
             let assigned = swarm.assign_task(&task_id);
 
             // Determine the lead agent for this sub-task
@@ -700,18 +422,33 @@ impl Agent {
             );
         }
 
+        self.run_execution_loop(&task_description, LoopMode::Resume).await
+    }
+
+    /// Shared execution loop used by both `run_task` and `continue_execution`.
+    ///
+    /// This is the single source of truth for the Planning → Executing →
+    /// ErrorRecovery → Completed/Failed state machine. `mode` controls minor
+    /// behavioral differences (event emission, progress tracking, labels).
+    async fn run_execution_loop(
+        &mut self,
+        task_description: &str,
+        mode: LoopMode,
+    ) -> Result<()> {
         #[cfg(feature = "resilience")]
         let mut recovery_attempts = 0u32;
 
+        let mut progress = output::TaskProgress::new(&["Planning", "Executing"]);
+        if mode == LoopMode::NewTask {
+            progress.start_phase();
+        }
+
+        let planning_label = if mode == LoopMode::NewTask { "Start" } else { "Resume" };
+
         while let Some(state) = self.loop_control.next_state() {
-            // Inject a system warning when approaching the iteration limit so
-            // the LLM can wrap up gracefully instead of being cut off.
             if let Some(warning) = self.loop_control.approaching_limit_warning() {
                 self.messages.push(Message::system(warning));
             }
-
-            // Trim message history before each iteration to stay within
-            // the token budget.
             self.trim_message_history();
 
             if self.is_cancelled() {
@@ -719,7 +456,7 @@ impl Agent {
                 self.messages
                     .push(Message::user("[Task interrupted by user]"));
                 self.record_task_outcome(
-                    &task_description,
+                    task_description,
                     Outcome::Abandoned,
                     Some("Task interrupted by user"),
                 );
@@ -729,37 +466,66 @@ impl Agent {
             match state {
                 AgentState::Planning => {
                     let _span = enter_agent_step("Planning", 0);
-                    record_state_transition("Resume", "Planning");
-                    cli_println!("{}", "📋 Planning...".bright_yellow());
+                    record_state_transition(planning_label, "Planning");
+                    if mode == LoopMode::NewTask {
+                        output::phase_transition(planning_label, "Planning");
+                        self.emit_event(AgentEvent::Status {
+                            message: "Planning...".to_string(),
+                        });
+                    } else {
+                        cli_println!("{}", "📋 Planning...".bright_yellow());
+                    }
+
                     self.cognitive_state.set_phase(CyclePhase::Plan);
 
-                    if let Err(e) = self.plan().await {
-                        self.record_task_outcome(
-                            &task_description,
-                            Outcome::Failure,
-                            Some(&e.to_string()),
-                        );
-                        return Err(e);
-                    }
+                    let has_tool_calls = match self.plan().await {
+                        Ok(has_tool_calls) => has_tool_calls,
+                        Err(e) => {
+                            if mode == LoopMode::NewTask {
+                                self.emit_event(AgentEvent::Error {
+                                    message: format!("Planning failed: {}", e),
+                                });
+                            }
+                            self.record_task_outcome(
+                                task_description,
+                                Outcome::Failure,
+                                Some(&e.to_string()),
+                            );
+                            return Err(e);
+                        }
+                    };
+
                     if self.is_cancelled() {
                         continue;
                     }
-                    let has_tool_calls = self
-                        .messages
-                        .last()
-                        .map(|message| self.message_has_tool_calls(message))
-                        .unwrap_or(false);
-                    self.transition_from_planning_to_executing();
 
+                    record_state_transition("Planning", "Executing");
+                    if mode == LoopMode::NewTask {
+                        output::phase_transition("Planning", "Executing");
+                        self.emit_event(AgentEvent::Status {
+                            message: "Executing...".to_string(),
+                        });
+                        progress.complete_phase();
+                    }
+                    self.transition_from_planning_to_executing()?;
+
+                    if has_tool_calls && mode == LoopMode::NewTask {
+                        output::step_start(1, "Executing");
+                    }
                     match self
-                        .execute_planned_tool_calls_if_any(&task_description, has_tool_calls, 1)
+                        .execute_planned_tool_calls_if_any(task_description, has_tool_calls, 1)
                         .await
                     {
                         Ok(PlannedToolExecution::Interrupted) => continue,
                         Ok(PlannedToolExecution::Completed) => {
                             record_state_transition("Executing", "Completed");
                             output::task_completed();
-                            self.record_task_outcome(&task_description, Outcome::Success, None);
+                            self.record_task_outcome(task_description, Outcome::Success, None);
+                            if mode == LoopMode::NewTask {
+                                self.emit_event(AgentEvent::Completed {
+                                    message: "Task completed successfully".to_string(),
+                                });
+                            }
                             if let Err(e) = self.complete_checkpoint() {
                                 warn!("Failed to save completed checkpoint: {}", e);
                             }
@@ -774,16 +540,16 @@ impl Agent {
                         }
                         Ok(PlannedToolExecution::NoToolCalls) => {}
                         Err(e) => {
-                            warn!("Initial resumed execution failed: {}", e);
+                            warn!("Initial execution failed: {}", e);
 
-                            if is_confirmation_error(&e) {
+                            if is_confirmation_error(&e) || is_no_action_error(&e) {
                                 record_state_transition("Planning", "Failed");
                                 if let Some(ref mut checkpoint) = self.current_checkpoint {
                                     checkpoint.log_error(0, e.to_string(), false);
                                 }
-                                self.loop_control.set_state(AgentState::Failed {
+                                self.set_loop_state(AgentState::Failed {
                                     reason: e.to_string(),
-                                });
+                                })?;
                                 continue;
                             }
 
@@ -795,22 +561,19 @@ impl Agent {
                             if let Some(ref mut checkpoint) = self.current_checkpoint {
                                 checkpoint.log_error(0, e.to_string(), true);
                             }
-                            self.loop_control.set_state(AgentState::ErrorRecovery {
+                            self.set_loop_state(AgentState::ErrorRecovery {
                                 error: e.to_string(),
-                            });
+                            })?;
                         }
                     }
 
-                    if let Err(e) = self.save_checkpoint(&task_description) {
+                    if let Err(e) = self.save_checkpoint(task_description) {
                         warn!("Failed to save checkpoint: {}", e);
                     }
                 }
                 AgentState::Executing { step } => {
                     let _span = enter_agent_step("Executing", step);
-                    cli_println!(
-                        "{} Executing...",
-                        format!("📝 Step {}", step + 1).bright_blue()
-                    );
+                    output::step_start(step + 1, "Executing");
                     if let Some(task_id) =
                         self.current_checkpoint.as_ref().map(|c| c.task_id.clone())
                     {
@@ -820,7 +583,14 @@ impl Agent {
                             &format!("Execution step {}", step + 1),
                         );
                     }
-                    match self.execute_step_with_logging(&task_description).await {
+                    if let Some(progress_msg) = self.build_progress_injection(step) {
+                        self.messages.push(Message::system(progress_msg));
+                    }
+                    if mode == LoopMode::NewTask {
+                        let step_progress = ((step + 1) as f64 * 0.1).min(0.9);
+                        progress.update_progress(step_progress);
+                    }
+                    match self.execute_step_with_logging(task_description).await {
                         Ok(completed) => {
                             if self.is_cancelled() {
                                 continue;
@@ -832,34 +602,45 @@ impl Agent {
                             }
                             if completed {
                                 record_state_transition("Executing", "Completed");
+                                if mode == LoopMode::NewTask {
+                                    progress.complete_phase();
+                                }
                                 output::task_completed();
-                                self.record_task_outcome(&task_description, Outcome::Success, None);
+                                self.record_task_outcome(task_description, Outcome::Success, None);
                                 if let Err(e) = self.complete_checkpoint() {
                                     warn!("Failed to save completed checkpoint: {}", e);
                                 }
                                 return Ok(());
                             }
-                            self.loop_control.increment_step();
-
-                            // Reflect and continue
+                            self.loop_control.increment_step()?;
                             self.reflect_on_step(step + 1).await;
 
-                            if let Err(e) = self.save_checkpoint(&task_description) {
+                            if let Err(e) = self.save_checkpoint(task_description) {
                                 warn!("Failed to save checkpoint: {}", e);
                             }
                         }
                         Err(e) => {
                             warn!("Step failed: {}", e);
 
-                            // Check for confirmation error - these are fatal in non-interactive mode
-                            if is_confirmation_error(&e) {
+                            if mode == LoopMode::NewTask {
+                                self.emit_event(AgentEvent::Error {
+                                    message: format!("Step {} failed: {}", step + 1, e),
+                                });
+                            }
+
+                            // Confirmation and no-action errors are fatal
+                            if is_confirmation_error(&e) || is_no_action_error(&e) {
                                 record_state_transition("Executing", "Failed");
                                 if let Some(ref mut checkpoint) = self.current_checkpoint {
                                     checkpoint.log_error(step, e.to_string(), false);
                                 }
-                                self.loop_control.set_state(AgentState::Failed {
+                                if is_no_action_error(&e) {
+                                    cli_println!("{} {}", "❌ Agent stuck in action loop:".bright_red(), e);
+                                    cli_println!("{}", "The agent repeatedly described intent without executing tools. This is a non-recoverable error.".bright_yellow());
+                                }
+                                self.set_loop_state(AgentState::Failed {
                                     reason: e.to_string(),
-                                });
+                                })?;
                                 continue;
                             }
 
@@ -869,19 +650,25 @@ impl Agent {
                                 .fail_step(step + 1, &e.to_string());
                             self.cognitive_state
                                 .fail_operational_step(step + 1, &e.to_string());
+                            self.cognitive_state
+                                .episodic_memory
+                                .what_failed("execution", &e.to_string());
 
                             if let Some(ref mut checkpoint) = self.current_checkpoint {
                                 checkpoint.log_error(step, e.to_string(), true);
                             }
-                            self.loop_control.set_state(AgentState::ErrorRecovery {
+                            self.set_loop_state(AgentState::ErrorRecovery {
                                 error: e.to_string(),
-                            });
+                            })?;
                         }
                     }
                 }
                 AgentState::ErrorRecovery { error } => {
                     let _span = enter_agent_step("ErrorRecovery", self.loop_control.current_step());
 
+                    self.emit_event(AgentEvent::Status {
+                        message: "Recovering from error...".to_string(),
+                    });
                     cli_println!("{} {}", "⚠️ Recovering from error:".bright_red(), error);
 
                     #[cfg(feature = "resilience")]
@@ -892,8 +679,7 @@ impl Agent {
                     {
                         if recovery_attempts < self.config.continuous_work.max_recovery_attempts {
                             recovery_attempts += 1;
-                            recovered =
-                                self.try_self_healing_recovery(&error, "continue_execution");
+                            recovered = self.try_self_healing_recovery(&error, "run_execution_loop");
                         } else {
                             warn!(
                                 "Auto-recovery attempts exhausted ({})",
@@ -904,9 +690,9 @@ impl Agent {
 
                     if recovered {
                         record_state_transition("ErrorRecovery", "Executing");
-                        self.loop_control.set_state(AgentState::Executing {
+                        self.set_loop_state(AgentState::Executing {
                             step: self.loop_control.current_step(),
-                        });
+                        })?;
                         continue;
                     }
 
@@ -917,14 +703,17 @@ impl Agent {
                     )));
 
                     record_state_transition("ErrorRecovery", "Executing");
-                    self.loop_control.set_state(AgentState::Executing {
+                    self.set_loop_state(AgentState::Executing {
                         step: self.loop_control.current_step(),
-                    });
+                    })?;
                 }
                 AgentState::Completed => {
                     record_state_transition("Executing", "Completed");
+                    if mode == LoopMode::NewTask {
+                        progress.complete_phase();
+                    }
                     output::task_completed();
-                    self.record_task_outcome(&task_description, Outcome::Success, None);
+                    self.record_task_outcome(task_description, Outcome::Success, None);
                     if let Err(e) = self.complete_checkpoint() {
                         warn!("Failed to save completed checkpoint: {}", e);
                     }
@@ -932,20 +721,25 @@ impl Agent {
                 }
                 AgentState::Failed { reason } => {
                     record_state_transition("Executing", "Failed");
+                    if mode == LoopMode::NewTask {
+                        progress.fail_phase();
+                        self.emit_event(AgentEvent::Error {
+                            message: format!("Task failed: {}", reason),
+                        });
+                    }
+
                     cli_println!("{} {}", "❌ Task failed:".bright_red(), reason);
-                    self.record_task_outcome(&task_description, Outcome::Failure, Some(&reason));
+                    self.record_task_outcome(task_description, Outcome::Failure, Some(&reason));
                     if let Err(e) = self.fail_checkpoint(&reason) {
                         warn!("Failed to save failed checkpoint: {}", e);
                     }
                     anyhow::bail!("Agent failed: {}", reason);
                 }
             }
-
-            // Iteration tracking is handled by loop_control.next_state()
         }
 
         self.record_task_outcome(
-            &task_description,
+            task_description,
             Outcome::Partial,
             Some("Execution stopped before completion"),
         );
@@ -1789,7 +1583,7 @@ mod tests {
         agent.continue_execution().await.unwrap();
 
         assert!(agent
-            .context_files
+            .file_tracker.context_files
             .iter()
             .any(|path| path.ends_with("Cargo.toml")));
         server.stop().await;
@@ -1911,6 +1705,49 @@ mod tests {
         assert!(
             !plan.steps.is_empty(),
             "operational plan should survive execution"
+        );
+        server.stop().await;
+    }
+
+    /// Regression test: continue_execution must treat no-action errors as
+    /// fatal (go to Failed state) rather than routing to ErrorRecovery.
+    /// Before the run_execution_loop dedup this check was missing from
+    /// continue_execution, causing the agent to loop indefinitely.
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_continue_execution_no_action_error_is_fatal() {
+        // The model will repeatedly describe intent without using tools.
+        // The shared run_execution_loop should eventually abort.
+        // Set the default response to an intent phrase so it persists after
+        // the queue is exhausted.
+        let intent = "Let me check the code";
+        let server = MockLlmServer::builder()
+            .with_default_response(crate::testing::mock_api::MockResponse::Text(intent.to_string()))
+            .build()
+            .await;
+        let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
+        config.agent.max_iterations = 30;
+        // Require >=3 min steps so short responses aren't accepted as completion
+        config.agent.min_completion_steps = 3;
+        let mut agent = Agent::new(config).await.unwrap();
+
+        // Seed a checkpoint so continue_execution has something to resume
+        agent.current_checkpoint =
+            Some(TaskCheckpoint::new("test-id".to_string(), "test task".to_string()));
+
+        let result = agent.continue_execution().await;
+        assert!(
+            result.is_err(),
+            "continue_execution must fail when the model never uses tools"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("failed to take action") || err_msg.contains("Agent failed"),
+            "error should mention action failure, got: {}",
+            err_msg
         );
         server.stop().await;
     }

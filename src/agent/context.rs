@@ -5,6 +5,17 @@ use crate::token_count::estimate_tokens_with_overhead;
 use anyhow::Result;
 use tracing::{debug, info, warn};
 
+/// Per-message overhead tokens (role header, formatting, separators).
+const MESSAGE_OVERHEAD_TOKENS: usize = 4;
+
+/// Estimate the token cost of a single message, including text, images, and
+/// per-message overhead. This is the single source of truth for message-level
+/// token estimation — both `ContextCompressor` and `trim_message_history` use it.
+pub fn estimate_message_tokens(m: &Message) -> usize {
+    estimate_tokens_with_overhead(&m.content.text_all(), MESSAGE_OVERHEAD_TOKENS)
+        + m.content.image_count() * crate::tokens::DEFAULT_IMAGE_TOKEN_ESTIMATE
+}
+
 /// Hard upper limit on message count. If the message list exceeds this,
 /// `should_compress` returns true regardless of token estimate, so the
 /// conversation is always bounded.
@@ -17,8 +28,14 @@ pub struct ContextCompressor {
 
 impl ContextCompressor {
     pub fn new(token_budget: usize) -> Self {
+        // Default: compress at 75% (content zone), leaving 20% headroom + 5% thinking.
+        Self::with_content_ratio(token_budget, 0.75)
+    }
+
+    /// Create with a custom content ratio (fraction of budget that triggers compression).
+    pub fn with_content_ratio(token_budget: usize, content_ratio: f32) -> Self {
         Self {
-            compression_threshold: (token_budget as f32 * 0.85) as usize,
+            compression_threshold: (token_budget as f32 * content_ratio) as usize,
             min_messages_to_keep: 6,
         }
     }
@@ -43,10 +60,7 @@ impl ContextCompressor {
     }
 
     pub fn estimate_tokens(&self, messages: &[Message]) -> usize {
-        messages
-            .iter()
-            .map(|m| estimate_tokens_with_overhead(m.content.text(), 50))
-            .sum()
+        messages.iter().map(|m| estimate_message_tokens(m)).sum()
     }
 
     pub fn compression_threshold(&self) -> usize {
@@ -172,7 +186,7 @@ mod tests {
     #[test]
     fn test_context_compressor_new() {
         let compressor = ContextCompressor::new(100000);
-        assert_eq!(compressor.compression_threshold, 85000);
+        assert_eq!(compressor.compression_threshold, 75000); // 75% content zone
         assert_eq!(compressor.min_messages_to_keep, 6);
     }
 
@@ -180,10 +194,11 @@ mod tests {
     fn test_estimate_tokens_simple() {
         let compressor = ContextCompressor::new(100000);
         let messages = vec![
-            Message::system("Hello world"), // 11 chars / 4 + 50 = 52
+            Message::system("Hello world"), // ~3 tokens + MESSAGE_OVERHEAD_TOKENS
         ];
         let estimate = compressor.estimate_tokens(&messages);
-        assert!(estimate > 50); // At minimum, base cost per message
+        assert!(estimate > 0, "should produce a non-zero estimate");
+        assert!(estimate < 100, "single short message shouldn't be huge");
     }
 
     #[test]
@@ -199,9 +214,9 @@ mod tests {
         let code_estimate = compressor.estimate_tokens(&code_messages);
         let text_estimate = compressor.estimate_tokens(&text_messages);
 
-        // Both should have reasonable estimates
-        assert!(code_estimate > 50);
-        assert!(text_estimate > 50);
+        // Both should produce positive estimates
+        assert!(code_estimate > 0);
+        assert!(text_estimate > 0);
     }
 
     #[test]
@@ -330,7 +345,7 @@ mod tests {
         let estimate = compressor.estimate_tokens(&messages);
 
         // Should be sum of individual estimates
-        assert!(estimate > 150); // 3 messages * ~50 base
+        assert!(estimate > 10); // 3 messages with short content
     }
 
     // Additional tests for improved coverage
@@ -338,8 +353,8 @@ mod tests {
     #[test]
     fn test_compression_threshold_calculation() {
         let compressor = ContextCompressor::new(10000);
-        // Threshold should be 85% of budget
-        assert_eq!(compressor.compression_threshold, 8500);
+        // Threshold should be 75% of budget (content zone)
+        assert_eq!(compressor.compression_threshold, 7500);
     }
 
     #[test]
@@ -363,7 +378,7 @@ mod tests {
         let messages = vec![Message::user("let x = 1; let y = 2; let z = 3;")];
         let estimate = compressor.estimate_tokens(&messages);
         // 31 chars / 3 + 50 = ~60
-        assert!(estimate > 50 && estimate < 100);
+        assert!(estimate > 0 && estimate < 100);
     }
 
     #[test]
@@ -372,7 +387,7 @@ mod tests {
         // Code with braces uses factor 3
         let messages = vec![Message::user("fn main() { println!(\"hello\"); }")];
         let estimate = compressor.estimate_tokens(&messages);
-        assert!(estimate > 50 && estimate < 100);
+        assert!(estimate > 0 && estimate < 100);
     }
 
     #[test]
@@ -382,7 +397,7 @@ mod tests {
         let messages = vec![Message::user("This is plain text without any code")];
         let estimate = compressor.estimate_tokens(&messages);
         // Should be chars/4 + 50
-        assert!(estimate > 50);
+        assert!(estimate > 0);
     }
 
     #[test]
@@ -498,7 +513,7 @@ mod tests {
         let estimate = compressor.estimate_tokens(&messages);
         let small_estimate = compressor.estimate_tokens(&small_messages);
         assert!(estimate > small_estimate);
-        assert!(estimate > 50);
+        assert!(estimate > 0);
     }
 
     #[test]
@@ -509,6 +524,6 @@ mod tests {
 
         let estimate = compressor.estimate_tokens(&messages);
         // Should not crash and give reasonable estimate
-        assert!(estimate > 50);
+        assert!(estimate > 0);
     }
 }

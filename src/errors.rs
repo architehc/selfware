@@ -57,6 +57,9 @@ pub enum AgentError {
 
     #[error("Agent loop panicked: {0}")]
     Panic(String),
+
+    #[error("Task failed: {message}")]
+    TaskFailed { message: String },
 }
 
 #[derive(Error, Debug)]
@@ -148,6 +151,27 @@ pub fn is_confirmation_error(e: &anyhow::Error) -> bool {
     }
 
     false
+}
+
+/// Check if an anyhow error is a "no action" error (agent failed to take action after multiple prompts)
+/// These are fatal errors - the agent is stuck in a loop describing intent without executing.
+pub fn is_no_action_error(e: &anyhow::Error) -> bool {
+    // Check if wrapped as SelfwareError::Agent(AgentError::TaskFailed)
+    if let Some(SelfwareError::Agent(AgentError::TaskFailed { message })) =
+        e.downcast_ref::<SelfwareError>()
+    {
+        return message.contains("failed to take action after");
+    }
+
+    // Also check if AgentError was returned directly into anyhow
+    if let Some(AgentError::TaskFailed { message }) = e.downcast_ref::<AgentError>() {
+        return message.contains("failed to take action after");
+    }
+
+    // Check the error message directly
+    let error_string = e.to_string();
+    error_string.contains("failed to take action after") || 
+    error_string.contains("Agent failed to take action")
 }
 
 #[derive(Error, Debug)]

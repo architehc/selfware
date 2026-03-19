@@ -183,6 +183,11 @@ name = "integration"
 path = "tests/integration/mod.rs"
 required-features = ["integration"]
 
+[[test]]
+name = "tui_integration"
+path = "tests/tui_integration/mod.rs"
+required-features = ["tui"]
+
 # Examples
 [[example]]
 name = "basic_chat"

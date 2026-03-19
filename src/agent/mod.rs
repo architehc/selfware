@@ -28,21 +28,37 @@ use crate::tools::file::init_safety_config;
 use crate::tools::ToolRegistry;
 use crate::verification::{VerificationConfig, VerificationGate};
 
+/// Print only when TUI is NOT active (avoids writing to stdout while
+/// ratatui owns the alternate screen).
+/// Uses the global output lock to prevent interleaving from concurrent tasks.
+macro_rules! cli_println {
+    ($($arg:tt)*) => {
+        if !crate::output::is_tui_active() {
+            let _lock = crate::output::OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            println!($($arg)*);
+        }
+    };
+}
+
 mod checkpointing;
 pub mod context;
 mod context_management;
+pub mod context_map;
 mod execution;
 mod interactive;
 pub mod last_tool;
 mod learning;
 pub mod loop_control;
 pub mod planning;
+mod recovery;
 mod session_log;
 mod streaming;
 mod task_runner;
+mod tool_dispatch;
 pub mod tui_events;
+mod verification;
 
-use crate::errors::is_confirmation_error;
+use crate::errors::{is_confirmation_error, is_no_action_error};
 use context::ContextCompressor;
 use loop_control::{AgentLoop, AgentState};
 use planning::Planner;
@@ -139,6 +155,37 @@ fn verification_instructions(pt: ProjectType) -> (&'static str, &'static str, &'
     }
 }
 
+/// Canonical list of tools offered when the model fails to take action.
+/// Single source of truth — used by both the error recovery instructions
+/// and the no-action prompt escalation in execution.rs.
+pub(super) const NO_ACTION_TOOL_OPTIONS: &str =
+    "directory_tree, glob_find, grep_search, file_read, shell_exec";
+
+/// The safest fallback when the model is completely stuck: list the working directory.
+pub(super) const FALLBACK_TOOL_NAME: &str = "directory_tree";
+pub(super) const FALLBACK_TOOL_ARGS: &str = r#"{"path":"."}"#;
+
+const ERROR_RECOVERY_INSTRUCTIONS: &str = r#"## ERROR RECOVERY (CRITICAL)
+When a tool fails, you MUST try a DIFFERENT approach. Do NOT describe what you'll do - just do it.
+
+Examples of correct error recovery:
+
+WRONG: "The file was not found. Let me search for it first."
+CORRECT: [immediately use glob_find or directory_tree]
+
+WRONG: "I see the error. I'll try a different file."
+CORRECT: [immediately call file_read with a different path]
+
+WRONG: "The command failed. I should check what went wrong."
+CORRECT: [immediately run a different command or use a different tool]
+
+Error Recovery Rules:
+1. After ANY error, use a DIFFERENT tool - never retry the same tool with the same arguments
+2. NEVER say "Let me..." or "I will..." - just execute the tool immediately
+3. If file_read fails, try directory_tree, glob_find, or grep_search
+4. If a command fails, try a different command or a completely different approach
+5. Describing intent without using a tool counts as FAILURE"#;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FailedToolAttempt {
     tool_name: String,
@@ -153,6 +200,48 @@ struct FileReadState {
     total_lines: usize,
     last_modified: Option<u64>,
     unchanged_read_count: u32,
+}
+
+/// Consolidated file-context tracking.
+///
+/// Groups the three previously-scattered file tracking structures into one
+/// coherent unit: which files are in context, which need reload, and
+/// per-file read state for redundancy detection.
+struct FileTracker {
+    /// Files loaded into context for reload functionality
+    context_files: Vec<String>,
+    /// Files modified since last loaded into context (need refresh)
+    stale_files: HashSet<String>,
+    /// Per-file read state used to detect redundant unchanged rereads
+    read_state: HashMap<String, FileReadState>,
+}
+
+impl FileTracker {
+    fn new() -> Self {
+        Self {
+            context_files: Vec::new(),
+            stale_files: HashSet::new(),
+            read_state: HashMap::new(),
+        }
+    }
+
+    fn mark_stale(&mut self, path: &str) {
+        if self.stale_files.len() < 500 {
+            self.stale_files.insert(path.to_string());
+        }
+    }
+
+    fn mark_written(&mut self, path: &str) {
+        // Remove read state so next read gets a fresh baseline
+        self.read_state.remove(path);
+        self.mark_stale(path);
+    }
+
+    fn remove_deleted(&mut self, path: &str) {
+        self.read_state.remove(path);
+        self.stale_files.remove(path);
+        self.context_files.retain(|p| p != path);
+    }
 }
 
 const TASK_STATE_NOTE_LIMIT: usize = 16;
@@ -183,12 +272,8 @@ pub struct Agent {
     verification_gate: VerificationGate,
     /// Error analyzer for intelligent error suggestions
     error_analyzer: ErrorAnalyzer,
-    /// Files loaded into context for reload functionality
-    context_files: Vec<String>,
-    /// Files modified since last loaded into context (need refresh)
-    stale_files: HashSet<String>,
-    /// Per-file read state used to detect redundant unchanged rereads.
-    file_read_state: HashMap<String, FileReadState>,
+    /// Consolidated file tracking: context files, stale files, and read state.
+    file_tracker: FileTracker,
     /// Recent task-state notes surfaced in debug output.
     task_state_notes: VecDeque<String>,
     /// Last time a checkpoint was persisted to disk
@@ -218,6 +303,8 @@ pub struct Agent {
     self_healing: SelfHealingEngine,
     /// Recent tool call signatures for repetition detection (name, args_hash)
     recent_tool_calls: VecDeque<(String, u64)>,
+    /// Recent per-step tool batches for oscillation detection.
+    recent_tool_batches: VecDeque<Vec<(String, u64)>>,
     /// Failed tool attempts in the current recovery window.
     recent_failed_tool_attempts: VecDeque<FailedToolAttempt>,
     /// Hook registry for event-driven automation
@@ -232,24 +319,31 @@ pub struct Agent {
     pending_failure_hint: Option<String>,
     /// Consecutive turns where the model described intent but emitted no tool call.
     consecutive_no_action_prompts: usize,
+    /// Lifetime total of no-action prompts across the entire task.
+    /// Unlike the consecutive counter, this is NOT reset when the model produces
+    /// a non-intent response. It provides a hard abort ceiling.
+    total_no_action_prompts: usize,
     /// Hash of the most recent no-action assistant content used for loop detection.
     last_no_action_prompt_hash: Option<u64>,
     /// Permission store for pre-authorized tool grants
     permission_store: crate::safety::permissions::PermissionStore,
-    /// Tool result cache for read-only operations
-    tool_cache: crate::session::cache::ToolCache,
-    /// Local-first coordinator for response caching and offline support
-    local_first: crate::session::local_first::LocalFirstCoordinator,
+    /// Unified cache manager for tool results and LLM responses (long-term memory)
+    cache_manager: crate::session::cache::CacheManager,
     /// Concurrency governor for limiting concurrent streams and tool executions
     governor: ConcurrencyGovernor,
     /// Pause flag for the ESC listener — set when a confirmation prompt needs stdin
     esc_paused: Arc<AtomicBool>,
     /// Acknowledgement from the ESC listener that it observed the pause flag.
     esc_pause_ack: Arc<AtomicBool>,
+    /// Last tool output for progressive disclosure via `/last`.
+    last_tool_output: Option<last_tool::LastToolOutput>,
+    /// Hierarchical context map for token-aware codebase ingestion.
+    context_map: context_map::ContextMap,
 }
 
 impl Agent {
     pub async fn new(config: Config) -> Result<Self> {
+        let cache_config = config.cache.clone();
         let client = ApiClient::new(&config)?;
         let mut tools = ToolRegistry::new();
         tools.register(crate::tools::fim::FileFimEdit::new(std::sync::Arc::new(
@@ -260,7 +354,10 @@ impl Agent {
         // Publish the user-loaded safety config so file tools honour allowed_paths etc.
         init_safety_config(&config.safety);
         let loop_control = AgentLoop::new(config.agent.max_iterations);
-        let compressor = ContextCompressor::new(config.max_tokens);
+        let compressor = ContextCompressor::with_content_ratio(
+            config.max_tokens,
+            config.agent.context_content_ratio,
+        );
 
         // Initialize cognitive state and load global episodic memory if available
         let mut cognitive_state = CognitiveState::new();
@@ -328,13 +425,15 @@ You have access to tools for file operations, git, shell commands, and more.
 {}
 - When editing files, include 3-5 lines of context for unique matches
 - You have a large budget. Do NOT rush. Be thorough and methodical.
-- When the task is complete, respond with a summary of what was done."#,
-                verify_step, test_step, completion_rule
+- When the task is complete, respond with a summary of what was done.
+
+{}"#,
+                verify_step, test_step, completion_rule, ERROR_RECOVERY_INSTRUCTIONS
             )
         } else {
             // XML-based: embed tools in system prompt
             // This works with backends that don't support native function calling
-            let tool_descriptions = tools
+            let mut tool_desc_parts: Vec<String> = tools
                 .list()
                 .iter()
                 .map(|t| {
@@ -348,8 +447,19 @@ You have access to tools for file operations, git, shell commands, and more.
                         t.schema()
                     )
                 })
-                .collect::<Vec<_>>()
-                .join("\n");
+                .collect();
+
+            // Add context management tools.
+            for ctx_tool in crate::tools::context::context_tool_descriptions() {
+                tool_desc_parts.push(format!(
+                    r#"<tool name="{}">
+  <description>{}</description>
+  <parameters>{}</parameters>
+</tool>"#,
+                    ctx_tool.name, ctx_tool.description, ctx_tool.schema
+                ));
+            }
+            let tool_descriptions = tool_desc_parts.join("\n");
 
             format!(
                 r#"You are Selfware, an expert software engineering AI assistant with access to tools.
@@ -404,8 +514,14 @@ To call a tool, use this EXACT XML structure:
 - NEVER skip verification after file_edit or file_write
 {}
 - You have a large budget. Do NOT rush. Be thorough and methodical.
-- When done, respond with plain text only (no tool tags)"#,
-                tool_descriptions, verify_step, test_step, completion_rule
+- When done, respond with plain text only (no tool tags)
+
+{}"#,
+                tool_descriptions,
+                verify_step,
+                test_step,
+                completion_rule,
+                ERROR_RECOVERY_INSTRUCTIONS
             )
         };
 
@@ -518,6 +634,14 @@ To call a tool, use this EXACT XML structure:
 
         info!("Agent initialized with cognitive state, verification gate, and error analyzer");
 
+        // Extract context map config before moving `config` into the struct.
+        let ctx_map = context_map::ContextMap::new(
+            config.agent.token_budget,
+            config.agent.context_content_ratio,
+            config.agent.context_compression_ratio,
+            config.agent.context_thinking_ratio,
+        );
+
         let agent = Self {
             client,
             tools,
@@ -534,9 +658,7 @@ To call a tool, use this EXACT XML structure:
             current_task_context: String::new(),
             verification_gate,
             error_analyzer,
-            context_files: Vec::new(),
-            stale_files: HashSet::new(),
-            file_read_state: HashMap::new(),
+            file_tracker: FileTracker::new(),
             task_state_notes: VecDeque::new(),
             last_checkpoint_persisted_at: Instant::now(),
             last_checkpoint_tool_calls: 0,
@@ -551,6 +673,7 @@ To call a tool, use this EXACT XML structure:
             #[cfg(feature = "resilience")]
             self_healing,
             recent_tool_calls: VecDeque::new(),
+            recent_tool_batches: VecDeque::new(),
             recent_failed_tool_attempts: VecDeque::new(),
             hook_registry,
             plan_mode,
@@ -558,13 +681,15 @@ To call a tool, use this EXACT XML structure:
             session_logger,
             pending_failure_hint: None,
             consecutive_no_action_prompts: 0,
+            total_no_action_prompts: 0,
             last_no_action_prompt_hash: None,
             permission_store,
-            tool_cache: crate::session::cache::ToolCache::new(),
-            local_first: crate::session::local_first::LocalFirstCoordinator::new(),
+            cache_manager: crate::session::cache::CacheManager::new(cache_config),
             governor: ConcurrencyGovernor::with_defaults(),
             esc_paused: Arc::new(AtomicBool::new(false)),
             esc_pause_ack: Arc::new(AtomicBool::new(false)),
+            last_tool_output: None,
+            context_map: ctx_map,
         };
 
         let reconcile_report = crate::tools::process::reconcile_managed_processes(true).await;

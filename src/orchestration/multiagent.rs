@@ -514,7 +514,8 @@ impl MultiAgentChat {
             io::stdout().flush()?;
 
             let mut input = String::new();
-            if io::stdin().read_line(&mut input).is_err() {
+            // Use block_in_place to prevent blocking the async runtime
+            if tokio::task::block_in_place(|| io::stdin().read_line(&mut input)).is_err() {
                 continue;
             }
 

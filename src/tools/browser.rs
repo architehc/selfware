@@ -1170,20 +1170,7 @@ fn extract_text_from_html(html: &str) -> String {
 
 /// Truncate output to max length
 fn truncate_output(output: &str, max_len: usize) -> String {
-    if output.len() <= max_len {
-        output.to_string()
-    } else {
-        // Find a valid UTF-8 character boundary
-        let mut end = max_len;
-        while end > 0 && !output.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!(
-            "{}... [truncated, {} total chars]",
-            &output[..end],
-            output.len()
-        )
-    }
+    super::truncate_output(output, max_len)
 }
 
 // ============================================================================

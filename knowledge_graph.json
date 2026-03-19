@@ -1,0 +1,3055 @@
+{
+  "edges": [
+    {
+      "created_at": "2026-03-17T14:05:23.848242059+00:00",
+      "from_id": "a36869551ed3",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "e5e154cc4110"
+    },
+    {
+      "created_at": "2026-03-17T14:05:23.858976662+00:00",
+      "from_id": "a36869551ed3",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "eb8705197cbc"
+    },
+    {
+      "created_at": "2026-03-17T14:05:23.869552260+00:00",
+      "from_id": "a36869551ed3",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "347612c9ae64"
+    },
+    {
+      "created_at": "2026-03-17T14:05:23.880191274+00:00",
+      "from_id": "a36869551ed3",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "93873cbf24d4"
+    },
+    {
+      "created_at": "2026-03-17T14:05:23.890762036+00:00",
+      "from_id": "a36869551ed3",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "a6f380c40c7b"
+    },
+    {
+      "created_at": "2026-03-17T14:05:23.901351943+00:00",
+      "from_id": "a36869551ed3",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "385b56c7fd69"
+    },
+    {
+      "created_at": "2026-03-17T14:05:23.911856809+00:00",
+      "from_id": "a36869551ed3",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "0c079ab4c8cc"
+    },
+    {
+      "created_at": "2026-03-17T14:05:23.922366796+00:00",
+      "from_id": "a36869551ed3",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "0b2fcfd9e446"
+    },
+    {
+      "created_at": "2026-03-17T14:05:23.932917379+00:00",
+      "from_id": "a36869551ed3",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "e01054e1fb54"
+    },
+    {
+      "created_at": "2026-03-17T14:05:23.943531813+00:00",
+      "from_id": "a36869551ed3",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "49b7bcc303b7"
+    },
+    {
+      "created_at": "2026-03-17T14:05:23.954061448+00:00",
+      "from_id": "a36869551ed3",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "02647dba22d2"
+    },
+    {
+      "created_at": "2026-03-17T14:05:23.964731966+00:00",
+      "from_id": "a36869551ed3",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "ab35373c9f1b"
+    },
+    {
+      "created_at": "2026-03-17T14:05:23.975452575+00:00",
+      "from_id": "a36869551ed3",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "db3528230e0b"
+    },
+    {
+      "created_at": "2026-03-17T14:05:23.985880420+00:00",
+      "from_id": "a36869551ed3",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "3cec7dbb0650"
+    },
+    {
+      "created_at": "2026-03-17T14:05:23.996512548+00:00",
+      "from_id": "a36869551ed3",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "b5cb96ff0f67"
+    },
+    {
+      "created_at": "2026-03-17T14:05:24.007455506+00:00",
+      "from_id": "a36869551ed3",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "4850e4aecf3a"
+    },
+    {
+      "created_at": "2026-03-17T14:05:24.018096843+00:00",
+      "from_id": "a36869551ed3",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "a4f580f9a9d4"
+    },
+    {
+      "created_at": "2026-03-17T14:05:24.028721961+00:00",
+      "from_id": "a36869551ed3",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "08c83091e0bb"
+    },
+    {
+      "created_at": "2026-03-17T14:05:24.039349723+00:00",
+      "from_id": "a36869551ed3",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "5dc0198017ea"
+    },
+    {
+      "created_at": "2026-03-17T14:05:24.050040795+00:00",
+      "from_id": "a36869551ed3",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "264974467493"
+    },
+    {
+      "created_at": "2026-03-17T14:05:24.060753905+00:00",
+      "from_id": "a36869551ed3",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "a2346ee119bd"
+    },
+    {
+      "created_at": "2026-03-17T14:05:24.071519761+00:00",
+      "from_id": "a36869551ed3",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "7d29fe2e30f8"
+    },
+    {
+      "created_at": "2026-03-17T14:05:24.082383205+00:00",
+      "from_id": "a36869551ed3",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "38cfca6aa7d8"
+    },
+    {
+      "created_at": "2026-03-17T14:10:08.409410132+00:00",
+      "from_id": "bde2cd57feac",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "16934f756243"
+    },
+    {
+      "created_at": "2026-03-17T14:10:12.245774749+00:00",
+      "from_id": "bde2cd57feac",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "4691ffc45303"
+    },
+    {
+      "created_at": "2026-03-17T14:10:16.132837540+00:00",
+      "from_id": "bde2cd57feac",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "77394c16c431"
+    },
+    {
+      "created_at": "2026-03-17T14:10:20.072646197+00:00",
+      "from_id": "bde2cd57feac",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "49d68c296570"
+    },
+    {
+      "created_at": "2026-03-17T14:10:24.493401125+00:00",
+      "from_id": "bde2cd57feac",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "97094ed6f4c1"
+    },
+    {
+      "created_at": "2026-03-17T14:10:49.636263656+00:00",
+      "from_id": "bde2cd57feac",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "7cadff40b28f"
+    },
+    {
+      "created_at": "2026-03-17T14:10:52.899553844+00:00",
+      "from_id": "bde2cd57feac",
+      "properties": {},
+      "relation": "implements",
+      "to_id": "e290de605082"
+    },
+    {
+      "created_at": "2026-03-17T14:10:55.153612551+00:00",
+      "from_id": "e5e154cc4110",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "bde2cd57feac"
+    },
+    {
+      "created_at": "2026-03-17T14:10:58.563160174+00:00",
+      "from_id": "d6680659381c",
+      "properties": {},
+      "relation": "related_to",
+      "to_id": "bde2cd57feac"
+    },
+    {
+      "created_at": "2026-03-17T14:11:48.404734476+00:00",
+      "from_id": "4691ffc45303",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "be0a20a5ff4b"
+    },
+    {
+      "created_at": "2026-03-17T14:11:55.635751503+00:00",
+      "from_id": "4691ffc45303",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "a40d874b92a9"
+    },
+    {
+      "created_at": "2026-03-17T14:12:19.012986666+00:00",
+      "from_id": "4691ffc45303",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "5784a64f30a6"
+    },
+    {
+      "created_at": "2026-03-17T14:12:31.503683215+00:00",
+      "from_id": "bde2cd57feac",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "f6cfbb206271"
+    },
+    {
+      "created_at": "2026-03-17T14:13:08.116833795+00:00",
+      "from_id": "bde2cd57feac",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "237e698700c1"
+    },
+    {
+      "created_at": "2026-03-17T14:13:29.106453106+00:00",
+      "from_id": "bde2cd57feac",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "96c068d89947"
+    },
+    {
+      "created_at": "2026-03-17T14:14:08.674894877+00:00",
+      "from_id": "bde2cd57feac",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "63d70143a3e7"
+    },
+    {
+      "created_at": "2026-03-17T14:14:46.549950766+00:00",
+      "from_id": "bde2cd57feac",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "a2598041c56f"
+    },
+    {
+      "created_at": "2026-03-17T14:14:50.053096089+00:00",
+      "from_id": "bde2cd57feac",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "deb01b6c462f"
+    },
+    {
+      "created_at": "2026-03-17T14:14:53.907973912+00:00",
+      "from_id": "bde2cd57feac",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "a90b95e5582f"
+    },
+    {
+      "created_at": "2026-03-17T14:15:07.055102872+00:00",
+      "from_id": "93873cbf24d4",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "96c068d89947"
+    },
+    {
+      "created_at": "2026-03-17T14:15:33.969971921+00:00",
+      "from_id": "93873cbf24d4",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "237e698700c1"
+    },
+    {
+      "created_at": "2026-03-17T14:15:37.795867618+00:00",
+      "from_id": "347612c9ae64",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "4691ffc45303"
+    },
+    {
+      "created_at": "2026-03-17T14:15:45.375848878+00:00",
+      "from_id": "e01054e1fb54",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "97094ed6f4c1"
+    },
+    {
+      "created_at": "2026-03-17T14:15:48.952326405+00:00",
+      "from_id": "08c83091e0bb",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "7cadff40b28f"
+    },
+    {
+      "created_at": "2026-03-17T14:15:58.949412078+00:00",
+      "from_id": "7d29fe2e30f8",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "49d68c296570"
+    },
+    {
+      "created_at": "2026-03-17T14:16:22.381928781+00:00",
+      "from_id": "a6f380c40c7b",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "77394c16c431"
+    },
+    {
+      "created_at": "2026-03-17T14:16:26.954997508+00:00",
+      "from_id": "e5e154cc4110",
+      "properties": {},
+      "relation": "depends_on",
+      "to_id": "a6f380c40c7b"
+    },
+    {
+      "created_at": "2026-03-17T14:16:30.992623474+00:00",
+      "from_id": "e5e154cc4110",
+      "properties": {},
+      "relation": "depends_on",
+      "to_id": "93873cbf24d4"
+    },
+    {
+      "created_at": "2026-03-17T14:16:34.716341243+00:00",
+      "from_id": "e5e154cc4110",
+      "properties": {},
+      "relation": "depends_on",
+      "to_id": "347612c9ae64"
+    },
+    {
+      "created_at": "2026-03-17T14:16:44.343458631+00:00",
+      "from_id": "e5e154cc4110",
+      "properties": {},
+      "relation": "depends_on",
+      "to_id": "a2346ee119bd"
+    },
+    {
+      "created_at": "2026-03-17T14:39:06.665148081+00:00",
+      "from_id": "97624de61472",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "40d9bdbe7e2f"
+    },
+    {
+      "created_at": "2026-03-17T15:12:24.919834802+00:00",
+      "from_id": "85323dedf940",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "6e7da1caf86e"
+    },
+    {
+      "created_at": "2026-03-17T15:12:56.264026918+00:00",
+      "from_id": "85323dedf940",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "22e0e303d121"
+    },
+    {
+      "created_at": "2026-03-17T15:13:12.574620749+00:00",
+      "from_id": "85323dedf940",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "570f4ce3c441"
+    },
+    {
+      "created_at": "2026-03-17T15:13:12.585134507+00:00",
+      "from_id": "85323dedf940",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "05df1eb6327b"
+    },
+    {
+      "created_at": "2026-03-17T15:13:12.595523351+00:00",
+      "from_id": "85323dedf940",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "16a11e14d524"
+    },
+    {
+      "created_at": "2026-03-17T15:13:12.605926003+00:00",
+      "from_id": "85323dedf940",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "cbe5b5ffb8ed"
+    },
+    {
+      "created_at": "2026-03-17T15:13:12.616308916+00:00",
+      "from_id": "85323dedf940",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "84c01593a7d4"
+    },
+    {
+      "created_at": "2026-03-17T15:13:28.380275842+00:00",
+      "from_id": "85323dedf940",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "7cafed877030"
+    },
+    {
+      "created_at": "2026-03-17T15:13:28.390764577+00:00",
+      "from_id": "85323dedf940",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "540db13fd1bc"
+    },
+    {
+      "created_at": "2026-03-17T15:13:28.401190643+00:00",
+      "from_id": "85323dedf940",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "b1794cfc909f"
+    },
+    {
+      "created_at": "2026-03-17T15:13:28.411597147+00:00",
+      "from_id": "85323dedf940",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "8fa1d4c987ac"
+    },
+    {
+      "created_at": "2026-03-17T15:13:28.422023164+00:00",
+      "from_id": "85323dedf940",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "451a70ac0500"
+    },
+    {
+      "created_at": "2026-03-17T15:13:39.334009794+00:00",
+      "from_id": "85323dedf940",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "9778ca3e438f"
+    },
+    {
+      "created_at": "2026-03-17T15:13:39.344561584+00:00",
+      "from_id": "85323dedf940",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "43fc10c02d1c"
+    },
+    {
+      "created_at": "2026-03-17T15:13:39.354969677+00:00",
+      "from_id": "85323dedf940",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "a2598041c56f"
+    },
+    {
+      "created_at": "2026-03-17T15:14:26.250823586+00:00",
+      "from_id": "bde2cd57feac",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "85323dedf940"
+    },
+    {
+      "created_at": "2026-03-17T15:14:26.261292480+00:00",
+      "from_id": "bde2cd57feac",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "96c068d89947"
+    },
+    {
+      "created_at": "2026-03-17T15:14:26.271665825+00:00",
+      "from_id": "bde2cd57feac",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "63d70143a3e7"
+    },
+    {
+      "created_at": "2026-03-17T15:14:44.916259100+00:00",
+      "from_id": "16934f756243",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "a2346ee119bd"
+    },
+    {
+      "created_at": "2026-03-17T15:14:44.926767177+00:00",
+      "from_id": "8faac86b74ac",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "96c068d89947"
+    },
+    {
+      "created_at": "2026-03-17T15:14:44.937174376+00:00",
+      "from_id": "8faac86b74ac",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "a90b95e5582f"
+    },
+    {
+      "created_at": "2026-03-17T15:14:44.947575705+00:00",
+      "from_id": "8faac86b74ac",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "237e698700c1"
+    },
+    {
+      "created_at": "2026-03-17T15:14:44.957983644+00:00",
+      "from_id": "8faac86b74ac",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "deb01b6c462f"
+    },
+    {
+      "created_at": "2026-03-17T15:17:37.878032683+00:00",
+      "from_id": "a9f6a6e65ba9",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "e2214aa864be"
+    },
+    {
+      "created_at": "2026-03-17T15:17:37.888612232+00:00",
+      "from_id": "fa108118cce8",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "d99da5e35cb6"
+    },
+    {
+      "created_at": "2026-03-17T15:17:37.899034815+00:00",
+      "from_id": "fa108118cce8",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "1e72fa9172d7"
+    },
+    {
+      "created_at": "2026-03-17T15:17:37.909417190+00:00",
+      "from_id": "fa108118cce8",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "bfad0377b9ab"
+    },
+    {
+      "created_at": "2026-03-17T15:18:19.958694858+00:00",
+      "from_id": "2acad6763361",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "ec637cd062f9"
+    },
+    {
+      "created_at": "2026-03-17T15:18:19.969186154+00:00",
+      "from_id": "2acad6763361",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "8071fac48ff5"
+    },
+    {
+      "created_at": "2026-03-17T15:18:43.648607815+00:00",
+      "from_id": "321f31b4d1ce",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "8fa53f5f74a2"
+    },
+    {
+      "created_at": "2026-03-17T15:18:43.659092409+00:00",
+      "from_id": "0b2fcfd9e446",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "0a9156f43494"
+    },
+    {
+      "created_at": "2026-03-17T15:18:43.669497696+00:00",
+      "from_id": "0b2fcfd9e446",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "347612c9ae64"
+    },
+    {
+      "created_at": "2026-03-17T15:18:43.679856183+00:00",
+      "from_id": "0b2fcfd9e446",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "4850e4aecf3a"
+    },
+    {
+      "created_at": "2026-03-17T15:18:43.690452751+00:00",
+      "from_id": "0b2fcfd9e446",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "fa108118cce8"
+    },
+    {
+      "created_at": "2026-03-17T15:18:43.701016416+00:00",
+      "from_id": "e5e154cc4110",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "347612c9ae64"
+    },
+    {
+      "created_at": "2026-03-17T15:19:04.182704996+00:00",
+      "from_id": "e5e154cc4110",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "eb8705197cbc"
+    },
+    {
+      "created_at": "2026-03-17T15:19:04.193325135+00:00",
+      "from_id": "e5e154cc4110",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "93873cbf24d4"
+    },
+    {
+      "created_at": "2026-03-17T15:19:04.203778833+00:00",
+      "from_id": "e5e154cc4110",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "a6f380c40c7b"
+    },
+    {
+      "created_at": "2026-03-17T15:19:04.214207803+00:00",
+      "from_id": "93873cbf24d4",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "a2346ee119bd"
+    },
+    {
+      "created_at": "2026-03-17T15:19:04.224567240+00:00",
+      "from_id": "93873cbf24d4",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "3cec7dbb0650"
+    },
+    {
+      "created_at": "2026-03-17T15:19:04.234945689+00:00",
+      "from_id": "3cec7dbb0650",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "2acad6763361"
+    },
+    {
+      "created_at": "2026-03-17T15:19:30.356388560+00:00",
+      "from_id": "a6f380c40c7b",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "08c83091e0bb"
+    },
+    {
+      "created_at": "2026-03-17T15:19:30.366944528+00:00",
+      "from_id": "385b56c7fd69",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "e5e154cc4110"
+    },
+    {
+      "created_at": "2026-03-17T15:19:30.377339350+00:00",
+      "from_id": "385b56c7fd69",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "347612c9ae64"
+    },
+    {
+      "created_at": "2026-03-17T15:19:30.387810947+00:00",
+      "from_id": "ab35373c9f1b",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "2acad6763361"
+    },
+    {
+      "created_at": "2026-03-17T15:19:30.398221719+00:00",
+      "from_id": "0c079ab4c8cc",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "347612c9ae64"
+    },
+    {
+      "created_at": "2026-03-17T15:19:30.408603521+00:00",
+      "from_id": "b5cb96ff0f67",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "347612c9ae64"
+    },
+    {
+      "created_at": "2026-03-17T15:20:15.285522184+00:00",
+      "from_id": "49b7bcc303b7",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "347612c9ae64"
+    },
+    {
+      "created_at": "2026-03-17T15:20:15.296170287+00:00",
+      "from_id": "02647dba22d2",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "347612c9ae64"
+    },
+    {
+      "created_at": "2026-03-17T15:20:15.306563864+00:00",
+      "from_id": "264974467493",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "db3528230e0b"
+    },
+    {
+      "created_at": "2026-03-17T15:20:15.316947923+00:00",
+      "from_id": "5dc0198017ea",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "db3528230e0b"
+    },
+    {
+      "created_at": "2026-03-17T15:20:15.327332228+00:00",
+      "from_id": "4850e4aecf3a",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "a4f580f9a9d4"
+    },
+    {
+      "created_at": "2026-03-17T15:20:15.337721197+00:00",
+      "from_id": "e01054e1fb54",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "264974467493"
+    },
+    {
+      "created_at": "2026-03-17T15:21:01.469893407+00:00",
+      "from_id": "93873cbf24d4",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "1fc3701add01"
+    },
+    {
+      "created_at": "2026-03-17T15:21:01.480449464+00:00",
+      "from_id": "93873cbf24d4",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "ea74a1f5b896"
+    },
+    {
+      "created_at": "2026-03-17T15:21:01.490844206+00:00",
+      "from_id": "93873cbf24d4",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "ca368431dbf5"
+    },
+    {
+      "created_at": "2026-03-17T15:21:01.501225821+00:00",
+      "from_id": "93873cbf24d4",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "24ebfed7ad11"
+    },
+    {
+      "created_at": "2026-03-17T15:21:01.511620383+00:00",
+      "from_id": "93873cbf24d4",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "15d6cb3a58c8"
+    },
+    {
+      "created_at": "2026-03-17T15:21:01.522004204+00:00",
+      "from_id": "93873cbf24d4",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "5b47b0d7cd25"
+    },
+    {
+      "created_at": "2026-03-17T15:22:16.508508598+00:00",
+      "from_id": "a6f380c40c7b",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "0197816a9d8c"
+    },
+    {
+      "created_at": "2026-03-17T15:22:16.518999277+00:00",
+      "from_id": "a6f380c40c7b",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "f97550a931be"
+    },
+    {
+      "created_at": "2026-03-17T15:22:16.529369315+00:00",
+      "from_id": "3cec7dbb0650",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "922a052bf877"
+    },
+    {
+      "created_at": "2026-03-17T15:22:16.539759277+00:00",
+      "from_id": "3cec7dbb0650",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "930948e2a829"
+    },
+    {
+      "created_at": "2026-03-17T15:22:16.550142952+00:00",
+      "from_id": "ab35373c9f1b",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "7dd3934a8607"
+    },
+    {
+      "created_at": "2026-03-17T15:23:10.880540504+00:00",
+      "from_id": "e5e154cc4110",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "66490f60c2de"
+    },
+    {
+      "created_at": "2026-03-17T15:23:10.891149976+00:00",
+      "from_id": "e5e154cc4110",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "d7531a71c516"
+    },
+    {
+      "created_at": "2026-03-17T15:23:10.901550531+00:00",
+      "from_id": "e5e154cc4110",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "7d55c96adb1f"
+    },
+    {
+      "created_at": "2026-03-17T15:23:10.911946962+00:00",
+      "from_id": "e5e154cc4110",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "98b2eb2342ac"
+    },
+    {
+      "created_at": "2026-03-17T15:23:10.922346775+00:00",
+      "from_id": "e5e154cc4110",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "91e224aacfe9"
+    },
+    {
+      "created_at": "2026-03-17T15:23:10.932744610+00:00",
+      "from_id": "347612c9ae64",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "9c33e43f0b22"
+    },
+    {
+      "created_at": "2026-03-17T15:24:31.203571309+00:00",
+      "from_id": "347612c9ae64",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "9c03655ae009"
+    },
+    {
+      "created_at": "2026-03-17T15:24:31.214197263+00:00",
+      "from_id": "347612c9ae64",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "f2fbe37054eb"
+    },
+    {
+      "created_at": "2026-03-17T15:24:31.224603098+00:00",
+      "from_id": "347612c9ae64",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "8446d7766613"
+    },
+    {
+      "created_at": "2026-03-17T15:24:31.235002310+00:00",
+      "from_id": "347612c9ae64",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "acee274e6bb7"
+    },
+    {
+      "created_at": "2026-03-17T15:24:31.245398503+00:00",
+      "from_id": "347612c9ae64",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "8f667e1b6012"
+    },
+    {
+      "created_at": "2026-03-17T15:24:31.255849884+00:00",
+      "from_id": "347612c9ae64",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "711f485d4d30"
+    },
+    {
+      "created_at": "2026-03-17T15:25:16.613059792+00:00",
+      "from_id": "e5e154cc4110",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "8bacbdf2b1c8"
+    },
+    {
+      "created_at": "2026-03-17T15:25:16.623606599+00:00",
+      "from_id": "eb8705197cbc",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "1633f92431cb"
+    },
+    {
+      "created_at": "2026-03-17T15:25:16.634010456+00:00",
+      "from_id": "4850e4aecf3a",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "c54990c67e39"
+    },
+    {
+      "created_at": "2026-03-17T15:25:16.644434901+00:00",
+      "from_id": "02647dba22d2",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "ec6fc30f750e"
+    },
+    {
+      "created_at": "2026-03-17T15:25:16.654817170+00:00",
+      "from_id": "02647dba22d2",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "e1a1dfb8c662"
+    },
+    {
+      "created_at": "2026-03-17T15:25:16.665198663+00:00",
+      "from_id": "49b7bcc303b7",
+      "properties": {},
+      "relation": "contains",
+      "to_id": "b926be04bc16"
+    },
+    {
+      "created_at": "2026-03-17T15:29:46.605699463+00:00",
+      "from_id": "b34480853844",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "e22e9f7ba342"
+    },
+    {
+      "created_at": "2026-03-17T15:29:46.616094059+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "b34480853844"
+    },
+    {
+      "created_at": "2026-03-17T15:29:46.626481204+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "98db3dafe837"
+    },
+    {
+      "created_at": "2026-03-17T15:30:05.030513440+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "198bba55c188"
+    },
+    {
+      "created_at": "2026-03-17T15:30:05.041022025+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "df15823c5b83"
+    },
+    {
+      "created_at": "2026-03-17T15:30:05.051440775+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "678b81b69b2a"
+    },
+    {
+      "created_at": "2026-03-17T15:30:05.061837042+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "3da893cc5087"
+    },
+    {
+      "created_at": "2026-03-17T15:30:05.072265330+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "5ecee85fb793"
+    },
+    {
+      "created_at": "2026-03-17T15:30:21.774220163+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "a3985d5990c3"
+    },
+    {
+      "created_at": "2026-03-17T15:30:21.784780189+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "e75c34b67e4c"
+    },
+    {
+      "created_at": "2026-03-17T15:30:21.795201178+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "df8109d54b3f"
+    },
+    {
+      "created_at": "2026-03-17T15:30:21.805607335+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "65c806aed27d"
+    },
+    {
+      "created_at": "2026-03-17T15:30:21.816092254+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "32c09ce4cf6b"
+    },
+    {
+      "created_at": "2026-03-17T15:30:42.239444488+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "97d1277a6118"
+    },
+    {
+      "created_at": "2026-03-17T15:30:42.249917942+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "6cbfe367c34d"
+    },
+    {
+      "created_at": "2026-03-17T15:30:42.260308104+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "86c4bf90f1c4"
+    },
+    {
+      "created_at": "2026-03-17T15:30:42.270674139+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "f8466833bc62"
+    },
+    {
+      "created_at": "2026-03-17T15:30:42.281062585+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "c2e2afb81bce"
+    },
+    {
+      "created_at": "2026-03-17T15:31:17.664279156+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "4e3240b96a68"
+    },
+    {
+      "created_at": "2026-03-17T15:31:17.674819888+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "0178cfa39a04"
+    },
+    {
+      "created_at": "2026-03-17T15:31:17.685194768+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "5f6d73e2f439"
+    },
+    {
+      "created_at": "2026-03-17T15:31:17.695569508+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "e0fb36f05228"
+    },
+    {
+      "created_at": "2026-03-17T15:31:17.705986743+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "05b51cff7805"
+    },
+    {
+      "created_at": "2026-03-17T15:31:36.447954390+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "0297dfb21c54"
+    },
+    {
+      "created_at": "2026-03-17T15:31:36.458538968+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "2b06d95be3d3"
+    },
+    {
+      "created_at": "2026-03-17T15:31:36.469074061+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "0f54a9c65577"
+    },
+    {
+      "created_at": "2026-03-17T15:31:36.479458729+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "9173cdb4fe67"
+    },
+    {
+      "created_at": "2026-03-17T15:31:36.489856085+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "82de967f8f64"
+    },
+    {
+      "created_at": "2026-03-17T15:31:52.584145488+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "3b08b1747db1"
+    },
+    {
+      "created_at": "2026-03-17T15:31:52.594717307+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "8d3518d69873"
+    },
+    {
+      "created_at": "2026-03-17T15:31:52.605139992+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "601e57eb4bac"
+    },
+    {
+      "created_at": "2026-03-17T15:31:52.615570084+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "89e9c61c29cd"
+    },
+    {
+      "created_at": "2026-03-17T15:31:52.625964658+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "d4bffe6a8de4"
+    },
+    {
+      "created_at": "2026-03-17T15:32:08.957403348+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "5dc8defb1551"
+    },
+    {
+      "created_at": "2026-03-17T15:32:08.967911180+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "9765a009941f"
+    },
+    {
+      "created_at": "2026-03-17T15:32:08.978332359+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "4361c26ab8ef"
+    },
+    {
+      "created_at": "2026-03-17T15:32:08.988732215+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "548983dc6bff"
+    },
+    {
+      "created_at": "2026-03-17T15:32:08.999136239+00:00",
+      "from_id": "e22e9f7ba342",
+      "properties": {},
+      "relation": "uses",
+      "to_id": "43938f3d3b37"
+    }
+  ],
+  "exported_at": "2026-03-17T15:32:52.920527026+00:00",
+  "nodes": [
+    {
+      "created_at": "2026-03-17T15:26:22.244456942+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "a3985d5990c3",
+      "line_number": null,
+      "name": "src/interruptible.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:24.373686393+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "3d3338ab0aca",
+      "line_number": null,
+      "name": "src/analysis/code_graph.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:34.530530903+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "165217b1fee5",
+      "line_number": null,
+      "name": "src/self_healing/highlighter.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:29:29.576779344+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "f5bb8ef8dba2",
+      "line_number": null,
+      "name": "src/utils.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:23:45.277501810+00:00",
+      "description": "Knowledge tool for graph operations",
+      "file_path": "./src/tools/knowledge.rs",
+      "id": "f2fbe37054eb",
+      "line_number": null,
+      "name": "knowledge_tool",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:26:52.187889154+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "0bef6bf7803a",
+      "line_number": null,
+      "name": "src/config.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:48.541881636+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "cb7f5345ee80",
+      "line_number": null,
+      "name": "src/input/completer.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:27:23.806719397+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "05b51cff7805",
+      "line_number": null,
+      "name": "src/cognitive/rsi_orchestrator.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:27:23.817127118+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "0297dfb21c54",
+      "line_number": null,
+      "name": "src/cognitive/cognitive_kg.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:14.601818741+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "548983dc6bff",
+      "line_number": null,
+      "name": "src/safety/threat_modeling.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:46:27.764168808+00:00",
+      "description": "File operations tools - file_read (line ranges), file_write, file_edit (surgical edit with old/new strings), file_delete, directory_tree, with safety validation, backup creation, and atomic writes",
+      "file_path": "src/tools/file.rs",
+      "id": "d7187503c86e",
+      "line_number": null,
+      "name": "tools::file",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:08:39.165939483+00:00",
+      "description": "Agent memory system for maintaining conversation history, context compression, and session persistence",
+      "file_path": "src/memory/mod.rs",
+      "id": "49d68c296570",
+      "line_number": null,
+      "name": "AgentMemory",
+      "node_type": "struct",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:10:37.859111088+00:00",
+      "description": "Interactive PTY shell sessions - pty_shell for persistent interactive terminal sessions across invocations with start, send, read, resize, status, close actions; supports multiple concurrent sessions with automatic idle cleanup, configurable timeout (up to 3600s)",
+      "file_path": "src/tools/pty_shell.rs",
+      "id": "16a11e14d524",
+      "line_number": null,
+      "name": "tools::pty_shell",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:17:12.794841654+00:00",
+      "description": "Syntax highlighting for input",
+      "file_path": "./src/input/highlighter.rs",
+      "id": "bfad0377b9ab",
+      "line_number": null,
+      "name": "highlighter",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:48.531042360+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "858318d23788",
+      "line_number": null,
+      "name": "src/input/command_registry.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:13:19.580661923+00:00",
+      "description": "Cognitive state management for PDVR cycle with working memory, episodic memory, and plan tracking",
+      "file_path": "src/cognitive/state.rs",
+      "id": "96c068d89947",
+      "line_number": null,
+      "name": "CognitiveState",
+      "node_type": "struct",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:03:32.317827754+00:00",
+      "description": "Configuration management with resource quotas, model settings, and semantic feature flags",
+      "file_path": "./src/config/mod.rs",
+      "id": "e01054e1fb54",
+      "line_number": null,
+      "name": "config",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:27:13.362021263+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "86c4bf90f1c4",
+      "line_number": null,
+      "name": "src/tools/container_tool.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:04.402253041+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "89e9c61c29cd",
+      "line_number": null,
+      "name": "src/agent/agent_streaming.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:47:36.274258420+00:00",
+      "description": "Token tracking and optimization - token usage estimation (messages, files), context pruning, budget management, drift tracking (estimated vs actual), step-level usage tracking, cost optimization recommendations",
+      "file_path": "src/tokens.rs",
+      "id": "6fd0ff1befe9",
+      "line_number": null,
+      "name": "tokens.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:26:22.254914563+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "e75c34b67e4c",
+      "line_number": null,
+      "name": "src/panic_handler.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:08:34.121284208+00:00",
+      "description": "Multi-layer safety system with path protection, command filtering, JSONL audit logging, permission grants with expiry",
+      "file_path": "src/safety/mod.rs",
+      "id": "77394c16c431",
+      "line_number": null,
+      "name": "SafetyChecker",
+      "node_type": "struct",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:03:32.372094410+00:00",
+      "description": "Session management with checkpointing, caching, encryption, and local-first persistence",
+      "file_path": "./src/session/mod.rs",
+      "id": "3cec7dbb0650",
+      "line_number": null,
+      "name": "session",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:12:15.548843210+00:00",
+      "description": "Swarm tool - swarm_dispatch for multi-agent parallel execution with specialized roles (Architect, Coder, Tester, Reviewer), configurable conflict resolution strategies (majority, unanimous, weighted, architect_decides), and collaborative task decomposition",
+      "file_path": "src/tools/swarm_tool.rs",
+      "id": "43fc10c02d1c",
+      "line_number": null,
+      "name": "tools::swarm_tool",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:03:32.339478841+00:00",
+      "description": "Language Server Protocol client for semantic code intelligence (rust-analyzer, pyright, tsserver, gopls)",
+      "file_path": "./src/lsp/mod.rs",
+      "id": "02647dba22d2",
+      "line_number": null,
+      "name": "lsp",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:48:19.374818655+00:00",
+      "description": "Agent memory management with token estimation, context window limits (500K tokens, 10K entries), message summarization, automatic eviction strategies (entry count and token budget), statistics tracking",
+      "file_path": "src/memory.rs",
+      "id": "95f8ec8de479",
+      "line_number": null,
+      "name": "memory.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:03:02.236973254+00:00",
+      "description": "Core agent module with task execution, context management, checkpointing, and learning capabilities",
+      "file_path": "./src/agent/mod.rs",
+      "id": "e5e154cc4110",
+      "line_number": null,
+      "name": "agent",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:12:01.370813407+00:00",
+      "description": "Shell execution tools - shell_exec for command execution with configurable timeout, working directory, environment variables, output pagination (offset/limit); supports builds, tests, system operations with error handling",
+      "file_path": "src/tools/shell.rs",
+      "id": "451a70ac0500",
+      "line_number": null,
+      "name": "tools::shell",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:21:30.820939939+00:00",
+      "description": "Session cache for state management",
+      "file_path": "./src/session/cache.rs",
+      "id": "922a052bf877",
+      "line_number": null,
+      "name": "session_cache",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:22:48.517961936+00:00",
+      "description": "Agent task runner",
+      "file_path": "./src/agent/task_runner.rs",
+      "id": "7d55c96adb1f",
+      "line_number": null,
+      "name": "task_runner",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:11:16.229767419+00:00",
+      "description": "Computer control tools - computer_keyboard (type, press, combo actions), computer_mouse (move, click, scroll, drag) for desktop automation and GUI interaction",
+      "file_path": "src/tools/computer.rs",
+      "id": "7cafed877030",
+      "line_number": null,
+      "name": "tools::computer",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:12:28.261751476+00:00",
+      "description": "Checkpoint system for task resumption and session persistence with automatic save points",
+      "file_path": "src/agent/checkpointing.rs",
+      "id": "f6cfbb206271",
+      "line_number": null,
+      "name": "CheckpointSystem",
+      "node_type": "concept",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:26:52.156411462+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "65c806aed27d",
+      "line_number": null,
+      "name": "src/monitoring.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:27:13.372451723+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "f8466833bc62",
+      "line_number": null,
+      "name": "src/tools/knowledge_tool.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:24.415823496+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "74fa37ad6f64",
+      "line_number": null,
+      "name": "src/interface/lsp_client.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:03:32.361218863+00:00",
+      "description": "Telemetry, metrics, logging, carbon tracking, and dashboard for system observability",
+      "file_path": "./src/observability/mod.rs",
+      "id": "db3528230e0b",
+      "line_number": null,
+      "name": "observability",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:21:30.810544779+00:00",
+      "description": "Threat modeling for security analysis",
+      "file_path": "./src/safety/threat_modeling.rs",
+      "id": "f97550a931be",
+      "line_number": null,
+      "name": "threat_modeling",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:48.552318669+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "98a823cd20c6",
+      "line_number": null,
+      "name": "src/input/highlighter.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:42:29.162376060+00:00",
+      "description": "Configuration management with TOML loading, API settings, agent behavior (max iterations, context limits), safety settings (allowed paths, blocked commands), model profiles, execution modes (Normal, AutoEdit, Yolo, Daemon), MCP server config, hook registry, caching, continuous work, self-improvement settings",
+      "file_path": "src/config/mod.rs",
+      "id": "158d825be190",
+      "line_number": null,
+      "name": "config::mod.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:26:22.223420807+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "5ecee85fb793",
+      "line_number": null,
+      "name": "src/resource.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:29:29.534794328+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "ab9a2b304b9f",
+      "line_number": null,
+      "name": "src/kv_store/kv_store_impl.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:11:06.470646116+00:00",
+      "description": "Hot reload tools for automatic code reloading during development - hot_reload with file watching and automatic recompilation triggers for iterative development workflows",
+      "file_path": "src/tools/hot_reload.rs",
+      "id": "cbe5b5ffb8ed",
+      "line_number": null,
+      "name": "tools::hot_reload",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:03:02.290561475+00:00",
+      "description": "Multi-agent swarm, workflows, planning, and parallel execution orchestration",
+      "file_path": "./src/orchestration/mod.rs",
+      "id": "385b56c7fd69",
+      "line_number": null,
+      "name": "orchestration",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:04.381250382+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "8d3518d69873",
+      "line_number": null,
+      "name": "src/agent/agent_execution.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:04:10.064369966+00:00",
+      "description": "Computer control with keyboard, mouse, screen capture, and window management",
+      "file_path": "./src/computer/mod.rs",
+      "id": "a4f580f9a9d4",
+      "line_number": null,
+      "name": "computer",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:24:55.563145916+00:00",
+      "description": "LSP client implementation",
+      "file_path": "./src/lsp/client.rs",
+      "id": "e1a1dfb8c662",
+      "line_number": null,
+      "name": "lsp_client",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:11:44.824550078+00:00",
+      "description": "Knowledge graph tools for managing the codebase knowledge base with add, query, relate, and export operations",
+      "file_path": "src/tools/knowledge.rs",
+      "id": "5784a64f30a6",
+      "line_number": null,
+      "name": "Knowledge Tools",
+      "node_type": "concept",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:04:10.130397571+00:00",
+      "description": "System dependency checker and LLM backend diagnostics tool",
+      "file_path": "./src/doctor.rs",
+      "id": "38cfca6aa7d8",
+      "line_number": null,
+      "name": "doctor",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:42:18.895606355+00:00",
+      "description": "Cognitive systems and AI capabilities - PDVR cycle, episodic memory, RAG, self-improvement, meta-learning, knowledge graphs, 1M context support with cognitive systems, hierarchical memory, token budget allocation, and self-reference mechanisms",
+      "file_path": "src/cognitive/mod.rs",
+      "id": "8faac86b74ac",
+      "line_number": null,
+      "name": "cognitive::mod.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:23:45.319463451+00:00",
+      "description": "LSP tools for code intelligence",
+      "file_path": "./src/tools/lsp_tools.rs",
+      "id": "711f485d4d30",
+      "line_number": null,
+      "name": "lsp_tools_file",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:24.394935703+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "48227b9a54c9",
+      "line_number": null,
+      "name": "src/interface/tui_widgets.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:09:27.324872034+00:00",
+      "description": "Event-driven hook system for automation with PreToolUse, PostToolUse, and Stop events",
+      "file_path": "src/hooks/mod.rs",
+      "id": "7cadff40b28f",
+      "line_number": null,
+      "name": "HookRegistry",
+      "node_type": "struct",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:04:10.108162607+00:00",
+      "description": "Token counting, estimation, and management for LLM context windows",
+      "file_path": "./src/tokens.rs",
+      "id": "a2346ee119bd",
+      "line_number": null,
+      "name": "tokens",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:29:29.545389289+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "b999d514406f",
+      "line_number": null,
+      "name": "src/tokens.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:41:34.128696280+00:00",
+      "description": "LLM API client with circuit breaker pattern, streaming support, token budget enforcement via input token estimation, message ordering canonicalization, rate limiting (100 concurrent streams), error handling for various backends",
+      "file_path": "src/api/mod.rs",
+      "id": "ab8616bef2aa",
+      "line_number": null,
+      "name": "api::mod.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:48:34.804850447+00:00",
+      "description": "Concurrency governor with layered semaphore control - limits concurrent streams (default 4), tool executions (default 8), and total inflight operations (default 16) to prevent resource exhaustion",
+      "file_path": "src/concurrency.rs",
+      "id": "8d78f25a9f06",
+      "line_number": null,
+      "name": "concurrency.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:21:30.800116907+00:00",
+      "description": "Path validator for safety checks",
+      "file_path": "./src/safety/path_validator.rs",
+      "id": "0197816a9d8c",
+      "line_number": null,
+      "name": "path_validator",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:24:55.531726457+00:00",
+      "description": "API types for LLM communication",
+      "file_path": "./src/api/types.rs",
+      "id": "1633f92431cb",
+      "line_number": null,
+      "name": "api_types",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:03:02.301390140+00:00",
+      "description": "Container and process management for Docker/Podman with health checks and lifecycle management",
+      "file_path": "./src/devops/mod.rs",
+      "id": "0c079ab4c8cc",
+      "line_number": null,
+      "name": "devops",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:27:23.785832068+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "5f6d73e2f439",
+      "line_number": null,
+      "name": "src/tools/lsp_tools_file.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:16:48.011649599+00:00",
+      "description": "Key-value store with query, serialization, and entry management",
+      "file_path": "./src/kv_store/mod.rs",
+      "id": "2acad6763361",
+      "line_number": null,
+      "name": "kv_store",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:08:43.818282887+00:00",
+      "description": "Configuration system for agent behavior, API settings, safety rules, and feature flags",
+      "file_path": "src/config/mod.rs",
+      "id": "97094ed6f4c1",
+      "line_number": null,
+      "name": "Config",
+      "node_type": "struct",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:24:55.552663452+00:00",
+      "description": "LSP server implementation",
+      "file_path": "./src/lsp/server.rs",
+      "id": "ec6fc30f750e",
+      "line_number": null,
+      "name": "lsp_server",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:04:10.053644330+00:00",
+      "description": "TUI dashboard with animations, garden view, swarm visualization, diff viewer, and theme system",
+      "file_path": "./src/ui/mod.rs",
+      "id": "4850e4aecf3a",
+      "line_number": null,
+      "name": "ui",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:26:22.233997242+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "3da893cc5087",
+      "line_number": null,
+      "name": "src/supervision.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:12:23.961462990+00:00",
+      "description": "Interactive command-line interface with chat mode, run mode, doctor, init, multi-chat, and MCP server modes",
+      "file_path": "src/cli/mod.rs",
+      "id": "4a158f55060f",
+      "line_number": null,
+      "name": "CLI",
+      "node_type": "concept",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:26:52.166995069+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "32c09ce4cf6b",
+      "line_number": null,
+      "name": "src/event_loop.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:27:34.586513156+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "0f54a9c65577",
+      "line_number": null,
+      "name": "src/cognitive/memory_hierarchy.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:04:10.119207212+00:00",
+      "description": "Working memory system for agent state and context retention",
+      "file_path": "./src/memory.rs",
+      "id": "7d29fe2e30f8",
+      "line_number": null,
+      "name": "memory",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:27:13.351465011+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "6cbfe367c34d",
+      "line_number": null,
+      "name": "src/tools/file.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:27:34.596948412+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "9173cdb4fe67",
+      "line_number": null,
+      "name": "src/cognitive/self_improvement.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:34.509546920+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "5859fd57f758",
+      "line_number": null,
+      "name": "src/self_healing/command_registry.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:46:37.144561031+00:00",
+      "description": "Git operations - git_status, git_diff, git_commit (conventional commits), git_push, git_checkpoint with auto-branching and rollback support",
+      "file_path": "src/tools/git.rs",
+      "id": "53b2151707e4",
+      "line_number": null,
+      "name": "tools::git",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:50:25.746806903+00:00",
+      "description": "Observability and telemetry - tracing, Prometheus metrics export, carbon footprint tracking, log analysis, analytics, dashboard support for monitoring agent performance and resource usage",
+      "file_path": "src/observability/mod.rs",
+      "id": "192ca76952d3",
+      "line_number": null,
+      "name": "observability::mod.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:39:03.367449346+00:00",
+      "description": "Core agent orchestrator - manages 70+ tools, conversation state, checkpointing, PDVR cognitive loop, context compression, self-improvement, verification gates, error analysis, LLM caching, local-first coordination, concurrency control, and interactive message queuing",
+      "file_path": "src/agent/mod.rs",
+      "id": "97624de61472",
+      "line_number": null,
+      "name": "agent::mod.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:03:02.247692460+00:00",
+      "description": "LLM API client with token budget enforcement, streaming support, and model configuration",
+      "file_path": "./src/api/mod.rs",
+      "id": "eb8705197cbc",
+      "line_number": null,
+      "name": "api",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:49:27.989991145+00:00",
+      "description": "Hook system for event-driven automation - PreToolUse (can block), PostToolUse (auto-format/lint), Stop (run tests, auto-commit); supports shell commands with context (tool name, args, result, affected path)",
+      "file_path": "src/hooks/mod.rs",
+      "id": "0fa9fa52a688",
+      "line_number": null,
+      "name": "hooks::mod.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:27:13.393406928+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "4e3240b96a68",
+      "line_number": null,
+      "name": "src/tools/shell_tool.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:27:34.617792503+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "3b08b1747db1",
+      "line_number": null,
+      "name": "src/agent/context_management.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:34.520033519+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "9c93cfed92b8",
+      "line_number": null,
+      "name": "src/self_healing/completer.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:27:34.607358455+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "82de967f8f64",
+      "line_number": null,
+      "name": "src/cognitive/intelligence.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:23:45.298580382+00:00",
+      "description": "Shell tool for command execution",
+      "file_path": "./src/tools/shell.rs",
+      "id": "acee274e6bb7",
+      "line_number": null,
+      "name": "shell_tool",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:23:45.309047109+00:00",
+      "description": "Process management tool",
+      "file_path": "./src/tools/process.rs",
+      "id": "8f667e1b6012",
+      "line_number": null,
+      "name": "process_tool",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:14.612188794+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "43938f3d3b37",
+      "line_number": null,
+      "name": "src/session/session_cache.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:27:01.913363228+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "e22e9f7ba342",
+      "line_number": null,
+      "name": "src/lib.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:17:37.930338330+00:00",
+      "description": "KV store storage backend",
+      "file_path": "./src/kv_store/store.rs",
+      "id": "8071fac48ff5",
+      "line_number": null,
+      "name": "kv_store_impl",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:14:05.105322643+00:00",
+      "description": "Verification gate for automatic code validation with cargo check, test, and clippy integration",
+      "file_path": "src/agent/execution.rs",
+      "id": "63d70143a3e7",
+      "line_number": null,
+      "name": "VerificationGate",
+      "node_type": "struct",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:11:56.365303173+00:00",
+      "description": "Process management tools - process_start (background processes with health checks, auto-restart, port reservation), process_stop (graceful/force), process_restart, process_list, process_logs for dev servers, file watchers, and managed services",
+      "file_path": "src/tools/process.rs",
+      "id": "8fa1d4c987ac",
+      "line_number": null,
+      "name": "tools::process",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:34.488250181+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "9ba77117548a",
+      "line_number": null,
+      "name": "src/interface/mcp_server.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:20:41.170902874+00:00",
+      "description": "Self-improvement system",
+      "file_path": "./src/cognitive/self_improvement.rs",
+      "id": "15d6cb3a58c8",
+      "line_number": null,
+      "name": "self_improvement",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:24:55.573633045+00:00",
+      "description": "MCP server implementation",
+      "file_path": "./src/mcp/server.rs",
+      "id": "b926be04bc16",
+      "line_number": null,
+      "name": "mcp_server",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:27:01.902900335+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "b34480853844",
+      "line_number": null,
+      "name": "src/main.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:16:48.001160064+00:00",
+      "description": "Output formatting and rendering system",
+      "file_path": "./src/output/mod.rs",
+      "id": "321f31b4d1ce",
+      "line_number": null,
+      "name": "output",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:18:19.990089740+00:00",
+      "description": "Main CLI interface",
+      "file_path": "./src/main.rs",
+      "id": "0a9156f43494",
+      "line_number": null,
+      "name": "main",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:17:12.784358817+00:00",
+      "description": "Input completion system with intelligent suggestions",
+      "file_path": "./src/input/completer.rs",
+      "id": "1e72fa9172d7",
+      "line_number": null,
+      "name": "completer",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:04:10.097168786+00:00",
+      "description": "Resource governance with memory, disk, GPU monitoring and quota enforcement",
+      "file_path": "./src/resource/mod.rs",
+      "id": "264974467493",
+      "line_number": null,
+      "name": "resource",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:08:01.317363300+00:00",
+      "description": "Core agent orchestrating LLM reasoning with tool execution, maintaining conversation state, managing tool calls through safety checker, supports checkpointing and implements observe-orient-decide-act cognitive loop",
+      "file_path": "src/agent/mod.rs",
+      "id": "bde2cd57feac",
+      "line_number": 165,
+      "name": "Agent",
+      "node_type": "struct",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:04:10.086239783+00:00",
+      "description": "Agent supervision with circuit breaker, health monitoring, and fault tolerance",
+      "file_path": "./src/supervision/mod.rs",
+      "id": "5dc0198017ea",
+      "line_number": null,
+      "name": "supervision",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:26:52.177462102+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "678b81b69b2a",
+      "line_number": null,
+      "name": "src/state.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:10:22.650660469+00:00",
+      "description": "Browser automation via Playwright - full browser control with navigation (goto, back, forward, reload, wait_for), interaction (click, type, fill, select, check, hover, press), content extraction (text, html, attribute, value, count, visible), page info (title, url, screenshot, pdf), JavaScript evaluation, multi-tab management",
+      "file_path": "src/tools/page_controller.rs",
+      "id": "570f4ce3c441",
+      "line_number": null,
+      "name": "tools::page_controller",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:21:30.841751556+00:00",
+      "description": "Analysis code graph for code understanding",
+      "file_path": "./src/analysis/code_graph.rs",
+      "id": "7dd3934a8607",
+      "line_number": null,
+      "name": "code_graph",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:16:47.990690549+00:00",
+      "description": "Input handling with command registry, prompt, highlighter, and completer",
+      "file_path": "./src/input/mod.rs",
+      "id": "fa108118cce8",
+      "line_number": null,
+      "name": "input",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:22:48.507457862+00:00",
+      "description": "Agent execution engine",
+      "file_path": "./src/agent/execution.rs",
+      "id": "d7531a71c516",
+      "line_number": null,
+      "name": "agent_execution",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:20:41.160466031+00:00",
+      "description": "Memory hierarchy for cognitive system",
+      "file_path": "./src/cognitive/memory_hierarchy.rs",
+      "id": "24ebfed7ad11",
+      "line_number": null,
+      "name": "memory_hierarchy",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:23:45.266811525+00:00",
+      "description": "Container management tool",
+      "file_path": "./src/tools/container.rs",
+      "id": "9c03655ae009",
+      "line_number": null,
+      "name": "container_tool",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:10:27.774101755+00:00",
+      "description": "Screen capture tools - screen_capture (full screen, window by title, or region by coordinates), computer_screen (region capture with base64 PNG output) for vision model analysis and screenshot automation",
+      "file_path": "src/tools/screen_capture.rs",
+      "id": "05df1eb6327b",
+      "line_number": null,
+      "name": "tools::screen_capture",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:09:22.753953975+00:00",
+      "description": "Main entry point for running agent tasks, orchestrates the full workflow from task parsing to completion",
+      "file_path": "src/agent/mod.rs",
+      "id": "d6680659381c",
+      "line_number": null,
+      "name": "Agent::run_task",
+      "node_type": "function",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:24:55.542247842+00:00",
+      "description": "UI TUI widgets",
+      "file_path": "./src/ui/tui/widgets.rs",
+      "id": "c54990c67e39",
+      "line_number": null,
+      "name": "tui_widgets",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:29:29.555895169+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "cd9cfef833a9",
+      "line_number": null,
+      "name": "src/serde_utils.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:29:29.566313914+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "61a23b218bfb",
+      "line_number": null,
+      "name": "src/types.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:03:02.225393301+00:00",
+      "description": "Personal AI workshop — local-first agentic coding harness with 70+ tools, multi-agent swarm, evolution engine, and safety features",
+      "file_path": "./Cargo.toml",
+      "id": "a36869551ed3",
+      "line_number": null,
+      "name": "selfware",
+      "node_type": "crate",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:18:19.979646092+00:00",
+      "description": "Output formatting and rendering",
+      "file_path": "./src/output/mod.rs",
+      "id": "8fa53f5f74a2",
+      "line_number": null,
+      "name": "output_main",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:04:10.075284352+00:00",
+      "description": "Event-driven hook system for PreToolUse, PostToolUse, Stop events with shell handler",
+      "file_path": "./src/hooks/mod.rs",
+      "id": "08c83091e0bb",
+      "line_number": null,
+      "name": "hooks",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:08:06.322360702+00:00",
+      "description": "API client for interacting with LLM backends (Ollama, local servers), supports streaming, token budgeting, and multiple model configurations",
+      "file_path": "src/api/mod.rs",
+      "id": "16934f756243",
+      "line_number": null,
+      "name": "ApiClient",
+      "node_type": "struct",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:21:30.831334524+00:00",
+      "description": "Session checkpoint for persistence",
+      "file_path": "./src/session/checkpoint.rs",
+      "id": "930948e2a829",
+      "line_number": null,
+      "name": "session_checkpoint",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:27:23.775276925+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "0178cfa39a04",
+      "line_number": null,
+      "name": "src/tools/process_tool.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:47:19.097210316+00:00",
+      "description": "Container operations - container_run, container_stop, container_remove, container_list, container_images, container_build, container_pull, container_exec, container_logs, compose_up, compose_down with Docker and Podman support",
+      "file_path": "src/tools/container.rs",
+      "id": "e311c45e56f2",
+      "line_number": null,
+      "name": "tools::container",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:24.405323480+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "c5730bf970c6",
+      "line_number": null,
+      "name": "src/interface/lsp_server.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:22:48.496870043+00:00",
+      "description": "Agent context management for state handling",
+      "file_path": "./src/agent/context_management.rs",
+      "id": "66490f60c2de",
+      "line_number": null,
+      "name": "context_management",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:08:52.485298656+00:00",
+      "description": "Multi-agent swarm system supporting up to 16 concurrent agents with consensus voting and role specialization",
+      "file_path": null,
+      "id": "c8193a5b68e1",
+      "line_number": null,
+      "name": "Multi-Agent Swarm",
+      "node_type": "concept",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:14.580752032+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "9765a009941f",
+      "line_number": null,
+      "name": "src/safety/safety_checker.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:48.573239645+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "45bfd19812f2",
+      "line_number": null,
+      "name": "src/kv_store/kv_query.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:41:43.320473664+00:00",
+      "description": "Tool registry with 70+ tools organized by domain (file, git, shell, container, browser, LSP, knowledge graph, vision, screen capture, process management, package management, etc.), includes validation, pagination, and async trait for tool execution",
+      "file_path": "src/tools/mod.rs",
+      "id": "85323dedf940",
+      "line_number": null,
+      "name": "tools::mod.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:14:16.857386307+00:00",
+      "description": "Error analyzer for intelligent error suggestions and classification",
+      "file_path": "src/tools/analyzer.rs",
+      "id": "a2598041c56f",
+      "line_number": null,
+      "name": "ErrorAnalyzer",
+      "node_type": "struct",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:21:30.789525483+00:00",
+      "description": "Safety checker for validation and risk assessment",
+      "file_path": "./src/safety/checker.rs",
+      "id": "c35eb98750f5",
+      "line_number": null,
+      "name": "safety_checker",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:16:47.979989683+00:00",
+      "description": "Self-healing system with executor for automatic recovery from errors and faults",
+      "file_path": "./src/self_healing.rs",
+      "id": "a9f6a6e65ba9",
+      "line_number": null,
+      "name": "self_healing",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:14:01.010015011+00:00",
+      "description": "Token budget allocator for managing context windows and preventing token limit errors",
+      "file_path": "src/cognitive/token_budget.rs",
+      "id": "a90b95e5582f",
+      "line_number": null,
+      "name": "TokenBudgetAllocator",
+      "node_type": "struct",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:11:31.758264054+00:00",
+      "description": "Browser automation tools - browser_fetch (HTML with JS or curl), browser_links (extract/filter links), browser_eval (JavaScript execution), browser_screenshot (Chrome/Chromium), browser_pdf (save page as PDF) with timeout control and wait conditions",
+      "file_path": "src/tools/browser.rs",
+      "id": "b1794cfc909f",
+      "line_number": null,
+      "name": "tools::browser",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:09:32.887413959+00:00",
+      "description": "System dependency checker for 30+ tools and LLM backend diagnostics",
+      "file_path": "src/doctor/mod.rs",
+      "id": "502348138e6f",
+      "line_number": null,
+      "name": "Doctor",
+      "node_type": "struct",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:27:23.796316892+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "e0fb36f05228",
+      "line_number": null,
+      "name": "src/tools/cargo_tool.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:22:48.549390680+00:00",
+      "description": "Cargo tool for Rust package management",
+      "file_path": "./src/tools/cargo.rs",
+      "id": "9c33e43f0b22",
+      "line_number": null,
+      "name": "cargo_tool",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:20:41.181521784+00:00",
+      "description": "Cognitive system intelligence core",
+      "file_path": "./src/cognitive/intelligence.rs",
+      "id": "5b47b0d7cd25",
+      "line_number": null,
+      "name": "intelligence",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:23:45.288104307+00:00",
+      "description": "Git tool for version control",
+      "file_path": "./src/tools/git.rs",
+      "id": "8446d7766613",
+      "line_number": null,
+      "name": "git_tool",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:42:42.276353937+00:00",
+      "description": "Security and safety systems - safety checker, security scanner (secrets detection), threat modeling (STRIDE), sandboxing (filesystem/network/resource limits), path validator, permission store, audit logger, redaction, autonomy controller (4 levels), circuit breaker pattern for API resilience",
+      "file_path": "src/safety/mod.rs",
+      "id": "5f6a4986522d",
+      "line_number": null,
+      "name": "safety::mod.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:11:11.699198914+00:00",
+      "description": "Fill-in-the-Middle (FIM) code editing - file_fim_edit for intelligent AI-powered code replacement by specifying start_line, end_line, and instruction; AI generates middle content based on surrounding context for natural code modifications",
+      "file_path": "src/tools/fim.rs",
+      "id": "84c01593a7d4",
+      "line_number": null,
+      "name": "tools::fim",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:04.423136010+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "5dc8defb1551",
+      "line_number": null,
+      "name": "src/agent/message_handling.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:11:35.813669018+00:00",
+      "description": "Language Server Protocol integration for semantic code intelligence via rust-analyzer, pyright, tsserver, gopls",
+      "file_path": "src/lsp/mod.rs",
+      "id": "a40d874b92a9",
+      "line_number": null,
+      "name": "LSP",
+      "node_type": "concept",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:37:33.998238063+00:00",
+      "description": "Main crate library defining public API - exports 23 modules (agent, api, cli, tools, safety, mcp, lsp, cognitive, etc.), shutdown coordination, feature-gated modules",
+      "file_path": "src/lib.rs",
+      "id": "40d9bdbe7e2f",
+      "line_number": null,
+      "name": "lib.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:17:12.763390083+00:00",
+      "description": "Self-healing executor for automatic recovery from errors",
+      "file_path": "./src/self_healing/executor.rs",
+      "id": "e2214aa864be",
+      "line_number": null,
+      "name": "executor",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:04.391802213+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "601e57eb4bac",
+      "line_number": null,
+      "name": "src/agent/task_runner.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:03:02.269171349+00:00",
+      "description": "Cognitive system with RSI orchestrator, knowledge graph, memory hierarchy, token budget, and self-improvement",
+      "file_path": "./src/cognitive/mod.rs",
+      "id": "93873cbf24d4",
+      "line_number": null,
+      "name": "cognitive",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:26:52.198310615+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "df15823c5b83",
+      "line_number": null,
+      "name": "src/errors.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:03:32.350303776+00:00",
+      "description": "Code analysis with vector store, BM25 search, workspace graph, and tech debt tracking",
+      "file_path": "./src/analysis/mod.rs",
+      "id": "ab35373c9f1b",
+      "line_number": null,
+      "name": "analysis",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:04.412664263+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "d4bffe6a8de4",
+      "line_number": null,
+      "name": "src/agent/agent_checkpointing.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:26:22.265688586+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "df8109d54b3f",
+      "line_number": null,
+      "name": "src/progress.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:27:01.892473615+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "98db3dafe837",
+      "line_number": null,
+      "name": "src/cli.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:13:55.686065698+00:00",
+      "description": "Hierarchical memory system for managing short-term, working, and long-term memory with token budget allocation",
+      "file_path": "src/cognitive/memory_hierarchy.rs",
+      "id": "deb01b6c462f",
+      "line_number": null,
+      "name": "HierarchicalMemory",
+      "node_type": "struct",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:46:41.805723098+00:00",
+      "description": "Knowledge graph tools - knowledge_add, knowledge_query, knowledge_relate, knowledge_remove, knowledge_clear, knowledge_export, knowledge_stats for building and querying the codebase knowledge graph",
+      "file_path": "src/tools/knowledge.rs",
+      "id": "a01e6bde173d",
+      "line_number": null,
+      "name": "tools::knowledge",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:03:02.258415276+00:00",
+      "description": "70+ tools for file operations, git, cargo, shell, browser automation, computer control, LSP, MCP, and more",
+      "file_path": "./src/tools/mod.rs",
+      "id": "347612c9ae64",
+      "line_number": null,
+      "name": "tools",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:11:07.262317351+00:00",
+      "description": "Model Context Protocol implementation supporting both client (connect to external tools) and server (expose selfware tools to other AI systems) modes",
+      "file_path": "src/mcp/mod.rs",
+      "id": "be0a20a5ff4b",
+      "line_number": null,
+      "name": "MCP",
+      "node_type": "concept",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:22:48.528506057+00:00",
+      "description": "Agent streaming support",
+      "file_path": "./src/agent/streaming.rs",
+      "id": "98b2eb2342ac",
+      "line_number": null,
+      "name": "agent_streaming",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:12:40.530285692+00:00",
+      "description": "Recursive self-improvement engine with evolutionary mutation, fitness evaluation, and learning from outcomes",
+      "file_path": "src/cognitive/self_improvement.rs",
+      "id": "237e698700c1",
+      "line_number": null,
+      "name": "SelfImprovementEngine",
+      "node_type": "struct",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:48.562789357+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "fb6ec21f36cc",
+      "line_number": null,
+      "name": "src/output/output_main.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:03:02.279774601+00:00",
+      "description": "Multi-layer safety system with path validation, sandboxing, threat modeling, audit logging, and permission grants",
+      "file_path": "./src/safety/mod.rs",
+      "id": "a6f380c40c7b",
+      "line_number": null,
+      "name": "safety",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:08:48.058880835+00:00",
+      "description": "Plan-Do-Verify-Reflect cognitive cycle for structured reasoning and task execution",
+      "file_path": null,
+      "id": "e290de605082",
+      "line_number": null,
+      "name": "PDVR Cycle",
+      "node_type": "concept",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:36:45.754630825+00:00",
+      "description": "Crate configuration with 70+ dependencies, semantic feature flags (tui, workflows, resilience, self-improvement, vlm-bench), multiple binaries and tests",
+      "file_path": "Cargo.toml",
+      "id": "31d967f46d00",
+      "line_number": null,
+      "name": "Cargo.toml",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:10:10.100865029+00:00",
+      "description": "Vision tools - vision_analyze (LLM-powered image analysis with base64 or file input), vision_compare (pixel-by-pixel and semantic image comparison with similarity scoring) for visual regression testing and design verification",
+      "file_path": "src/tools/vision.rs",
+      "id": "6e7da1caf86e",
+      "line_number": null,
+      "name": "tools::vision",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:20:41.150020942+00:00",
+      "description": "Token budget management for cognitive operations",
+      "file_path": "./src/cognitive/token_budget.rs",
+      "id": "ca368431dbf5",
+      "line_number": null,
+      "name": "token_budget",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:22:48.538937373+00:00",
+      "description": "Agent checkpointing",
+      "file_path": "./src/agent/checkpointing.rs",
+      "id": "91e224aacfe9",
+      "line_number": null,
+      "name": "agent_checkpointing",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:48:11.255644500+00:00",
+      "description": "Comprehensive error hierarchy - SelfwareError as central error type with variants for Agent, API, Tool, Safety, Session, Resource errors; supports programmatic recovery and unified error handling across all layers",
+      "file_path": "src/errors.rs",
+      "id": "120b1aefaba5",
+      "line_number": null,
+      "name": "errors.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:14.591340867+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "4361c26ab8ef",
+      "line_number": null,
+      "name": "src/safety/path_validator.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:46:51.792272712+00:00",
+      "description": "Cargo tools - cargo_check (structured error parsing), cargo_clippy (lint analysis), cargo_fmt (formatting), cargo_test (detailed test results)",
+      "file_path": "src/tools/cargo.rs",
+      "id": "7c2eaf8dadfa",
+      "line_number": null,
+      "name": "tools::cargo",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:12:08.854896159+00:00",
+      "description": "LSP tools - lsp_document_symbols (list all symbols in file), lsp_hover (type signatures, documentation), lsp_goto_definition (navigate to symbol definition), lsp_find_references (find all uses of symbol) requiring language servers (rust-analyzer, pyright, typescript-language-server, gopls)",
+      "file_path": "src/tools/lsp_tools.rs",
+      "id": "9778ca3e438f",
+      "line_number": null,
+      "name": "tools::lsp_tools",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:27:13.382920661+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "c2e2afb81bce",
+      "line_number": null,
+      "name": "src/tools/git_tool.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:27:34.575900942+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "2b06d95be3d3",
+      "line_number": null,
+      "name": "src/cognitive/token_budget.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:17:12.773904640+00:00",
+      "description": "Input command registry with command parsing and validation",
+      "file_path": "./src/input/command_registry.rs",
+      "id": "d99da5e35cb6",
+      "line_number": null,
+      "name": "command_registry",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:11:21.502356555+00:00",
+      "description": "Package management tools - pip_install, pip_freeze, pip_list for Python; npm_install, npm_run, npm_scripts for Node.js; yarn_install for Yarn; supports dev dependencies, global installs, requirements.txt, and upgrade operations",
+      "file_path": "src/tools/package.rs",
+      "id": "540db13fd1bc",
+      "line_number": null,
+      "name": "tools::package",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:14.622603169+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "0c2f6d1bebe4",
+      "line_number": null,
+      "name": "src/session/session_checkpoint.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:46:32.820013900+00:00",
+      "description": "File search tools - glob_find (pattern matching with metadata), grep_search (regex with context), symbol_search (Rust symbols), with pagination and Unicode safety",
+      "file_path": "src/tools/search.rs",
+      "id": "5dbf91ee0abc",
+      "line_number": null,
+      "name": "tools::search",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:08:13.118454910+00:00",
+      "description": "Registry of 70+ tools including file operations, git, cargo, shell, browser automation, LSP, MCP, vision, and more",
+      "file_path": "src/tools/mod.rs",
+      "id": "4691ffc45303",
+      "line_number": null,
+      "name": "ToolRegistry",
+      "node_type": "struct",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:20:41.139609317+00:00",
+      "description": "Knowledge graph implementation for cognitive system",
+      "file_path": "./src/cognitive/knowledge_graph.rs",
+      "id": "ea74a1f5b896",
+      "line_number": null,
+      "name": "cognitive_kg",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:17:37.919852125+00:00",
+      "description": "KV store query engine",
+      "file_path": "./src/kv_store/query.rs",
+      "id": "ec637cd062f9",
+      "line_number": null,
+      "name": "kv_query",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:03:32.306899060+00:00",
+      "description": "Command-line interface with interactive REPL, TUI dashboard, and CLI commands",
+      "file_path": "./src/cli.rs",
+      "id": "0b2fcfd9e446",
+      "line_number": null,
+      "name": "cli",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:10:16.136939959+00:00",
+      "description": "HTTP client tools - http_request (GET, POST, PUT, DELETE, PATCH, HEAD) with headers, body, timeout, redirect following; browser_fetch (headless browser or curl), browser_links (extract all links from page), browser_eval (JavaScript execution), browser_screenshot, browser_pdf for web automation",
+      "file_path": "src/tools/http.rs",
+      "id": "22e0e303d121",
+      "line_number": null,
+      "name": "tools::http",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:27:01.871475233+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "198bba55c188",
+      "line_number": null,
+      "name": "src/logger.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:27:01.882008384+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "97d1277a6118",
+      "line_number": null,
+      "name": "src/metrics.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:03:32.328644171+00:00",
+      "description": "Model Context Protocol client and server for tool bridging and external integration",
+      "file_path": "./src/mcp/mod.rs",
+      "id": "49b7bcc303b7",
+      "line_number": null,
+      "name": "mcp",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:24:55.521185914+00:00",
+      "description": "Agent message handling",
+      "file_path": "./src/agent/message_handling.rs",
+      "id": "8bacbdf2b1c8",
+      "line_number": null,
+      "name": "message_handling",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:43:25.198595174+00:00",
+      "description": "Session and state management - checkpointing for task resumption, caching (tool results, LLM responses with semantic matching), chat store (save/resume/delete), edit history (undo/redo), encryption (OS keychain integration), local-first coordinator for offline support",
+      "file_path": "src/session/mod.rs",
+      "id": "f38809e8c44a",
+      "line_number": null,
+      "name": "session::mod.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:24.384305260+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "4ae60f2677cc",
+      "line_number": null,
+      "name": "src/interface/api_types.rs",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T14:03:32.383015624+00:00",
+      "description": "Evolution engine for recursive self-improvement with fitness evaluation and tournament selection",
+      "file_path": "./src/evolution/mod.rs",
+      "id": "b5cb96ff0f67",
+      "line_number": null,
+      "name": "evolution",
+      "node_type": "module",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:20:41.129063081+00:00",
+      "description": "Cognitive RSI orchestrator for recursive self-improvement",
+      "file_path": "./src/cognitive/rsi_orchestrator.rs",
+      "id": "1fc3701add01",
+      "line_number": null,
+      "name": "rsi_orchestrator",
+      "node_type": "file",
+      "properties": {}
+    },
+    {
+      "created_at": "2026-03-17T15:28:34.499016367+00:00",
+      "description": null,
+      "file_path": null,
+      "id": "524983da4782",
+      "line_number": null,
+      "name": "src/self_healing/executor.rs",
+      "node_type": "file",
+      "properties": {}
+    }
+  ]
+}

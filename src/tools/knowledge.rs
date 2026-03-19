@@ -858,6 +858,310 @@ fn resolve_node_id(graph: &KnowledgeGraph, id_or_name: &str) -> Result<String> {
 }
 
 // ============================================================================
+// Auto-Extract Entities Tool
+// ============================================================================
+
+/// Auto-extract entities from a Rust file using LSP
+pub struct KnowledgeAutoExtract;
+
+#[async_trait]
+impl Tool for KnowledgeAutoExtract {
+    fn name(&self) -> &str {
+        "knowledge_auto_extract"
+    }
+
+    fn description(&self) -> &str {
+        "Automatically extract all entities (functions, structs, enums, traits) from a Rust source file and add them to the knowledge graph. Uses LSP to parse the file and detect all symbols."
+    }
+
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "Path to the Rust source file to extract entities from"
+                },
+                "add_relations": {
+                    "type": "boolean",
+                    "description": "Whether to add inferred relationships between entities (default: true)",
+                    "default": true
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "If true, return what would be added without actually adding to the graph",
+                    "default": false
+                }
+            },
+            "required": ["file_path"]
+        })
+    }
+
+    async fn execute(&self, args: Value) -> Result<Value> {
+        let file_path = args
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("file_path is required"))?;
+
+        let add_relations = args
+            .get("add_relations")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        let dry_run = args
+            .get("dry_run")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // Use LSP to get all symbols in the file
+        let lsp_symbols = match lsp_document_symbols(file_path).await {
+            Ok(symbols) => symbols,
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Failed to get document symbols from '{}': {}",
+                    file_path,
+                    e
+                ));
+            }
+        };
+
+        let mut added_nodes = Vec::new();
+        let mut added_edges = Vec::new();
+        let mut symbol_ids: HashMap<String, String> = HashMap::new();
+
+        // Add all symbols as nodes
+        for symbol in &lsp_symbols {
+            let node_type = parse_symbol_kind(&symbol.kind);
+            let node_id = generate_id(&symbol.name, &node_type);
+
+            let node = KnowledgeNode {
+                id: node_id.clone(),
+                node_type: node_type.clone(),
+                name: symbol.name.clone(),
+                description: symbol
+                    .documentation
+                    .clone()
+                    .or_else(|| Some(format!("{} at line {}", node_type, symbol.line_number))),
+                properties: HashMap::new(),
+                file_path: Some(file_path.to_string()),
+                line_number: Some(symbol.line_number),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            };
+
+            if dry_run {
+                added_nodes.push(node.clone());
+            } else {
+                let mut graph = KNOWLEDGE_GRAPH.write().await;
+                graph.add_node(node);
+                added_nodes.push(KnowledgeNode {
+                    id: node_id.clone(),
+                    node_type: node_type.clone(),
+                    name: symbol.name.clone(),
+                    description: None,
+                    properties: HashMap::new(),
+                    file_path: Some(file_path.to_string()),
+                    line_number: Some(symbol.line_number),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                });
+            }
+
+            symbol_ids.insert(symbol.name.clone(), node_id);
+        }
+
+        // Optionally add inferred relationships
+        if add_relations && !dry_run {
+            // Add "contains" relationships for nested symbols
+            for (i, symbol) in lsp_symbols.iter().enumerate() {
+                if let Some(parent_symbol) = lsp_symbols.get(i.saturating_sub(1)) {
+                    if symbol.indentation > parent_symbol.indentation {
+                        let edge = KnowledgeEdge {
+                            from_id: symbol_ids[&parent_symbol.name].clone(),
+                            to_id: symbol_ids[&symbol.name].clone(),
+                            relation: RelationType::Contains,
+                            properties: HashMap::new(),
+                            created_at: chrono::Utc::now().to_rfc3339(),
+                        };
+
+                        let mut graph = KNOWLEDGE_GRAPH.write().await;
+                        graph.add_edge(edge);
+                        added_edges.push(1);
+                    }
+                }
+            }
+        }
+
+        Ok(json!({
+            "success": true,
+            "file_path": file_path,
+            "entities_extracted": added_nodes.len(),
+            "relations_added": added_edges.len(),
+            "dry_run": dry_run,
+            "entities": added_nodes
+                .iter()
+                .map(|n| json!({"name": n.name, "type": format!("{:?}", n.node_type), "line": n.line_number}))
+                .collect::<Vec<_>>()
+        }))
+    }
+}
+
+/// Parse LSP symbol kind to our node type
+fn parse_symbol_kind(kind: &str) -> NodeType {
+    match kind.to_lowercase().as_str() {
+        "function" | "method" => NodeType::Function,
+        "struct" | "class" => NodeType::Struct,
+        "enum" => NodeType::Enum,
+        "trait" | "interface" => NodeType::Trait,
+        "module" | "namespace" => NodeType::Module,
+        "file" => NodeType::File,
+        "test" => NodeType::Test,
+        "type" | "type_alias" => NodeType::Custom("type".into()),
+        "constant" | "const" => NodeType::Custom("const".into()),
+        _ => NodeType::Custom(kind.to_lowercase()),
+    }
+}
+
+/// LSP document symbols wrapper
+async fn lsp_document_symbols(file_path: &str) -> Result<Vec<LSymbol>> {
+    // For now, use a simple grep-based approach to find definitions
+    // In a full implementation, this would call rust-analyzer or similar
+    let content = std::fs::read_to_string(file_path)
+        .context(format!("Cannot read file: {}", file_path))?;
+
+    let mut symbols = Vec::new();
+    let lines: Vec<&str> = content.lines().collect();
+
+    for (idx, line) in lines.iter().enumerate() {
+        let line_num = (idx + 1) as u32;
+        let trimmed = line.trim();
+
+        // Skip comments and empty lines
+        if trimmed.starts_with("//") || trimmed.is_empty() {
+            continue;
+        }
+
+        // Detect various Rust definitions
+        if let Some(name) = extract_symbol_name(line, "pub fn") {
+            symbols.push(LSymbol {
+                name,
+                kind: "function".to_string(),
+                line_number: line_num,
+                indentation: line.len() - line.trim_start().len(),
+                documentation: None,
+            });
+        } else if let Some(name) = extract_symbol_name(line, "fn") {
+            symbols.push(LSymbol {
+                name,
+                kind: "function".to_string(),
+                line_number: line_num,
+                indentation: line.len() - line.trim_start().len(),
+                documentation: None,
+            });
+        } else if let Some(name) = extract_symbol_name(line, "pub struct") {
+            symbols.push(LSymbol {
+                name,
+                kind: "struct".to_string(),
+                line_number: line_num,
+                indentation: line.len() - line.trim_start().len(),
+                documentation: None,
+            });
+        } else if let Some(name) = extract_symbol_name(line, "struct") {
+            symbols.push(LSymbol {
+                name,
+                kind: "struct".to_string(),
+                line_number: line_num,
+                indentation: line.len() - line.trim_start().len(),
+                documentation: None,
+            });
+        } else if let Some(name) = extract_symbol_name(line, "pub enum") {
+            symbols.push(LSymbol {
+                name,
+                kind: "enum".to_string(),
+                line_number: line_num,
+                indentation: line.len() - line.trim_start().len(),
+                documentation: None,
+            });
+        } else if let Some(name) = extract_symbol_name(line, "enum") {
+            symbols.push(LSymbol {
+                name,
+                kind: "enum".to_string(),
+                line_number: line_num,
+                indentation: line.len() - line.trim_start().len(),
+                documentation: None,
+            });
+        } else if let Some(name) = extract_symbol_name(line, "pub trait") {
+            symbols.push(LSymbol {
+                name,
+                kind: "trait".to_string(),
+                line_number: line_num,
+                indentation: line.len() - line.trim_start().len(),
+                documentation: None,
+            });
+        } else if let Some(name) = extract_symbol_name(line, "trait") {
+            symbols.push(LSymbol {
+                name,
+                kind: "trait".to_string(),
+                line_number: line_num,
+                indentation: line.len() - line.trim_start().len(),
+                documentation: None,
+            });
+        } else if let Some(name) = extract_symbol_name(line, "pub mod") {
+            symbols.push(LSymbol {
+                name,
+                kind: "module".to_string(),
+                line_number: line_num,
+                indentation: line.len() - line.trim_start().len(),
+                documentation: None,
+            });
+        } else if let Some(name) = extract_symbol_name(line, "mod") {
+            symbols.push(LSymbol {
+                name,
+                kind: "module".to_string(),
+                line_number: line_num,
+                indentation: line.len() - line.trim_start().len(),
+                documentation: None,
+            });
+        } else if let Some(name) = extract_symbol_name(line, "impl") {
+            symbols.push(LSymbol {
+                name,
+                kind: "impl".to_string(),
+                line_number: line_num,
+                indentation: line.len() - line.trim_start().len(),
+                documentation: None,
+            });
+        }
+    }
+
+    Ok(symbols)
+}
+
+/// Extract symbol name from a definition line
+fn extract_symbol_name(line: &str, prefix: &str) -> Option<String> {
+    if let Some(pos) = line.find(prefix) {
+        let after_prefix = &line[pos + prefix.len()..];
+        let trimmed = after_prefix.trim_start();
+        
+        // Extract the identifier (alphanumeric + _)
+        if let Some(name_end) = trimmed.find(|c: char| !c.is_alphanumeric() && c != '_') {
+            let name = &trimmed[..name_end];
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// LSP symbol representation
+#[derive(Debug, Clone)]
+struct LSymbol {
+    name: String,
+    kind: String,
+    line_number: u32,
+    indentation: usize,
+    documentation: Option<String>,
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

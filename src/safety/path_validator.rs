@@ -177,26 +177,52 @@ impl PathValidator {
         };
         let canonical_str = strip_unc_prefix(&canonical.to_string_lossy());
 
-        // Strict path traversal check
-        if path.contains("..") {
-            let original_parent = self
-                .working_dir
-                .canonicalize()
-                .unwrap_or_else(|_| self.working_dir.clone());
+        // Strict path traversal check - ALWAYS check, not just for ".."
+        // Absolute paths can bypass ".." checks, so we validate all paths
+        let original_parent = self
+            .working_dir
+            .canonicalize()
+            .unwrap_or_else(|_| self.working_dir.clone());
 
-            // The resolved path must be within allowed boundaries
-            let is_within_working_dir = canonical.starts_with(&original_parent);
-            let is_explicitly_allowed = self.is_path_in_allowed_list(&canonical_str, path)?;
+        // The resolved path must be within allowed boundaries
+        let is_within_working_dir = canonical.starts_with(&original_parent);
+        let is_explicitly_allowed = self.is_path_in_allowed_list(&canonical_str, path).unwrap_or(false);
 
-            if !is_within_working_dir && !is_explicitly_allowed {
-                anyhow::bail!(
-                    "Path traversal detected: {} resolves to {}",
-                    path,
-                    canonical_str
+        // Check allowed_paths configuration
+        if !self.config.allowed_paths.is_empty() {
+            // allowed_paths is configured: path must be in the allowed list
+            if !is_explicitly_allowed {
+                anyhow::bail!("Path not in allowed list: {}", canonical_str);
+            }
+            // Even if in allowed list, still check denied patterns below
+        } else {
+            // No allowed_paths configured: restrict to working directory
+            // to prevent unrestricted filesystem access.
+            if !is_within_working_dir {
+                tracing::warn!(
+                    "No allowed_paths configured — restricting to working directory. \
+                     Path '{}' is outside '{}'",
+                    canonical_str,
+                    original_parent.display()
                 );
+                // Distinguish between traversal attack vs absolute path access
+                if path.contains("..") {
+                    anyhow::bail!(
+                        "Path traversal detected: {} resolves to {}",
+                        path,
+                        canonical_str
+                    );
+                } else {
+                    anyhow::bail!(
+                        "Path '{}' is outside working directory and no allowed_paths configured",
+                        canonical_str
+                    );
+                }
             }
         }
 
+        // Always validate denied patterns, even for paths in allowed_paths
+        // This prevents accidentally allowing dangerous paths via overly broad allowed_paths
         // Check against denied patterns using both original and canonical paths.
         for pattern in &self.config.denied_paths {
             let glob_pattern = glob::Pattern::new(pattern)?;
@@ -222,27 +248,26 @@ impl PathValidator {
             }
         }
 
-        if self.config.allowed_paths.is_empty() {
-            // No allowed_paths configured: restrict to working directory
-            // to prevent unrestricted filesystem access.
-            let working_dir_canonical = self
-                .working_dir
-                .canonicalize()
-                .unwrap_or_else(|_| self.working_dir.clone());
-            if !canonical.starts_with(&working_dir_canonical) {
-                tracing::warn!(
-                    "No allowed_paths configured — restricting to working directory. \
-                     Path '{}' is outside '{}'",
-                    canonical_str,
-                    working_dir_canonical.display()
-                );
+        // Check for dangerous absolute paths that should never be allowed
+        // even if they match allowed_paths (defense in depth)
+        let dangerous_system_paths = [
+            "/etc/passwd",
+            "/etc/shadow",
+            "/etc/sudoers",
+            "/etc/ssh/",
+            "/root/",
+            "/proc/",
+            "/sys/",
+            "/boot/",
+            "/var/log/",
+        ];
+        for dangerous in &dangerous_system_paths {
+            if canonical_str.starts_with(dangerous) {
                 anyhow::bail!(
-                    "Path '{}' is outside working directory and no allowed_paths configured",
+                    "Access to protected system path is not allowed: {}",
                     canonical_str
                 );
             }
-        } else if !self.is_path_in_allowed_list(&canonical_str, path)? {
-            anyhow::bail!("Path not in allowed list: {}", canonical_str);
         }
 
         Ok(())

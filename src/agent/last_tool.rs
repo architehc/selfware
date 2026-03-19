@@ -3,8 +3,9 @@
 //! During normal operation, tool output is shown as concise one-liner semantic
 //! summaries.  The `/last` command lets users inspect the full output without
 //! restarting in `--verbose` mode.
-
-use std::sync::Mutex;
+//!
+//! The output is stored per-agent (on the `Agent` struct) rather than in
+//! process-global state, which makes testing and multi-agent scenarios safe.
 
 /// Captured output from the most recent tool execution.
 #[derive(Debug, Clone, Default)]
@@ -23,121 +24,27 @@ pub struct LastToolOutput {
     pub duration_ms: u64,
 }
 
-static LAST_OUTPUT: Mutex<Option<LastToolOutput>> = Mutex::new(None);
-
-/// Store the output of the most recent tool execution.
-pub fn store(output: LastToolOutput) {
-    if let Ok(mut guard) = LAST_OUTPUT.lock() {
-        *guard = Some(output);
+impl super::Agent {
+    /// Store the output of the most recent tool execution.
+    pub fn store_last_tool_output(&mut self, output: LastToolOutput) {
+        self.last_tool_output = Some(output);
     }
-}
 
-/// Retrieve the stored output (cloned).  Returns `None` if no tool has been
-/// executed yet or if the lock is poisoned.
-pub fn retrieve() -> Option<LastToolOutput> {
-    LAST_OUTPUT.lock().ok().and_then(|g| g.clone())
-}
+    /// Retrieve the stored output (cloned).  Returns `None` if no tool has been
+    /// executed yet.
+    pub fn retrieve_last_tool_output(&self) -> Option<LastToolOutput> {
+        self.last_tool_output.clone()
+    }
 
-/// Clear the stored output (mainly useful for tests).
-#[cfg(test)]
-pub fn clear() {
-    if let Ok(mut guard) = LAST_OUTPUT.lock() {
-        *guard = None;
+    /// Clear the stored output.
+    pub fn clear_last_tool_output(&mut self) {
+        self.last_tool_output = None;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Tests that mutate the global `LAST_OUTPUT` must not run concurrently.
-    /// This mutex serialises them without adding an external dependency.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
-
-    #[test]
-    fn store_and_retrieve_round_trip() {
-        let _g = TEST_LOCK.lock().unwrap();
-        clear();
-
-        assert!(retrieve().is_none(), "should start empty");
-
-        store(LastToolOutput {
-            tool_name: "shell_exec".into(),
-            summary: "Ran: cargo check (exit 0)".into(),
-            full_output: r#"{"exit_code":0,"stdout":"ok","stderr":""}"#.into(),
-            success: true,
-            exit_code: Some(0),
-            duration_ms: 123,
-        });
-
-        let out = retrieve().expect("should have stored output");
-        assert_eq!(out.tool_name, "shell_exec");
-        assert_eq!(out.summary, "Ran: cargo check (exit 0)");
-        assert!(out.success);
-        assert_eq!(out.exit_code, Some(0));
-        assert_eq!(out.duration_ms, 123);
-    }
-
-    #[test]
-    fn latest_store_wins() {
-        let _g = TEST_LOCK.lock().unwrap();
-        clear();
-
-        store(LastToolOutput {
-            tool_name: "file_read".into(),
-            summary: "Read src/main.rs".into(),
-            full_output: "first".into(),
-            success: true,
-            exit_code: None,
-            duration_ms: 10,
-        });
-
-        store(LastToolOutput {
-            tool_name: "shell_exec".into(),
-            summary: "Ran: ls".into(),
-            full_output: "second".into(),
-            success: true,
-            exit_code: Some(0),
-            duration_ms: 20,
-        });
-
-        let out = retrieve().expect("should have stored output");
-        assert_eq!(out.tool_name, "shell_exec");
-        assert_eq!(out.full_output, "second");
-    }
-
-    #[test]
-    fn retrieve_clones_not_takes() {
-        let _g = TEST_LOCK.lock().unwrap();
-        clear();
-
-        store(LastToolOutput {
-            tool_name: "grep_search".into(),
-            summary: "Searched 'foo'".into(),
-            full_output: "matches".into(),
-            success: true,
-            exit_code: None,
-            duration_ms: 5,
-        });
-
-        let _first = retrieve();
-        let second = retrieve();
-        assert!(
-            second.is_some(),
-            "retrieve should not consume the stored value"
-        );
-    }
-
-    #[test]
-    fn clear_resets_state() {
-        let _g = TEST_LOCK.lock().unwrap();
-        store(LastToolOutput {
-            tool_name: "test".into(),
-            ..Default::default()
-        });
-        clear();
-        assert!(retrieve().is_none());
-    }
 
     #[test]
     fn default_last_tool_output() {

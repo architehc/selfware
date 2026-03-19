@@ -10,5 +10,6 @@ mod test_context;
 mod test_error_paths;
 mod test_file_extended;
 mod test_git;
+mod test_regex_check;
 mod test_safety;
 mod test_tools;

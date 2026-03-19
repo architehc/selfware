@@ -431,6 +431,7 @@ pub fn run_tui(model: &str) -> Result<Vec<String>> {
     let mut terminal = TuiTerminal::new()?;
     let mut app = App::new(model);
     let mut user_inputs = Vec::new();
+    let mut quit_armed_at: Option<Instant> = None;
 
     // Create layout engine for advanced pane management
     let mut layout_engine = LayoutEngine::new();
@@ -485,43 +486,56 @@ pub fn run_tui(model: &str) -> Result<Vec<String>> {
         } // end redraw throttle
 
         // Handle events
-        if let Some(event) = read_event(100)? {
+        if let Some(Event::Key(key)) = read_event(100)? {
             needs_redraw = true; // Any event triggers a redraw
-            if is_quit(&event) {
-                break;
+
+            // Check if we're in input mode (chatting with non-empty input)
+            let in_input_mode = app.state == AppState::Chatting;
+            let allow_q_quit = !in_input_mode || app.input.is_empty();
+
+            // Use evaluate_quit_key for consistent quit handling:
+            // - Ctrl+C: immediate quit
+            // - 'q': armed quit (press twice within 2 seconds)
+            match evaluate_quit_key(&key, allow_q_quit, &mut quit_armed_at) {
+                QuitDecision::Quit => {
+                    break;
+                }
+                QuitDecision::Armed => {
+                    app.status = "Press q again within 2s to quit (or Ctrl+C to quit now)".to_string();
+                    continue;
+                }
+                QuitDecision::None => {}
             }
 
-            if let Event::Key(key) = event {
-                match key.code {
-                    KeyCode::Enter => {
-                        if let Some(input) = app.on_enter() {
-                            if input.starts_with('/') {
-                                // Command
-                                app.add_user_message(&input);
-                                app.status = format!("Executed: {}", input);
-                            } else {
-                                // Regular message
-                                app.add_user_message(&input);
-                                user_inputs.push(input);
-                            }
+            match key.code {
+                KeyCode::Enter => {
+                    if let Some(input) = app.on_enter() {
+                        if input.starts_with('/') {
+                            // Command
+                            app.add_user_message(&input);
+                            app.status = format!("Executed: {}", input);
+                        } else {
+                            // Regular message
+                            app.add_user_message(&input);
+                            user_inputs.push(input);
                         }
                     }
-                    KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
-                        app.toggle_palette();
-                    }
-                    KeyCode::Char(c) => app.on_char(c),
-                    KeyCode::Backspace => app.on_backspace(),
-                    KeyCode::Left => app.on_left(),
-                    KeyCode::Right => app.on_right(),
-                    KeyCode::Up => app.on_up(),
-                    KeyCode::Down => app.on_down(),
-                    KeyCode::Esc => app.on_escape(),
-                    KeyCode::Tab => {
-                        // Cycle through panes
-                        layout_engine.focus_next();
-                    }
-                    _ => {}
                 }
+                KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
+                    app.toggle_palette();
+                }
+                KeyCode::Char(c) => app.on_char(c),
+                KeyCode::Backspace => app.on_backspace(),
+                KeyCode::Left => app.on_left(),
+                KeyCode::Right => app.on_right(),
+                KeyCode::Up => app.on_up(),
+                KeyCode::Down => app.on_down(),
+                KeyCode::Esc => app.on_escape(),
+                KeyCode::Tab => {
+                    // Cycle through panes
+                    layout_engine.focus_next();
+                }
+                _ => {}
             }
         }
     }
@@ -537,6 +551,7 @@ where
 {
     let mut terminal = TuiTerminal::new()?;
     let mut app = App::new(model);
+    let mut quit_armed_at: Option<Instant> = None;
 
     // Throttle redraws to ~30fps to avoid wasting CPU
     let min_draw_interval = Duration::from_millis(33);
@@ -552,36 +567,49 @@ where
             needs_redraw = false;
         }
 
-        if let Some(event) = read_event(100)? {
+        if let Some(Event::Key(key)) = read_event(100)? {
             needs_redraw = true;
-            if is_quit(&event) {
-                break;
+
+            // Check if we're in input mode (chatting with non-empty input)
+            let in_input_mode = app.state == AppState::Chatting;
+            let allow_q_quit = !in_input_mode || app.input.is_empty();
+
+            // Use evaluate_quit_key for consistent quit handling:
+            // - Ctrl+C: immediate quit
+            // - 'q': armed quit (press twice within 2 seconds)
+            match evaluate_quit_key(&key, allow_q_quit, &mut quit_armed_at) {
+                QuitDecision::Quit => {
+                    break;
+                }
+                QuitDecision::Armed => {
+                    app.status = "Press q again within 2s to quit (or Ctrl+C to quit now)".to_string();
+                    continue;
+                }
+                QuitDecision::None => {}
             }
 
-            if let Event::Key(key) = event {
-                match key.code {
-                    KeyCode::Enter => {
-                        if let Some(input) = app.on_enter() {
-                            app.add_user_message(&input);
+            match key.code {
+                KeyCode::Enter => {
+                    if let Some(input) = app.on_enter() {
+                        app.add_user_message(&input);
 
-                            // Call handler and get response
-                            if let Some(response) = handler(&input) {
-                                app.add_assistant_message(&response);
-                            }
+                        // Call handler and get response
+                        if let Some(response) = handler(&input) {
+                            app.add_assistant_message(&response);
                         }
                     }
-                    KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
-                        app.toggle_palette();
-                    }
-                    KeyCode::Char(c) => app.on_char(c),
-                    KeyCode::Backspace => app.on_backspace(),
-                    KeyCode::Left => app.on_left(),
-                    KeyCode::Right => app.on_right(),
-                    KeyCode::Up => app.on_up(),
-                    KeyCode::Down => app.on_down(),
-                    KeyCode::Esc => app.on_escape(),
-                    _ => {}
                 }
+                KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
+                    app.toggle_palette();
+                }
+                KeyCode::Char(c) => app.on_char(c),
+                KeyCode::Backspace => app.on_backspace(),
+                KeyCode::Left => app.on_left(),
+                KeyCode::Right => app.on_right(),
+                KeyCode::Up => app.on_up(),
+                KeyCode::Down => app.on_down(),
+                KeyCode::Esc => app.on_escape(),
+                _ => {}
             }
         }
     }
