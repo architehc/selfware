@@ -1676,6 +1676,41 @@ impl Agent {
                             native_tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
                         );
                     }
+                    // Cache storage: store the successful streaming response
+                    {
+                        use crate::session::cache::LlmCacheEntry;
+                        use std::collections::hash_map::DefaultHasher;
+                        use std::hash::{Hash, Hasher};
+                        
+                        let mut hasher = DefaultHasher::new();
+                        format!("{:?}", request_messages).hash(&mut hasher);
+                        let context_hash = hasher.finish();
+                        
+                        // Estimate token usage for streaming responses
+                        let input_tokens = request_messages
+                            .iter()
+                            .map(|m| m.content.text().len() / 4) // Rough estimate
+                            .sum::<usize>() as u32;
+                        let output_tokens = (content.len() / 4) as u32; // Rough estimate
+                        
+                        let entry = LlmCacheEntry {
+                            id: format!("cache_{}", context_hash),
+                            prompt: format!("{:?}", request_messages),
+                            embedding: vec![], // Empty embedding for non-semantic cache entries
+                            response: content.clone(),
+                            model: self.config.model.clone(),
+                            input_tokens,
+                            output_tokens,
+                            created_at: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
+                            hit_count: 0,
+                            context_hash,
+                            file_paths: vec![],
+                        };
+                        self.cache_manager.llm_cache.store(entry);
+                    }
                     (content, reasoning)
                 }
                 Err(stream_err) => {
@@ -1684,16 +1719,65 @@ impl Agent {
                         stream_err
                     );
 
-                    let response = self
-                        .client
-                        .chat(request_messages, self.api_tools(), ThinkingMode::Enabled)
-                        .await
-                        .with_context(|| {
-                            format!(
-                                "Streaming failed: {}. Non-streaming fallback request also failed",
-                                stream_err
-                            )
-                        });
+                    // Cache lookup: hash the request messages and check for cached response
+                    let context_hash = {
+                        use std::collections::hash_map::DefaultHasher;
+                        use std::hash::{Hash, Hasher};
+                        let mut hasher = DefaultHasher::new();
+                        format!("{:?}", request_messages).hash(&mut hasher);
+                        hasher.finish()
+                    };
+                    
+                    // Store the prompt string for later caching after successful response
+                    let prompt_string = format!("{:?}", request_messages);
+                    
+                    // Try to get cached response
+                    let cached = self.cache_manager.llm_cache.lookup(
+                        &prompt_string,
+                        &[], // embedding would go here
+                        context_hash,
+                    );
+                    
+                    let response: Result<crate::api::types::ChatResponse, _> = if let Some(cached_entry) = cached {
+                        info!("Cache HIT for LLM response");
+                        // Wrap cached response in ChatResponse structure
+                        Ok(crate::api::types::ChatResponse {
+                            id: cached_entry.id,
+                            object: "chat.completion".to_string(),
+                            created: cached_entry.created_at,
+                            model: cached_entry.model,
+                            choices: vec![crate::api::types::Choice {
+                                index: 0,
+                                message: crate::api::types::Message {
+                                    role: "assistant".to_string(),
+                                    content: crate::api::types::MessageContent::Text(cached_entry.response),
+                                    reasoning_content: None,
+                                    tool_calls: None,
+                                    tool_call_id: None,
+                                    name: None,
+                                },
+                                reasoning_content: None,
+                                finish_reason: Some("stop".to_string()),
+                            }],
+                            usage: crate::api::types::Usage {
+                                prompt_tokens: cached_entry.input_tokens as usize,
+                                completion_tokens: cached_entry.output_tokens as usize,
+                                total_tokens: (cached_entry.input_tokens + cached_entry.output_tokens) as usize,
+                            },
+                        })
+                    } else {
+                        info!("Cache MISS for LLM response, calling API");
+                        self
+                            .client
+                            .chat(request_messages, self.api_tools(), ThinkingMode::Enabled)
+                            .await
+                            .with_context(|| {
+                                format!(
+                                    "Streaming failed: {}. Non-streaming fallback request also failed",
+                                    stream_err
+                                )
+                            })
+                    };
                     let response = match response {
                         Ok(response) => response,
                         Err(e) => {
@@ -1722,6 +1806,31 @@ impl Agent {
                     let content = message.content.text().to_string();
                     let reasoning = message.reasoning_content.clone();
 
+                    // Cache storage: store the successful response
+                    // Note: context_hash and prompt_string were computed before the API call
+                    {
+                        use crate::session::cache::LlmCacheEntry;
+                        
+                        let usage = &response.usage;
+                        let entry = LlmCacheEntry {
+                            id: format!("cache_{}", context_hash),
+                            prompt: prompt_string,
+                            embedding: vec![], // Empty embedding for non-semantic cache entries
+                            response: content.clone(),
+                            model: response.model.clone(),
+                            input_tokens: usage.prompt_tokens as u32,
+                            output_tokens: usage.completion_tokens as u32,
+                            created_at: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
+                            hit_count: 0,
+                            context_hash,
+                            file_paths: vec![],
+                        };
+                        self.cache_manager.llm_cache.store(entry);
+                    }
+
                     if self.config.agent.native_function_calling && message.tool_calls.is_some() {
                         native_tool_calls = message.tool_calls.clone();
                         info!(
@@ -1747,10 +1856,59 @@ impl Agent {
                 }
             }
         } else {
-            let response = self
-                .client
-                .chat(request_messages, self.api_tools(), ThinkingMode::Enabled)
-                .await;
+            // Cache lookup for non-streaming path
+            let context_hash = {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                format!("{:?}", request_messages).hash(&mut hasher);
+                hasher.finish()
+            };
+            
+            let prompt_string = format!("{:?}", request_messages);
+            
+            // Try to get cached response
+            let cached = self.cache_manager.llm_cache.lookup(
+                &prompt_string,
+                &[],
+                context_hash,
+            );
+            
+            let response = if let Some(cached_entry) = &cached {
+                info!("Cache HIT for non-streaming LLM response");
+                // Wrap cached response in ChatResponse structure
+                Ok(crate::api::types::ChatResponse {
+                    id: cached_entry.id.clone(),
+                    object: "chat.completion".to_string(),
+                    created: cached_entry.created_at,
+                    model: cached_entry.model.clone(),
+                    choices: vec![crate::api::types::Choice {
+                        index: 0,
+                        message: crate::api::types::Message {
+                            role: "assistant".to_string(),
+                            content: crate::api::types::MessageContent::Text(cached_entry.response.clone()),
+                            reasoning_content: None,
+                            tool_calls: None,
+                            tool_call_id: None,
+                            name: None,
+                        },
+                        reasoning_content: None,
+                        finish_reason: Some("stop".to_string()),
+                    }],
+                    usage: crate::api::types::Usage {
+                        prompt_tokens: cached_entry.input_tokens as usize,
+                        completion_tokens: cached_entry.output_tokens as usize,
+                        total_tokens: (cached_entry.input_tokens + cached_entry.output_tokens) as usize,
+                    },
+                })
+            } else {
+                info!("Cache MISS for non-streaming LLM response, calling API");
+                self
+                    .client
+                    .chat(request_messages.clone(), self.api_tools(), ThinkingMode::Enabled)
+                    .await
+            };
+            
             let response = match response {
                 Ok(response) => response,
                 Err(e) => {
@@ -1778,6 +1936,31 @@ impl Agent {
             let message = choice.message;
             let content = message.content.text().to_string();
             let reasoning = message.reasoning_content.clone();
+            
+            // Cache storage: store the successful non-streaming response
+            // Only store if we actually called the API (not a cache hit)
+            if cached.is_none() {
+                use crate::session::cache::LlmCacheEntry;
+                
+                let usage = &response.usage;
+                let entry = LlmCacheEntry {
+                    id: format!("cache_{}", context_hash),
+                    prompt: prompt_string,
+                    embedding: vec![], // Empty embedding for non-semantic cache entries
+                    response: content.clone(),
+                    model: response.model.clone(),
+                    input_tokens: usage.prompt_tokens as u32,
+                    output_tokens: usage.completion_tokens as u32,
+                    created_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    hit_count: 0,
+                    context_hash,
+                    file_paths: vec![],
+                };
+                self.cache_manager.llm_cache.store(entry);
+            }
 
             if self.config.agent.native_function_calling && message.tool_calls.is_some() {
                 native_tool_calls = message.tool_calls.clone();
