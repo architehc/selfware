@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! Permission grants for tool execution.
 //!
 //! Allows users to pre-authorize specific tools/patterns with optional
@@ -6,7 +5,6 @@
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use tracing::{debug, info};
 
 /// A pre-authorized permission grant for tool execution.

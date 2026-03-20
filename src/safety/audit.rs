@@ -1,10 +1,8 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! Audit logging for tool executions and agent actions.
 //!
 //! Writes structured JSONL audit events to `~/.selfware/audit/YYYY-MM-DD.jsonl`.
 //! Uses an mpsc channel for buffered, non-blocking writes.
 
-use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

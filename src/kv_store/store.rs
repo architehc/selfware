@@ -1,5 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
-
 use crate::kv_store::entry::Entry;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -85,7 +83,7 @@ impl KvStore {
         let entry = Entry::new(key.clone(), value);
         self.data.insert(key.clone(), entry);
 
-        if let Some(ref path) = self.path {
+        if let Some(ref _path) = self.path {
             self.save()?;
         }
 
@@ -98,7 +96,7 @@ impl KvStore {
         let entry = Entry::new(key.clone(), value);
         self.data.insert(key.clone(), entry);
 
-        if let Some(ref path) = self.path {
+        if let Some(ref _path) = self.path {
             self.save()?;
         }
 
@@ -110,7 +108,7 @@ impl KvStore {
         let key = key.into();
         self.data.insert(key.clone(), entry);
 
-        if let Some(ref path) = self.path {
+        if let Some(ref _path) = self.path {
             self.save()?;
         }
 
@@ -143,7 +141,7 @@ impl KvStore {
         match self.data.remove(key) {
             Some(entry) => {
                 let value = entry.value.clone();
-                if let Some(ref path) = self.path {
+                if let Some(ref _path) = self.path {
                     self.save()?;
                 }
                 Ok(value)
@@ -165,7 +163,7 @@ impl KvStore {
     /// Clear all entries from the store
     pub fn clear(&mut self) -> Result<()> {
         self.data.clear();
-        if let Some(ref path) = self.path {
+        if let Some(ref _path) = self.path {
             self.save()?;
         }
         Ok(())
