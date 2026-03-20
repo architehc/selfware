@@ -120,10 +120,24 @@ impl Agent {
             Ok(ActionPrompt::Corrected) => return Ok(false),
             Ok(ActionPrompt::NotNeeded) => {}
             Ok(ActionPrompt::ForceFallback) => {
-                // The model repeatedly described intent without calling tools.
-                // Try to extract what the model wanted to do and execute it,
-                // or fall back to a useful discovery action.
                 let (tool_name, tool_args) = self.pick_smart_fallback(&content);
+
+                // If the only fallback is directory_tree (nothing new to load),
+                // the model is stuck and should just answer with what it has.
+                if tool_name == super::FALLBACK_TOOL_NAME {
+                    info!("No useful fallback available — prompting model to finalize");
+                    self.messages.push(crate::api::types::Message::user(
+                        "<selfware_system_directive>\n\
+                         You have been unable to call tools. You already have the codebase \
+                         overview and any files you previously read in context.\n\
+                         Provide your answer now based on what you already know. \
+                         Do not describe what you would do — just give the answer.\n\
+                         </selfware_system_directive>"
+                            .to_string(),
+                    ));
+                    return Ok(false);
+                }
+
                 info!("Smart fallback: {} {}", tool_name, tool_args);
                 let fallback: Vec<CollectedToolCall> = vec![(
                     tool_name.clone(),

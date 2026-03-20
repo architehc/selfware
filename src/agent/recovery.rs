@@ -491,68 +491,37 @@ Try ONE of these strategies:\
     /// always running `directory_tree .`. Extracts file paths, search queries,
     /// or commands the model mentioned but didn't execute.
     pub(super) fn pick_smart_fallback(&self, content: &str) -> (String, String) {
-        let lower = content.to_lowercase();
         let stripped = strip_think_blocks(content);
 
         // Try to extract a file path the model mentioned wanting to read.
         if let Some(path) = extract_mentioned_path(&stripped) {
-            return (
-                "file_read".to_string(),
-                format!(r#"{{"path":"{}"}}"#, path),
-            );
-        }
-
-        // If model mentions running cargo explicitly (not just mentioning it).
-        if lower.contains("cargo check") || lower.contains("cargo test") || lower.contains("cargo build") {
-            return (
-                "shell_exec".to_string(),
-                r#"{"command":"cargo check"}"#.to_string(),
-            );
-        }
-
-        // If the model mentions searching/grep with a clear pattern.
-        if (lower.contains("search for") || lower.contains("grep ") || lower.contains("find "))
-            && !lower.contains("find all") // "find all files" is not a grep query
-        {
-            if let Some(pattern) = extract_quoted_string(&stripped) {
-                // Only use grep if the pattern looks like a search term, not a command.
-                if !pattern.contains("cargo") && !pattern.contains("check") && pattern.len() < 100 {
-                    return (
-                        "grep_search".to_string(),
-                        format!(
-                            r#"{{"pattern":"{}","path":".","recursive":true}}"#,
-                            pattern
-                        ),
-                    );
-                }
+            // Only if not already loaded at L3.
+            let p = std::path::Path::new(&path);
+            if self.context_map.level_of(p)
+                != Some(super::context_map::ContextLevel::Full)
+            {
+                return (
+                    "file_read".to_string(),
+                    format!(r#"{{"path":"{}"}}"#, path),
+                );
             }
         }
 
-        // Use context map to pick a relevant file NOT already loaded at L3.
+        // Pick the first relevant file NOT already loaded at L3.
         let relevant = self.context_map.find_relevant_files(content);
         for (path, _score) in &relevant {
-            // Skip files already fully loaded — reading them again is useless.
             if self.context_map.level_of(path)
-                == Some(super::context_map::ContextLevel::Full)
+                != Some(super::context_map::ContextLevel::Full)
             {
-                continue;
+                let path_str = path.to_string_lossy();
+                return (
+                    "file_read".to_string(),
+                    format!(r#"{{"path":"{}"}}"#, path_str),
+                );
             }
-            let path_str = path.to_string_lossy();
-            return (
-                "file_read".to_string(),
-                format!(r#"{{"path":"{}"}}"#, path_str),
-            );
         }
 
-        // If all relevant files are loaded, try glob to discover more.
-        if !relevant.is_empty() {
-            return (
-                "glob_find".to_string(),
-                r#"{"pattern":"src/**/*.rs","path":"."}"#.to_string(),
-            );
-        }
-
-        // Default fallback.
+        // Default: list the project structure (only useful once, but safe).
         (
             super::FALLBACK_TOOL_NAME.to_string(),
             super::FALLBACK_TOOL_ARGS.to_string(),
