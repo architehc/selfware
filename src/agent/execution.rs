@@ -144,6 +144,7 @@ impl Agent {
                 }
 
                 info!("Smart fallback: {} {}", tool_name, tool_args);
+                output::smart_fallback_action(&tool_name, &tool_args);
                 let fallback: Vec<CollectedToolCall> = vec![(tool_name.clone(), tool_args, None)];
                 self.execute_tool_batch(fallback).await?;
                 self.messages.push(crate::api::types::Message::user(format!(

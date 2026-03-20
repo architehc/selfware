@@ -676,10 +676,70 @@ pub(crate) fn intent_without_action() {
         let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         print!(
             "\r\x1b[2K{}\n",
-            "🔄 Model described intent but didn't act - prompting for action...".bright_yellow()
+            "🔄 Model described intent but didn't act - prompting for action..."
+                .bright_yellow()
         );
         io::stdout().flush().ok();
     }
+}
+
+/// Show detailed no-action recovery info (verbose mode or when content is short).
+pub(crate) fn intent_without_action_detail(
+    model_said: &str,
+    correction: &str,
+    attempt: usize,
+    total: usize,
+) {
+    if is_tui_active() || is_compact() {
+        return;
+    }
+    if !is_verbose() {
+        return;
+    }
+    let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Show what the model said (truncated)
+    let preview: String = model_said.chars().take(120).collect();
+    let truncated = if model_said.len() > 120 { "…" } else { "" };
+    print!(
+        "\r\x1b[2K  {} {}{}\n",
+        "Model:".dimmed(),
+        preview.dimmed(),
+        truncated.dimmed()
+    );
+
+    // Show what correction is being sent
+    let corr_preview: String = correction
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(100)
+        .collect();
+    print!(
+        "\r\x1b[2K  {} {} ({}/{})\n",
+        "Action:".bright_yellow(),
+        corr_preview,
+        attempt,
+        total
+    );
+    io::stdout().flush().ok();
+}
+
+/// Show what the smart fallback decided to do.
+pub(crate) fn smart_fallback_action(tool_name: &str, tool_args: &str) {
+    if is_tui_active() || is_compact() {
+        return;
+    }
+    let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let args_preview: String = tool_args.chars().take(80).collect();
+    print!(
+        "\r\x1b[2K  {} {} {}\n",
+        "↪ Auto:".bright_cyan(),
+        tool_name.bright_cyan(),
+        args_preview.dimmed()
+    );
+    io::stdout().flush().ok();
 }
 
 /// Print final answer

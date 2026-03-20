@@ -331,6 +331,12 @@ Try ONE of these strategies:\
                 "Forcing deterministic fallback tool after {} failed text prompts",
                 self.consecutive_no_action_prompts
             );
+            crate::output::intent_without_action_detail(
+                content,
+                "→ Forcing automatic tool execution",
+                self.consecutive_no_action_prompts,
+                MAX_TOTAL_NO_ACTION_PROMPTS,
+            );
             return Ok(ActionPrompt::ForceFallback);
         }
 
@@ -338,6 +344,12 @@ Try ONE of these strategies:\
         info!(
             "Detected intent without action, prompting model to use tools (count={})",
             self.consecutive_no_action_prompts
+        );
+        crate::output::intent_without_action_detail(
+            content,
+            &correction,
+            self.consecutive_no_action_prompts,
+            MAX_TOTAL_NO_ACTION_PROMPTS,
         );
         self.messages.push(Message::user(correction));
         Ok(ActionPrompt::Corrected)
