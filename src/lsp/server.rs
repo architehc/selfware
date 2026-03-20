@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use url::Url;
 
 #[derive(Debug, Deserialize)]

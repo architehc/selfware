@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! LSP tool wrappers for the agent's tool registry.
 //!
 //! Provides `LspGotoDefinitionTool`, `LspFindReferencesTool`,
@@ -12,7 +11,7 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
-use tracing::info;
+
 
 use super::Tool;
 use crate::lsp::LspClient;

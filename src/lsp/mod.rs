@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! Language Server Protocol (LSP) client for semantic code intelligence.
 //!
 //! Provides go-to-definition, find-references, document symbols, hover, and
