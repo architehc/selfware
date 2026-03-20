@@ -196,19 +196,18 @@ pub async fn into_channel(self) -> Result<mpsc::Receiver<Result<StreamChunk>>> {
 
 ## 🟢 MEDIUM: Fix When Convenient
 
-### 7. Remove Dead Code
+### 7. Remove Dead Code ✅ COMPLETED
 
 **File:** `src/config/typed.rs`
 
-This entire file (1,168 lines) is unused. Either:
-- Option A: Remove it entirely
-- Option B: Integrate it to replace `mod.rs`
+**Status:** File was removed in commit `132c4e5`.
 
-If removing:
-```bash
-rm src/config/typed.rs
-# Remove from src/config/mod.rs module declarations
-```
+The 1,168 line schema-based configuration system (`ConfigStore`, `ConfigSchema`, `FieldSchema`) was unused. The codebase now uses `src/config/mod.rs` exclusively for configuration.
+
+**Verification:**
+- `cargo check` passes with no errors
+- `cargo build` succeeds
+- No remaining references to the typed config system
 
 ---
 
@@ -276,7 +275,7 @@ binary_size_mb: measure_binary_size().await?,
 - [ ] Add config validation
 - [ ] Add API spawning limits
 - [ ] Fix token cache contention
-- [ ] Remove or integrate `typed.rs`
+- [x] Remove or integrate `typed.rs`
 - [ ] Fix error type detection
 - [ ] Implement actual fitness measurement
 

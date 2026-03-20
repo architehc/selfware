@@ -146,6 +146,27 @@ impl Agent {
         }
 
         if tool_calls.is_empty() {
+            // Detect repeated identical responses — the model is stuck producing
+            // the same completion that keeps getting rejected by the gate.
+            if content == self.last_assistant_response && !content.is_empty() {
+                self.consecutive_no_action_prompts += 1;
+                if self.consecutive_no_action_prompts >= 3 {
+                    // Accept the response after 3 identical completions — the model
+                    // genuinely believes the task is done but the gate keeps rejecting.
+                    info!(
+                        "Accepting repeated completion after {} identical responses",
+                        self.consecutive_no_action_prompts
+                    );
+                    let clean = super::recovery::strip_think_blocks(&content).trim().to_string();
+                    output::final_answer(&clean);
+                    self.last_assistant_response = clean;
+                    return Ok(true);
+                }
+            } else {
+                // Different response — store it for comparison.
+                self.last_assistant_response = content.clone();
+            }
+
             // Reject confused meta-reasoning before treating as completion
             if super::verification::is_confused_response(&content) {
                 info!("Rejected confused meta-reasoning response");

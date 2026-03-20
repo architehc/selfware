@@ -85,7 +85,6 @@ src/
 │
 ├── config/         # Configuration management
 │   ├── mod.rs               # Main config (1,000+ lines)
-│   ├── typed.rs             # Schema-based config (UNUSED - 1,168 lines)
 │   └── resources.rs         # Resource limits
 │
 ├── session/        # Persistence
@@ -191,7 +190,7 @@ system_tests/
 | Blocking I/O in async | 2 | `agent/execution.rs`, `agent/checkpointing.rs` |
 | Security bypass | 1 | `tools/file.rs` |
 | Prompt injection | 1 | `tools/fim.rs` |
-| Stubbed functionality | 2 | `cognitive/rsi_orchestrator.rs`, `config/typed.rs` |
+| Stubbed functionality | 1 | `cognitive/rsi_orchestrator.rs` |
 | Race conditions | 2 | `safety/path_validator.rs` |
 | Missing validation | 5+ | `config/mod.rs` |
 
