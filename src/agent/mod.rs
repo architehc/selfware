@@ -724,6 +724,43 @@ To call a tool, use this EXACT XML structure:
         }
     }
 
+    /// Build LSP-enriched context for a file, helping smaller models understand code semantics.
+    /// Returns a summary of symbols (functions, structs, etc.) with their signatures.
+    #[allow(dead_code)]
+    async fn build_lsp_context(&self, file_path: &str) -> Option<String> {
+        // Use the lsp_document_symbols tool to get file structure
+        let args = serde_json::json!({
+            "file": file_path
+        });
+        
+        match self.tools.execute("lsp_document_symbols", args).await {
+            Ok(result) => {
+                if let Some(symbols) = result.get("symbols").and_then(|s| s.as_array()) {
+                    if symbols.is_empty() {
+                        return None;
+                    }
+                    
+                    let mut context = format!("\n## Symbol Outline for `{}`:\n", file_path);
+                    for sym in symbols.iter().take(50) { // Limit to prevent context bloat
+                        if let (Some(name), Some(kind), Some(line)) = (
+                            sym.get("name").and_then(|n| n.as_str()),
+                            sym.get("kind").and_then(|k| k.as_str()),
+                            sym.get("line").and_then(|l| l.as_u64()),
+                        ) {
+                            context.push_str(&format!("- {} `{}` (line {})\n", kind, name, line));
+                        }
+                    }
+                    return Some(context);
+                }
+                None
+            }
+            Err(e) => {
+                tracing::debug!("LSP context building failed for {}: {}", file_path, e);
+                None
+            }
+        }
+    }
+
     /// Get current execution mode
     #[inline]
     pub fn execution_mode(&self) -> crate::config::ExecutionMode {
