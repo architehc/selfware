@@ -1,11 +1,10 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! Mouse control for desktop automation.
 //!
 //! Provides programmatic mouse movement, clicking, scrolling, and dragging.
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use tracing::debug;
 
 use super::{ActionRateLimiter, MovementProfile};
 
@@ -112,7 +111,7 @@ impl MouseController {
     }
 
     /// Drag from one point to another.
-    pub async fn drag(&self, from: Point, to: Point, button: MouseButton) -> Result<()> {
+    pub async fn drag(&self, from: Point, to: Point, _button: MouseButton) -> Result<()> {
         if !self.rate_limiter.check() {
             bail!("Mouse action rate limit exceeded");
         }

@@ -1,10 +1,8 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! MCP tool discovery.
 //!
 //! Converts MCP tool schemas (JSON Schema format) into native Selfware tool schemas.
 
 use anyhow::Result;
-use serde_json::Value;
 use tracing::{debug, info};
 
 use super::client::McpClient;

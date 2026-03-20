@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! Model Context Protocol (MCP) client implementation.
 //!
 //! Enables Selfware to connect to MCP servers (GitHub, Playwright, databases, etc.)

@@ -1,11 +1,10 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! MCP tool bridge: adapts MCP tools to the native Tool trait.
 
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::debug;
 
 use super::client::McpClient;
 use crate::tools::Tool;

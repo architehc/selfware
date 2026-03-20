@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! Computer control module for desktop automation.
 //!
 //! Provides mouse, keyboard, screen capture, and window management capabilities
@@ -21,10 +20,7 @@ pub use screen::ScreenCapture;
 pub use window::WindowManager;
 
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
-use tracing::warn;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Rate limiter for computer control actions.
 #[derive(Debug)]

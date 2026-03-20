@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! MCP transport layer.
 //!
 //! Provides the `Transport` trait and a `StdioTransport` implementation that
@@ -15,7 +14,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{oneshot, Mutex};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// JSON-RPC 2.0 request.
 #[derive(Debug, Serialize)]
@@ -138,7 +137,7 @@ impl StdioTransport {
                             debug!("MCP server notification: {:?}", response);
                         }
                     }
-                    Err(e) => {
+                    Err(_e) => {
                         debug!("Non-JSON line from MCP server: {}", line);
                     }
                 }

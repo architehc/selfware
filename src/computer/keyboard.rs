@@ -1,11 +1,9 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! Keyboard control for desktop automation.
 //!
 //! Provides programmatic typing, key presses, and key combinations.
 
 use anyhow::{bail, Result};
-use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use tracing::debug;
 
 use super::{is_blocked_combo, ActionRateLimiter, TypingProfile};
 

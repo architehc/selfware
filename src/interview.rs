@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! Interview / Clarification Mode
 //!
 //! Asks users structured questions before starting a task so the agent does not
@@ -19,9 +18,9 @@
 //! module intentionally does **not** modify those files — integration is left to
 //! the caller.
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use colored::*;
-use crossterm::event::{self, Event, KeyCode, KeyEvent};
+use crossterm::event::{self, Event, KeyCode};
 use crossterm::terminal;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::Path;

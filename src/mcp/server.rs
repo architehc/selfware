@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! MCP server implementation.
 //!
 //! Exposes Selfware's tools and project resources to external AI clients
@@ -11,10 +10,10 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 use crate::tools::ToolRegistry;
 
@@ -61,6 +60,7 @@ impl std::fmt::Display for JsonRpcError {
 
 // Standard JSON-RPC error codes.
 const PARSE_ERROR: i64 = -32700;
+#[allow(dead_code)]
 const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
@@ -236,7 +236,7 @@ impl McpServer {
     /// Handle `initialize` request.
     fn handle_initialize(
         &mut self,
-        params: &Option<Value>,
+        _params: &Option<Value>,
     ) -> (Option<Value>, Option<JsonRpcError>) {
         self.initialized = true;
 
@@ -260,7 +260,7 @@ impl McpServer {
     }
 
     /// Handle `tools/list` request.
-    fn handle_tools_list(&self, params: &Option<Value>) -> (Option<Value>, Option<JsonRpcError>) {
+    fn handle_tools_list(&self, _params: &Option<Value>) -> (Option<Value>, Option<JsonRpcError>) {
         let tools: Vec<Value> = self
             .registry
             .list()
@@ -355,7 +355,7 @@ impl McpServer {
     /// Handle `resources/list` request.
     fn handle_resources_list(
         &self,
-        params: &Option<Value>,
+        _params: &Option<Value>,
     ) -> (Option<Value>, Option<JsonRpcError>) {
         let resources = vec![
             serde_json::json!({

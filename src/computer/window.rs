@@ -1,9 +1,8 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! Window management for desktop automation.
 //!
 //! Provides cross-platform window listing, focusing, resizing, and application control.
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info};

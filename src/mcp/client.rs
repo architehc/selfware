@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! MCP client that manages the protocol lifecycle.
 //!
 //! Handles initialization, tool discovery, and tool execution via the transport.
@@ -6,7 +5,7 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use super::transport::Transport;
 use super::McpServerConfig;

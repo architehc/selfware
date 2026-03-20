@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! Screen capture and analysis for desktop automation.
 //!
 //! Provides full-screen and region-based screen capture with optional
@@ -6,7 +5,7 @@
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tracing::info;
 
 /// A captured screen region.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,7 +103,7 @@ impl ScreenCapture {
     }
 
     /// Validate capture dimensions to prevent unreasonable values.
-    fn validate_capture_dimensions(x: i32, y: i32, width: u32, height: u32) -> Result<()> {
+    fn validate_capture_dimensions(_x: i32, _y: i32, width: u32, height: u32) -> Result<()> {
         if width == 0 || height == 0 {
             bail!("Screen capture dimensions must be non-zero");
         }
