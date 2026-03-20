@@ -9,8 +9,9 @@ use crate::api::types::Message;
 pub(super) const MAX_NO_ACTION_PROMPTS: usize = 5;
 /// After this many text-only reprompts, force a deterministic fallback tool call
 /// instead of sending another text correction the model will ignore.
-/// Set to 1 for weak models (qwen3.5-27b) that never respond to text corrections.
-pub(super) const FORCE_FALLBACK_AFTER: usize = 1;
+/// Set to 2: one text correction, then immediate force-fallback.
+/// Weak models (qwen3.5-27b) rarely respond to text corrections.
+pub(super) const FORCE_FALLBACK_AFTER: usize = 2;
 /// Absolute lifetime cap on total no-action prompts across the entire task.
 /// Prevents infinite cycling when the consecutive counter gets reset by
 /// intervening responses that pass `should_prompt_for_action` (e.g. long

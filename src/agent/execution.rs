@@ -955,20 +955,14 @@ mod tests {
         let config = test_config(format!("{}/v1", server.url()));
         let mut agent = Agent::new(config).await.unwrap();
 
-        // First two attempts return Corrected with escalating text
+        // First attempt returns Corrected
         assert!(matches!(
             agent.maybe_prompt_for_action("Let me inspect the file", true, false, 0).unwrap(),
             ActionPrompt::Corrected
         ));
         assert!(agent.messages.last().unwrap().content.text().contains("selfware_system_directive"));
 
-        assert!(matches!(
-            agent.maybe_prompt_for_action("Let me inspect the file", true, false, 0).unwrap(),
-            ActionPrompt::Corrected
-        ));
-        assert!(agent.messages.last().unwrap().content.text().contains("Attempt 2"));
-
-        // Third attempt triggers ForceFallback instead of another text correction
+        // Second attempt triggers ForceFallback (FORCE_FALLBACK_AFTER=2)
         assert!(matches!(
             agent.maybe_prompt_for_action("Let me inspect the file", true, false, 0).unwrap(),
             ActionPrompt::ForceFallback
@@ -987,18 +981,16 @@ mod tests {
             agent.maybe_prompt_for_action("Let me inspect the file", true, false, 0).unwrap(),
             ActionPrompt::Corrected
         ));
-        assert!(matches!(
-            agent.maybe_prompt_for_action("Let me inspect the file", true, false, 0).unwrap(),
-            ActionPrompt::Corrected
-        ));
-        assert_eq!(agent.consecutive_no_action_prompts, 2);
+        assert_eq!(agent.consecutive_no_action_prompts, 1);
 
+        // Non-intent response resets the counter
         assert!(matches!(
             agent.maybe_prompt_for_action("Here is the result.", true, false, 0).unwrap(),
             ActionPrompt::NotNeeded
         ));
         assert_eq!(agent.consecutive_no_action_prompts, 0);
 
+        // After reset, first intent is Corrected again
         assert!(matches!(
             agent.maybe_prompt_for_action("Let me inspect the file", true, false, 0).unwrap(),
             ActionPrompt::Corrected
@@ -1017,8 +1009,8 @@ mod tests {
         let config = test_config(format!("{}/v1", server.url()));
         let mut agent = Agent::new(config).await.unwrap();
 
-        for cycle in 0..6 {
-            // Two intent prompts (consecutive counter goes to 2)
+        for cycle in 0..10 {
+            // One intent prompt (consecutive=1, then ForceFallback on second)
             let _ = agent.maybe_prompt_for_action("Let me check", true, false, 0);
             let _ = agent.maybe_prompt_for_action("Let me check", true, false, 0);
             // One non-intent response resets the consecutive counter
@@ -1029,8 +1021,8 @@ mod tests {
                 cycle
             );
         }
-        // 6 cycles * 2 intent prompts = 12 total, which equals MAX_TOTAL_NO_ACTION_PROMPTS
-        assert_eq!(agent.total_no_action_prompts, 12);
+        // 10 cycles * 2 intent prompts = 20 total, which equals MAX_TOTAL_NO_ACTION_PROMPTS
+        assert_eq!(agent.total_no_action_prompts, 20);
 
         // The next intent prompt should trigger the lifetime abort
         let result = agent.maybe_prompt_for_action("Let me try again", true, false, 0);
