@@ -16,7 +16,9 @@ pub(super) const FORCE_FALLBACK_AFTER: usize = 2;
 /// Prevents infinite cycling when the consecutive counter gets reset by
 /// intervening responses that pass `should_prompt_for_action` (e.g. long
 /// responses, or responses without intent phrases after seeing forced tool output).
-pub(super) const MAX_TOTAL_NO_ACTION_PROMPTS: usize = 20;
+/// Increased to 50 because smart fallbacks make real progress (reading files)
+/// even though the model itself isn't producing tool calls.
+pub(super) const MAX_TOTAL_NO_ACTION_PROMPTS: usize = 50;
 pub(super) const FILE_DISCOVERY_TOOLS: &str = "directory_tree, glob_find, or grep_search";
 
 /// Result of the intent-without-action check.

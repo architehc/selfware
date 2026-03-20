@@ -147,6 +147,12 @@ impl Agent {
                 output::smart_fallback_action(&tool_name, &tool_args);
                 let fallback: Vec<CollectedToolCall> = vec![(tool_name.clone(), tool_args, None)];
                 self.execute_tool_batch(fallback).await?;
+
+                // Successful fallback = progress. Reset consecutive counter
+                // so it doesn't accumulate toward abort. The total counter
+                // still tracks lifetime attempts for the hard ceiling.
+                self.consecutive_no_action_prompts = 0;
+
                 self.messages.push(crate::api::types::Message::user(format!(
                     "<selfware_system_directive>\n\
                      A `{}` was executed automatically because you did not call any tool.\n\
@@ -1101,7 +1107,7 @@ mod tests {
         let config = test_config(format!("{}/v1", server.url()));
         let mut agent = Agent::new(config).await.unwrap();
 
-        for cycle in 0..10 {
+        for cycle in 0..25 {
             // One intent prompt (consecutive=1, then ForceFallback on second)
             let _ = agent.maybe_prompt_for_action("Let me check", true, false, 0);
             let _ = agent.maybe_prompt_for_action("Let me check", true, false, 0);
@@ -1113,8 +1119,8 @@ mod tests {
                 cycle
             );
         }
-        // 10 cycles * 2 intent prompts = 20 total, which equals MAX_TOTAL_NO_ACTION_PROMPTS
-        assert_eq!(agent.total_no_action_prompts, 20);
+        // 25 cycles * 2 intent prompts = 50 total, which equals MAX_TOTAL_NO_ACTION_PROMPTS
+        assert_eq!(agent.total_no_action_prompts, 50);
 
         // The next intent prompt should trigger the lifetime abort
         let result = agent.maybe_prompt_for_action("Let me try again", true, false, 0);
