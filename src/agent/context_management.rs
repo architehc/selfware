@@ -167,7 +167,22 @@ impl Agent {
             .collect();
 
         let mut loaded = 0usize;
+        // Cap skeleton loading to avoid bloating the system prompt.
+        // 30 files gives a good overview without overwhelming the context.
+        const MAX_SKELETON_FILES: usize = 30;
+        // Also cap total skeleton tokens to ~15K (reasonable for any context size).
+        const MAX_SKELETON_TOKENS: usize = 15_000;
+        let mut total_skeleton_tokens = 0usize;
         for path in files_at_tree {
+            if loaded >= MAX_SKELETON_FILES || total_skeleton_tokens >= MAX_SKELETON_TOKENS {
+                tracing::info!(
+                    "Skeleton cap reached: {} files, {} tokens",
+                    loaded,
+                    total_skeleton_tokens
+                );
+                break;
+            }
+
             // Check budget before loading.
             let estimate = self.context_map.can_load(&path, ContextLevel::Skeleton);
             if !estimate.fits {
@@ -189,6 +204,7 @@ impl Agent {
             if skeleton.items.is_empty() {
                 continue;
             }
+            total_skeleton_tokens += skeleton.token_count;
             self.context_map.load_skeleton(&path, skeleton);
             loaded += 1;
         }
