@@ -12,7 +12,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
-
 use super::Tool;
 use crate::lsp::LspClient;
 

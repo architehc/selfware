@@ -389,9 +389,7 @@ impl SafetyChecker {
             // Block standalone variable expansion commands like `${FUNC}` or `$VAR`
             // which could execute arbitrary code when expanded
             if STANDING_VARIABLE_EXEC_PATTERN.is_match(&normalized) {
-                anyhow::bail!(
-                    "Dangerous command blocked: standalone variable expansion command"
-                );
+                anyhow::bail!("Dangerous command blocked: standalone variable expansion command");
             }
 
             // Block indirect execution where the command itself is sourced from
@@ -837,8 +835,10 @@ static BASE64_EXEC_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 // Pattern to detect hex-encoded command execution (xxd, printf with hex escapes)
 static HEX_EXEC_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     // Match: xxd -r -p | sh, printf '\xXX' | sh, etc.
-    Regex::new(r#"(xxd\s+-r|-r\s+xxd|printf\s+.*\\x[0-9a-fA-F]{2}.*\|\s*(sh|bash|zsh|perl|python|ruby))"#)
-        .expect("Invalid regex")
+    Regex::new(
+        r#"(xxd\s+-r|-r\s+xxd|printf\s+.*\\x[0-9a-fA-F]{2}.*\|\s*(sh|bash|zsh|perl|python|ruby))"#,
+    )
+    .expect("Invalid regex")
 });
 
 // Pattern to detect other encoding/obfuscation execution patterns
@@ -856,8 +856,7 @@ static SUSPICIOUS_SUBSTITUTION_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 // Pattern to detect standalone variable execution (blocking commands like ${FUNC})
 static STANDING_VARIABLE_EXEC_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     // Match commands that are purely variable expansion, which could hide malicious code
-    Regex::new(r#"^\s*\$\s*\{?\s*[A-Za-z_][A-Za-z0-9_]*\s*\}?\s*$"#)
-        .expect("Invalid regex")
+    Regex::new(r#"^\s*\$\s*\{?\s*[A-Za-z_][A-Za-z0-9_]*\s*\}?\s*$"#).expect("Invalid regex")
 });
 
 /// Normalize a shell command to handle common obfuscation techniques.
@@ -1267,7 +1266,10 @@ mod tests {
         let result = checker.check_tool_call(&call);
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().to_string().contains("Unregistered tool"),
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Unregistered tool"),
             "Error should mention unregistered tool"
         );
     }
@@ -1347,10 +1349,8 @@ mod tests {
         );
 
         // Paths inside working directory should be allowed
-        let call_local = create_test_call(
-            "file_write",
-            r#"{"path": "src/main.rs", "content": ""}"#,
-        );
+        let call_local =
+            create_test_call("file_write", r#"{"path": "src/main.rs", "content": ""}"#);
         assert!(
             checker.check_tool_call(&call_local).is_ok(),
             "Paths inside working directory should be allowed"
@@ -1887,10 +1887,7 @@ mod tests {
         let checker = SafetyChecker::new(&config);
 
         // uudecode piped to shell
-        let call = create_test_call(
-            "shell_exec",
-            r#"{"command": "uudecode file.txt | sh"}"#,
-        );
+        let call = create_test_call("shell_exec", r#"{"command": "uudecode file.txt | sh"}"#);
         assert!(checker.check_tool_call(&call).is_err());
     }
 

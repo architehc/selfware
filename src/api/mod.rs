@@ -158,7 +158,9 @@ impl StreamingResponse {
                 Ok(p) => Some(p),
                 Err(e) => {
                     // Should not happen with a semaphore, but handle gracefully
-                    let _ = tx.send(Err(anyhow::anyhow!("Stream semaphore error: {}", e))).await;
+                    let _ = tx
+                        .send(Err(anyhow::anyhow!("Stream semaphore error: {}", e)))
+                        .await;
                     return;
                 }
             };
@@ -460,9 +462,7 @@ fn parse_sse_event(event: &str, accumulator: &mut ToolCallAccumulator) -> Vec<St
                 // Extract reasoning content (supports both "reasoning_content"
                 // from OpenAI/SGLang and "reasoning" from vLLM)
                 if let Some(reasoning) = delta
-                    .and_then(|d| {
-                        d.get("reasoning_content").or_else(|| d.get("reasoning"))
-                    })
+                    .and_then(|d| d.get("reasoning_content").or_else(|| d.get("reasoning")))
                     .and_then(|c| c.as_str())
                 {
                     if !reasoning.is_empty() {
@@ -668,7 +668,12 @@ impl ApiClient {
         // Calculate input token estimate and set max_tokens accordingly
         // max_tokens controls output tokens only, not total context window
         let input_tokens = estimate_messages_tokens(&messages);
-        let max_tokens = self.config.agent.token_budget.saturating_sub(input_tokens).max(1);
+        let max_tokens = self
+            .config
+            .agent
+            .token_budget
+            .saturating_sub(input_tokens)
+            .max(1);
 
         let mut body = serde_json::json!({
             "model": self.config.model,
@@ -732,7 +737,12 @@ impl ApiClient {
         // Calculate input token estimate and set max_tokens accordingly
         // max_tokens controls output tokens only, not total context window
         let input_tokens = estimate_messages_tokens(&messages);
-        let max_tokens = self.config.agent.token_budget.saturating_sub(input_tokens).max(1);
+        let max_tokens = self
+            .config
+            .agent
+            .token_budget
+            .saturating_sub(input_tokens)
+            .max(1);
 
         let mut body = serde_json::json!({
             "model": self.config.model,

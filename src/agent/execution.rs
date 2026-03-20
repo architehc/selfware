@@ -116,7 +116,12 @@ impl Agent {
             return Ok(false);
         }
 
-        match self.maybe_prompt_for_action(&content, tool_calls.is_empty(), use_last_message, reasoning_chars) {
+        match self.maybe_prompt_for_action(
+            &content,
+            tool_calls.is_empty(),
+            use_last_message,
+            reasoning_chars,
+        ) {
             Ok(ActionPrompt::Corrected) => return Ok(false),
             Ok(ActionPrompt::NotNeeded) => {}
             Ok(ActionPrompt::ForceFallback) => {
@@ -139,11 +144,7 @@ impl Agent {
                 }
 
                 info!("Smart fallback: {} {}", tool_name, tool_args);
-                let fallback: Vec<CollectedToolCall> = vec![(
-                    tool_name.clone(),
-                    tool_args,
-                    None,
-                )];
+                let fallback: Vec<CollectedToolCall> = vec![(tool_name.clone(), tool_args, None)];
                 self.execute_tool_batch(fallback).await?;
                 self.messages.push(crate::api::types::Message::user(format!(
                     "<selfware_system_directive>\n\
@@ -171,7 +172,9 @@ impl Agent {
                         "Accepting repeated completion after {} identical responses",
                         self.consecutive_no_action_prompts
                     );
-                    let clean = super::recovery::strip_think_blocks(&content).trim().to_string();
+                    let clean = super::recovery::strip_think_blocks(&content)
+                        .trim()
+                        .to_string();
                     output::final_answer(&clean);
                     self.last_assistant_response = clean;
                     return Ok(true);
@@ -197,7 +200,8 @@ impl Agent {
             // Check completion gate before accepting task as done
             if let Some(gate_msg) = self.check_completion_gate() {
                 info!("Completion gate rejected: {}", gate_msg);
-                self.messages.push(crate::api::types::Message::user(gate_msg));
+                self.messages
+                    .push(crate::api::types::Message::user(gate_msg));
                 return Ok(false);
             }
 
@@ -209,7 +213,9 @@ impl Agent {
             // includes raw <think>...</think> tags from models like Qwen3.5 that
             // emit inline thinking. Without stripping, "Final answer:" shows the
             // think block content instead of the actual response.
-            let clean_content = super::recovery::strip_think_blocks(&content).trim().to_string();
+            let clean_content = super::recovery::strip_think_blocks(&content)
+                .trim()
+                .to_string();
             output::final_answer(&clean_content);
             self.last_assistant_response = clean_content;
             return Ok(true);
@@ -241,7 +247,8 @@ impl Agent {
         // Detect repetition loops before executing
         if let Some(loop_msg) = self.detect_repetition(&tool_calls) {
             info!("Repetition loop detected, injecting correction");
-            self.messages.push(crate::api::types::Message::user(loop_msg));
+            self.messages
+                .push(crate::api::types::Message::user(loop_msg));
             return Ok(false);
         }
 
@@ -586,7 +593,10 @@ impl Agent {
         Ok(response)
     }
 
-    pub(super) fn message_has_tool_calls(&self, assistant_msg: &crate::api::types::Message) -> bool {
+    pub(super) fn message_has_tool_calls(
+        &self,
+        assistant_msg: &crate::api::types::Message,
+    ) -> bool {
         if self.config.agent.native_function_calling
             && assistant_msg
                 .tool_calls
@@ -712,16 +722,14 @@ impl Agent {
                 )
                 .await
             {
-                Ok((content, reasoning, tool_calls)) => {
-                    crate::api::types::Message {
-                        role: "assistant".to_string(),
-                        content: content.into(),
-                        reasoning_content: reasoning,
-                        tool_calls: tool_calls,
-                        tool_call_id: None,
-                        name: None,
-                    }
-                }
+                Ok((content, reasoning, tool_calls)) => crate::api::types::Message {
+                    role: "assistant".to_string(),
+                    content: content.into(),
+                    reasoning_content: reasoning,
+                    tool_calls: tool_calls,
+                    tool_call_id: None,
+                    name: None,
+                },
                 Err(e) => {
                     self.log_turn_end_event(
                         "planning",
@@ -846,12 +854,12 @@ impl Agent {
 mod tests {
     use super::*;
     use crate::api::types::{ToolCall as ApiToolCall, ToolFunction};
+    use crate::checkpoint::ToolCallLog;
     use crate::testing::mock_api::MockLlmServer;
     use crate::tool_parser::parse_tool_calls;
-    use crate::checkpoint::ToolCallLog;
     use chrono::Utc;
-    use tempfile::tempdir;
     use std::hash::{Hash, Hasher};
+    use tempfile::tempdir;
 
     // =========================================================================
     // Helper: mirrors should_prompt_for_action logic for standalone testing
@@ -950,7 +958,12 @@ mod tests {
 
     #[test]
     fn test_should_not_prompt_for_plain_response() {
-        assert!(!should_prompt_for_action("The answer is 42.", true, false, 0));
+        assert!(!should_prompt_for_action(
+            "The answer is 42.",
+            true,
+            false,
+            0
+        ));
         assert!(!should_prompt_for_action(
             "Here is the result.",
             true,
@@ -971,7 +984,12 @@ mod tests {
         // Short intent content + huge think block = should still detect intent
         let content = "Let me check the file structure";
         let reasoning_chars = 5000; // Simulates large think block
-        assert!(should_prompt_for_action(content, true, false, reasoning_chars));
+        assert!(should_prompt_for_action(
+            content,
+            true,
+            false,
+            reasoning_chars
+        ));
     }
 
     #[test]
@@ -1008,14 +1026,24 @@ mod tests {
 
         // First attempt returns Corrected
         assert!(matches!(
-            agent.maybe_prompt_for_action("Let me inspect the file", true, false, 0).unwrap(),
+            agent
+                .maybe_prompt_for_action("Let me inspect the file", true, false, 0)
+                .unwrap(),
             ActionPrompt::Corrected
         ));
-        assert!(agent.messages.last().unwrap().content.text().contains("selfware_system_directive"));
+        assert!(agent
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .text()
+            .contains("selfware_system_directive"));
 
         // Second attempt triggers ForceFallback (FORCE_FALLBACK_AFTER=2)
         assert!(matches!(
-            agent.maybe_prompt_for_action("Let me inspect the file", true, false, 0).unwrap(),
+            agent
+                .maybe_prompt_for_action("Let me inspect the file", true, false, 0)
+                .unwrap(),
             ActionPrompt::ForceFallback
         ));
 
@@ -1029,24 +1057,36 @@ mod tests {
         let mut agent = Agent::new(config).await.unwrap();
 
         assert!(matches!(
-            agent.maybe_prompt_for_action("Let me inspect the file", true, false, 0).unwrap(),
+            agent
+                .maybe_prompt_for_action("Let me inspect the file", true, false, 0)
+                .unwrap(),
             ActionPrompt::Corrected
         ));
         assert_eq!(agent.consecutive_no_action_prompts, 1);
 
         // Non-intent response resets the counter
         assert!(matches!(
-            agent.maybe_prompt_for_action("Here is the result.", true, false, 0).unwrap(),
+            agent
+                .maybe_prompt_for_action("Here is the result.", true, false, 0)
+                .unwrap(),
             ActionPrompt::NotNeeded
         ));
         assert_eq!(agent.consecutive_no_action_prompts, 0);
 
         // After reset, first intent is Corrected again
         assert!(matches!(
-            agent.maybe_prompt_for_action("Let me inspect the file", true, false, 0).unwrap(),
+            agent
+                .maybe_prompt_for_action("Let me inspect the file", true, false, 0)
+                .unwrap(),
             ActionPrompt::Corrected
         ));
-        assert!(agent.messages.last().unwrap().content.text().contains("selfware_system_directive"));
+        assert!(agent
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .text()
+            .contains("selfware_system_directive"));
 
         server.stop().await;
     }
@@ -3236,16 +3276,20 @@ mod tests {
         );
 
         for i in 0..10 {
-            agent.messages.push(crate::api::types::Message::user(format!(
-                "previous turn {} {}",
-                i,
-                "x".repeat(250)
-            )));
-            agent.messages.push(crate::api::types::Message::assistant(format!(
-                "assistant turn {} {}",
-                i,
-                "y".repeat(250)
-            )));
+            agent
+                .messages
+                .push(crate::api::types::Message::user(format!(
+                    "previous turn {} {}",
+                    i,
+                    "x".repeat(250)
+                )));
+            agent
+                .messages
+                .push(crate::api::types::Message::assistant(format!(
+                    "assistant turn {} {}",
+                    i,
+                    "y".repeat(250)
+                )));
         }
 
         let response = agent.get_assistant_step_response(false).await;
@@ -3555,7 +3599,8 @@ mod tests {
 
         assert!(
             agent
-                .file_tracker.context_files
+                .file_tracker
+                .context_files
                 .iter()
                 .any(|p| p.ends_with("Cargo.toml")),
             "Expected Cargo.toml in context_files: {:?}",
@@ -3588,20 +3633,17 @@ mod tests {
         agent.execute_tool_batch(batch).await.unwrap();
 
         let state = agent
-            .file_tracker.read_state
+            .file_tracker
+            .read_state
             .get(&cargo_toml_path)
             .expect("expected Cargo.toml file state");
         assert_eq!(state.unchanged_read_count, 1);
-        assert!(agent
-            .task_state_notes
-            .iter()
-            .any(|note| { note.contains(&format!("Reread unchanged file `{}`", cargo_toml_path)) }));
-        assert!(agent
-            .pending_failure_hint
-            .as_deref()
-            .is_some_and(|hint| {
-                hint.contains(&format!("reread unchanged file `{}`", cargo_toml_path))
-            }));
+        assert!(agent.task_state_notes.iter().any(|note| {
+            note.contains(&format!("Reread unchanged file `{}`", cargo_toml_path))
+        }));
+        assert!(agent.pending_failure_hint.as_deref().is_some_and(|hint| {
+            hint.contains(&format!("reread unchanged file `{}`", cargo_toml_path))
+        }));
 
         server.stop().await;
     }
@@ -3640,7 +3682,8 @@ mod tests {
         agent.execute_tool_batch(batch).await.unwrap();
 
         let state = agent
-            .file_tracker.read_state
+            .file_tracker
+            .read_state
             .get(&path)
             .expect("expected tracked file state");
         assert_eq!(state.unchanged_read_count, 1);

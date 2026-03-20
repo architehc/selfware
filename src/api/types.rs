@@ -219,11 +219,7 @@ pub struct Message {
     pub content: MessageContent,
     /// Reasoning content — accepts both `reasoning_content` (OpenAI/SGLang)
     /// and `reasoning` (vLLM) field names.
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        alias = "reasoning"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "reasoning")]
     pub reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,

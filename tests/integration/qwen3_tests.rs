@@ -28,8 +28,7 @@ fn qwen3_config() -> Config {
     Config {
         endpoint: std::env::var("SELFWARE_ENDPOINT")
             .unwrap_or_else(|_| "http://localhost:8000/v1".to_string()),
-        model: std::env::var("SELFWARE_MODEL")
-            .unwrap_or_else(|_| "qwen3.5-27b".to_string()),
+        model: std::env::var("SELFWARE_MODEL").unwrap_or_else(|_| "qwen3.5-27b".to_string()),
         max_tokens: 65536,
         temperature: 1.0, // Recommended by Qwen3-Coder docs
         api_key: None,
@@ -57,8 +56,7 @@ fn qwen3_config() -> Config {
 async fn qwen3_available() -> bool {
     let endpoint = std::env::var("SELFWARE_ENDPOINT")
         .unwrap_or_else(|_| "http://localhost:8000/v1".to_string());
-    let model = std::env::var("SELFWARE_MODEL")
-        .unwrap_or_else(|_| "qwen3.5-27b".to_string());
+    let model = std::env::var("SELFWARE_MODEL").unwrap_or_else(|_| "qwen3.5-27b".to_string());
 
     // First check if endpoint is reachable at all.
     if !require_llm_endpoint_url(&endpoint).await {
@@ -74,11 +72,7 @@ async fn qwen3_available() -> bool {
         Err(_) => return false,
     };
 
-    match client
-        .get(format!("{}/models", endpoint))
-        .send()
-        .await
-    {
+    match client.get(format!("{}/models", endpoint)).send().await {
         Ok(resp) => {
             if let Ok(body) = resp.text().await {
                 // Check if model ID appears in the models list.
@@ -98,8 +92,8 @@ macro_rules! skip_if_no_qwen3 {
     () => {
         if !qwen3_available().await {
             let test_path = module_path!();
-            let model = std::env::var("SELFWARE_MODEL")
-                .unwrap_or_else(|_| "qwen3.5-27b".to_string());
+            let model =
+                std::env::var("SELFWARE_MODEL").unwrap_or_else(|_| "qwen3.5-27b".to_string());
             let endpoint = std::env::var("SELFWARE_ENDPOINT")
                 .unwrap_or_else(|_| "http://localhost:8000/v1".to_string());
             println!(

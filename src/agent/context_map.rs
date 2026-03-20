@@ -100,14 +100,20 @@ impl FileSkeleton {
                     fields_summary,
                     line,
                 } => {
-                    out.push_str(&format!("L{}: struct {} {{ {} }}\n", line, name, fields_summary));
+                    out.push_str(&format!(
+                        "L{}: struct {} {{ {} }}\n",
+                        line, name, fields_summary
+                    ));
                 }
                 SkeletonItem::Enum {
                     name,
                     variants_summary,
                     line,
                 } => {
-                    out.push_str(&format!("L{}: enum {} {{ {} }}\n", line, name, variants_summary));
+                    out.push_str(&format!(
+                        "L{}: enum {} {{ {} }}\n",
+                        line, name, variants_summary
+                    ));
                 }
                 SkeletonItem::Trait {
                     name,
@@ -201,9 +207,7 @@ pub enum ContextModality {
         orchestrator: Option<PathBuf>,
     },
     /// Brand-new feature with minimal coupling.
-    Greenfield {
-        integration_points: Vec<PathBuf>,
-    },
+    Greenfield { integration_points: Vec<PathBuf> },
 }
 
 impl ContextModality {
@@ -317,9 +321,7 @@ impl ContextModality {
                     description: "Refactor: source + targets + orchestrator at L3".into(),
                 }
             }
-            ContextModality::Greenfield {
-                integration_points,
-            } => LoadingPlan {
+            ContextModality::Greenfield { integration_points } => LoadingPlan {
                 l3_files: vec![],
                 l2_files: integration_points.clone(),
                 description: "Greenfield: integration points at L2, rest minimal".into(),
@@ -509,9 +511,7 @@ impl ContextMap {
             self.project_root.join(path)
         };
 
-        let file_size = std::fs::metadata(&full_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let file_size = std::fs::metadata(&full_path).map(|m| m.len()).unwrap_or(0);
 
         match level {
             ContextLevel::Tree => 10, // single line entry
@@ -1045,9 +1045,7 @@ impl ContextMap {
             // Estimate cost and ensure headroom.
             let estimate = self.can_load(&path, ContextLevel::Full);
             if !estimate.fits {
-                let needed = estimate
-                    .estimated_tokens
-                    .saturating_sub(self.remaining());
+                let needed = estimate.estimated_tokens.saturating_sub(self.remaining());
                 self.compress_to_fit(needed);
             }
 
@@ -1120,9 +1118,10 @@ impl ContextMap {
                         } else {
                             format!("High relevance score ({:.1})", relevance)
                         },
-                        estimated_tokens: entry.costs.l3.max(
-                            self.estimate_level_tokens(&entry.path, ContextLevel::Full),
-                        ),
+                        estimated_tokens: entry
+                            .costs
+                            .l3
+                            .max(self.estimate_level_tokens(&entry.path, ContextLevel::Full)),
                     });
                 } else {
                     keep.push(entry.path.clone());
@@ -1154,7 +1153,11 @@ impl ContextMap {
         }
 
         // Sort promotions by relevance (highest first), evictions by savings.
-        promote.sort_by(|a, b| b.relevance.partial_cmp(&a.relevance).unwrap_or(std::cmp::Ordering::Equal));
+        promote.sort_by(|a, b| {
+            b.relevance
+                .partial_cmp(&a.relevance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         evict.sort_by(|a, b| {
             let savings_a = a.estimated_tokens.saturating_sub(10);
             let savings_b = b.estimated_tokens.saturating_sub(10);
@@ -1523,7 +1526,10 @@ fn extract_const_parts(line: &str) -> (String, String) {
     };
 
     let parts: Vec<&str> = after_const.splitn(2, ':').collect();
-    let name = parts.first().map(|s| s.trim().to_string()).unwrap_or_default();
+    let name = parts
+        .first()
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
     let type_hint = parts
         .get(1)
         .map(|s| {
@@ -1580,7 +1586,10 @@ mod tests {
         let mut map = ContextMap::new(100_000, 0.75, 0.20, 0.05);
         map.register_tree_entry("src/main.rs".into(), 1024);
         assert_eq!(map.file_count(), 1);
-        assert_eq!(map.level_of(Path::new("src/main.rs")), Some(ContextLevel::Tree));
+        assert_eq!(
+            map.level_of(Path::new("src/main.rs")),
+            Some(ContextLevel::Tree)
+        );
         assert!(map.total_tokens() > 0);
     }
 
@@ -1622,7 +1631,10 @@ mod tests {
         map.load_skeleton(Path::new("src/main.rs"), skeleton);
 
         // Load full (use enough content to exceed skeleton cost of 20 tokens).
-        map.load_full(Path::new("src/main.rs"), "fn main() {\n".to_string() + &"    let x = 1;\n".repeat(50) + "}");
+        map.load_full(
+            Path::new("src/main.rs"),
+            "fn main() {\n".to_string() + &"    let x = 1;\n".repeat(50) + "}",
+        );
         assert_eq!(
             map.level_of(Path::new("src/main.rs")),
             Some(ContextLevel::Full)

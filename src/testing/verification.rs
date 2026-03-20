@@ -305,7 +305,7 @@ impl VerificationGate {
                         affected_files: changed_files.to_vec(),
                         side_effects: vec![],
                         suggested_next_steps: vec![
-                            "Files unchanged - using cached verification results".to_string()
+                            "Files unchanged - using cached verification results".to_string(),
                         ],
                     });
                 }
@@ -424,11 +424,11 @@ impl VerificationGate {
         };
 
         self.last_results = Some(report.clone());
-        
+
         // Update file hash cache for future change detection
         self.update_file_cache(&report.affected_files);
         self.last_verification_time = Some(std::time::Instant::now());
-        
+
         Ok(report)
     }
 
@@ -512,16 +512,16 @@ impl VerificationGate {
     /// Run cargo test with timeout to prevent getting stuck
     async fn run_cargo_test(&self) -> Result<CheckResult> {
         let start = Instant::now();
-        
+
         // Apply timeout from config (default 5 minutes)
         let timeout_secs = self.config.check_timeout_secs.max(60); // At least 60 seconds
         let timeout_duration = tokio::time::Duration::from_secs(timeout_secs);
-        
+
         let command_future = Command::new("cargo")
             .args(["test", "--no-fail-fast"])
             .current_dir(&self.project_root)
             .output();
-        
+
         let output = match tokio::time::timeout(timeout_duration, command_future).await {
             Ok(Ok(output)) => output,
             Ok(Err(e)) => return Err(e.into()),
@@ -2729,7 +2729,8 @@ mod tests {
 
         // Simulate a verification by updating the cache
         // Note: We can't actually read files in this test, so we'll manually populate
-        gate.file_hash_cache.insert("src/lib.rs".to_string(), 12345u64);
+        gate.file_hash_cache
+            .insert("src/lib.rs".to_string(), 12345u64);
 
         // Now if we check the same file with same hash, it should not be changed
         // But since we can't actually compute the hash, we'll just test the logic

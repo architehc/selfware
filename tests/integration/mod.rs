@@ -20,12 +20,12 @@ mod extended_e2e;
 mod helpers;
 #[cfg(not(target_os = "windows"))]
 mod interactive_tests;
+mod live_context_tests;
 mod model_format_tests;
 mod qwen3_tests;
+mod smoke_tests;
 mod supervision_tests;
 mod test_agent_loop;
 mod tool_tests;
-mod live_context_tests;
-mod smoke_tests;
 
 pub use helpers::*;

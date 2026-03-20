@@ -927,7 +927,9 @@ impl Swarm {
 
     /// Get a specific task (checks both queued and active tasks)
     pub fn get_task(&self, id: &str) -> Option<&SwarmTask> {
-        self.active_tasks.get(id).or_else(|| self.task_queue.iter().find(|t| t.id == id))
+        self.active_tasks
+            .get(id)
+            .or_else(|| self.task_queue.iter().find(|t| t.id == id))
     }
 
     /// Handle conflict
@@ -1028,7 +1030,7 @@ impl Swarm {
                 return Vec::new();
             }
         }
-        
+
         let task = match self.active_tasks.get_mut(task_id) {
             Some(t) => t,
             None => {
@@ -1071,11 +1073,14 @@ impl Swarm {
         let task = match self.active_tasks.get_mut(task_id) {
             Some(t) => t,
             None => {
-                tracing::warn!("Task {} not found in active tasks during completion", task_id);
+                tracing::warn!(
+                    "Task {} not found in active tasks during completion",
+                    task_id
+                );
                 return;
             }
         };
-        
+
         task.results.insert(agent_id.to_string(), result.into());
 
         // Check if all agents have submitted results — done atomically

@@ -117,7 +117,10 @@ impl Tool for HttpRequest {
             )));
 
         if let Some(host) = url.host_str() {
-            if net_policy::is_private_network_host(host) && policy.allow_private && !policy.allow_localhost {
+            if net_policy::is_private_network_host(host)
+                && policy.allow_private
+                && !policy.allow_localhost
+            {
                 tracing::warn!(
                     "Allowing request to private network (SELFWARE_ALLOW_PRIVATE_NETWORK=1): {}",
                     host

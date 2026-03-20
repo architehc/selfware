@@ -185,7 +185,8 @@ async fn test_agent_run_task_e2e_tool_workflow_with_mock_api() {
     );
     assert!(
         agent
-            .file_tracker.context_files
+            .file_tracker
+            .context_files
             .iter()
             .any(|p| p.ends_with("Cargo.toml")),
         "file_read should add Cargo.toml to context tracking"

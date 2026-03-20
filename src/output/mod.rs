@@ -786,11 +786,7 @@ pub(crate) fn display_file_diff(path: &str, old_content: &str, new_content: &str
     }
 
     if !diff_lines.is_empty() {
-        println!(
-            "\r\x1b[2K  {} {}",
-            "┌─".dimmed(),
-            path.dimmed()
-        );
+        println!("\r\x1b[2K  {} {}", "┌─".dimmed(), path.dimmed());
         for line in &diff_lines {
             println!("\r\x1b[2K{}", line);
         }
@@ -1678,10 +1674,7 @@ mod tests {
             // contain no fragment from the other thread.
             let is_t0 = line.starts_with("THREAD_0:");
             let is_t1 = line.starts_with("THREAD_1:");
-            assert!(
-                is_t0 || is_t1,
-                "Line {idx} has unexpected prefix: {line}"
-            );
+            assert!(is_t0 || is_t1, "Line {idx} has unexpected prefix: {line}");
             // Ensure no cross-contamination: a THREAD_0 line must not
             // contain "THREAD_1" anywhere and vice-versa.
             if is_t0 {

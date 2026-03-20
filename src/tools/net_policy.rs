@@ -70,9 +70,7 @@ pub fn validate_url_target(url: &url::Url, allow_private: bool) -> Result<Networ
     }
 
     let allow_localhost = is_local_endpoint(url.as_str())
-        || url
-            .host_str()
-            .is_some_and(is_trusted_local_network_host);
+        || url.host_str().is_some_and(is_trusted_local_network_host);
 
     if let Some(host) = url.host_str() {
         if let Ok(ip) = host

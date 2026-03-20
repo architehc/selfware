@@ -326,8 +326,8 @@ impl Agent {
         &mut self,
         tool_calls: Vec<super::execution::CollectedToolCall>,
     ) -> Result<()> {
-        use crate::hooks::HookAction;
         use super::tui_events::AgentEvent;
+        use crate::hooks::HookAction;
 
         for (name, args_str, tool_call_id) in tool_calls {
             if self.is_cancelled() {
@@ -444,7 +444,10 @@ impl Agent {
                 continue;
             }
 
-            if !self.confirm_tool_execution(&name, &args_str, &call_id, use_native_fc).await? {
+            if !self
+                .confirm_tool_execution(&name, &args_str, &call_id, use_native_fc)
+                .await?
+            {
                 continue;
             }
 
@@ -536,9 +539,12 @@ impl Agent {
                                 self.file_tracker.context_files.push(path_str.clone());
                             }
                             // Track in hierarchical context map for budget-aware management.
-                            if let Some(content) = serde_json::from_str::<serde_json::Value>(&result)
-                                .ok()
-                                .and_then(|v| v.get("content").and_then(|c| c.as_str()).map(String::from))
+                            if let Some(content) =
+                                serde_json::from_str::<serde_json::Value>(&result)
+                                    .ok()
+                                    .and_then(|v| {
+                                        v.get("content").and_then(|c| c.as_str()).map(String::from)
+                                    })
                             {
                                 self.track_file_read_in_context_map(&path_str, &content);
                             }
@@ -606,14 +612,9 @@ impl Agent {
                 })
             }
             CONTEXT_FOCUS => {
-                let query = args
-                    .get("query")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let max_files = args
-                    .get("max_files")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(5) as usize;
+                let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                let max_files =
+                    args.get("max_files").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
 
                 let to_promote = self.context_map.focus_on_query(query, max_files);
 
@@ -637,13 +638,8 @@ impl Agent {
                 })
             }
             CONTEXT_EVICT => {
-                let path = args
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let freed = self
-                    .context_map
-                    .evict_to_tree(std::path::Path::new(path));
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let freed = self.context_map.evict_to_tree(std::path::Path::new(path));
                 serde_json::json!({
                     "evicted": path,
                     "tokens_freed": freed,
@@ -651,10 +647,7 @@ impl Agent {
                 })
             }
             CONTEXT_RECOMMEND => {
-                let task = args
-                    .get("task")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
                 let rec = self.context_map.recommend_context(task);
                 serde_json::json!({
                     "modality": rec.modality_description,
@@ -675,18 +668,14 @@ impl Agent {
                 })
             }
             CONTEXT_LOAD_SKELETON => {
-                let path_str = args
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let path_str = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
                 let path = std::path::Path::new(path_str);
                 let root = super::current_project_root();
                 let full_path = root.join(path);
 
                 match std::fs::read_to_string(&full_path) {
                     Ok(content) => {
-                        let skeleton =
-                            super::context_map::extract_rust_skeleton(path, &content);
+                        let skeleton = super::context_map::extract_rust_skeleton(path, &content);
                         let rendered = skeleton.render();
                         let token_count = skeleton.token_count;
                         self.context_map.load_skeleton(path, skeleton);
@@ -774,7 +763,8 @@ impl Agent {
         );
         let _ = tokio::io::stdout().flush().await;
 
-        let response = super::execution::read_line_pausing_esc(&self.esc_paused, &self.esc_pause_ack).await;
+        let response =
+            super::execution::read_line_pausing_esc(&self.esc_paused, &self.esc_pause_ack).await;
         if let Ok(response) = response {
             let response = response.trim().to_lowercase();
             match response.as_str() {
@@ -954,28 +944,30 @@ impl Agent {
         }
 
         // Snapshot file before edit/write for undo support + diff display.
-        let pre_edit_content: Option<(String, String)> = if matches!(name, "file_edit" | "file_write" | "file_delete") {
-            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                if let Ok(content) = tokio::fs::read_to_string(path).await {
-                    use crate::session::edit_history::{EditAction, FileSnapshot};
-                    let snapshot = FileSnapshot::new(std::path::PathBuf::from(path), content.clone());
-                    let action = EditAction::FileEdit {
-                        path: std::path::PathBuf::from(path),
-                        tool: name.to_string(),
-                    };
-                    self.edit_history.create_checkpoint(action);
-                    self.edit_history.add_file_to_current(snapshot);
-                    Some((path.to_string(), content))
+        let pre_edit_content: Option<(String, String)> =
+            if matches!(name, "file_edit" | "file_write" | "file_delete") {
+                if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                    if let Ok(content) = tokio::fs::read_to_string(path).await {
+                        use crate::session::edit_history::{EditAction, FileSnapshot};
+                        let snapshot =
+                            FileSnapshot::new(std::path::PathBuf::from(path), content.clone());
+                        let action = EditAction::FileEdit {
+                            path: std::path::PathBuf::from(path),
+                            tool: name.to_string(),
+                        };
+                        self.edit_history.create_checkpoint(action);
+                        self.edit_history.add_file_to_current(snapshot);
+                        Some((path.to_string(), content))
+                    } else {
+                        // New file (file_write to nonexistent path)
+                        Some((path.to_string(), String::new()))
+                    }
                 } else {
-                    // New file (file_write to nonexistent path)
-                    Some((path.to_string(), String::new()))
+                    None
                 }
             } else {
                 None
-            }
-        } else {
-            None
-        };
+            };
 
         // Acquire concurrency governor permit before executing the tool.
         // The permit is held for the duration of execution and released on drop.
@@ -1011,13 +1003,18 @@ impl Agent {
 
                 // Store successful cacheable results in ToolCache
                 if is_cacheable {
-                    self.cache_manager.tool_cache.set(name, args, result.clone());
+                    self.cache_manager
+                        .tool_cache
+                        .set(name, args, result.clone());
                 }
 
                 // Cache tool results in LocalFirstCoordinator
                 let cache_key = crate::session::cache::ToolCache::cache_key(name, args);
-                self.cache_manager.local_first
-                    .cache_response(&cache_key, result_str.clone(), result_str.len());
+                self.cache_manager.local_first.cache_response(
+                    &cache_key,
+                    result_str.clone(),
+                    result_str.len(),
+                );
 
                 // Display color-coded diff for file mutations
                 if let Some((ref path, ref old_content)) = pre_edit_content {
@@ -1047,8 +1044,13 @@ impl Agent {
             }
             Ok(Err(e)) => {
                 let elapsed = start_time.elapsed().as_millis() as u64;
-                let summary =
-                    crate::output::semantic_summary(name, args, Some(&e.to_string()), false, elapsed);
+                let summary = crate::output::semantic_summary(
+                    name,
+                    args,
+                    Some(&e.to_string()),
+                    false,
+                    elapsed,
+                );
                 self.log_tool_call(name, args_str, &e.to_string(), false, start_time, false);
                 self.cognitive_state
                     .episodic_memory
@@ -1068,7 +1070,8 @@ impl Agent {
             Err(_) => {
                 let elapsed = start_time.elapsed().as_millis() as u64;
                 let err = format!("Tool '{}' timed out after {}s", name, timeout_secs);
-                let summary = crate::output::semantic_summary(name, args, Some(&err), false, elapsed);
+                let summary =
+                    crate::output::semantic_summary(name, args, Some(&err), false, elapsed);
                 self.log_tool_call(name, args_str, &err, false, start_time, false);
                 self.cognitive_state.episodic_memory.what_failed(name, &err);
                 self.self_improvement.record_tool(

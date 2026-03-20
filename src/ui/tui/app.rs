@@ -306,8 +306,7 @@ impl App {
             Paragraph::new(format!("❯ {}", self.input))
                 .style(Style::default().fg(TuiPalette::PARCHMENT))
         } else {
-            Paragraph::new(" — ".to_string())
-                .style(TuiPalette::muted_style())
+            Paragraph::new(" — ".to_string()).style(TuiPalette::muted_style())
         };
         frame.render_widget(input_text, inner);
 
@@ -342,12 +341,8 @@ impl App {
 
         // Build status bar based on current state
         let help_hint = match self.state {
-            AppState::Chatting => {
-                "Ctrl+P: palette │ Enter: send │ ↑/↓: scroll │ Ctrl+C: quit"
-            }
-            AppState::Palette => {
-                "↑/↓: navigate │ Enter: select │ Esc: close │ Type: filter"
-            }
+            AppState::Chatting => "Ctrl+P: palette │ Enter: send │ ↑/↓: scroll │ Ctrl+C: quit",
+            AppState::Palette => "↑/↓: navigate │ Enter: select │ Esc: close │ Type: filter",
             AppState::RunningTask => "Task running... │ Esc: cancel (if possible)",
             AppState::Confirming(_) => "y: yes │ n: no │ Enter: confirm │ Esc: cancel",
             _ => "Esc: back │ Ctrl+C: quit",
@@ -497,9 +492,7 @@ impl App {
                     self.status = "Input cleared".into();
                 } else {
                     // Clean state - show exit confirmation
-                    self.state = AppState::Confirming(
-                        "Press Enter to exit, Esc to cancel".into()
-                    );
+                    self.state = AppState::Confirming("Press Enter to exit, Esc to cancel".into());
                     self.status = "Exit?".into();
                 }
             }

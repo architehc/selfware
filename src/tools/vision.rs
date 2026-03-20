@@ -310,7 +310,8 @@ pub(crate) fn encode_image_file(path: &str) -> Result<String> {
         );
     }
 
-    let bytes = std::fs::read(path).with_context(|| format!("Failed to read image file: {}", path))?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("Failed to read image file: {}", path))?;
 
     // Validate it's actually an image by checking magic bytes
     validate_image_magic(&bytes, path)?;

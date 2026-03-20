@@ -4,13 +4,13 @@
 //! This is the foundation for recursive self-improvement.
 
 use anyhow::{anyhow, Result};
+use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 use tracing::{debug, info};
-use lru::LruCache;
 
 use crate::cognitive::memory_hierarchy::{CodeContext, FileContent, IndexedFile, SemanticMemory};
 use crate::token_count::estimate_tokens_with_overhead;
@@ -670,7 +670,7 @@ impl SelfReferenceSystem {
                 return Ok(cached.content.clone());
             }
         }
-        
+
         let semantic = self.semantic.read().await;
 
         // Get main file

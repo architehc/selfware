@@ -138,7 +138,8 @@ impl Agent {
         self.memory.add_message(&msg);
         self.messages.push(msg);
 
-        self.run_execution_loop(&task_description, LoopMode::NewTask).await
+        self.run_execution_loop(&task_description, LoopMode::NewTask)
+            .await
     }
 
     pub(super) async fn run_swarm_task(&mut self, task: &str) -> Result<()> {
@@ -208,7 +209,7 @@ impl Agent {
         let mut phase_num = 0usize;
         while let Some(task_id) = swarm.next_task() {
             phase_num += 1;
-            
+
             // Get the task details from active_tasks
             let sub_task = match swarm.get_task(&task_id) {
                 Some(t) => t.clone(),
@@ -217,7 +218,7 @@ impl Agent {
                     break;
                 }
             };
-            
+
             let assigned = swarm.assign_task(&task_id);
 
             // Determine the lead agent for this sub-task
@@ -422,7 +423,8 @@ impl Agent {
             );
         }
 
-        self.run_execution_loop(&task_description, LoopMode::Resume).await
+        self.run_execution_loop(&task_description, LoopMode::Resume)
+            .await
     }
 
     /// Shared execution loop used by both `run_task` and `continue_execution`.
@@ -430,11 +432,7 @@ impl Agent {
     /// This is the single source of truth for the Planning → Executing →
     /// ErrorRecovery → Completed/Failed state machine. `mode` controls minor
     /// behavioral differences (event emission, progress tracking, labels).
-    async fn run_execution_loop(
-        &mut self,
-        task_description: &str,
-        mode: LoopMode,
-    ) -> Result<()> {
+    async fn run_execution_loop(&mut self, task_description: &str, mode: LoopMode) -> Result<()> {
         #[cfg(feature = "resilience")]
         let mut recovery_attempts = 0u32;
 
@@ -443,7 +441,11 @@ impl Agent {
             progress.start_phase();
         }
 
-        let planning_label = if mode == LoopMode::NewTask { "Start" } else { "Resume" };
+        let planning_label = if mode == LoopMode::NewTask {
+            "Start"
+        } else {
+            "Resume"
+        };
 
         while let Some(state) = self.loop_control.next_state() {
             if let Some(warning) = self.loop_control.approaching_limit_warning() {
@@ -635,7 +637,11 @@ impl Agent {
                                     checkpoint.log_error(step, e.to_string(), false);
                                 }
                                 if is_no_action_error(&e) {
-                                    cli_println!("{} {}", "❌ Agent stuck in action loop:".bright_red(), e);
+                                    cli_println!(
+                                        "{} {}",
+                                        "❌ Agent stuck in action loop:".bright_red(),
+                                        e
+                                    );
                                     cli_println!("{}", "The agent repeatedly described intent without executing tools. This is a non-recoverable error.".bright_yellow());
                                 }
                                 self.set_loop_state(AgentState::Failed {
@@ -679,7 +685,8 @@ impl Agent {
                     {
                         if recovery_attempts < self.config.continuous_work.max_recovery_attempts {
                             recovery_attempts += 1;
-                            recovered = self.try_self_healing_recovery(&error, "run_execution_loop");
+                            recovered =
+                                self.try_self_healing_recovery(&error, "run_execution_loop");
                         } else {
                             warn!(
                                 "Auto-recovery attempts exhausted ({})",
@@ -1583,7 +1590,8 @@ mod tests {
         agent.continue_execution().await.unwrap();
 
         assert!(agent
-            .file_tracker.context_files
+            .file_tracker
+            .context_files
             .iter()
             .any(|path| path.ends_with("Cargo.toml")));
         server.stop().await;
@@ -1725,7 +1733,9 @@ mod tests {
         // the queue is exhausted.
         let intent = "Let me check the code";
         let server = MockLlmServer::builder()
-            .with_default_response(crate::testing::mock_api::MockResponse::Text(intent.to_string()))
+            .with_default_response(crate::testing::mock_api::MockResponse::Text(
+                intent.to_string(),
+            ))
             .build()
             .await;
         let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
@@ -1735,8 +1745,10 @@ mod tests {
         let mut agent = Agent::new(config).await.unwrap();
 
         // Seed a checkpoint so continue_execution has something to resume
-        agent.current_checkpoint =
-            Some(TaskCheckpoint::new("test-id".to_string(), "test task".to_string()));
+        agent.current_checkpoint = Some(TaskCheckpoint::new(
+            "test-id".to_string(),
+            "test task".to_string(),
+        ));
 
         let result = agent.continue_execution().await;
         assert!(

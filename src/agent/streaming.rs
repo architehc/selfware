@@ -3,8 +3,8 @@ use colored::*;
 use tracing::debug;
 use uuid::Uuid;
 
-use super::*;
 use super::tui_events::AgentEvent;
+use super::*;
 use crate::analysis::vector_store::EmbeddingProvider;
 use crate::session::cache::LlmCacheEntry;
 
@@ -99,13 +99,13 @@ impl Agent {
         // Generate cache key from messages, tools, and thinking mode
         let prompt = Self::messages_to_prompt(messages);
         let _key = format!("{}:{:?}:{:?}", prompt, tools, thinking);
-        
+
         // Generate embedding for the prompt
         let embedding = self.cache_manager.llm_embedding.embed(&prompt).await?;
-        
+
         // Look up in cache (context_hash=0 for now)
         let cached = self.cache_manager.llm_cache.lookup(&prompt, &embedding, 0);
-        
+
         Ok(cached)
     }
 
@@ -119,7 +119,7 @@ impl Agent {
     }
 
     /// Cache a response after streaming completes
-    /// 
+    ///
     /// This function stores the LLM response in the cache for future reuse,
     /// using embeddings for semantic matching of similar requests.
     pub async fn cache_response(
@@ -133,7 +133,7 @@ impl Agent {
     ) {
         let prompt = Self::messages_to_prompt(messages);
         let _key = format!("{}:{:?}:{:?}", prompt, tools, thinking);
-        
+
         let embedding = match self.cache_manager.llm_embedding.embed(&prompt).await {
             Ok(e) => e,
             Err(e) => {
@@ -141,7 +141,7 @@ impl Agent {
                 return;
             }
         };
-        
+
         // Build response text from content and reasoning
         let mut response = content.to_string();
         if let Some(reason) = reasoning {
@@ -150,14 +150,14 @@ impl Agent {
                 response.push_str(reason);
             }
         }
-        
+
         let entry = LlmCacheEntry {
             id: Uuid::new_v4().to_string(),
             prompt: prompt.clone(),
             embedding,
             response,
             model: self.config.model.clone(),
-            input_tokens: 0, // Would need to track this
+            input_tokens: 0,                     // Would need to track this
             output_tokens: content.len() as u32, // Approximation
             created_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -167,7 +167,7 @@ impl Agent {
             context_hash: 0,
             file_paths: vec![],
         };
-        
+
         self.cache_manager.llm_cache.store(entry);
     }
 
@@ -477,9 +477,17 @@ impl Agent {
 
             // Cache the response for long-term memory (using cloned data from before move)
             if !content.is_empty() {
-                let reasoning_opt: Option<String> = if reasoning.is_empty() { None } else { Some(reasoning.clone()) };
-                let tool_calls_opt: Option<Vec<ToolCall>> = if tool_calls.is_empty() { None } else { Some(tool_calls.clone()) };
-                
+                let reasoning_opt: Option<String> = if reasoning.is_empty() {
+                    None
+                } else {
+                    Some(reasoning.clone())
+                };
+                let tool_calls_opt: Option<Vec<ToolCall>> = if tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(tool_calls.clone())
+                };
+
                 self.cache_response(
                     &messages_for_cache,
                     &tools_for_cache,

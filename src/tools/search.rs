@@ -263,10 +263,11 @@ impl Tool for GrepSearch {
                 }
 
                 // Wrap blocking file I/O in block_in_place to avoid blocking the async runtime
-                let content = match tokio::task::block_in_place(|| std::fs::read_to_string(&file_path)) {
-                    Ok(c) => c,
-                    Err(_) => continue, // Skip binary/unreadable files
-                };
+                let content =
+                    match tokio::task::block_in_place(|| std::fs::read_to_string(&file_path)) {
+                        Ok(c) => c,
+                        Err(_) => continue, // Skip binary/unreadable files
+                    };
 
                 let lines: Vec<&str> = content.lines().collect();
 

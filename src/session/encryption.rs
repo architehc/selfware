@@ -85,7 +85,10 @@ fn get_salt() -> Result<Vec<u8>> {
     match load_or_create_salt() {
         Ok(salt) => Ok(salt),
         Err(e) => {
-            tracing::warn!("Failed to persist salt: {}. Using ephemeral salt for this session.", e);
+            tracing::warn!(
+                "Failed to persist salt: {}. Using ephemeral salt for this session.",
+                e
+            );
             // Use or create ephemeral salt in memory
             Ok(EPHEMERAL_SALT
                 .get_or_init(|| {

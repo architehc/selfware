@@ -463,12 +463,12 @@ impl Agent {
                 Ok(ReadlineResult::Interrupt) => {
                     consecutive_errors = 0;
                     self.reset_cancellation();
-                    
+
                     // Triple-tap Ctrl+C for immediate force quit
                     // Double-tap for graceful exit
                     const DOUBLE_TAP_MS: u128 = 3000; // 3 seconds (was 1.5)
                     const FORCE_QUIT_TAPS: u32 = 3;
-                    
+
                     let now = Instant::now();
                     let tap_count = if let Some((last, count)) = last_ctrl_c {
                         if now.duration_since(last).as_millis() < DOUBLE_TAP_MS {
@@ -479,9 +479,9 @@ impl Agent {
                     } else {
                         1
                     };
-                    
+
                     last_ctrl_c = Some((now, tap_count));
-                    
+
                     if tap_count >= FORCE_QUIT_TAPS {
                         // Force quit immediately
                         println!("\n\x1b[1m\x1b[91m⚠️  FORCE QUIT - Exiting immediately\x1b[0m");
@@ -1797,9 +1797,7 @@ impl Agent {
                 std::io::Write::flush(&mut std::io::stdout())?;
                 let mut confirm = String::new();
                 // Use block_in_place to prevent blocking the async runtime
-                tokio::task::block_in_place(|| {
-                    std::io::stdin().read_line(&mut confirm)
-                })?;
+                tokio::task::block_in_place(|| std::io::stdin().read_line(&mut confirm))?;
                 let confirm = confirm.trim().to_lowercase();
                 if confirm == "n" || confirm == "no" {
                     println!("Input cancelled.");
@@ -2020,7 +2018,9 @@ impl Agent {
         call: &crate::checkpoint::ToolCallLog,
         full: bool,
     ) {
-        let _lock = crate::output::OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::output::OUTPUT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let status = if call.success {
             "success".bright_green()
         } else {
@@ -2044,7 +2044,9 @@ impl Agent {
     }
 
     fn print_task_state_summary(&self) {
-        let _lock = crate::output::OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::output::OUTPUT_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         println!("  Task State");
         println!(
             "    tracked_files={} stale_files={} task_notes={}",
@@ -2080,13 +2082,17 @@ impl Agent {
         // NOTE: print_task_state_summary acquires OUTPUT_LOCK internally,
         // so we only lock the surrounding println! calls here.
         {
-            let _lock = crate::output::OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _lock = crate::output::OUTPUT_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             println!();
             println!("  {} Task State", ">>".bright_cyan());
         }
         self.print_task_state_summary();
         {
-            let _lock = crate::output::OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _lock = crate::output::OUTPUT_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             println!();
         }
     }
@@ -2170,9 +2176,7 @@ impl Agent {
 
             let mut input = String::new();
             // Use block_in_place to prevent blocking the async runtime
-            let bytes_read = tokio::task::block_in_place(|| {
-                io::stdin().read_line(&mut input)
-            })?;
+            let bytes_read = tokio::task::block_in_place(|| io::stdin().read_line(&mut input))?;
 
             // EOF detection: read_line returns Ok(0) on EOF
             if bytes_read == 0 {
@@ -2474,9 +2478,7 @@ impl Agent {
                 io::stdout().flush()?;
                 let mut confirm = String::new();
                 // Use block_in_place to prevent blocking the async runtime
-                tokio::task::block_in_place(|| {
-                    io::stdin().read_line(&mut confirm)
-                })?;
+                tokio::task::block_in_place(|| io::stdin().read_line(&mut confirm))?;
                 let confirm = confirm.trim().to_lowercase();
                 if confirm == "n" || confirm == "no" {
                     println!("Input cancelled.");

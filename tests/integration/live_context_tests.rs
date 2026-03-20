@@ -164,12 +164,7 @@ fn test_recommend_context_for_real_codebase() {
         .max_depth(5)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_type().is_file()
-                && e.path()
-                    .extension()
-                    .is_some_and(|ext| ext == "rs")
-        })
+        .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|ext| ext == "rs"))
     {
         let path = entry.path().to_path_buf();
         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
@@ -222,8 +217,7 @@ fn test_auto_optimize_evicts_stale() {
 
 fn live_config() -> Option<selfware::config::Config> {
     let endpoint = std::env::var("SELFWARE_LIVE_ENDPOINT").ok()?;
-    let model = std::env::var("SELFWARE_LIVE_MODEL")
-        .unwrap_or_else(|_| "qwen3.5-27b".to_string());
+    let model = std::env::var("SELFWARE_LIVE_MODEL").unwrap_or_else(|_| "qwen3.5-27b".to_string());
 
     Some(selfware::config::Config {
         endpoint,

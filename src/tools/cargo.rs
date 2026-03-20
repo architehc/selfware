@@ -205,17 +205,13 @@ impl Tool for CargoTest {
         cmd.kill_on_drop(true);
 
         let timeout_duration = Duration::from_secs(CARGO_TIMEOUT_SECS);
-        let output_result =
-            tokio::time::timeout(timeout_duration, cmd.output()).await;
+        let output_result = tokio::time::timeout(timeout_duration, cmd.output()).await;
 
         let output = match output_result {
             Ok(Ok(o)) => o,
             Ok(Err(e)) => anyhow::bail!("Failed to execute cargo test: {}", e),
             Err(_) => {
-                anyhow::bail!(
-                    "cargo test timed out after {} seconds",
-                    CARGO_TIMEOUT_SECS
-                )
+                anyhow::bail!("cargo test timed out after {} seconds", CARGO_TIMEOUT_SECS)
             }
         };
 
@@ -310,17 +306,13 @@ impl Tool for CargoCheck {
         }
 
         let timeout_duration = Duration::from_secs(CARGO_TIMEOUT_SECS);
-        let output_result =
-            tokio::time::timeout(timeout_duration, cmd.output()).await;
+        let output_result = tokio::time::timeout(timeout_duration, cmd.output()).await;
 
         let output = match output_result {
             Ok(Ok(o)) => o,
             Ok(Err(e)) => anyhow::bail!("Failed to execute cargo check: {}", e),
             Err(_) => {
-                anyhow::bail!(
-                    "cargo check timed out after {} seconds",
-                    CARGO_TIMEOUT_SECS
-                )
+                anyhow::bail!("cargo check timed out after {} seconds", CARGO_TIMEOUT_SECS)
             }
         };
 
@@ -433,8 +425,7 @@ impl Tool for CargoClippy {
         ]);
 
         let timeout_duration = Duration::from_secs(CARGO_TIMEOUT_SECS);
-        let output_result =
-            tokio::time::timeout(timeout_duration, cmd.output()).await;
+        let output_result = tokio::time::timeout(timeout_duration, cmd.output()).await;
 
         let output = match output_result {
             Ok(Ok(o)) => o,
@@ -524,17 +515,13 @@ impl Tool for CargoFmt {
         }
 
         let timeout_duration = Duration::from_secs(CARGO_TIMEOUT_SECS);
-        let output_result =
-            tokio::time::timeout(timeout_duration, cmd.output()).await;
+        let output_result = tokio::time::timeout(timeout_duration, cmd.output()).await;
 
         let output = match output_result {
             Ok(Ok(o)) => o,
             Ok(Err(e)) => anyhow::bail!("Failed to execute cargo fmt: {}", e),
             Err(_) => {
-                anyhow::bail!(
-                    "cargo fmt timed out after {} seconds",
-                    CARGO_TIMEOUT_SECS
-                )
+                anyhow::bail!("cargo fmt timed out after {} seconds", CARGO_TIMEOUT_SECS)
             }
         };
 

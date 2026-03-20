@@ -160,9 +160,7 @@ impl Agent {
             .context_map
             .files_at_level(ContextLevel::Tree)
             .iter()
-            .filter(|p| {
-                p.to_string_lossy().ends_with(".rs")
-            })
+            .filter(|p| p.to_string_lossy().ends_with(".rs"))
             .map(|p| p.to_path_buf())
             .collect();
 
@@ -234,8 +232,7 @@ impl Agent {
             // Append to the system message (first message).
             if let Some(first) = self.messages.first_mut() {
                 if first.role == "system" {
-                    first.content =
-                        format!("{}\n{}", first.content, skeleton_text).into();
+                    first.content = format!("{}\n{}", first.content, skeleton_text).into();
                 }
             }
         }
@@ -259,9 +256,9 @@ impl Agent {
             .can_load(p, super::context_map::ContextLevel::Full);
         if !estimate.fits {
             // Auto-compress to make room.
-            let needed = estimate.estimated_tokens.saturating_sub(
-                self.context_map.remaining(),
-            );
+            let needed = estimate
+                .estimated_tokens
+                .saturating_sub(self.context_map.remaining());
             let freed = self.context_map.compress_to_fit(needed);
             tracing::debug!(
                 "Auto-compressed {} tokens to fit {} (needed {})",
@@ -668,7 +665,8 @@ impl Agent {
 
         // Find which stale files are in our context
         let stale_in_context: Vec<String> = self
-            .file_tracker.context_files
+            .file_tracker
+            .context_files
             .iter()
             .filter(|f| self.file_tracker.stale_files.contains(f.as_str()))
             .cloned()
@@ -1672,7 +1670,10 @@ mod tests {
         // Inject some user/assistant messages and context files
         agent.messages.push(Message::user("question"));
         agent.messages.push(Message::assistant("answer"));
-        agent.file_tracker.context_files.push("some_file.rs".to_string());
+        agent
+            .file_tracker
+            .context_files
+            .push("some_file.rs".to_string());
 
         agent.clear_context();
 
@@ -2241,8 +2242,14 @@ mod tests {
         let server = MockLlmServer::builder().with_response("ok").build().await;
         let mut agent = make_test_agent(&server).await;
 
-        agent.file_tracker.stale_files.insert("stale.rs".to_string());
-        agent.file_tracker.context_files.push("tracked.rs".to_string());
+        agent
+            .file_tracker
+            .stale_files
+            .insert("stale.rs".to_string());
+        agent
+            .file_tracker
+            .context_files
+            .push("tracked.rs".to_string());
         agent.messages.push(Message::user("user"));
 
         agent.clear_context();
@@ -2491,7 +2498,10 @@ mod tests {
         let server = MockLlmServer::builder().with_response("ok").build().await;
         let mut agent = make_test_agent(&server).await;
 
-        agent.file_tracker.stale_files.insert("src/lib.rs".to_string());
+        agent
+            .file_tracker
+            .stale_files
+            .insert("src/lib.rs".to_string());
         assert!(
             agent.file_tracker.stale_files.contains("src/lib.rs"),
             "inserted stale file should be in the stale set"
@@ -2562,7 +2572,10 @@ mod tests {
         let mut agent = make_test_agent(&server).await;
 
         // Mark a file as stale but don't add it to context_files.
-        agent.file_tracker.stale_files.insert("src/missing.rs".to_string());
+        agent
+            .file_tracker
+            .stale_files
+            .insert("src/missing.rs".to_string());
 
         let refreshed = agent.refresh_stale_context_files().await;
         assert_eq!(

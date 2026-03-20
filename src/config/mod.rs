@@ -1124,12 +1124,18 @@ impl Config {
 
         // --- Continuous work recovery settings ---
         if self.continuous_work.max_recovery_attempts > 10 {
-            bail!("continuous_work.max_recovery_attempts must be <= 10, got: {}", self.continuous_work.max_recovery_attempts);
+            bail!(
+                "continuous_work.max_recovery_attempts must be <= 10, got: {}",
+                self.continuous_work.max_recovery_attempts
+            );
         }
 
         // --- Continuous work checkpoint settings ---
         if self.continuous_work.checkpoint_interval_tools < 1 {
-            bail!("checkpoint_interval_tools must be >= 1, got: {}", self.continuous_work.checkpoint_interval_tools);
+            bail!(
+                "checkpoint_interval_tools must be >= 1, got: {}",
+                self.continuous_work.checkpoint_interval_tools
+            );
         }
 
         // --- Glob pattern validation ---

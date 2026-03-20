@@ -98,7 +98,7 @@ pub(super) fn strip_think_blocks(content: &str) -> String {
         let after_think = &content[end_think + 8..]; // 8 = len("</think>")
         return after_think.trim().to_string();
     }
-    
+
     // Handle explicit <think>...</think> tags (for other models)
     let mut result = String::with_capacity(content.len());
     let mut rest = content;
@@ -213,7 +213,10 @@ Try ONE of these alternatives:\
         }
 
         // JSON / argument errors
-        if error_lower.contains("json") || error_lower.contains("argument") || error_lower.contains("parameter") {
+        if error_lower.contains("json")
+            || error_lower.contains("argument")
+            || error_lower.contains("parameter")
+        {
             return format!(
                 "ERROR RECOVERY: The tool '{}' failed due to invalid arguments. \
 Try ONE of these alternatives:\
@@ -254,7 +257,12 @@ Try ONE of these strategies:\
         use_last_message: bool,
         reasoning_chars: usize,
     ) -> Result<ActionPrompt, String> {
-        if !self.should_prompt_for_action(content, has_no_tool_calls, use_last_message, reasoning_chars) {
+        if !self.should_prompt_for_action(
+            content,
+            has_no_tool_calls,
+            use_last_message,
+            reasoning_chars,
+        ) {
             self.reset_no_action_prompt_state();
             return Ok(ActionPrompt::NotNeeded);
         }
@@ -421,7 +429,9 @@ Try ONE of these strategies:\
 
         let batch_signatures: Vec<_> = tool_calls
             .iter()
-            .map(|(name, args_str, _)| (name.clone(), super::tool_dispatch::hash_tool_args(args_str)))
+            .map(|(name, args_str, _)| {
+                (name.clone(), super::tool_dispatch::hash_tool_args(args_str))
+            })
             .collect();
 
         for sig in &batch_signatures {
@@ -497,22 +507,15 @@ Try ONE of these strategies:\
         if let Some(path) = extract_mentioned_path(&stripped) {
             // Only if not already loaded at L3.
             let p = std::path::Path::new(&path);
-            if self.context_map.level_of(p)
-                != Some(super::context_map::ContextLevel::Full)
-            {
-                return (
-                    "file_read".to_string(),
-                    format!(r#"{{"path":"{}"}}"#, path),
-                );
+            if self.context_map.level_of(p) != Some(super::context_map::ContextLevel::Full) {
+                return ("file_read".to_string(), format!(r#"{{"path":"{}"}}"#, path));
             }
         }
 
         // Pick the first relevant file NOT already loaded at L3.
         let relevant = self.context_map.find_relevant_files(content);
         for (path, _score) in &relevant {
-            if self.context_map.level_of(path)
-                != Some(super::context_map::ContextLevel::Full)
-            {
+            if self.context_map.level_of(path) != Some(super::context_map::ContextLevel::Full) {
                 let path_str = path.to_string_lossy();
                 return (
                     "file_read".to_string(),

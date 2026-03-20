@@ -170,8 +170,8 @@ pub fn is_no_action_error(e: &anyhow::Error) -> bool {
 
     // Check the error message directly
     let error_string = e.to_string();
-    error_string.contains("failed to take action after") || 
-    error_string.contains("Agent failed to take action")
+    error_string.contains("failed to take action after")
+        || error_string.contains("Agent failed to take action")
 }
 
 #[derive(Error, Debug)]

@@ -186,7 +186,9 @@ impl PathValidator {
 
         // The resolved path must be within allowed boundaries
         let is_within_working_dir = canonical.starts_with(&original_parent);
-        let is_explicitly_allowed = self.is_path_in_allowed_list(&canonical_str, path).unwrap_or(false);
+        let is_explicitly_allowed = self
+            .is_path_in_allowed_list(&canonical_str, path)
+            .unwrap_or(false);
 
         // Check allowed_paths configuration
         if !self.config.allowed_paths.is_empty() {

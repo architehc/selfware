@@ -17,8 +17,8 @@ pub mod git;
 pub mod hot_reload;
 pub mod http;
 pub mod knowledge;
-pub mod net_policy;
 pub mod lsp_tools;
+pub mod net_policy;
 pub mod package;
 pub mod page_controller;
 pub mod process;
@@ -84,8 +84,13 @@ pub fn truncate_with_pagination(
     (page, info)
 }
 
-pub(crate) const DANGEROUS_SHELL_PATTERNS: &[&str] =
-    &["/dev/tcp/", "/dev/udp/", "| bash -i", "| sh -i", "mkfifo /tmp"];
+pub(crate) const DANGEROUS_SHELL_PATTERNS: &[&str] = &[
+    "/dev/tcp/",
+    "/dev/udp/",
+    "| bash -i",
+    "| sh -i",
+    "mkfifo /tmp",
+];
 
 pub(crate) fn find_dangerous_shell_pattern(command: &str) -> Option<&'static str> {
     let normalized = command

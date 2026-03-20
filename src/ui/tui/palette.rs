@@ -248,8 +248,8 @@ impl CommandPalette {
 
     /// Render the palette
     pub fn render(&self, frame: &mut Frame, area: Rect, _selected_override: usize) {
-        use ratatui::style::Modifier;
         use ratatui::layout::Alignment;
+        use ratatui::style::Modifier;
 
         // Clear background
         frame.render_widget(Clear, area);
@@ -282,7 +282,12 @@ impl CommandPalette {
             Paragraph::new("Type to search commands...").style(TuiPalette::muted_style())
         } else {
             Paragraph::new(Line::from(vec![
-                Span::styled("❯ ", Style::default().fg(TuiPalette::AMBER).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "❯ ",
+                    Style::default()
+                        .fg(TuiPalette::AMBER)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(&self.query),
             ]))
         };

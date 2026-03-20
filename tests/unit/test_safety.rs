@@ -384,7 +384,10 @@ mod obfuscation_tests {
         let config = SafetyConfig::default();
         let checker = SafetyChecker::new(&config);
 
-        let call = create_test_call("shell_exec", r#"{"command": "date; $(rm -rf /); echo done"}"#);
+        let call = create_test_call(
+            "shell_exec",
+            r#"{"command": "date; $(rm -rf /); echo done"}"#,
+        );
         assert!(checker.check_tool_call(&call).is_err());
     }
 
@@ -407,10 +410,7 @@ mod obfuscation_tests {
         let config = SafetyConfig::default();
         let checker = SafetyChecker::new(&config);
 
-        let call = create_test_call(
-            "shell_exec",
-            r#"{"command": "eval $(cat /etc/passwd)"}"#,
-        );
+        let call = create_test_call("shell_exec", r#"{"command": "eval $(cat /etc/passwd)"}"#);
         assert!(checker.check_tool_call(&call).is_err());
     }
 
@@ -585,9 +585,12 @@ mod edge_case_tests {
         // Absolute paths outside working directory should be blocked
         let call = create_test_call("file_write", r#"{"path": "/any/path.txt", "content": ""}"#);
         assert!(checker.check_tool_call(&call).is_err());
-        
+
         // Paths inside working directory should be allowed
-        let call_local = create_test_call("file_write", r#"{"path": "./local/file.txt", "content": ""}"#);
+        let call_local = create_test_call(
+            "file_write",
+            r#"{"path": "./local/file.txt", "content": ""}"#,
+        );
         assert!(checker.check_tool_call(&call_local).is_ok());
     }
 

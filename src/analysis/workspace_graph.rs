@@ -69,8 +69,18 @@ struct IndexedSymbol {
 pub fn build_workspace_graph(options: &WorkspaceGraphOptions) -> Result<CodeGraph> {
     let full_graph = build_full_graph(options)?;
 
-    match options.focus.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        Some(focus) => Ok(filter_graph(&full_graph, focus, options.neighborhood_depth, options.max_nodes)),
+    match options
+        .focus
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(focus) => Ok(filter_graph(
+            &full_graph,
+            focus,
+            options.neighborhood_depth,
+            options.max_nodes,
+        )),
         None => Ok(full_graph),
     }
 }
@@ -182,13 +192,14 @@ fn build_full_graph(options: &WorkspaceGraphOptions) -> Result<CodeGraph> {
                 for symbol in file_symbols {
                     let unique_name = symbol_unique_name(symbol, &root);
                     let qualified = symbol_qualified_name(symbol, &root);
-                    let mut node = GraphNode::new(&unique_name, symbol_kind_to_node_type(&symbol.kind))
-                        .with_qualified_name(&qualified)
-                        .in_file(&relative)
-                        .at_line(symbol.line as u32)
-                        .with_meta("symbol_name", &symbol.name)
-                        .with_meta("symbol_kind", &format!("{:?}", symbol.kind))
-                        .with_meta("signature", &symbol.signature);
+                    let mut node =
+                        GraphNode::new(&unique_name, symbol_kind_to_node_type(&symbol.kind))
+                            .with_qualified_name(&qualified)
+                            .in_file(&relative)
+                            .at_line(symbol.line as u32)
+                            .with_meta("symbol_name", &symbol.name)
+                            .with_meta("symbol_kind", &format!("{:?}", symbol.kind))
+                            .with_meta("signature", &symbol.signature);
 
                     if let Some(doc) = &symbol.doc {
                         node = node.with_doc(doc);
@@ -308,7 +319,9 @@ fn add_import_edges(
         for target_id in targets.iter().take(3) {
             let key = (source_id.to_string(), target_id.clone(), EdgeType::Imports);
             if edge_keys.insert(key) {
-                graph.add_edge(GraphEdge::new(source_id, target_id, EdgeType::Imports).with_label(&import));
+                graph.add_edge(
+                    GraphEdge::new(source_id, target_id, EdgeType::Imports).with_label(&import),
+                );
             }
         }
     }
@@ -457,11 +470,7 @@ mod tests {
             "pub mod model;\nuse crate::model::Widget;\n\npub fn build(widget: Widget) -> Widget { widget }\n",
         )
         .expect("lib");
-        fs::write(
-            dir.path().join("src/model.rs"),
-            "pub struct Widget;\n",
-        )
-        .expect("model");
+        fs::write(dir.path().join("src/model.rs"), "pub struct Widget;\n").expect("model");
         dir
     }
 
@@ -496,8 +505,9 @@ mod tests {
     #[test]
     fn renders_ascii_graph() {
         let dir = sample_workspace();
-        let rendered = render_workspace_graph(&WorkspaceGraphOptions::new(dir.path()), OutputFormat::Ascii)
-            .expect("render");
+        let rendered =
+            render_workspace_graph(&WorkspaceGraphOptions::new(dir.path()), OutputFormat::Ascii)
+                .expect("render");
 
         assert!(rendered.contains("Widget"));
     }

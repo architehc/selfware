@@ -732,16 +732,17 @@ To call a tool, use this EXACT XML structure:
         let args = serde_json::json!({
             "file": file_path
         });
-        
+
         match self.tools.execute("lsp_document_symbols", args).await {
             Ok(result) => {
                 if let Some(symbols) = result.get("symbols").and_then(|s| s.as_array()) {
                     if symbols.is_empty() {
                         return None;
                     }
-                    
+
                     let mut context = format!("\n## Symbol Outline for `{}`:\n", file_path);
-                    for sym in symbols.iter().take(50) { // Limit to prevent context bloat
+                    for sym in symbols.iter().take(50) {
+                        // Limit to prevent context bloat
                         if let (Some(name), Some(kind), Some(line)) = (
                             sym.get("name").and_then(|n| n.as_str()),
                             sym.get("kind").and_then(|k| k.as_str()),

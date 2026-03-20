@@ -159,10 +159,7 @@ impl SelfwareLspServer {
         }))
     }
 
-    fn document_symbols(
-        &self,
-        params: Option<&Value>,
-    ) -> std::result::Result<Value, JsonRpcError> {
+    fn document_symbols(&self, params: Option<&Value>) -> std::result::Result<Value, JsonRpcError> {
         let Some(uri) = params
             .and_then(|p| p.get("textDocument"))
             .and_then(|doc| doc.get("uri"))
@@ -250,9 +247,7 @@ impl SelfwareLspServer {
             .find(|symbol| symbol.file == path)
             .or_else(|| matches.first());
 
-        Ok(target
-            .map(location_value)
-            .unwrap_or(Value::Null))
+        Ok(target.map(location_value).unwrap_or(Value::Null))
     }
 
     fn hover(&self, params: Option<&Value>) -> std::result::Result<Value, JsonRpcError> {
@@ -286,10 +281,12 @@ impl SelfwareLspServer {
             .symbols()
             .read()
             .map_err(|_| internal_error("Failed to acquire symbol index"))?;
-        let Some(symbol) = symbols
-            .get(&token)
-            .and_then(|items| items.iter().find(|item| item.file == path).or_else(|| items.first()))
-        else {
+        let Some(symbol) = symbols.get(&token).and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.file == path)
+                .or_else(|| items.first())
+        }) else {
             return Ok(Value::Null);
         };
 
@@ -389,7 +386,9 @@ async fn read_message<R: tokio::io::AsyncRead + Unpin>(
     let length = content_length.context("missing Content-Length header")?;
     let mut buf = vec![0u8; length];
     reader.read_exact(&mut buf).await?;
-    Ok(Some(String::from_utf8(buf).context("message was not valid UTF-8")?))
+    Ok(Some(
+        String::from_utf8(buf).context("message was not valid UTF-8")?,
+    ))
 }
 
 async fn write_message<W: tokio::io::AsyncWrite + Unpin>(writer: &mut W, body: &str) -> Result<()> {
@@ -534,10 +533,7 @@ mod tests {
             extract_token_at(source, 0, 8).as_deref(),
             Some("build_widget")
         );
-        assert_eq!(
-            extract_token_at(source, 0, 26).as_deref(),
-            Some("widget")
-        );
+        assert_eq!(extract_token_at(source, 0, 26).as_deref(), Some("widget"));
     }
 
     #[test]
@@ -547,7 +543,10 @@ mod tests {
                 { "uri": "file:///tmp/example" }
             ]
         });
-        assert_eq!(extract_root(Some(&params)), Some(PathBuf::from("/tmp/example")));
+        assert_eq!(
+            extract_root(Some(&params)),
+            Some(PathBuf::from("/tmp/example"))
+        );
     }
 
     #[test]

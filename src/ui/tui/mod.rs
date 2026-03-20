@@ -501,7 +501,8 @@ pub fn run_tui(model: &str) -> Result<Vec<String>> {
                     break;
                 }
                 QuitDecision::Armed => {
-                    app.status = "Press q again within 2s to quit (or Ctrl+C to quit now)".to_string();
+                    app.status =
+                        "Press q again within 2s to quit (or Ctrl+C to quit now)".to_string();
                     continue;
                 }
                 QuitDecision::None => {}
@@ -582,7 +583,8 @@ where
                     break;
                 }
                 QuitDecision::Armed => {
-                    app.status = "Press q again within 2s to quit (or Ctrl+C to quit now)".to_string();
+                    app.status =
+                        "Press q again within 2s to quit (or Ctrl+C to quit now)".to_string();
                     continue;
                 }
                 QuitDecision::None => {}

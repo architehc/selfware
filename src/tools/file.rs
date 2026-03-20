@@ -518,7 +518,8 @@ pub(super) fn validate_tool_path(path: &str, config: &SafetyConfig) -> Result<()
     #[cfg(test)]
     {
         if std::env::var("SELFWARE_TEST_MODE").is_ok() {
-            if !path.starts_with("tests/e2e-projects/") && !path.starts_with("/tmp/selfware-test-") {
+            if !path.starts_with("tests/e2e-projects/") && !path.starts_with("/tmp/selfware-test-")
+            {
                 anyhow::bail!("Test mode only valid for test fixtures, got: {}", path);
             }
             return Ok(());
@@ -1156,7 +1157,11 @@ mod tests {
     #[tokio::test]
     async fn test_file_read_blocks_traversal() {
         let temp_dir = TempDir::new().unwrap();
-        let blocked_path = temp_dir.path().parent().unwrap().join("should_not_escape.txt");
+        let blocked_path = temp_dir
+            .path()
+            .parent()
+            .unwrap()
+            .join("should_not_escape.txt");
         let tool = FileRead::with_safety_config(restricted_safety_config(temp_dir.path()));
         let args = serde_json::json!({"path": blocked_path});
         let result = tool.execute(args).await;

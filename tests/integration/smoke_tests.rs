@@ -18,15 +18,18 @@ use tempfile::TempDir;
 async fn smoke_config(work_dir: &Path) -> Option<selfware::config::Config> {
     let endpoint = std::env::var("SELFWARE_ENDPOINT")
         .unwrap_or_else(|_| "http://localhost:8000/v1".to_string());
-    let model = std::env::var("SELFWARE_MODEL")
-        .unwrap_or_else(|_| "qwen3.5-27b".to_string());
+    let model = std::env::var("SELFWARE_MODEL").unwrap_or_else(|_| "qwen3.5-27b".to_string());
 
     // Quick check: is the endpoint up and serving our model?
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .ok()?;
-    let resp = client.get(format!("{}/models", endpoint)).send().await.ok()?;
+    let resp = client
+        .get(format!("{}/models", endpoint))
+        .send()
+        .await
+        .ok()?;
     if !resp.status().is_success() {
         return None;
     }
@@ -52,10 +55,7 @@ async fn smoke_config(work_dir: &Path) -> Option<selfware::config::Config> {
             ..Default::default()
         },
         safety: selfware::config::SafetyConfig {
-            allowed_paths: vec![
-                format!("{}/**", work_dir.display()),
-                "./**".to_string(),
-            ],
+            allowed_paths: vec![format!("{}/**", work_dir.display()), "./**".to_string()],
             ..Default::default()
         },
         execution_mode: selfware::config::ExecutionMode::Yolo,
@@ -78,9 +78,15 @@ async fn smoke_simple_qa() {
     };
 
     let mut agent = selfware::agent::Agent::new(config).await.unwrap();
-    let result = agent.run_task("What is 2 + 2? Just answer with the number.").await;
+    let result = agent
+        .run_task("What is 2 + 2? Just answer with the number.")
+        .await;
 
-    assert!(result.is_ok(), "Simple Q&A should complete: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Simple Q&A should complete: {:?}",
+        result.err()
+    );
 }
 
 // ─── File Creation ──────────────────────────────────────────────────────────
@@ -97,10 +103,7 @@ async fn smoke_create_file() {
         }
     };
     // Allow writing to tmp dir
-    config.safety.allowed_paths = vec![
-        format!("{}/**", tmp.path().display()),
-        "./**".to_string(),
-    ];
+    config.safety.allowed_paths = vec![format!("{}/**", tmp.path().display()), "./**".to_string()];
 
     let mut agent = selfware::agent::Agent::new(config).await.unwrap();
     let task = format!(
@@ -109,7 +112,11 @@ async fn smoke_create_file() {
     );
     let result = agent.run_task(&task).await;
 
-    assert!(result.is_ok(), "File creation should complete: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "File creation should complete: {:?}",
+        result.err()
+    );
 
     let file_path = tmp.path().join("hello.txt");
     if file_path.exists() {
@@ -150,7 +157,11 @@ async fn smoke_read_file() {
     );
     let result = agent.run_task(&task).await;
 
-    assert!(result.is_ok(), "File reading should complete: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "File reading should complete: {:?}",
+        result.err()
+    );
     println!("PASS: Read file task completed");
 }
 
@@ -169,10 +180,7 @@ async fn smoke_create_rust_project() {
             return;
         }
     };
-    config.safety.allowed_paths = vec![
-        format!("{}/**", tmp.path().display()),
-        "./**".to_string(),
-    ];
+    config.safety.allowed_paths = vec![format!("{}/**", tmp.path().display()), "./**".to_string()];
     config.agent.max_iterations = 20; // More room for multi-step
 
     let mut agent = selfware::agent::Agent::new(config).await.unwrap();
@@ -227,10 +235,7 @@ async fn smoke_create_python_script() {
             return;
         }
     };
-    config.safety.allowed_paths = vec![
-        format!("{}/**", tmp.path().display()),
-        "./**".to_string(),
-    ];
+    config.safety.allowed_paths = vec![format!("{}/**", tmp.path().display()), "./**".to_string()];
 
     let mut agent = selfware::agent::Agent::new(config).await.unwrap();
     let task = format!(
@@ -245,8 +250,14 @@ async fn smoke_create_python_script() {
     let script = tmp.path().join("fibonacci.py");
     if script.exists() {
         let content = std::fs::read_to_string(&script).unwrap();
-        assert!(content.contains("fibonacci"), "Should contain fibonacci function");
-        assert!(content.contains("def "), "Should contain a function definition");
+        assert!(
+            content.contains("fibonacci"),
+            "Should contain fibonacci function"
+        );
+        assert!(
+            content.contains("def "),
+            "Should contain a function definition"
+        );
         println!("PASS: Python script created ({} bytes)", content.len());
     } else {
         println!("WARN: Script not created at expected path");
@@ -283,10 +294,7 @@ async fn smoke_multi_file_edit() {
             return;
         }
     };
-    config.safety.allowed_paths = vec![
-        format!("{}/**", tmp.path().display()),
-        "./**".to_string(),
-    ];
+    config.safety.allowed_paths = vec![format!("{}/**", tmp.path().display()), "./**".to_string()];
 
     let mut agent = selfware::agent::Agent::new(config).await.unwrap();
     let task = format!(
@@ -344,7 +352,11 @@ async fn smoke_search_codebase() {
         .run_task("Search for 'strip_think_blocks' in the codebase and tell me which files contain it and what it does.")
         .await;
 
-    assert!(result.is_ok(), "Search task should complete: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Search task should complete: {:?}",
+        result.err()
+    );
     println!("PASS: Search and analyze completed");
 }
 
@@ -367,7 +379,11 @@ async fn smoke_shell_command() {
         .run_task("Run 'rustc --version' and 'cargo --version' and tell me the versions.")
         .await;
 
-    assert!(result.is_ok(), "Shell command should complete: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Shell command should complete: {:?}",
+        result.err()
+    );
     println!("PASS: Shell command execution completed");
 }
 
@@ -415,6 +431,10 @@ async fn smoke_cargo_check_selfware() {
         .run_task("Run cargo check on this project and report if it compiles successfully.")
         .await;
 
-    assert!(result.is_ok(), "Cargo check should complete: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Cargo check should complete: {:?}",
+        result.err()
+    );
     println!("PASS: Cargo check task completed");
 }

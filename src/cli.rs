@@ -765,7 +765,10 @@ async fn handle_command(
                 .cluster()
                 .render(&graph, graph_format_to_output_format(format));
 
-            println!("{}", render_graph_output(&graph.name, focus.as_deref(), &summary, format, &rendered));
+            println!(
+                "{}",
+                render_graph_output(&graph.name, focus.as_deref(), &summary, format, &rendered)
+            );
         }
 
         #[cfg(feature = "tui")]

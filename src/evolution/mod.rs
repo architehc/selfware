@@ -229,7 +229,7 @@ impl std::fmt::Display for GenerationRating {
 }
 
 /// Check if a path is protected from evolution mutations
-/// 
+///
 /// Uses proper path prefix matching with canonicalization to prevent bypasses
 /// via symlinks, relative paths, or substring tricks.
 pub fn is_protected(path: &std::path::Path) -> bool {
@@ -242,9 +242,9 @@ pub fn is_protected(path: &std::path::Path) -> bool {
             path.to_path_buf()
         }
     };
-    
+
     let path_str = canonical_path.to_string_lossy();
-    
+
     PROTECTED_PATHS.iter().any(|protected_prefix| {
         // Check if the path starts with the protected prefix (for relative paths)
         // or contains the protected prefix (for canonical/absolute paths)

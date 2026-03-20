@@ -1024,8 +1024,8 @@ fn parse_symbol_kind(kind: &str) -> NodeType {
 async fn lsp_document_symbols(file_path: &str) -> Result<Vec<LSymbol>> {
     // For now, use a simple grep-based approach to find definitions
     // In a full implementation, this would call rust-analyzer or similar
-    let content = std::fs::read_to_string(file_path)
-        .context(format!("Cannot read file: {}", file_path))?;
+    let content =
+        std::fs::read_to_string(file_path).context(format!("Cannot read file: {}", file_path))?;
 
     let mut symbols = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
@@ -1139,7 +1139,7 @@ fn extract_symbol_name(line: &str, prefix: &str) -> Option<String> {
     if let Some(pos) = line.find(prefix) {
         let after_prefix = &line[pos + prefix.len()..];
         let trimmed = after_prefix.trim_start();
-        
+
         // Extract the identifier (alphanumeric + _)
         if let Some(name_end) = trimmed.find(|c: char| !c.is_alphanumeric() && c != '_') {
             let name = &trimmed[..name_end];
