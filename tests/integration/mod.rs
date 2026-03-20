@@ -26,5 +26,6 @@ mod supervision_tests;
 mod test_agent_loop;
 mod tool_tests;
 mod live_context_tests;
+mod smoke_tests;
 
 pub use helpers::*;
