@@ -9,12 +9,13 @@ use crate::api::types::Message;
 pub(super) const MAX_NO_ACTION_PROMPTS: usize = 5;
 /// After this many text-only reprompts, force a deterministic fallback tool call
 /// instead of sending another text correction the model will ignore.
-pub(super) const FORCE_FALLBACK_AFTER: usize = 3;
+/// Set to 1 for weak models (qwen3.5-27b) that never respond to text corrections.
+pub(super) const FORCE_FALLBACK_AFTER: usize = 1;
 /// Absolute lifetime cap on total no-action prompts across the entire task.
 /// Prevents infinite cycling when the consecutive counter gets reset by
 /// intervening responses that pass `should_prompt_for_action` (e.g. long
 /// responses, or responses without intent phrases after seeing forced tool output).
-pub(super) const MAX_TOTAL_NO_ACTION_PROMPTS: usize = 12;
+pub(super) const MAX_TOTAL_NO_ACTION_PROMPTS: usize = 20;
 pub(super) const FILE_DISCOVERY_TOOLS: &str = "directory_tree, glob_find, or grep_search";
 
 /// Result of the intent-without-action check.
@@ -526,13 +527,27 @@ Try ONE of these strategies:\
             }
         }
 
-        // Use context map to pick a relevant file the model might want to read.
+        // Use context map to pick a relevant file NOT already loaded at L3.
         let relevant = self.context_map.find_relevant_files(content);
-        if let Some((path, _score)) = relevant.first() {
+        for (path, _score) in &relevant {
+            // Skip files already fully loaded — reading them again is useless.
+            if self.context_map.level_of(path)
+                == Some(super::context_map::ContextLevel::Full)
+            {
+                continue;
+            }
             let path_str = path.to_string_lossy();
             return (
                 "file_read".to_string(),
                 format!(r#"{{"path":"{}"}}"#, path_str),
+            );
+        }
+
+        // If all relevant files are loaded, try glob to discover more.
+        if !relevant.is_empty() {
+            return (
+                "glob_find".to_string(),
+                r#"{"pattern":"src/**/*.rs","path":"."}"#.to_string(),
             );
         }
 

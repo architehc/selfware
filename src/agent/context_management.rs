@@ -193,17 +193,16 @@ impl Agent {
             loaded += 1;
         }
 
-        // Inject the skeletons as a message so the model can actually see them.
-        // This is the critical step — without this, skeletons are tracked internally
-        // but invisible to the LLM.
+        // Inject skeletons into the system prompt so the model has the codebase
+        // overview at the START of context (RoPE high-attention zone).
+        // This avoids consecutive user messages and ensures the model sees it.
         if loaded > 0 {
             let mut skeleton_text = format!(
-                "## Codebase Overview ({} files, L2 skeletons)\n\
-                 Below are function/struct/trait signatures for all Rust source files.\n\
-                 Use `context_focus` or `file_read` to see full content of specific files.\n\n",
+                "\n\n## Codebase Overview ({} Rust files, function/struct signatures)\n\
+                 You already have the full project structure below. \
+                 Use `file_read` only for files you need to see in full detail.\n\n",
                 loaded
             );
-            // Collect all loaded skeletons and render them.
             let skeleton_paths: Vec<std::path::PathBuf> = self
                 .context_map
                 .files_at_level(ContextLevel::Skeleton)
@@ -216,8 +215,13 @@ impl Agent {
                     skeleton_text.push('\n');
                 }
             }
-            self.messages
-                .push(crate::api::types::Message::user(skeleton_text));
+            // Append to the system message (first message).
+            if let Some(first) = self.messages.first_mut() {
+                if first.role == "system" {
+                    first.content =
+                        format!("{}\n{}", first.content, skeleton_text).into();
+                }
+            }
         }
 
         let stats = self.context_map.stats();
