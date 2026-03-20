@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! Selection / Recommendation Menus
 //!
 //! A guided wizard system where the agent presents scored options and the user
@@ -21,11 +20,11 @@
 //! deployment) and returns a [`ProjectPlan`] suitable for injection into a
 //! system prompt.
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use colored::*;
 use crossterm::event::{self, Event, KeyCode};
 use crossterm::terminal;
-use std::io::{self, BufRead, IsTerminal, Write as IoWrite};
+use std::io::{self, IsTerminal, Write as IoWrite};
 
 // ---------------------------------------------------------------------------
 // Public types

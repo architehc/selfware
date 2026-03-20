@@ -1,4 +1,3 @@
-#![allow(dead_code, unused_imports, unused_variables)]
 //! Template engine for scaffolding new projects from embedded templates.
 //!
 //! Provides compile-time embedded templates for Rust, Python, and Node.js/TypeScript
@@ -48,6 +47,7 @@ const NODEJS_VITEST_CONFIG: &str = include_str!("../templates/nodejs/vitest.conf
 const WORKFLOW_RUST_QA: &str = include_str!("../templates/workflows/rust-qa.yml");
 const WORKFLOW_PYTHON_QA: &str = include_str!("../templates/workflows/python-qa.yml");
 const WORKFLOW_NODEJS_QA: &str = include_str!("../templates/workflows/nodejs-qa.yml");
+#[allow(dead_code)]
 const WORKFLOW_ORCHESTRATOR: &str =
     include_str!("../templates/workflows/selfware-qa-orchestrator.yml");
 
