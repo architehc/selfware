@@ -505,18 +505,35 @@ Try ONE of these strategies:\
 
         // Try to extract a file path the model mentioned wanting to read.
         if let Some(path) = extract_mentioned_path(&stripped) {
-            // Only if not already loaded at L3.
             let p = std::path::Path::new(&path);
-            if self.context_map.level_of(p) != Some(super::context_map::ContextLevel::Full) {
-                return ("file_read".to_string(), format!(r#"{{"path":"{}"}}"#, path));
+            if self.context_map.level_of(p)
+                != Some(super::context_map::ContextLevel::Full)
+            {
+                return (
+                    "file_read".to_string(),
+                    format!(r#"{{"path":"{}"}}"#, path),
+                );
             }
         }
 
-        // Pick the first relevant file NOT already loaded at L3.
-        let relevant = self.context_map.find_relevant_files(content);
-        for (path, _score) in &relevant {
-            if self.context_map.level_of(path) != Some(super::context_map::ContextLevel::Full) {
-                let path_str = path.to_string_lossy();
+        // Pick the next unread source file (prioritize .rs, then other source).
+        // This is more useful than keyword matching which returns random non-source files.
+        let source_extensions = [".rs", ".toml", ".py", ".ts", ".js", ".go"];
+        for ext in &source_extensions {
+            let unread: Vec<_> = self
+                .context_map
+                .files_at_level(super::context_map::ContextLevel::Tree)
+                .into_iter()
+                .chain(
+                    self.context_map
+                        .files_at_level(super::context_map::ContextLevel::Skeleton),
+                )
+                .filter(|p| p.to_string_lossy().ends_with(ext))
+                .filter(|p| p.to_string_lossy().starts_with("src/"))
+                .collect();
+
+            if let Some(path) = unread.first() {
+                let path_str = path.to_string_lossy().to_string();
                 return (
                     "file_read".to_string(),
                     format!(r#"{{"path":"{}"}}"#, path_str),
