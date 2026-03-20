@@ -430,7 +430,7 @@ impl Agent {
     /// Compress the context to fit within `target_tokens` by generating
     /// a structured summary and replacing old messages.
     /// Unlike the flat LLM-based compression, this is deterministic and fast.
-    pub(super) fn compress_to_structured_summary(&mut self, target_tokens: usize) {
+    pub fn compress_to_structured_summary(&mut self, target_tokens: usize) {
         let current = self.estimate_messages_tokens();
         if current <= target_tokens {
             return;

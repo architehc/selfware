@@ -420,6 +420,12 @@ You have access to tools for file operations, git, shell commands, and more.
 4. FIX: If verification fails, fix errors before proceeding
 {}
 
+## EFFICIENCY RULES
+- To read multiple files at once, use context_bulk_read with a glob pattern (e.g. "src/agent/*.rs")
+- For read-only tasks (summarize, explain, review), you do NOT need cargo_check — just provide your answer
+- Use grep_search to find specific code instead of reading entire files
+- Use directory_tree to understand structure before reading files
+
 ## CRITICAL RULES
 - NEVER skip verification after file_edit or file_write
 {}
@@ -505,6 +511,12 @@ To call a tool, use this EXACT XML structure:
 {}
 4. FIX: If verification fails, fix errors before proceeding
 {}
+
+## EFFICIENCY RULES
+- To read multiple files at once, use context_bulk_read with a glob pattern (e.g. "src/agent/*.rs")
+- For read-only tasks (summarize, explain, review), you do NOT need cargo_check — just provide your answer
+- Use grep_search to find specific code instead of reading entire files
+- Use directory_tree to understand structure before reading files
 
 ## CRITICAL RULES
 - Use <name>TOOL_NAME</name> - never <function>

@@ -37,12 +37,44 @@ impl Agent {
         "http_request", // http_request
     ];
 
+    /// Tools that are read-only / informational and never modify code.
+    /// Tasks that only use these tools should not require cargo verification.
+    const READ_ONLY_TOOLS: &'static [&'static str] = &[
+        "file_read",
+        "directory_tree",
+        "glob_find",
+        "grep_search",
+        "symbol_search",
+        "git_status",
+        "git_diff",
+        "git_log",
+        "lsp_goto_definition",
+        "lsp_find_references",
+        "lsp_document_symbols",
+        "lsp_hover",
+        "context_status",
+        "context_focus",
+        "context_recommend",
+        "context_bulk_read",
+        "context_summary",
+        "context_load_skeleton",
+        "knowledge_query",
+        "knowledge_stats",
+        "knowledge_export",
+        "process_list",
+        "process_logs",
+        "port_check",
+    ];
+
     /// Returns true if the current task appears to be a non-Rust task that should
-    /// bypass cargo-based verification.  Two conditions trigger the bypass:
+    /// bypass cargo-based verification.  Three conditions trigger the bypass:
     ///
     /// 1. **No Cargo.toml** in the working directory — there is no Rust project to verify.
     /// 2. **Only non-Rust tools used** — the task exclusively used browser, vision,
     ///    computer-control, or web tools with no file-write or cargo activity.
+    /// 3. **Only read-only tools used** — the task only read files, searched, or
+    ///    queried information without making any changes. No code was modified,
+    ///    so there is nothing to verify.
     pub(super) fn should_skip_cargo_verification(&self) -> bool {
         // Condition 1: No Cargo.toml in the project root or its ancestors → not a Rust project
         if !super::current_project_root().join("Cargo.toml").exists() {
@@ -52,29 +84,47 @@ impl Agent {
             return true;
         }
 
-        // Condition 2: Every tool call in the checkpoint is a non-Rust tool
-        let all_non_rust = self
-            .current_checkpoint
-            .as_ref()
-            .map(|cp| {
-                // If there are no tool calls at all, this is a text-only response — skip cargo
-                if cp.tool_calls.is_empty() {
-                    return true;
-                }
-                cp.tool_calls.iter().all(|tc| {
-                    Self::NON_RUST_TOOL_PREFIXES
-                        .iter()
-                        .any(|prefix| tc.tool_name.starts_with(prefix))
-                })
-            })
-            .unwrap_or(false);
+        let Some(cp) = self.current_checkpoint.as_ref() else {
+            return false;
+        };
+
+        // If there are no tool calls at all, this is a text-only response — skip cargo
+        if cp.tool_calls.is_empty() {
+            debug!("Completion gate: no tool calls in checkpoint, skipping cargo verification");
+            return true;
+        }
+
+        // Condition 2: Every tool call is a non-Rust tool
+        let all_non_rust = cp.tool_calls.iter().all(|tc| {
+            Self::NON_RUST_TOOL_PREFIXES
+                .iter()
+                .any(|prefix| tc.tool_name.starts_with(prefix))
+        });
 
         if all_non_rust {
             debug!(
                 "Completion gate: all tool calls are non-Rust tools, skipping cargo verification"
             );
+            return true;
         }
-        all_non_rust
+
+        // Condition 3: Every tool call is read-only (no code was modified)
+        let all_read_only = cp.tool_calls.iter().all(|tc| {
+            Self::READ_ONLY_TOOLS.contains(&tc.tool_name.as_str())
+                || Self::NON_RUST_TOOL_PREFIXES
+                    .iter()
+                    .any(|prefix| tc.tool_name.starts_with(prefix))
+        });
+
+        if all_read_only {
+            debug!(
+                "Completion gate: all {} tool calls are read-only, skipping cargo verification",
+                cp.tool_calls.len()
+            );
+            return true;
+        }
+
+        false
     }
 
     /// Check whether the agent has done enough work to accept completion.

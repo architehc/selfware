@@ -322,12 +322,116 @@ impl Agent {
         true
     }
 
+    /// Tools that are safe to execute concurrently (read-only, no side effects).
+    const PARALLEL_SAFE_TOOLS: &'static [&'static str] = &[
+        "file_read",
+        "directory_tree",
+        "glob_find",
+        "grep_search",
+        "symbol_search",
+        "git_status",
+        "git_diff",
+        "git_log",
+        "lsp_document_symbols",
+        "lsp_find_references",
+        "lsp_goto_definition",
+        "lsp_hover",
+    ];
+
+    /// Check if a tool can be executed concurrently with other tools.
+    fn is_parallel_safe(name: &str) -> bool {
+        Self::PARALLEL_SAFE_TOOLS.contains(&name)
+    }
+
     pub(super) async fn execute_tool_batch(
+        &mut self,
+        tool_calls: Vec<super::execution::CollectedToolCall>,
+    ) -> Result<()> {
+        // Phase 1: Partition into parallel-safe and sequential groups.
+        // Read-only tools with no path conflicts go into the parallel batch.
+        let mut parallel_batch: Vec<super::execution::CollectedToolCall> = Vec::new();
+        let mut sequential_batch: Vec<super::execution::CollectedToolCall> = Vec::new();
+        let mut parallel_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for call in &tool_calls {
+            let (name, args_str, _) = call;
+            if Self::is_parallel_safe(name) {
+                // Check for path conflicts within the parallel batch
+                let path = serde_json::from_str::<serde_json::Value>(args_str)
+                    .ok()
+                    .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from));
+                let has_conflict = path
+                    .as_ref()
+                    .is_some_and(|p| parallel_paths.contains(p));
+                if has_conflict {
+                    sequential_batch.push(call.clone());
+                } else {
+                    if let Some(ref p) = path {
+                        parallel_paths.insert(p.clone());
+                    }
+                    parallel_batch.push(call.clone());
+                }
+            } else {
+                sequential_batch.push(call.clone());
+            }
+        }
+
+        // Phase 2: Execute parallel-safe tools concurrently.
+        // Phase 2: If fewer than 2 parallel tools, merge back and run everything
+        // sequentially in the original order to preserve execution semantics.
+        if parallel_batch.len() < 2 {
+            for (name, args_str, tool_call_id) in tool_calls {
+                if self.is_cancelled() {
+                    break;
+                }
+                self.execute_single_tool_in_batch(name, args_str, tool_call_id)
+                    .await?;
+            }
+            return Ok(());
+        }
+
+        // Phase 3: Execute parallel-safe tools concurrently.
+        debug!(
+            "Executing {} tools in parallel, {} sequentially",
+            parallel_batch.len(),
+            sequential_batch.len()
+        );
+        self.execute_parallel_tools(parallel_batch).await?;
+
+        // Phase 4: Execute sequential tools one at a time.
+        for (name, args_str, tool_call_id) in sequential_batch {
+            if self.is_cancelled() {
+                break;
+            }
+            self.execute_single_tool_in_batch(name, args_str, tool_call_id)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Execute multiple read-only tools concurrently.
+    ///
+    /// Pre-validates all tools sequentially (fast), spawns concurrent executions
+    /// for tools that pass validation, then processes results sequentially.
+    async fn execute_parallel_tools(
         &mut self,
         tool_calls: Vec<super::execution::CollectedToolCall>,
     ) -> Result<()> {
         use super::tui_events::AgentEvent;
         use crate::hooks::HookAction;
+
+        // Pre-validate all tools and collect validated ones for concurrent execution
+        struct ValidatedTool {
+            name: String,
+            args_str: String,
+            args: Value,
+            call_id: String,
+            use_native_fc: bool,
+            start_time: std::time::Instant,
+        }
+
+        let mut validated: Vec<ValidatedTool> = Vec::with_capacity(tool_calls.len());
 
         for (name, args_str, tool_call_id) in tool_calls {
             if self.is_cancelled() {
@@ -354,11 +458,7 @@ impl Agent {
                 self.build_tool_call_context(&name, &args_str, tool_call_id);
 
             if self.suppress_repeated_failed_tool_retry(
-                &name,
-                &args_str,
-                &call_id,
-                use_native_fc,
-                start_time,
+                &name, &args_str, &call_id, use_native_fc, start_time,
             ) {
                 self.emit_event(AgentEvent::ToolCompleted {
                     name: name.clone(),
@@ -370,84 +470,27 @@ impl Agent {
 
             if let Err(e) = self.safety.check_tool_call(&fake_call) {
                 let error_msg = format!("Safety check failed: {}", e);
-                let spinner = crate::ui::spinner::TerminalSpinner::start(&error_msg);
-                spinner.stop_error(&error_msg);
                 crate::output::safety_blocked(&error_msg);
-                // Audit: log safety block
                 if let Some(ref logger) = self.audit_logger {
                     logger.log_safety_block(&name, &error_msg);
                 }
                 self.push_tool_result_message(use_native_fc, &call_id, &name, false, &error_msg);
                 self.log_tool_call(&name, &args_str, &error_msg, false, start_time, false);
                 self.remember_failed_tool(&name, &error_msg);
-                let duration_ms = start_time.elapsed().as_millis() as u64;
-                self.self_improvement.record_tool(
-                    &name,
-                    self.learning_context(),
-                    Outcome::Failure,
-                    duration_ms,
-                    Some(error_msg.clone()),
-                );
-                self.self_improvement.record_error(
-                    &error_msg,
-                    "safety",
-                    self.learning_context(),
-                    &name,
-                    None,
-                );
                 self.record_failed_tool_attempt(&name, &args_str, "safety", &error_msg);
                 continue;
             }
 
-            let args =
-                match self.parse_tool_args(&name, &args_str, &call_id, use_native_fc, start_time) {
-                    Some(args) => args,
-                    None => {
-                        self.emit_event(AgentEvent::ToolCompleted {
-                            name: name.clone(),
-                            success: false,
-                            duration_ms: start_time.elapsed().as_millis() as u64,
-                        });
-                        continue;
-                    }
-                };
+            let args = match self.parse_tool_args(&name, &args_str, &call_id, use_native_fc, start_time) {
+                Some(args) => args,
+                None => continue,
+            };
 
-            if !self.validate_tool_args(
-                &name,
-                &args_str,
-                &args,
-                &call_id,
-                use_native_fc,
-                start_time,
-            ) {
-                self.emit_event(AgentEvent::ToolCompleted {
-                    name: name.clone(),
-                    success: false,
-                    duration_ms: start_time.elapsed().as_millis() as u64,
-                });
+            if !self.validate_tool_args(&name, &args_str, &args, &call_id, use_native_fc, start_time) {
                 continue;
             }
 
-            if self.maybe_block_redundant_reread(
-                &name,
-                &args_str,
-                &args,
-                &call_id,
-                use_native_fc,
-                start_time,
-            ) {
-                self.emit_event(AgentEvent::ToolCompleted {
-                    name: name.clone(),
-                    success: false,
-                    duration_ms: start_time.elapsed().as_millis() as u64,
-                });
-                continue;
-            }
-
-            if !self
-                .confirm_tool_execution(&name, &args_str, &call_id, use_native_fc)
-                .await?
-            {
+            if self.maybe_block_redundant_reread(&name, &args_str, &args, &call_id, use_native_fc, start_time) {
                 continue;
             }
 
@@ -462,49 +505,131 @@ impl Agent {
 
             self.emit_event(AgentEvent::ToolStarted { name: name.clone() });
 
-            let activity = crate::output::tool_activity_message(&name, &args);
-            let spinner = crate::ui::spinner::TerminalSpinner::start(&activity);
-            let (success, result, summary) = self
-                .execute_single_tool(&name, &args_str, &args, start_time)
-                .await?;
+            validated.push(ValidatedTool {
+                name,
+                args_str,
+                args,
+                call_id,
+                use_native_fc,
+                start_time,
+            });
+        }
 
-            let duration_ms = start_time.elapsed().as_millis() as u64;
+        if validated.is_empty() {
+            return Ok(());
+        }
+
+        // Build futures for concurrent execution. We use FuturesUnordered
+        // to run them concurrently within the current task (no spawning needed,
+        // avoids 'static lifetime requirements).
+        let timeout_secs = self.config.agent.step_timeout_secs.max(1);
+
+        for vt in &validated {
+            let activity = crate::output::tool_activity_message(&vt.name, &vt.args);
+            cli_println!("  {} {}", "↪".bright_black(), activity.dimmed());
+        }
+
+        // Execute all validated tools concurrently using the tool registry
+        let mut results: Vec<(usize, (bool, String, String))> =
+            Vec::with_capacity(validated.len());
+
+        {
+            use futures::stream::{FuturesUnordered, StreamExt};
+            let mut futures = FuturesUnordered::new();
+
+            for (idx, vt) in validated.iter().enumerate() {
+                let tool_name = vt.name.clone();
+                let tool_args = vt.args.clone();
+                let tool_ref = self.tools.get(&tool_name);
+
+                futures.push(async move {
+                    let Some(tool) = tool_ref else {
+                        let msg = format!("Unknown tool: {}", tool_name);
+                        return (idx, (false, msg.clone(), msg));
+                    };
+                    let start = std::time::Instant::now();
+                    let execution = tokio::time::timeout(
+                        std::time::Duration::from_secs(timeout_secs),
+                        tool.execute(tool_args.clone()),
+                    )
+                    .await;
+                    let elapsed = start.elapsed().as_millis() as u64;
+                    match execution {
+                        Ok(Ok(result)) => {
+                            let result_str = serde_json::to_string(&result)
+                                .unwrap_or_else(|_| "{}".to_string());
+                            let summary = crate::output::semantic_summary(
+                                &tool_name,
+                                &tool_args,
+                                Some(&result_str),
+                                true,
+                                elapsed,
+                            );
+                            (idx, (true, result_str, summary))
+                        }
+                        Ok(Err(e)) => {
+                            let summary = crate::output::semantic_summary(
+                                &tool_name,
+                                &tool_args,
+                                Some(&e.to_string()),
+                                false,
+                                elapsed,
+                            );
+                            (idx, (false, e.to_string(), summary))
+                        }
+                        Err(_) => {
+                            let msg = format!("Tool execution timed out after {}s", timeout_secs);
+                            (idx, (false, msg.clone(), msg))
+                        }
+                    }
+                });
+            }
+
+            while let Some(result) = futures.next().await {
+                results.push(result);
+            }
+        }
+
+        // Sort by original order to maintain deterministic message ordering
+        results.sort_by_key(|(idx, _)| *idx);
+
+        // Post-process all results
+        for (idx, (success, result_str, summary)) in results {
+            let vt = &validated[idx];
+
+            let duration_ms = vt.start_time.elapsed().as_millis() as u64;
             self.emit_event(AgentEvent::ToolCompleted {
-                name: name.clone(),
+                name: vt.name.clone(),
                 success,
                 duration_ms,
             });
 
             if success {
-                spinner.stop_success(&summary);
+                cli_println!("  {} {}", "✔".bright_green(), summary);
             } else {
-                spinner.stop_error(&summary);
+                cli_println!("  {} {}", "✗".bright_red(), summary);
             }
 
             // Store for progressive disclosure via /last
             {
-                let exit_code = serde_json::from_str::<serde_json::Value>(&result)
+                let exit_code = serde_json::from_str::<serde_json::Value>(&result_str)
                     .ok()
                     .and_then(|v| v.get("exit_code").and_then(|c| c.as_i64()))
                     .map(|c| c as i32);
                 self.store_last_tool_output(crate::agent::last_tool::LastToolOutput {
-                    tool_name: name.clone(),
+                    tool_name: vt.name.clone(),
                     summary: summary.clone(),
-                    full_output: result.clone(),
+                    full_output: result_str.clone(),
                     success,
                     exit_code,
                     duration_ms,
                 });
             }
 
-            let tool_outcome = if success {
-                Outcome::Success
-            } else {
-                Outcome::Failure
-            };
-            let tool_error = (!success).then(|| result.clone());
+            let tool_outcome = if success { Outcome::Success } else { Outcome::Failure };
+            let tool_error = (!success).then(|| result_str.clone());
             self.self_improvement.record_tool(
-                &name,
+                &vt.name,
                 self.learning_context(),
                 tool_outcome,
                 duration_ms,
@@ -515,78 +640,329 @@ impl Agent {
                     &error_text,
                     Self::classify_error_type(&error_text),
                     self.learning_context(),
-                    &name,
+                    &vt.name,
                     None,
                 );
             }
             if success {
                 self.clear_failed_tool_attempts();
             } else {
-                self.record_failed_tool_attempt(&name, &args_str, "execution", &result);
+                self.record_failed_tool_attempt(&vt.name, &vt.args_str, "execution", &result_str);
             }
 
-            self.track_task_state_after_tool(&name, &args, &result, success);
+            self.track_task_state_after_tool(&vt.name, &vt.args, &result_str, success);
 
             // Track file operations for context management
             if success {
-                if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                if let Some(path) = vt.args.get("path").and_then(|v| v.as_str()) {
                     let path_str = path.to_string();
-                    match name.as_str() {
-                        "file_read" => {
-                            if self.file_tracker.context_files.len() < 500
-                                && !self.file_tracker.context_files.contains(&path_str)
-                            {
-                                self.file_tracker.context_files.push(path_str.clone());
-                            }
-                            // Track in hierarchical context map for budget-aware management.
-                            if let Some(content) =
-                                serde_json::from_str::<serde_json::Value>(&result)
-                                    .ok()
-                                    .and_then(|v| {
-                                        v.get("content").and_then(|c| c.as_str()).map(String::from)
-                                    })
-                            {
-                                self.track_file_read_in_context_map(&path_str, &content);
-                            }
+                    if vt.name == "file_read" {
+                        if self.file_tracker.context_files.len() < 500
+                            && !self.file_tracker.context_files.contains(&path_str)
+                        {
+                            self.file_tracker.context_files.push(path_str.clone());
                         }
-                        "file_delete" => {
-                            self.file_tracker.remove_deleted(&path_str);
+                        if let Some(content) = serde_json::from_str::<serde_json::Value>(&result_str)
+                            .ok()
+                            .and_then(|v| v.get("content").and_then(|c| c.as_str()).map(String::from))
+                        {
+                            self.track_file_read_in_context_map(&path_str, &content);
                         }
-                        "file_write" | "file_edit" => {
-                            self.file_tracker.mark_stale(&path_str);
-                        }
-                        _ => {}
                     }
                 }
             }
 
-            self.push_tool_result_message(use_native_fc, &call_id, &name, success, &result);
+            self.push_tool_result_message(vt.use_native_fc, &vt.call_id, &vt.name, success, &result_str);
             if !success {
-                self.remember_failed_tool(&name, &result);
+                self.remember_failed_tool(&vt.name, &result_str);
             }
 
-            // Reset no-action counter - the model attempted to use a tool
-            // (even if it failed, this counts as taking action)
             self.reset_no_action_prompt_state();
 
-            // Add post-error guidance for failed tools to help model recover
             if !success {
-                let recovery_hint = self.build_error_recovery_hint(&name, &result);
+                let recovery_hint = self.build_error_recovery_hint(&vt.name, &result_str);
                 self.messages.push(Message::user(recovery_hint));
             }
 
-            // Fire PostToolUse hooks (e.g., auto-format, lint, auto-commit)
-            let post_ctx = HookContext::post_tool(&name, &args_str, success, &result);
+            // Fire PostToolUse hooks
+            let post_ctx = HookContext::post_tool(&vt.name, &vt.args_str, success, &result_str);
             self.hook_registry.fire(&post_ctx).await;
 
-            // Audit: log tool execution
+            // Audit log
             if let Some(ref logger) = self.audit_logger {
                 use std::hash::{Hash, Hasher};
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                args_str.hash(&mut hasher);
+                vt.args_str.hash(&mut hasher);
                 let args_hash = format!("{:x}", hasher.finish());
-                logger.log_tool_execution(&name, &args_hash, success, duration_ms, None);
+                logger.log_tool_execution(&vt.name, &args_hash, success, duration_ms, None);
             }
+
+            self.log_tool_call(&vt.name, &vt.args_str, &result_str, success, vt.start_time, true);
+        }
+
+        Ok(())
+    }
+
+    /// Execute a single tool call within a batch (sequential path).
+    async fn execute_single_tool_in_batch(
+        &mut self,
+        name: String,
+        args_str: String,
+        tool_call_id: Option<String>,
+    ) -> Result<()> {
+        use super::tui_events::AgentEvent;
+        use crate::hooks::HookAction;
+
+        let start_time = std::time::Instant::now();
+        if let Some(warning) = self
+            .self_improvement
+            .check_for_errors(&name, self.learning_context())
+            .into_iter()
+            .next()
+            .filter(|w| w.likelihood >= 0.7)
+        {
+            warn!(
+                "Self-improvement warning before {}: potential {} pattern ({}%)",
+                name,
+                warning.error_type,
+                (warning.likelihood * 100.0) as u32
+            );
+        }
+
+        let (call_id, use_native_fc, fake_call) =
+            self.build_tool_call_context(&name, &args_str, tool_call_id);
+
+        if self.suppress_repeated_failed_tool_retry(
+            &name,
+            &args_str,
+            &call_id,
+            use_native_fc,
+            start_time,
+        ) {
+            self.emit_event(AgentEvent::ToolCompleted {
+                name: name.clone(),
+                success: false,
+                duration_ms: start_time.elapsed().as_millis() as u64,
+            });
+            return Ok(());
+        }
+
+        if let Err(e) = self.safety.check_tool_call(&fake_call) {
+            let error_msg = format!("Safety check failed: {}", e);
+            let spinner = crate::ui::spinner::TerminalSpinner::start(&error_msg);
+            spinner.stop_error(&error_msg);
+            crate::output::safety_blocked(&error_msg);
+            if let Some(ref logger) = self.audit_logger {
+                logger.log_safety_block(&name, &error_msg);
+            }
+            self.push_tool_result_message(use_native_fc, &call_id, &name, false, &error_msg);
+            self.log_tool_call(&name, &args_str, &error_msg, false, start_time, false);
+            self.remember_failed_tool(&name, &error_msg);
+            let duration_ms = start_time.elapsed().as_millis() as u64;
+            self.self_improvement.record_tool(
+                &name,
+                self.learning_context(),
+                Outcome::Failure,
+                duration_ms,
+                Some(error_msg.clone()),
+            );
+            self.self_improvement.record_error(
+                &error_msg,
+                "safety",
+                self.learning_context(),
+                &name,
+                None,
+            );
+            self.record_failed_tool_attempt(&name, &args_str, "safety", &error_msg);
+            return Ok(());
+        }
+
+        let args =
+            match self.parse_tool_args(&name, &args_str, &call_id, use_native_fc, start_time) {
+                Some(args) => args,
+                None => {
+                    self.emit_event(AgentEvent::ToolCompleted {
+                        name: name.clone(),
+                        success: false,
+                        duration_ms: start_time.elapsed().as_millis() as u64,
+                    });
+                    return Ok(());
+                }
+            };
+
+        if !self.validate_tool_args(
+            &name,
+            &args_str,
+            &args,
+            &call_id,
+            use_native_fc,
+            start_time,
+        ) {
+            self.emit_event(AgentEvent::ToolCompleted {
+                name: name.clone(),
+                success: false,
+                duration_ms: start_time.elapsed().as_millis() as u64,
+            });
+            return Ok(());
+        }
+
+        if self.maybe_block_redundant_reread(
+            &name,
+            &args_str,
+            &args,
+            &call_id,
+            use_native_fc,
+            start_time,
+        ) {
+            self.emit_event(AgentEvent::ToolCompleted {
+                name: name.clone(),
+                success: false,
+                duration_ms: start_time.elapsed().as_millis() as u64,
+            });
+            return Ok(());
+        }
+
+        if !self
+            .confirm_tool_execution(&name, &args_str, &call_id, use_native_fc)
+            .await?
+        {
+            return Ok(());
+        }
+
+        // Fire PreToolUse hooks (may skip execution)
+        let pre_ctx = HookContext::pre_tool(&name, &args_str);
+        if let HookAction::Skip { reason } = self.hook_registry.fire(&pre_ctx).await {
+            let skip_msg = format!("Tool skipped by PreToolUse hook: {}", reason);
+            info!("{}", skip_msg);
+            self.push_tool_result_message(use_native_fc, &call_id, &name, false, &skip_msg);
+            return Ok(());
+        }
+
+        self.emit_event(AgentEvent::ToolStarted { name: name.clone() });
+
+        let activity = crate::output::tool_activity_message(&name, &args);
+        let spinner = crate::ui::spinner::TerminalSpinner::start(&activity);
+        let (success, result, summary) = self
+            .execute_single_tool(&name, &args_str, &args, start_time)
+            .await?;
+
+        let duration_ms = start_time.elapsed().as_millis() as u64;
+        self.emit_event(AgentEvent::ToolCompleted {
+            name: name.clone(),
+            success,
+            duration_ms,
+        });
+
+        if success {
+            spinner.stop_success(&summary);
+        } else {
+            spinner.stop_error(&summary);
+        }
+
+        // Store for progressive disclosure via /last
+        {
+            let exit_code = serde_json::from_str::<serde_json::Value>(&result)
+                .ok()
+                .and_then(|v| v.get("exit_code").and_then(|c| c.as_i64()))
+                .map(|c| c as i32);
+            self.store_last_tool_output(crate::agent::last_tool::LastToolOutput {
+                tool_name: name.clone(),
+                summary: summary.clone(),
+                full_output: result.clone(),
+                success,
+                exit_code,
+                duration_ms,
+            });
+        }
+
+        let tool_outcome = if success {
+            Outcome::Success
+        } else {
+            Outcome::Failure
+        };
+        let tool_error = (!success).then(|| result.clone());
+        self.self_improvement.record_tool(
+            &name,
+            self.learning_context(),
+            tool_outcome,
+            duration_ms,
+            tool_error.clone(),
+        );
+        if let Some(error_text) = tool_error {
+            self.self_improvement.record_error(
+                &error_text,
+                Self::classify_error_type(&error_text),
+                self.learning_context(),
+                &name,
+                None,
+            );
+        }
+        if success {
+            self.clear_failed_tool_attempts();
+        } else {
+            self.record_failed_tool_attempt(&name, &args_str, "execution", &result);
+        }
+
+        self.track_task_state_after_tool(&name, &args, &result, success);
+
+        // Track file operations for context management
+        if success {
+            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                let path_str = path.to_string();
+                match name.as_str() {
+                    "file_read" => {
+                        if self.file_tracker.context_files.len() < 500
+                            && !self.file_tracker.context_files.contains(&path_str)
+                        {
+                            self.file_tracker.context_files.push(path_str.clone());
+                        }
+                        if let Some(content) =
+                            serde_json::from_str::<serde_json::Value>(&result)
+                                .ok()
+                                .and_then(|v| {
+                                    v.get("content").and_then(|c| c.as_str()).map(String::from)
+                                })
+                        {
+                            self.track_file_read_in_context_map(&path_str, &content);
+                        }
+                    }
+                    "file_delete" => {
+                        self.file_tracker.remove_deleted(&path_str);
+                    }
+                    "file_write" | "file_edit" => {
+                        self.file_tracker.mark_stale(&path_str);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        self.push_tool_result_message(use_native_fc, &call_id, &name, success, &result);
+        if !success {
+            self.remember_failed_tool(&name, &result);
+        }
+
+        // Reset no-action counter - the model attempted to use a tool
+        // (even if it failed, this counts as taking action)
+        self.reset_no_action_prompt_state();
+
+        // Add post-error guidance for failed tools to help model recover
+        if !success {
+            let recovery_hint = self.build_error_recovery_hint(&name, &result);
+            self.messages.push(Message::user(recovery_hint));
+        }
+
+        // Fire PostToolUse hooks (e.g., auto-format, lint, auto-commit)
+        let post_ctx = HookContext::post_tool(&name, &args_str, success, &result);
+        self.hook_registry.fire(&post_ctx).await;
+
+        // Audit: log tool execution
+        if let Some(ref logger) = self.audit_logger {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            args_str.hash(&mut hasher);
+            let args_hash = format!("{:x}", hasher.finish());
+            logger.log_tool_execution(&name, &args_hash, success, duration_ms, None);
         }
 
         Ok(())

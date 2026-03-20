@@ -45,10 +45,10 @@ impl ConcurrencyGovernor {
 
     /// Create a governor with sensible defaults:
     /// - 4 concurrent streams
-    /// - 8 concurrent tool executions
-    /// - 16 total inflight operations
+    /// - 16 concurrent tool executions
+    /// - 24 total inflight operations
     pub fn with_defaults() -> Self {
-        Self::new(4, 8, 16)
+        Self::new(4, 16, 24)
     }
 
     /// Acquire a stream permit, waiting if none are currently available.
@@ -246,7 +246,7 @@ mod tests {
         let gov = ConcurrencyGovernor::with_defaults();
         let stats = gov.stats();
         assert_eq!(stats.streams_max, 4);
-        assert_eq!(stats.tools_max, 8);
-        assert_eq!(stats.global_max, 16);
+        assert_eq!(stats.tools_max, 16);
+        assert_eq!(stats.global_max, 24);
     }
 }
