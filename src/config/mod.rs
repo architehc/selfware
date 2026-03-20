@@ -609,7 +609,7 @@ fn default_endpoint() -> String {
     "http://localhost:8000/v1".to_string()
 }
 fn default_model() -> String {
-    "Qwen/Qwen3-Coder-Next-FP8".to_string()
+    "qwen3.5-27b".to_string()
 }
 fn default_max_tokens() -> usize {
     65536
@@ -1177,7 +1177,7 @@ mod tests {
     fn test_config_default() {
         let config = Config::default();
         assert_eq!(config.endpoint, "http://localhost:8000/v1");
-        assert_eq!(config.model, "Qwen/Qwen3-Coder-Next-FP8");
+        assert_eq!(config.model, "qwen3.5-27b");
         assert_eq!(config.max_tokens, 65536);
         assert!((config.temperature - 1.0).abs() < f32::EPSILON);
         assert!(config.api_key.is_none());
@@ -1377,7 +1377,7 @@ mod tests {
         "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.endpoint, "http://custom:1234/v1");
-        assert_eq!(config.model, "Qwen/Qwen3-Coder-Next-FP8"); // default
+        assert_eq!(config.model, "qwen3.5-27b"); // default
         assert_eq!(config.max_tokens, 65536); // default
     }
 
@@ -1587,7 +1587,7 @@ mod tests {
         let toml_str = "";
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.endpoint, "http://localhost:8000/v1");
-        assert_eq!(config.model, "Qwen/Qwen3-Coder-Next-FP8");
+        assert_eq!(config.model, "qwen3.5-27b");
         assert_eq!(config.max_tokens, 65536);
         assert!(!config.yolo.enabled);
     }
@@ -1750,7 +1750,7 @@ mod tests {
     #[test]
     fn test_default_helpers() {
         assert_eq!(default_endpoint(), "http://localhost:8000/v1");
-        assert_eq!(default_model(), "Qwen/Qwen3-Coder-Next-FP8");
+        assert_eq!(default_model(), "qwen3.5-27b");
         assert_eq!(default_max_tokens(), 65536);
         assert!((default_temperature() - 1.0).abs() < f32::EPSILON);
         assert_eq!(default_max_iterations(), 100);
@@ -2849,7 +2849,7 @@ model = "coder-v1"
 
         let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
         assert_eq!(config.endpoint, "http://localhost:8000/v1");
-        assert_eq!(config.model, "Qwen/Qwen3-Coder-Next-FP8");
+        assert_eq!(config.model, "qwen3.5-27b");
         assert_eq!(config.max_tokens, 65536);
         assert!(config.models.contains_key("default"));
     }

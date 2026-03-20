@@ -223,7 +223,7 @@ fn test_auto_optimize_evicts_stale() {
 fn live_config() -> Option<selfware::config::Config> {
     let endpoint = std::env::var("SELFWARE_LIVE_ENDPOINT").ok()?;
     let model = std::env::var("SELFWARE_LIVE_MODEL")
-        .unwrap_or_else(|_| "Qwen/Qwen3-Coder-Next-FP8".to_string());
+        .unwrap_or_else(|_| "qwen3.5-27b".to_string());
 
     Some(selfware::config::Config {
         endpoint,

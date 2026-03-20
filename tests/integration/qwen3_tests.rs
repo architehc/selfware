@@ -1,7 +1,14 @@
-//! Qwen3-Coder-Next Integration Tests
+//! Qwen3 Integration Tests
 //!
-//! Tests for Qwen3-Coder-Next-FP8 model with native tool calling support.
-//! Run with: SELFWARE_ENDPOINT=http://localhost:8000/v1 SELFWARE_MODEL="Qwen/Qwen3-Coder-Next-FP8" cargo test --features integration qwen3_
+//! Tests for Qwen3 models with native tool calling support.
+//! Reads SELFWARE_ENDPOINT and SELFWARE_MODEL from env, with defaults.
+//!
+//! Examples:
+//!   # Local vLLM (qwen3.5-27b)
+//!   SELFWARE_ENDPOINT=http://localhost:8000/v1 SELFWARE_MODEL=qwen3.5-27b cargo test --features integration qwen3_
+//!
+//!   # Remote sglang (Qwen3.5-122B)
+//!   SELFWARE_ENDPOINT=https://crazyshit.ngrok.io/v1 SELFWARE_MODEL="txn545/Qwen3.5-122B-A10B-NVFP4" cargo test --features integration qwen3_
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -22,7 +29,7 @@ fn qwen3_config() -> Config {
         endpoint: std::env::var("SELFWARE_ENDPOINT")
             .unwrap_or_else(|_| "http://localhost:8000/v1".to_string()),
         model: std::env::var("SELFWARE_MODEL")
-            .unwrap_or_else(|_| "Qwen/Qwen3-Coder-Next-FP8".to_string()),
+            .unwrap_or_else(|_| "qwen3.5-27b".to_string()),
         max_tokens: 65536,
         temperature: 1.0, // Recommended by Qwen3-Coder docs
         api_key: None,
@@ -45,11 +52,43 @@ fn qwen3_config() -> Config {
     }
 }
 
-/// Check if Qwen3 model is available
+/// Check if the configured model is available at the endpoint.
+/// Queries `/models` and verifies the model name exists in the response.
 async fn qwen3_available() -> bool {
     let endpoint = std::env::var("SELFWARE_ENDPOINT")
         .unwrap_or_else(|_| "http://localhost:8000/v1".to_string());
-    require_llm_endpoint_url(&endpoint).await
+    let model = std::env::var("SELFWARE_MODEL")
+        .unwrap_or_else(|_| "qwen3.5-27b".to_string());
+
+    // First check if endpoint is reachable at all.
+    if !require_llm_endpoint_url(&endpoint).await {
+        return false;
+    }
+
+    // Then verify the specific model is served.
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    match client
+        .get(format!("{}/models", endpoint))
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if let Ok(body) = resp.text().await {
+                // Check if model ID appears in the models list.
+                body.contains(&model)
+            } else {
+                false
+            }
+        }
+        Err(_) => false,
+    }
 }
 
 /// Macro-style helper: check Qwen3 availability and skip with a clear message
@@ -59,11 +98,18 @@ macro_rules! skip_if_no_qwen3 {
     () => {
         if !qwen3_available().await {
             let test_path = module_path!();
+            let model = std::env::var("SELFWARE_MODEL")
+                .unwrap_or_else(|_| "qwen3.5-27b".to_string());
+            let endpoint = std::env::var("SELFWARE_ENDPOINT")
+                .unwrap_or_else(|_| "http://localhost:8000/v1".to_string());
             println!(
-                "test {} ... SKIPPED (Qwen3 endpoint not available)",
-                test_path
+                "test {} ... SKIPPED (model '{}' not available at {})",
+                test_path, model, endpoint
             );
-            eprintln!("SKIPPED: {} - Qwen3 endpoint not available", test_path);
+            eprintln!(
+                "SKIPPED: {} - model '{}' not available at {}",
+                test_path, model, endpoint
+            );
             return;
         }
     };
