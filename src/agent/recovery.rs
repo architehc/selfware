@@ -87,8 +87,17 @@ pub(super) fn detect_oscillating_batch_pair(
     }
 }
 
-/// Strip `<think>...</think>` blocks from content, returning only the non-think text.
+/// Strip `<think>...</think>` blocks and Qwen3.5 thinking from content.
 pub(super) fn strip_think_blocks(content: &str) -> String {
+    // Handle Qwen3.5 format: extensive thinking followed by </think> marker
+    // The model outputs thinking as regular text, then </think>, then the answer
+    if let Some(end_think) = content.find("</think>") {
+        // Return everything after </think>
+        let after_think = &content[end_think + 8..]; // 8 = len("</think>")
+        return after_think.trim().to_string();
+    }
+    
+    // Handle explicit <think>...</think> tags (for other models)
     let mut result = String::with_capacity(content.len());
     let mut rest = content;
     while let Some(start) = rest.find("<think>") {

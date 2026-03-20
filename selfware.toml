@@ -2,7 +2,24 @@
 # You can set this via environment variable SELFWARE_ENDPOINT or in your config
 endpoint = "http://localhost:8000/v1"
 model = "qwen3.5-27b"
-max_tokens = 32768
+max_tokens = 81920
+# Qwen3.5 recommended: thinking mode for precise coding tasks
+temperature = 0.6
+
+# Qwen3.5 sampling parameters for coding (thinking mode)
+[extra_body]
+top_p = 0.95
+top_k = 20
+min_p = 0.0
+
+# Context length: 1M tokens (matches vLLM max_model_len: 1010000)
+context_length = 1048576
+
+# Concurrency settings for parallel requests
+[concurrency]
+max_parallel_requests = 8
+max_retries = 3
+timeout_secs = 120
 
 # Safety section is nested - that part was correct
 [safety]
@@ -11,12 +28,13 @@ denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
 
 
 [agent]
-max_iterations = 10
-step_timeout_secs = 120
-# Enable native function calling (requires backend support like sglang --tool-call-parser)
+streaming = true
+max_iterations = 100
+step_timeout_secs = 980
+# Enable native function calling — matches vLLM's --enable-auto-tool-choice --tool-call-parser qwen3_coder
 native_function_calling = true
-token_budget = 50000 
-token_safety_margin = 1000
+token_budget = 900000
+token_safety_margin = 100000
 
 [continuous_work]
 enabled = true

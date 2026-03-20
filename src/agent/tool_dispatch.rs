@@ -953,22 +953,29 @@ impl Agent {
             }
         }
 
-        // Snapshot file before edit/write for undo support.
-        // Use tokio::fs to avoid blocking the async runtime thread.
-        if matches!(name, "file_edit" | "file_write" | "file_delete") {
+        // Snapshot file before edit/write for undo support + diff display.
+        let pre_edit_content: Option<(String, String)> = if matches!(name, "file_edit" | "file_write" | "file_delete") {
             if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
                 if let Ok(content) = tokio::fs::read_to_string(path).await {
                     use crate::session::edit_history::{EditAction, FileSnapshot};
-                    let snapshot = FileSnapshot::new(std::path::PathBuf::from(path), content);
+                    let snapshot = FileSnapshot::new(std::path::PathBuf::from(path), content.clone());
                     let action = EditAction::FileEdit {
                         path: std::path::PathBuf::from(path),
                         tool: name.to_string(),
                     };
                     self.edit_history.create_checkpoint(action);
                     self.edit_history.add_file_to_current(snapshot);
+                    Some((path.to_string(), content))
+                } else {
+                    // New file (file_write to nonexistent path)
+                    Some((path.to_string(), String::new()))
                 }
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
 
         // Acquire concurrency governor permit before executing the tool.
         // The permit is held for the duration of execution and released on drop.
@@ -1011,6 +1018,15 @@ impl Agent {
                 let cache_key = crate::session::cache::ToolCache::cache_key(name, args);
                 self.cache_manager.local_first
                     .cache_response(&cache_key, result_str.clone(), result_str.len());
+
+                // Display color-coded diff for file mutations
+                if let Some((ref path, ref old_content)) = pre_edit_content {
+                    if matches!(name, "file_edit" | "file_write") {
+                        if let Ok(new_content) = std::fs::read_to_string(path) {
+                            crate::output::display_file_diff(path, old_content, &new_content);
+                        }
+                    }
+                }
 
                 // Record successful tool usage for learning
                 self.self_improvement.record_tool(

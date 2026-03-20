@@ -696,6 +696,109 @@ pub(crate) fn final_answer(content: &str) {
     io::stdout().flush().ok();
 }
 
+/// Display a color-coded diff for file edits/writes.
+/// Shows deleted lines in red and added lines in green.
+pub(crate) fn display_file_diff(path: &str, old_content: &str, new_content: &str) {
+    if is_tui_active() || is_compact() {
+        return;
+    }
+    let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let old_lines: Vec<&str> = old_content.lines().collect();
+    let new_lines: Vec<&str> = new_content.lines().collect();
+
+    // Simple line-by-line diff — find changed regions
+    let mut diff_lines: Vec<String> = Vec::new();
+    let max_diff_lines = 30; // Limit display to avoid flooding
+
+    // Use a basic LCS-style diff
+    let mut i = 0;
+    let mut j = 0;
+    while i < old_lines.len() || j < new_lines.len() {
+        if diff_lines.len() >= max_diff_lines {
+            diff_lines.push(format!("  {} more changes...", "…".dimmed()));
+            break;
+        }
+
+        if i < old_lines.len() && j < new_lines.len() && old_lines[i] == new_lines[j] {
+            // Lines match — skip (don't show unchanged lines unless near a change)
+            i += 1;
+            j += 1;
+            continue;
+        }
+
+        // Find the next sync point
+        let mut found_sync = false;
+        for lookahead in 1..10 {
+            if j + lookahead < new_lines.len()
+                && i < old_lines.len()
+                && old_lines[i] == new_lines[j + lookahead]
+            {
+                // Added lines
+                for add_j in j..j + lookahead {
+                    diff_lines.push(format!(
+                        "  {} {}",
+                        "+".bright_green(),
+                        new_lines[add_j].bright_green()
+                    ));
+                }
+                j += lookahead;
+                found_sync = true;
+                break;
+            }
+            if i + lookahead < old_lines.len()
+                && j < new_lines.len()
+                && old_lines[i + lookahead] == new_lines[j]
+            {
+                // Deleted lines
+                for del_i in i..i + lookahead {
+                    diff_lines.push(format!(
+                        "  {} {}",
+                        "-".bright_red(),
+                        old_lines[del_i].bright_red()
+                    ));
+                }
+                i += lookahead;
+                found_sync = true;
+                break;
+            }
+        }
+
+        if !found_sync {
+            // Changed line (delete old + add new)
+            if i < old_lines.len() {
+                diff_lines.push(format!(
+                    "  {} {}",
+                    "-".bright_red(),
+                    old_lines[i].bright_red()
+                ));
+                i += 1;
+            }
+            if j < new_lines.len() {
+                diff_lines.push(format!(
+                    "  {} {}",
+                    "+".bright_green(),
+                    new_lines[j].bright_green()
+                ));
+                j += 1;
+            }
+        }
+    }
+
+    if !diff_lines.is_empty() {
+        println!(
+            "\r\x1b[2K  {} {}",
+            "┌─".dimmed(),
+            path.dimmed()
+        );
+        for line in &diff_lines {
+            println!("\r\x1b[2K{}", line);
+        }
+        println!("\r\x1b[2K  {}", "└─".dimmed());
+        io::stdout().flush().ok();
+    }
+}
+
 /// Print task completed message
 pub(crate) fn task_completed() {
     if !is_compact() {

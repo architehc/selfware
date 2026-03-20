@@ -508,10 +508,20 @@ impl Agent {
             (content, reasoning)
         };
 
+        // Qwen3.5 best practice: "No Thinking Content in History — historical
+        // model output should only include the final output part and does not
+        // need to include the thinking content."
+        // Strip inline <think> blocks from content before storing in message
+        // history. Keep the raw content in the response for tool parsing.
+        // Qwen3.5 best practice: "No Thinking Content in History — historical
+        // model output should only include the final output part and does not
+        // need to include the thinking content."
+        // Strip inline <think> blocks from content and omit reasoning_content.
+        let history_content = super::recovery::strip_think_blocks(&content);
         self.messages.push(crate::api::types::Message {
             role: "assistant".to_string(),
-            content: content.clone().into(),
-            reasoning_content: reasoning.clone(),
+            content: history_content.into(),
+            reasoning_content: None, // Excluded from history per Qwen3.5 best practice
             tool_calls: native_tool_calls.clone(),
             tool_call_id: None,
             name: None,
