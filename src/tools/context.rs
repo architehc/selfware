@@ -12,6 +12,8 @@ pub const CONTEXT_FOCUS: &str = "context_focus";
 pub const CONTEXT_EVICT: &str = "context_evict";
 pub const CONTEXT_RECOMMEND: &str = "context_recommend";
 pub const CONTEXT_LOAD_SKELETON: &str = "context_load_skeleton";
+pub const CONTEXT_BULK_READ: &str = "context_bulk_read";
+pub const CONTEXT_SUMMARY: &str = "context_summary";
 
 /// All context tool names (for checking in dispatch).
 pub const CONTEXT_TOOL_NAMES: &[&str] = &[
@@ -20,6 +22,8 @@ pub const CONTEXT_TOOL_NAMES: &[&str] = &[
     CONTEXT_EVICT,
     CONTEXT_RECOMMEND,
     CONTEXT_LOAD_SKELETON,
+    CONTEXT_BULK_READ,
+    CONTEXT_SUMMARY,
 ];
 
 /// Check if a tool name is a context management tool.
@@ -98,6 +102,34 @@ pub fn context_tool_descriptions() -> Vec<ToolDesc> {
                     }
                 },
                 "required": ["path"]
+            }),
+        },
+        ToolDesc {
+            name: CONTEXT_BULK_READ,
+            description: "Read multiple source files in parallel into the context. Much faster than reading one at a time. Automatically manages budget by compressing older files. Use glob pattern to select files.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Glob pattern for files to read (e.g., 'src/agent/*.rs', 'src/**/*.rs')"
+                    },
+                    "max_files": {
+                        "type": "integer",
+                        "description": "Maximum number of files to read (default: 20)",
+                        "default": 20
+                    }
+                },
+                "required": ["pattern"]
+            }),
+        },
+        ToolDesc {
+            name: CONTEXT_SUMMARY,
+            description: "Generate a structured per-module summary of the codebase. Shows file counts, function/struct counts per module, and what's loaded at each level. Use this to understand the codebase without reading every file.",
+            schema: json!({
+                "type": "object",
+                "properties": {},
+                "required": []
             }),
         },
     ]

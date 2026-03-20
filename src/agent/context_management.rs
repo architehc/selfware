@@ -270,6 +270,224 @@ impl Agent {
         self.context_map.load_full(p, content.to_string());
     }
 
+    /// Bulk-read multiple files in parallel using tokio tasks.
+    /// Loads files into the context map at L3, respecting budget limits.
+    /// Returns (loaded_count, skipped_count, total_tokens_added).
+    pub(super) async fn parallel_bulk_read(
+        &mut self,
+        paths: Vec<std::path::PathBuf>,
+    ) -> (usize, usize, usize) {
+        use super::context_map::ContextLevel;
+        use tokio::task::JoinSet;
+
+        let root = super::current_project_root();
+        let mut join_set = JoinSet::new();
+
+        // Spawn parallel file reads (just IO, no LLM calls).
+        for path in &paths {
+            let full_path = root.join(path);
+            let p = path.clone();
+            join_set.spawn(async move {
+                match tokio::fs::read_to_string(&full_path).await {
+                    Ok(content) => Some((p, content)),
+                    Err(_) => None,
+                }
+            });
+        }
+
+        // Collect results and load into context map (sequential — context_map is not Send).
+        let mut loaded = 0usize;
+        let mut skipped = 0usize;
+        let mut tokens_added = 0usize;
+
+        while let Some(result) = join_set.join_next().await {
+            if let Ok(Some((path, content))) = result {
+                // Skip if already at L3.
+                if self.context_map.level_of(&path) == Some(ContextLevel::Full) {
+                    skipped += 1;
+                    continue;
+                }
+
+                // Check budget.
+                let estimate = self.context_map.can_load(&path, ContextLevel::Full);
+                if !estimate.fits {
+                    // Try to compress existing content to make room.
+                    let needed = estimate.estimated_tokens.saturating_sub(self.context_map.remaining());
+                    let freed = self.context_map.compress_to_fit(needed);
+                    if freed < needed {
+                        skipped += 1;
+                        continue; // Can't fit even after compression.
+                    }
+                }
+
+                let token_count = crate::token_count::estimate_content_tokens(&content);
+                self.context_map.load_full(&path, content);
+                tokens_added += token_count;
+                loaded += 1;
+            }
+        }
+
+        tracing::info!(
+            "Parallel bulk read: {} loaded, {} skipped, {} tokens ({:.0}% of budget)",
+            loaded,
+            skipped,
+            tokens_added,
+            self.context_map.usage_fraction() * 100.0
+        );
+
+        (loaded, skipped, tokens_added)
+    }
+
+    /// Generate a structured per-module summary of the codebase.
+    /// Groups files by directory and produces a compact summary for each module
+    /// that fits in the available context window.
+    pub(super) fn generate_structured_summary(&self) -> String {
+        use super::context_map::ContextLevel;
+        use std::collections::BTreeMap;
+
+        // Group files by top-level module directory.
+        let mut modules: BTreeMap<String, Vec<(&std::path::Path, ContextLevel, usize)>> =
+            BTreeMap::new();
+
+        let stats = self.context_map.stats();
+        for level in [ContextLevel::Full, ContextLevel::Skeleton, ContextLevel::Tree] {
+            for path in self.context_map.files_at_level(level) {
+                let module = path
+                    .components()
+                    .take(2) // e.g., "src/agent" or "src/tools"
+                    .collect::<std::path::PathBuf>()
+                    .to_string_lossy()
+                    .to_string();
+
+                modules
+                    .entry(module)
+                    .or_default()
+                    .push((path, level, 0));
+            }
+        }
+
+        let mut summary = format!(
+            "# Codebase Summary ({} files, {}/{} tokens)\n\n",
+            stats.l1_count + stats.l2_count + stats.l3_count,
+            stats.total_tokens,
+            stats.budget,
+        );
+
+        for (module, files) in &modules {
+            let file_count = files.len();
+            let l3_count = files
+                .iter()
+                .filter(|(_, l, _)| *l == ContextLevel::Full)
+                .count();
+            let l2_count = files
+                .iter()
+                .filter(|(_, l, _)| *l == ContextLevel::Skeleton)
+                .count();
+
+            summary.push_str(&format!(
+                "## {} ({} files, {} full, {} skeleton)\n",
+                module, file_count, l3_count, l2_count,
+            ));
+
+            // List key items from skeletons.
+            for (path, level, _) in files {
+                if *level == ContextLevel::Skeleton {
+                    if let Some(skel) = self.context_map.skeleton(path) {
+                        let fn_count = skel
+                            .items
+                            .iter()
+                            .filter(|i| {
+                                matches!(i, super::context_map::SkeletonItem::Function { .. })
+                            })
+                            .count();
+                        let struct_count = skel
+                            .items
+                            .iter()
+                            .filter(|i| {
+                                matches!(i, super::context_map::SkeletonItem::Struct { .. })
+                            })
+                            .count();
+                        if fn_count > 0 || struct_count > 0 {
+                            summary.push_str(&format!(
+                                "  - {} ({} fn, {} struct, ~{} tok)\n",
+                                path.display(),
+                                fn_count,
+                                struct_count,
+                                skel.token_count,
+                            ));
+                        }
+                    }
+                } else if *level == ContextLevel::Full {
+                    summary.push_str(&format!("  - {} [FULL]\n", path.display()));
+                }
+            }
+            summary.push('\n');
+        }
+
+        summary
+    }
+
+    /// Compress the context to fit within `target_tokens` by generating
+    /// a structured summary and replacing old messages.
+    /// Unlike the flat LLM-based compression, this is deterministic and fast.
+    pub(super) fn compress_to_structured_summary(&mut self, target_tokens: usize) {
+        let current = self.estimate_messages_tokens();
+        if current <= target_tokens {
+            return;
+        }
+
+        let summary = self.generate_structured_summary();
+        let summary_tokens = crate::token_count::estimate_content_tokens(&summary);
+
+        tracing::info!(
+            "Structured compression: {} tokens → ~{} token summary (target: {})",
+            current,
+            summary_tokens,
+            target_tokens,
+        );
+
+        // Downgrade all L3 files to L2 to free context map space.
+        let l3_files: Vec<std::path::PathBuf> = self
+            .context_map
+            .files_at_level(super::context_map::ContextLevel::Full)
+            .iter()
+            .map(|p| p.to_path_buf())
+            .collect();
+        for path in &l3_files {
+            self.context_map.downgrade_to_skeleton(path);
+        }
+
+        // Replace old messages with the structured summary.
+        // Keep: system message + last 4 messages.
+        let keep_recent = 4;
+        if self.messages.len() > keep_recent + 1 {
+            let system_msg = self.messages.first().cloned();
+            let recent: Vec<_> = self
+                .messages
+                .iter()
+                .rev()
+                .take(keep_recent)
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+
+            self.messages.clear();
+            if let Some(sys) = system_msg {
+                self.messages.push(sys);
+            }
+            self.messages.push(crate::api::types::Message::user(format!(
+                "[STRUCTURED SUMMARY — {} earlier messages compressed]\n{}",
+                self.messages.len(),
+                summary
+            )));
+            self.messages
+                .push(crate::api::types::Message::user("[RECENT CONTEXT]:"));
+            self.messages.extend(recent);
+        }
+    }
+
     /// Estimate total tokens from accumulated messages (the actual context sent to API)
     pub(super) fn estimate_messages_tokens(&self) -> usize {
         self.messages

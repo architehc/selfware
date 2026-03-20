@@ -593,10 +593,58 @@ impl Agent {
     }
 
     /// Execute a context management tool (operates on agent state, not filesystem).
-    fn execute_context_tool(&mut self, name: &str, args: &serde_json::Value) -> serde_json::Value {
+    async fn execute_context_tool_async(
+        &mut self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> serde_json::Value {
         use crate::tools::context::*;
 
         match name {
+            CONTEXT_BULK_READ => {
+                let pattern = args
+                    .get("pattern")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("src/**/*.rs");
+                let max_files = args
+                    .get("max_files")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(20) as usize;
+
+                // Collect matching files from context map.
+                let root = super::current_project_root();
+                let mut paths: Vec<std::path::PathBuf> = Vec::new();
+                let glob_pattern = root.join(pattern).to_string_lossy().to_string();
+                if let Ok(entries) = glob::glob(&glob_pattern) {
+                    for entry in entries.flatten() {
+                        if let Ok(rel) = entry.strip_prefix(&root) {
+                            paths.push(rel.to_path_buf());
+                        }
+                        if paths.len() >= max_files {
+                            break;
+                        }
+                    }
+                }
+
+                let total_files = paths.len();
+                let (loaded, skipped, tokens) = self.parallel_bulk_read(paths).await;
+
+                serde_json::json!({
+                    "matched_files": total_files,
+                    "loaded": loaded,
+                    "skipped": skipped,
+                    "tokens_added": tokens,
+                    "context_usage_pct": format!("{:.1}%", self.context_map.usage_fraction() * 100.0),
+                })
+            }
+            CONTEXT_SUMMARY => {
+                let summary = self.generate_structured_summary();
+                serde_json::json!({
+                    "summary": summary,
+                    "total_tokens": self.context_map.total_tokens(),
+                    "budget": self.context_map.budget(),
+                })
+            }
             CONTEXT_STATUS => {
                 let stats = self.context_map.stats();
                 serde_json::json!({
@@ -903,7 +951,7 @@ impl Agent {
         // Intercept context management tools — they operate on agent state,
         // not the filesystem, so they bypass the normal tool registry.
         if crate::tools::context::is_context_tool(name) {
-            let result = self.execute_context_tool(name, args);
+            let result = self.execute_context_tool_async(name, args).await;
             let elapsed = start_time.elapsed().as_millis() as u64;
             let result_str = serde_json::to_string(&result)?;
             let summary =
