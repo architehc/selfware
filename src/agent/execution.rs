@@ -687,35 +687,72 @@ impl Agent {
                 request_messages.insert(0, Message::system(learning_hint));
             }
         }
-        let response = self
-            .client
-            .chat(request_messages, self.api_tools(), ThinkingMode::Enabled)
-            .await;
-        let response = match response {
-            Ok(response) => response,
-            Err(e) => {
-                self.log_turn_end_event(
-                    "planning",
-                    false,
-                    false,
-                    turn_start.elapsed().as_millis() as u64,
-                    Some(e.to_string()),
-                    serde_json::json!({
-                        "message_count": self.messages.len(),
-                        "estimated_message_tokens": self.estimate_messages_tokens(),
-                    }),
-                );
-                return Err(e);
+        // Use streaming for planning so the user sees progress and can cancel.
+        // Non-streaming blocks silently for 60+ seconds while the model thinks.
+        let assistant_msg = if self.config.agent.streaming {
+            match self
+                .chat_streaming(
+                    request_messages.clone(),
+                    self.api_tools(),
+                    ThinkingMode::Enabled,
+                )
+                .await
+            {
+                Ok((content, reasoning, tool_calls)) => {
+                    crate::api::types::Message {
+                        role: "assistant".to_string(),
+                        content: content.into(),
+                        reasoning_content: reasoning,
+                        tool_calls: tool_calls,
+                        tool_call_id: None,
+                        name: None,
+                    }
+                }
+                Err(e) => {
+                    self.log_turn_end_event(
+                        "planning",
+                        false,
+                        false,
+                        turn_start.elapsed().as_millis() as u64,
+                        Some(e.to_string()),
+                        serde_json::json!({
+                            "message_count": self.messages.len(),
+                            "estimated_message_tokens": self.estimate_messages_tokens(),
+                        }),
+                    );
+                    return Err(e);
+                }
             }
+        } else {
+            let response = self
+                .client
+                .chat(request_messages, self.api_tools(), ThinkingMode::Enabled)
+                .await;
+            let response = match response {
+                Ok(response) => response,
+                Err(e) => {
+                    self.log_turn_end_event(
+                        "planning",
+                        false,
+                        false,
+                        turn_start.elapsed().as_millis() as u64,
+                        Some(e.to_string()),
+                        serde_json::json!({
+                            "message_count": self.messages.len(),
+                            "estimated_message_tokens": self.estimate_messages_tokens(),
+                        }),
+                    );
+                    return Err(e);
+                }
+            };
+
+            response
+                .choices
+                .into_iter()
+                .next()
+                .context("No response from model")?
+                .message
         };
-
-        let choice = response
-            .choices
-            .into_iter()
-            .next()
-            .context("No response from model")?;
-
-        let assistant_msg = choice.message;
         let content = &assistant_msg.content;
 
         // Debug logging for planning response
