@@ -2,7 +2,7 @@
 # You can set this via environment variable SELFWARE_ENDPOINT or in your config
 endpoint = "http://localhost:8000/v1"
 model = "qwen3.5-27b"
-max_tokens = 81920 #output
+max_tokens = 32768
 
 # Safety section is nested - that part was correct
 [safety]
@@ -11,12 +11,12 @@ denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
 
 
 [agent]
-max_iterations = 5000
-step_timeout_secs = 600
+max_iterations = 10
+step_timeout_secs = 120
 # Enable native function calling (requires backend support like sglang --tool-call-parser)
 native_function_calling = true
-token_budget = 900000 #safe 900k < 1M 
-token_safety_margin = 5000
+token_budget = 50000 
+token_safety_margin = 1000
 
 [continuous_work]
 enabled = true

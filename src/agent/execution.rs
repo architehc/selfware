@@ -170,8 +170,13 @@ impl Agent {
             let stop_ctx = HookContext::stop();
             self.hook_registry.fire(&stop_ctx).await;
 
-            output::final_answer(&content);
-            self.last_assistant_response = content;
+            // Strip think blocks from the final answer — the content accumulator
+            // includes raw <think>...</think> tags from models like Qwen3.5 that
+            // emit inline thinking. Without stripping, "Final answer:" shows the
+            // think block content instead of the actual response.
+            let clean_content = super::recovery::strip_think_blocks(&content).trim().to_string();
+            output::final_answer(&clean_content);
+            self.last_assistant_response = clean_content;
             return Ok(true);
         }
 
