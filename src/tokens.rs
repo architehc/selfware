@@ -373,6 +373,23 @@ pub fn estimate_messages_tokens(messages: &[crate::api::types::Message]) -> usiz
     total
 }
 
+/// Estimate the token count of tool definitions sent via native function calling.
+/// vLLM/OpenAI count these as input tokens, so they must be included in budget calculations.
+pub fn estimate_tool_definitions_tokens(tools: &[crate::api::types::ToolDefinition]) -> usize {
+    let mut total = 0;
+    for tool in tools {
+        // Each tool definition has overhead + name + description + parameter schema
+        total += 10; // structural overhead (type, function wrapper)
+        total += estimate_tokens(&tool.function.name);
+        total += estimate_tokens(&tool.function.description);
+        // Parameter schema JSON — serialize and estimate
+        let schema_str = serde_json::to_string(&tool.function.parameters)
+            .unwrap_or_default();
+        total += estimate_tokens(&schema_str);
+    }
+    total
+}
+
 // ============================================================================
 // Model Pricing Configuration
 // ============================================================================

@@ -506,7 +506,7 @@ fn generate_hypotheses(
 }
 
 /// Max total source context characters
-const MAX_CONTEXT_CHARS: usize = 120_000;
+const MAX_CONTEXT_CHARS: usize = 45_000;
 
 pub fn read_mutation_targets(targets: &super::MutationTargets, repo_root: &Path) -> String {
     // Collect all files with their sizes, then sort smallest-first so we

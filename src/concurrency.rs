@@ -44,11 +44,14 @@ impl ConcurrencyGovernor {
     }
 
     /// Create a governor with sensible defaults:
-    /// - 4 concurrent streams
-    /// - 16 concurrent tool executions
-    /// - 24 total inflight operations
+    /// - 4 concurrent streams (LLM API calls)
+    /// - 8 concurrent tool executions (file I/O, shell, etc.)
+    /// - 12 total inflight operations
+    ///
+    /// Tuned for 2x4090 with Qwen3.5-27B: 8 concurrent is the sweet spot
+    /// (48 tok/s aggregate). 16 concurrent causes OOM/timeouts.
     pub fn with_defaults() -> Self {
-        Self::new(4, 16, 24)
+        Self::new(4, 8, 12)
     }
 
     /// Acquire a stream permit, waiting if none are currently available.
@@ -246,7 +249,7 @@ mod tests {
         let gov = ConcurrencyGovernor::with_defaults();
         let stats = gov.stats();
         assert_eq!(stats.streams_max, 4);
-        assert_eq!(stats.tools_max, 16);
-        assert_eq!(stats.global_max, 24);
+        assert_eq!(stats.tools_max, 8);
+        assert_eq!(stats.global_max, 12);
     }
 }

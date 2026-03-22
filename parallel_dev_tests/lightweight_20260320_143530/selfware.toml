@@ -1,0 +1,25 @@
+endpoint = "http://localhost:8000/v1"
+model = "qwen3.5-27b"
+max_tokens = 32768
+temperature = 0.7
+
+[concurrency]
+max_parallel_requests = 4
+max_retries = 3
+timeout_secs = 180
+
+[safety]
+allowed_paths = ["/home/ivo/selfware/parallel_dev_tests/lightweight_20260320_143530/**"]
+denied_paths = []
+
+[agent]
+streaming = true
+max_iterations = 30
+step_timeout_secs = 180
+native_function_calling = true
+token_budget = 500000
+
+[continuous_work]
+enabled = true
+checkpoint_interval_tools = 5
+auto_recovery = true

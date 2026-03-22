@@ -16,6 +16,7 @@ pub mod git;
 #[cfg(feature = "hot-reload")]
 pub mod hot_reload;
 pub mod http;
+pub mod introspect;
 pub mod knowledge;
 pub mod lsp_tools;
 pub mod net_policy;
@@ -293,6 +294,12 @@ impl ToolRegistry {
         registry.register(lsp_refs);
         registry.register(lsp_syms);
         registry.register(lsp_hover);
+
+        // Code introspection tools for evolution
+        registry.register(introspect::CodeIntrospect::new());
+        registry.register(introspect::CodeQuery::new());
+        registry.register(introspect::CodePlan::new());
+        registry.register(introspect::CodeDiffPlan::new());
 
         registry
     }

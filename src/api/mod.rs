@@ -13,7 +13,7 @@ use crate::errors::ApiError;
 use crate::supervision::circuit_breaker::{
     CircuitBreaker, CircuitBreakerConfig, CircuitBreakerError,
 };
-use crate::tokens::estimate_messages_tokens;
+use crate::tokens::{estimate_messages_tokens, estimate_tool_definitions_tokens};
 use std::sync::Arc;
 use types::*;
 
@@ -665,15 +665,19 @@ impl ApiClient {
 
         canonicalize_message_order(&mut messages);
 
-        // Calculate input token estimate and set max_tokens accordingly
-        // max_tokens controls output tokens only, not total context window
-        let input_tokens = estimate_messages_tokens(&messages);
+        // Calculate input token estimate and set max_tokens accordingly.
+        // max_tokens controls output tokens only, not total context window.
+        // Must account for tool definitions which vLLM counts as input tokens.
+        let message_tokens = estimate_messages_tokens(&messages);
+        let tool_tokens = tools
+            .as_ref()
+            .map(|t| estimate_tool_definitions_tokens(t))
+            .unwrap_or(0);
+        let input_tokens = message_tokens + tool_tokens;
         let max_tokens = self
             .config
-            .agent
-            .token_budget
-            .saturating_sub(input_tokens)
-            .max(1);
+            .max_tokens
+            .min(self.config.agent.token_budget.saturating_sub(input_tokens).max(1));
 
         let mut body = serde_json::json!({
             "model": self.config.model,
@@ -734,15 +738,18 @@ impl ApiClient {
 
         canonicalize_message_order(&mut messages);
 
-        // Calculate input token estimate and set max_tokens accordingly
-        // max_tokens controls output tokens only, not total context window
-        let input_tokens = estimate_messages_tokens(&messages);
+        // Calculate input token estimate and set max_tokens accordingly.
+        // Must account for tool definitions which vLLM counts as input tokens.
+        let message_tokens = estimate_messages_tokens(&messages);
+        let tool_tokens = tools
+            .as_ref()
+            .map(|t| estimate_tool_definitions_tokens(t))
+            .unwrap_or(0);
+        let input_tokens = message_tokens + tool_tokens;
         let max_tokens = self
             .config
-            .agent
-            .token_budget
-            .saturating_sub(input_tokens)
-            .max(1);
+            .max_tokens
+            .min(self.config.agent.token_budget.saturating_sub(input_tokens).max(1));
 
         let mut body = serde_json::json!({
             "model": self.config.model,
