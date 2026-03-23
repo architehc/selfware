@@ -1481,9 +1481,12 @@ mod tests {
     #[test]
     fn test_semantic_summary_grep_search() {
         // Test that grep_search can find public functions in the codebase
+        // Note: This test requires the grep_search tool to be available
+        #[allow(unused_imports)]
+        use crate::tools::search::grep_search;
         let results = grep_search("pub fn format_evolution_history", ".", true, 10, 0);
         assert!(results.total_matches > 0, "Should find at least one match for pub fn format_evolution_history");
-        let match_found = results.matches.iter().any(|m| m.line.contains("format_evolution_history"));
+        let match_found = results.matches.iter().any(|m| m.content.contains("format_evolution_history"));
         assert!(match_found, "Should find the format_evolution_history function definition");
     }
 

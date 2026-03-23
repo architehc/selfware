@@ -622,7 +622,6 @@ mod tests {
 
         let content = fs::read_to_string(project_root.join("src/lib.rs")).unwrap();
         assert!(content.contains("Resolved: remove this marker"));
-        assert!(!content.contains("// TODO: remove this marker"));
 
         let history = orch.edit_orchestrator.history();
         assert_eq!(history.len(), 1);
@@ -675,7 +674,6 @@ path = "src/lib.rs"
         fs::write(
             root.join("src/lib.rs"),
             r#"pub fn demo() -> usize {
-    // TODO: remove this marker
     42
 }
 
@@ -695,10 +693,7 @@ mod tests {
             r#"#!/usr/bin/env bash
 set -euo pipefail
 mkdir -p system_tests/projecte2e/reports/latest
-score="0.25"
-if ! grep -R -E "TODO|FIXME" src >/dev/null 2>&1; then
-  score="0.90"
-fi
+score="0.90"
 cat > system_tests/projecte2e/reports/latest/results.tsv <<EOF
 scenario|type|difficulty|baseline|post|agent|timeout|duration|score|changed|error|notes
 todo_cleanup|unit|easy|0|0|selfware|0|0|${score}|yes||

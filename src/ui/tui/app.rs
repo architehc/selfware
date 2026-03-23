@@ -28,6 +28,8 @@ pub enum AppState {
     Help,
     /// Confirming an action
     Confirming(String),
+    /// Viewing digital garden
+    GardenView,
 }
 
 /// A chat message for display
@@ -90,6 +92,8 @@ pub struct App {
     pub animation_speed: f64,
     /// Verbose output mode (toggled by /verbose and /compact)
     pub verbose: bool,
+    /// Garden view for codebase visualization
+    pub garden_view: super::GardenView,
 }
 
 impl App {
@@ -114,7 +118,23 @@ impl App {
             selected: 0,
             animation_speed: ANIMATION_SPEED_DEFAULT,
             verbose: false,
+            garden_view: super::GardenView::new(),
         }
+    }
+    
+    /// Toggle garden view
+    pub fn toggle_garden_view(&mut self) {
+        self.state = if self.state == AppState::GardenView {
+            AppState::Chatting
+        } else {
+            // Try to load garden data if not already loaded
+            if self.garden_view.garden().is_none() {
+                if let Ok(garden) = crate::ui::garden::build_garden_from_path(".") {
+                    self.garden_view.set_garden(garden);
+                }
+            }
+            AppState::GardenView
+        };
     }
 
     /// Add a user message
@@ -186,8 +206,38 @@ impl App {
     }
 
     /// Render the application
-    pub fn render(&self, frame: &mut Frame) {
+    pub fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
+
+        // Handle garden view as full-screen overlay
+        if self.state == AppState::GardenView {
+            self.render_header(frame, Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(3)])
+                .split(area)[0]);
+            
+            let main_area = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3), // Header (already rendered)
+                    Constraint::Min(10),   // Garden view
+                    Constraint::Length(1), // Status bar
+                ])
+                .split(area)[1];
+            
+            self.garden_view.render(frame, main_area);
+            
+            let status_area = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(3),
+                    Constraint::Min(10),
+                    Constraint::Length(1),
+                ])
+                .split(area)[2];
+            self.render_status_bar(frame, status_area);
+            return;
+        }
 
         // Create main layout
         let chunks = Layout::default()
@@ -325,6 +375,7 @@ impl App {
             AppState::FileBrowser => "files",
             AppState::Help => "help",
             AppState::Confirming(_) => "confirm",
+            AppState::GardenView => "garden",
         }
     }
 
@@ -345,7 +396,9 @@ impl App {
             AppState::Palette => "↑/↓: navigate │ Enter: select │ Esc: close │ Type: filter",
             AppState::RunningTask => "Task running... │ Esc: cancel (if possible)",
             AppState::Confirming(_) => "y: yes │ n: no │ Enter: confirm │ Esc: cancel",
-            _ => "Esc: back │ Ctrl+C: quit",
+            AppState::FileBrowser => "↑/↓: navigate │ Enter: open │ Esc: back │ Ctrl+C: quit",
+            AppState::Help => "↑/↓: scroll │ Esc: back │ Ctrl+C: quit",
+            AppState::GardenView => "arrows: navigate | Enter: expand | r: refresh | Ctrl+G: exit garden",
         };
 
         let status_line = Line::from(vec![
@@ -483,6 +536,10 @@ impl App {
             AppState::Help => {
                 self.state = AppState::Chatting;
                 self.status = "Help closed".into();
+            }
+            AppState::GardenView => {
+                self.state = AppState::Chatting;
+                self.status = "Garden view closed".into();
             }
             AppState::Chatting => {
                 if !self.input.is_empty() {

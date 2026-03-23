@@ -508,6 +508,47 @@ pub fn run_tui(model: &str) -> Result<Vec<String>> {
                 QuitDecision::None => {}
             }
 
+            // Handle garden view mode separately
+            if app.state == AppState::GardenView {
+                match key.code {
+                    KeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => {
+                        // Let quit handler deal with it
+                    }
+                    KeyCode::Char('g') if key.modifiers == KeyModifiers::CONTROL => {
+                        app.toggle_garden_view();
+                    }
+                    KeyCode::Esc => {
+                        app.toggle_garden_view();
+                    }
+                    KeyCode::Up => {
+                        app.garden_view.select_prev();
+                    }
+                    KeyCode::Down => {
+                        app.garden_view.select_next();
+                    }
+                    KeyCode::Enter | KeyCode::Right => {
+                        app.garden_view.toggle_expand();
+                    }
+                    KeyCode::Left => {
+                        // Collapse if expanded
+                        if let Some(item) = app.garden_view.selected_item() {
+                            if let GardenItem::Bed { expanded: true, .. } = item {
+                                app.garden_view.toggle_expand();
+                            }
+                        }
+                    }
+                    KeyCode::Char('r') => {
+                        // Refresh garden
+                        if let Ok(garden) = crate::ui::garden::build_garden_from_path(".") {
+                            app.garden_view.set_garden(garden);
+                            app.status = "Garden refreshed".to_string();
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            
             match key.code {
                 KeyCode::Enter => {
                     if let Some(input) = app.on_enter() {
@@ -524,6 +565,12 @@ pub fn run_tui(model: &str) -> Result<Vec<String>> {
                 }
                 KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => {
                     app.toggle_palette();
+                }
+                KeyCode::Char('g') if key.modifiers == KeyModifiers::CONTROL => {
+                    app.toggle_garden_view();
+                    if app.state == AppState::GardenView {
+                        app.status = "Garden view: ↑↓ navigate, Enter expand, r refresh, Esc/Ctrl+G exit".to_string();
+                    }
                 }
                 KeyCode::Char(c) => app.on_char(c),
                 KeyCode::Backspace => app.on_backspace(),

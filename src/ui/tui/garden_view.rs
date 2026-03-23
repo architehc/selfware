@@ -105,6 +105,11 @@ impl GardenView {
         self.garden = Some(garden);
         self.rebuild_items();
     }
+    
+    /// Get reference to garden data
+    pub fn garden(&self) -> Option<&DigitalGarden> {
+        self.garden.as_ref()
+    }
 
     /// Mark a path as recently changed (for growth animation)
     pub fn mark_changed(&mut self, path: &str) {

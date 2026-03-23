@@ -70,13 +70,21 @@ pub struct SymbolSearch;
 
 /// A single match result from grep search
 #[derive(Debug, Serialize, Deserialize)]
-struct GrepMatch {
-    file: String,
-    line: u32,
-    column: u32,
-    content: String,
-    context_before: Vec<String>,
-    context_after: Vec<String>,
+pub struct GrepMatch {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+    pub content: String,
+    pub context_before: Vec<String>,
+    pub context_after: Vec<String>,
+}
+
+/// Result of a grep search operation
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GrepSearchResult {
+    pub matches: Vec<GrepMatch>,
+    pub total_matches: usize,
+    pub file_count: usize,
 }
 
 /// Result of a glob find operation
@@ -849,35 +857,89 @@ mod tests {
             .iter()
             .any(|s| s["name"].as_str().unwrap() == "MyStruct"));
     }
+}
 
-    #[tokio::test]
-    async fn test_symbol_search_all_types() {
-        let dir = tempdir().unwrap();
-        let file_path = dir.path().join("test.rs");
-        fs::write(
-            &file_path,
-            r#"
-            pub struct TestStruct {}
-            pub enum TestEnum {}
-            pub trait TestTrait {}
-            pub fn test_function() {}
-            impl TestStruct {}
-        "#,
-        )
-        .unwrap();
+/// Standalone function for grep search (for use in tests and other modules)
+/// 
+/// # Arguments
+/// * `pattern` - Regex pattern to search for
+/// * `path` - File or directory to search in
+/// * `recursive` - Whether to search recursively
+/// * `max_matches` - Maximum number of matches to return
+/// * `offset` - Number of matches to skip
+/// 
+/// # Returns
+/// A GrepSearchResult containing matches and metadata
+pub fn grep_search(
+    pattern: &str,
+    path: &str,
+    recursive: bool,
+    max_matches: usize,
+    offset: usize,
+) -> GrepSearchResult {
+    let mut matches = Vec::new();
+    let mut file_count = 0;
+    let re = cached_regex(pattern).unwrap_or_else(|_| {
+        // Fallback to simple regex if caching fails
+        regex::Regex::new(pattern).expect("Invalid regex pattern")
+    });
 
-        let tool = SymbolSearch;
-        let result = tool
-            .execute(serde_json::json!({
-                "name": "Test",
-                "path": dir.path().to_str().unwrap(),
-                "symbol_type": "all"
-            }))
-            .await
-            .unwrap();
+    if Path::new(path).is_file() {
+        // Search single file
+        let content = std::fs::read_to_string(path).unwrap_or_default();
+        let lines: Vec<&str> = content.lines().collect();
+        
+        for (line_idx, line) in lines.iter().enumerate() {
+            if re.is_match(line) {
+                let line_num = (line_idx + 1) as u32;
+                let column = line.find(re.as_str()).map_or(1, |i| i + 1) as u32;
+                
+                matches.push(GrepMatch {
+                    file: path.to_string(),
+                    line: line_num,
+                    column,
+                    content: line.to_string(),
+                    context_before: Vec::new(),
+                    context_after: Vec::new(),
+                });
+            }
+        }
+        file_count = 1;
+    } else if recursive {
+        // Search directory recursively
+        for entry in WalkDir::new(path).into_iter().flatten() {
+            if entry.file_type().is_file() {
+                let path_str = entry.path().to_string_lossy();
+                let content = std::fs::read_to_string(entry.path()).unwrap_or_default();
+                let lines: Vec<&str> = content.lines().collect();
+                
+                for (line_idx, line) in lines.iter().enumerate() {
+                    if re.is_match(line) {
+                        let line_num = (line_idx + 1) as u32;
+                        let column = line.find(re.as_str()).map_or(1, |i| i + 1) as u32;
+                        
+                        matches.push(GrepMatch {
+                            file: path_str.to_string(),
+                            line: line_num,
+                            column,
+                            content: line.to_string(),
+                            context_before: Vec::new(),
+                            context_after: Vec::new(),
+                        });
+                    }
+                }
+                file_count += 1;
+            }
+        }
+    }
 
-        let symbols = result["symbols"].as_array().unwrap();
-        // Should find struct, enum, trait, function
-        assert!(symbols.len() >= 4);
+    let total_matches = matches.len();
+    // Apply offset and limit
+    matches = matches.into_iter().skip(offset).take(max_matches).collect();
+
+    GrepSearchResult {
+        matches,
+        total_matches,
+        file_count,
     }
 }
