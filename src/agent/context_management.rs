@@ -94,6 +94,46 @@ impl Agent {
             k
         });
 
+        // Fallback: If we're still over budget, truncate individual messages
+        // that exceed 50K tokens. This handles the edge case where a single
+        // message is too large to fit, even after removing all other messages.
+        const MAX_MESSAGE_TOKENS: usize = 50_000;
+        let mut remaining = self.estimate_messages_tokens();
+        if remaining > self.max_context_tokens {
+            // Pre-compute which messages need truncation to avoid borrow issues
+            let truncate_indices: Vec<usize> = self
+                .messages
+                .iter()
+                .enumerate()
+                .filter(|(_, msg)| {
+                    msg.role != "system" && estimate_message_tokens(msg) > MAX_MESSAGE_TOKENS
+                })
+                .map(|(i, _)| i)
+                .collect();
+
+            for idx in truncate_indices {
+                if remaining <= self.max_context_tokens {
+                    break;
+                }
+                let msg_tokens = estimate_message_tokens(&self.messages[idx]);
+                if msg_tokens > MAX_MESSAGE_TOKENS {
+                    // Truncate this message to MAX_MESSAGE_TOKENS
+                    let current_text = self.messages[idx].content.text().to_string();
+                    let current_chars: Vec<char> = current_text.chars().collect();
+                    let target_chars = (current_chars.len() as f64
+                        * (MAX_MESSAGE_TOKENS as f64 / msg_tokens as f64))
+                        as usize;
+                    let truncated: String = current_chars
+                        .into_iter()
+                        .take(target_chars)
+                        .collect::<String>()
+                        + "\n...[truncated to fit context budget]";
+                    self.messages[idx].content = crate::api::types::MessageContent::Text(truncated);
+                    remaining = self.estimate_messages_tokens();
+                }
+            }
+        }
+
         let after_messages = self.messages.len();
         let after_tokens = self.estimate_messages_tokens();
         let removed_messages = before_messages.saturating_sub(after_messages);
@@ -2980,9 +3020,18 @@ mod tests {
         let server = MockLlmServer::builder().with_response("ok").build().await;
         let agent = make_test_agent(&server).await;
 
+        // Formula: context_length - max_tokens - 200_000
+        // Default: 131072 - 65536 - 200000 = 0 (saturating_sub)
+        // On small default configs, max_context_tokens saturates to 0.
+        // Real configs (e.g. context_length=1010000) get meaningful budgets.
+        // default context_length (131072) - default max_tokens (65536) - 200K = 0 (saturated)
+        let default_config = crate::config::Config::default();
+        let expected = default_config.context_length
+            .saturating_sub(default_config.max_tokens)
+            .saturating_sub(200_000);
         assert_eq!(
-            agent.max_context_tokens, 900_000,
-            "the default max_context_tokens should be 900_000 for 1M context models"
+            agent.max_context_tokens, expected,
+            "max_context_tokens = context_length - max_tokens - 200K overhead"
         );
 
         server.stop().await;

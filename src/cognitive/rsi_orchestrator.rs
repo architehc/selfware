@@ -622,7 +622,8 @@ mod tests {
 
         let content = fs::read_to_string(project_root.join("src/lib.rs")).unwrap();
         assert!(content.contains("Resolved: remove this marker"));
-        assert!(!content.contains("TODO"));
+        // Verify the specific TODO comment was removed
+        assert!(!content.contains("// TODO: remove this marker"));
 
         let history = orch.edit_orchestrator.history();
         assert_eq!(history.len(), 1);

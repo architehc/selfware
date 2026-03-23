@@ -1,0 +1,21 @@
+endpoint = "http://localhost:8000/v1"
+model = "qwen3.5-27b"
+context_length = 256000
+max_tokens = 8192
+temperature = 0.6
+
+[agent]
+token_budget = 100000
+token_safety_margin = 30000
+
+[evolution]
+population_size = 4
+generations = 15
+prompt_logic = []
+tool_code = []
+cognitive = [
+    "src/cognitive/memory_hierarchy.rs",
+    "src/cognitive/episodic.rs",
+    "src/cognitive/self_improvement.rs",
+    "src/memory.rs"
+]

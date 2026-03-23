@@ -1,0 +1,16 @@
+endpoint = "http://localhost:8000/v1"
+model = "qwen3.5-27b"
+context_length = 32768
+max_tokens = 2048
+temperature = 0.6
+
+[agent]
+token_budget = 15000
+token_safety_margin = 5000
+
+[evolution]
+population_size = 2
+generations = 30
+prompt_logic = ["src/cognitive/state.rs"]
+tool_code = []
+cognitive = []

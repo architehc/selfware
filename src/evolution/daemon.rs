@@ -592,6 +592,73 @@ fn generate_micro_hypotheses(
 /// Max total source context characters
 const MAX_CONTEXT_CHARS: usize = 45_000;
 
+/// Extract function signatures from Rust source code
+fn extract_function_signatures(source: &str) -> Vec<String> {
+    let mut signatures = Vec::new();
+    let mut in_impl_block = false;
+    let mut impl_context = String::new();
+    
+    for line in source.lines() {
+        let trimmed = line.trim();
+        
+        // Track impl blocks for context
+        if trimmed.starts_with("impl ") || trimmed.starts_with("pub impl ") {
+            in_impl_block = true;
+            impl_context = trimmed.to_string();
+            continue;
+        }
+        if trimmed == "}" && in_impl_block {
+            in_impl_block = false;
+            impl_context.clear();
+            continue;
+        }
+        
+        // Match function signatures (fn or pub fn)
+        if (trimmed.starts_with("fn ") || trimmed.starts_with("pub fn ")) 
+            && !trimmed.starts_with("fn main()") // Skip main functions in tests
+        {
+            let mut sig = trimmed.to_string();
+            
+            // Add impl context if available
+            if !impl_context.is_empty() {
+                sig = format!("// In: {}\n{}", impl_context, sig);
+            }
+            
+            // Extract just the signature line (stop at opening brace)
+            if let Some(brace_pos) = sig.find('{') {
+                sig = sig[..brace_pos].to_string();
+            }
+            
+            if !sig.is_empty() {
+                signatures.push(sig);
+            }
+        }
+    }
+    
+    signatures
+}
+
+/// Get recent git changes for context
+fn get_recent_git_changes(repo_root: &Path, max_commits: usize) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["log", "--oneline", "--no-merges"])
+        .arg(format!("-{}", max_commits))
+        .current_dir(repo_root)
+        .output();
+    
+    match output {
+        Ok(o) if o.status.success() => {
+            let log = String::from_utf8_lossy(&o.stdout);
+            if log.trim().is_empty() {
+                None
+            } else {
+                Some(format!("Recent commits:\n{}", log))
+            }
+        }
+        _ => None,
+    }
+}
+
 pub fn read_mutation_targets(targets: &super::MutationTargets, repo_root: &Path) -> String {
     // Collect all files with their sizes, then sort smallest-first so we
     // maximise the number of files sent in full within the context budget.
@@ -602,13 +669,14 @@ pub fn read_mutation_targets(targets: &super::MutationTargets, repo_root: &Path)
         .chain(targets.cognitive.iter())
         .collect();
 
-    let mut file_entries: Vec<(&PathBuf, String, usize)> = Vec::new();
+    let mut file_entries: Vec<(&PathBuf, String, usize, Vec<String>)> = Vec::new();
     for file in &all_paths {
         let full_path = repo_root.join(file);
         match std::fs::read_to_string(&full_path) {
             Ok(contents) => {
                 let len = contents.len();
-                file_entries.push((file, contents, len));
+                let signatures = extract_function_signatures(&contents);
+                file_entries.push((file, contents, len, signatures));
             }
             Err(e) => {
                 log_warning(&format!("Could not read {}: {}", file.display(), e));
@@ -617,13 +685,19 @@ pub fn read_mutation_targets(targets: &super::MutationTargets, repo_root: &Path)
     }
 
     // Sort by size ascending — small files go in full, big files get truncated
-    file_entries.sort_by_key(|(_, _, len)| *len);
+    file_entries.sort_by_key(|(_, _, len, _)| *len);
 
     let mut context = String::new();
     let mut files_full = 0usize;
     let mut files_truncated = 0usize;
+    let mut total_signatures = 0usize;
 
-    for (file, contents, _len) in &file_entries {
+    // Add recent git changes at the top for context
+    if let Some(recent_changes) = get_recent_git_changes(repo_root, 10) {
+        context.push_str(&format!("## Recent Git Changes\n{}\n\n", recent_changes));
+    }
+
+    for (file, contents, _len, signatures) in &file_entries {
         let remaining = MAX_CONTEXT_CHARS.saturating_sub(context.len());
         if remaining < 500 {
             log_warning(&format!(
@@ -636,8 +710,9 @@ pub fn read_mutation_targets(targets: &super::MutationTargets, repo_root: &Path)
         // Add line numbers to source — helps the LLM generate accurate @@ hunk headers
         let numbered = add_line_numbers(contents);
 
-        // Budget for this file: overhead for the header + fences (~100 chars)
-        let overhead = 100 + file.display().to_string().len();
+        // Budget for this file: overhead for the header + fences + signatures (~200 chars)
+        let sig_overhead = signatures.len() * 50;
+        let overhead = 200 + file.display().to_string().len() + sig_overhead;
         let budget = remaining.saturating_sub(overhead);
 
         let (display_content, was_truncated) = if numbered.len() <= budget {
@@ -664,19 +739,36 @@ pub fn read_mutation_targets(targets: &super::MutationTargets, repo_root: &Path)
         } else {
             files_full += 1;
         }
+        
+        total_signatures += signatures.len();
+
+        // Add function signatures as a summary before the source
+        let sig_summary = if !signatures.is_empty() {
+            let sigs: String = signatures
+                .iter()
+                .take(20) // Limit to 20 signatures per file
+                .map(|s| format!("  {}", s))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("\n// Function signatures ({} total):\n{}\n", signatures.len(), sigs)
+        } else {
+            String::new()
+        };
 
         context.push_str(&format!(
-            "\n### {}\n```rust\n{}\n```\n",
+            "\n### {}\n{}\n```rust\n{}\n```\n",
             file.display(),
+            sig_summary,
             display_content
         ));
     }
     log_phase(&format!(
-        "Source context: {} chars from {} files ({} full, {} truncated)",
+        "Source context: {} chars from {} files ({} full, {} truncated, {} signatures)",
         context.len(),
         files_full + files_truncated,
         files_full,
         files_truncated,
+        total_signatures,
     ));
     context
 }
