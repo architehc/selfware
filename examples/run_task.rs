@@ -41,6 +41,7 @@ async fn main() -> Result<()> {
 
         // Token limits
         max_tokens: 65536,
+        context_length: 131072,
         temperature: 0.7,
 
         // API key (if required by your backend)

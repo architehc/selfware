@@ -16,8 +16,242 @@ pub(super) const TOOL_CONFIRM_ARGS_PREVIEW_CHARS: usize = 240;
 pub(super) const TOOL_FAILURE_HINT_PREVIEW_CHARS: usize = 400;
 pub(super) const FAILED_TOOL_ATTEMPT_WINDOW_SIZE: usize = 16;
 
+/// Maximum tokens allowed for a single tool result before it gets summarized.
+/// ~5% of a 1M context window — leaves room for many tool results in one session.
+const MAX_TOOL_RESULT_TOKENS: usize = 50_000;
+
+/// Directory where oversized raw tool results are spilled to disk.
+const TOOL_RESULTS_DIR: &str = ".selfware/tool_results";
+
+/// Summarize an oversized tool result and save raw data to disk.
+///
+/// Returns a structured summary string that includes:
+/// - Key statistics extracted from the result
+/// - A reference path to the raw data on disk
+/// - Enough context for the agent to decide whether to drill down
+fn summarize_and_spill(tool_name: &str, call_id: &str, raw: &str, estimated_tokens: usize) -> String {
+    // Save raw result to disk
+    let spill_dir = std::path::Path::new(TOOL_RESULTS_DIR);
+    let _ = std::fs::create_dir_all(spill_dir);
+    let spill_file = spill_dir.join(format!("{}_{}.json", tool_name, &call_id[..call_id.len().min(12)]));
+    let spill_path = spill_file.display().to_string();
+    if let Err(e) = std::fs::write(&spill_file, raw) {
+        warn!("Failed to spill tool result to {}: {}", spill_path, e);
+        // Fall back to aggressive truncation if disk write fails
+        let truncated: String = raw.chars().take(20_000).collect();
+        return format!(
+            "{}\n\n[TRUNCATED — original was ~{} tokens, disk spill failed: {}]",
+            truncated, estimated_tokens, e
+        );
+    }
+
+    // Build a tool-specific structured summary
+    let summary = match tool_name {
+        "directory_tree" => summarize_directory_tree(raw),
+        "file_read" => summarize_file_read(raw),
+        "git_diff" => summarize_git_diff(raw),
+        "context_bulk_read" => summarize_bulk_read(raw),
+        "shell_exec" => summarize_shell_exec(raw),
+        _ => summarize_generic(raw),
+    };
+
+    format!(
+        "{}\n\n[SUMMARY — original result was ~{} tokens. Raw data saved to: {} — use file_read to inspect details]",
+        summary, estimated_tokens, spill_path
+    )
+}
+
+fn summarize_directory_tree(raw: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(raw).unwrap_or_default();
+    let root = v.get("root").and_then(|v| v.as_str()).unwrap_or(".");
+    let entries = v.get("entries").and_then(|v| v.as_array());
+    let total = v.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    if let Some(entries) = entries {
+        // Count dirs vs files, group top-level
+        let mut dir_count = 0usize;
+        let mut file_count = 0usize;
+        let mut top_level: std::collections::BTreeMap<String, (usize, usize, u64)> =
+            std::collections::BTreeMap::new(); // name -> (files, dirs, total_size)
+
+        for entry in entries {
+            let path = entry.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let etype = entry.get("type").and_then(|v| v.as_str()).unwrap_or("file");
+            let size = entry.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+
+            if etype == "directory" {
+                dir_count += 1;
+            } else {
+                file_count += 1;
+            }
+
+            // Extract first path component after root
+            let relative = path.strip_prefix(root).unwrap_or(path);
+            let relative = relative.trim_start_matches('/');
+            if let Some(top) = relative.split('/').next() {
+                if !top.is_empty() {
+                    let entry = top_level.entry(top.to_string()).or_insert((0, 0, 0));
+                    if etype == "directory" {
+                        entry.1 += 1;
+                    } else {
+                        entry.0 += 1;
+                    }
+                    entry.2 += size;
+                }
+            }
+        }
+
+        let mut summary = format!(
+            "Directory: {}\nTotal: {} entries ({} files, {} dirs)\n\nTop-level contents:\n",
+            root, total, file_count, dir_count
+        );
+        for (name, (files, dirs, size)) in &top_level {
+            let size_str = if *size > 1_000_000 {
+                format!("{:.1}MB", *size as f64 / 1_000_000.0)
+            } else if *size > 1_000 {
+                format!("{:.1}KB", *size as f64 / 1_000.0)
+            } else {
+                format!("{}B", size)
+            };
+            summary.push_str(&format!(
+                "  {:<30} {:>4} files, {:>3} dirs, {}\n",
+                name, files, dirs, size_str
+            ));
+        }
+        summary
+    } else {
+        format!("Directory: {} — {} entries (parse failed, see raw file)", root, total)
+    }
+}
+
+fn summarize_file_read(raw: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(raw).unwrap_or_default();
+    let total_lines = v.get("total_lines").and_then(|v| v.as_u64()).unwrap_or(0);
+    let content = v.get("content").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Show first 100 and last 50 lines
+    let lines: Vec<&str> = content.lines().collect();
+    let head: String = lines.iter().take(100).cloned().collect::<Vec<_>>().join("\n");
+    let tail: String = if lines.len() > 150 {
+        lines.iter().rev().take(50).rev().cloned().collect::<Vec<_>>().join("\n")
+    } else {
+        String::new()
+    };
+
+    let mut summary = format!("File: {} total lines\n\n--- First 100 lines ---\n{}", total_lines, head);
+    if !tail.is_empty() {
+        summary.push_str(&format!(
+            "\n\n--- Last 50 lines (lines {}–{}) ---\n{}",
+            lines.len() - 50, lines.len(), tail
+        ));
+    }
+    if lines.len() > 150 {
+        summary.push_str(&format!(
+            "\n\n[{} lines omitted from middle]",
+            lines.len() - 150
+        ));
+    }
+    summary
+}
+
+fn summarize_git_diff(raw: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(raw).unwrap_or_default();
+    let diff = v.get("diff").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Parse diff headers to extract per-file stats
+    let mut files: Vec<(String, usize, usize)> = Vec::new(); // (path, added, removed)
+    let mut current_file = String::new();
+    let mut added = 0usize;
+    let mut removed = 0usize;
+
+    for line in diff.lines() {
+        if line.starts_with("diff --git") {
+            if !current_file.is_empty() {
+                files.push((current_file.clone(), added, removed));
+            }
+            current_file = line.split(" b/").last().unwrap_or("").to_string();
+            added = 0;
+            removed = 0;
+        } else if line.starts_with('+') && !line.starts_with("+++") {
+            added += 1;
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            removed += 1;
+        }
+    }
+    if !current_file.is_empty() {
+        files.push((current_file, added, removed));
+    }
+
+    let total_added: usize = files.iter().map(|(_, a, _)| a).sum();
+    let total_removed: usize = files.iter().map(|(_, _, r)| r).sum();
+
+    let mut summary = format!(
+        "Diff: {} files changed, +{} -{}\n\n",
+        files.len(), total_added, total_removed
+    );
+    for (path, a, r) in &files {
+        summary.push_str(&format!("  {:<60} +{:<5} -{}\n", path, a, r));
+    }
+    summary
+}
+
+fn summarize_bulk_read(raw: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(raw).unwrap_or_default();
+    let loaded = v.get("loaded").and_then(|v| v.as_u64()).unwrap_or(0);
+    let skipped = v.get("skipped").and_then(|v| v.as_u64()).unwrap_or(0);
+    let tokens = v.get("tokens_added").and_then(|v| v.as_u64()).unwrap_or(0);
+    format!(
+        "Bulk read: {} files loaded, {} skipped, {} tokens added",
+        loaded, skipped, tokens
+    )
+}
+
+fn summarize_shell_exec(raw: &str) -> String {
+    let v: serde_json::Value = serde_json::from_str(raw).unwrap_or_default();
+    let exit_code = v.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(-1);
+    let stdout = v.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+    let stderr = v.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+
+    let stdout_lines: Vec<&str> = stdout.lines().collect();
+    let stderr_lines: Vec<&str> = stderr.lines().collect();
+
+    let mut summary = format!(
+        "Exit code: {}\nStdout: {} lines, Stderr: {} lines\n",
+        exit_code, stdout_lines.len(), stderr_lines.len()
+    );
+
+    // Show first 80 + last 20 lines of stdout
+    let head: String = stdout_lines.iter().take(80).cloned().collect::<Vec<_>>().join("\n");
+    summary.push_str(&format!("\n--- stdout (first 80 lines) ---\n{}", head));
+    if stdout_lines.len() > 100 {
+        let tail: String = stdout_lines.iter().rev().take(20).rev().cloned().collect::<Vec<_>>().join("\n");
+        summary.push_str(&format!(
+            "\n\n--- stdout (last 20 lines) ---\n{}\n[{} lines omitted]",
+            tail,
+            stdout_lines.len() - 100
+        ));
+    }
+
+    if !stderr.is_empty() {
+        let stderr_head: String = stderr_lines.iter().take(30).cloned().collect::<Vec<_>>().join("\n");
+        summary.push_str(&format!("\n\n--- stderr (first 30 lines) ---\n{}", stderr_head));
+    }
+    summary
+}
+
+fn summarize_generic(raw: &str) -> String {
+    // Show first 15K chars + stats
+    let char_count = raw.chars().count();
+    let line_count = raw.lines().count();
+    let preview: String = raw.chars().take(15_000).collect();
+    format!(
+        "{}\n\n[... {} total chars, {} lines — see raw file for full output]",
+        preview, char_count, line_count
+    )
+}
+
 /// Classification of tool execution failures for better recovery suggestions.
-/// 
+///
 /// Each variant represents a category of error that the agent can use to
 /// adapt its strategy and provide contextual recovery hints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1599,7 +1833,7 @@ impl Agent {
         &mut self,
         use_native_fc: bool,
         call_id: &str,
-        _tool_name: &str,
+        tool_name: &str,
         success: bool,
         result: &str,
     ) {
@@ -1610,7 +1844,6 @@ impl Agent {
                 let content =
                     crate::api::types::MessageContent::from_text(&summary).with_image(&base64_png);
                 if use_native_fc {
-                    // For native FC, create a tool message with multimodal content
                     self.messages.push(crate::api::types::Message {
                         role: "tool".to_string(),
                         content,
@@ -1626,18 +1859,35 @@ impl Agent {
             }
         }
 
+        // Budget check: if the result exceeds the per-result token budget,
+        // spill the raw data to disk and store a structured summary + reference.
+        let result_to_store = if success {
+            let estimated_tokens = crate::token_count::estimate_content_tokens(result);
+            if estimated_tokens > MAX_TOOL_RESULT_TOKENS {
+                info!(
+                    "Tool result from '{}' is {} tokens (budget {}), summarizing with disk reference",
+                    tool_name, estimated_tokens, MAX_TOOL_RESULT_TOKENS
+                );
+                summarize_and_spill(tool_name, call_id, result, estimated_tokens)
+            } else {
+                result.to_string()
+            }
+        } else {
+            result.to_string()
+        };
+
         if use_native_fc {
             let result_json = if success {
-                result.to_string()
+                result_to_store
             } else {
-                serde_json::json!({"error": result}).to_string()
+                serde_json::json!({"error": result_to_store}).to_string()
             };
             self.messages.push(Message::tool(result_json, call_id));
         } else {
             let formatted = if success {
-                format!("<tool_result>{}</tool_result>", result)
+                format!("<tool_result>{}</tool_result>", result_to_store)
             } else {
-                format!("<tool_result><error>{}</error></tool_result>", result)
+                format!("<tool_result><error>{}</error></tool_result>", result_to_store)
             };
             self.messages.push(Message::user(formatted));
         }

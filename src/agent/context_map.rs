@@ -741,18 +741,35 @@ impl ContextMap {
 
     /// Render the L1 project tree as a compact string.
     pub fn render_tree(&self) -> String {
+        /// Max files to render in the tree. Keeps system prompt bounded.
+        const MAX_TREE_LINES: usize = 500;
+
         let mut lines: Vec<String> = Vec::new();
         let mut sorted: Vec<_> = self.entries.values().collect();
         sorted.sort_by(|a, b| a.path.cmp(&b.path));
 
+        let total_files = sorted.len();
         lines.push(format!(
             "# Project tree ({} files, {}/{} tokens used)\n",
-            self.entries.len(),
-            self.total_tokens,
-            self.budget,
+            total_files, self.total_tokens, self.budget,
         ));
 
+        // Show loaded/skeleton files first (more relevant), then tree-only up to cap
+        sorted.sort_by_key(|e| match e.level {
+            ContextLevel::Full => 0,
+            ContextLevel::Skeleton => 1,
+            ContextLevel::Tree => 2,
+        });
+
+        let mut shown = 0;
         for entry in &sorted {
+            if shown >= MAX_TREE_LINES {
+                lines.push(format!(
+                    "\n  ... and {} more files (use directory_tree for full listing)",
+                    total_files - shown
+                ));
+                break;
+            }
             let level_marker = match entry.level {
                 ContextLevel::Tree => "·",
                 ContextLevel::Skeleton => "◆",
@@ -770,12 +787,13 @@ impl ContextMap {
                 size_str,
                 entry.current_tokens
             ));
+            shown += 1;
         }
 
         lines.push(String::new());
-        lines.push(format!(
-            "Legend: · = tree only, ◆ = skeleton loaded, █ = full content loaded"
-        ));
+        lines.push(
+            "Legend: · = tree only, ◆ = skeleton loaded, █ = full content loaded".to_string(),
+        );
 
         lines.join("\n")
     }

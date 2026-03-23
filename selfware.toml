@@ -5,15 +5,14 @@ model = "qwen3.5-27b"
 max_tokens = 8192
 # Qwen3.5 recommended: thinking mode for precise coding tasks
 temperature = 0.6
+# Context length: must match vLLM --max-model-len exactly
+context_length = 1010000
 
 # Qwen3.5 sampling parameters for coding (thinking mode)
 [extra_body]
 top_p = 0.95
 top_k = 20
 min_p = 0.0
-
-# Context length: 1M tokens (matches vLLM max_model_len: 1010000)
-context_length = 1048576
 
 # Concurrency settings for parallel requests
 [concurrency]

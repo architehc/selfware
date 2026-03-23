@@ -130,7 +130,7 @@ fn default_modalities() -> Vec<String> {
     vec!["text".to_string()]
 }
 
-fn default_context_length() -> usize {
+pub fn default_context_length() -> usize {
     131072
 }
 
@@ -168,6 +168,9 @@ pub struct Config {
     pub model: String,
     #[serde(default = "default_max_tokens")]
     pub max_tokens: usize,
+    /// Context window length in tokens (must match vLLM --max-model-len)
+    #[serde(default = "default_context_length")]
+    pub context_length: usize,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
     /// API authentication key (can also be set via `SELFWARE_API_KEY` env var).
@@ -502,6 +505,10 @@ pub struct AgentConfig {
     pub step_timeout_secs: u64,
     #[serde(default = "default_token_budget")]
     pub token_budget: usize,
+    /// Safety margin subtracted from token_budget to prevent exceeding model context limit.
+    /// Accounts for tool definitions, system prompt overhead, and output tokens.
+    #[serde(default = "default_token_safety_margin")]
+    pub token_safety_margin: usize,
     /// Enable native function calling (requires backend support like sglang --tool-call-parser)
     /// When true, tools are passed via API and tool_calls are returned in response
     /// When false (default), tools are embedded in system prompt and parsed from content
@@ -549,6 +556,7 @@ impl Default for Config {
             endpoint: default_endpoint(),
             model: default_model(),
             max_tokens: default_max_tokens(),
+            context_length: default_context_length(),
             temperature: default_temperature(),
             api_key: None,
             safety: SafetyConfig::default(),
@@ -593,6 +601,7 @@ impl Default for AgentConfig {
             max_iterations: default_max_iterations(),
             step_timeout_secs: default_step_timeout(),
             token_budget: default_max_tokens(), // matches max_tokens; overridden by Config::load() when user sets max_tokens
+            token_safety_margin: default_token_safety_margin(),
             native_function_calling: false,
             streaming: true,
             min_completion_steps: default_min_completion_steps(),
@@ -628,6 +637,9 @@ fn default_min_completion_steps() -> usize {
 }
 fn default_token_budget() -> usize {
     0 // sentinel: 0 means "derive from max_tokens at load time"
+}
+fn default_token_safety_margin() -> usize {
+    100_000 // 100K token safety margin for tool definitions + output + overhead
 }
 fn default_context_content_ratio() -> f32 {
     0.75
@@ -977,7 +989,7 @@ impl Config {
                     max_tokens: config.max_tokens,
                     temperature: config.temperature,
                     modalities: default_modalities(),
-                    context_length: default_context_length(),
+                    context_length: config.context_length,
                     extra_body: config.extra_body.clone(),
                 },
             );
@@ -1083,6 +1095,14 @@ impl Config {
                 "Config error: agent.token_budget ({}) exceeds maximum allowed ({})",
                 self.agent.token_budget,
                 MAX_TOKEN_LIMIT
+            );
+        }
+        // Validate token_safety_margin doesn't exceed token_budget
+        if self.agent.token_safety_margin >= self.agent.token_budget {
+            bail!(
+                "Config error: agent.token_safety_margin ({}) must be less than agent.token_budget ({})",
+                self.agent.token_safety_margin,
+                self.agent.token_budget
             );
         }
 
@@ -1454,6 +1474,7 @@ mod tests {
     fn test_config_debug_redacts_api_key() {
         let config = Config {
             api_key: Some(RedactedString::new("sk-super-secret-key-12345")),
+            context_length: default_context_length(),
             ..Config::default()
         };
         let debug_str = format!("{:?}", config);
@@ -1511,6 +1532,7 @@ mod tests {
             endpoint: "http://test:9999/v1".to_string(),
             model: "test-model".to_string(),
             max_tokens: 4096,
+            context_length: 131072,
             temperature: 0.7,
             api_key: Some(RedactedString::new("test-key")),
             safety: SafetyConfig {
@@ -1596,6 +1618,25 @@ mod tests {
         assert_eq!(config.model, "qwen3.5-27b");
         assert_eq!(config.max_tokens, 65536);
         assert!(!config.yolo.enabled);
+    }
+
+    #[test]
+    fn test_context_length_from_toml() {
+        let toml_str = r#"
+            endpoint = "http://localhost:8000/v1"
+            context_length = 1010000
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.context_length, 1010000, "context_length should be parsed from TOML");
+    }
+
+    #[test]
+    fn test_context_length_default() {
+        let toml_str = r#"
+            endpoint = "http://localhost:8000/v1"
+        "#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.context_length, 131072, "context_length should use default when not specified");
     }
 
     #[test]
@@ -1965,6 +2006,7 @@ mod tests {
     fn test_validate_empty_endpoint() {
         let config = Config {
             endpoint: "".to_string(),
+            context_length: default_context_length(),
             ..Config::default()
         };
         let err = config.validate().unwrap_err();
@@ -1975,6 +2017,7 @@ mod tests {
     fn test_validate_invalid_endpoint_scheme() {
         let config = Config {
             endpoint: "ftp://example.com".to_string(),
+            context_length: default_context_length(),
             ..Config::default()
         };
         let err = config.validate().unwrap_err();
@@ -1985,6 +2028,7 @@ mod tests {
     fn test_validate_endpoint_no_host() {
         let config = Config {
             endpoint: "http://".to_string(),
+            context_length: default_context_length(),
             ..Config::default()
         };
         let err = config.validate().unwrap_err();
@@ -1995,6 +2039,7 @@ mod tests {
     fn test_validate_empty_model() {
         let config = Config {
             model: "   ".to_string(),
+            context_length: default_context_length(),
             ..Config::default()
         };
         let err = config.validate().unwrap_err();
@@ -2005,6 +2050,7 @@ mod tests {
     fn test_validate_zero_max_tokens() {
         let config = Config {
             max_tokens: 0,
+            context_length: default_context_length(),
             ..Config::default()
         };
         let err = config.validate().unwrap_err();
@@ -2017,6 +2063,7 @@ mod tests {
     fn test_validate_excessive_max_tokens() {
         let config = Config {
             max_tokens: 100_000_000,
+            context_length: default_context_length(),
             ..Config::default()
         };
         let err = config.validate().unwrap_err();
@@ -2027,6 +2074,7 @@ mod tests {
     fn test_validate_negative_temperature() {
         let config = Config {
             temperature: -0.5,
+            context_length: default_context_length(),
             ..Config::default()
         };
         let err = config.validate().unwrap_err();
@@ -2084,6 +2132,7 @@ mod tests {
     fn test_validate_valid_https_endpoint() {
         let config = Config {
             endpoint: "https://api.example.com/v1".to_string(),
+            context_length: default_context_length(),
             ..Config::default()
         };
         assert!(config.validate().is_ok());
@@ -2133,6 +2182,7 @@ mod tests {
         // Local HTTP endpoints should pass validation without error
         let config = Config {
             endpoint: "http://localhost:8000/v1".to_string(),
+            context_length: default_context_length(),
             ..Config::default()
         };
         assert!(config.validate().is_ok());
@@ -2143,6 +2193,7 @@ mod tests {
         // Remote HTTP endpoints should still pass validation (warning only, not error)
         let config = Config {
             endpoint: "http://api.example.com/v1".to_string(),
+            context_length: default_context_length(),
             ..Config::default()
         };
         assert!(config.validate().is_ok());
@@ -2230,6 +2281,7 @@ mod tests {
         // Verify the invariant: strict + plaintext ⇒ should_error is true.
         let config = Config {
             api_key: Some(RedactedString::new("sk-test-plaintext")),
+            context_length: default_context_length(),
             safety: SafetyConfig {
                 strict_permissions: true,
                 ..SafetyConfig::default()
@@ -2252,6 +2304,7 @@ mod tests {
     fn test_plaintext_key_no_error_without_strict() {
         let config = Config {
             api_key: Some(RedactedString::new("sk-test-plaintext")),
+            context_length: default_context_length(),
             safety: SafetyConfig {
                 strict_permissions: false,
                 ..SafetyConfig::default()
@@ -2274,6 +2327,7 @@ mod tests {
         // not trigger any error or warning about plaintext config files.
         let config = Config {
             api_key: Some(RedactedString::new("sk-from-env")),
+            context_length: default_context_length(),
             safety: SafetyConfig {
                 strict_permissions: true,
                 ..SafetyConfig::default()
@@ -2963,6 +3017,7 @@ model = "explicit-default-model"
     fn test_validate_high_temperature_still_valid() {
         let config = Config {
             temperature: 15.0,
+            context_length: default_context_length(),
             ..Config::default()
         };
         assert!(config.validate().is_ok());
@@ -2972,6 +3027,7 @@ model = "explicit-default-model"
     fn test_validate_boundary_temperature() {
         let config = Config {
             temperature: 10.0,
+            context_length: default_context_length(),
             ..Config::default()
         };
         assert!(config.validate().is_ok());
@@ -2997,6 +3053,7 @@ model = "explicit-default-model"
     fn test_validate_empty_api_key_still_valid() {
         let config = Config {
             api_key: Some(RedactedString::new("")),
+            context_length: default_context_length(),
             ..Config::default()
         };
         assert!(config.validate().is_ok());
@@ -3021,6 +3078,7 @@ model = "explicit-default-model"
     fn test_validate_endpoint_http_slash_only() {
         let config = Config {
             endpoint: "http:///path".to_string(),
+            context_length: default_context_length(),
             ..Config::default()
         };
         let err = config.validate().unwrap_err();
@@ -3031,6 +3089,7 @@ model = "explicit-default-model"
     fn test_validate_endpoint_https_slash_only() {
         let config = Config {
             endpoint: "https://".to_string(),
+            context_length: default_context_length(),
             ..Config::default()
         };
         let err = config.validate().unwrap_err();
@@ -3041,6 +3100,7 @@ model = "explicit-default-model"
     fn test_validate_max_tokens_at_limit() {
         let config = Config {
             max_tokens: 10_000_000,
+            context_length: default_context_length(),
             ..Config::default()
         };
         assert!(config.validate().is_ok());
@@ -3050,6 +3110,7 @@ model = "explicit-default-model"
     fn test_validate_max_tokens_over_limit() {
         let config = Config {
             max_tokens: 10_000_001,
+            context_length: default_context_length(),
             ..Config::default()
         };
         let err = config.validate().unwrap_err();
@@ -3068,6 +3129,7 @@ model = "explicit-default-model"
     fn test_validate_remote_http_endpoint_still_valid() {
         let config = Config {
             endpoint: "http://remote-server.example.com:8080/v1".to_string(),
+            context_length: default_context_length(),
             ..Config::default()
         };
         assert!(config.validate().is_ok());
@@ -3508,6 +3570,7 @@ model = "explicit-default-model"
             compact_mode: true,
             verbose_mode: true,
             show_tokens: true,
+            context_length: default_context_length(),
             ..Config::default()
         };
         let toml_str = toml::to_string(&config).unwrap();

@@ -8,12 +8,22 @@ use tracing::{debug, info, warn};
 /// Per-message overhead tokens (role header, formatting, separators).
 const MESSAGE_OVERHEAD_TOKENS: usize = 4;
 
-/// Estimate the token cost of a single message, including text, images, and
-/// per-message overhead. This is the single source of truth for message-level
-/// token estimation — both `ContextCompressor` and `trim_message_history` use it.
+/// Estimate the token cost of a single message, including text, images,
+/// per-message overhead, and tool calls. This is the single source of truth
+/// for message-level token estimation — both `ContextCompressor` and 
+/// `trim_message_history` use it.
 pub fn estimate_message_tokens(m: &Message) -> usize {
-    estimate_tokens_with_overhead(&m.content.text_all(), MESSAGE_OVERHEAD_TOKENS)
-        + m.content.image_count() * crate::tokens::DEFAULT_IMAGE_TOKEN_ESTIMATE
+    let mut total = estimate_tokens_with_overhead(&m.content.text_all(), MESSAGE_OVERHEAD_TOKENS)
+        + m.content.image_count() * crate::tokens::DEFAULT_IMAGE_TOKEN_ESTIMATE;
+    // Include tool calls if present (must match estimate_messages_tokens in tokens.rs)
+    if let Some(ref tool_calls) = m.tool_calls {
+        for call in tool_calls {
+            total += 10; // Overhead per tool call
+            total += crate::token_count::estimate_content_tokens(&call.function.name);
+            total += crate::token_count::estimate_content_tokens(&call.function.arguments);
+        }
+    }
+    total
 }
 
 /// Hard upper limit on message count. If the message list exceeds this,

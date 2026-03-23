@@ -167,7 +167,7 @@ pub fn parse(content: &str, language: Language) -> ParsedFile {
 }
 
 /// Parse Rust code using regex-based extraction
-fn parse_rust(content: &str) -> ParsedFile {
+pub fn parse_rust(content: &str) -> ParsedFile {
     let mut symbols = Vec::new();
     let mut imports = Vec::new();
     let mut module_doc = None;

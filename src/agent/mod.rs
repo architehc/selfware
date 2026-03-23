@@ -184,7 +184,20 @@ Error Recovery Rules:
 2. NEVER say "Let me..." or "I will..." - just execute the tool immediately
 3. If file_read fails, try directory_tree, glob_find, or grep_search
 4. If a command fails, try a different command or a completely different approach
-5. Describing intent without using a tool counts as FAILURE"#;
+5. Describing intent without using a tool counts as FAILURE
+
+## Global Lessons Learned
+Do not repeat past mistakes. Consider these lessons:
+- Prefer previously effective tools: file_read (100% confidence), grep_search (100% confidence), directory_tree (100% confidence).
+- [Success] Preferred tools for similar tasks: cargo_check (100% confidence), directory_tree (100% confidence), http_request (100% confidence)
+- [Success] Preferred tools for similar tasks: symbol_search (100% confidence), git_checkpoint (100% confidence), knowledge_add (100% confidence)
+- [Success] Preferred tools for similar tasks: file_edit (100% confidence), cargo_check (100% confidence), git_status (100% confidence)
+- [Success] Preferred tools for similar tasks: knowledge_stats (100% confidence), git_diff (100% confidence), code_introspect (100% confidence)
+- [Failure] Observed tool failures with learned patterns. Apply error recovery rules strictly.
+- [Success] Tool learning system tracks execution history across all tools.
+- [Success] Preferred tools for similar tasks: git_push (100% confidence), file_delete (100% confidence), cargo_clippy (100% confidence)
+- [Success] Preferred tools for similar tasks: knowledge_export (100% confidence), knowledge_query (100% confidence), http_request (100% confidence)
+- [Success] Preferred tools for similar tasks: browser_fetch (100% confidence), http_request (100% confidence), code_query (100% confidence)"#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FailedToolAttempt {
@@ -646,6 +659,27 @@ To call a tool, use this EXACT XML structure:
 
         info!("Agent initialized with cognitive state, verification gate, and error analyzer");
 
+        // Calculate max_context_tokens before moving config.
+        // context_length MUST match vLLM --max-model-len exactly.
+        // Reserve space for: output tokens (max_tokens), tool definitions (~100-200K),
+        // chat template formatting, and estimation variance (~10-20%).
+        let model_context_limit = config.context_length;
+        let max_context_tokens = model_context_limit
+            .saturating_sub(config.max_tokens)      // reserve for output tokens
+            .saturating_sub(200_000);                // tools + template + estimation safety
+        
+        if max_context_tokens == 0 {
+            tracing::error!(
+                "max_context_tokens is 0! context_length ({}) is too small for max_tokens ({}) + 200K overhead. \
+                 Check that selfware.toml context_length matches your vLLM --max-model-len.",
+                model_context_limit, config.max_tokens
+            );
+        }
+        tracing::info!(
+            "Context limits: model={}, max_context_tokens={}, token_budget={}",
+            model_context_limit, max_context_tokens, config.agent.token_budget
+        );
+
         // Extract context map config before moving `config` into the struct.
         let ctx_map = context_map::ContextMap::new(
             config.agent.token_budget,
@@ -681,7 +715,9 @@ To call a tool, use this EXACT XML structure:
             chat_store,
             cancelled: Arc::new(AtomicBool::new(false)),
             pending_messages: VecDeque::new(),
-            max_context_tokens: 100_000,
+            // max_context_tokens calculated above to stay within token_budget
+            // after accounting for safety_margin and tool definition tokens
+            max_context_tokens,
             #[cfg(feature = "resilience")]
             self_healing,
             recent_tool_calls: VecDeque::new(),

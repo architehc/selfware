@@ -34,19 +34,18 @@ impl Agent {
     /// Trim the message history so total estimated tokens stay within
     /// `max_context_tokens`. Removes the oldest non-system messages first.
     pub(super) fn trim_message_history(&mut self) {
-        use super::context::estimate_message_tokens;
-        let total: usize = self
-            .messages
-            .iter()
-            .map(|m| estimate_message_tokens(m))
-            .sum();
+        // Use the same estimator as the API (includes tool_calls tokens)
+        // This ensures trim budget matches the actual API input_tokens calculation
+        use crate::tokens::estimate_messages_tokens;
+        let total: usize = estimate_messages_tokens(&self.messages);
         if total <= self.max_context_tokens {
             return;
         }
         let before_messages = self.messages.len();
 
         // Collect per-message token counts once (O(N)) instead of recomputing
-        // every iteration.
+        // every iteration. Use estimate_message_tokens for per-message breakdown.
+        use super::context::estimate_message_tokens;
         let token_counts: Vec<usize> = self
             .messages
             .iter()
@@ -120,10 +119,14 @@ impl Agent {
             .into_iter()
             .filter_entry(|e| {
                 let name = e.file_name().to_string_lossy();
-                // Skip common non-source directories.
+                // Skip hidden dirs, build artifacts, and other non-source directories.
+                if name.starts_with('.') {
+                    return false;
+                }
                 !matches!(
                     name.as_ref(),
-                    ".git" | "target" | "node_modules" | ".venv" | "__pycache__" | ".mypy_cache"
+                    "target" | "node_modules" | ".venv" | "__pycache__" | ".mypy_cache"
+                        | "vendor" | "dist" | "build" | "out" | "pkg"
                 )
             })
         {
@@ -1581,6 +1584,7 @@ mod tests {
         let config = Config {
             endpoint: format!("{}/v1", server.url()),
             model: "mock-model".to_string(),
+            context_length: crate::config::default_context_length(),
             agent: crate::config::AgentConfig {
                 max_iterations: 4,
                 step_timeout_secs: 5,
@@ -2977,8 +2981,8 @@ mod tests {
         let agent = make_test_agent(&server).await;
 
         assert_eq!(
-            agent.max_context_tokens, 100_000,
-            "the default max_context_tokens should be 100_000"
+            agent.max_context_tokens, 900_000,
+            "the default max_context_tokens should be 900_000 for 1M context models"
         );
 
         server.stop().await;

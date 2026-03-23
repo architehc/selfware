@@ -446,36 +446,69 @@ impl Tool for DirectoryTree {
         let max_depth = args.max_depth;
         let include_hidden = args.include_hidden;
 
-        let entries = tokio::task::spawn_blocking(move || {
-            let mut entries = vec![];
-            for entry in walkdir::WalkDir::new(&walk_path)
+        let entries: Vec<serde_json::Value> = tokio::task::spawn_blocking(move || {
+            // Use filter_entry (not filter_map) so hidden directories are not descended into.
+            // filter_map would skip the hidden entry from output but still walk its children.
+            /// Directories to never descend into — build artifacts, caches, VCS internals.
+            const SKIP_DIRS: &[&str] = &[
+                "target", "node_modules", "dist", "build", "__pycache__",
+                ".worktrees", "vendor", "pkg", "out", "cmake-build-debug",
+            ];
+
+            /// Source file extensions shown first in output for quick scanning.
+            const SOURCE_EXTS: &[&str] = &[
+                "rs", "toml", "md", "py", "ts", "tsx", "js", "jsx",
+                "go", "java", "c", "cpp", "h", "yaml", "yml", "json",
+            ];
+
+            let walker = walkdir::WalkDir::new(&walk_path)
                 .max_depth(max_depth)
                 .into_iter()
-                .filter_map(|e| e.ok())
-            {
+                .filter_entry(|e| {
+                    if include_hidden {
+                        return true;
+                    }
+                    if e.depth() == 0 {
+                        return true;
+                    }
+                    let name = e.file_name().to_str().unwrap_or("");
+                    // Skip hidden entries and known-large directories
+                    !name.starts_with('.')
+                        && !SKIP_DIRS.contains(&name)
+                });
+
+            let mut source_entries = vec![];
+            let mut other_entries = vec![];
+
+            for entry in walker.filter_map(|e| e.ok()) {
                 let path = entry.path();
                 let metadata = match entry.metadata() {
                     Ok(m) => m,
                     Err(_) => continue,
                 };
 
-                if !include_hidden
-                    && entry
-                        .file_name()
-                        .to_str()
-                        .map(|s| s.starts_with('.'))
-                        .unwrap_or(false)
-                {
-                    continue;
-                }
+                let is_source = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(|ext| SOURCE_EXTS.contains(&ext))
+                    .unwrap_or(false);
 
-                entries.push(serde_json::json!({
+                let json = serde_json::json!({
                     "path": path.display().to_string(),
                     "type": if metadata.is_dir() { "directory" } else { "file" },
                     "size": metadata.len()
-                }));
+                });
+
+                if metadata.is_dir() || is_source {
+                    source_entries.push(json);
+                } else {
+                    other_entries.push(json);
+                }
             }
-            entries
+
+            // Source files first, then other files
+            source_entries.extend(other_entries);
+            source_entries
         })
         .await?;
 

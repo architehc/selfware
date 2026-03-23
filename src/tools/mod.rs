@@ -7,6 +7,7 @@ use std::collections::HashMap;
 pub mod analyzer;
 pub mod browser;
 pub mod cargo;
+pub mod code_metrics;
 pub mod computer;
 pub mod container;
 pub mod context;
@@ -32,6 +33,7 @@ pub mod vision;
 
 use browser::{BrowserEval, BrowserFetch, BrowserLinks, BrowserPdf, BrowserScreenshot};
 use cargo::{CargoCheck, CargoClippy, CargoFmt, CargoTest};
+use code_metrics::CodeMetricsTool;
 use container::{
     ComposeDown, ComposeUp, ContainerBuild, ContainerExec, ContainerImages, ContainerList,
     ContainerLogs, ContainerPull, ContainerRemove, ContainerRun, ContainerStop,

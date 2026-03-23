@@ -703,11 +703,20 @@ impl Agent {
                         continue;
                     }
 
-                    let cognitive_summary = self.cognitive_state.summary();
-                    self.messages.push(Message::user(format!(
-                        "The previous action failed with error: {}. Please try a different approach.\n\n{}",
-                        error, cognitive_summary
-                    )));
+                    // Context overflow: the message history is too large.
+                    // Hard-compress before retrying — adding more messages would
+                    // only make things worse.
+                    if error.contains("CONTEXT OVERFLOW") {
+                        warn!("Context overflow detected — hard-compressing before retry");
+                        self.messages = self.compressor.hard_compress(&self.messages);
+                        self.trim_message_history();
+                    } else {
+                        let cognitive_summary = self.cognitive_state.summary();
+                        self.messages.push(Message::user(format!(
+                            "The previous action failed with error: {}. Please try a different approach.\n\n{}",
+                            error, cognitive_summary
+                        )));
+                    }
 
                     record_state_transition("ErrorRecovery", "Executing");
                     self.set_loop_state(AgentState::Executing {
