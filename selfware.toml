@@ -50,7 +50,8 @@ max_delay_ms = 70000
 # Remote 122B MoE for evolution hypotheses and architectural decisions
 # Runs on sglang with 64 concurrency — much stronger reasoning than local 27B
 [models.architect]
-endpoint = "https://crazyshit.ngrok.io/v1"
+# endpoint = "https://your-sglang-endpoint.example.com/v1"
+endpoint = "https://crazyshit.ngrok.io/v1"  # Ivo's remote — change to your own
 model = "txn545/Qwen3.5-122B-A10B-NVFP4"
 max_tokens = 65536
 context_length = 262144

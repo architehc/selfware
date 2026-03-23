@@ -184,20 +184,7 @@ Error Recovery Rules:
 2. NEVER say "Let me..." or "I will..." - just execute the tool immediately
 3. If file_read fails, try directory_tree, glob_find, or grep_search
 4. If a command fails, try a different command or a completely different approach
-5. Describing intent without using a tool counts as FAILURE
-
-## Global Lessons Learned
-Do not repeat past mistakes. Consider these lessons:
-- Prefer previously effective tools: file_read (100% confidence), grep_search (100% confidence), directory_tree (100% confidence).
-- [Success] Preferred tools for similar tasks: cargo_check (100% confidence), directory_tree (100% confidence), http_request (100% confidence)
-- [Success] Preferred tools for similar tasks: symbol_search (100% confidence), git_checkpoint (100% confidence), knowledge_add (100% confidence)
-- [Success] Preferred tools for similar tasks: file_edit (100% confidence), cargo_check (100% confidence), git_status (100% confidence)
-- [Success] Preferred tools for similar tasks: knowledge_stats (100% confidence), git_diff (100% confidence), code_introspect (100% confidence)
-- [Failure] Observed tool failures with learned patterns. Apply error recovery rules strictly.
-- [Success] Tool learning system tracks execution history across all tools.
-- [Success] Preferred tools for similar tasks: git_push (100% confidence), file_delete (100% confidence), cargo_clippy (100% confidence)
-- [Success] Preferred tools for similar tasks: knowledge_export (100% confidence), knowledge_query (100% confidence), http_request (100% confidence)
-- [Success] Preferred tools for similar tasks: browser_fetch (100% confidence), http_request (100% confidence), code_query (100% confidence)"#;
+5. Describing intent without using a tool counts as FAILURE"#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FailedToolAttempt {
