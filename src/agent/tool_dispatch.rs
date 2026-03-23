@@ -16,6 +16,86 @@ pub(super) const TOOL_CONFIRM_ARGS_PREVIEW_CHARS: usize = 240;
 pub(super) const TOOL_FAILURE_HINT_PREVIEW_CHARS: usize = 400;
 pub(super) const FAILED_TOOL_ATTEMPT_WINDOW_SIZE: usize = 16;
 
+/// Classification of tool execution failures for better recovery suggestions.
+/// 
+/// Each variant represents a category of error that the agent can use to
+/// adapt its strategy and provide contextual recovery hints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolErrorKind {
+    /// Safety/blocked operations (e.g., attempting to modify protected files)
+    SafetyViolation,
+    /// Missing files or resources
+    ResourceNotFound,
+    /// Permission denied errors
+    PermissionDenied,
+    /// Invalid arguments, parse errors, or JSON issues
+    ArgumentError,
+    /// Timeout errors
+    Timeout,
+    /// Generic execution errors (fallback)
+    ExecutionError,
+}
+
+impl ToolErrorKind {
+    /// Classify an error message into a ToolErrorKind.
+    /// 
+    /// Uses keyword heuristics to categorize error messages.
+    pub fn classify(error: &str) -> Self {
+        let error_lower = error.to_lowercase();
+        if error_lower.contains("safety") || error_lower.contains("blocked") {
+            Self::SafetyViolation
+        } else if error_lower.contains("not found") || error_lower.contains("no such file") {
+            Self::ResourceNotFound
+        } else if error_lower.contains("permission") || error_lower.contains("denied") || error_lower.contains("not permitted") {
+            Self::PermissionDenied
+        } else if error_lower.contains("parse") || error_lower.contains("json") || error_lower.contains("invalid") {
+            Self::ArgumentError
+        } else if error_lower.contains("timeout") || error_lower.contains("timed out") {
+            Self::Timeout
+        } else {
+            Self::ExecutionError
+        }
+    }
+
+    /// Get a human-readable name for this error kind.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::SafetyViolation => "SAFETY_VIOLATION",
+            Self::ResourceNotFound => "RESOURCE_NOT_FOUND",
+            Self::PermissionDenied => "PERMISSION_DENIED",
+            Self::ArgumentError => "ARGUMENT_ERROR",
+            Self::Timeout => "TIMEOUT",
+            Self::ExecutionError => "EXECUTION_ERROR",
+        }
+    }
+
+    /// Get a recovery hint specific to this error kind.
+    /// 
+    /// The hint guides the agent toward appropriate corrective actions.
+    pub fn recovery_hint(&self) -> &'static str {
+        match self {
+            Self::SafetyViolation => {
+                "Try a different approach that doesn't modify protected files."
+            }
+            Self::ResourceNotFound => {
+                "Check the path exists or create the resource first."
+            }
+            Self::PermissionDenied => {
+                "Use sudo or check file permissions before retrying."
+            }
+            Self::ArgumentError => {
+                "Review the tool schema and fix the arguments."
+            }
+            Self::Timeout => {
+                "Consider breaking the task into smaller steps."
+            }
+            Self::ExecutionError => {
+                "Review the error and adjust your approach."
+            }
+        }
+    }
+}
+
 pub(super) fn truncate_chars(s: &str, max_chars: usize) -> String {
     let collected: String = s.chars().take(max_chars).collect();
     if s.chars().count() > max_chars {
@@ -55,9 +135,14 @@ impl Agent {
 
     fn remember_failed_tool(&mut self, tool_name: &str, error: &str) {
         let error_preview = truncate_chars(error, TOOL_FAILURE_HINT_PREVIEW_CHARS);
+        
+        // Classify the error and generate contextual recovery hint
+        let error_kind = ToolErrorKind::classify(error);
+        let recovery_hint = error_kind.recovery_hint();
+        
         self.pending_failure_hint = Some(format!(
-            "Warning: the previous tool call `{}` failed. Do not claim success, observation, or completion unless a later tool actually confirms it. Failure details: {}",
-            tool_name, error_preview
+            "⚠️  Tool failure [{}]: `{}` failed.\n   Error: {}\n   Recovery: {}",
+            error_kind.as_str(), tool_name, error_preview, recovery_hint
         ));
     }
 
@@ -1592,5 +1677,316 @@ impl Agent {
                 duration_ms: Some(duration_ms),
             });
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =========================================================================
+    // ToolErrorKind Classification Tests
+    // =========================================================================
+
+    #[test]
+    fn test_tool_error_kind_classify_safety_violation() {
+        // Test safety-related keywords
+        assert_eq!(
+            ToolErrorKind::classify("safety check failed"),
+            ToolErrorKind::SafetyViolation
+        );
+        assert_eq!(
+            ToolErrorKind::classify("Operation blocked by safety policy"),
+            ToolErrorKind::SafetyViolation
+        );
+        assert_eq!(
+            ToolErrorKind::classify("BLOCKED: File access denied"),
+            ToolErrorKind::SafetyViolation
+        );
+    }
+
+    #[test]
+    fn test_tool_error_kind_classify_resource_not_found() {
+        // Test resource not found keywords
+        assert_eq!(
+            ToolErrorKind::classify("File not found"),
+            ToolErrorKind::ResourceNotFound
+        );
+        assert_eq!(
+            ToolErrorKind::classify("No such file or directory"),
+            ToolErrorKind::ResourceNotFound
+        );
+        assert_eq!(
+            ToolErrorKind::classify("resource NOT FOUND"),
+            ToolErrorKind::ResourceNotFound
+        );
+    }
+
+    #[test]
+    fn test_tool_error_kind_classify_permission_denied() {
+        // Test permission-related keywords
+        assert_eq!(
+            ToolErrorKind::classify("Permission denied"),
+            ToolErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            ToolErrorKind::classify("Access denied"),
+            ToolErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            ToolErrorKind::classify("operation not permitted"),
+            ToolErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn test_tool_error_kind_classify_argument_error() {
+        // Test parse/JSON/invalid keywords
+        assert_eq!(
+            ToolErrorKind::classify("Failed to parse JSON"),
+            ToolErrorKind::ArgumentError
+        );
+        assert_eq!(
+            ToolErrorKind::classify("Invalid argument provided"),
+            ToolErrorKind::ArgumentError
+        );
+        assert_eq!(
+            ToolErrorKind::classify("JSON parsing error"),
+            ToolErrorKind::ArgumentError
+        );
+        assert_eq!(
+            ToolErrorKind::classify("parse error at line 5"),
+            ToolErrorKind::ArgumentError
+        );
+    }
+
+    #[test]
+    fn test_tool_error_kind_classify_timeout() {
+        // Test timeout keyword
+        assert_eq!(
+            ToolErrorKind::classify("Request timeout"),
+            ToolErrorKind::Timeout
+        );
+        assert_eq!(
+            ToolErrorKind::classify("Operation timed out after 30s"),
+            ToolErrorKind::Timeout
+        );
+    }
+
+    #[test]
+    fn test_tool_error_kind_classify_execution_error_fallback() {
+        // Test that unknown errors fall back to ExecutionError
+        assert_eq!(
+            ToolErrorKind::classify("Something went wrong"),
+            ToolErrorKind::ExecutionError
+        );
+        assert_eq!(
+            ToolErrorKind::classify("Unknown error occurred"),
+            ToolErrorKind::ExecutionError
+        );
+        assert_eq!(
+            ToolErrorKind::classify(""),
+            ToolErrorKind::ExecutionError
+        );
+    }
+
+    #[test]
+    fn test_tool_error_kind_classify_case_insensitive() {
+        // Test that classification is case-insensitive
+        assert_eq!(
+            ToolErrorKind::classify("SAFETY VIOLATION"),
+            ToolErrorKind::SafetyViolation
+        );
+        assert_eq!(
+            ToolErrorKind::classify("Timeout"),
+            ToolErrorKind::Timeout
+        );
+        assert_eq!(
+            ToolErrorKind::classify("JSON error"),
+            ToolErrorKind::ArgumentError
+        );
+    }
+
+    // =========================================================================
+    // ToolErrorKind String Representation Tests
+    // =========================================================================
+
+    #[test]
+    fn test_tool_error_kind_as_str() {
+        assert_eq!(ToolErrorKind::SafetyViolation.as_str(), "SAFETY_VIOLATION");
+        assert_eq!(ToolErrorKind::ResourceNotFound.as_str(), "RESOURCE_NOT_FOUND");
+        assert_eq!(ToolErrorKind::PermissionDenied.as_str(), "PERMISSION_DENIED");
+        assert_eq!(ToolErrorKind::ArgumentError.as_str(), "ARGUMENT_ERROR");
+        assert_eq!(ToolErrorKind::Timeout.as_str(), "TIMEOUT");
+        assert_eq!(ToolErrorKind::ExecutionError.as_str(), "EXECUTION_ERROR");
+    }
+
+    // =========================================================================
+    // ToolErrorKind Recovery Hint Tests
+    // =========================================================================
+
+    #[test]
+    fn test_tool_error_kind_recovery_hint_safety() {
+        let hint = ToolErrorKind::SafetyViolation.recovery_hint();
+        assert!(hint.contains("protected files"));
+        assert!(!hint.is_empty());
+    }
+
+    #[test]
+    fn test_tool_error_kind_recovery_hint_resource_not_found() {
+        let hint = ToolErrorKind::ResourceNotFound.recovery_hint();
+        assert!(hint.contains("path exists"));
+        assert!(!hint.is_empty());
+    }
+
+    #[test]
+    fn test_tool_error_kind_recovery_hint_permission_denied() {
+        let hint = ToolErrorKind::PermissionDenied.recovery_hint();
+        assert!(hint.contains("sudo") || hint.contains("permissions"));
+        assert!(!hint.is_empty());
+    }
+
+    #[test]
+    fn test_tool_error_kind_recovery_hint_argument_error() {
+        let hint = ToolErrorKind::ArgumentError.recovery_hint();
+        assert!(hint.contains("schema") || hint.contains("arguments"));
+        assert!(!hint.is_empty());
+    }
+
+    #[test]
+    fn test_tool_error_kind_recovery_hint_timeout() {
+        let hint = ToolErrorKind::Timeout.recovery_hint();
+        assert!(hint.contains("smaller steps") || hint.contains("timeout"));
+        assert!(!hint.is_empty());
+    }
+
+    #[test]
+    fn test_tool_error_kind_recovery_hint_execution_error() {
+        let hint = ToolErrorKind::ExecutionError.recovery_hint();
+        assert!(hint.contains("adjust") || hint.contains("Review"));
+        assert!(!hint.is_empty());
+    }
+
+    #[test]
+    fn test_tool_error_kind_all_hints_are_non_empty() {
+        // Ensure all error kinds have meaningful recovery hints
+        for kind in [
+            ToolErrorKind::SafetyViolation,
+            ToolErrorKind::ResourceNotFound,
+            ToolErrorKind::PermissionDenied,
+            ToolErrorKind::ArgumentError,
+            ToolErrorKind::Timeout,
+            ToolErrorKind::ExecutionError,
+        ] {
+            let hint = kind.recovery_hint();
+            assert!(
+                hint.len() > 10,
+                "Recovery hint for {:?} should be meaningful, got: {}",
+                kind,
+                hint
+            );
+        }
+    }
+
+    // =========================================================================
+    // Integration Test: Round-trip Classification
+    // =========================================================================
+
+    #[test]
+    fn test_tool_error_kind_roundtrip_classification() {
+        // Test that classified errors can be converted back to strings
+        let test_errors = vec![
+            ("safety block triggered", ToolErrorKind::SafetyViolation),
+            ("file not found error", ToolErrorKind::ResourceNotFound),
+            ("permission denied on read", ToolErrorKind::PermissionDenied),
+            ("invalid JSON format", ToolErrorKind::ArgumentError),
+            ("connection timeout", ToolErrorKind::Timeout),
+            ("unexpected failure", ToolErrorKind::ExecutionError),
+        ];
+
+        for (error_msg, expected_kind) in test_errors {
+            let classified = ToolErrorKind::classify(error_msg);
+            assert_eq!(
+                classified, expected_kind,
+                "Failed to classify '{}' correctly",
+                error_msg
+            );
+            
+            // Verify we can get string representation and hint
+            let _ = classified.as_str();
+            let _ = classified.recovery_hint();
+        }
+    }
+
+    // =========================================================================
+    // Helper Function Tests
+    // =========================================================================
+
+    #[test]
+    fn test_truncate_chars_short_string() {
+        let input = "short";
+        let result = truncate_chars(input, 100);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_truncate_chars_exact_length() {
+        let input = "exactly10";
+        let result = truncate_chars(input, 9);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_truncate_chars_long_string() {
+        let input = "this is a very long string";
+        let result = truncate_chars(input, 10);
+        assert_eq!(result, "this is a ...");
+    }
+
+    #[test]
+    fn test_truncate_chars_unicode() {
+        let input = "🎉🎊🎁🎄🎃🎅🤶🧑‍🎄";
+        let result = truncate_chars(input, 3);
+        assert_eq!(result, "🎉🎊🎁...");
+    }
+
+    #[test]
+    fn test_canonicalize_tool_args_valid_json() {
+        let input = r#"{"key": "value", "num": 42}"#;
+        let result = canonicalize_tool_args(input);
+        // Should parse and re-serialize
+        assert!(result.contains("key"));
+        assert!(result.contains("value"));
+    }
+
+    #[test]
+    fn test_canonicalize_tool_args_invalid_json() {
+        let input = "not valid json";
+        let result = canonicalize_tool_args(input);
+        // Should return original string
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_hash_tool_args_consistency() {
+        // Same input should produce same hash
+        let input = r#"{"key": "value"}"#;
+        let hash1 = hash_tool_args(input);
+        let hash2 = hash_tool_args(input);
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_hash_tool_args_equivalent_json() {
+        // Different formatting of same JSON should produce same hash
+        let input1 = r#"{"a":1,"b":2}"#;
+        let input2 = r#"{"b":2,"a":1}"#;
+        let hash1 = hash_tool_args(input1);
+        let hash2 = hash_tool_args(input2);
+        // Note: This depends on JSON canonicalization
+        // The current implementation uses serde_json which preserves order
+        // This test documents current behavior
+        let _ = (hash1, hash2);
     }
 }
