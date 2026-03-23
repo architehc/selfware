@@ -399,8 +399,10 @@ impl RecoveryExecutor {
         // the full call-tree to async.  `block_in_place` tells tokio to temporarily move
         // this worker's tasks to another thread, preventing executor starvation.
         //
-        // TODO: If the execute chain is made async in the future, replace this with
-        // `tokio::time::sleep(Duration::from_millis(capped_delay)).await`.
+        // NOTE: To convert this to async sleep, the following functions would need to be
+        // changed to async: execute, execute_with_state, execute_for_pattern, execute_internal,
+        // execute_action, and execute_retry. This would require updating all call sites
+        // throughout the codebase.
         //
         // The delay is capped at 30s (line above) and bounded by max_attempts,
         // so total blocking time per recovery is predictable and limited.

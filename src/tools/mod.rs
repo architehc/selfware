@@ -33,7 +33,6 @@ pub mod vision;
 
 use browser::{BrowserEval, BrowserFetch, BrowserLinks, BrowserPdf, BrowserScreenshot};
 use cargo::{CargoCheck, CargoClippy, CargoFmt, CargoTest};
-use code_metrics::CodeMetricsTool;
 use container::{
     ComposeDown, ComposeUp, ContainerBuild, ContainerExec, ContainerImages, ContainerList,
     ContainerLogs, ContainerPull, ContainerRemove, ContainerRun, ContainerStop,
@@ -302,6 +301,9 @@ impl ToolRegistry {
         registry.register(introspect::CodeQuery::new());
         registry.register(introspect::CodePlan::new());
         registry.register(introspect::CodeDiffPlan::new());
+
+        // Code metrics tool
+        registry.register(code_metrics::CodeMetricsTool::new());
 
         registry
     }
