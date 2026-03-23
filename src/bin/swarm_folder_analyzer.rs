@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tracing::{info, warn};
 
-use selfware::swarm::{
+use selfware::orchestration::swarm::{
     create_dev_swarm, Agent, AgentRole, Swarm, SwarmTask,
 };
 
