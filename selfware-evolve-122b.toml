@@ -1,0 +1,56 @@
+# Selfware Evolution Configuration - External 122B Model
+# Model: txn545/Qwen3.5-122B-A10B-NVFP4
+# Endpoint: https://crazyshit.ngrok.io/v1
+# Context: 262,144 tokens
+
+endpoint = "https://crazyshit.ngrok.io/v1"
+model = "txn545/Qwen3.5-122B-A10B-NVFP4"
+max_tokens = 8192
+context_length = 262144
+temperature = 0.6
+
+# Qwen3.5 sampling parameters
+[extra_body]
+top_p = 0.95
+top_k = 20
+min_p = 0.0
+
+[agent]
+# Conservative token budget for 262K context
+# 262K - 50K safety - 50K tools = ~160K for messages
+token_budget = 180000
+token_safety_margin = 50000
+max_iterations = 50
+step_timeout_secs = 600
+native_function_calling = true
+streaming = false
+
+[evolution]
+# Files the evolution engine can mutate
+prompt_logic = [
+    "src/agent/planning.rs",
+    "src/agent/loop_control.rs",
+    "src/agent/learning.rs",
+    "src/agent/execution.rs",
+    "src/agent/context_management.rs",
+]
+
+tool_code = [
+    "src/tools/file.rs",
+    "src/tools/search.rs",
+    "src/tools/analyzer.rs",
+    "src/tools/shell.rs",
+    "src/tools/cargo.rs",
+]
+
+cognitive = [
+    "src/cognitive/memory_hierarchy.rs",
+    "src/cognitive/episodic.rs",
+    "src/cognitive/self_improvement.rs",
+]
+
+config_keys = ["temperature", "max_tokens", "token_budget"]
+
+[safety]
+allowed_paths = ["./src/**", "./tests/**", "./benches/**"]
+denied_paths = ["**/.env", "**/secrets/**", "**/target/**", "**/.git/**"]

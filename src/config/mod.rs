@@ -678,6 +678,10 @@ fn default_require_confirmation() -> Vec<String> {
 /// Evolution daemon configuration (loaded from `[evolution]` in selfware.toml)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EvolutionTomlConfig {
+    /// Model profile name to use for hypothesis generation (e.g. "architect").
+    /// If set, looks up `[models.<name>]` for endpoint/model. Falls back to default.
+    #[serde(default)]
+    pub hypothesis_model: Option<String>,
     /// Source files containing prompt construction logic
     #[serde(default)]
     pub prompt_logic: Vec<String>,
@@ -3214,6 +3218,7 @@ model = "explicit-default-model"
     #[test]
     fn test_evolution_config_serialize_roundtrip() {
         let config = EvolutionTomlConfig {
+            hypothesis_model: Some("architect".to_string()),
             prompt_logic: vec!["a.rs".to_string()],
             tool_code: vec!["b.rs".to_string()],
             cognitive: vec!["c.rs".to_string()],

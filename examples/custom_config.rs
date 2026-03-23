@@ -66,7 +66,6 @@ fn build_custom_config() -> Config {
             ],
             strict_permissions: false,
             permissions: vec![],
-            protected_files: vec![],
         },
 
         // Agent behavior

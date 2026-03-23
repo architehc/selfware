@@ -1296,10 +1296,10 @@ mod tests {
 
     #[test]
     fn test_semantic_summary_grep_search() {
-        let args = serde_json::json!({"pattern": "TODO"});
+        let args = serde_json::json!({"pattern": "pub fn"});
         let summary = semantic_summary("grep_search", &args, None, true, 30);
         assert!(summary.contains("Searched"));
-        assert!(summary.contains("TODO"));
+        assert!(summary.contains("pub fn"));
     }
 
     #[test]
@@ -1347,8 +1347,8 @@ mod tests {
 
     #[test]
     fn test_extract_pattern() {
-        let args = serde_json::json!({"pattern": "TODO"});
-        assert_eq!(extract_pattern(&args), Some("TODO"));
+        let args = serde_json::json!({"pattern": "pub fn"});
+        assert_eq!(extract_pattern(&args), Some("pub fn"));
 
         let args2 = serde_json::json!({"query": "search term"});
         assert_eq!(extract_pattern(&args2), Some("search term"));

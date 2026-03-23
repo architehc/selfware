@@ -150,7 +150,42 @@ docker build -t selfware .
 docker run --rm -it -v $(pwd):/workspace selfware chat
 ```
 
-### 2. Set Up a Local LLM
+### 2. Find the Right Model for Your Hardware
+
+Not sure which model fits your GPU? **[llmfit](https://github.com/AlexsJones/llmfit)** detects your hardware and recommends the best model automatically:
+
+```bash
+# Install llmfit
+cargo install llmfit
+
+# See what your hardware can run
+llmfit recommend
+```
+
+![llmfit demo](https://github.com/AlexsJones/llmfit/raw/main/demo.gif)
+
+llmfit scans your VRAM, RAM, and CPU, then scores hundreds of models on Quality, Speed, Fit, and Context. It supports multi-GPU setups and MoE architectures out of the box.
+
+> **Tip:** Use `llmfit recommend --json` for machine-readable output, or `llmfit plan "Qwen3.5-27B" --context 32768` to check if a specific model fits.
+
+### 3. Download a Model
+
+We recommend **[Qwen3.5](https://huggingface.co/collections/Qwen/qwen35)** models — they have excellent instruction following, native tool calling, and thinking/reasoning capabilities that selfware leverages.
+
+**Recommended models by hardware:**
+
+| Your GPU | Model | Download | Context |
+|----------|-------|----------|---------|
+| **2x RTX 4090** (48 GB) | Qwen3.5-27B-FP8 | [Qwen/Qwen3.5-27B-FP8](https://huggingface.co/Qwen/Qwen3.5-27B-FP8) | Up to 1M |
+| **RTX 4090** (24 GB) | Qwen3-Coder-Next GGUF Q4 | [unsloth/Qwen3-Coder-Next-GGUF](https://huggingface.co/unsloth/Qwen3-Coder-Next-GGUF) | 32–128K |
+| **RTX 4090** (24 GB) | Qwen3.5-27B-AWQ (4-bit) | [Qwen/Qwen3.5-27B-AWQ](https://huggingface.co/Qwen/Qwen3.5-27B-AWQ) | 32–64K |
+| **RTX 3090 / 4070** (16+ GB) | Qwen3.5-9B | [Qwen/Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B) | 16–32K |
+| **Any GPU** (8+ GB) | Qwen3.5-4B | [Qwen/Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B) | 8–32K |
+| **Mac / CPU** | Qwen3.5-4B via Ollama | `ollama run qwen3.5:4b` | 8–16K |
+
+> **For GGUF users:** [unsloth/Qwen3-Coder-Next-GGUF](https://huggingface.co/unsloth/Qwen3-Coder-Next-GGUF) provides pre-quantized versions optimized for llama.cpp. Pick the largest quant that fits your VRAM — `IQ4_XS` is the sweet spot for 24 GB cards.
+
+### 4. Set Up a Local LLM Server
 
 Selfware needs an **OpenAI-compatible API endpoint**. Pick any backend:
 
@@ -167,7 +202,7 @@ Selfware needs an **OpenAI-compatible API endpoint**. Pick any backend:
 
 > **Mac + LM Studio?** See the dedicated **[LM Studio Mac Setup Guide](docs/LM_STUDIO_MAC_GUIDE.md)** for step-by-step setup with RAM-based model recommendations.
 
-### 3. Configure
+### 5. Configure
 
 Create `selfware.toml` in your project directory:
 
@@ -204,7 +239,7 @@ Or use the setup wizard:
 selfware init
 ```
 
-### 4. Start Coding
+### 6. Start Coding
 
 ```bash
 # Interactive chat
@@ -272,6 +307,30 @@ Mac uses unified memory — your total RAM determines what you can run:
 | **16 GB** | Qwen3.5 4B or LFM2.5 1.2B | Q8 | 8–16K | Lightweight, fast feedback |
 
 > **Context window matters.** SAB scenarios work best with >=32K context. Adjust `max_tokens` in `selfware.toml` to match your model's context.
+
+### Multi-Model Setup (Local + Remote)
+
+For the evolution engine and architectural decisions, selfware supports a **hybrid setup** — a fast local model for tool execution and a stronger remote model for hypothesis generation:
+
+```toml
+# selfware.toml — hybrid local + remote setup
+
+# Local workhorse: fast tool execution, code editing, verification
+endpoint = "http://localhost:8000/v1"
+model = "qwen3.5-27b"
+max_tokens = 8192
+context_length = 1010000
+
+# Remote architect: stronger model for evolution hypotheses and architecture
+[models.architect]
+endpoint = "https://your-remote-endpoint.example.com/v1"
+model = "txn545/Qwen3.5-122B-A10B-NVFP4"
+max_tokens = 65536
+context_length = 262144
+modalities = ["text", "vision"]
+```
+
+This lets a 27B model handle the high-volume grind (file reads, edits, cargo checks) while a 122B MoE model provides the strategic direction for evolution and self-improvement.
 
 ### Quick Setup Examples
 

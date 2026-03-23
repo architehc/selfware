@@ -490,10 +490,10 @@ mod tests {
     #[test]
     fn test_preview_grep_search() {
         let config = DryRunConfig::default();
-        let args = serde_json::json!({"pattern": "FIXME"});
+        let args = serde_json::json!({"pattern": "fn test"});
         let preview = preview_tool_call("grep_search", &args, &config);
 
-        assert!(preview.description.contains("FIXME"));
+        assert!(preview.description.contains("fn test"));
         assert!(preview.risk_assessment.contains("Safe"));
     }
 

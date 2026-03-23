@@ -1206,7 +1206,7 @@ mod tests {
         let content = "I need to think about this...";
         let reasoning = r#"<tool>
 <name>grep_search</name>
-<arguments>{"pattern":"TODO","path":"src/"}</arguments>
+<arguments>{"pattern":"pub fn","path":"src/"}</arguments>
 </tool>"#;
 
         let content_result = parse_tool_calls(content);
@@ -2644,7 +2644,7 @@ mod tests {
             call_type: "function".to_string(),
             function: ToolFunction {
                 name: "grep_search".to_string(),
-                arguments: r#"{"pattern":"TODO"}"#.to_string(),
+                arguments: r#"{"pattern":"pub fn"}"#.to_string(),
             },
         }];
 

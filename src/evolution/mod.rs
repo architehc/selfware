@@ -36,6 +36,7 @@
 pub mod ast_tools;
 pub mod daemon;
 pub mod fitness;
+pub mod micro_mode;
 pub mod sandbox;
 pub mod telemetry;
 pub mod tournament;

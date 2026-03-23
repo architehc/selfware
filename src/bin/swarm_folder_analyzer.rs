@@ -4,15 +4,17 @@
 //! a recommended list of interesting/documented/important folders.
 
 use anyhow::{Context, Result};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tracing::{info, warn};
 
 use selfware::swarm::{
-    create_dev_swarm, Agent, AgentRole, SharedMemory, Swarm, SwarmTask,
+    create_dev_swarm, Agent, AgentRole, Swarm, SwarmTask,
 };
 
 /// Analyze a folder and return metadata
+#[derive(Serialize)]
 struct FolderAnalysis {
     path: PathBuf,
     name: String,
@@ -284,7 +286,8 @@ pub struct FolderAnalyzerSwarm {
 
 impl FolderAnalyzerSwarm {
     pub fn new(root: impl Into<PathBuf>, max_depth: usize) -> Self {
-        let scanner = FolderScanner::new(&root, max_depth);
+        let root_path: PathBuf = root.into();
+        let scanner = FolderScanner::new(root_path.clone(), max_depth);
         let mut swarm = create_dev_swarm();
 
         // Add specialized agents for folder analysis

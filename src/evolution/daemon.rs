@@ -480,6 +480,23 @@ fn generate_hypotheses(
     history_prompt: &str,
     repo_root: &Path,
 ) -> Vec<Hypothesis> {
+    // Check if we should use micro mode for small models
+    let use_micro_mode = super::micro_mode::is_micro_model(&config.llm.model);
+    
+    if use_micro_mode {
+        log_phase("Micro mode: Using simplified prompts for small model");
+        generate_micro_hypotheses(config, telemetry_prompt, history_prompt, repo_root)
+    } else {
+        generate_standard_hypotheses(config, telemetry_prompt, history_prompt, repo_root)
+    }
+}
+
+fn generate_standard_hypotheses(
+    config: &EvolutionConfig,
+    telemetry_prompt: &str,
+    history_prompt: &str,
+    repo_root: &Path,
+) -> Vec<Hypothesis> {
     let source_context = read_mutation_targets(&config.mutation_targets, repo_root);
     if source_context.is_empty() {
         log_warning("No mutation target files found or readable");
@@ -500,6 +517,73 @@ fn generate_hypotheses(
         }
         Err(e) => {
             log_warning(&format!("LLM call failed: {}", e));
+            vec![]
+        }
+    }
+}
+
+fn generate_micro_hypotheses(
+    config: &EvolutionConfig,
+    telemetry_prompt: &str,
+    history_prompt: &str,
+    repo_root: &Path,
+) -> Vec<Hypothesis> {
+    use super::micro_mode;
+    
+    // Collect all target paths
+    let all_paths: Vec<PathBuf> = config
+        .mutation_targets
+        .prompt_logic
+        .iter()
+        .chain(config.mutation_targets.tool_code.iter())
+        .chain(config.mutation_targets.cognitive.iter())
+        .cloned()
+        .collect();
+    
+    // Select small subset of files
+    let selected = micro_mode::select_micro_targets(&all_paths, repo_root);
+    if selected.is_empty() {
+        log_warning("Micro mode: No suitable target files found");
+        return vec![];
+    }
+    
+    log_phase(&format!(
+        "Micro mode: Using {} files ({} chars)",
+        selected.len(),
+        selected.iter().map(|(_, c)| c.len()).sum::<usize>()
+    ));
+    
+    let source_context = micro_mode::build_micro_context(&selected);
+    let micro_population = config.population_size.min(3); // Clamp for micro mode
+    
+    let system_prompt = micro_mode::build_micro_system_prompt(micro_population);
+    let user_prompt = build_user_prompt(telemetry_prompt, history_prompt, &source_context);
+
+    match call_llm(&config.llm, &system_prompt, &user_prompt) {
+        Ok(response) => {
+            log_phase(&format!(
+                "Micro mode: LLM response ({} chars)",
+                response.len()
+            ));
+            let hypotheses = parse_hypotheses_response(&response);
+            
+            // Validate micro-safety
+            hypotheses
+                .into_iter()
+                .filter(|h| {
+                    match micro_mode::validate_micro_hypothesis(h) {
+                        Ok(()) => true,
+                        Err(e) => {
+                            log_warning(&format!("Micro mode: Rejected hypothesis: {}", e));
+                            false
+                        }
+                    }
+                })
+                .take(micro_population)
+                .collect()
+        }
+        Err(e) => {
+            log_warning(&format!("Micro mode: LLM call failed: {}", e));
             vec![]
         }
     }

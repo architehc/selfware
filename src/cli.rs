@@ -1194,12 +1194,35 @@ async fn handle_command(
                         .collect(),
                 },
                 safety: SafetyConfig::default(),
-                llm: LlmConfig {
-                    endpoint: config.endpoint.clone(),
-                    model: config.model.clone(),
-                    api_key: config.api_key.as_ref().map(|k| k.expose().to_string()),
-                    max_tokens: config.max_tokens,
-                    temperature: config.temperature,
+                llm: {
+                    // Use the hypothesis_model profile if configured, else fall back to default
+                    let hypothesis_profile = config
+                        .evolution
+                        .hypothesis_model
+                        .as_deref()
+                        .and_then(|name| config.resolve_model(Some(name)));
+                    if let Some(profile) = hypothesis_profile {
+                        tracing::info!(
+                            "Evolution using '{}' model profile for hypothesis generation: {}",
+                            config.evolution.hypothesis_model.as_deref().unwrap_or("default"),
+                            profile.model
+                        );
+                        LlmConfig {
+                            endpoint: profile.endpoint.clone(),
+                            model: profile.model.clone(),
+                            api_key: profile.api_key.as_ref().map(|k| k.expose().to_string()),
+                            max_tokens: profile.max_tokens,
+                            temperature: profile.temperature,
+                        }
+                    } else {
+                        LlmConfig {
+                            endpoint: config.endpoint.clone(),
+                            model: config.model.clone(),
+                            api_key: config.api_key.as_ref().map(|k| k.expose().to_string()),
+                            max_tokens: config.max_tokens,
+                            temperature: config.temperature,
+                        }
+                    }
                 },
             };
 
