@@ -1,7 +1,7 @@
 //! Swarm Folder Analyzer
 //!
-//! Spawns a swarm of specialized agents to analyze subfolders and create
-//! a recommended list of interesting/documented/important folders.
+//! Analyzes folder structures and creates a recommended list of 
+//! interesting/documented/important folders.
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -9,12 +9,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tracing::{info, warn};
 
-use selfware::orchestration::swarm::{
-    create_dev_swarm, Agent, AgentRole, Swarm, SwarmTask,
-};
-
 /// Analyze a folder and return metadata
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct FolderAnalysis {
     path: PathBuf,
     name: String,
@@ -191,9 +187,6 @@ impl FolderScanner {
                     if let Ok(metadata) = entry_path.metadata() {
                         analysis.total_size += metadata.len();
                     }
-                } else if entry_path.is_dir() {
-                    // Recursively scan subdirectories
-                    self.scan_directory(&entry_path, depth + 1, folders)?;
                 }
             }
         }
@@ -256,123 +249,51 @@ impl FolderScanner {
         let mut tags = Vec::new();
 
         if analysis.has_readme {
-            tags.push("documented");
+            tags.push("documented".to_string());
         }
         if analysis.has_code {
-            tags.push("source");
+            tags.push("source".to_string());
         }
         if analysis.has_tests {
-            tags.push("tests");
+            tags.push("tests".to_string());
         }
         if analysis.has_docs {
-            tags.push("docs");
+            tags.push("docs".to_string());
         }
 
         if analysis.priority_score > 30.0 {
-            tags.push("high-priority");
+            tags.push("high-priority".to_string());
         } else if analysis.priority_score > 15.0 {
-            tags.push("medium-priority");
+            tags.push("medium-priority".to_string());
         }
 
         tags
     }
 }
 
-/// Swarm-based folder analyzer
-pub struct FolderAnalyzerSwarm {
-    swarm: Swarm,
+/// Folder analyzer
+pub struct FolderAnalyzer {
     scanner: FolderScanner,
 }
 
-impl FolderAnalyzerSwarm {
+impl FolderAnalyzer {
     pub fn new(root: impl Into<PathBuf>, max_depth: usize) -> Self {
-        let root_path: PathBuf = root.into();
-        let scanner = FolderScanner::new(root_path.clone(), max_depth);
-        let mut swarm = create_dev_swarm();
-
-        // Add specialized agents for folder analysis
-        swarm.add_agent(
-            Agent::new("Explorer", AgentRole::General)
-                .with_prompt("You are a folder explorer. Analyze folder structures, \
-                             identify patterns, and categorize content.")
-                .with_expertise("File Systems")
-                .with_expertise("Organization"),
-        );
-
-        swarm.add_agent(
-            Agent::new("Categorizer", AgentRole::Architect)
-                .with_prompt("You are a categorization expert. Identify the purpose and \
-                             type of folders based on their contents and structure.")
-                .with_expertise("Classification")
-                .with_expertise("Patterns"),
-        );
-
-        swarm.add_agent(
-            Agent::new("Prioritizer", AgentRole::Reviewer)
-                .with_prompt("You are a prioritization specialist. Rank folders by \
-                             importance, usefulness, and relevance.")
-                .with_expertise("Prioritization")
-                .with_expertise("Evaluation"),
-        );
-
-        Self { swarm, scanner }
+        let scanner = FolderScanner::new(root, max_depth);
+        Self { scanner }
     }
 
-    pub async fn analyze(&mut self) -> Result<Vec<FolderAnalysis>> {
-        info!("Starting folder analysis with swarm...");
+    pub fn analyze(&self) -> Result<Vec<FolderAnalysis>> {
+        info!("Starting folder analysis...");
         let start = Instant::now();
 
-        // Phase 1: Scan folders
+        // Scan folders
         info!("Scanning folders...");
         let mut folders = self.scanner.scan()?;
-        info!("Found {} folders in {}", folders.len(), self.scanner.root.display());
-
-        // Store folder data in shared memory
-        {
-            let memory = self.swarm.memory();
-            let mut mem = memory.write().unwrap_or_else(|e| {
-                warn!("Shared memory write lock poisoned, recovering");
-                e.into_inner()
-            });
-
-            for (i, folder) in folders.iter().enumerate() {
-                let key = format!("folder:{}", i);
-                mem.write(
-                    key,
-                    serde_json::to_string(folder).unwrap_or_default(),
-                    "scanner",
-                );
-            }
-
-            mem.write("folder:count", folders.len().to_string(), "scanner");
-        }
-
-        // Phase 2: Create analysis tasks for top folders
-        let top_folders: Vec<_> = folders
-            .iter()
-            .take(20) // Analyze top 20 folders in detail
-            .enumerate()
-            .collect();
-
-        for (i, folder) in top_folders {
-            let task = SwarmTask::new(format!(
-                "Analyze folder '{}': {}. Description: {}. Files: {}, Size: {} bytes",
-                folder.name, folder.path.display(), folder.description, folder.file_count,
-                folder.total_size
-            ))
-            .with_role(AgentRole::Architect)
-            .with_priority((30.0 - folder.priority_score.max(0.0).min(30.0)) as u8 + 5);
-
-            self.swarm.queue_task(task)?;
-        }
-
-        // Phase 3: Create recommendation task
-        let rec_task = SwarmTask::new("Create a recommended list of folders based on analysis")
-            .with_role(AgentRole::Reviewer)
-            .with_role(AgentRole::Architect)
-            .with_priority(10);
-
-        self.swarm.queue_task(rec_task)?;
+        info!(
+            "Found {} folders in {}",
+            folders.len(),
+            self.scanner.root.display()
+        );
 
         info!(
             "Analysis complete in {:.2?}. Found {} folders.",
@@ -388,7 +309,7 @@ impl FolderAnalyzerSwarm {
 
     pub fn generate_recommendations(&self, folders: &[FolderAnalysis]) -> String {
         let mut output = String::from("# 📁 Recommended Folders\n\n");
-        output.push_str("Generated by Selfware Swarm Folder Analyzer\n\n");
+        output.push_str("Generated by Selfware Folder Analyzer\n\n");
         output.push_str("## Top Recommendations\n\n");
 
         let top_folders: Vec<_> = folders
@@ -408,7 +329,7 @@ impl FolderAnalyzerSwarm {
             output.push_str(&format!("**Path:** `{}`\n\n", folder.path.display()));
             output.push_str(&format!("**Description:** {}\n\n", folder.description));
 
-            output.push_str("**Characteristics:**\n");
+            output.push_str("**Characteristics**:\n");
             if folder.has_readme {
                 output.push_str("- ✅ Has README\n");
             }
@@ -422,7 +343,7 @@ impl FolderAnalyzerSwarm {
                 output.push_str("- 📚 Has documentation\n");
             }
 
-            output.push_str(&format!("\n**Stats:**\n"));
+            output.push_str(&format!("\n**Stats**:\n"));
             output.push_str(&format!("- Files: {}\n", folder.file_count));
             output.push_str(&format!(
                 "- Size: {:.2} MB\n",
@@ -482,15 +403,15 @@ async fn main() -> Result<()> {
     info!("Analyzing folders in: {}", root);
     info!("Max depth: {}", max_depth);
 
-    let mut analyzer = FolderAnalyzerSwarm::new(&root, max_depth);
-    let folders = analyzer.analyze().await?;
+    let analyzer = FolderAnalyzer::new(&root, max_depth);
+    let folders = analyzer.analyze()?;
 
     // Generate recommendations
     let recommendations = analyzer.generate_recommendations(&folders);
 
     // Save to file
     let output_path = PathBuf::from(&root).join("RECOMMENDED_FOLDERS.md");
-    std::fs::write(&output_path, &recommendments).with_context(|| {
+    std::fs::write(&output_path, &recommendations).with_context(|| {
         format!("Failed to write recommendations to {}", output_path.display())
     })?;
 
@@ -508,6 +429,7 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn test_folder_analysis_scoring() {
@@ -547,9 +469,9 @@ mod tests {
         let scanner = FolderScanner::new(temp_dir.path(), 3);
 
         // Create some test structure
-        std::fs::create_dir(temp_dir.path().join("src")).unwrap();
-        std::fs::write(temp_dir.path().join("README.md")).unwrap();
-        std::fs::write(temp_dir.path().join("src").join("main.rs")).unwrap();
+        fs::create_dir(temp_dir.path().join("src")).unwrap();
+        fs::write(temp_dir.path().join("README.md")).unwrap();
+        fs::write(temp_dir.path().join("src").join("main.rs")).unwrap();
 
         let folders = scanner.scan().unwrap();
         assert!(!folders.is_empty());
@@ -577,5 +499,34 @@ mod tests {
         assert!(tags.contains(&"documented".to_string()));
         assert!(tags.contains(&"source".to_string()));
         assert!(tags.contains(&"high-priority".to_string()));
+    }
+
+    #[test]
+    fn test_folder_analyzer() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        
+        // Create test structure
+        fs::create_dir(temp_dir.path().join("src")).unwrap();
+        fs::write(temp_dir.path().join("README.md")).unwrap();
+        fs::write(temp_dir.path().join("src").join("main.rs")).unwrap();
+        fs::write(temp_dir.path().join("src").join("lib.rs")).unwrap();
+
+        let analyzer = FolderAnalyzer::new(temp_dir.path(), 3);
+        let folders = analyzer.analyze().unwrap();
+
+        assert!(!folders.is_empty());
+        assert!(folders[0].priority_score >= 0.0);
+    }
+
+    #[test]
+    fn test_generate_recommendations() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        
+        let analyzer = FolderAnalyzer::new(temp_dir.path(), 3);
+        let folders = analyzer.analyze().unwrap();
+        let recommendations = analyzer.generate_recommendations(&folders);
+
+        assert!(recommendations.contains("Recommended Folders"));
+        assert!(recommendations.contains("Summary Statistics"));
     }
 }
