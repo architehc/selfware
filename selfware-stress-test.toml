@@ -1,0 +1,67 @@
+# Stress Test Configuration for Local vLLM with 2x RTX 4090
+# Qwen/Qwen3.5-27B-FP8 - Maxed Out Settings
+#
+# vLLM Config:
+#   - Tensor Parallel: 2
+#   - Max Model Len: 1,010,000 tokens
+#   - Max Num Seqs: 32
+#   - GPU Memory Util: 0.91
+#   - KV Cache: ~43,904 tokens
+
+endpoint = "http://localhost:8000/v1"
+model = "qwen3.5-27b"
+max_tokens = 8192
+temperature = 0.6
+context_length = 1010000
+
+# MAXED OUT Concurrency Settings
+[concurrency]
+# Push to the limit - vLLM configured for 32 max_num_seqs
+max_parallel_requests = 24
+max_retries = 3
+timeout_secs = 300
+
+[extra_body]
+# Thinking mode enabled - vLLM started with --reasoning-parser qwen3
+# Account for ~300-500 thinking tokens overhead
+chat_template_kwargs = { enable_thinking = true }
+top_p = 0.95
+top_k = 20
+min_p = 0.0
+
+[safety]
+allowed_paths = ["./**", "/tmp/**", "/home/ivo/selfware/**"]
+denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
+protected_branches = ["main"]
+
+[agent]
+streaming = false
+max_iterations = 200
+step_timeout_secs = 900
+# Enable native function calling - matches vLLM's --enable-auto-tool-choice --tool-call-parser qwen3_coder
+native_function_calling = true
+token_budget = 600000
+token_safety_margin = 100000
+
+[continuous_work]
+enabled = true
+checkpoint_interval_tools = 10
+checkpoint_interval_secs = 300
+auto_recovery = true
+max_recovery_attempts = 6
+
+[retry]
+max_retries = 8
+base_delay_ms = 1000
+max_delay_ms = 70000
+
+# Stress test specific settings
+[stress_test]
+# Number of concurrent agents to spawn
+concurrent_agents = 16
+# Duration of stress test in minutes
+duration_minutes = 30
+# Request rate (0 = unlimited)
+requests_per_second = 0
+# Enable token throughput measurement
+measure_throughput = true

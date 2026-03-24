@@ -144,12 +144,25 @@ impl ContextCompressor {
         // Keep messages in chronological order (recent_msgs is already chronological)
         compressed.extend(recent_msgs);
 
+        let original_estimate = self.estimate_tokens(messages);
         let new_estimate = self.estimate_tokens(&compressed);
+
+        if new_estimate >= original_estimate {
+            warn!(
+                "Compression increased token count ({} -> {}), returning original",
+                original_estimate, new_estimate
+            );
+            return Ok(messages.to_vec());
+        }
+
         info!(
-            "Compression complete: {} -> {} messages, ~{} tokens",
+            "Compression saved {} tokens ({} -> {}), {} messages ({} -> {})",
+            original_estimate - new_estimate,
+            original_estimate,
+            new_estimate,
             messages.len(),
             compressed.len(),
-            new_estimate
+            messages.len()
         );
 
         Ok(compressed)
