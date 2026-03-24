@@ -115,6 +115,7 @@ pub use observability::telemetry;
 pub use orchestration::multiagent;
 pub use orchestration::planning;
 pub use orchestration::swarm;
+pub use orchestration::visual_loop;
 pub use orchestration::workflows;
 
 // Backward-compatible re-exports for devops module
@@ -128,7 +129,9 @@ pub use testing::verification;
 // New feature modules
 // ============================================================================
 pub mod batch;
+pub mod browser;
 pub mod profiles;
+pub mod swebench;
 pub mod validation;
 
 // ============================================================================

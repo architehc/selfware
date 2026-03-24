@@ -159,6 +159,20 @@ mod tests {
     }
 
     #[test]
+    fn test_window_id_equality() {
+        assert_eq!(WindowId(1), WindowId(1));
+        assert_ne!(WindowId(1), WindowId(2));
+    }
+
+    #[test]
+    fn test_window_id_serde_roundtrip() {
+        let id = WindowId(99);
+        let json = serde_json::to_string(&id).unwrap();
+        let parsed: WindowId = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, id);
+    }
+
+    #[test]
     fn test_window_info() {
         let info = WindowInfo {
             id: WindowId(1),
@@ -173,5 +187,64 @@ mod tests {
         };
         assert!(info.is_focused);
         assert!(!info.is_minimized);
+        assert_eq!(info.title, "Test Window");
+        assert_eq!(info.app_name, "test-app");
+        assert_eq!(info.x, 100);
+        assert_eq!(info.y, 200);
+        assert_eq!(info.width, 800);
+        assert_eq!(info.height, 600);
+    }
+
+    #[test]
+    fn test_window_info_serde_roundtrip() {
+        let info = WindowInfo {
+            id: WindowId(5),
+            title: "Firefox".to_string(),
+            app_name: "firefox".to_string(),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            is_focused: false,
+            is_minimized: true,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let parsed: WindowInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.id, WindowId(5));
+        assert_eq!(parsed.title, "Firefox");
+        assert!(!parsed.is_focused);
+        assert!(parsed.is_minimized);
+    }
+
+    #[test]
+    fn test_window_manager_default() {
+        let wm = WindowManager::default();
+        let _ = format!("{:?}", "WindowManager created");
+    }
+
+    #[tokio::test]
+    async fn test_list_windows_returns_vec() {
+        let wm = WindowManager::new();
+        // On non-macOS, returns empty vec
+        let result = wm.list_windows().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_focus_window() {
+        let wm = WindowManager::new();
+        let result = wm.focus_window(&WindowId(1)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_active_window_empty_list() {
+        let wm = WindowManager::new();
+        // On Linux (non-macOS), list_windows returns empty, so get_active_window should fail
+        #[cfg(not(target_os = "macos"))]
+        {
+            let result = wm.get_active_window().await;
+            assert!(result.is_err());
+        }
     }
 }

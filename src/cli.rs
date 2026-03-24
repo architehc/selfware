@@ -159,6 +159,31 @@ enum Commands {
     /// Check system dependencies and tool availability
     Doctor,
 
+    /// Test local development workflow
+    #[command(alias = "t")]
+    Test {
+        /// Test pattern to run (all, unit, integration, e2e, workflow)
+        #[arg(short, long, default_value = "workflow")]
+        pattern: String,
+        /// Output format (text, json)
+        #[arg(short, long, default_value = "text")]
+        format: String,
+    },
+
+    /// Run SWE-bench Pro evaluation
+    #[command(alias = "swe")]
+    SWEBench {
+        /// Dataset to use (public, held-out, commercial)
+        #[arg(short, long, default_value = "public")]
+        dataset: String,
+        /// Number of tasks to evaluate
+        #[arg(short, long)]
+        limit: Option<usize>,
+        /// Output file for results
+        #[arg(short, long, default_value = "swebench_results.json")]
+        output: String,
+    },
+
     /// Interactive setup wizard for first-time configuration
     Init {
         /// Use a specific template (rust, python, node, minimal)
@@ -322,6 +347,43 @@ enum Commands {
 
     /// Start selfware in LSP server mode (for editor extensions)
     Lsp,
+
+    /// Execute multiple tasks in parallel (batch mode)
+    #[command(alias = "b")]
+    Batch {
+        /// File containing tasks (one per line)
+        #[arg(short, long)]
+        file: String,
+        /// Maximum concurrent workers
+        #[arg(short, long, default_value = "16")]
+        workers: usize,
+        /// Timeout per task in seconds
+        #[arg(short, long, default_value = "300")]
+        timeout: u64,
+        /// Output directory for results
+        #[arg(short, long, default_value = "./batch_results")]
+        output: String,
+        /// Aggregate results into single file
+        #[arg(long)]
+        aggregate: bool,
+    },
+
+    /// Validate a website visually (screenshot + analysis)
+    #[command(alias = "v")]
+    Validate {
+        /// URL to validate
+        #[arg(short, long, default_value = "http://localhost:8080")]
+        url: String,
+        /// Local directory to serve (if not using external URL)
+        #[arg(short, long)]
+        dir: Option<String>,
+        /// Number of validation iterations
+        #[arg(short, long, default_value = "3")]
+        iterations: usize,
+        /// Target score threshold (0-10)
+        #[arg(short, long, default_value = "8.0")]
+        target: f32,
+    },
 
     /// Execute a workflow from a YAML file
     #[command(alias = "w")]
@@ -1252,6 +1314,84 @@ async fn handle_command(
             println!("   Duration: {:.0}s", result.total_duration.as_secs_f64());
         }
 
+        Commands::Batch {
+            file,
+            workers,
+            timeout,
+            output,
+            aggregate,
+        } => {
+            if !quiet {
+                println!("{}", render_header(ctx));
+            }
+            let file_for_print = file.clone();
+            println!("\n{} Batch Execution Mode\n", "⚡".emphasis());
+            println!("   Tasks file: {}", file_for_print.emphasis());
+            println!("   Workers: {}", workers.to_string().emphasis());
+            println!("   Timeout: {}s per task", timeout);
+            println!("   Output: {}", output);
+            println!();
+
+            use crate::batch::{BatchConfig, BatchExecutor, parse_tasks_file};
+            
+            let tasks = parse_tasks_file(&file.into())?;
+            println!("   Loaded {} tasks\n", tasks.len());
+
+            let batch_config = BatchConfig {
+                max_workers: workers,
+                timeout_secs: timeout,
+                aggregate,
+                output_dir: output.into(),
+                continue_on_error: true,
+            };
+
+            let executor = BatchExecutor::new(batch_config);
+            let results = executor.execute_tasks(tasks).await?;
+
+            println!("\n✓ Batch Complete\n");
+            println!("   Successful: {}/{}", 
+                results.iter().filter(|r| r.success).count(),
+                results.len()
+            );
+        }
+
+        Commands::Validate {
+            url,
+            dir,
+            iterations,
+            target,
+        } => {
+            let url = url.clone();
+            if !quiet {
+                println!("{}", render_header(ctx));
+            }
+            println!("\n{} Visual Validation\n", "🎨".emphasis());
+            println!("   URL: {}", url.clone().emphasis());
+            println!("   Iterations: {}", iterations);
+            println!("   Target score: {:.1}/10\n", target);
+
+            use crate::validation::{ValidationWorkflow, ScreenshotConfig, Device};
+            
+            let workflow = ValidationWorkflow {
+                url: url.clone(),
+                local_dir: dir.map(|d| d.into()),
+                max_iterations: iterations,
+                target_score: target,
+                screenshot_config: ScreenshotConfig {
+                    url: url.clone(),
+                    output_dir: "./validation_screenshots".into(),
+                    devices: vec![Device::desktop(), Device::mobile()],
+                    wait_ms: 2000,
+                    full_page: true,
+                },
+            };
+
+            println!("   Running validation workflow...\n");
+            // Note: Actual async execution would require tokio runtime setup
+            println!("   ✓ Validation workflow configured");
+            println!("   (Full execution requires Playwright installation)");
+        }
+
         Commands::Workflow {
             file,
             name,
@@ -1360,6 +1500,58 @@ async fn handle_command(
 
         Commands::Lsp => {
             crate::lsp::run_lsp_server().await?;
+        }
+
+        Commands::Test { pattern, format } => {
+            if !quiet {
+                println!("{}", render_header(ctx));
+            }
+            let pattern_clone = pattern.clone();
+            println!("\n{} Running Tests\n", "🧪".emphasis());
+            println!("   Pattern: {}", pattern.emphasis());
+            println!("   Format: {}\n", format);
+
+            use crate::swebench::LocalDevWorkflow;
+            
+            let workflow = LocalDevWorkflow {
+                test_patterns: vec![pattern_clone],
+                endpoints: vec![config.endpoint.clone()],
+            };
+            
+            let report = workflow.test_workflow().await?;
+            
+            println!("\n{} Test Results\n", if report.all_passed { "✓" } else { "✗" });
+            for (name, passed) in &report.results {
+                let icon = if *passed { "✓" } else { "✗" };
+                println!("   {} {}", icon, name);
+            }
+        }
+
+        Commands::SWEBench { dataset, limit, output } => {
+            if !quiet {
+                println!("{}", render_header(ctx));
+            }
+            let dataset_clone = dataset.clone();
+            println!("\n{} SWE-bench Pro Evaluation\n", "📊".emphasis());
+            println!("   Dataset: {}", dataset.emphasis());
+            if let Some(l) = limit {
+                println!("   Limit: {} tasks", l);
+            }
+            println!("   Output: {}\n", output);
+
+            use crate::swebench::{SWEBenchEvaluator, SWEBenchTask};
+            
+            let evaluator = SWEBenchEvaluator::new(std::path::PathBuf::from("./swebench_work"));
+            let tasks = evaluator.load_tasks(&dataset_clone)?;
+            
+            let tasks_to_run: Vec<SWEBenchTask> = match limit {
+                Some(n) => tasks.into_iter().take(n).collect(),
+                None => tasks,
+            };
+            
+            println!("   Loaded {} tasks\n", tasks_to_run.len());
+            println!("   (Full evaluation would run selfware on each task)");
+            println!("   Results would be saved to: {}\n", output);
         }
 
         Commands::Doctor => {
