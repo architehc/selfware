@@ -235,15 +235,25 @@ async fn run_single_task(task: &SWETask, base_dir: &Path) -> AgentResult {
 
     // 2. Create agent config
     let mut config = Config::default();
-    config.endpoint = "http://localhost:8000/v1".to_string();
-    config.model = "qwen3.5-27b".to_string();
-    config.max_tokens = 32768; // Qwen3.5-27B supports up to 81920 output tokens
-    config.context_length = 1_010_000; // Match vLLM --max-model-len
-    config.temperature = 0.6; // Thinking mode for precise coding tasks
-    config.execution_mode = ExecutionMode::Yolo; // Auto-approve all tool calls
+    // Use environment variable to select endpoint, default to local vLLM
+    let endpoint = std::env::var("SELFWARE_ENDPOINT")
+        .unwrap_or_else(|_| "http://localhost:8000/v1".to_string());
+    let model = std::env::var("SELFWARE_MODEL")
+        .unwrap_or_else(|_| "qwen3.5-27b".to_string());
+    let native_fc = std::env::var("SELFWARE_NATIVE_FC")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(true);
+
+    config.endpoint = endpoint;
+    config.model = model;
+    config.max_tokens = 16384;
+    config.context_length = std::env::var("SELFWARE_CONTEXT_LENGTH")
+        .ok().and_then(|v| v.parse().ok()).unwrap_or(262144);
+    config.temperature = 0.6;
+    config.execution_mode = ExecutionMode::Yolo;
     config.compact_mode = true;
     config.agent.max_iterations = 30;
-    config.agent.native_function_calling = true; // vLLM supports native FC for Qwen3.5
+    config.agent.native_function_calling = native_fc;
     config.agent.step_timeout_secs = 300;
 
     // Allow access to swebench work directories
@@ -254,8 +264,14 @@ async fn run_single_task(task: &SWETask, base_dir: &Path) -> AgentResult {
         format!("{}/**", work_dir_abs.display()),
     ];
 
-    // Qwen3.5 thinking mode sampling parameters for precise coding
+    // Disable thinking — with thinking enabled the model consumes all output
+    // tokens on reasoning and returns content:null, breaking tool call parsing.
+    // Native FC works correctly with thinking disabled.
     let mut extra = serde_json::Map::new();
+    extra.insert(
+        "chat_template_kwargs".to_string(),
+        serde_json::json!({"enable_thinking": false}),
+    );
     extra.insert("top_p".to_string(), serde_json::json!(0.95));
     extra.insert("top_k".to_string(), serde_json::json!(20));
     config.extra_body = Some(extra);

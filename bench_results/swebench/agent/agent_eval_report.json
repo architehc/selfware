@@ -1,30 +1,16 @@
 {
-  "timestamp": "2026-03-25T16:02:48.147892654+00:00",
+  "timestamp": "2026-03-25T16:14:53.056345324+00:00",
   "model": "qwen3.5-27b",
-  "total_tasks": 3,
-  "completed": 3,
+  "total_tasks": 1,
+  "completed": 0,
   "results": [
     {
-      "instance_id": "django__django-10914",
+      "instance_id": "django__django-11133",
       "repo": "django/django",
-      "completed": true,
-      "duration_secs": 32.475585259,
-      "error": null
-    },
-    {
-      "instance_id": "django__django-10924",
-      "repo": "django/django",
-      "completed": true,
-      "duration_secs": 31.458450027,
-      "error": null
-    },
-    {
-      "instance_id": "django__django-11001",
-      "repo": "django/django",
-      "completed": true,
-      "duration_secs": 34.424743953,
-      "error": null
+      "completed": false,
+      "duration_secs": 271.921402761,
+      "error": "Agent failed: Max iterations exceeded"
     }
   ],
-  "total_duration_secs": 98.363709361
+  "total_duration_secs": 271.924044264
 }

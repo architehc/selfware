@@ -4,9 +4,13 @@ pub fn merge_json(base: &Value, patch: &Value) -> Value {
     match (base, patch) {
         (Value::Object(base_map), Value::Object(patch_map)) => {
             let mut merged = base_map.clone();
-            // BUG: this is shallow merge only; nested objects are overwritten.
             for (key, patch_value) in patch_map {
-                merged.insert(key.clone(), patch_value.clone());
+                if merged.contains_key(key) {
+                    let base_value = merged.get(key).unwrap();
+                    merged.insert(key.clone(), merge_json(base_value, patch_value));
+                } else {
+                    merged.insert(key.clone(), patch_value.clone());
+                }
             }
             Value::Object(merged)
         }

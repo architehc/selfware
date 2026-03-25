@@ -100,8 +100,8 @@ Requirements:
 
 Provide the fix as a git diff patch."
 
-    # Run selfware in Docker
-    timeout 600 docker run --rm \
+    # Run selfware in Docker (60 minute timeout for complex SWE-bench tasks)
+    timeout 3600 docker run --rm \
         --name "swebench-${task_id//\//-}" \
         -v "$output_dir:/output" \
         -e SELFWARE_ENDPOINT=http://host.docker.internal:8000/v1 \
@@ -205,7 +205,7 @@ run_all_tasks() {
         run_swebench_task "$task_id" "$task_desc" &
         pids+=($!)
         
-        # Limit to 4 concurrent
+        # Limit to 4 concurrent (optimal for 2x RTX 4090)
         if [ ${#pids[@]} -ge 4 ]; then
             for pid in "${pids[@]}"; do
                 wait $pid 2>/dev/null || true

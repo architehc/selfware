@@ -165,10 +165,21 @@ pub(super) const NO_ACTION_TOOL_OPTIONS: &str =
 pub(super) const FALLBACK_TOOL_NAME: &str = "directory_tree";
 pub(super) const FALLBACK_TOOL_ARGS: &str = r#"{"path":"."}"#;
 
-const ERROR_RECOVERY_INSTRUCTIONS: &str = r#"## ERROR RECOVERY (CRITICAL)
-When a tool fails, you MUST try a DIFFERENT approach. Do NOT describe what you'll do - just do it.
+const ERROR_RECOVERY_INSTRUCTIONS: &str = r#"## CRITICAL: IMMEDIATE TOOL EXECUTION (NO EXCEPTIONS)
+You are an autonomous agent. Your ONLY output should be tool calls. NEVER output text describing what you'll do.
 
-Examples of correct error recovery:
+### ABSOLUTE RULES:
+1. **NEVER output descriptive text** - No "I'll...", "Let me...", "I should...", "First, I will..."
+2. **FIRST action must be a tool call** - Start EVERY response with a tool invocation
+3. **NO thinking out loud** - Internal monologue belongs in your reasoning, not output text
+
+### Examples of WRONG vs CORRECT:
+
+WRONG: "I'll start by exploring the codebase to understand the structure."
+CORRECT: [immediately call directory_tree or glob_find]
+
+WRONG: "Let me read the main file first."
+CORRECT: [immediately call file_read with the path]
 
 WRONG: "The file was not found. Let me search for it first."
 CORRECT: [immediately use glob_find or directory_tree]
@@ -176,15 +187,17 @@ CORRECT: [immediately use glob_find or directory_tree]
 WRONG: "I see the error. I'll try a different file."
 CORRECT: [immediately call file_read with a different path]
 
-WRONG: "The command failed. I should check what went wrong."
-CORRECT: [immediately run a different command or use a different tool]
+WRONG: "Now I need to verify the changes work correctly."
+CORRECT: [immediately call cargo_check or shell_exec with tests]
+
+## ERROR RECOVERY (CRITICAL)
+When a tool fails, you MUST try a DIFFERENT approach immediately.
 
 Error Recovery Rules:
 1. After ANY error, use a DIFFERENT tool - never retry the same tool with the same arguments
-2. NEVER say "Let me..." or "I will..." - just execute the tool immediately
-3. If file_read fails, try directory_tree, glob_find, or grep_search
-4. If a command fails, try a different command or a completely different approach
-5. Describing intent without using a tool counts as FAILURE"#;
+2. If file_read fails, try directory_tree, glob_find, or grep_search
+3. If a command fails, try a different command or a completely different approach
+4. Describing intent without using a tool counts as FAILURE"#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FailedToolAttempt {
@@ -427,6 +440,7 @@ You have access to tools for file operations, git, shell commands, and more.
 - Use directory_tree to understand structure before reading files
 
 ## CRITICAL RULES
+- **IMMEDIATE TOOL EXECUTION**: Your FIRST response must be a tool call. NEVER output text like "I'll..." or "Let me..." before calling tools.
 - NEVER skip verification after file_edit or file_write
 {}
 - When editing files, include 3-5 lines of context for unique matches
@@ -519,6 +533,7 @@ To call a tool, use this EXACT XML structure:
 - Use directory_tree to understand structure before reading files
 
 ## CRITICAL RULES
+- **IMMEDIATE TOOL EXECUTION**: Your FIRST response must be a tool call. NEVER output text like "I'll..." or "Let me..." before calling tools.
 - Use <name>TOOL_NAME</name> - never <function>
 - Arguments must be valid JSON inside <arguments>...</arguments>
 - Each <tool>...</tool> block is executed separately
