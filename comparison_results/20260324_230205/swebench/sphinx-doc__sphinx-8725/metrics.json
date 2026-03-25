@@ -1,0 +1,9 @@
+{
+  "task_id": "sphinx-doc__sphinx-8725",
+  "system": "swebench_pro",
+  "duration_ms": 990,
+  "tokens_in": 6844,
+  "tokens_out": 3412,
+  "success": 1,
+  "timestamp": "2026-03-24T23:02:10-04:00"
+}

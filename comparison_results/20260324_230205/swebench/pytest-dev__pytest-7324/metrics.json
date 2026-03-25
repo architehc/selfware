@@ -1,0 +1,9 @@
+{
+  "task_id": "pytest-dev__pytest-7324",
+  "system": "swebench_pro",
+  "duration_ms": 1872,
+  "tokens_in": 3747,
+  "tokens_out": 2870,
+  "success": 0,
+  "timestamp": "2026-03-24T23:02:07-04:00"
+}

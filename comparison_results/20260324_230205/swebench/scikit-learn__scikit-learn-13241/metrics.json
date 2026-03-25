@@ -1,0 +1,9 @@
+{
+  "task_id": "scikit-learn__scikit-learn-13241",
+  "system": "swebench_pro",
+  "duration_ms": 1392,
+  "tokens_in": 3716,
+  "tokens_out": 3841,
+  "success": 0,
+  "timestamp": "2026-03-24T23:02:10-04:00"
+}

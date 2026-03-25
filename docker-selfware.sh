@@ -46,9 +46,9 @@ check_docker() {
 # Check if vLLM endpoint is accessible
 check_endpoint() {
     log "Checking vLLM endpoint at localhost:8000..."
-    if curl -s https://crazyshit.ngrok.io/health > /dev/null 2>&1; then
+    if curl -s http://localhost:8000/health > /dev/null 2>&1; then
         log_ok "vLLM endpoint is accessible"
-        MODEL=$(curl -s https://crazyshit.ngrok.io/v1/models 2>/dev/null | \
+        MODEL=$(curl -s http://localhost:8000/v1/models 2>/dev/null | \
           python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data'][0]['id'])" 2>/dev/null || echo "unknown")
         log_info "Model: $MODEL"
     else
@@ -95,7 +95,7 @@ start() {
     echo "  Check status:       ./docker-selfware.sh status"
     echo ""
     echo "Host services (accessible from container):"
-    echo "  LLM API:            https://crazyshit.ngrok.io/v1"
+    echo "  vLLM API:           http://localhost:8000/v1"
     echo "  Swarm Visualizer:   http://localhost:7777 (if running)"
     echo "  GPU Dashboard:      http://localhost:8888 (if running)"
     echo ""
@@ -214,7 +214,7 @@ quick-test() {
     # Test 2: Can access vLLM from container
     log "Test 2: Checking vLLM connectivity from container..."
     if docker-compose -f "$COMPOSE_FILE" exec -T selfware \
-        curl -s https://crazyshit.ngrok.io/health > /dev/null 2>&1; then
+        curl -s http://localhost:8000/health > /dev/null 2>&1; then
         log_ok "vLLM accessible from container"
     else
         log_error "vLLM not accessible from container"
@@ -254,12 +254,12 @@ status() {
     
     echo ""
     echo -e "${BLUE}Endpoint Status:${NC}"
-    if curl -s https://crazyshit.ngrok.io/health > /dev/null 2>&1; then
-        log_ok "LLM endpoint: ONLINE"
-        curl -s https://crazyshit.ngrok.io/v1/models 2>/dev/null | \
+    if curl -s http://localhost:8000/health > /dev/null 2>&1; then
+        log_ok "vLLM endpoint: ONLINE"
+        curl -s http://localhost:8000/v1/models 2>/dev/null | \
           python3 -c "import sys,json; d=json.load(sys.stdin); m=d['data'][0]; print(f\"  Model: {m['id']}\")" 2>/dev/null || echo "  (Cannot parse model info)"
     else
-        log_error "LLM endpoint: OFFLINE"
+        log_error "vLLM endpoint: OFFLINE"
         echo "  Run: vllm serve Qwen/Qwen3.5-27B-FP8 --tensor-parallel-size 2 ..."
     fi
     

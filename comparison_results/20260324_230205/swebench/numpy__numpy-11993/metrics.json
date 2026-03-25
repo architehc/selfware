@@ -1,0 +1,9 @@
+{
+  "task_id": "numpy__numpy-11993",
+  "system": "swebench_pro",
+  "duration_ms": 1115,
+  "tokens_in": 3668,
+  "tokens_out": 1587,
+  "success": 0,
+  "timestamp": "2026-03-24T23:02:10-04:00"
+}

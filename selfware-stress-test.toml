@@ -8,7 +8,7 @@
 #   - GPU Memory Util: 0.91
 #   - KV Cache: ~43,904 tokens
 
-endpoint = "http://localhost:8000/v1"
+endpoint = "http://host.docker.internal:8000/v1"
 model = "qwen3.5-27b"
 max_tokens = 8192
 temperature = 0.6

@@ -92,6 +92,14 @@ pub mod evolution;
 #[cfg(feature = "vlm-bench")]
 pub mod vlm_bench;
 
+// Concurrent benchmark harness for throughput testing
+#[cfg(feature = "bench-harness")]
+pub mod bench_harness;
+
+// Memory consolidation ("sleep") system
+#[cfg(feature = "consolidation")]
+pub mod consolidation;
+
 // Backward-compatible re-exports for safety module
 pub use safety::redact;
 
