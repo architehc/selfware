@@ -1,0 +1,87 @@
+{
+  "task_id": "data-extract",
+  "task_name": "Data Extraction",
+  "started_at": "2026-03-25T11:49:43.326447186Z",
+  "ended_at": "2026-03-25T11:49:43.800068843Z",
+  "actions": [
+    {
+      "timestamp": "2026-03-25T11:49:43.799780712Z",
+      "action": {
+        "Navigate": {
+          "url": "https://httpbin.org/json"
+        }
+      },
+      "outcome": {
+        "Success": {
+          "output": "HTTP 200 OK, 429 bytes"
+        }
+      },
+      "screenshot_before": null,
+      "screenshot_after": null,
+      "duration_ms": 473
+    },
+    {
+      "timestamp": "2026-03-25T11:49:43.799798356Z",
+      "action": {
+        "WaitFor": {
+          "selector": "body",
+          "timeout_ms": 10000
+        }
+      },
+      "outcome": {
+        "Success": {
+          "output": "WaitFor 'body' skipped (HTTP mode)"
+        }
+      },
+      "screenshot_before": null,
+      "screenshot_after": null,
+      "duration_ms": 0
+    },
+    {
+      "timestamp": "2026-03-25T11:49:43.799801078Z",
+      "action": {
+        "Extract": {
+          "selector": "body",
+          "expected": "slideshow"
+        }
+      },
+      "outcome": {
+        "Success": {
+          "output": "Found expected content 'slideshow'"
+        }
+      },
+      "screenshot_before": null,
+      "screenshot_after": null,
+      "duration_ms": 0
+    },
+    {
+      "timestamp": "2026-03-25T11:49:43.800064005Z",
+      "action": {
+        "Screenshot": {
+          "label": "json_data"
+        }
+      },
+      "outcome": {
+        "Success": {
+          "output": "Screenshot 'json_data' captured"
+        }
+      },
+      "screenshot_before": null,
+      "screenshot_after": "bench_results/browser/screenshots/data-extract/json_data.html",
+      "duration_ms": 0
+    }
+  ],
+  "screenshots": [
+    {
+      "path": "bench_results/browser/screenshots/data-extract/json_data.html",
+      "timestamp": "2026-03-25T11:49:43.800060676Z",
+      "label": "json_data",
+      "dimensions": [
+        0,
+        0
+      ]
+    }
+  ],
+  "final_outcome": "Passed",
+  "total_duration_ms": 473
+}

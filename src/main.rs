@@ -54,3 +54,6 @@ async fn shutdown_signal() {
         ctrl_c.await.ok();
     }
 }
+
+// Auto-scaler integration placeholder
+// To use: add `mod autoscaler;` and integrate into CLI

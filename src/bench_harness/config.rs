@@ -20,6 +20,9 @@ pub struct HarnessConfig {
     pub timeout_secs: u64,
     /// Directory for output reports.
     pub output_dir: PathBuf,
+    /// Extra body parameters for the API request (e.g., chat_template_kwargs).
+    #[serde(default)]
+    pub extra_body: serde_json::Value,
 }
 
 impl Default for HarnessConfig {
@@ -32,6 +35,9 @@ impl Default for HarnessConfig {
             temperature: 0.2,
             timeout_secs: 300,
             output_dir: PathBuf::from("bench_results"),
+            extra_body: serde_json::json!({
+                "chat_template_kwargs": {"enable_thinking": false}
+            }),
         }
     }
 }

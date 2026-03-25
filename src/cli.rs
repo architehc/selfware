@@ -184,6 +184,30 @@ enum Commands {
         output: String,
     },
 
+    /// Auto-detect and configure endpoint settings
+    #[command(alias = "ac")]
+    AutoConfig {
+        /// API endpoint URL to test (e.g., http://localhost:8000/v1)
+        #[arg(short, long)]
+        endpoint: Option<String>,
+
+        /// Model name to test (auto-detected if not provided)
+        #[arg(short, long)]
+        model: Option<String>,
+
+        /// API key for authenticated endpoints
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Output the detected configuration as TOML
+        #[arg(long)]
+        toml: bool,
+
+        /// Save configuration to selfware.toml
+        #[arg(long)]
+        save: bool,
+    },
+
     /// Interactive setup wizard for first-time configuration
     Init {
         /// Use a specific template (rust, python, node, minimal)
@@ -1560,6 +1584,133 @@ async fn handle_command(
             }
             let report = crate::doctor::run_doctor().await;
             report.print();
+        }
+
+        Commands::AutoConfig { endpoint, model, api_key, toml, save } => {
+            use crate::config::auto_config::AutoConfigurator;
+            use colored::Colorize;
+            
+            let endpoint = endpoint.unwrap_or_else(|| config.endpoint.clone());
+            let api_key = api_key.as_deref().or(config.api_key.as_ref().map(|k| k.expose()));
+            
+            println!("{}", render_header(ctx));
+            println!("\n{} Auto-Configuration Detection\n", "⚙️".emphasis());
+            println!("   Endpoint: {}", endpoint.clone().emphasis());
+            
+            let configurator = AutoConfigurator::new(&endpoint, api_key);
+            
+            let models = match configurator.fetch_models().await {
+                Ok(m) => m,
+                Err(e) => {
+                    println!("\n{} Failed to fetch models: {}", "✗".red().bold(), e);
+                    std::process::exit(1);
+                }
+            };
+            
+            if models.is_empty() {
+                println!("\n{} No models found at endpoint", "✗".red().bold());
+                std::process::exit(1);
+            }
+            
+            println!("   Found {} model(s)", models.len());
+            
+            let model_to_test = model.unwrap_or_else(|| models[0].id.clone());
+            println!("   Testing model: {}\n", model_to_test.clone().emphasis());
+            
+            let results = match configurator.run_tests(&model_to_test).await {
+                Ok(r) => r,
+                Err(e) => {
+                    println!("\n{} Tests failed: {}", "✗".red().bold(), e);
+                    std::process::exit(1);
+                }
+            };
+            
+            let detected_config = match configurator.generate_config(&model_to_test).await {
+                Ok(c) => c,
+                Err(e) => {
+                    println!("\n{} Config generation failed: {}", "✗".red().bold(), e);
+                    std::process::exit(1);
+                }
+            };
+            
+            println!("\n{} Detection Results:\n", "📊".emphasis());
+            println!("   Backend: {}", 
+                results.backend_type.map(|b| b.name()).unwrap_or("Unknown").emphasis()
+            );
+            println!("   Function Calling: {}", 
+                if results.function_calling { "✓ Supported".green().to_string() } else { "✗ Not detected".yellow().to_string() }
+            );
+            println!("   Streaming: {}", 
+                if results.streaming { "✓ Supported".green().to_string() } else { "✗ Not detected".yellow().to_string() }
+            );
+            println!("   Chat API: {}", 
+                if results.chat_works { "✓ Working".green().to_string() } else { "✗ Failed".red().to_string() }
+            );
+            
+            if toml || save {
+                configurator.print_config_toml(&detected_config);
+            }
+            
+            if save {
+                let mut toml_str = format!(r#"# Auto-configured by selfware auto-config
+endpoint = "{}"
+model = "{}"
+max_tokens = {}
+context_length = {}
+temperature = {}
+
+[safety]
+allowed_paths = ["./**", "/tmp/**"]
+denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**"]
+protected_branches = ["main"]
+
+[agent]
+native_function_calling = {}
+streaming = {}
+token_budget = {}
+step_timeout_secs = {}
+
+[continuous_work]
+enabled = true
+checkpoint_interval_tools = 10
+checkpoint_interval_secs = 300
+auto_recovery = true
+max_recovery_attempts = 3
+"#,
+                    detected_config.endpoint,
+                    detected_config.model,
+                    detected_config.max_tokens,
+                    detected_config.context_length,
+                    detected_config.temperature,
+                    detected_config.agent.native_function_calling,
+                    detected_config.agent.streaming,
+                    detected_config.agent.token_budget,
+                    detected_config.agent.step_timeout_secs
+                );
+
+                // Include extra_body if present (e.g., thinking mode config)
+                if let Some(ref extra) = detected_config.extra_body {
+                    toml_str.push_str("\n[extra_body]\n");
+                    for (k, v) in extra {
+                        if let Some(obj) = v.as_object() {
+                            let inner: Vec<String> = obj
+                                .iter()
+                                .map(|(ik, iv)| format!("{ik} = {iv}"))
+                                .collect();
+                            toml_str.push_str(&format!("{k} = {{ {} }}\n", inner.join(", ")));
+                        } else {
+                            toml_str.push_str(&format!("{k} = {v}\n"));
+                        }
+                    }
+                }
+
+                toml_str.push_str("\n[retry]\nmax_retries = 5\nbase_delay_ms = 1000\nmax_delay_ms = 60000\n");
+
+                std::fs::write("selfware.toml", &toml_str)?;
+                println!("{} Configuration saved to selfware.toml", "✓".green());
+            }
+            
+            println!();
         }
 
         Commands::Init { template } => {

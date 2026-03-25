@@ -1,0 +1,30 @@
+{
+  "timestamp": "2026-03-25T16:02:48.147892654+00:00",
+  "model": "qwen3.5-27b",
+  "total_tasks": 3,
+  "completed": 3,
+  "results": [
+    {
+      "instance_id": "django__django-10914",
+      "repo": "django/django",
+      "completed": true,
+      "duration_secs": 32.475585259,
+      "error": null
+    },
+    {
+      "instance_id": "django__django-10924",
+      "repo": "django/django",
+      "completed": true,
+      "duration_secs": 31.458450027,
+      "error": null
+    },
+    {
+      "instance_id": "django__django-11001",
+      "repo": "django/django",
+      "completed": true,
+      "duration_secs": 34.424743953,
+      "error": null
+    }
+  ],
+  "total_duration_secs": 98.363709361
+}

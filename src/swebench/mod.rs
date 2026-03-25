@@ -110,7 +110,7 @@ impl SWEBenchEvaluator {
     pub async fn evaluate_task(
         &self,
         task: &SWEBenchTask,
-        agent: &crate::agent::Agent,
+        _agent: &crate::agent::Agent,
     ) -> Result<TestResult> {
         info!("Evaluating task: {}", task.instance_id);
         let start = std::time::Instant::now();
@@ -134,7 +134,7 @@ impl SWEBenchEvaluator {
         });
         
         // Step 3: Selfware solves the problem
-        let task_prompt = format!(
+        let _task_prompt = format!(
             "SWE-bench Pro Task: {}\n\nRepository: {}\nProblem: {}\n\nFiles to modify: {:?}\n\nPlease implement a fix for this issue.",
             task.instance_id,
             task.repo,

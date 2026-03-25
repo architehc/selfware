@@ -248,6 +248,11 @@ impl SafetyChecker {
                 // Screen capture returns base64 PNG in-memory; window list/focus/active
                 // are desktop queries. No filesystem or network side-effects to validate.
             }
+            // Context management tools — virtual, no filesystem access
+            "context_status" | "context_focus" | "context_evict" | "context_recommend"
+            | "context_load_skeleton" | "context_bulk_read" | "context_summary" => {
+                // Context tools interact with the agent's internal state only
+            }
             // Computer tools — system manipulation (medium risk)
             "computer_mouse" | "computer_keyboard" => {
                 // These manipulate the desktop (clicks, keystrokes). No path or URL args

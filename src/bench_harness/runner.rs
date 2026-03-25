@@ -141,13 +141,22 @@ async fn execute_task(
     let start = Instant::now();
     let url = format!("{}/chat/completions", config.endpoint.trim_end_matches('/'));
 
-    let body = json!({
+    let mut body = json!({
         "model": config.model,
         "messages": task.messages,
         "max_tokens": config.max_tokens,
         "temperature": config.temperature,
         "stream": false,
     });
+
+    // Merge extra_body fields (e.g., chat_template_kwargs for Qwen thinking mode)
+    if let (Some(body_obj), Some(extra_obj)) =
+        (body.as_object_mut(), config.extra_body.as_object())
+    {
+        for (k, v) in extra_obj {
+            body_obj.insert(k.clone(), v.clone());
+        }
+    }
 
     debug!(task_id = %task.id, stream_id, "Sending request");
 
@@ -219,8 +228,12 @@ async fn execute_task(
         }
     };
 
+    // Extract content, falling back to reasoning_content if content is null
+    // (Qwen3.5 thinking mode returns content=null when all tokens go to reasoning)
     let content = parsed["choices"][0]["message"]["content"]
         .as_str()
+        .or_else(|| parsed["choices"][0]["message"]["reasoning_content"].as_str())
+        .or_else(|| parsed["choices"][0]["message"]["reasoning"].as_str())
         .unwrap_or("")
         .to_string();
 

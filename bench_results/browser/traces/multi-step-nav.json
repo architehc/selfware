@@ -1,0 +1,145 @@
+{
+  "task_id": "multi-step-nav",
+  "task_name": "Multi-Step Navigation",
+  "started_at": "2026-03-25T11:49:43.326355711Z",
+  "ended_at": "2026-03-25T11:49:43.450612704Z",
+  "actions": [
+    {
+      "timestamp": "2026-03-25T11:49:43.431123587Z",
+      "action": {
+        "Navigate": {
+          "url": "https://en.wikipedia.org/wiki/Rust_(programming_language)"
+        }
+      },
+      "outcome": {
+        "Success": {
+          "output": "HTTP 200 OK, 592053 bytes"
+        }
+      },
+      "screenshot_before": null,
+      "screenshot_after": null,
+      "duration_ms": 104
+    },
+    {
+      "timestamp": "2026-03-25T11:49:43.435064881Z",
+      "action": {
+        "WaitFor": {
+          "selector": "#firstHeading",
+          "timeout_ms": 10000
+        }
+      },
+      "outcome": {
+        "Success": {
+          "output": "Content matching '#firstHeading' found"
+        }
+      },
+      "screenshot_before": null,
+      "screenshot_after": null,
+      "duration_ms": 3
+    },
+    {
+      "timestamp": "2026-03-25T11:49:43.435543167Z",
+      "action": {
+        "Screenshot": {
+          "label": "wiki_rust_page"
+        }
+      },
+      "outcome": {
+        "Success": {
+          "output": "Screenshot 'wiki_rust_page' captured"
+        }
+      },
+      "screenshot_before": null,
+      "screenshot_after": "bench_results/browser/screenshots/multi-step-nav/wiki_rust_page.html",
+      "duration_ms": 0
+    },
+    {
+      "timestamp": "2026-03-25T11:49:43.437393361Z",
+      "action": {
+        "Extract": {
+          "selector": "#firstHeading",
+          "expected": "Rust"
+        }
+      },
+      "outcome": {
+        "Success": {
+          "output": "Found expected content 'Rust'"
+        }
+      },
+      "screenshot_before": null,
+      "screenshot_after": null,
+      "duration_ms": 1
+    },
+    {
+      "timestamp": "2026-03-25T11:49:43.448979115Z",
+      "action": {
+        "Click": {
+          "selector": "a[href='/wiki/Memory_safety']"
+        }
+      },
+      "outcome": {
+        "Success": {
+          "output": "Followed link to https://en.wikipedia.org/wiki/Memory_safety"
+        }
+      },
+      "screenshot_before": null,
+      "screenshot_after": null,
+      "duration_ms": 11
+    },
+    {
+      "timestamp": "2026-03-25T11:49:43.450000260Z",
+      "action": {
+        "WaitFor": {
+          "selector": "#firstHeading",
+          "timeout_ms": 10000
+        }
+      },
+      "outcome": {
+        "Success": {
+          "output": "Content matching '#firstHeading' found"
+        }
+      },
+      "screenshot_before": null,
+      "screenshot_after": null,
+      "duration_ms": 1
+    },
+    {
+      "timestamp": "2026-03-25T11:49:43.450317850Z",
+      "action": {
+        "Screenshot": {
+          "label": "wiki_memory_safety"
+        }
+      },
+      "outcome": {
+        "Success": {
+          "output": "Screenshot 'wiki_memory_safety' captured"
+        }
+      },
+      "screenshot_before": null,
+      "screenshot_after": "bench_results/browser/screenshots/multi-step-nav/wiki_memory_safety.html",
+      "duration_ms": 0
+    }
+  ],
+  "screenshots": [
+    {
+      "path": "bench_results/browser/screenshots/multi-step-nav/wiki_rust_page.html",
+      "timestamp": "2026-03-25T11:49:43.435541481Z",
+      "label": "wiki_rust_page",
+      "dimensions": [
+        0,
+        0
+      ]
+    },
+    {
+      "path": "bench_results/browser/screenshots/multi-step-nav/wiki_memory_safety.html",
+      "timestamp": "2026-03-25T11:49:43.450317244Z",
+      "label": "wiki_memory_safety",
+      "dimensions": [
+        0,
+        0
+      ]
+    }
+  ],
+  "final_outcome": "Passed",
+  "total_duration_ms": 124
+}
