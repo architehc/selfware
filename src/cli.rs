@@ -845,7 +845,7 @@ async fn handle_command(
             focus,
             depth,
             max_nodes,
-            _format,
+            format: output_format,
         } => {
             if !quiet {
                 println!("{}", render_header(ctx));
@@ -867,11 +867,11 @@ async fn handle_command(
             let rendered = crate::analysis::code_graph::GraphRenderer::new()
                 .with_direction("LR")
                 .cluster()
-                .render(&graph, graph_format_to_output_format(format));
+                .render(&graph, graph_format_to_output_format(output_format));
 
             println!(
                 "{}",
-                render_graph_output(&graph.name, focus.as_deref(), &summary, format, &rendered)
+                render_graph_output(&graph.name, focus.as_deref(), &summary, output_format, &rendered)
             );
         }
 
@@ -1612,7 +1612,7 @@ async fn handle_command(
             endpoint,
             suite,
             concurrent,
-            format,
+            format: _format,
         } => {
             if !quiet {
                 println!("{}", render_header(ctx));
