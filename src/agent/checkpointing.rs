@@ -219,6 +219,11 @@ impl Agent {
         // (done outside the borrow of current_checkpoint to avoid double borrow)
         self.reflect_and_learn()?;
 
+        // Trigger memory consolidation ("sleep") — compact session episodes
+        // into long-term storage for future retrieval.
+        #[cfg(feature = "consolidation")]
+        self.consolidate_session_memory();
+
         if let Some(ref checkpoint) = self.current_checkpoint {
             if let Some(ref manager) = self.checkpoint_manager {
                 manager.save(checkpoint)?;
@@ -332,6 +337,125 @@ impl Agent {
         });
 
         Ok(())
+    }
+
+    /// Consolidate session memory — convert episodic experiences into
+    /// long-term storage. This is the "sleep" cycle that compacts short-term
+    /// session data into structured temporal records.
+    #[cfg(feature = "consolidation")]
+    fn consolidate_session_memory(&self) {
+        use crate::consolidation::{CollectedItem, SourceType, LongTermStore};
+
+        let checkpoint = match self.current_checkpoint.as_ref() {
+            Some(cp) => cp,
+            None => return,
+        };
+
+        // Collect tool call data as consolidation items
+        let items: Vec<CollectedItem> = checkpoint
+            .tool_calls
+            .iter()
+            .map(|tc| {
+                let mut metadata = std::collections::HashMap::new();
+                metadata.insert("tool".to_string(), tc.tool_name.clone());
+                metadata.insert("success".to_string(), tc.success.to_string());
+                if let Some(dur) = tc.duration_ms {
+                    metadata.insert("duration_ms".to_string(), dur.to_string());
+                }
+
+                CollectedItem {
+                    source_id: format!("tc-{}-{}", checkpoint.task_id, tc.timestamp.timestamp()),
+                    source_type: SourceType::ToolResult,
+                    content: format!(
+                        "Tool: {} | Args: {} | Success: {}",
+                        tc.tool_name,
+                        &tc.arguments[..tc.arguments.len().min(200)],
+                        tc.success,
+                    ),
+                    timestamp: tc.timestamp,
+                    importance: if tc.success { 2 } else { 3 }, // Normal / High
+                    tags: vec![tc.tool_name.clone(), checkpoint.task_id.clone()],
+                    metadata,
+                    related_ids: Vec::new(),
+                    session_id: Some(checkpoint.task_id.clone()),
+                    file_refs: Vec::new(),
+                }
+            })
+            .collect();
+
+        if items.is_empty() {
+            return;
+        }
+
+        // Store to disk (non-blocking)
+        let store = LongTermStore::new(
+            dirs::data_local_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join("selfware")
+                .join("consolidated_memory"),
+        );
+
+        let item_count = items.len();
+        let task_id = checkpoint.task_id.clone();
+
+        // Convert items to temporal records directly (skip LLM summarization for speed)
+        let now = chrono::Utc::now();
+        let records: Vec<crate::consolidation::TemporalRecord> = vec![
+            crate::consolidation::TemporalRecord {
+                id: format!("session-{}", &task_id[..task_id.len().min(16)]),
+                created_at: now,
+                source_timestamps: items.iter().map(|i| i.timestamp).collect(),
+                sequence_order: now.timestamp() as u64,
+                causal_parents: Vec::new(),
+                causal_children: Vec::new(),
+                decay_score: 1.0,
+                access_count: 0,
+                last_accessed: now,
+                content: crate::consolidation::CompactedContent {
+                    summary: format!(
+                        "Session {} with {} tool calls",
+                        task_id, item_count
+                    ),
+                    key_facts: items
+                        .iter()
+                        .filter(|i| !i.tags.is_empty())
+                        .take(5)
+                        .map(|i| i.content.clone())
+                        .collect(),
+                    entities: items
+                        .iter()
+                        .flat_map(|i| i.tags.clone())
+                        .collect::<std::collections::HashSet<_>>()
+                        .into_iter()
+                        .collect(),
+                    actions: Vec::new(),
+                    outcomes: Vec::new(),
+                    insights: Vec::new(),
+                },
+                multimodal_refs: Vec::new(),
+                source_ids: items.iter().map(|i| i.source_id.clone()).collect(),
+                tags: vec!["session".to_string(), task_id.clone()],
+                importance: crate::consolidation::RecordImportance::Normal,
+                session_id: Some(task_id),
+                metadata: std::collections::HashMap::new(),
+            },
+        ];
+
+        // Save in background
+        tokio::spawn(async move {
+            match store.store(&records).await {
+                Ok(result) => {
+                    tracing::info!(
+                        "Consolidated {} tool calls into {} records",
+                        item_count,
+                        result.stored
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("Memory consolidation failed: {}", e);
+                }
+            }
+        });
     }
 
     /// Mark current task as failed
