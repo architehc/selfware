@@ -1,4 +1,24 @@
-//! Runtime -- workflow executor that walks the AST and evaluates nodes.
+//! Runtime -- tree-walking interpreter that evaluates [`AstNode`]s into [`Value`]s.
+//!
+//! The [`Runtime`] holds global variable bindings, user-defined function
+//! definitions, an execution event log, and an optional command executor.
+//!
+//! ## Execution model
+//!
+//! - **Steps** run shell commands via the pluggable `command_executor`.  Without
+//!   one, commands are simulated (always succeed).  Step results are stored as
+//!   globals so later code can inspect `step_name.success`, `.output`, `.error`.
+//! - **Parallel blocks** fork child runtimes on real OS threads
+//!   (`std::thread::scope`), each with a clone of the current globals and a
+//!   shared `Arc` command executor.  Child globals are merged back after join.
+//! - **Loops** (`for`, `while`) execute in the current scope.  `while` has a
+//!   10 000 iteration safety limit.
+//! - **Pipelines** (`a | b | c`) pass each stage's output to the next via the
+//!   `_input` global.
+//! - **Built-in functions**: `print`, `len`, `range`, `env`.
+//!
+//! Execution events (workflow/step/parallel start/end) are logged to a bounded
+//! `VecDeque` (max 1000 entries) for tracing and debugging.
 
 #![allow(dead_code, unused_imports, unused_variables)]
 

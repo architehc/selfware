@@ -1,7 +1,9 @@
 //! Memory Consolidation ("Sleep") System
 //!
 //! Periodic batch compaction of short-term experience into long-term storage,
-//! inspired by human sleep-based memory consolidation.
+//! inspired by human sleep-based memory consolidation.  The
+//! [`ConsolidationEngine`] orchestrates the full pipeline: collect, compact,
+//! store.
 //!
 //! # Architecture
 //!
@@ -18,12 +20,28 @@
 //!                            └──────────────────┘           └───────────────┘
 //! ```
 //!
-//! # Key Features
+//! ## Pipeline stages
 //!
-//! - **Temporal preservation**: Timestamps, ordering, causal chains, decay curves
-//! - **Multimodal references**: Screenshots, interaction traces, spatial layouts
-//! - **Parallel processing**: Uses 32 concurrent LLM streams for summarization
-//! - **Configurable decay**: Exponential with access reinforcement (24h half-life)
+//! 1. **[`ShortTermCollector`]** -- gathers episodes, memory entries, session
+//!    logs, and traces.  Filters by age (`max_episode_age_hours`) and minimum
+//!    importance score.  Assembles a [`CollectedBatch`] for the compactor.
+//!
+//! 2. **[`MemoryCompactor`]** -- summarizes and deduplicates the batch using
+//!    parallel LLM calls (up to 32 concurrent streams).  Produces
+//!    [`TemporalRecord`]s with importance scores, causal links, and
+//!    [`MultimodalRef`]s.
+//!
+//! 3. **[`LongTermStore`]** -- persists records as JSON files on disk.
+//!    Supports loading all records back for querying.
+//!
+//! # Key features
+//!
+//! - **Temporal preservation**: timestamps, ordering, causal chains, decay curves
+//! - **Multimodal references**: screenshots, interaction traces, spatial layouts
+//! - **Parallel processing**: uses 32 concurrent LLM streams for summarization
+//! - **Configurable decay**: exponential with access reinforcement (24h half-life)
+//! - **Periodic mode**: [`ConsolidationEngine::start_periodic`] runs cycles on a
+//!   timer in a background tokio task
 //!
 //! # Example
 //!
@@ -31,9 +49,16 @@
 //! use selfware::consolidation::*;
 //!
 //! let config = ConsolidationConfig::new("http://localhost:8000/v1", "qwen3.5-27b");
-//! let mut engine = ConsolidationEngine::new(config)?;
-//! let report = engine.consolidate().await?;
-//! println!("Consolidated {} episodes into {} records", report.episodes_processed, report.records_produced);
+//! let mut engine = ConsolidationEngine::new(config)?
+//!     .with_storage_dir("/data/memory".into());
+//!
+//! // One-shot consolidation:
+//! let report = engine.consolidate_episodes(episodes).await?;
+//! println!("Consolidated {} episodes into {} records",
+//!     report.episodes_processed, report.records_produced);
+//!
+//! // Or periodic (background task):
+//! let handle = engine.start_periodic(Duration::from_secs(3600));
 //! ```
 
 pub mod collector;
