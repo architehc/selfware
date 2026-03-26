@@ -1,0 +1,58 @@
+# Selfware Configuration - 27B vLLM (Local, Concurrency 16)
+# Optimized for 1M context window and parallel execution
+
+endpoint = "http://localhost:8000/v1"
+model = "qwen3.5-27b"
+max_tokens = 8192
+context_length = 1010000  # 1M context from endpoint
+temperature = 0.6
+
+[extra_body]
+# vLLM specific optimizations
+top_p = 0.95
+top_k = 20
+min_p = 0.0
+
+[agent]
+# Token budget for 1M context:
+# 1M - 50K safety - 8K max_tokens = ~940K for messages
+token_budget = 942000
+token_safety_margin = 50000
+max_iterations = 50
+step_timeout_secs = 600
+
+# vLLM works better with XML-based tool calling (native_function_calling = false)
+# Set to true only if using --enable-auto-tool-choice in vLLM
+native_function_calling = false
+streaming = false
+
+# Parallel execution settings for concurrency=16
+max_parallel_tools = 8
+
+[parallel]
+# Match the endpoint concurrency limit
+max_concurrency = 16
+enabled = true
+
+[safety]
+allowed_paths = ["./**", "/tmp/**"]
+denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**"]
+protected_branches = ["main"]
+
+[continuous_work]
+enabled = true
+checkpoint_interval_tools = 10
+checkpoint_interval_secs = 300
+auto_recovery = true
+max_recovery_attempts = 3
+
+[retry]
+max_retries = 5
+base_delay_ms = 1000
+max_delay_ms = 60000
+
+[resources]
+# Conservative resource limits for local 27B
+max_file_size_mb = 10
+max_search_results = 100
+max_context_files = 20

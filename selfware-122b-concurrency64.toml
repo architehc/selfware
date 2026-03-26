@@ -1,0 +1,59 @@
+# Selfware Configuration - 122B SGLang (Remote, Concurrency 64)
+# Optimized for high-throughput tool calling with 262K context
+
+endpoint = "https://crazyshit.ngrok.io/v1"
+model = "txn545/Qwen3.5-122B-A10B-NVFP4"
+max_tokens = 8192
+context_length = 262144  # 262K context from endpoint
+temperature = 0.6
+
+[extra_body]
+# SGLang native tool calling optimizations
+top_p = 0.95
+top_k = 20
+min_p = 0.0
+# Disable thinking for tool-heavy workflows
+chat_template_kwargs = { enable_thinking = false }
+
+[agent]
+# Token budget for 262K context:
+# 262K - 50K safety - 8K max_tokens = ~200K for messages
+token_budget = 180000
+token_safety_margin = 50000
+max_iterations = 50
+step_timeout_secs = 600
+
+# SGLang has excellent native function calling support
+native_function_calling = true
+streaming = false
+
+# Aggressive parallel execution for high concurrency
+max_parallel_tools = 16
+
+[parallel]
+# Maximize throughput with 64 concurrent streams
+max_concurrency = 64
+enabled = true
+
+[safety]
+allowed_paths = ["./**", "/tmp/**"]
+denied_paths = ["**/.env", "**/secrets/**", "**/.git/**"]
+protected_branches = ["main"]
+
+[continuous_work]
+enabled = true
+checkpoint_interval_tools = 10
+checkpoint_interval_secs = 300
+auto_recovery = true
+max_recovery_attempts = 3
+
+[retry]
+max_retries = 5
+base_delay_ms = 1000
+max_delay_ms = 60000
+
+[resources]
+# Higher limits for powerful remote endpoint
+max_file_size_mb = 20
+max_search_results = 200
+max_context_files = 50

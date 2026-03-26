@@ -67,6 +67,14 @@ impl Tool for VisionAnalyze {
                 "max_tokens": {
                     "type": "integer",
                     "description": "Max response tokens. Default: 4096"
+                },
+                "temperature": {
+                    "type": "number",
+                    "description": "Sampling temperature. Default: 0.2"
+                },
+                "extra_body": {
+                    "type": "object",
+                    "description": "Optional extra request fields merged into the chat-completion body, e.g. chat_template_kwargs."
                 }
             },
             "required": ["prompt", "endpoint", "model"]
@@ -94,11 +102,15 @@ impl Tool for VisionAnalyze {
             .get("max_tokens")
             .and_then(|v| v.as_u64())
             .unwrap_or(4096) as usize;
+        let temperature = args
+            .get("temperature")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.2);
 
         let data_uri = resolve_image_data_uri(&args)?;
 
         // Build the multimodal message array (OpenAI vision format)
-        let body = json!({
+        let mut body = json!({
             "model": model,
             "messages": [{
                 "role": "user",
@@ -108,9 +120,10 @@ impl Tool for VisionAnalyze {
                 ]
             }],
             "max_tokens": max_tokens,
-            "temperature": 0.2,
+            "temperature": temperature,
             "stream": false
         });
+        merge_extra_body(&mut body, args.get("extra_body"))?;
 
         let response = call_vision_endpoint(endpoint, &body).await?;
 
@@ -178,6 +191,23 @@ impl Tool for VisionCompare {
                 "model": {
                     "type": "string",
                     "description": "Optional vision model name for semantic comparison"
+                },
+                "detail": {
+                    "type": "string",
+                    "enum": ["low", "high", "auto"],
+                    "description": "Optional image detail level for semantic comparison. Default: auto"
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Optional max response tokens for semantic comparison. Default: 2048"
+                },
+                "temperature": {
+                    "type": "number",
+                    "description": "Optional sampling temperature for semantic comparison. Default: 0.2"
+                },
+                "extra_body": {
+                    "type": "object",
+                    "description": "Optional extra request fields merged into the semantic compare request body."
                 }
             },
             "required": ["image_a", "image_b"]
@@ -197,6 +227,18 @@ impl Tool for VisionCompare {
             .get("threshold")
             .and_then(|v| v.as_f64())
             .unwrap_or(90.0);
+        let detail = args
+            .get("detail")
+            .and_then(|v| v.as_str())
+            .unwrap_or("auto");
+        let max_tokens = args
+            .get("max_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(2048) as usize;
+        let temperature = args
+            .get("temperature")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.2);
 
         // Load both images
         let img_a = image::open(path_a)
@@ -239,20 +281,21 @@ impl Tool for VisionCompare {
             let uri_a = format!("data:image/png;base64,{}", b64_a);
             let uri_b = format!("data:image/png;base64,{}", b64_b);
 
-            let body = json!({
+            let mut body = json!({
                 "model": model,
                 "messages": [{
                     "role": "user",
                     "content": [
                         { "type": "text", "text": "Compare these two images. Describe the visual differences between image 1 and image 2. Be specific about layout, color, typography, and content differences." },
-                        { "type": "image_url", "image_url": { "url": uri_a } },
-                        { "type": "image_url", "image_url": { "url": uri_b } }
+                        { "type": "image_url", "image_url": { "url": uri_a, "detail": detail } },
+                        { "type": "image_url", "image_url": { "url": uri_b, "detail": detail } }
                     ]
                 }],
-                "max_tokens": 2048,
-                "temperature": 0.2,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
                 "stream": false
             });
+            merge_extra_body(&mut body, args.get("extra_body"))?;
 
             match call_vision_endpoint(endpoint, &body).await {
                 Ok(response) => {
@@ -278,6 +321,22 @@ impl Tool for VisionCompare {
 
 /// Maximum image file size (50 MB).
 const MAX_IMAGE_SIZE: u64 = 50 * 1024 * 1024;
+
+fn merge_extra_body(body: &mut Value, extra_body: Option<&Value>) -> Result<()> {
+    let Some(extra_body) = extra_body else {
+        return Ok(());
+    };
+    let Some(extra_obj) = extra_body.as_object() else {
+        anyhow::bail!("extra_body must be an object");
+    };
+    let Some(body_obj) = body.as_object_mut() else {
+        return Ok(());
+    };
+    for (key, value) in extra_obj {
+        body_obj.insert(key.clone(), value.clone());
+    }
+    Ok(())
+}
 
 /// Resolve an image to a data URI from either `image_path` or `image_base64`.
 fn resolve_image_data_uri(args: &Value) -> Result<String> {

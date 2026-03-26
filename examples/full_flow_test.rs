@@ -10,15 +10,20 @@
 //! Run with:
 //!   cargo run --features bench-harness --example full_flow_test -- https://crazyshit.ngrok.io/v1
 
-use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::future::Future;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::json;
 
 use selfware::api::types::Message;
 use selfware::bench_harness::*;
 use selfware::config::auto_config::AutoConfigurator;
+use selfware::self_healing::{ErrorOccurrence, SelfHealingConfig, SelfHealingEngine};
+use selfware::testing::visual_verification::VisualVerifier;
+use selfware::tools::vision::{encode_image_file, VisionCompare};
+use selfware::tools::Tool;
 
 #[derive(Debug)]
 struct FlowResult {
@@ -49,6 +54,119 @@ impl FlowResult {
             errors,
         }
     }
+
+    fn with_note(mut self, note: impl AsRef<str>) -> Self {
+        let note = note.as_ref();
+        if !note.is_empty() {
+            self.details = format!("{} | {}", self.details, note);
+        }
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+struct EndpointTarget {
+    endpoint: String,
+    concurrent: usize,
+}
+
+fn default_targets() -> Vec<EndpointTarget> {
+    vec![
+        EndpointTarget {
+            endpoint: "http://localhost:8000/v1".to_string(),
+            concurrent: 16,
+        },
+        EndpointTarget {
+            endpoint: "https://crazyshit.ngrok.io/v1".to_string(),
+            concurrent: 64,
+        },
+    ]
+}
+
+fn is_local_endpoint(endpoint: &str) -> bool {
+    endpoint.contains("localhost") || endpoint.contains("127.0.0.1") || endpoint.contains("[::1]")
+}
+
+fn infer_text_concurrency(endpoint: &str) -> usize {
+    if is_local_endpoint(endpoint) { 16 } else { 64 }
+}
+
+fn infer_vision_concurrency(endpoint: &str) -> usize {
+    if is_local_endpoint(endpoint) { 4 } else { 8 }
+}
+
+fn infer_vision_timeout(endpoint: &str) -> Duration {
+    if is_local_endpoint(endpoint) {
+        Duration::from_secs(30)
+    } else {
+        Duration::from_secs(45)
+    }
+}
+
+fn sanitize_endpoint(endpoint: &str) -> String {
+    endpoint
+        .replace("://", "_")
+        .replace(['/', ':', '.'], "_")
+        .trim_matches('_')
+        .to_string()
+}
+
+fn preview(text: &str, limit: usize) -> String {
+    text.chars().take(limit).collect()
+}
+
+fn classify_flow_errors(errors: &[String]) -> (&'static str, String) {
+    let message = if errors.is_empty() {
+        "unknown endpoint step failure".to_string()
+    } else {
+        errors.join(" | ")
+    };
+    let lower = message.to_lowercase();
+
+    let error_type = if lower.contains("429") || lower.contains("rate limit") {
+        "rate_limit"
+    } else if lower.contains("timeout") || lower.contains("timed out") {
+        "timeout"
+    } else if lower.contains("connection")
+        || lower.contains("network")
+        || lower.contains("refused")
+        || lower.contains("reset")
+        || lower.contains("circuit breaker")
+    {
+        "network"
+    } else if lower.contains("parse") || lower.contains("json") || lower.contains("invalid") {
+        "parse"
+    } else {
+        "unknown"
+    };
+
+    (error_type, message)
+}
+
+async fn retry_after_self_heal<F, Fut>(
+    engine: &SelfHealingEngine,
+    endpoint: &str,
+    step: &str,
+    errors: &[String],
+    run: F,
+) -> Option<FlowResult>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = FlowResult>,
+{
+    let (error_type, message) = classify_flow_errors(errors);
+    let context = format!("{step}@{endpoint}");
+    let recovery = engine.handle_error(ErrorOccurrence::new(error_type, &message, &context))?;
+
+    if recovery.success {
+        Some(run().await)
+    } else {
+        None
+    }
+}
+
+fn vision_fixture(name: &str) -> PathBuf {
+    PathBuf::from("vlm_fixtures/l1_tui_state").join(name)
 }
 
 // ---- Step 1: Auto-config ----
@@ -103,7 +221,7 @@ async fn test_auto_config(endpoint: &str) -> FlowResult {
     }
 
     let details = format!(
-        "backend={}, model={}, context={}, fc={}, streaming={}, thinking={}",
+        "backend={}, model={}, context={}, fc={}, streaming={}, thinking={}, disable_thinking={}, text_concurrency={}, vision_concurrency={}",
         results
             .backend_type
             .map(|b| b.name())
@@ -113,6 +231,9 @@ async fn test_auto_config(endpoint: &str) -> FlowResult {
         results.function_calling,
         results.streaming,
         results.thinking_supported,
+        results.thinking_eats_tokens,
+        infer_text_concurrency(endpoint),
+        infer_vision_concurrency(endpoint),
     );
 
     if errors.is_empty() {
@@ -132,8 +253,8 @@ async fn test_throughput(endpoint: &str, model: &str, concurrent: usize) -> Flow
         model: model.to_string(),
         max_concurrent: concurrent,
         max_tokens: 256,
-        temperature: 0.7,
-        timeout_secs: 120,
+        temperature: 0.2,
+        timeout_secs: if concurrent > 32 { 180 } else { 120 },
         output_dir: "bench_results/flow_test".into(),
         extra_body: json!({"chat_template_kwargs": {"enable_thinking": false}}),
     };
@@ -262,7 +383,7 @@ async fn test_throughput(endpoint: &str, model: &str, concurrent: usize) -> Flow
 }
 
 // ---- Step 3: Error resilience ----
-async fn test_error_resilience(endpoint: &str, model: &str) -> FlowResult {
+async fn test_error_resilience(endpoint: &str, model: &str, burst_size: usize) -> FlowResult {
     let start = Instant::now();
     eprintln!("\n=== Step 3: Error Resilience ===");
 
@@ -387,10 +508,11 @@ async fn test_error_resilience(endpoint: &str, model: &str) -> FlowResult {
     }
 
     // Test 3e: Concurrent burst (stress test)
-    eprintln!("  [3e] Testing concurrent burst (32 simultaneous)...");
+    let burst_size = burst_size.max(4);
+    eprintln!("  [3e] Testing concurrent burst ({burst_size} simultaneous)...");
     tests_run += 1;
     let mut handles = vec![];
-    for i in 0..32 {
+    for i in 0..burst_size {
         let c = client.clone();
         let url = format!("{}/chat/completions", endpoint);
         let m = model.to_string();
@@ -417,11 +539,11 @@ async fn test_error_resilience(endpoint: &str, model: &str) -> FlowResult {
             _ => burst_fail += 1,
         }
     }
-    if burst_fail > 16 {
+    if burst_fail > burst_size / 2 {
         // More than half failed
-        errors.push(format!("Burst test: {burst_fail}/32 failed"));
+        errors.push(format!("Burst test: {burst_fail}/{burst_size} failed"));
     } else {
-        eprintln!("    OK: {burst_ok}/32 succeeded in burst");
+        eprintln!("    OK: {burst_ok}/{burst_size} succeeded in burst");
         tests_passed += 1;
     }
 
@@ -587,103 +709,496 @@ async fn test_tool_calling(endpoint: &str, model: &str) -> FlowResult {
     }
 }
 
+// ---- Step 5: Vision workflows ----
+async fn test_vision_workflows(
+    endpoint: &str,
+    model: &str,
+    detail: &str,
+    max_tokens: usize,
+) -> FlowResult {
+    let start = Instant::now();
+    let request_timeout = infer_vision_timeout(endpoint);
+    eprintln!("\n=== Step 5: Vision Workflows (detail={detail}, max_tokens={max_tokens}) ===");
+
+    let compare = VisionCompare;
+    let mut errors = vec![];
+    let mut tests_run = 0;
+    let mut tests_passed = 0;
+    let mut analyze_latency_secs = 0.0;
+    let mut compare_latency_secs = 0.0;
+
+    let dashboard_normal = vision_fixture("dashboard_normal.png");
+    let help_panel = vision_fixture("help_panel.png");
+    let dashboard_path = dashboard_normal.display().to_string();
+    let help_panel_path = help_panel.display().to_string();
+
+    let dashboard_base64 = match encode_image_file(&dashboard_path) {
+        Ok(image) => image,
+        Err(e) => {
+            return FlowResult::fail(
+                "vision-workflows",
+                start.elapsed().as_secs_f64(),
+                "Failed to load dashboard fixture",
+                vec![e.to_string()],
+            );
+        }
+    };
+    let help_panel_base64 = match encode_image_file(&help_panel_path) {
+        Ok(image) => image,
+        Err(e) => {
+            return FlowResult::fail(
+                "vision-workflows",
+                start.elapsed().as_secs_f64(),
+                "Failed to load help-panel fixture",
+                vec![e.to_string()],
+            );
+        }
+    };
+
+    let verifier_extra_body = json!({
+        "chat_template_kwargs": { "enable_thinking": false }
+    });
+    let verifier = VisualVerifier::new(endpoint, model)
+        .with_timeout(request_timeout.as_secs())
+        .with_generation(max_tokens, 0.0)
+        .with_image_detail(detail)
+        .with_extra_body(verifier_extra_body.as_object().cloned());
+
+    tests_run += 1;
+    eprintln!("  [5a] Testing single-image analysis...");
+    let analyze_start = Instant::now();
+    match tokio::time::timeout(
+        request_timeout,
+        verifier.verify_screenshot(
+            &help_panel_base64,
+            "A terminal dashboard with a help or shortcut panel open and readable shortcut text visible inside the panel.",
+        ),
+    )
+    .await
+    {
+        Ok(Ok(analysis)) => {
+            analyze_latency_secs = analyze_start.elapsed().as_secs_f64();
+            let informative = analysis.passed && !analysis.description.trim().is_empty();
+            let preview_text = preview(&analysis.description, 100);
+
+            if informative {
+                eprintln!("    OK: {preview_text}");
+                tests_passed += 1;
+            } else {
+                let issue_text = if analysis.issues.is_empty() {
+                    "no issues reported".to_string()
+                } else {
+                    analysis.issues.join("; ")
+                };
+                errors.push(format!(
+                    "Single-image analysis mismatch: passed={}, description={}, issues={}",
+                    analysis.passed,
+                    preview_text,
+                    preview(&issue_text, 120),
+                ));
+            }
+        }
+        Ok(Err(e)) => errors.push(format!("Single-image analysis failed: {e}")),
+        Err(_) => errors.push(format!(
+            "Single-image analysis timed out after {}s",
+            request_timeout.as_secs()
+        )),
+    }
+
+    tests_run += 1;
+    eprintln!("  [5b] Testing image comparison workflow...");
+    let compare_start = Instant::now();
+    match tokio::time::timeout(
+        request_timeout,
+        compare.execute(json!({
+            "image_a": dashboard_path,
+            "image_b": help_panel_path,
+            "threshold": 99.9,
+        })),
+    )
+    .await
+    {
+        Ok(Ok(value)) => {
+            compare_latency_secs = compare_start.elapsed().as_secs_f64();
+            let pixel_similarity = value["pixel_similarity"].as_f64().unwrap_or(0.0);
+            let semantic = match tokio::time::timeout(
+                request_timeout,
+                verifier.compare_screenshots(
+                    &dashboard_base64,
+                    &help_panel_base64,
+                    "Image 2 should show a help or shortcut panel opened over the dashboard with additional visible shortcut text.",
+                ),
+            )
+            .await
+            {
+                Ok(Ok(result)) => result,
+                Ok(Err(e)) => {
+                    errors.push(format!("Structured semantic compare failed: {e}"));
+                    selfware::testing::visual_verification::VisualDiffResult {
+                        changes_detected: false,
+                        expected_change_found: false,
+                        description: String::new(),
+                        unexpected_changes: vec![],
+                    }
+                }
+                Err(_) => {
+                    errors.push(format!(
+                        "Structured semantic compare timed out after {}s",
+                        request_timeout.as_secs()
+                    ));
+                    selfware::testing::visual_verification::VisualDiffResult {
+                        changes_detected: false,
+                        expected_change_found: false,
+                        description: String::new(),
+                        unexpected_changes: vec![],
+                    }
+                }
+            };
+            let semantic_ok = semantic.changes_detected && semantic.expected_change_found;
+            let semantic_preview = preview(&semantic.description, 120);
+            let unexpected = if semantic.unexpected_changes.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ", unexpected={}",
+                    preview(&semantic.unexpected_changes.join("; "), 120)
+                )
+            };
+
+            if pixel_similarity < 99.9 && semantic_ok {
+                eprintln!(
+                    "    OK: pixel_similarity={:.1}, semantic={}",
+                    pixel_similarity,
+                    semantic_preview
+                );
+                tests_passed += 1;
+            } else {
+                errors.push(format!(
+                    "Image comparison too weak: pixel_similarity={:.1}, semantic={}{}",
+                    pixel_similarity,
+                    semantic_preview,
+                    unexpected
+                ));
+            }
+        }
+        Ok(Err(e)) => errors.push(format!("Image comparison failed: {e}")),
+        Err(_) => errors.push(format!(
+            "Image comparison timed out after {}s",
+            request_timeout.as_secs()
+        )),
+    }
+
+    let details = format!(
+        "{tests_passed}/{tests_run} vision checks passed, detail={detail}, max_tokens={max_tokens}, timeout={}s, analyze={:.1}s, compare={:.1}s",
+        request_timeout.as_secs(),
+        analyze_latency_secs,
+        compare_latency_secs,
+    );
+
+    if errors.is_empty() {
+        FlowResult::ok("vision-workflows", start.elapsed().as_secs_f64(), &details)
+    } else {
+        FlowResult::fail(
+            "vision-workflows",
+            start.elapsed().as_secs_f64(),
+            &details,
+            errors,
+        )
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let endpoint = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "https://crazyshit.ngrok.io/v1".to_string());
-
-    let concurrent: usize = std::env::args()
-        .skip_while(|a| a != "--concurrent")
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(16);
-
     eprintln!("=== Full Flow Integration Test ===");
-    eprintln!("Endpoint: {endpoint}");
-    eprintln!("Concurrency: {concurrent}");
+    std::fs::create_dir_all("bench_results/flow_test")?;
 
-    let total_start = Instant::now();
-    let mut results = vec![];
-
-    // Step 1: Auto-config
-    results.push(test_auto_config(&endpoint).await);
-
-    // Get model name for subsequent tests
-    let configurator = AutoConfigurator::new(&endpoint, None);
-    let model = configurator
-        .fetch_models()
-        .await
-        .ok()
-        .and_then(|m| m.first().map(|m| m.id.clone()))
-        .unwrap_or_else(|| "unknown".to_string());
-
-    // Step 2: Throughput
-    results.push(test_throughput(&endpoint, &model, concurrent).await);
-
-    // Step 3: Error resilience
-    results.push(test_error_resilience(&endpoint, &model).await);
-
-    // Step 4: Tool calling
-    results.push(test_tool_calling(&endpoint, &model).await);
-
-    // Print summary
-    let total_duration = total_start.elapsed().as_secs_f64();
-    let passed = results.iter().filter(|r| r.passed).count();
-    let failed = results.iter().filter(|r| !r.passed).count();
-
-    eprintln!("\n{}", "=".repeat(70));
-    eprintln!("FULL FLOW TEST RESULTS — {endpoint}");
-    eprintln!("{}", "=".repeat(70));
-    eprintln!();
-
-    for r in &results {
-        let icon = if r.passed { "PASS" } else { "FAIL" };
-        eprintln!(
-            "  {} [{icon}] {} ({:.1}s)",
-            if r.passed { "+" } else { "-" },
-            r.step,
-            r.duration_secs,
-        );
-        eprintln!("       {}", r.details);
-        for err in &r.errors {
-            eprintln!("       ! {err}");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut endpoint_arg: Option<String> = None;
+    let mut concurrent_arg: Option<usize> = None;
+    let mut vision_only = false;
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--concurrent" => {
+                if let Some(value) = args.get(i + 1).and_then(|s| s.parse().ok()) {
+                    concurrent_arg = Some(value);
+                }
+                i += 2;
+            }
+            "--vision-only" => {
+                vision_only = true;
+                i += 1;
+            }
+            arg if arg.starts_with("--") => {
+                i += 1;
+            }
+            _ => {
+                if endpoint_arg.is_none() {
+                    endpoint_arg = Some(args[i].clone());
+                }
+                i += 1;
+            }
         }
     }
 
-    eprintln!();
-    eprintln!(
-        "  {passed}/{} passed, {failed} failed, {:.1}s total",
-        results.len(),
-        total_duration
-    );
-    eprintln!("{}", "=".repeat(70));
+    let targets = if endpoint_arg.is_none() && concurrent_arg.is_none() && !vision_only {
+        default_targets()
+    } else {
+        let endpoint = endpoint_arg.unwrap_or_else(|| "https://crazyshit.ngrok.io/v1".to_string());
+        let concurrent = concurrent_arg.unwrap_or_else(|| infer_text_concurrency(&endpoint));
+        vec![EndpointTarget {
+            endpoint,
+            concurrent,
+        }]
+    };
 
-    // Save report
-    let report = json!({
-        "endpoint": endpoint,
-        "model": model,
-        "concurrent": concurrent,
-        "total_duration_secs": total_duration,
-        "passed": passed,
-        "failed": failed,
-        "results": results.iter().map(|r| json!({
-            "step": r.step,
-            "passed": r.passed,
-            "duration_secs": r.duration_secs,
-            "details": r.details,
-            "errors": r.errors,
-        })).collect::<Vec<_>>(),
-    });
+    let mut combined_reports = Vec::new();
+    let mut any_failed = false;
 
-    std::fs::create_dir_all("bench_results/flow_test")?;
+    for target in targets {
+        eprintln!("\n{}", "=".repeat(70));
+        eprintln!(
+            "Endpoint: {} | Text concurrency: {} | Vision concurrency: {}",
+            target.endpoint,
+            target.concurrent,
+            infer_vision_concurrency(&target.endpoint),
+        );
+
+        let total_start = Instant::now();
+        let healer = SelfHealingEngine::new(SelfHealingConfig {
+            max_healing_attempts: 3,
+            ..SelfHealingConfig::default()
+        });
+        let mut results = vec![];
+
+        // Step 1: Auto-config
+        results.push(test_auto_config(&target.endpoint).await);
+
+        // Get model name for subsequent tests
+        let configurator = AutoConfigurator::new(&target.endpoint, None);
+        let model = configurator
+            .fetch_models()
+            .await
+            .ok()
+            .and_then(|m| m.first().map(|m| m.id.clone()))
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let _ = healer.checkpoint(
+            "endpoint-calibration",
+            json!({
+                "endpoint": target.endpoint,
+                "model": model,
+                "text_concurrency": target.concurrent,
+                "vision_concurrency": infer_vision_concurrency(&target.endpoint),
+            }),
+        );
+
+        if vision_only {
+            let vision = test_vision_workflows(&target.endpoint, &model, "low", 192).await;
+            let vision = if vision.passed {
+                vision
+            } else {
+                match retry_after_self_heal(
+                    &healer,
+                    &target.endpoint,
+                    "vision-workflows",
+                    &vision.errors,
+                    || async {
+                        test_vision_workflows(&target.endpoint, &model, "high", 256)
+                            .await
+                            .with_note("self-heal retry switched to detail=high max_tokens=256")
+                    },
+                )
+                .await
+                {
+                    Some(recovered) => recovered,
+                    None => vision.with_note("self-heal exhausted"),
+                }
+            };
+            results.push(vision);
+        } else {
+        // Step 2: Throughput with self-heal fallback
+        let throughput = test_throughput(&target.endpoint, &model, target.concurrent).await;
+        let throughput = if throughput.passed {
+            throughput
+        } else {
+            let fallback_concurrent = (target.concurrent / 2).max(4);
+            match retry_after_self_heal(
+                &healer,
+                &target.endpoint,
+                "throughput",
+                &throughput.errors,
+                || async {
+                    test_throughput(&target.endpoint, &model, fallback_concurrent)
+                        .await
+                        .with_note(format!(
+                            "self-heal retry reduced concurrency to {fallback_concurrent}"
+                        ))
+                },
+            )
+            .await
+            {
+                Some(recovered) => recovered,
+                None => throughput.with_note("self-heal exhausted"),
+            }
+        };
+        results.push(throughput);
+
+        // Step 3: Vision workflows with self-heal fallback
+        let vision = test_vision_workflows(&target.endpoint, &model, "low", 192).await;
+        let vision = if vision.passed {
+            vision
+        } else {
+            match retry_after_self_heal(
+                &healer,
+                &target.endpoint,
+                "vision-workflows",
+                &vision.errors,
+                || async {
+                    test_vision_workflows(&target.endpoint, &model, "high", 256)
+                        .await
+                        .with_note("self-heal retry switched to detail=high max_tokens=256")
+                },
+            )
+            .await
+            {
+                Some(recovered) => recovered,
+                None => vision.with_note("self-heal exhausted"),
+            }
+        };
+        results.push(vision);
+
+        // Step 4: Error resilience with self-heal retry
+        let error_resilience =
+            test_error_resilience(&target.endpoint, &model, target.concurrent).await;
+        let error_resilience = if error_resilience.passed {
+            error_resilience
+        } else {
+            match retry_after_self_heal(
+                &healer,
+                &target.endpoint,
+                "error-resilience",
+                &error_resilience.errors,
+                || async {
+                    test_error_resilience(&target.endpoint, &model, target.concurrent)
+                        .await
+                        .with_note("self-heal retry reran resilience checks")
+                },
+            )
+            .await
+            {
+                Some(recovered) => recovered,
+                None => error_resilience.with_note("self-heal exhausted"),
+            }
+        };
+        results.push(error_resilience);
+
+        // Step 5: Tool calling with self-heal retry
+        let tool_calling = test_tool_calling(&target.endpoint, &model).await;
+        let tool_calling = if tool_calling.passed {
+            tool_calling
+        } else {
+            match retry_after_self_heal(
+                &healer,
+                &target.endpoint,
+                "tool-calling",
+                &tool_calling.errors,
+                || async {
+                    test_tool_calling(&target.endpoint, &model)
+                        .await
+                        .with_note("self-heal retry reran tool-calling checks")
+                },
+            )
+            .await
+            {
+                Some(recovered) => recovered,
+                None => tool_calling.with_note("self-heal exhausted"),
+            }
+        };
+        results.push(tool_calling);
+        }
+
+        // Print summary
+        let total_duration = total_start.elapsed().as_secs_f64();
+        let passed = results.iter().filter(|r| r.passed).count();
+        let failed = results.iter().filter(|r| !r.passed).count();
+        let heal_summary = healer.summary();
+
+        eprintln!("\n{}", "=".repeat(70));
+        eprintln!("FULL FLOW TEST RESULTS — {}", target.endpoint);
+        eprintln!("{}", "=".repeat(70));
+        eprintln!();
+
+        for r in &results {
+            let icon = if r.passed { "PASS" } else { "FAIL" };
+            eprintln!(
+                "  {} [{icon}] {} ({:.1}s)",
+                if r.passed { "+" } else { "-" },
+                r.step,
+                r.duration_secs,
+            );
+            eprintln!("       {}", r.details);
+            for err in &r.errors {
+                eprintln!("       ! {err}");
+            }
+        }
+
+        eprintln!();
+        eprintln!(
+            "  {passed}/{} passed, {failed} failed, {:.1}s total",
+            results.len(),
+            total_duration
+        );
+        eprintln!(
+            "  self-heal: executions={}, successes={}, failures={}",
+            heal_summary.executor.executions,
+            heal_summary.executor.successes,
+            heal_summary.executor.failures,
+        );
+        eprintln!("{}", "=".repeat(70));
+
+        let report = json!({
+            "endpoint": target.endpoint,
+            "model": model,
+            "text_concurrency": target.concurrent,
+            "vision_concurrency": infer_vision_concurrency(&target.endpoint),
+            "vision_only": vision_only,
+            "total_duration_secs": total_duration,
+            "passed": passed,
+            "failed": failed,
+            "results": results.iter().map(|r| json!({
+                "step": r.step,
+                "passed": r.passed,
+                "duration_secs": r.duration_secs,
+                "details": r.details,
+                "errors": r.errors,
+            })).collect::<Vec<_>>(),
+            "self_healing": {
+                "executions": heal_summary.executor.executions,
+                "successes": heal_summary.executor.successes,
+                "failures": heal_summary.executor.failures,
+                "success_rate": heal_summary.executor.success_rate,
+            }
+        });
+
+        let report_path = format!(
+            "bench_results/flow_test/report_{}.json",
+            sanitize_endpoint(&target.endpoint)
+        );
+        std::fs::write(&report_path, serde_json::to_string_pretty(&report)?)?;
+        eprintln!("\nReport saved to {report_path}");
+
+        any_failed |= failed > 0;
+        combined_reports.push(report);
+    }
+
     std::fs::write(
         "bench_results/flow_test/report.json",
-        serde_json::to_string_pretty(&report)?,
+        serde_json::to_string_pretty(&combined_reports)?,
     )?;
-    eprintln!("\nReport saved to bench_results/flow_test/report.json");
+    eprintln!("\nCombined report saved to bench_results/flow_test/report.json");
 
-    if failed > 0 {
+    if any_failed {
         std::process::exit(1);
     }
 

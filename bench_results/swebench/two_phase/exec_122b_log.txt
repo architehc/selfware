@@ -1,0 +1,1547 @@
+Loaded 300 tasks, 293 patches
+  Skipping django__django-13401 (no patch)
+  Skipping django__django-15738 (no patch)
+  Skipping matplotlib__matplotlib-23987 (no patch)
+  Skipping matplotlib__matplotlib-25079 (no patch)
+  Skipping scikit-learn__scikit-learn-25747 (no patch)
+  Skipping sympy__sympy-12236 (no patch)
+  Skipping sympy__sympy-15609 (no patch)
+
+Evaluating 293 tasks with 4 concurrent containers
+Timeout: 600s per task
+
+  [astropy__astropy-12907] Starting Docker execution...
+  [astropy__astropy-14182] Starting Docker execution...
+  [astropy__astropy-14995] Starting Docker execution...
+  [astropy__astropy-14365] Starting Docker execution...
+  [astropy__astropy-12907] FAILED (68.8s)
+  [astropy__astropy-6938] Starting Docker execution...
+  [astropy__astropy-14995] FAILED (71.7s)
+  [astropy__astropy-7746] Starting Docker execution...
+  [astropy__astropy-14365] FAILED (73.2s)
+  [django__django-10914] Starting Docker execution...
+  [astropy__astropy-14182] FAILED (74.0s)
+  [django__django-10924] Starting Docker execution...
+  [astropy__astropy-6938] FAILED (56.8s)
+  [django__django-11001] Starting Docker execution...
+  [astropy__astropy-7746] FAILED (62.7s)
+  [django__django-11019] Starting Docker execution...
+  [django__django-10914] PATCHED (72.5s)
+  [django__django-11039] Starting Docker execution...
+  [django__django-10924] PATCHED (72.5s)
+  [django__django-11049] Starting Docker execution...
+  [django__django-11001] FAILED (70.4s)
+  [django__django-11099] Starting Docker execution...
+  [django__django-11019] FAILED (68.9s)
+  [django__django-11133] Starting Docker execution...
+  [django__django-11049] FAILED (66.8s)
+  [django__django-11179] Starting Docker execution...
+  [django__django-11039] FAILED (68.6s)
+  [django__django-11283] Starting Docker execution...
+  [django__django-11099] FAILED (63.5s)
+  [django__django-11422] Starting Docker execution...
+  [django__django-11133] FAILED (69.6s)
+  [django__django-11564] Starting Docker execution...
+  [django__django-11179] PATCHED (68.7s)
+  [django__django-11583] Starting Docker execution...
+  [django__django-11283] FAILED (69.9s)
+  [django__django-11620] Starting Docker execution...
+  [django__django-11422] FAILED (100.8s)
+  [django__django-11630] Starting Docker execution...
+  [django__django-11564] FAILED (92.6s)
+  [django__django-11742] Starting Docker execution...
+  [django__django-11583] FAILED (91.2s)
+  [django__django-11797] Starting Docker execution...
+  [django__django-11620] FAILED (93.9s)
+  [django__django-11815] Starting Docker execution...
+  [django__django-11630] FAILED (84.6s)
+  [django__django-11848] Starting Docker execution...
+  [django__django-11742] PATCHED (100.1s)
+  [django__django-11905] Starting Docker execution...
+  [django__django-11815] FAILED (91.6s)
+  [django__django-11910] Starting Docker execution...
+  [django__django-11797] FAILED (101.9s)
+  [django__django-11964] Starting Docker execution...
+  [django__django-11848] FAILED (85.3s)
+  [django__django-11999] Starting Docker execution...
+  [django__django-11905] PATCHED (93.2s)
+  [django__django-12113] Starting Docker execution...
+  [django__django-11910] FAILED (94.1s)
+  [django__django-12125] Starting Docker execution...
+  [django__django-11964] FAILED (92.9s)
+  [django__django-12184] Starting Docker execution...
+  [django__django-11999] FAILED (96.6s)
+  [django__django-12284] Starting Docker execution...
+  [django__django-12113] FAILED (90.5s)
+  [django__django-12286] Starting Docker execution...
+  [django__django-12125] PATCHED (91.4s)
+  [django__django-12308] Starting Docker execution...
+  [django__django-12184] PATCHED (93.4s)
+  [django__django-12453] Starting Docker execution...
+  [django__django-12284] FAILED (92.9s)
+  [django__django-12470] Starting Docker execution...
+  [django__django-12286] FAILED (83.0s)
+  [django__django-12497] Starting Docker execution...
+  [django__django-12308] FAILED (82.1s)
+  [django__django-12589] Starting Docker execution...
+  [django__django-12453] FAILED (81.6s)
+  [django__django-12700] Starting Docker execution...
+  [django__django-12470] PATCHED (81.6s)
+  [django__django-12708] Starting Docker execution...
+  [django__django-12497] FAILED (83.8s)
+  [django__django-12747] Starting Docker execution...
+  [django__django-12589] PATCHED (84.1s)
+  [django__django-12856] Starting Docker execution...
+  [django__django-12700] FAILED (85.8s)
+  [django__django-12908] Starting Docker execution...
+  [django__django-12708] FAILED (92.2s)
+  [django__django-12915] Starting Docker execution...
+  [django__django-12747] RESOLVED (87.1s)
+  [django__django-12983] Starting Docker execution...
+  [django__django-12856] FAILED (89.6s)
+  [django__django-13028] Starting Docker execution...
+  [django__django-12908] PATCHED (83.3s)
+  [django__django-13033] Starting Docker execution...
+  [django__django-12915] FAILED (88.8s)
+  [django__django-13158] Starting Docker execution...
+  [django__django-12983] FAILED (81.0s)
+  [django__django-13220] Starting Docker execution...
+  [django__django-13028] RESOLVED (82.5s)
+  [django__django-13230] Starting Docker execution...
+  [django__django-13033] FAILED (79.7s)
+  [django__django-13265] Starting Docker execution...
+  [django__django-13158] FAILED (92.2s)
+  [django__django-13315] Starting Docker execution...
+  [django__django-13220] FAILED (94.2s)
+  [django__django-13321] Starting Docker execution...
+  [django__django-13230] FAILED (93.0s)
+  [django__django-13447] Starting Docker execution...
+  [django__django-13265] PATCHED (95.7s)
+  [django__django-13448] Starting Docker execution...
+  [django__django-13315] FAILED (86.7s)
+  [django__django-13551] Starting Docker execution...
+  [django__django-13321] FAILED (83.7s)
+  [django__django-13590] Starting Docker execution...
+  [django__django-13447] FAILED (85.7s)
+  [django__django-13658] Starting Docker execution...
+  [django__django-13448] FAILED (85.6s)
+  [django__django-13660] Starting Docker execution...
+  [django__django-13551] FAILED (83.1s)
+  [django__django-13710] Starting Docker execution...
+  [django__django-13590] FAILED (83.9s)
+  [django__django-13757] Starting Docker execution...
+  [django__django-13660] FAILED (82.0s)
+  [django__django-13768] Starting Docker execution...
+  [django__django-13658] FAILED (148.8s)
+  [django__django-13925] Starting Docker execution...
+  [django__django-13757] FAILED (87.5s)
+  [django__django-13933] Starting Docker execution...
+  [django__django-13768] FAILED (81.3s)
+  [django__django-13964] Starting Docker execution...
+  [django__django-13710] FAILED (93.9s)
+  [django__django-14016] Starting Docker execution...
+  [django__django-13925] PATCHED (80.9s)
+  [django__django-14017] Starting Docker execution...
+  [django__django-13933] FAILED (82.9s)
+  [django__django-14155] Starting Docker execution...
+  [django__django-13964] RESOLVED (80.6s)
+  [django__django-14238] Starting Docker execution...
+  [django__django-14016] FAILED (78.9s)
+  [django__django-14382] Starting Docker execution...
+  [django__django-14017] FAILED (84.4s)
+  [django__django-14411] Starting Docker execution...
+  [django__django-14155] FAILED (87.1s)
+  [django__django-14534] Starting Docker execution...
+  [django__django-14238] FAILED (89.0s)
+  [django__django-14580] Starting Docker execution...
+  [django__django-14382] FAILED (134.5s)
+  [django__django-14608] Starting Docker execution...
+  [django__django-14411] FAILED (83.6s)
+  [django__django-14667] Starting Docker execution...
+  [django__django-14580] PATCHED (81.4s)
+  [django__django-14672] Starting Docker execution...
+  [django__django-14534] PATCHED (84.4s)
+  [django__django-14730] Starting Docker execution...
+  [django__django-14667] FAILED (83.4s)
+  [django__django-14752] Starting Docker execution...
+  [django__django-14672] PATCHED (84.6s)
+  [django__django-14787] Starting Docker execution...
+  [django__django-14730] FAILED (84.7s)
+  [django__django-14855] Starting Docker execution...
+  [django__django-14608] FAILED (134.7s)
+  [django__django-14915] Starting Docker execution...
+  [django__django-14752] FAILED (85.6s)
+  [django__django-14997] Starting Docker execution...
+  [django__django-14787] FAILED (83.1s)
+  [django__django-14999] Starting Docker execution...
+  [django__django-14915] PATCHED (76.1s)
+  [django__django-15061] Starting Docker execution...
+  [django__django-14855] FAILED (120.9s)
+  [django__django-15202] Starting Docker execution...
+  [django__django-14997] PATCHED (83.5s)
+  [django__django-15213] Starting Docker execution...
+  [django__django-14999] RESOLVED (84.2s)
+  [django__django-15252] Starting Docker execution...
+  [django__django-15061] FAILED (77.6s)
+  [django__django-15320] Starting Docker execution...
+  [django__django-15202] FAILED (76.6s)
+  [django__django-15347] Starting Docker execution...
+  [django__django-15213] PATCHED (85.0s)
+  [django__django-15388] Starting Docker execution...
+  [django__django-15320] FAILED (81.2s)
+  [django__django-15400] Starting Docker execution...
+  [django__django-15252] FAILED (85.6s)
+  [django__django-15498] Starting Docker execution...
+  [django__django-15347] PATCHED (81.3s)
+  [django__django-15695] Starting Docker execution...
+  [django__django-15388] FAILED (88.7s)
+  [django__django-15781] Starting Docker execution...
+  [django__django-15400] FAILED (90.0s)
+  [django__django-15789] Starting Docker execution...
+  [django__django-15498] RESOLVED (95.7s)
+  [django__django-15790] Starting Docker execution...
+  [django__django-15695] FAILED (86.6s)
+  [django__django-15814] Starting Docker execution...
+  [django__django-15781] FAILED (84.9s)
+  [django__django-15819] Starting Docker execution...
+  [django__django-15789] FAILED (80.3s)
+  [django__django-15851] Starting Docker execution...
+  [django__django-15790] PATCHED (80.7s)
+  [django__django-15902] Starting Docker execution...
+  [django__django-15814] PATCHED (82.2s)
+  [django__django-15996] Starting Docker execution...
+  [django__django-15819] FAILED (82.0s)
+  [django__django-16041] Starting Docker execution...
+  [django__django-15851] FAILED (85.9s)
+  [django__django-16046] Starting Docker execution...
+  [django__django-15902] PATCHED (85.9s)
+  [django__django-16139] Starting Docker execution...
+  [django__django-15996] FAILED (83.5s)
+  [django__django-16229] Starting Docker execution...
+  [django__django-16041] FAILED (80.2s)
+  [django__django-16255] Starting Docker execution...
+  [django__django-16046] RESOLVED (86.6s)
+  [django__django-16379] Starting Docker execution...
+  [django__django-16139] FAILED (88.1s)
+  [django__django-16400] Starting Docker execution...
+  [django__django-16229] FAILED (78.7s)
+  [django__django-16408] Starting Docker execution...
+  [django__django-16255] FAILED (80.5s)
+  [django__django-16527] Starting Docker execution...
+  [django__django-16408] FAILED (71.5s)
+  [django__django-16595] Starting Docker execution...
+  [django__django-16400] FAILED (79.3s)
+  [django__django-16816] Starting Docker execution...
+  [django__django-16527] FAILED (64.7s)
+  [django__django-16820] Starting Docker execution...
+  [django__django-16595] FAILED (71.3s)
+  [django__django-16873] Starting Docker execution...
+  [django__django-16816] FAILED (71.5s)
+  [django__django-16910] Starting Docker execution...
+  [django__django-16820] FAILED (56.8s)
+  [django__django-17051] Starting Docker execution...
+  [django__django-16379] FAILED (212.7s)
+  [django__django-17087] Starting Docker execution...
+  [django__django-16873] FAILED (73.7s)
+  [django__django-16910] FAILED (73.0s)
+  [matplotlib__matplotlib-18869] Starting Docker execution...
+  [matplotlib__matplotlib-22711] Starting Docker execution...
+  [django__django-17051] FAILED (65.6s)
+  [matplotlib__matplotlib-22835] Starting Docker execution...
+  [django__django-17087] FAILED (60.3s)
+  [matplotlib__matplotlib-23299] Starting Docker execution...
+  [matplotlib__matplotlib-18869] FAILED (148.1s)
+  [matplotlib__matplotlib-23314] Starting Docker execution...
+  [matplotlib__matplotlib-22711] FAILED (162.7s)
+  [matplotlib__matplotlib-23476] Starting Docker execution...
+  [matplotlib__matplotlib-22835] PATCHED (158.5s)
+  [matplotlib__matplotlib-23562] Starting Docker execution...
+  [matplotlib__matplotlib-23299] FAILED (147.2s)
+  [matplotlib__matplotlib-23563] Starting Docker execution...
+  [matplotlib__matplotlib-23314] FAILED (154.0s)
+  [matplotlib__matplotlib-23913] Starting Docker execution...
+  [matplotlib__matplotlib-23476] FAILED (144.9s)
+  [matplotlib__matplotlib-23964] Starting Docker execution...
+  [matplotlib__matplotlib-23562] PATCHED (144.4s)
+  [matplotlib__matplotlib-24149] Starting Docker execution...
+  [matplotlib__matplotlib-23563] FAILED (149.3s)
+  [matplotlib__matplotlib-24265] Starting Docker execution...
+  [matplotlib__matplotlib-23913] FAILED (160.3s)
+  [matplotlib__matplotlib-24334] Starting Docker execution...
+  [matplotlib__matplotlib-23964] FAILED (159.5s)
+  [matplotlib__matplotlib-24970] Starting Docker execution...
+  [matplotlib__matplotlib-24149] PATCHED (156.0s)
+  [matplotlib__matplotlib-25311] Starting Docker execution...
+  [matplotlib__matplotlib-24265] FAILED (154.7s)
+  [matplotlib__matplotlib-25332] Starting Docker execution...
+  [matplotlib__matplotlib-24334] FAILED (156.2s)
+  [matplotlib__matplotlib-25433] Starting Docker execution...
+  [matplotlib__matplotlib-24970] FAILED (160.3s)
+  [matplotlib__matplotlib-25442] Starting Docker execution...
+  [matplotlib__matplotlib-25311] FAILED (160.5s)
+  [matplotlib__matplotlib-25498] Starting Docker execution...
+  [matplotlib__matplotlib-25332] PATCHED (155.5s)
+  [matplotlib__matplotlib-26011] Starting Docker execution...
+  [matplotlib__matplotlib-25433] PATCHED (157.2s)
+  [matplotlib__matplotlib-26020] Starting Docker execution...
+  [matplotlib__matplotlib-25442] FAILED (166.7s)
+  [mwaskom__seaborn-2848] Starting Docker execution...
+  [matplotlib__matplotlib-25498] PATCHED (170.5s)
+  [mwaskom__seaborn-3010] Starting Docker execution...
+  [matplotlib__matplotlib-26011] FAILED (165.8s)
+  [mwaskom__seaborn-3190] Starting Docker execution...
+  [mwaskom__seaborn-2848] FAILED (78.1s)
+  [mwaskom__seaborn-3407] Starting Docker execution...
+  [mwaskom__seaborn-3010] FAILED (79.1s)
+  [pallets__flask-4045] Starting Docker execution...
+  [mwaskom__seaborn-3190] PATCHED (82.6s)
+  [pallets__flask-4992] Starting Docker execution...
+  [matplotlib__matplotlib-26020] PATCHED (149.8s)
+  [pallets__flask-5063] Starting Docker execution...
+  [mwaskom__seaborn-3407] PATCHED (72.2s)
+  [psf__requests-1963] Starting Docker execution...
+  [pallets__flask-4045] PATCHED (63.8s)
+  [psf__requests-2148] Starting Docker execution...
+  [pallets__flask-4992] FAILED (65.0s)
+  [psf__requests-2317] Starting Docker execution...
+  [pallets__flask-5063] FAILED (63.1s)
+  [psf__requests-2674] Starting Docker execution...
+  [psf__requests-1963] FAILED (67.2s)
+  [psf__requests-3362] Starting Docker execution...
+  [psf__requests-2148] FAILED (67.4s)
+  [psf__requests-863] Starting Docker execution...
+  [psf__requests-2317] PATCHED (61.5s)
+  [pydata__xarray-3364] Starting Docker execution...
+  [psf__requests-2674] PATCHED (66.8s)
+  [pydata__xarray-4094] Starting Docker execution...
+  [psf__requests-863] FAILED (65.6s)
+  [pydata__xarray-4248] Starting Docker execution...
+  [psf__requests-3362] FAILED (71.1s)
+  [pydata__xarray-4493] Starting Docker execution...
+  [pydata__xarray-3364] FAILED (70.8s)
+  [pydata__xarray-5131] Starting Docker execution...
+  [pydata__xarray-4094] FAILED (76.9s)
+  [pylint-dev__pylint-5859] Starting Docker execution...
+  [pydata__xarray-4248] FAILED (70.7s)
+  [pylint-dev__pylint-6506] Starting Docker execution...
+  [pydata__xarray-4493] FAILED (70.3s)
+  [pylint-dev__pylint-7080] Starting Docker execution...
+  [pydata__xarray-5131] FAILED (73.6s)
+  [pylint-dev__pylint-7114] Starting Docker execution...
+  [pylint-dev__pylint-5859] FAILED (65.7s)
+  [pylint-dev__pylint-7228] Starting Docker execution...
+  [pylint-dev__pylint-6506] FAILED (68.8s)
+  [pylint-dev__pylint-7993] Starting Docker execution...
+  [pylint-dev__pylint-7080] PATCHED (67.2s)
+  [pytest-dev__pytest-11143] Starting Docker execution...
+  [pylint-dev__pylint-7114] FAILED (67.8s)
+  [pytest-dev__pytest-11148] Starting Docker execution...
+  [pylint-dev__pylint-7228] FAILED (76.5s)
+  [pytest-dev__pytest-5103] Starting Docker execution...
+  [pytest-dev__pytest-11143] FAILED (63.5s)
+  [pytest-dev__pytest-5221] Starting Docker execution...
+  [pylint-dev__pylint-7993] FAILED (70.7s)
+  [pytest-dev__pytest-5227] Starting Docker execution...
+  [pytest-dev__pytest-11148] PATCHED (61.5s)
+  [pytest-dev__pytest-5413] Starting Docker execution...
+  [pytest-dev__pytest-5103] FAILED (59.4s)
+  [pytest-dev__pytest-5495] Starting Docker execution...
+  [pytest-dev__pytest-5221] FAILED (68.8s)
+  [pytest-dev__pytest-5692] Starting Docker execution...
+  [pytest-dev__pytest-5227] FAILED (66.4s)
+  [pytest-dev__pytest-6116] Starting Docker execution...
+  [pytest-dev__pytest-5413] PATCHED (63.8s)
+  [pytest-dev__pytest-7168] Starting Docker execution...
+  [pytest-dev__pytest-5495] PATCHED (62.4s)
+  [pytest-dev__pytest-7220] Starting Docker execution...
+  [pytest-dev__pytest-5692] FAILED (64.8s)
+  [pytest-dev__pytest-7373] Starting Docker execution...
+  [pytest-dev__pytest-6116] FAILED (66.8s)
+  [pytest-dev__pytest-7432] Starting Docker execution...
+  [pytest-dev__pytest-7168] FAILED (67.1s)
+  [pytest-dev__pytest-7490] Starting Docker execution...
+  [pytest-dev__pytest-7220] FAILED (59.5s)
+  [pytest-dev__pytest-8365] Starting Docker execution...
+  [pytest-dev__pytest-7373] FAILED (64.2s)
+  [pytest-dev__pytest-8906] Starting Docker execution...
+  [pytest-dev__pytest-7432] FAILED (64.8s)
+  [pytest-dev__pytest-9359] Starting Docker execution...
+  [pytest-dev__pytest-7490] FAILED (62.5s)
+  [scikit-learn__scikit-learn-10297] Starting Docker execution...
+  [pytest-dev__pytest-8365] FAILED (61.6s)
+  [scikit-learn__scikit-learn-10508] Starting Docker execution...
+  [pytest-dev__pytest-8906] FAILED (63.8s)
+  [scikit-learn__scikit-learn-10949] Starting Docker execution...
+  [pytest-dev__pytest-9359] FAILED (71.4s)
+  [scikit-learn__scikit-learn-11040] Starting Docker execution...
+  [scikit-learn__scikit-learn-10297] FAILED (75.1s)
+  [scikit-learn__scikit-learn-11281] Starting Docker execution...
+  [scikit-learn__scikit-learn-10508] FAILED (68.7s)
+  [scikit-learn__scikit-learn-12471] Starting Docker execution...
+  [scikit-learn__scikit-learn-10949] FAILED (69.4s)
+  [scikit-learn__scikit-learn-13142] Starting Docker execution...
+  [scikit-learn__scikit-learn-11040] FAILED (67.8s)
+  [scikit-learn__scikit-learn-13241] Starting Docker execution...
+  [scikit-learn__scikit-learn-11281] FAILED (81.3s)
+  [scikit-learn__scikit-learn-13439] Starting Docker execution...
+  [scikit-learn__scikit-learn-12471] FAILED (65.9s)
+  [scikit-learn__scikit-learn-13496] Starting Docker execution...
+  [scikit-learn__scikit-learn-13142] FAILED (70.9s)
+  [scikit-learn__scikit-learn-13497] Starting Docker execution...
+  [scikit-learn__scikit-learn-13241] FAILED (63.7s)
+  [scikit-learn__scikit-learn-13584] Starting Docker execution...
+  [scikit-learn__scikit-learn-13439] FAILED (66.9s)
+  [scikit-learn__scikit-learn-13779] Starting Docker execution...
+  [scikit-learn__scikit-learn-13496] FAILED (64.4s)
+  [scikit-learn__scikit-learn-14087] Starting Docker execution...
+  [scikit-learn__scikit-learn-13497] FAILED (61.2s)
+  [scikit-learn__scikit-learn-14092] Starting Docker execution...
+  [scikit-learn__scikit-learn-13584] FAILED (59.3s)
+  [scikit-learn__scikit-learn-14894] Starting Docker execution...
+  [scikit-learn__scikit-learn-13779] FAILED (59.0s)
+  [scikit-learn__scikit-learn-14983] Starting Docker execution...
+  [scikit-learn__scikit-learn-14087] FAILED (58.8s)
+  [scikit-learn__scikit-learn-15512] Starting Docker execution...
+  [scikit-learn__scikit-learn-14092] FAILED (61.2s)
+  [scikit-learn__scikit-learn-15535] Starting Docker execution...
+  [scikit-learn__scikit-learn-14894] FAILED (60.0s)
+  [scikit-learn__scikit-learn-25500] Starting Docker execution...
+  [scikit-learn__scikit-learn-14983] FAILED (60.3s)
+  [scikit-learn__scikit-learn-25570] Starting Docker execution...
+  [scikit-learn__scikit-learn-15512] FAILED (58.1s)
+  [scikit-learn__scikit-learn-25638] Starting Docker execution...
+  [scikit-learn__scikit-learn-15535] FAILED (63.2s)
+  [sphinx-doc__sphinx-10325] Starting Docker execution...
+  [sphinx-doc__sphinx-10325] FAILED (51.4s)
+  [sphinx-doc__sphinx-10451] Starting Docker execution...
+  [sphinx-doc__sphinx-10451] FAILED (42.1s)
+  [sphinx-doc__sphinx-11445] Starting Docker execution...
+  [sphinx-doc__sphinx-11445] FAILED (34.2s)
+  [sphinx-doc__sphinx-7686] Starting Docker execution...
+  [sphinx-doc__sphinx-7686] FAILED (34.8s)
+  [sphinx-doc__sphinx-7738] Starting Docker execution...
+  [sphinx-doc__sphinx-7738] PATCHED (32.8s)
+  [sphinx-doc__sphinx-7975] Starting Docker execution...
+  [sphinx-doc__sphinx-7975] FAILED (33.6s)
+  [sphinx-doc__sphinx-8273] Starting Docker execution...
+  [scikit-learn__scikit-learn-25500] FAILED (297.3s)
+  [sphinx-doc__sphinx-8282] Starting Docker execution...
+  [scikit-learn__scikit-learn-25638] PATCHED (288.3s)
+  [sphinx-doc__sphinx-8435] Starting Docker execution...
+  [scikit-learn__scikit-learn-25570] FAILED (298.6s)
+  [sphinx-doc__sphinx-8474] Starting Docker execution...
+  [sphinx-doc__sphinx-8273] FAILED (42.1s)
+  [sphinx-doc__sphinx-8506] Starting Docker execution...
+  [sphinx-doc__sphinx-8282] FAILED (40.4s)
+  [sphinx-doc__sphinx-8595] Starting Docker execution...
+  [sphinx-doc__sphinx-8435] FAILED (40.4s)
+  [sphinx-doc__sphinx-8627] Starting Docker execution...
+  [sphinx-doc__sphinx-8474] FAILED (43.7s)
+  [sphinx-doc__sphinx-8713] Starting Docker execution...
+  [sphinx-doc__sphinx-8506] FAILED (42.2s)
+  [sphinx-doc__sphinx-8721] Starting Docker execution...
+  [sphinx-doc__sphinx-8595] FAILED (41.1s)
+  [sphinx-doc__sphinx-8801] Starting Docker execution...
+  [sphinx-doc__sphinx-8627] PATCHED (39.8s)
+  [sympy__sympy-11400] Starting Docker execution...
+  [sphinx-doc__sphinx-8713] FAILED (38.5s)
+  [sympy__sympy-11870] Starting Docker execution...
+  [sphinx-doc__sphinx-8721] FAILED (44.9s)
+  [sympy__sympy-11897] Starting Docker execution...
+  [sphinx-doc__sphinx-8801] FAILED (43.5s)
+  [sympy__sympy-12171] Starting Docker execution...
+  [sympy__sympy-11400] PATCHED (45.5s)
+  [sympy__sympy-12419] Starting Docker execution...
+  [sympy__sympy-11870] PATCHED (47.2s)
+  [sympy__sympy-12454] Starting Docker execution...
+  [sympy__sympy-11897] PATCHED (49.6s)
+  [sympy__sympy-12481] Starting Docker execution...
+  [sympy__sympy-12171] FAILED (50.5s)
+  [sympy__sympy-13031] Starting Docker execution...
+  [sympy__sympy-12419] FAILED (43.8s)
+  [sympy__sympy-13043] Starting Docker execution...
+  [sympy__sympy-12454] PATCHED (44.4s)
+  [sympy__sympy-13146] Starting Docker execution...
+  [sympy__sympy-12481] FAILED (55.7s)
+  [sympy__sympy-13177] Starting Docker execution...
+  [sympy__sympy-13031] FAILED (55.8s)
+  [sympy__sympy-13437] Starting Docker execution...
+  [sympy__sympy-13043] FAILED (48.5s)
+  [sympy__sympy-13471] Starting Docker execution...
+  [sympy__sympy-13146] PATCHED (42.6s)
+  [sympy__sympy-13480] Starting Docker execution...
+  [sympy__sympy-13177] FAILED (46.2s)
+  [sympy__sympy-13647] Starting Docker execution...
+  [sympy__sympy-13437] PATCHED (49.2s)
+  [sympy__sympy-13773] Starting Docker execution...
+  [sympy__sympy-13471] FAILED (50.1s)
+  [sympy__sympy-13895] Starting Docker execution...
+  [sympy__sympy-13480] FAILED (46.2s)
+  [sympy__sympy-13915] Starting Docker execution...
+  [sympy__sympy-13647] PATCHED (46.7s)
+  [sympy__sympy-13971] Starting Docker execution...
+  [sympy__sympy-13773] FAILED (48.0s)
+  [sympy__sympy-14024] Starting Docker execution...
+  [sympy__sympy-13915] FAILED (47.4s)
+  [sympy__sympy-14308] Starting Docker execution...
+  [sympy__sympy-13895] FAILED (49.4s)
+  [sympy__sympy-14317] Starting Docker execution...
+  [sympy__sympy-13971] FAILED (47.1s)
+  [sympy__sympy-14396] Starting Docker execution...
+  [sympy__sympy-14024] PATCHED (47.6s)
+  [sympy__sympy-14774] Starting Docker execution...
+  [sympy__sympy-14317] FAILED (48.6s)
+  [sympy__sympy-14817] Starting Docker execution...
+  [sympy__sympy-14308] FAILED (51.0s)
+  [sympy__sympy-15011] Starting Docker execution...
+  [sympy__sympy-14396] FAILED (41.7s)
+  [sympy__sympy-15308] Starting Docker execution...
+  [sympy__sympy-14774] FAILED (48.6s)
+  [sympy__sympy-15345] Starting Docker execution...
+  [sympy__sympy-15011] FAILED (49.4s)
+  [sympy__sympy-15346] Starting Docker execution...
+  [sympy__sympy-14817] FAILED (53.2s)
+  [sympy__sympy-15678] Starting Docker execution...
+  [sympy__sympy-15308] FAILED (48.3s)
+  [sympy__sympy-16106] Starting Docker execution...
+  [sympy__sympy-15345] FAILED (40.1s)
+  [sympy__sympy-16281] Starting Docker execution...
+  [sympy__sympy-15678] FAILED (51.1s)
+  [sympy__sympy-16503] Starting Docker execution...
+  [sympy__sympy-15346] FAILED (57.6s)
+  [sympy__sympy-16792] Starting Docker execution...
+  [sympy__sympy-16106] FAILED (48.3s)
+  [sympy__sympy-16988] Starting Docker execution...
+  [sympy__sympy-16281] FAILED (47.8s)
+  [sympy__sympy-17022] Starting Docker execution...
+  [sympy__sympy-16503] PATCHED (45.9s)
+  [sympy__sympy-17139] Starting Docker execution...
+  [sympy__sympy-16792] PATCHED (48.0s)
+  [sympy__sympy-17630] Starting Docker execution...
+  [sympy__sympy-16988] FAILED (45.2s)
+  [sympy__sympy-17655] Starting Docker execution...
+  [sympy__sympy-17022] PATCHED (48.2s)
+  [sympy__sympy-18057] Starting Docker execution...
+  [sympy__sympy-17139] FAILED (48.3s)
+  [sympy__sympy-18087] Starting Docker execution...
+  [sympy__sympy-17630] FAILED (51.3s)
+  [sympy__sympy-18189] Starting Docker execution...
+  [sympy__sympy-17655] FAILED (47.3s)
+  [sympy__sympy-18199] Starting Docker execution...
+  [sympy__sympy-18057] PATCHED (45.1s)
+  [sympy__sympy-18532] Starting Docker execution...
+  [sympy__sympy-18087] FAILED (49.7s)
+  [sympy__sympy-18621] Starting Docker execution...
+  [sympy__sympy-18189] PATCHED (50.3s)
+  [sympy__sympy-18698] Starting Docker execution...
+  [sympy__sympy-18199] PATCHED (48.0s)
+  [sympy__sympy-18835] Starting Docker execution...
+  [sympy__sympy-18532] FAILED (45.4s)
+  [sympy__sympy-19007] Starting Docker execution...
+  [sympy__sympy-18621] PATCHED (45.5s)
+  [sympy__sympy-19254] Starting Docker execution...
+  [sympy__sympy-18698] FAILED (48.4s)
+  [sympy__sympy-19487] Starting Docker execution...
+  [sympy__sympy-18835] FAILED (48.2s)
+  [sympy__sympy-20049] Starting Docker execution...
+  [sympy__sympy-19007] FAILED (44.9s)
+  [sympy__sympy-20154] Starting Docker execution...
+  [sympy__sympy-19254] FAILED (48.4s)
+  [sympy__sympy-20212] Starting Docker execution...
+  [sympy__sympy-19487] FAILED (47.5s)
+  [sympy__sympy-20322] Starting Docker execution...
+  [sympy__sympy-20049] PATCHED (44.8s)
+  [sympy__sympy-20442] Starting Docker execution...
+  [sympy__sympy-20154] FAILED (49.9s)
+  [sympy__sympy-20590] Starting Docker execution...
+  [sympy__sympy-20212] FAILED (50.5s)
+  [sympy__sympy-20639] Starting Docker execution...
+  [sympy__sympy-20322] PATCHED (47.7s)
+  [sympy__sympy-21055] Starting Docker execution...
+  [sympy__sympy-20442] FAILED (44.5s)
+  [sympy__sympy-21171] Starting Docker execution...
+  [sympy__sympy-20590] PATCHED (44.7s)
+  [sympy__sympy-21379] Starting Docker execution...
+  [sympy__sympy-20639] FAILED (40.3s)
+  [sympy__sympy-21612] Starting Docker execution...
+  [sympy__sympy-21171] FAILED (48.8s)
+  [sympy__sympy-21614] Starting Docker execution...
+  [sympy__sympy-21379] FAILED (46.9s)
+  [sympy__sympy-21627] Starting Docker execution...
+  [sympy__sympy-21055] PATCHED (57.1s)
+  [sympy__sympy-21847] Starting Docker execution...
+  [sympy__sympy-21612] PATCHED (49.2s)
+  [sympy__sympy-22005] Starting Docker execution...
+  [sympy__sympy-21614] FAILED (48.1s)
+  [sympy__sympy-22714] Starting Docker execution...
+  [sympy__sympy-21627] PATCHED (49.1s)
+  [sympy__sympy-22840] Starting Docker execution...
+  [sympy__sympy-21847] FAILED (49.4s)
+  [sympy__sympy-23117] Starting Docker execution...
+  [sympy__sympy-22005] PATCHED (48.1s)
+  [sympy__sympy-23191] Starting Docker execution...
+  [sympy__sympy-22714] FAILED (46.6s)
+  [sympy__sympy-23262] Starting Docker execution...
+  [sympy__sympy-23117] PATCHED (52.5s)
+  [sympy__sympy-24066] Starting Docker execution...
+  [sympy__sympy-22840] PATCHED (54.2s)
+  [sympy__sympy-24102] Starting Docker execution...
+  [sympy__sympy-23191] FAILED (40.9s)
+  [sympy__sympy-24152] Starting Docker execution...
+  [sympy__sympy-23262] FAILED (46.7s)
+  [sympy__sympy-24213] Starting Docker execution...
+  [sympy__sympy-24102] FAILED (52.0s)
+  [sympy__sympy-24909] Starting Docker execution...
+  [sympy__sympy-24066] FAILED (50.2s)
+  [sympy__sympy-24152] FAILED (44.5s)
+  [sympy__sympy-24213] FAILED (45.9s)
+  [sympy__sympy-24909] PATCHED (36.0s)
+
+============================================================
+SWE-BENCH EXECUTION RESULTS
+============================================================
+Total tasks:     293
+Patches applied: 72/293 (25%)
+Tests passed:    6/293 (2%)
+RESOLVED:        6/293 (2%)
+Duration:        5635.2s
+============================================================
+
+Instance                                       Patch  Tests     Result     Time
+--------------------------------------------------------------------------------
+astropy__astropy-12907                          FAIL   FAIL     FAILED    68.8s
+  !      [end of output]
+  
+  note: This error originates from a subprocess, and is 
+astropy__astropy-14182                          FAIL   FAIL     FAILED    74.0s
+  !      [end of output]
+  
+  note: This error originates from a subprocess, and is 
+astropy__astropy-14365                          FAIL   FAIL     FAILED    73.2s
+  !      [end of output]
+  
+  note: This error originates from a subprocess, and is 
+astropy__astropy-14995                          FAIL   FAIL     FAILED    71.7s
+  !      [end of output]
+  
+  note: This error originates from a subprocess, and is 
+astropy__astropy-6938                           FAIL   FAIL     FAILED    56.8s
+  ! [end of output]
+  
+  note: This error originates from a subprocess, and is likel
+astropy__astropy-7746                           FAIL   FAIL     FAILED    62.7s
+  ! ces'
+      [end of output]
+  
+  note: This error originates from a subprocess, a
+django__django-10914                              OK   FAIL     FAILED    72.5s
+django__django-10924                              OK   FAIL     FAILED    72.5s
+django__django-11001                            FAIL   FAIL     FAILED    70.4s
+  ! table expressions_time
+    Creating table expressions_simulationrun
+    Creating
+django__django-11019                            FAIL   FAIL     FAILED    68.9s
+  ! min_widgets_advisor
+    Creating table admin_widgets_student
+    Creating table 
+django__django-11039                            FAIL   FAIL     FAILED    68.6s
+  ! e auth_user
+    Creating table django_session
+    Creating table migrations_mode
+django__django-11049                            FAIL   FAIL     FAILED    66.8s
+  ! l
+    Creating table model_fields_relatedtouuidmodel
+    Creating table model_fi
+django__django-11099                            FAIL   FAIL     FAILED    63.5s
+  ! le auth_tests_customuserwithfk
+    Creating table auth_tests_integerusernameuser
+django__django-11133                            FAIL   FAIL     FAILED    69.6s
+  ! pwrappers/tests.py", line 371, in test_memoryview_content
+    self.assertEqual(r
+django__django-11179                              OK   FAIL     FAILED    68.7s
+django__django-11283                            FAIL   FAIL     FAILED    69.9s
+  ! le auth_tests_customuserwithfk
+    Creating table auth_tests_integerusernameuser
+django__django-11422                            FAIL   FAIL     FAILED   100.8s
+  ! uptools/_imp.py'), PosixPath('/usr/local/lib/python3.9/pickle.py'), PosixPath('/
+django__django-11564                            FAIL   FAIL     FAILED    92.6s
+  ! _content_type
+    Creating table auth_permission
+    Creating table auth_group
+ 
+django__django-11583                            FAIL   FAIL     FAILED    91.2s
+  ! 0], filename, strict, {})
+  File "/usr/local/lib/python3.9/posixpath.py", line 4
+django__django-11620                            FAIL   FAIL     FAILED    93.9s
+  ! le view_tests_author
+    Creating table view_tests_article
+    Creating table vi
+django__django-11630                            FAIL   FAIL     FAILED    84.6s
+  ! n
+    Creating table auth_group
+    Creating table auth_user
+    Creating table 
+django__django-11742                              OK   FAIL     FAILED   100.1s
+django__django-11797                            FAIL   FAIL     FAILED   101.9s
+  ! okup_season
+    Creating table lookup_game
+    Creating table lookup_player
+    
+django__django-11815                            FAIL   FAIL     FAILED    91.6s
+  ! ']"
+
++ ("migrations.test_writer.TextEnum['A']", {'import migrations.test_writer'
+django__django-11848                            FAIL   FAIL     FAILED    85.3s
+  ! f.assertEqual(datetime.utcfromtimestamp(parsed), expected_date)
+AssertionError: 
+django__django-11905                              OK   FAIL     FAILED    93.2s
+django__django-11910                            FAIL   FAIL     FAILED    94.1s
+  ! e auth_user
+    Creating table django_session
+    Creating table migrations_mode
+django__django-11964                            FAIL   FAIL     FAILED    92.9s
+  ! _enums/tests.py", line 150, in test_str
+    self.assertEqual(str(test[member.nam
+django__django-11999                            FAIL   FAIL     FAILED    96.6s
+  ! l
+    Creating table model_fields_relatedtouuidmodel
+    Creating table model_fi
+django__django-12113                            FAIL   FAIL     FAILED    90.5s
+  ! eating table backends_objectreference
+    Creating table backends_rawdata
+    Cr
+django__django-12125                              OK   FAIL     FAILED    91.4s
+django__django-12184                              OK   FAIL     FAILED    93.4s
+django__django-12284                            FAIL   FAIL     FAILED    92.9s
+  ! l
+    Creating table model_fields_relatedtouuidmodel
+    Creating table model_fi
+django__django-12286                            FAIL   FAIL     FAILED    83.0s
+  ! ror: level=40, msg='You have provided a value for the LANGUAGE_CODE setting that
+django__django-12308                            FAIL   FAIL     FAILED    82.1s
+  ! g table admin_utils_guest
+    Creating table admin_utils_eventguide
+    Creating
+django__django-12453                            FAIL   FAIL     FAILED    81.6s
+  ! eating table backends_objectreference
+    Creating table backends_rawdata
+    Cr
+django__django-12470                              OK   FAIL     FAILED    81.6s
+django__django-12497                            FAIL   FAIL     FAILED    83.8s
+  ! 07 chars]335'>
+<Erro[319 chars] use ManyToManyField("self", through="Ambiguou[93
+django__django-12589                              OK   FAIL     FAILED    84.1s
+django__django-12700                            FAIL   FAIL     FAILED    85.8s
+  ! le view_tests_author
+    Creating table view_tests_article
+    Creating table vi
+django__django-12708                            FAIL   FAIL     FAILED    92.2s
+  ! e auth_user
+    Creating table django_session
+    Creating table migrations_mode
+django__django-12747                              OK     OK   RESOLVED    87.1s
+django__django-12856                            FAIL   FAIL     FAILED    89.6s
+  ! _content_type
+    Creating table auth_permission
+    Creating table auth_group
+ 
+django__django-12908                              OK   FAIL     FAILED    83.3s
+django__django-12915                            FAIL   FAIL     FAILED    88.8s
+  ! se.py", line 148, in get_response_async
+    response = await self._middleware_ch
+django__django-12983                            FAIL   FAIL     FAILED    81.0s
+  ! ut)
+AssertionError: '__strip__underscore-value___' != 'strip__underscore-value'
+
+django__django-13028                              OK     OK   RESOLVED    82.5s
+django__django-13033                            FAIL   FAIL     FAILED    79.7s
+  ! ting table ordering_author
+    Creating table ordering_article
+    Creating tabl
+django__django-13158                            FAIL   FAIL     FAILED    92.2s
+  ! 
+    Creating table queries_returningmodel
+    Creating table queries_noninteger
+django__django-13220                            FAIL   FAIL     FAILED    94.2s
+  ! on_error.py", line 266, in test_hash_nested
+    self.assertEqual(hash(error), ha
+django__django-13230                            FAIL   FAIL     FAILED    93.0s
+  ! ing table auth_user
+    Creating table django_session
+    Creating table syndica
+django__django-13265                              OK   FAIL     FAILED    95.7s
+django__django-13315                            FAIL   FAIL     FAILED    86.7s
+  ! del_forms/tests.py", line 2886, in test_limit_choices_to_no_duplicates
+    self.
+django__django-13321                            FAIL   FAIL     FAILED    83.7s
+  ! his warning.
+=== Applying test patch (adds failing tests from dataset) ===
+/tmp/
+django__django-13447                            FAIL   FAIL     FAILED    85.7s
+  ! e 317, in each_context
+    'available_apps': self.get_app_list(request),
+  File 
+django__django-13448                            FAIL   FAIL     FAILED    85.6s
+  !     Creating table backends_circularb
+    Creating table backends_rawdata
+    Cr
+django__django-13551                            FAIL   FAIL     FAILED    83.1s
+  ! ---------------------------------
+Traceback (most recent call last):
+  File "/re
+django__django-13590                            FAIL   FAIL     FAILED    83.9s
+  ! 
+    value = self.resolve_lookup_value(value, can_reuse, allow_joins)
+  File "/r
+django__django-13658                            FAIL   FAIL     FAILED   148.8s
+  ! ocal/lib/python3.9/argparse.py", line 1716, in __init__
+    prog = _os.path.base
+django__django-13660                            FAIL   FAIL     FAILED    82.0s
+  ! ommand.execute(*args, **defaults)
+  File "/repo/django/core/management/base.py",
+django__django-13710                            FAIL   FAIL     FAILED    93.9s
+  ! po/django/test/testcases.py", line 465, in assertContains
+    self.assertTrue(re
+django__django-13757                            FAIL   FAIL     FAILED    87.5s
+  !  (5)>
+<NullableJSONModel: NullableJSONModel object (6)>
+
+First sequence contains
+django__django-13768                            FAIL   FAIL     FAILED    81.3s
+  ! -----------
+Traceback (most recent call last):
+  File "/repo/tests/dispatch/test
+django__django-13925                              OK   FAIL     FAILED    80.9s
+django__django-13933                            FAIL   FAIL     FAILED    82.9s
+  ! value)s" is not one of the available choices.'
+'"invalid" is not one of the avai
+django__django-13964                              OK     OK   RESOLVED    80.6s
+django__django-14016                            FAIL   FAIL     FAILED    78.9s
+  ! r(x, memo)
+  File "/usr/local/lib/python3.9/copy.py", line 210, in _deepcopy_tup
+django__django-14017                            FAIL   FAIL     FAILED    84.4s
+  ! ery_utils.py", line 65, in __and__
+    return self._combine(other, self.AND)
+  F
+django__django-14155                            FAIL   FAIL     FAILED    87.1s
+  ! , namespaces=[], route=partial_wrapped/)
++ ResolverMatch(func=functools.partial(
+django__django-14238                            FAIL   FAIL     FAILED    89.0s
+  ! --------------------------
+Traceback (most recent call last):
+  File "/repo/test
+django__django-14382                            FAIL   FAIL     FAILED   134.5s
+  ! tEqual(len(stream), 0, "Stream should be empty: actually contains '%s'" % stream
+django__django-14411                            FAIL   FAIL     FAILED    83.6s
+  ! (most recent call last):
+  File "/usr/local/lib/python3.9/unittest/loader.py", l
+django__django-14534                              OK   FAIL     FAILED    84.4s
+django__django-14580                              OK   FAIL     FAILED    81.4s
+django__django-14608                            FAIL   FAIL     FAILED   134.7s
+  ! ", line 995, in test_non_form_errors
+    self.assertEqual(
+AssertionError: '<ul 
+django__django-14667                            FAIL   FAIL     FAILED    83.4s
+  ! /tests/defer/tests.py", line 55, in test_defer_only_chaining
+    self.assert_del
+django__django-14672                              OK   FAIL     FAILED    84.6s
+django__django-14730                            FAIL   FAIL     FAILED    84.7s
+  !  with a symmetrical relationship, e.g. to "self".', hint=None, obj=<django.db.mo
+django__django-14752                            FAIL   FAIL     FAILED    85.6s
+  !  'Question 1'},
+?                         ++++++++++++++++++++++++
+
+-           
+django__django-14787                            FAIL   FAIL     FAILED    83.1s
+  ! nt call last):
+  File "/usr/local/lib/python3.9/unittest/loader.py", line 154, i
+django__django-14855                            FAIL   FAIL     FAILED   120.9s
+  !   self.assertTrue(real_count != 0, msg_prefix + "Couldn't find %s in response" %
+django__django-14915                              OK   FAIL     FAILED    76.1s
+django__django-14997                              OK   FAIL     FAILED    83.5s
+django__django-14999                              OK     OK   RESOLVED    84.2s
+django__django-15061                            FAIL   FAIL     FAILED    77.6s
+  ! ="id_datetime_0" name="datetime_0" required type="text"><input id="id_datetime_1
+django__django-15202                            FAIL   FAIL     FAILED    76.6s
+  ! go/core/validators.py", line 142, in __call__
+    if len(urlsplit(value).hostnam
+django__django-15213                              OK   FAIL     FAILED    85.0s
+django__django-15252                            FAIL   FAIL     FAILED    85.6s
+  ! ot_called
+    raise AssertionError(msg)
+AssertionError: Expected 'ensure_schema'
+django__django-15320                            FAIL   FAIL     FAILED    81.2s
+  ! ---------------------
+Traceback (most recent call last):
+  File "/repo/tests/exp
+django__django-15347                              OK   FAIL     FAILED    81.3s
+django__django-15388                            FAIL   FAIL     FAILED    88.7s
+  ! _changed_in_template_directory
+    self.assertIsNone(autoreload.template_changed
+django__django-15400                            FAIL   FAIL     FAILED    90.0s
+  ! test_lazyobject.py", line 329, in test_radd
+    self.assertEqual(1 + obj1, 2)
+Ty
+django__django-15498                              OK     OK   RESOLVED    95.7s
+django__django-15695                            FAIL   FAIL     FAILED    86.6s
+  !  get_index_by_name
+    raise ValueError("No index named %s on model %s" % (name,
+django__django-15781                            FAIL   FAIL     FAILED    84.9s
+  ! e a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --ro
+django__django-15789                            FAIL   FAIL     FAILED    80.3s
+  ! ror: '>' != '><!&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&[15958 chars]&&&D'
+Diff i
+django__django-15790                              OK   FAIL     FAILED    80.7s
+django__django-15814                              OK   FAIL     FAILED    82.2s
+django__django-15819                            FAIL   FAIL     FAILED    82.0s
+  ! DO_NOTHING, db_column='from_id')  # Field renamed because it was a Python reserv
+django__django-15851                            FAIL   FAIL     FAILED    85.9s
+  ! ent 0:
+['psql', 'dbname', '--help']
+['psql', '--help', 'dbname']
+
+- (['psql', 'd
+django__django-15902                              OK   FAIL     FAILED    85.9s
+django__django-15996                            FAIL   FAIL     FAILED    83.5s
+  ! ions.test_writer'})
++ ("migrations.test_writer.IntFlagEnum['A'] | "
++  "migratio
+django__django-16041                            FAIL   FAIL     FAILED    80.2s
+  ! formset.empty_form.empty_permitted, True)
+  File "/repo/django/forms/formsets.py
+django__django-16046                              OK     OK   RESOLVED    86.6s
+django__django-16139                            FAIL   FAIL     FAILED    88.1s
+  ! self.assertEqual(joined_url, pw_change_url)
+AssertionError: '/admin/auth/user/te
+django__django-16229                            FAIL   FAIL     FAILED    78.7s
+  ! _int_field">
+Int field:
+</label><input id="id_int_field" name= [truncated]... !=
+django__django-16255                            FAIL   FAIL     FAILED    80.5s
+  ! s.py", line 76, in index
+    site_lastmod = site.get_latest_lastmod()
+  File "/r
+django__django-16379                            FAIL   FAIL     FAILED   212.7s
+  ! tests/cache/tests.py", line 577, in test_set_many_expiration
+    self.assertIsNo
+django__django-16400                            FAIL   FAIL     FAILED    79.3s
+  ! s.py", line 285, in __set__
+    raise ValueError(
+ValueError: Cannot assign "<Co
+django__django-16408                            FAIL   FAIL     FAILED    71.5s
+  ! uires a different Python: 3.9.25 not in '>=3.10'
+Editable install failed, trying
+django__django-16527                            FAIL   FAIL     FAILED    64.7s
+  ! uires a different Python: 3.9.25 not in '>=3.10'
+Editable install failed, trying
+django__django-16595                            FAIL   FAIL     FAILED    71.3s
+  ! uires a different Python: 3.9.25 not in '>=3.10'
+Editable install failed, trying
+django__django-16816                            FAIL   FAIL     FAILED    71.5s
+  ! uires a different Python: 3.9.25 not in '>=3.10'
+Editable install failed, trying
+django__django-16820                            FAIL   FAIL     FAILED    56.8s
+  ! uires a different Python: 3.9.25 not in '>=3.10'
+Editable install failed, trying
+django__django-16873                            FAIL   FAIL     FAILED    73.7s
+  ! uires a different Python: 3.9.25 not in '>=3.10'
+Editable install failed, trying
+django__django-16910                            FAIL   FAIL     FAILED    73.0s
+  ! uires a different Python: 3.9.25 not in '>=3.10'
+Editable install failed, trying
+django__django-17051                            FAIL   FAIL     FAILED    65.6s
+  ! uires a different Python: 3.9.25 not in '>=3.10'
+Editable install failed, trying
+django__django-17087                            FAIL   FAIL     FAILED    60.3s
+  ! uires a different Python: 3.9.25 not in '>=3.10'
+Editable install failed, trying
+matplotlib__matplotlib-18869                    FAIL   FAIL     FAILED   148.1s
+  ! eprecated - use 'reset_cache'
+    self._parser.resetCache()
+
+-- Docs: https://do
+matplotlib__matplotlib-22711                    FAIL   FAIL     FAILED   162.7s
+  ! -----------------------
+WARNING  matplotlib.testing:__init__.py:38 Could not set
+matplotlib__matplotlib-22835                      OK   FAIL     FAILED   158.5s
+matplotlib__matplotlib-23299                    FAIL   FAIL     FAILED   147.2s
+  !  'resetCache' deprecated - use 'reset_cache'
+    self._parser.resetCache()
+
+-- D
+matplotlib__matplotlib-23314                    FAIL   FAIL     FAILED   154.0s
+  !  'resetCache' deprecated - use 'reset_cache'
+    self._parser.resetCache()
+
+-- D
+matplotlib__matplotlib-23476                    FAIL   FAIL     FAILED   144.9s
+  !  'resetCache' deprecated - use 'reset_cache'
+    self._parser.resetCache()
+
+-- D
+matplotlib__matplotlib-23562                      OK   FAIL     FAILED   144.4s
+matplotlib__matplotlib-23563                    FAIL   FAIL     FAILED   149.3s
+  !  'resetCache' deprecated - use 'reset_cache'
+    self._parser.resetCache()
+
+-- D
+matplotlib__matplotlib-23913                    FAIL   FAIL     FAILED   160.3s
+  !  'resetCache' deprecated - use 'reset_cache'
+    self._parser.resetCache()
+
+-- D
+matplotlib__matplotlib-23964                    FAIL   FAIL     FAILED   159.5s
+  !  'resetCache' deprecated - use 'reset_cache'
+    self._parser.resetCache()
+
+-- D
+matplotlib__matplotlib-24149                      OK   FAIL     FAILED   156.0s
+matplotlib__matplotlib-24265                    FAIL   FAIL     FAILED   154.7s
+  !  'resetCache' deprecated - use 'reset_cache'
+    self._parser.resetCache()
+
+-- D
+matplotlib__matplotlib-24334                    FAIL   FAIL     FAILED   156.2s
+  ! 7: in <module>
+    from matplotlib.colors import Colormap, is_color_like
+lib/mat
+matplotlib__matplotlib-24970                    FAIL   FAIL     FAILED   160.3s
+  ! 7: in <module>
+    from matplotlib.colors import Colormap, is_color_like
+lib/mat
+matplotlib__matplotlib-25311                    FAIL   FAIL     FAILED   160.5s
+  ! 7: in <module>
+    from matplotlib.colors import Colormap, is_color_like
+lib/mat
+matplotlib__matplotlib-25332                      OK   FAIL     FAILED   155.5s
+matplotlib__matplotlib-25433                      OK   FAIL     FAILED   157.2s
+matplotlib__matplotlib-25442                    FAIL   FAIL     FAILED   166.7s
+  ! 7: in <module>
+    from matplotlib.colors import Colormap, is_color_like
+lib/mat
+matplotlib__matplotlib-25498                      OK   FAIL     FAILED   170.5s
+matplotlib__matplotlib-26011                    FAIL   FAIL     FAILED   165.8s
+  ! 7: in <module>
+    from matplotlib.colors import Colormap, is_color_like
+lib/mat
+matplotlib__matplotlib-26020                      OK   FAIL     FAILED   149.8s
+mwaskom__seaborn-2848                           FAIL   FAIL     FAILED    78.1s
+  ! text.py:45: PyparsingDeprecationWarning: 'enablePackrat' deprecated - use 'enabl
+mwaskom__seaborn-3010                           FAIL   FAIL     FAILED    79.1s
+  ! pture-warnings.html
+=========================== short test summary info ========
+mwaskom__seaborn-3190                             OK   FAIL     FAILED    82.6s
+mwaskom__seaborn-3407                             OK   FAIL     FAILED    72.2s
+pallets__flask-4045                               OK   FAIL     FAILED    63.8s
+pallets__flask-4992                             FAIL   FAIL     FAILED    65.0s
+  ! lask/config.py.rej
+PATCH_APPLY_FAILED
+=== Post-patch test (should PASS) ===
+Impo
+pallets__flask-5063                             FAIL   FAIL     FAILED    63.1s
+  ! thods  Rule\n--------  -------  ----\na         GET      /a\nb         GET      
+psf__requests-1963                              FAIL   FAIL     FAILED    67.2s
+  ! sts/sessions.py:458: DeprecationWarning: invalid escape sequence \*
+    """Sends
+psf__requests-2148                              FAIL   FAIL     FAILED    67.4s
+  !  3.10 it will stop working
+    if isinstance(hook, collections.Callable):
+
+-- Do
+psf__requests-2317                                OK   FAIL     FAILED    61.5s
+psf__requests-2674                                OK   FAIL     FAILED    66.8s
+psf__requests-3362                              FAIL   FAIL     FAILED    71.1s
+  ! 0 it will stop working
+    from collections import Mapping, MutableMapping
+
+-- D
+psf__requests-863                               FAIL   FAIL     FAILED    65.6s
+  ! ===========
+requests/packages/urllib3/_collections.py:7
+  /repo/requests/package
+pydata__xarray-3364                             FAIL   FAIL     FAILED    70.8s
+  !  option: {key}\n")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-wa
+pydata__xarray-4094                             FAIL   FAIL     FAILED    76.9s
+  ! : PytestConfigWarning: Unknown config option: env
+  
+    self._warn_or_fail_if_s
+pydata__xarray-4248                             FAIL   FAIL     FAILED    70.7s
+  ! ytestConfigWarning: Unknown config option: env
+  
+    self._warn_or_fail_if_stri
+pydata__xarray-4493                             FAIL   FAIL     FAILED    70.3s
+  ! mport_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+xar
+pydata__xarray-5131                             FAIL   FAIL     FAILED    73.6s
+  ! import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+xa
+pylint-dev__pylint-5859                         FAIL   FAIL     FAILED    65.7s
+  ! l.'), col_offset=17, end_line=None, end_col_offset=None),))
+E        +  and   0 
+pylint-dev__pylint-6506                         FAIL   FAIL     FAILED    68.8s
+  ! ognized_options)
+E           pylint.config.exceptions._UnrecognizedOptionError
+
+
+pylint-dev__pylint-7080                           OK   FAIL     FAILED    67.2s
+pylint-dev__pylint-7114                         FAIL   FAIL     FAILED    67.8s
+  !   assert initialized_linter.stats.by_msg["deprecated-module"] == 1
+E       KeyEr
+pylint-dev__pylint-7228                         FAIL   FAIL     FAILED    76.5s
+  ! ('bad escape %s' % escape, len(escape))
+E                   re.error: bad escape
+pylint-dev__pylint-7993                         FAIL   FAIL     FAILED    70.7s
+  ! ou sure it is supported on the current version of pylint?
+    warnings.warn(
+
+--
+pytest-dev__pytest-11143                        FAIL   FAIL     FAILED    63.5s
+  ! NTERRUPTED len(stdout.lines)=48 len(stderr.lines)=0 duration=0.23s>.ret
+
+/repo/t
+pytest-dev__pytest-11148                          OK   FAIL     FAILED    61.5s
+pytest-dev__pytest-5103                         FAIL   FAIL     FAILED    59.4s
+  ! le "/repo/src/_pytest/config/__init__.py", line 684, in pytest_cmdline_parse
+   
+pytest-dev__pytest-5221                         FAIL   FAIL     FAILED    68.8s
+  ! le "/repo/src/_pytest/config/__init__.py", line 684, in pytest_cmdline_parse
+   
+pytest-dev__pytest-5227                         FAIL   FAIL     FAILED    66.4s
+  ! le "/repo/src/_pytest/config/__init__.py", line 684, in pytest_cmdline_parse
+   
+pytest-dev__pytest-5413                           OK   FAIL     FAILED    63.8s
+pytest-dev__pytest-5495                           OK   FAIL     FAILED    62.4s
+pytest-dev__pytest-5692                         FAIL   FAIL     FAILED    64.8s
+  !   node = dom.find_first_by_tag("testsuite")
+>       node.assert_attr(hostname=pl
+pytest-dev__pytest-6116                         FAIL   FAIL     FAILED    66.8s
+  ! st_x(): pass")
+        result = testdir.runpytest("--co")
+>       result.stdout.
+pytest-dev__pytest-7168                         FAIL   FAIL     FAILED    67.1s
+  ! epr.py", line 51, in repr
+INTERNALERROR>     s = _format_repr_exception(exc, x)
+
+pytest-dev__pytest-7220                         FAIL   FAIL     FAILED    59.5s
+  ! /pytest-of-root/pytest-1/test_failure_with_changed_cwd0/test_failure_with_change
+pytest-dev__pytest-7373                         FAIL   FAIL     FAILED    64.2s
+  !              ^...
+E         
+E         ...Full output truncated (3 lines hidden)
+pytest-dev__pytest-7432                         FAIL   FAIL     FAILED    64.8s
+  ! ========'
+E       remains unmatched: 'SKIPPED [1] test_sample.py:2: unconditiona
+pytest-dev__pytest-7490                         FAIL   FAIL     FAILED    62.5s
+  ! ,...
+E         
+E         ...Full output truncated (13 lines hidden), use '-vv' 
+pytest-dev__pytest-8365                         FAIL   FAIL     FAILED    61.6s
+  ! FoundError: [Errno 2] No such file or directory: '/tmp/pytest-of-os/<:*?;>agnost
+pytest-dev__pytest-8906                         FAIL   FAIL     FAILED    63.8s
+  ! ======'
+E       remains unmatched: '*Using pytest.skip outside of a test will sk
+pytest-dev__pytest-9359                         FAIL   FAIL     FAILED    71.4s
+  !   pass'
+E        +  where '    pass' = str(<_pytest._code.source.Source object a
+scikit-learn__scikit-learn-10297                FAIL   FAIL     FAILED    75.1s
+  ! ces'
+      [end of output]
+  
+  note: This error originates from a subprocess, a
+scikit-learn__scikit-learn-10508                FAIL   FAIL     FAILED    68.7s
+  ! ces'
+      [end of output]
+  
+  note: This error originates from a subprocess, a
+scikit-learn__scikit-learn-10949                FAIL   FAIL     FAILED    69.4s
+  ! ces'
+      [end of output]
+  
+  note: This error originates from a subprocess, a
+scikit-learn__scikit-learn-11040                FAIL   FAIL     FAILED    67.8s
+  ! ces'
+      [end of output]
+  
+  note: This error originates from a subprocess, a
+scikit-learn__scikit-learn-11281                FAIL   FAIL     FAILED    81.3s
+  ! ces'
+      [end of output]
+  
+  note: This error originates from a subprocess, a
+scikit-learn__scikit-learn-12471                FAIL   FAIL     FAILED    65.9s
+  ! ces'
+      [end of output]
+  
+  note: This error originates from a subprocess, a
+scikit-learn__scikit-learn-13142                FAIL   FAIL     FAILED    70.9s
+  ! ces'
+      [end of output]
+  
+  note: This error originates from a subprocess, a
+scikit-learn__scikit-learn-13241                FAIL   FAIL     FAILED    63.7s
+  ! ces'
+      [end of output]
+  
+  note: This error originates from a subprocess, a
+scikit-learn__scikit-learn-13439                FAIL   FAIL     FAILED    66.9s
+  ! ces'
+      [end of output]
+  
+  note: This error originates from a subprocess, a
+scikit-learn__scikit-learn-13496                FAIL   FAIL     FAILED    64.4s
+  ! ces'
+      [end of output]
+  
+  note: This error originates from a subprocess, a
+scikit-learn__scikit-learn-13497                FAIL   FAIL     FAILED    61.2s
+  ! ces'
+      [end of output]
+  
+  note: This error originates from a subprocess, a
+scikit-learn__scikit-learn-13584                FAIL   FAIL     FAILED    59.3s
+  ! ces'
+      [end of output]
+  
+  note: This error originates from a subprocess, a
+scikit-learn__scikit-learn-13779                FAIL   FAIL     FAILED    59.0s
+  ! ces'
+      [end of output]
+  
+  note: This error originates from a subprocess, a
+scikit-learn__scikit-learn-14087                FAIL   FAIL     FAILED    58.8s
+  ! ces'
+      [end of output]
+  
+  note: This error originates from a subprocess, a
+scikit-learn__scikit-learn-14092                FAIL   FAIL     FAILED    61.2s
+  ! ces'
+      [end of output]
+  
+  note: This error originates from a subprocess, a
+scikit-learn__scikit-learn-14894                FAIL   FAIL     FAILED    60.0s
+  ! ces'
+      [end of output]
+  
+  note: This error originates from a subprocess, a
+scikit-learn__scikit-learn-14983                FAIL   FAIL     FAILED    60.3s
+  ! ces'
+      [end of output]
+  
+  note: This error originates from a subprocess, a
+scikit-learn__scikit-learn-15512                FAIL   FAIL     FAILED    58.1s
+  ! ces'
+      [end of output]
+  
+  note: This error originates from a subprocess, a
+scikit-learn__scikit-learn-15535                FAIL   FAIL     FAILED    63.2s
+  ! ces'
+      [end of output]
+  
+  note: This error originates from a subprocess, a
+scikit-learn__scikit-learn-25500                FAIL   FAIL     FAILED   297.3s
+  !      _check_build.c
+_check_build.pyx
+___________________________________________
+scikit-learn__scikit-learn-25570                FAIL   FAIL     FAILED   298.6s
+  !      _check_build.c
+_check_build.pyx
+___________________________________________
+scikit-learn__scikit-learn-25638                  OK   FAIL     FAILED   288.3s
+sphinx-doc__sphinx-10325                        FAIL   FAIL     FAILED    51.4s
+  ! aluate_signature, getdoc, object_description, safe_getattr,
+E   ImportError: can
+sphinx-doc__sphinx-10451                        FAIL   FAIL     FAILED    42.1s
+  ! 
+E         ...Full output truncated (16 lines hidden), use '-vv' to show
+
+tests/
+sphinx-doc__sphinx-11445                        FAIL   FAIL     FAILED    34.2s
+  !     +     (...
+E         
+E         ...Full output truncated (45 lines hidden), 
+sphinx-doc__sphinx-7686                         FAIL   FAIL     FAILED    34.8s
+  ! ne 21, in <module>
+    from sphinx.testing import util
+  File "/repo/sphinx/test
+sphinx-doc__sphinx-7738                           OK   FAIL     FAILED    32.8s
+sphinx-doc__sphinx-7975                         FAIL   FAIL     FAILED    33.6s
+  ! ne 21, in <module>
+    from sphinx.testing import util
+  File "/repo/sphinx/test
+sphinx-doc__sphinx-8273                         FAIL   FAIL     FAILED    42.1s
+  ! ne 21, in <module>
+    from sphinx.testing import util
+  File "/repo/sphinx/test
+sphinx-doc__sphinx-8282                         FAIL   FAIL     FAILED    40.4s
+  ! ne 21, in <module>
+    from sphinx.testing import util
+  File "/repo/sphinx/test
+sphinx-doc__sphinx-8435                         FAIL   FAIL     FAILED    40.4s
+  ! ne 21, in <module>
+    from sphinx.testing import util
+  File "/repo/sphinx/test
+sphinx-doc__sphinx-8474                         FAIL   FAIL     FAILED    43.7s
+  ! ne 21, in <module>
+    from sphinx.testing import util
+  File "/repo/sphinx/test
+sphinx-doc__sphinx-8506                         FAIL   FAIL     FAILED    42.2s
+  ! ne 21, in <module>
+    from sphinx.testing import util
+  File "/repo/sphinx/test
+sphinx-doc__sphinx-8595                         FAIL   FAIL     FAILED    41.1s
+  ! ne 21, in <module>
+    from sphinx.testing import util
+  File "/repo/sphinx/test
+sphinx-doc__sphinx-8627                           OK   FAIL     FAILED    39.8s
+sphinx-doc__sphinx-8713                         FAIL   FAIL     FAILED    38.5s
+  ! ne 20, in <module>
+    from sphinx.testing import util
+  File "/repo/sphinx/test
+sphinx-doc__sphinx-8721                         FAIL   FAIL     FAILED    44.9s
+  ! ne 21, in <module>
+    from sphinx.testing import util
+  File "/repo/sphinx/test
+sphinx-doc__sphinx-8801                         FAIL   FAIL     FAILED    43.5s
+  ! ne 21, in <module>
+    from sphinx.testing import util
+  File "/repo/sphinx/test
+sympy__sympy-11400                                OK   FAIL     FAILED    45.5s
+sympy__sympy-11870                                OK   FAIL     FAILED    47.2s
+sympy__sympy-11897                                OK   FAIL     FAILED    49.6s
+sympy__sympy-12171                              FAIL   FAIL     FAILED    50.5s
+  ! atch: **** malformed patch at line 22:  
+
+PATCH_APPLY_FAILED
+=== Post-patch test
+sympy__sympy-12419                              FAIL   FAIL     FAILED    43.8s
+  ! ch at line 28:      def _eval_trace(self):
+
+PATCH_APPLY_FAILED
+=== Post-patch te
+sympy__sympy-12454                                OK   FAIL     FAILED    44.4s
+sympy__sympy-12481                              FAIL   FAIL     FAILED    55.7s
+  ! to file sympy/combinatorics/permutations.py.rej
+PATCH_APPLY_FAILED
+=== Post-patc
+sympy__sympy-13031                              FAIL   FAIL     FAILED    55.8s
+  ! h: **** malformed patch at line 18:  
+
+PATCH_APPLY_FAILED
+=== Post-patch test (s
+sympy__sympy-13043                              FAIL   FAIL     FAILED    48.5s
+  ! cts to file sympy/integrals/intpoly.py.rej
+PATCH_APPLY_FAILED
+=== Post-patch tes
+sympy__sympy-13146                                OK   FAIL     FAILED    42.6s
+sympy__sympy-13177                              FAIL   FAIL     FAILED    46.2s
+  !  -- saving rejects to file sympy/core/mod.py.rej
+PATCH_APPLY_FAILED
+=== Post-pat
+sympy__sympy-13437                                OK   FAIL     FAILED    49.2s
+sympy__sympy-13471                              FAIL   FAIL     FAILED    50.1s
+  ! s to file sympy/core/numbers.py.rej
+PATCH_APPLY_FAILED
+=== Post-patch test (shou
+sympy__sympy-13480                              FAIL   FAIL     FAILED    46.2s
+  ! le sympy/functions/elementary/hyperbolic.py.rej
+PATCH_APPLY_FAILED
+=== Post-patc
+sympy__sympy-13647                                OK   FAIL     FAILED    46.7s
+sympy__sympy-13773                              FAIL   FAIL     FAILED    48.0s
+  ! h at line 17:      def __mod__(self, other):
+
+PATCH_APPLY_FAILED
+=== Post-patch 
+sympy__sympy-13895                              FAIL   FAIL     FAILED    49.4s
+  ! cts to file sympy/core/numbers.py.rej
+PATCH_APPLY_FAILED
+=== Post-patch test (sh
+sympy__sympy-13915                              FAIL   FAIL     FAILED    47.4s
+  !      if b.is_Number:
+
+PATCH_APPLY_FAILED
+=== Post-patch test (should PASS) ===
+=
+sympy__sympy-13971                              FAIL   FAIL     FAILED    47.1s
+  !  to file sympy/printing/latex.py.rej
+PATCH_APPLY_FAILED
+=== Post-patch test (sho
+sympy__sympy-14024                                OK   FAIL     FAILED    47.6s
+sympy__sympy-14308                              FAIL   FAIL     FAILED    51.0s
+  ! file sympy/printing/pretty/pretty.py.rej
+PATCH_APPLY_FAILED
+=== Post-patch test 
+sympy__sympy-14317                              FAIL   FAIL     FAILED    48.6s
+  ! jects to file sympy/printing/latex.py.rej
+PATCH_APPLY_FAILED
+=== Post-patch test
+sympy__sympy-14396                              FAIL   FAIL     FAILED    41.7s
+  ! ile sympy/polys/polyoptions.py.rej
+PATCH_APPLY_FAILED
+=== Post-patch test (shoul
+sympy__sympy-14774                              FAIL   FAIL     FAILED    48.6s
+  !  to file sympy/printing/latex.py.rej
+PATCH_APPLY_FAILED
+=== Post-patch test (sho
+sympy__sympy-14817                              FAIL   FAIL     FAILED    53.2s
+  ! /printing/pretty/pretty.py.rej
+PATCH_APPLY_FAILED
+=== Post-patch test (should PA
+sympy__sympy-15011                              FAIL   FAIL     FAILED    49.4s
+  !  sympy/utilities/lambdify.py.rej
+PATCH_APPLY_FAILED
+=== Post-patch test (should 
+sympy__sympy-15308                              FAIL   FAIL     FAILED    48.3s
+  ! ng rejects to file sympy/printing/latex.py.rej
+PATCH_APPLY_FAILED
+=== Post-patch
+sympy__sympy-15345                              FAIL   FAIL     FAILED    40.1s
+  ! s to file sympy/printing/mathematica.py.rej
+PATCH_APPLY_FAILED
+=== Post-patch te
+sympy__sympy-15346                              FAIL   FAIL     FAILED    57.6s
+  ! implify/trigsimp.py.rej
+PATCH_APPLY_FAILED
+=== Post-patch test (should PASS) ===
+sympy__sympy-15678                              FAIL   FAIL     FAILED    51.1s
+  ! .py
+patch: **** malformed patch at line 26:  
+
+PATCH_APPLY_FAILED
+=== Post-patch
+sympy__sympy-16106                              FAIL   FAIL     FAILED    48.3s
+  ! he rational private module is deprecated",
+
+../usr/local/lib/python3.9/site-pack
+sympy__sympy-16281                              FAIL   FAIL     FAILED    47.8s
+  ! he rational private module is deprecated",
+
+../usr/local/lib/python3.9/site-pack
+sympy__sympy-16503                                OK   FAIL     FAILED    45.9s
+sympy__sympy-16792                                OK   FAIL     FAILED    48.0s
+sympy__sympy-16988                              FAIL   FAIL     FAILED    45.2s
+  ! he rational private module is deprecated",
+
+../usr/local/lib/python3.9/site-pack
+sympy__sympy-17022                                OK   FAIL     FAILED    48.2s
+sympy__sympy-17139                              FAIL   FAIL     FAILED    48.3s
+  ! he rational private module is deprecated",
+
+../usr/local/lib/python3.9/site-pack
+sympy__sympy-17630                              FAIL   FAIL     FAILED    51.3s
+  ! he rational private module is deprecated",
+
+../usr/local/lib/python3.9/site-pack
+sympy__sympy-17655                              FAIL   FAIL     FAILED    47.3s
+  ! he rational private module is deprecated",
+
+../usr/local/lib/python3.9/site-pack
+sympy__sympy-18057                                OK   FAIL     FAILED    45.1s
+sympy__sympy-18087                              FAIL   FAIL     FAILED    49.7s
+  ! he rational private module is deprecated",
+
+../usr/local/lib/python3.9/site-pack
+sympy__sympy-18189                                OK   FAIL     FAILED    50.3s
+sympy__sympy-18199                                OK   FAIL     FAILED    48.0s
+sympy__sympy-18532                              FAIL   FAIL     FAILED    45.4s
+  ! he rational private module is deprecated",
+
+../usr/local/lib/python3.9/site-pack
+sympy__sympy-18621                                OK   FAIL     FAILED    45.5s
+sympy__sympy-18698                              FAIL   FAIL     FAILED    48.4s
+  ! he rational private module is deprecated",
+
+../usr/local/lib/python3.9/site-pack
+sympy__sympy-18835                              FAIL   FAIL     FAILED    48.2s
+  ! he rational private module is deprecated",
+
+../usr/local/lib/python3.9/site-pack
+sympy__sympy-19007                              FAIL   FAIL     FAILED    44.9s
+  ! he rational private module is deprecated",
+
+../usr/local/lib/python3.9/site-pack
+sympy__sympy-19254                              FAIL   FAIL     FAILED    48.4s
+  ! he rational private module is deprecated",
+
+../usr/local/lib/python3.9/site-pack
+sympy__sympy-19487                              FAIL   FAIL     FAILED    47.5s
+  ! he rational private module is deprecated",
+
+../usr/local/lib/python3.9/site-pack
+sympy__sympy-20049                                OK   FAIL     FAILED    44.8s
+sympy__sympy-20154                              FAIL   FAIL     FAILED    49.9s
+  ! he rational private module is deprecated",
+
+../usr/local/lib/python3.9/site-pack
+sympy__sympy-20212                              FAIL   FAIL     FAILED    50.5s
+  ! he rational private module is deprecated",
+
+../usr/local/lib/python3.9/site-pack
+sympy__sympy-20322                                OK   FAIL     FAILED    47.7s
+sympy__sympy-20442                              FAIL   FAIL     FAILED    44.5s
+  ! he rational private module is deprecated",
+
+../usr/local/lib/python3.9/site-pack
+sympy__sympy-20590                                OK   FAIL     FAILED    44.7s
+sympy__sympy-20639                              FAIL   FAIL     FAILED    40.3s
+  ! he rational private module is deprecated",
+
+../usr/local/lib/python3.9/site-pack
+sympy__sympy-21055                                OK   FAIL     FAILED    57.1s
+sympy__sympy-21171                              FAIL   FAIL     FAILED    48.8s
+  ! he rational private module is deprecated",
+
+../usr/local/lib/python3.9/site-pack
+sympy__sympy-21379                              FAIL   FAIL     FAILED    46.9s
+  ! he rational private module is deprecated",
+
+../usr/local/lib/python3.9/site-pack
+sympy__sympy-21612                                OK   FAIL     FAILED    49.2s
+sympy__sympy-21614                              FAIL   FAIL     FAILED    48.1s
+  ! he rational private module is deprecated",
+
+../usr/local/lib/python3.9/site-pack
+sympy__sympy-21627                                OK   FAIL     FAILED    49.1s
+sympy__sympy-21847                              FAIL   FAIL     FAILED    49.4s
+  ! .py:4
+../usr/local/lib/python3.9/site-packages/mpmath/rational.py:4
+../usr/local
+sympy__sympy-22005                                OK   FAIL     FAILED    48.1s
+sympy__sympy-22714                              FAIL   FAIL     FAILED    46.6s
+  ! .py:4
+../usr/local/lib/python3.9/site-packages/mpmath/rational.py:4
+../usr/local
+sympy__sympy-22840                                OK   FAIL     FAILED    54.2s
+sympy__sympy-23117                                OK   FAIL     FAILED    52.5s
+sympy__sympy-23191                              FAIL   FAIL     FAILED    40.9s
+  ! .py:4
+../usr/local/lib/python3.9/site-packages/mpmath/rational.py:4
+../usr/local
+sympy__sympy-23262                              FAIL   FAIL     FAILED    46.7s
+  ! .py:4
+../usr/local/lib/python3.9/site-packages/mpmath/rational.py:4
+../usr/local
+sympy__sympy-24066                              FAIL   FAIL     FAILED    50.2s
+  ! .py:4
+../usr/local/lib/python3.9/site-packages/mpmath/rational.py:4
+../usr/local
+sympy__sympy-24102                              FAIL   FAIL     FAILED    52.0s
+  ! .py:4
+../usr/local/lib/python3.9/site-packages/mpmath/rational.py:4
+../usr/local
+sympy__sympy-24152                              FAIL   FAIL     FAILED    44.5s
+  ! .py:4
+../usr/local/lib/python3.9/site-packages/mpmath/rational.py:4
+../usr/local
+sympy__sympy-24213                              FAIL   FAIL     FAILED    45.9s
+  ! .py:4
+../usr/local/lib/python3.9/site-packages/mpmath/rational.py:4
+../usr/local
+sympy__sympy-24909                                OK   FAIL     FAILED    36.0s
+
+Results saved to bench_results/swebench/two_phase/exec_122b_full.json
+Markdown report saved to bench_results/swebench/two_phase/exec_122b_full.md

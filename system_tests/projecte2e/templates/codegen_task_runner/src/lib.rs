@@ -32,6 +32,12 @@ pub struct TaskManager {
     next_id: u64,
 }
 
+impl Default for TaskManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TaskManager {
     pub fn new() -> Self {
         Self {
@@ -116,8 +122,8 @@ impl TaskManager {
         sorted
     }
 
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).expect("Failed to serialize TaskManager")
+    pub fn to_json(&self) -> Result<String, String> {
+        serde_json::to_string(self).map_err(|e| e.to_string())
     }
 
     pub fn from_json(json: &str) -> Result<Self, String> {

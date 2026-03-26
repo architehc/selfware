@@ -223,10 +223,11 @@ cd /repo
 git apply /tmp/patch.diff 2>&1 && echo "PATCH_APPLIED_OK" || {{
     echo "git apply strict failed, trying --3way..."
     git apply --3way /tmp/patch.diff 2>&1 && echo "PATCH_APPLIED_OK" || {{
-        echo "git apply --3way failed, trying patch -p1..."
-        patch -p1 < /tmp/patch.diff 2>&1 && echo "PATCH_APPLIED_OK" || {{
-            echo "patch -p1 failed, trying patch --fuzz=3..."
-            patch -p1 --fuzz=3 < /tmp/patch.diff 2>&1 && echo "PATCH_APPLIED_OK" || echo "PATCH_APPLY_FAILED"
+        echo "git apply --3way failed, trying patch --fuzz=3..."
+        patch -p1 --fuzz=3 < /tmp/patch.diff 2>&1 && echo "PATCH_APPLIED_OK" || {{
+            echo "patch --fuzz=3 failed, trying Python fuzzy apply..."
+            pip install -q difflib 2>/dev/null
+            python3 /tmp/fuzzy_apply.py /repo /tmp/patch.diff 2>&1 && echo "PATCH_APPLIED_OK" || echo "PATCH_APPLY_FAILED"
         }}
     }}
 }}
@@ -254,6 +255,7 @@ echo "POST_PATCH_TEST_EXIT_CODE=$POST_EXIT"
             "-v", f"{patch_file}:/tmp/patch.diff:ro",
             "-v", f"{test_patch_file}:/tmp/test_patch.diff:ro",
             "-v", f"{script_file}:/tmp/run.sh:ro",
+            "-v", f"{os.path.abspath('scripts/fuzzy_apply.py')}:/tmp/fuzzy_apply.py:ro",
             "--memory", "4g",
             "--cpus", "2",
             "python:3.9-slim",

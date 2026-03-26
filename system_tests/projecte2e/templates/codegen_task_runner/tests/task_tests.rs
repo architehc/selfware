@@ -140,7 +140,7 @@ fn test_json_roundtrip() {
     tm.update_status(1, Status::Running);
     tm.add("second_json", Priority::Low);
 
-    let json = tm.to_json();
+    let json = tm.to_json().expect("serialization should succeed");
     let restored = TaskManager::from_json(&json).expect("should parse");
     assert_eq!(restored.get(1).unwrap().name, "json_test");
     assert_eq!(restored.get(1).unwrap().status, Status::Running);

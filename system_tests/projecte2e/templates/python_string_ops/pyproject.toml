@@ -1,0 +1,9 @@
+[project]
+name = "python_string_ops"
+version = "0.1.0"
+description = "String operations test template"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]

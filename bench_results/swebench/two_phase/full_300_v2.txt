@@ -1,0 +1,1065 @@
+warning: unused import: `AgentConfig`
+  --> src/config/auto_config.rs:13:13
+   |
+13 | use super::{AgentConfig, Config, RedactedString};
+   |             ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `warn`
+ --> src/batch/mod.rs:9:21
+  |
+9 | use tracing::{info, warn};
+  |                     ^^^^
+
+warning: unused imports: `error` and `warn`
+ --> src/validation/mod.rs:8:21
+  |
+8 | use tracing::{info, warn, error};
+  |                     ^^^^  ^^^^^
+
+warning: unused variable: `workflow`
+    --> src/cli.rs:1417:17
+     |
+1417 |             let workflow = ValidationWorkflow {
+     |                 ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_workflow`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `config` is never read
+  --> src/browser/mod.rs:28:5
+   |
+27 | pub struct BrowserSession {
+   |            -------------- field in this struct
+28 |     config: BrowserConfig,
+   |     ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `intent_without_action` is never used
+   --> src/output/mod.rs:671:15
+    |
+671 | pub(crate) fn intent_without_action() {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `selfware` (lib) generated 6 warnings (run `cargo fix --lib -p selfware` to apply 3 suggestions)
+warning: unused import: `Serialize`
+  --> examples/swebench_two_phase.rs:18:26
+   |
+18 | use serde::{Deserialize, Serialize};
+   |                          ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `test_patch` is never read
+  --> examples/swebench_two_phase.rs:32:5
+   |
+24 | struct SWETask {
+   |        ------- field in this struct
+...
+32 |     test_patch: String,
+   |     ^^^^^^^^^^
+   |
+   = note: `SWETask` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `selfware` (example "swebench_two_phase") generated 2 warnings (run `cargo fix --example "swebench_two_phase"` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running `target/debug/examples/swebench_two_phase bench_results/swebench_lite_300.json --limit 300`
+
+=== SWE-bench Two-Phase Evaluation ===
+Endpoint: https://crazyshit.ngrok.io/v1
+Model: txn545/Qwen3.5-122B-A10B-NVFP4
+Concurrent: 16
+Tasks: 300
+
+--- Phase 1: Reading source files ---
+  astropy__astropy-12907 ... 1 files, 102 lines
+  astropy__astropy-14182 ... 1 files, 99 lines
+  astropy__astropy-14365 ... 1 files, 204 lines
+  astropy__astropy-14995 ... 1 files, 102 lines
+  astropy__astropy-6938 ... 1 files, 102 lines
+  astropy__astropy-7746 ... 1 files, 125 lines
+  django__django-10914 ... 1 files, 102 lines
+  django__django-10924 ... 1 files, 102 lines
+  django__django-11001 ... 1 files, 82 lines
+  django__django-11019 ... 1 files, 165 lines
+  django__django-11039 ... 1 files, 83 lines
+  django__django-11049 ... 1 files, 102 lines
+  django__django-11099 ... 1 files, 25 lines
+  django__django-11133 ... 1 files, 102 lines
+  django__django-11179 ... 1 files, 102 lines
+  django__django-11283 ... 1 files, 76 lines
+  django__django-11422 ... 1 files, 102 lines
+  django__django-11564 ... 1 files, 257 lines
+  django__django-11583 ... 1 files, 102 lines
+  django__django-11620 ... 1 files, 157 lines
+  django__django-11630 ... 1 files, 227 lines
+  django__django-11742 ... 1 files, 115 lines
+  django__django-11797 ... 1 files, 102 lines
+  django__django-11815 ... 1 files, 102 lines
+  django__django-11848 ... 1 files, 102 lines
+  django__django-11905 ... 1 files, 161 lines
+  django__django-11910 ... 1 files, 102 lines
+  django__django-11964 ... 1 files, 79 lines
+  django__django-11999 ... 1 files, 102 lines
+  django__django-12113 ... 1 files, 158 lines
+  django__django-12125 ... 1 files, 102 lines
+  django__django-12184 ... 1 files, 102 lines
+  django__django-12284 ... 1 files, 102 lines
+  django__django-12286 ... 1 files, 66 lines
+  django__django-12308 ... 1 files, 102 lines
+  django__django-12453 ... 1 files, 158 lines
+  django__django-12470 ... 1 files, 102 lines
+  django__django-12497 ... 1 files, 122 lines
+  django__django-12589 ... 1 files, 115 lines
+  django__django-12700 ... 1 files, 102 lines
+  django__django-12708 ... 1 files, 102 lines
+  django__django-12747 ... 1 files, 120 lines
+  django__django-12856 ... 1 files, 102 lines
+  django__django-12908 ... 1 files, 102 lines
+  django__django-12915 ... 1 files, 115 lines
+  django__django-12983 ... 1 files, 102 lines
+  django__django-13028 ... 1 files, 102 lines
+  django__django-13033 ... 1 files, 102 lines
+  django__django-13158 ... 1 files, 204 lines
+  django__django-13220 ... 1 files, 265 lines
+  django__django-13230 ... 1 files, 235 lines
+  django__django-13265 ... 1 files, 245 lines
+  django__django-13315 ... 1 files, 102 lines
+  django__django-13321 ... 1 files, 102 lines
+  django__django-13401 ... 1 files, 102 lines
+  django__django-13447 ... 1 files, 102 lines
+  django__django-13448 ... 1 files, 113 lines
+  django__django-13551 ... 1 files, 132 lines
+  django__django-13590 ... 1 files, 102 lines
+  django__django-13658 ... 1 files, 102 lines
+  django__django-13660 ... 1 files, 283 lines
+  django__django-13710 ... 1 files, 102 lines
+  django__django-13757 ... 1 files, 102 lines
+  django__django-13768 ... 1 files, 157 lines
+  django__django-13925 ... 1 files, 102 lines
+  django__django-13933 ... 1 files, 102 lines
+  django__django-13964 ... 1 files, 102 lines
+  django__django-14016 ... 1 files, 96 lines
+  django__django-14017 ... 1 files, 90 lines
+  django__django-14155 ... 1 files, 102 lines
+  django__django-14238 ... 1 files, 102 lines
+  django__django-14382 ... 1 files, 102 lines
+  django__django-14411 ... 1 files, 100 lines
+  django__django-14534 ... 1 files, 102 lines
+  django__django-14580 ... 1 files, 102 lines
+  django__django-14608 ... 1 files, 149 lines
+  django__django-14667 ... 1 files, 102 lines
+  django__django-14672 ... 1 files, 102 lines
+  django__django-14730 ... 1 files, 102 lines
+  django__django-14752 ... 1 files, 123 lines
+  django__django-14787 ... 1 files, 228 lines
+  django__django-14855 ... 1 files, 102 lines
+  django__django-14915 ... 1 files, 102 lines
+  django__django-14997 ... 1 files, 270 lines
+  django__django-14999 ... 1 files, 102 lines
+  django__django-15061 ... 1 files, 102 lines
+  django__django-15202 ... 1 files, 133 lines
+  django__django-15213 ... 1 files, 102 lines
+  django__django-15252 ... 1 files, 102 lines
+  django__django-15320 ... 1 files, 102 lines
+  django__django-15347 ... 1 files, 248 lines
+  django__django-15388 ... 1 files, 61 lines
+  django__django-15400 ... 1 files, 75 lines
+  django__django-15498 ... 1 files, 122 lines
+  django__django-15695 ... 1 files, 102 lines
+  django__django-15738 ... 1 files, 102 lines
+  django__django-15781 ... 1 files, 102 lines
+  django__django-15789 ... 1 files, 110 lines
+  django__django-15790 ... 1 files, 12 lines
+  django__django-15814 ... 1 files, 102 lines
+  django__django-15819 ... 1 files, 161 lines
+  django__django-15851 ... 1 files, 64 lines
+  django__django-15902 ... 1 files, 82 lines
+  django__django-15996 ... 1 files, 168 lines
+  django__django-16041 ... 1 files, 102 lines
+  django__django-16046 ... 1 files, 108 lines
+  django__django-16139 ... 1 files, 102 lines
+  django__django-16229 ... 1 files, 102 lines
+  django__django-16255 ... 1 files, 202 lines
+  django__django-16379 ... 1 files, 169 lines
+  django__django-16400 ... 1 files, 292 lines
+  django__django-16408 ... 1 files, 123 lines
+  django__django-16527 ... 1 files, 152 lines
+  django__django-16595 ... 1 files, 102 lines
+  django__django-16816 ... 1 files, 102 lines
+  django__django-16820 ... 1 files, 102 lines
+  django__django-16873 ... 1 files, 102 lines
+  django__django-16910 ... 1 files, 102 lines
+  django__django-17051 ... 1 files, 102 lines
+  django__django-17087 ... 1 files, 102 lines
+  matplotlib__matplotlib-18869 ... 1 files, 102 lines
+  matplotlib__matplotlib-22711 ... 1 files, 193 lines
+  matplotlib__matplotlib-22835 ... 1 files, 164 lines
+  matplotlib__matplotlib-23299 ... 1 files, 130 lines
+  matplotlib__matplotlib-23314 ... 1 files, 102 lines
+  matplotlib__matplotlib-23476 ... 1 files, 102 lines
+  matplotlib__matplotlib-23562 ... 1 files, 102 lines
+  matplotlib__matplotlib-23563 ... 1 files, 102 lines
+  matplotlib__matplotlib-23913 ... 1 files, 260 lines
+  matplotlib__matplotlib-23964 ... 1 files, 102 lines
+  matplotlib__matplotlib-23987 ... 1 files, 102 lines
+  matplotlib__matplotlib-24149 ... 1 files, 102 lines
+  matplotlib__matplotlib-24265 ... 1 files, 27 lines
+  matplotlib__matplotlib-24334 ... 1 files, 102 lines
+  matplotlib__matplotlib-24970 ... 1 files, 102 lines
+  matplotlib__matplotlib-25079 ... 1 files, 102 lines
+  matplotlib__matplotlib-25311 ... 1 files, 111 lines
+  matplotlib__matplotlib-25332 ... 1 files, 102 lines
+  matplotlib__matplotlib-25433 ... 1 files, 102 lines
+  matplotlib__matplotlib-25442 ... 1 files, 160 lines
+  matplotlib__matplotlib-25498 ... 1 files, 204 lines
+  matplotlib__matplotlib-26011 ... 1 files, 102 lines
+  matplotlib__matplotlib-26020 ... 1 files, 57 lines
+  mwaskom__seaborn-2848 ...     Warning: could not read seaborn/_oldcore.py: No such file or directory (os error 2)
+0 files, 0 lines
+  mwaskom__seaborn-3010 ... 1 files, 50 lines
+  mwaskom__seaborn-3190 ... 1 files, 102 lines
+  mwaskom__seaborn-3407 ... 1 files, 102 lines
+  pallets__flask-4045 ... 1 files, 128 lines
+  pallets__flask-4992 ... 1 files, 122 lines
+  pallets__flask-5063 ... 1 files, 161 lines
+  psf__requests-1963 ...     Warning: could not read requests/sessions.py: No such file or directory (os error 2)
+0 files, 0 lines
+  psf__requests-2148 ...     Warning: could not read requests/models.py: No such file or directory (os error 2)
+0 files, 0 lines
+  psf__requests-2317 ...     Warning: could not read requests/sessions.py: No such file or directory (os error 2)
+0 files, 0 lines
+  psf__requests-2674 ...     Warning: could not read requests/adapters.py: No such file or directory (os error 2)
+0 files, 0 lines
+  psf__requests-3362 ...     Warning: could not read requests/utils.py: No such file or directory (os error 2)
+0 files, 0 lines
+  psf__requests-863 ...     Warning: could not read requests/models.py: No such file or directory (os error 2)
+0 files, 0 lines
+  pydata__xarray-3364 ...     Warning: could not read xarray/core/concat.py: No such file or directory (os error 2)
+0 files, 0 lines
+  pydata__xarray-4094 ... 1 files, 102 lines
+  pydata__xarray-4248 ... 1 files, 102 lines
+  pydata__xarray-4493 ... 1 files, 102 lines
+  pydata__xarray-5131 ... 1 files, 102 lines
+  pylint-dev__pylint-5859 ... 1 files, 192 lines
+  pylint-dev__pylint-6506 ... 1 files, 211 lines
+  pylint-dev__pylint-7080 ... 1 files, 185 lines
+  pylint-dev__pylint-7114 ... 1 files, 185 lines
+  pylint-dev__pylint-7228 ... 1 files, 133 lines
+  pylint-dev__pylint-7993 ... 1 files, 298 lines
+  pytest-dev__pytest-11143 ... 1 files, 102 lines
+  pytest-dev__pytest-11148 ... 1 files, 102 lines
+  pytest-dev__pytest-5103 ... 1 files, 135 lines
+  pytest-dev__pytest-5221 ... 1 files, 102 lines
+  pytest-dev__pytest-5227 ... 1 files, 65 lines
+  pytest-dev__pytest-5413 ... 1 files, 102 lines
+  pytest-dev__pytest-5495 ... 1 files, 102 lines
+  pytest-dev__pytest-5692 ... 1 files, 141 lines
+  pytest-dev__pytest-6116 ... 1 files, 102 lines
+  pytest-dev__pytest-7168 ... 1 files, 155 lines
+  pytest-dev__pytest-7220 ... 1 files, 181 lines
+  pytest-dev__pytest-7373 ...     Warning: could not read src/_pytest/mark/evaluate.py: No such file or directory (os error 2)
+0 files, 0 lines
+  pytest-dev__pytest-7432 ... 1 files, 82 lines
+  pytest-dev__pytest-7490 ... 1 files, 121 lines
+  pytest-dev__pytest-8365 ... 1 files, 102 lines
+  pytest-dev__pytest-8906 ... 1 files, 102 lines
+  pytest-dev__pytest-9359 ... 1 files, 228 lines
+  scikit-learn__scikit-learn-10297 ...     Warning: could not read sklearn/linear_model/ridge.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-10508 ...     Warning: could not read sklearn/preprocessing/label.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-10949 ... 1 files, 204 lines
+  scikit-learn__scikit-learn-11040 ...     Warning: could not read sklearn/neighbors/base.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-11281 ...     Warning: could not read sklearn/mixture/base.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-12471 ... 1 files, 102 lines
+  scikit-learn__scikit-learn-13142 ...     Warning: could not read sklearn/mixture/base.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-13241 ...     Warning: could not read sklearn/decomposition/kernel_pca.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-13439 ... 1 files, 102 lines
+  scikit-learn__scikit-learn-13496 ...     Warning: could not read sklearn/ensemble/iforest.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-13497 ...     Warning: could not read sklearn/feature_selection/mutual_info_.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-13584 ... 1 files, 102 lines
+  scikit-learn__scikit-learn-13779 ...     Warning: could not read sklearn/ensemble/voting.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-14087 ...     Warning: could not read sklearn/linear_model/logistic.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-14092 ...     Warning: could not read sklearn/neighbors/nca.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-14894 ...     Warning: could not read sklearn/svm/base.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-14983 ... 1 files, 204 lines
+  scikit-learn__scikit-learn-15512 ... 1 files, 204 lines
+  scikit-learn__scikit-learn-15535 ... 1 files, 93 lines
+  scikit-learn__scikit-learn-25500 ... 1 files, 152 lines
+  scikit-learn__scikit-learn-25570 ... 1 files, 102 lines
+  scikit-learn__scikit-learn-25638 ... 1 files, 204 lines
+  scikit-learn__scikit-learn-25747 ... 1 files, 105 lines
+  sphinx-doc__sphinx-10325 ... 1 files, 253 lines
+  sphinx-doc__sphinx-10451 ... 1 files, 215 lines
+  sphinx-doc__sphinx-11445 ... 1 files, 115 lines
+  sphinx-doc__sphinx-7686 ... 1 files, 240 lines
+  sphinx-doc__sphinx-7738 ... 1 files, 102 lines
+  sphinx-doc__sphinx-7975 ... 1 files, 267 lines
+  sphinx-doc__sphinx-8273 ... 1 files, 139 lines
+  sphinx-doc__sphinx-8282 ... 1 files, 253 lines
+  sphinx-doc__sphinx-8435 ... 1 files, 253 lines
+  sphinx-doc__sphinx-8474 ...     Warning: could not read sphinx/domains/std.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sphinx-doc__sphinx-8506 ...     Warning: could not read sphinx/domains/std.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sphinx-doc__sphinx-8595 ... 1 files, 253 lines
+  sphinx-doc__sphinx-8627 ... 1 files, 246 lines
+  sphinx-doc__sphinx-8713 ... 1 files, 102 lines
+  sphinx-doc__sphinx-8721 ... 1 files, 102 lines
+  sphinx-doc__sphinx-8801 ... 1 files, 81 lines
+  sympy__sympy-11400 ...     Warning: could not read sympy/printing/ccode.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-11870 ... 1 files, 270 lines
+  sympy__sympy-11897 ... 1 files, 102 lines
+  sympy__sympy-12171 ... 1 files, 102 lines
+  sympy__sympy-12236 ... 1 files, 223 lines
+  sympy__sympy-12419 ... 1 files, 255 lines
+  sympy__sympy-12454 ... 1 files, 99 lines
+  sympy__sympy-12481 ... 1 files, 102 lines
+  sympy__sympy-13031 ... 1 files, 0 lines
+  sympy__sympy-13043 ... 1 files, 139 lines
+  sympy__sympy-13146 ... 1 files, 115 lines
+  sympy__sympy-13177 ... 1 files, 261 lines
+  sympy__sympy-13437 ... 1 files, 102 lines
+  sympy__sympy-13471 ... 1 files, 102 lines
+  sympy__sympy-13480 ... 1 files, 102 lines
+  sympy__sympy-13647 ... 1 files, 102 lines
+  sympy__sympy-13773 ... 1 files, 195 lines
+  sympy__sympy-13895 ... 1 files, 136 lines
+  sympy__sympy-13915 ... 1 files, 102 lines
+  sympy__sympy-13971 ... 1 files, 102 lines
+  sympy__sympy-14024 ... 1 files, 204 lines
+  sympy__sympy-14308 ... 1 files, 102 lines
+  sympy__sympy-14317 ... 1 files, 102 lines
+  sympy__sympy-14396 ... 1 files, 156 lines
+  sympy__sympy-14774 ... 1 files, 102 lines
+  sympy__sympy-14817 ... 1 files, 102 lines
+  sympy__sympy-15011 ... 1 files, 141 lines
+  sympy__sympy-15308 ... 1 files, 204 lines
+  sympy__sympy-15345 ... 1 files, 151 lines
+  sympy__sympy-15346 ... 1 files, 102 lines
+  sympy__sympy-15609 ... 1 files, 102 lines
+  sympy__sympy-15678 ... 1 files, 102 lines
+  sympy__sympy-16106 ... 1 files, 102 lines
+  sympy__sympy-16281 ... 1 files, 102 lines
+  sympy__sympy-16503 ... 1 files, 167 lines
+  sympy__sympy-16792 ... 1 files, 146 lines
+  sympy__sympy-16988 ... 1 files, 102 lines
+  sympy__sympy-17022 ... 1 files, 102 lines
+  sympy__sympy-17139 ... 1 files, 102 lines
+  sympy__sympy-17630 ... 1 files, 102 lines
+  sympy__sympy-17655 ... 1 files, 102 lines
+  sympy__sympy-18057 ... 1 files, 102 lines
+  sympy__sympy-18087 ... 1 files, 192 lines
+  sympy__sympy-18189 ...     Warning: could not read sympy/solvers/diophantine.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-18199 ... 1 files, 183 lines
+  sympy__sympy-18532 ... 1 files, 102 lines
+  sympy__sympy-18621 ... 1 files, 102 lines
+  sympy__sympy-18698 ... 1 files, 198 lines
+  sympy__sympy-18835 ... 1 files, 120 lines
+  sympy__sympy-19007 ... 1 files, 159 lines
+  sympy__sympy-19254 ... 1 files, 102 lines
+  sympy__sympy-19487 ... 1 files, 102 lines
+  sympy__sympy-20049 ... 1 files, 102 lines
+  sympy__sympy-20154 ... 1 files, 206 lines
+  sympy__sympy-20212 ... 1 files, 102 lines
+  sympy__sympy-20322 ... 1 files, 159 lines
+  sympy__sympy-20442 ... 1 files, 266 lines
+  sympy__sympy-20590 ... 1 files, 66 lines
+  sympy__sympy-20639 ... 1 files, 154 lines
+  sympy__sympy-21055 ... 1 files, 184 lines
+  sympy__sympy-21171 ... 1 files, 102 lines
+  sympy__sympy-21379 ... 1 files, 261 lines
+  sympy__sympy-21612 ... 1 files, 102 lines
+  sympy__sympy-21614 ... 1 files, 102 lines
+  sympy__sympy-21627 ... 1 files, 102 lines
+  sympy__sympy-21847 ... 1 files, 114 lines
+  sympy__sympy-22005 ... 1 files, 102 lines
+  sympy__sympy-22714 ... 1 files, 102 lines
+  sympy__sympy-22840 ... 1 files, 121 lines
+  sympy__sympy-23117 ... 1 files, 245 lines
+  sympy__sympy-23191 ... 1 files, 102 lines
+  sympy__sympy-23262 ... 1 files, 102 lines
+  sympy__sympy-24066 ... 1 files, 207 lines
+  sympy__sympy-24102 ... 1 files, 102 lines
+  sympy__sympy-24152 ... 1 files, 102 lines
+  sympy__sympy-24213 ... 1 files, 207 lines
+  sympy__sympy-24909 ... 1 files, 220 lines
+Phase 1 complete: 300/300 tasks with file context (0.3s)
+
+--- Phase 2: Generating patches (16 concurrent) ---
+[2m2026-03-26T15:39:17.514251Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 300 tasks, 16 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/300] django__django-11039 — OK | 100% | 8905ms | 1760+154 tokens
+  [2/300] django__django-11179 — OK | 100% | 9587ms | 1962+163 tokens
+  [3/300] astropy__astropy-14182 — OK | 86% | 9617ms | 2065+164 tokens
+  [4/300] django__django-12708 — OK | 100% | 9682ms | 1942+166 tokens
+  [5/300] django__django-10914 — OK | 100% | 11035ms | 3156+186 tokens
+  [6/300] django__django-11905 — OK | 71% | 11598ms | 3581+195 tokens
+  [7/300] astropy__astropy-14995 — OK | 100% | 11630ms | 3975+196 tokens
+  [8/300] django__django-12284 — OK | 71% | 12208ms | 2912+203 tokens
+  [9/300] django__django-13658 — OK | 100% | 12240ms | 2116+204 tokens
+  [10/300] django__django-13220 — OK | 86% | 14109ms | 3318+250 tokens
+  [11/300] django__django-14752 — OK | 100% | 15606ms | 2522+289 tokens
+  [12/300] astropy__astropy-12907 — OK | 100% | 16205ms | 1898+298 tokens
+  [13/300] django__django-15400 — OK | 100% | 5447ms | 1812+123 tokens
+  [14/300] django__django-15498 — OK | 100% | 5305ms | 1937+126 tokens
+  [15/300] django__django-15388 — OK | 100% | 6557ms | 1657+144 tokens
+  [16/300] django__django-11797 — OK | 100% | 9554ms | 2560+198 tokens
+  [17/300] astropy__astropy-14365 — OK | 100% | 19772ms | 3881+379 tokens
+  [18/300] django__django-14155 — OK | 100% | 22219ms | 1679+454 tokens
+  [19/300] django__django-15789 — OK | 100% | 6082ms | 1914+155 tokens
+  [20/300] django__django-11283 — OK | 86% | 23014ms | 2822+461 tokens
+  [21/300] django__django-11848 — OK | 100% | 12383ms | 2406+279 tokens
+  [22/300] django__django-15738 — OK | 80% | 10330ms | 2721+242 tokens
+  [23/300] django__django-15781 — OK | 100% | 8894ms | 2831+205 tokens
+  [24/300] django__django-11815 — OK | 100% | 14818ms | 2643+331 tokens
+  [25/300] django__django-15851 — OK | 100% | 6311ms | 1262+136 tokens
+  [26/300] django__django-11630 — OK | 100% | 16577ms | 3855+344 tokens
+  [27/300] django__django-15902 — OK | 100% | 5946ms | 1667+125 tokens
+  [28/300] django__django-15695 — OK | 100% | 15275ms | 2252+325 tokens
+  [29/300] django__django-11742 — OK | 86% | 18608ms | 1824+377 tokens
+  [30/300] django__django-15790 — OK | 83% | 11933ms | 573+235 tokens
+  [31/300] django__django-15814 — OK | 100% | 12161ms | 3015+238 tokens
+  [32/300] django__django-16046 — OK | 100% | 7617ms | 1852+132 tokens
+  [33/300] django__django-16139 — OK | 100% | 7308ms | 1996+128 tokens
+  [34/300] django__django-15819 — OK | 100% | 13751ms | 2589+276 tokens
+  [35/300] django__django-16527 — OK | 100% | 7209ms | 2539+137 tokens
+  [36/300] django__django-16041 — OK | 100% | 11134ms | 2820+197 tokens
+  [37/300] django__django-16255 — OK | 100% | 8938ms | 3285+158 tokens
+  [38/300] django__django-16595 — OK | 100% | 7415ms | 2071+154 tokens
+  [39/300] matplotlib__matplotlib-23987 — OK | 80% | 4711ms | 2107+95 tokens
+  [40/300] django__django-15996 — OK | 100% | 13244ms | 2495+238 tokens
+  [41/300] django__django-16379 — OK | 100% | 11739ms | 2803+206 tokens
+  [42/300] django__django-16229 — OK | 100% | 11861ms | 1971+208 tokens
+  [43/300] django__django-16873 — OK | 100% | 8236ms | 2144+163 tokens
+  [44/300] django__django-16910 — OK | 100% | 7946ms | 2431+152 tokens
+  [45/300] django__django-16816 — OK | 100% | 11679ms | 3679+235 tokens
+  [46/300] django__django-16820 — OK | 100% | 11901ms | 1627+231 tokens
+  [47/300] django__django-16400 — OK | 100% | 16654ms | 6150+315 tokens
+  [48/300] matplotlib__matplotlib-24334 — OK | 100% | 9829ms | 1806+175 tokens
+  [49/300] matplotlib__matplotlib-25311 — OK | 50% | 9353ms | 2033+167 tokens
+  [50/300] django__django-16408 — OK | 100% | 19459ms | 2616+363 tokens
+  [51/300] matplotlib__matplotlib-25079 — OK | 71% | 11384ms | 2737+181 tokens
+  [52/300] django__django-17051 — OK | 71% | 12394ms | 2425+194 tokens
+  [53/300] matplotlib__matplotlib-24149 — OK | 100% | 16038ms | 3523+271 tokens
+  [54/300] django__django-17087 — OK | 100% | 10649ms | 2503+160 tokens
+  [55/300] matplotlib__matplotlib-25433 — OK | 100% | 14504ms | 3429+213 tokens
+  [56/300] matplotlib__matplotlib-25442 — OK | 71% | 12328ms | 3066+167 tokens
+  [57/300] matplotlib__matplotlib-24265 — OK | 100% | 18860ms | 918+283 tokens
+  [58/300] matplotlib__matplotlib-25498 — OK | 100% | 12664ms | 6932+152 tokens
+  [59/300] matplotlib__matplotlib-22711 — OK | 86% | 15026ms | 6148+192 tokens
+  [60/300] mwaskom__seaborn-3190 — OK | 100% | 19334ms | 2131+154 tokens
+  [61/300] mwaskom__seaborn-3407 — OK | 100% | 18907ms | 2519+158 tokens
+  [62/300] matplotlib__matplotlib-23314 — OK | 100% | 23544ms | 2311+203 tokens
+  [63/300] mwaskom__seaborn-3010 — OK | 100% | 24146ms | 2206+211 tokens
+  [64/300] matplotlib__matplotlib-23299 — OK | 60% | 26692ms | 2671+240 tokens
+  [65/300] matplotlib__matplotlib-23476 — OK | 75% | 25041ms | 2986+248 tokens
+  [66/300] mwaskom__seaborn-2848 — OK | 57% | 28598ms | 857+286 tokens
+  [67/300] matplotlib__matplotlib-18869 — OK | 100% | 35963ms | 2271+395 tokens
+  [68/300] matplotlib__matplotlib-26020 — OK | 71% | 32607ms | 8620+329 tokens
+  [69/300] pallets__flask-4045 — OK | 71% | 8877ms | 1426+155 tokens
+  [70/300] matplotlib__matplotlib-23562 — OK | 86% | 28363ms | 3994+316 tokens
+  [71/300] matplotlib__matplotlib-23964 — OK | 100% | 8241ms | 3057+149 tokens
+  [72/300] matplotlib__matplotlib-26011 — OK | 86% | 37778ms | 5121+427 tokens
+  [73/300] matplotlib__matplotlib-22835 — OK | 71% | 39218ms | 5587+431 tokens
+  [74/300] psf__requests-2148 — OK | 100% | 8768ms | 1217+135 tokens
+  [75/300] psf__requests-2317 — OK | 75% | 7770ms | 615+120 tokens
+  [76/300] pylint-dev__pylint-5859 — OK | 100% | 9871ms | 2347+154 tokens
+  [77/300] psf__requests-1963 — OK | 100% | 11186ms | 634+178 tokens
+  [78/300] matplotlib__matplotlib-23913 — OK | 100% | 16427ms | 4365+260 tokens
+  [79/300] psf__requests-3362 — OK | 71% | 11408ms | 612+158 tokens
+  [80/300] pylint-dev__pylint-7080 — OK | 100% | 13423ms | 11742+195 tokens
+  [81/300] pylint-dev__pylint-6506 — OK | 100% | 15343ms | 2702+228 tokens
+  [82/300] psf__requests-863 — OK | 100% | 11015ms | 647+173 tokens
+  [83/300] pallets__flask-4992 — OK | 100% | 24744ms | 2505+387 tokens
+  [84/300] pylint-dev__pylint-7114 — OK | 100% | 13724ms | 3398+217 tokens
+  [85/300] pylint-dev__pylint-7228 — OK | 100% | 13116ms | 3771+210 tokens
+  [86/300] pydata__xarray-4094 — OK | 67% | 13661ms | 2552+235 tokens
+  [87/300] pydata__xarray-4493 — OK | 71% | 8776ms | 3374+166 tokens
+  [88/300] pydata__xarray-5131 — OK | 100% | 8088ms | 2583+146 tokens
+  [89/300] pydata__xarray-4248 — OK | 100% | 16151ms | 3093+280 tokens
+  [90/300] pytest-dev__pytest-5227 — OK | 100% | 8818ms | 1390+171 tokens
+  [91/300] pytest-dev__pytest-5221 — OK | 71% | 11157ms | 1797+215 tokens
+  [92/300] psf__requests-2674 — OK | 100% | 26486ms | 2126+435 tokens
+  [93/300] pytest-dev__pytest-6116 — OK | 100% | 6499ms | 2417+105 tokens
+  [94/300] pytest-dev__pytest-5692 — OK | 83% | 9332ms | 2713+164 tokens
+  [95/300] pytest-dev__pytest-7220 — OK | 71% | 6827ms | 3276+118 tokens
+  [96/300] pytest-dev__pytest-5495 — OK | 100% | 13204ms | 2008+253 tokens
+  [97/300] pytest-dev__pytest-7168 — OK | 100% | 10260ms | 5157+188 tokens
+  [98/300] pydata__xarray-3364 — OK | 100% | 25256ms | 431+449 tokens
+  [99/300] pytest-dev__pytest-7432 — OK | 100% | 8443ms | 1669+154 tokens
+  [100/300] matplotlib__matplotlib-24970 — OK | 86% | 82248ms | 2850+1217 tokens
+  [101/300] pytest-dev__pytest-7490 — OK | 100% | 10978ms | 6258+201 tokens
+  [102/300] pytest-dev__pytest-8906 — OK | 83% | 9857ms | 3094+199 tokens
+  [103/300] pytest-dev__pytest-9359 — OK | 100% | 9517ms | 3129+196 tokens
+  [104/300] pytest-dev__pytest-8365 — OK | 100% | 12826ms | 2255+258 tokens
+  [105/300] scikit-learn__scikit-learn-10508 — OK | 86% | 8790ms | 914+172 tokens
+  [106/300] scikit-learn__scikit-learn-11040 — OK | 100% | 9505ms | 1123+185 tokens
+  [107/300] scikit-learn__scikit-learn-10949 — OK | 86% | 9457ms | 3491+186 tokens
+  [108/300] pytest-dev__pytest-11143 — OK | 100% | 7915ms | 4363+152 tokens
+  [109/300] pytest-dev__pytest-7373 — OK | 100% | 20052ms | 659+389 tokens
+  [110/300] pylint-dev__pylint-7993 — OK | 100% | 12491ms | 3782+243 tokens
+  [111/300] scikit-learn__scikit-learn-12471 — OK | 43% | 9424ms | 2217+203 tokens
+  [112/300] pytest-dev__pytest-11148 — OK | 100% | 10272ms | 2595+215 tokens
+  [113/300] scikit-learn__scikit-learn-11281 — OK | 100% | 11311ms | 557+239 tokens
+  [114/300] scikit-learn__scikit-learn-13439 — OK | 100% | 6203ms | 2154+144 tokens
+  [115/300] scikit-learn__scikit-learn-13142 — OK | 83% | 11275ms | 1514+248 tokens
+  [116/300] scikit-learn__scikit-learn-13779 — OK | 100% | 11128ms | 441+251 tokens
+  [117/300] scikit-learn__scikit-learn-10297 — OK | 86% | 25811ms | 810+550 tokens
+  [118/300] scikit-learn__scikit-learn-14087 — OK | 100% | 11237ms | 1358+250 tokens
+  [119/300] scikit-learn__scikit-learn-13241 — OK | 100% | 15213ms | 4142+327 tokens
+  [120/300] scikit-learn__scikit-learn-13497 — OK | 71% | 9069ms | 398+179 tokens
+  [121/300] scikit-learn__scikit-learn-14894 — OK | 100% | 9862ms | 890+194 tokens
+  [122/300] scikit-learn__scikit-learn-14983 — OK | 83% | 9200ms | 4380+172 tokens
+  [123/300] scikit-learn__scikit-learn-13496 — OK | 100% | 15487ms | 701+328 tokens
+  [124/300] scikit-learn__scikit-learn-25500 — OK | 86% | 7559ms | 4148+162 tokens
+  [125/300] scikit-learn__scikit-learn-14092 — OK | 86% | 17609ms | 1664+369 tokens
+  [126/300] pytest-dev__pytest-5413 — OK | 100% | 48815ms | 3194+988 tokens
+  [127/300] scikit-learn__scikit-learn-15535 — OK | 100% | 9984ms | 1739+197 tokens
+  [128/300] sphinx-doc__sphinx-7738 — OK | 100% | 10581ms | 1965+203 tokens
+  [129/300] scikit-learn__scikit-learn-15512 — OK | 67% | 15250ms | 3729+291 tokens
+  [130/300] sphinx-doc__sphinx-7975 — OK | 86% | 10621ms | 2572+209 tokens
+  [131/300] scikit-learn__scikit-learn-13584 — OK | 100% | 10094ms | 1974+191 tokens
+  [132/300] sphinx-doc__sphinx-7686 — OK | 86% | 15643ms | 3664+285 tokens
+  [133/300] astropy__astropy-6938 — OK | 100% | 12059ms | 2087+230 tokens
+  [134/300] scikit-learn__scikit-learn-25570 — OK | 80% | 8354ms | 3267+144 tokens
+  [135/300] sphinx-doc__sphinx-8282 — OK | 57% | 10127ms | 3828+169 tokens
+  [136/300] sphinx-doc__sphinx-8273 — OK | 100% | 14363ms | 1999+273 tokens
+  [137/300] sphinx-doc__sphinx-8435 — OK | 100% | 9957ms | 3825+165 tokens
+  [138/300] pytest-dev__pytest-5103 — OK | 100% | 36581ms | 3241+714 tokens
+  [139/300] sphinx-doc__sphinx-8595 — OK | 67% | 9460ms | 3786+164 tokens
+  [140/300] sphinx-doc__sphinx-8506 — OK | 57% | 11434ms | 1256+186 tokens
+  [141/300] django__django-11620 — OK | 100% | 157675ms | 2895+2685 tokens
+  [142/300] scikit-learn__scikit-learn-25747 — OK | 100% | 10682ms | 3983+187 tokens
+  [143/300] sphinx-doc__sphinx-8474 — OK | 60% | 11806ms | 1819+202 tokens
+  [144/300] sphinx-doc__sphinx-8627 — OK | 100% | 10322ms | 4896+165 tokens
+  [145/300] sympy__sympy-11400 — OK | 100% | 11031ms | 487+180 tokens
+  [146/300] sphinx-doc__sphinx-8721 — OK | 100% | 8583ms | 1845+154 tokens
+  [147/300] sphinx-doc__sphinx-10325 — OK | 71% | 14224ms | 4004+252 tokens
+  [148/300] sphinx-doc__sphinx-8713 — OK | 86% | 13813ms | 2065+250 tokens
+  [149/300] sympy__sympy-12236 — OK | 80% | 9112ms | 4823+174 tokens
+  [150/300] sphinx-doc__sphinx-11445 — OK | 50% | 11947ms | 2544+221 tokens
+  [151/300] sympy__sympy-13146 — OK | 100% | 7981ms | 2264+167 tokens
+  [152/300] sphinx-doc__sphinx-8801 — OK | 71% | 14125ms | 1591+282 tokens
+  [153/300] sympy__sympy-12171 — OK | 100% | 14544ms | 2581+289 tokens
+  [154/300] sympy__sympy-12454 — OK | 100% | 9065ms | 2153+183 tokens
+  [155/300] scikit-learn__scikit-learn-25638 — OK | 100% | 28494ms | 3958+521 tokens
+  [156/300] sphinx-doc__sphinx-10451 — OK | 100% | 21114ms | 4256+394 tokens
+  [157/300] sympy__sympy-13647 — OK | 67% | 9222ms | 2208+170 tokens
+  [158/300] sympy__sympy-13031 — FAIL | 29% | 5892ms | 1285+96 tokens
+  [159/300] astropy__astropy-7746 — OK | 100% | 9766ms | 2760+182 tokens
+  [160/300] sympy__sympy-13773 — OK | 100% | 11824ms | 2952+222 tokens
+  [161/300] sympy__sympy-13043 — OK | 100% | 8663ms | 2353+162 tokens
+  [162/300] sympy__sympy-13915 — OK | 57% | 8650ms | 3168+163 tokens
+  [163/300] sympy__sympy-12481 — OK | 75% | 17486ms | 1924+349 tokens
+  [164/300] sympy__sympy-13177 — OK | 100% | 10350ms | 4226+211 tokens
+  [165/300] sympy__sympy-13437 — OK | 71% | 7404ms | 2204+161 tokens
+  [166/300] sympy__sympy-13895 — OK | 50% | 14499ms | 2842+274 tokens
+  [167/300] sympy__sympy-15308 — OK | 100% | 11716ms | 3626+232 tokens
+  [168/300] sympy__sympy-13471 — OK | 57% | 6802ms | 2015+128 tokens
+  [169/300] sympy__sympy-14024 — OK | 100% | 11685ms | 3447+237 tokens
+  [170/300] sympy__sympy-13971 — OK | 100% | 14951ms | 1948+293 tokens
+  [171/300] sympy__sympy-14308 — OK | 43% | 11645ms | 1880+237 tokens
+  [172/300] sympy__sympy-13480 — OK | 67% | 7792ms | 1847+136 tokens
+  [173/300] sympy__sympy-16106 — OK | 100% | 10628ms | 2741+226 tokens
+  [174/300] sympy__sympy-16281 — OK | 100% | 8876ms | 2240+188 tokens
+  [175/300] sympy__sympy-16503 — OK | 43% | 9600ms | 3426+201 tokens
+  [176/300] sympy__sympy-15345 — OK | 80% | 13546ms | 3582+268 tokens
+  [177/300] sympy__sympy-15678 — OK | 100% | 14520ms | 1934+285 tokens
+  [178/300] sympy__sympy-14317 — OK | 100% | 19287ms | 2100+386 tokens
+  [179/300] sympy__sympy-15346 — OK | 100% | 14250ms | 2956+280 tokens
+  [180/300] sympy__sympy-17022 — OK | 100% | 12002ms | 1950+238 tokens
+  [181/300] sympy__sympy-17655 — OK | 100% | 8848ms | 2222+163 tokens
+  [182/300] sympy__sympy-18087 — OK | 57% | 10195ms | 3934+196 tokens
+  [183/300] sympy__sympy-17630 — OK | 50% | 12613ms | 2736+232 tokens
+  [184/300] sympy__sympy-14817 — OK | 75% | 9213ms | 2469+161 tokens
+  [185/300] sympy__sympy-14396 — OK | 100% | 21292ms | 3236+397 tokens
+  [186/300] sympy__sympy-11870 — OK | 100% | 59235ms | 4393+1117 tokens
+  [187/300] sympy__sympy-15011 — OK | 57% | 10878ms | 2802+182 tokens
+  [188/300] sympy__sympy-18189 — OK | 100% | 12788ms | 1258+214 tokens
+  [189/300] sympy__sympy-18199 — OK | 86% | 9986ms | 2786+171 tokens
+  [190/300] sympy__sympy-18621 — OK | 100% | 9113ms | 2487+190 tokens
+  [191/300] sympy__sympy-15609 — OK | 100% | 16310ms | 2190+299 tokens
+  [192/300] sympy__sympy-18835 — OK | 43% | 10266ms | 2685+204 tokens
+  [193/300] sympy__sympy-19487 — OK | 100% | 10904ms | 3860+226 tokens
+  [194/300] sympy__sympy-18532 — OK | 60% | 16092ms | 2578+293 tokens
+  [195/300] sympy__sympy-19254 — OK | 100% | 8157ms | 1623+145 tokens
+  [196/300] sympy__sympy-20212 — OK | 100% | 8975ms | 1915+164 tokens
+  [197/300] sympy__sympy-18698 — OK | 86% | 23505ms | 4761+430 tokens
+  [198/300] sympy__sympy-20590 — OK | 100% | 6742ms | 1687+129 tokens
+  [199/300] sympy__sympy-20442 — OK | 100% | 8068ms | 4749+151 tokens
+  [200/300] sympy__sympy-20154 — OK | 100% | 15347ms | 3173+260 tokens
+  [201/300] sympy__sympy-19007 — OK | 71% | 25219ms | 2926+475 tokens
+  [202/300] sympy__sympy-21055 — OK | 86% | 8687ms | 2882+148 tokens
+  [203/300] sympy__sympy-21171 — OK | 80% | 9645ms | 4619+181 tokens
+  [204/300] sympy__sympy-21614 — OK | 100% | 5669ms | 1949+118 tokens
+  [205/300] sympy__sympy-21612 — OK | 100% | 8555ms | 2555+174 tokens
+  [206/300] sympy__sympy-20049 — OK | 86% | 25671ms | 2575+481 tokens
+  [207/300] sympy__sympy-21379 — OK | 100% | 14447ms | 7790+284 tokens
+  [208/300] sympy__sympy-20639 — OK | 86% | 18411ms | 3055+343 tokens
+  [209/300] sympy__sympy-16792 — OK | 86% | 8900ms | 2734+158 tokens
+  [210/300] sympy__sympy-20322 — OK | 86% | 27513ms | 6755+498 tokens
+  [211/300] sympy__sympy-16988 — OK | 67% | 6318ms | 1678+101 tokens
+  [212/300] sympy__sympy-22005 — OK | 67% | 11354ms | 2537+203 tokens
+  [213/300] sympy__sympy-22714 — OK | 100% | 11359ms | 2171+203 tokens
+  [214/300] sympy__sympy-21627 — OK | 100% | 16684ms | 2175+312 tokens
+  [215/300] sympy__sympy-22840 — OK | 100% | 8925ms | 6424+140 tokens
+  [216/300] sympy__sympy-23117 — OK | 86% | 10745ms | 4206+193 tokens
+  [217/300] sympy__sympy-23191 — OK | 57% | 11423ms | 2779+219 tokens
+  [218/300] sympy__sympy-23262 — FAIL | 25% | 12283ms | 2572+234 tokens
+  [219/300] sympy__sympy-24066 — OK | 100% | 11646ms | 2126+219 tokens
+  [220/300] sympy__sympy-24102 — OK | 67% | 9690ms | 2631+181 tokens
+  [221/300] django__django-15061 — OK | 100% | 6185ms | 1699+113 tokens
+  [222/300] matplotlib__matplotlib-25332 — OK | 86% | 232504ms | 1894+4096 tokens
+  [223/300] sympy__sympy-24909 — OK | 100% | 11962ms | 4005+225 tokens
+  [224/300] sympy__sympy-21847 — OK | 100% | 15757ms | 2594+293 tokens
+  [225/300] django__django-14915 — OK | 100% | 6362ms | 2219+119 tokens
+  [226/300] sympy__sympy-24152 — OK | 100% | 16524ms | 2462+310 tokens
+  [227/300] django__django-14999 — OK | 43% | 8205ms | 1441+148 tokens
+  [228/300] django__django-14997 — OK | 100% | 11749ms | 5393+207 tokens
+  [229/300] django__django-15202 — OK | 86% | 7564ms | 2607+132 tokens
+  [230/300] django__django-15213 — OK | 43% | 8729ms | 1940+164 tokens
+  [231/300] sympy__sympy-24213 — OK | 100% | 14726ms | 2255+269 tokens
+  [232/300] django__django-12470 — OK | 60% | 8244ms | 1817+152 tokens
+  [233/300] django__django-12286 — OK | 100% | 8508ms | 1367+151 tokens
+  [234/300] django__django-15252 — OK | 100% | 13813ms | 4111+242 tokens
+  [235/300] django__django-13925 — OK | 80% | 10467ms | 3296+185 tokens
+  [236/300] matplotlib__matplotlib-23563 — OK | 67% | 228970ms | 57266+4096 tokens
+  [237/300] django__django-12453 — OK | 71% | 10576ms | 3297+202 tokens
+  [238/300] django__django-13660 — OK | 100% | 12390ms | 4539+231 tokens
+  [239/300] django__django-12308 — OK | 83% | 14771ms | 1795+283 tokens
+  [240/300] django__django-13710 — OK | 100% | 10585ms | 1824+202 tokens
+  [241/300] pallets__flask-5063 — OK | 86% | 217287ms | 2568+4096 tokens
+  [242/300] django__django-13768 — OK | 86% | 6887ms | 2321+142 tokens
+  [243/300] django__django-14787 — OK | 100% | 12068ms | 3401+235 tokens
+  [244/300] django__django-14855 — OK | 100% | 8402ms | 2267+161 tokens
+  [245/300] django__django-12856 — OK | 100% | 8101ms | 2000+156 tokens
+  [246/300] django__django-12908 — OK | 100% | 8298ms | 2053+154 tokens
+  [247/300] django__django-13964 — OK | 100% | 8625ms | 2182+164 tokens
+  [248/300] django__django-12915 — OK | 100% | 18731ms | 2022+362 tokens
+  [249/300] django__django-13230 — OK | 100% | 9211ms | 3578+176 tokens
+  [250/300] django__django-11564 — OK | 100% | 10162ms | 4803+192 tokens
+  [251/300] django__django-13401 — OK | 100% | 11680ms | 1798+222 tokens
+  [252/300] django__django-13265 — OK | 71% | 8992ms | 4393+184 tokens
+  [253/300] django__django-13447 — OK | 100% | 11159ms | 1672+237 tokens
+  [254/300] django__django-13551 — OK | 100% | 11552ms | 2113+270 tokens
+  [255/300] django__django-11422 — OK | 100% | 14302ms | 2314+332 tokens
+  [256/300] django__django-11964 — OK | 83% | 5801ms | 1957+139 tokens
+  [257/300] django__django-13448 — OK | 100% | 17982ms | 3746+394 tokens
+  [258/300] django__django-11910 — OK | 100% | 9904ms | 1940+211 tokens
+  [259/300] django__django-13315 — OK | 100% | 15965ms | 3330+339 tokens
+  [260/300] django__django-11001 — OK | 100% | 7517ms | 2316+143 tokens
+  [261/300] django__django-10924 — OK | 100% | 8547ms | 3147+168 tokens
+  [262/300] django__django-14016 — OK | 100% | 5027ms | 1699+118 tokens
+  [263/300] django__django-11583 — OK | 100% | 8908ms | 3784+177 tokens
+  [264/300] django__django-13321 — OK | 100% | 10873ms | 8290+227 tokens
+  [265/300] django__django-15320 — OK | 100% | 9746ms | 1930+226 tokens
+  [266/300] django__django-15347 — OK | 100% | 8428ms | 3793+194 tokens
+  [267/300] django__django-14017 — OK | 100% | 7110ms | 2023+161 tokens
+  [268/300] django__django-14580 — OK | 100% | 7555ms | 2270+178 tokens
+  [269/300] django__django-13590 — OK | 100% | 7930ms | 1861+183 tokens
+  [270/300] django__django-14411 — OK | 100% | 5164ms | 1637+107 tokens
+  [271/300] django__django-14382 — OK | 100% | 7106ms | 1870+148 tokens
+  [272/300] django__django-14534 — OK | 67% | 6378ms | 2191+141 tokens
+  [273/300] django__django-14667 — FAIL | 29% | 6596ms | 3153+131 tokens
+  [274/300] django__django-13933 — OK | 83% | 6393ms | 2047+133 tokens
+  [275/300] django__django-14238 — OK | 100% | 10952ms | 2315+218 tokens
+  [276/300] django__django-12184 — OK | 100% | 9118ms | 1953+189 tokens
+  [277/300] django__django-14672 — OK | 100% | 9254ms | 6754+202 tokens
+  [278/300] django__django-13028 — OK | 100% | 6454ms | 2679+158 tokens
+  [279/300] django__django-11019 — OK | 71% | 9274ms | 6096+209 tokens
+  [280/300] django__django-11049 — OK | 100% | 7580ms | 1752+185 tokens
+  [281/300] django__django-11099 — OK | 100% | 10518ms | 774+245 tokens
+  [282/300] django__django-14608 — OK | 100% | 5256ms | 2534+118 tokens
+  [283/300] django__django-14730 — OK | 100% | 8255ms | 1898+191 tokens
+  [284/300] django__django-12700 — OK | 100% | 7444ms | 2071+181 tokens
+  [285/300] django__django-11133 — OK | 100% | 6005ms | 1952+138 tokens
+  [286/300] django__django-13158 — OK | 100% | 12296ms | 3483+302 tokens
+  [287/300] django__django-12983 — OK | 71% | 17163ms | 1712+419 tokens
+  [288/300] django__django-12113 — OK | 100% | 8303ms | 4048+219 tokens
+  [289/300] sympy__sympy-11897 — OK | 80% | 202929ms | 2815+4096 tokens
+  [290/300] sympy__sympy-12419 — OK | 86% | 201170ms | 6657+4096 tokens
+  [291/300] django__django-13033 — OK | 100% | 8047ms | 3495+243 tokens
+  [292/300] sympy__sympy-17139 — OK | 100% | 186672ms | 2465+4096 tokens
+  [293/300] sympy__sympy-18057 — OK | 100% | 184588ms | 2447+4096 tokens
+  [294/300] sympy__sympy-14774 — OK | 100% | 184060ms | 2088+4096 tokens
+  [295/300] django__django-13757 — OK | 86% | 160876ms | 2099+4096 tokens
+  [296/300] django__django-12747 — OK | 100% | 159615ms | 2248+4096 tokens
+  [297/300] django__django-12589 — OK | 100% | 148636ms | 2836+4096 tokens
+  [298/300] django__django-11999 — OK | 100% | 148053ms | 3046+4096 tokens
+  [299/300] django__django-12497 — OK | 100% | 147331ms | 2108+4096 tokens
+  [300/300] django__django-12125 — OK | 100% | 129505ms | 2740+4096 tokens
+[2m2026-03-26T15:46:54.191616Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 457.5s | 297/300 passed | 276 tok/s
+
+Phase 2: 297/300 patches generated, 90% avg quality, 276 tok/s
+
+--- Phase 3: Fuzzy apply + retry ---
+  [1/300] astropy__astropy-12907 — APPLIED (APPLIED:fuzzy_apply)  [2/300] astropy__astropy-14182 — APPLIED (APPLIED:fuzzy_apply)  [3/300] astropy__astropy-14365 — APPLIED (APPLIED:fuzzy_apply)  [4/300] astropy__astropy-14995 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:46:54.463887Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-astropy__astropy-6938 — OK | 100% | 3170ms | 451+225 tokens
+[2m2026-03-26T15:46:57.635240Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 3.2s | 1/1 passed | 71 tok/s
+[2m2026-03-26T15:46:57.852948Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-astropy__astropy-7746 — OK | 100% | 2523ms | 404+177 tokens
+[2m2026-03-26T15:47:00.376622Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.5s | 1/1 passed | 70 tok/s
+  [7/300] django__django-10914 — APPLIED (APPLIED:fuzzy_apply)  [8/300] django__django-10924 — APPLIED (APPLIED:fuzzy_apply)  [9/300] django__django-11001 — APPLIED (APPLIED:fuzzy_apply)  [10/300] django__django-11019 — APPLIED (APPLIED:fuzzy_apply)  [11/300] django__django-11039 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:47:01.174665Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-11049 — OK | 100% | 2577ms | 400+180 tokens
+[2m2026-03-26T15:47:03.752722Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.6s | 1/1 passed | 70 tok/s
+  [13/300] django__django-11099 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:47:04.188281Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-11133 — OK | 100% | 1941ms | 352+133 tokens
+[2m2026-03-26T15:47:06.130048Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 1.9s | 1/1 passed | 68 tok/s
+  [15/300] django__django-11179 — APPLIED (APPLIED:fuzzy_apply)  [16/300] django__django-11283 — APPLIED (APPLIED:fuzzy_apply)  [17/300] django__django-11422 — APPLIED (APPLIED:fuzzy_apply)  [18/300] django__django-11564 — APPLIED (APPLIED:fuzzy_apply)  [19/300] django__django-11583 — APPLIED (APPLIED:fuzzy_apply)  [20/300] django__django-11620 — APPLIED (APPLIED:fuzzy_apply)  [21/300] django__django-11630 — APPLIED (APPLIED:fuzzy_apply)  [22/300] django__django-11742 — APPLIED (APPLIED:fuzzy_apply)  [23/300] django__django-11797 — APPLIED (APPLIED:fuzzy_apply)  [24/300] django__django-11815 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:47:07.482095Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-11848 — OK | 100% | 7432ms | 493+274 tokens
+[2m2026-03-26T15:47:14.856777Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 7.4s | 1/1 passed | 37 tok/s
+[2m2026-03-26T15:47:15.239585Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-11905 — OK | 100% | 5013ms | 410+190 tokens
+[2m2026-03-26T15:47:20.253009Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 5.0s | 1/1 passed | 38 tok/s
+[2m2026-03-26T15:47:20.635541Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-11910 — OK | 100% | 5470ms | 426+206 tokens
+[2m2026-03-26T15:47:26.106839Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 5.5s | 1/1 passed | 38 tok/s
+  [28/300] django__django-11964 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:47:26.591781Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-11999 — OK | 100% | 6902ms | 434+215 tokens
+[2m2026-03-26T15:47:33.494625Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 6.9s | 1/1 passed | 31 tok/s
+  [30/300] django__django-12113 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:47:34.198152Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-12125 — OK | 100% | 8485ms | 607+387 tokens
+[2m2026-03-26T15:47:42.624361Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 8.5s | 1/1 passed | 46 tok/s
+[2m2026-03-26T15:47:43.252948Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-12184 — OK | 100% | 3245ms | 404+184 tokens
+[2m2026-03-26T15:47:46.498371Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 3.2s | 1/1 passed | 57 tok/s
+[2m2026-03-26T15:47:46.922249Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-12284 — OK | 100% | 3447ms | 418+198 tokens
+[2m2026-03-26T15:47:50.369896Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 3.4s | 1/1 passed | 57 tok/s
+  [34/300] django__django-12286 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:47:50.912647Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-12308 — OK | 100% | 6625ms | 503+278 tokens
+[2m2026-03-26T15:47:57.538028Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 6.6s | 1/1 passed | 42 tok/s
+[2m2026-03-26T15:47:58.015286Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-12453 — OK | 100% | 5116ms | 418+197 tokens
+[2m2026-03-26T15:48:03.132349Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 5.1s | 1/1 passed | 38 tok/s
+  [37/300] django__django-12470 — APPLIED (APPLIED:fuzzy_apply)  [38/300] django__django-12497 — APPLIED (APPLIED:fuzzy_apply)  [39/300] django__django-12589 — APPLIED (APPLIED:fuzzy_apply)  [40/300] django__django-12700 — APPLIED (APPLIED:fuzzy_apply)  [41/300] django__django-12708 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:48:04.320173Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-12747 — OK | 100% | 5879ms | 436+216 tokens
+[2m2026-03-26T15:48:10.199633Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 5.9s | 1/1 passed | 37 tok/s
+  [43/300] django__django-12856 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:48:10.763731Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-12908 — OK | 100% | 2845ms | 369+149 tokens
+[2m2026-03-26T15:48:13.609571Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.8s | 1/1 passed | 52 tok/s
+[2m2026-03-26T15:48:13.953213Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-12915 — OK | 100% | 6046ms | 576+351 tokens
+[2m2026-03-26T15:48:19.999857Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 6.0s | 1/1 passed | 58 tok/s
+[2m2026-03-26T15:48:20.448428Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-12983 — OK | 100% | 8829ms | 639+415 tokens
+[2m2026-03-26T15:48:29.277901Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 8.8s | 1/1 passed | 47 tok/s
+[2m2026-03-26T15:48:29.787573Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-13028 — OK | 100% | 4351ms | 373+153 tokens
+[2m2026-03-26T15:48:34.139093Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 4.4s | 1/1 passed | 35 tok/s
+[2m2026-03-26T15:48:34.514891Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-13033 — OK | 100% | 4130ms | 458+238 tokens
+[2m2026-03-26T15:48:38.645978Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 4.1s | 1/1 passed | 58 tok/s
+[2m2026-03-26T15:48:38.987076Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-13158 — OK | 100% | 6873ms | 522+297 tokens
+[2m2026-03-26T15:48:45.808744Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 6.9s | 1/1 passed | 43 tok/s
+  [50/300] django__django-13220 — APPLIED (APPLIED:fuzzy_apply)  [51/300] django__django-13230 — APPLIED (APPLIED:fuzzy_apply)  [52/300] django__django-13265 — APPLIED (APPLIED:fuzzy_apply)  [53/300] django__django-13315 — APPLIED (APPLIED:fuzzy_apply)  [54/300] django__django-13321 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:48:46.651923Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-13401 — OK | 100% | 3038ms | 437+217 tokens
+[2m2026-03-26T15:48:49.690439Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 3.0s | 1/1 passed | 71 tok/s
+  [56/300] django__django-13447 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:48:50.128751Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-13448 — OK | 100% | 5294ms | 614+389 tokens
+[2m2026-03-26T15:48:55.423943Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 5.3s | 1/1 passed | 73 tok/s
+  [58/300] django__django-13551 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:48:55.871048Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-13590 — OK | 100% | 2539ms | 398+178 tokens
+[2m2026-03-26T15:48:58.411242Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.5s | 1/1 passed | 70 tok/s
+  [60/300] django__django-13658 — APPLIED (APPLIED:fuzzy_apply)  [61/300] django__django-13660 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:48:58.985291Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-13710 — OK | 100% | 2767ms | 417+197 tokens
+[2m2026-03-26T15:49:01.753394Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.8s | 1/1 passed | 71 tok/s
+[2m2026-03-26T15:49:03.863293Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-13757 — OK | 100% | 8506ms | 1223+627 tokens
+[2m2026-03-26T15:49:12.320958Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 8.5s | 1/1 passed | 74 tok/s
+[2m2026-03-26T15:49:12.821524Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-13768 — OK | 100% | 1979ms | 357+137 tokens
+[2m2026-03-26T15:49:14.801589Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.0s | 1/1 passed | 69 tok/s
+  [65/300] django__django-13925 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:49:15.291881Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-13933 — OK | 100% | 1857ms | 347+128 tokens
+[2m2026-03-26T15:49:17.149244Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 1.9s | 1/1 passed | 69 tok/s
+[2m2026-03-26T15:49:17.550283Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-13964 — OK | 100% | 2247ms | 378+159 tokens
+[2m2026-03-26T15:49:19.797994Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.2s | 1/1 passed | 71 tok/s
+  [68/300] django__django-14016 — APPLIED (APPLIED:fuzzy_apply)  [69/300] django__django-14017 — APPLIED (APPLIED:fuzzy_apply)  [70/300] django__django-14155 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:49:20.565955Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-14238 — OK | 100% | 2972ms | 433+213 tokens
+[2m2026-03-26T15:49:23.539123Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 3.0s | 1/1 passed | 72 tok/s
+  [72/300] django__django-14382 — APPLIED (APPLIED:fuzzy_apply)  [73/300] django__django-14411 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:49:24.150054Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-14534 — OK | 100% | 1967ms | 355+136 tokens
+[2m2026-03-26T15:49:26.117624Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.0s | 1/1 passed | 69 tok/s
+  [75/300] django__django-14580 — APPLIED (APPLIED:fuzzy_apply)  [76/300] django__django-14608 — APPLIED (APPLIED:fuzzy_apply)  [77/300] django__django-14667 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:49:26.841061Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-14672 — OK | 100% | 2867ms | 423+206 tokens
+[2m2026-03-26T15:49:29.708527Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.9s | 1/1 passed | 72 tok/s
+[2m2026-03-26T15:49:30.096990Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-14730 — OK | 100% | 1934ms | 406+130 tokens
+[2m2026-03-26T15:49:32.031890Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 1.9s | 1/1 passed | 67 tok/s
+  [80/300] django__django-14752 — APPLIED (APPLIED:fuzzy_apply)  [81/300] django__django-14787 — APPLIED (APPLIED:fuzzy_apply)  [82/300] django__django-14855 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:49:32.806609Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-14915 — OK | 100% | 1691ms | 333+114 tokens
+[2m2026-03-26T15:49:34.498188Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 1.7s | 1/1 passed | 67 tok/s
+  [84/300] django__django-14997 — APPLIED (APPLIED:fuzzy_apply)  [85/300] django__django-14999 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:49:35.101439Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-15061 — OK | 100% | 1627ms | 327+108 tokens
+[2m2026-03-26T15:49:36.729539Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 1.6s | 1/1 passed | 66 tok/s
+  [87/300] django__django-15202 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:49:37.186079Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-15213 — OK | 100% | 2288ms | 379+159 tokens
+[2m2026-03-26T15:49:39.474545Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.3s | 1/1 passed | 69 tok/s
+  [89/300] django__django-15252 — APPLIED (APPLIED:fuzzy_apply)  [90/300] django__django-15320 — APPLIED (APPLIED:fuzzy_apply)  [91/300] django__django-15347 — APPLIED (APPLIED:fuzzy_apply)  [92/300] django__django-15388 — APPLIED (APPLIED:fuzzy_apply)  [93/300] django__django-15400 — APPLIED (APPLIED:fuzzy_apply)  [94/300] django__django-15498 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:49:40.388040Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-15695 — OK | 100% | 4358ms | 540+320 tokens
+[2m2026-03-26T15:49:44.747030Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 4.4s | 1/1 passed | 73 tok/s
+[2m2026-03-26T15:49:45.087279Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-15738 — OK | 100% | 2942ms | 457+211 tokens
+[2m2026-03-26T15:49:48.029790Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.9s | 1/1 passed | 72 tok/s
+  [97/300] django__django-15781 — APPLIED (APPLIED:fuzzy_apply)  [98/300] django__django-15789 — APPLIED (APPLIED:fuzzy_apply)  [99/300] django__django-15790 — APPLIED (APPLIED:fuzzy_apply)  [100/300] django__django-15814 — APPLIED (APPLIED:fuzzy_apply)  [101/300] django__django-15819 — APPLIED (APPLIED:fuzzy_apply)  [102/300] django__django-15851 — APPLIED (APPLIED:fuzzy_apply)  [103/300] django__django-15902 — APPLIED (APPLIED:fuzzy_apply)  [104/300] django__django-15996 — APPLIED (APPLIED:fuzzy_apply)  [105/300] django__django-16041 — APPLIED (APPLIED:fuzzy_apply)  [106/300] django__django-16046 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:49:49.377362Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-16139 — OK | 100% | 1809ms | 343+123 tokens
+[2m2026-03-26T15:49:51.187668Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 1.8s | 1/1 passed | 68 tok/s
+  [108/300] django__django-16229 — APPLIED (APPLIED:fuzzy_apply)  [109/300] django__django-16255 — APPLIED (APPLIED:fuzzy_apply)  [110/300] django__django-16379 — APPLIED (APPLIED:fuzzy_apply)  [111/300] django__django-16400 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:49:52.022675Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-16408 — OK | 100% | 2814ms | 578+200 tokens
+[2m2026-03-26T15:49:54.837948Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.8s | 1/1 passed | 71 tok/s
+  [113/300] django__django-16527 — APPLIED (APPLIED:fuzzy_apply)  [114/300] django__django-16595 — APPLIED (APPLIED:fuzzy_apply)  [115/300] django__django-16816 — APPLIED (APPLIED:fuzzy_apply)  [116/300] django__django-16820 — APPLIED (APPLIED:fuzzy_apply)  [117/300] django__django-16873 — APPLIED (APPLIED:fuzzy_apply)  [118/300] django__django-16910 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:49:55.665721Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-django__django-17051 — OK | 100% | 2671ms | 409+189 tokens
+[2m2026-03-26T15:49:58.337074Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.7s | 1/1 passed | 71 tok/s
+  [120/300] django__django-17087 — APPLIED (APPLIED:fuzzy_apply)  [121/300] matplotlib__matplotlib-18869 — APPLIED (APPLIED:fuzzy_apply)  [122/300] matplotlib__matplotlib-22711 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:49:59.082534Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-matplotlib__matplotlib-22835 — OK | 100% | 5774ms | 643+426 tokens
+[2m2026-03-26T15:50:04.857210Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 5.8s | 1/1 passed | 74 tok/s
+[2m2026-03-26T15:50:05.291646Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-matplotlib__matplotlib-23299 — OK | 100% | 3287ms | 459+235 tokens
+[2m2026-03-26T15:50:08.579021Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 3.3s | 1/1 passed | 71 tok/s
+  [125/300] matplotlib__matplotlib-23314 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:50:08.880868Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-matplotlib__matplotlib-23476 — OK | 100% | 3232ms | 460+233 tokens
+[2m2026-03-26T15:50:12.060178Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 3.2s | 1/1 passed | 72 tok/s
+  [127/300] matplotlib__matplotlib-23562 — APPLIED (APPLIED:fuzzy_apply)  [128/300] matplotlib__matplotlib-23563 — APPLIED (APPLIED:fuzzy_apply)  [129/300] matplotlib__matplotlib-23913 — APPLIED (APPLIED:fuzzy_apply)  [130/300] matplotlib__matplotlib-23964 — APPLIED (APPLIED:fuzzy_apply)  [131/300] matplotlib__matplotlib-23987 — APPLIED (APPLIED:fuzzy_apply)  [132/300] matplotlib__matplotlib-24149 — APPLIED (APPLIED:fuzzy_apply)  [133/300] matplotlib__matplotlib-24265 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:50:12.787017Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-matplotlib__matplotlib-24334 — OK | 100% | 2481ms | 387+170 tokens
+[2m2026-03-26T15:50:15.268918Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.5s | 1/1 passed | 68 tok/s
+[2m2026-03-26T15:50:15.805758Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-matplotlib__matplotlib-24970 — OK | 100% | 12453ms | 1154+928 tokens
+[2m2026-03-26T15:50:28.259931Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 12.5s | 1/1 passed | 75 tok/s
+[2m2026-03-26T15:50:28.865501Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-matplotlib__matplotlib-25079 — OK | 100% | 2491ms | 393+176 tokens
+[2m2026-03-26T15:50:31.357337Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.5s | 1/1 passed | 71 tok/s
+  [137/300] matplotlib__matplotlib-25311 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:50:31.706792Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-matplotlib__matplotlib-25332 — OK | 100% | 2771ms | 413+196 tokens
+[2m2026-03-26T15:50:34.478815Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.8s | 1/1 passed | 71 tok/s
+  [139/300] matplotlib__matplotlib-25433 — APPLIED (APPLIED:fuzzy_apply)  [140/300] matplotlib__matplotlib-25442 — APPLIED (APPLIED:fuzzy_apply)  [141/300] matplotlib__matplotlib-25498 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:50:34.973086Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-matplotlib__matplotlib-26011 — OK | 100% | 5768ms | 646+422 tokens
+[2m2026-03-26T15:50:40.689130Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 5.8s | 1/1 passed | 73 tok/s
+[2m2026-03-26T15:50:40.938836Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-matplotlib__matplotlib-26020 — OK | 100% | 4376ms | 541+323 tokens
+[2m2026-03-26T15:50:45.315786Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 4.4s | 1/1 passed | 74 tok/s
+[2m2026-03-26T15:50:45.560376Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-mwaskom__seaborn-2848 — OK | 100% | 3846ms | 510+281 tokens
+[2m2026-03-26T15:50:49.406878Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 3.8s | 1/1 passed | 73 tok/s
+  [145/300] mwaskom__seaborn-3010 — APPLIED (APPLIED:fuzzy_apply)  [146/300] mwaskom__seaborn-3190 — APPLIED (APPLIED:fuzzy_apply)  [147/300] mwaskom__seaborn-3407 — APPLIED (APPLIED:fuzzy_apply)  [148/300] pallets__flask-4045 — APPLIED (APPLIED:fuzzy_apply)  [149/300] pallets__flask-4992 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:50:49.951889Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-pallets__flask-5063 — OK | 100% | 3007ms | 446+179 tokens
+[2m2026-03-26T15:50:52.959982Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 3.0s | 1/1 passed | 60 tok/s
+[2m2026-03-26T15:50:53.162496Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-psf__requests-1963 — OK | 100% | 3146ms | 393+173 tokens
+[2m2026-03-26T15:50:56.309512Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 3.1s | 1/1 passed | 55 tok/s
+[2m2026-03-26T15:50:56.389670Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-psf__requests-2148 — OK | 100% | 2298ms | 349+130 tokens
+[2m2026-03-26T15:50:58.688072Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.3s | 1/1 passed | 57 tok/s
+[2m2026-03-26T15:50:58.767107Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-psf__requests-2317 — OK | 100% | 2057ms | 335+115 tokens
+[2m2026-03-26T15:51:00.824639Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.1s | 1/1 passed | 56 tok/s
+[2m2026-03-26T15:51:00.906176Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-psf__requests-2674 — OK | 100% | 7287ms | 650+430 tokens
+[2m2026-03-26T15:51:08.194214Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 7.3s | 1/1 passed | 59 tok/s
+[2m2026-03-26T15:51:08.273022Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-psf__requests-3362 — OK | 100% | 2728ms | 372+153 tokens
+[2m2026-03-26T15:51:10.948660Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.7s | 1/1 passed | 56 tok/s
+[2m2026-03-26T15:51:11.027914Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-psf__requests-863 — OK | 100% | 2920ms | 387+168 tokens
+[2m2026-03-26T15:51:13.949154Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.9s | 1/1 passed | 58 tok/s
+[2m2026-03-26T15:51:14.035515Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-pydata__xarray-3364 — OK | 100% | 7607ms | 663+444 tokens
+[2m2026-03-26T15:51:21.642945Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 7.6s | 1/1 passed | 58 tok/s
+[2m2026-03-26T15:51:21.855592Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-pydata__xarray-4094 — OK | 100% | 4030ms | 451+230 tokens
+[2m2026-03-26T15:51:25.886605Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 4.0s | 1/1 passed | 57 tok/s
+[2m2026-03-26T15:51:26.178625Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-pydata__xarray-4248 — OK | 100% | 4779ms | 496+275 tokens
+[2m2026-03-26T15:51:30.958789Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 4.8s | 1/1 passed | 58 tok/s
+  [160/300] pydata__xarray-4493 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:51:31.249008Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-pydata__xarray-5131 — OK | 100% | 62882ms | 362+4096 tokens
+[2m2026-03-26T15:52:34.025176Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 62.9s | 1/1 passed | 65 tok/s
+  [162/300] pylint-dev__pylint-5859 — APPLIED (APPLIED:fuzzy_apply)  [163/300] pylint-dev__pylint-6506 — APPLIED (APPLIED:fuzzy_apply)  [164/300] pylint-dev__pylint-7080 — APPLIED (APPLIED:fuzzy_apply)  [165/300] pylint-dev__pylint-7114 — APPLIED (APPLIED:fuzzy_apply)  [166/300] pylint-dev__pylint-7228 — APPLIED (APPLIED:fuzzy_apply)  [167/300] pylint-dev__pylint-7993 — APPLIED (APPLIED:fuzzy_apply)  [168/300] pytest-dev__pytest-11143 — APPLIED (APPLIED:fuzzy_apply)  [169/300] pytest-dev__pytest-11148 — APPLIED (APPLIED:fuzzy_apply)  [170/300] pytest-dev__pytest-5103 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:52:34.685224Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-pytest-dev__pytest-5221 — OK | 100% | 3033ms | 435+210 tokens
+[2m2026-03-26T15:52:37.719384Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 3.0s | 1/1 passed | 69 tok/s
+  [172/300] pytest-dev__pytest-5227 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:52:38.493005Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-pytest-dev__pytest-5413 — OK | 100% | 10928ms | 1042+817 tokens
+[2m2026-03-26T15:52:49.355517Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 10.9s | 1/1 passed | 75 tok/s
+  [174/300] pytest-dev__pytest-5495 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:52:49.910062Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-pytest-dev__pytest-5692 — OK | 100% | 2265ms | 384+159 tokens
+[2m2026-03-26T15:52:52.176098Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.3s | 1/1 passed | 70 tok/s
+  [176/300] pytest-dev__pytest-6116 — APPLIED (APPLIED:fuzzy_apply)  [177/300] pytest-dev__pytest-7168 — APPLIED (APPLIED:fuzzy_apply)  [178/300] pytest-dev__pytest-7220 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:52:52.487944Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-pytest-dev__pytest-7373 — OK | 100% | 5214ms | 610+384 tokens
+[2m2026-03-26T15:52:57.702656Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 5.2s | 1/1 passed | 74 tok/s
+  [180/300] pytest-dev__pytest-7432 — APPLIED (APPLIED:fuzzy_apply)  [181/300] pytest-dev__pytest-7490 — APPLIED (APPLIED:fuzzy_apply)  [182/300] pytest-dev__pytest-8365 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:52:57.977289Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-pytest-dev__pytest-8906 — OK | 100% | 2755ms | 419+194 tokens
+[2m2026-03-26T15:53:00.733081Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.8s | 1/1 passed | 70 tok/s
+  [184/300] pytest-dev__pytest-9359 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:53:00.964309Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-scikit-learn__scikit-learn-10297 — OK | 100% | 7349ms | 771+545 tokens
+[2m2026-03-26T15:53:08.314577Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 7.4s | 1/1 passed | 74 tok/s
+[2m2026-03-26T15:53:08.420008Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-scikit-learn__scikit-learn-10508 — OK | 100% | 2372ms | 393+167 tokens
+[2m2026-03-26T15:53:10.742268Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.4s | 1/1 passed | 70 tok/s
+[2m2026-03-26T15:53:10.926864Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-scikit-learn__scikit-learn-10949 — OK | 100% | 2551ms | 406+181 tokens
+[2m2026-03-26T15:53:13.479135Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.6s | 1/1 passed | 71 tok/s
+[2m2026-03-26T15:53:13.745684Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-scikit-learn__scikit-learn-11040 — OK | 100% | 2524ms | 405+180 tokens
+[2m2026-03-26T15:53:16.270946Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.5s | 1/1 passed | 71 tok/s
+[2m2026-03-26T15:53:16.524144Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-scikit-learn__scikit-learn-11281 — OK | 100% | 3245ms | 459+233 tokens
+[2m2026-03-26T15:53:19.770434Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 3.2s | 1/1 passed | 72 tok/s
+  [190/300] scikit-learn__scikit-learn-12471 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:53:20.111496Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-scikit-learn__scikit-learn-13142 — OK | 100% | 3401ms | 468+243 tokens
+[2m2026-03-26T15:53:23.513312Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 3.4s | 1/1 passed | 71 tok/s
+[2m2026-03-26T15:53:23.844442Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-scikit-learn__scikit-learn-13241 — OK | 100% | 4402ms | 547+322 tokens
+[2m2026-03-26T15:53:28.247470Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 4.4s | 1/1 passed | 73 tok/s
+  [193/300] scikit-learn__scikit-learn-13439 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:53:28.565464Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-scikit-learn__scikit-learn-13496 — OK | 100% | 4409ms | 548+323 tokens
+[2m2026-03-26T15:53:32.975139Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 4.4s | 1/1 passed | 73 tok/s
+[2m2026-03-26T15:53:33.237266Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-scikit-learn__scikit-learn-13497 — OK | 100% | 2487ms | 399+174 tokens
+[2m2026-03-26T15:53:35.724766Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.5s | 1/1 passed | 70 tok/s
+  [196/300] scikit-learn__scikit-learn-13584 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:53:36.059581Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-scikit-learn__scikit-learn-13779 — OK | 100% | 3482ms | 471+246 tokens
+[2m2026-03-26T15:53:39.542612Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 3.5s | 1/1 passed | 71 tok/s
+[2m2026-03-26T15:53:39.767844Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-scikit-learn__scikit-learn-14087 — OK | 100% | 3367ms | 471+245 tokens
+[2m2026-03-26T15:53:43.080957Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 3.4s | 1/1 passed | 73 tok/s
+[2m2026-03-26T15:53:43.283100Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-scikit-learn__scikit-learn-14092 — OK | 100% | 4928ms | 589+364 tokens
+[2m2026-03-26T15:53:48.211542Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 4.9s | 1/1 passed | 74 tok/s
+[2m2026-03-26T15:53:48.411520Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-scikit-learn__scikit-learn-14894 — OK | 100% | 2649ms | 415+189 tokens
+[2m2026-03-26T15:53:51.061693Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.7s | 1/1 passed | 71 tok/s
+[2m2026-03-26T15:53:51.219745Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-scikit-learn__scikit-learn-14983 — OK | 100% | 2372ms | 392+167 tokens
+[2m2026-03-26T15:53:53.592307Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.4s | 1/1 passed | 70 tok/s
+  [202/300] scikit-learn__scikit-learn-15512 — APPLIED (APPLIED:fuzzy_apply)  [203/300] scikit-learn__scikit-learn-15535 — APPLIED (APPLIED:fuzzy_apply)  [204/300] scikit-learn__scikit-learn-25500 — APPLIED (APPLIED:fuzzy_apply)  [205/300] scikit-learn__scikit-learn-25570 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:53:54.130127Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-scikit-learn__scikit-learn-25638 — OK | 100% | 6997ms | 742+516 tokens
+[2m2026-03-26T15:54:01.127848Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 7.0s | 1/1 passed | 74 tok/s
+[2m2026-03-26T15:54:01.444093Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-scikit-learn__scikit-learn-25747 — OK | 100% | 2594ms | 407+182 tokens
+[2m2026-03-26T15:54:04.038592Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.6s | 1/1 passed | 70 tok/s
+  [208/300] sphinx-doc__sphinx-10325 — APPLIED (APPLIED:fuzzy_apply)  [209/300] sphinx-doc__sphinx-10451 — APPLIED (APPLIED:fuzzy_apply)  [210/300] sphinx-doc__sphinx-11445 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:54:04.424011Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sphinx-doc__sphinx-7686 — OK | 100% | 2142ms | 501+150 tokens
+[2m2026-03-26T15:54:06.566464Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.1s | 1/1 passed | 70 tok/s
+  [212/300] sphinx-doc__sphinx-7738 — APPLIED (APPLIED:fuzzy_apply)  [213/300] sphinx-doc__sphinx-7975 — APPLIED (APPLIED:fuzzy_apply)  [214/300] sphinx-doc__sphinx-8273 — APPLIED (APPLIED:fuzzy_apply)  [215/300] sphinx-doc__sphinx-8282 — APPLIED (APPLIED:fuzzy_apply)  [216/300] sphinx-doc__sphinx-8435 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:54:06.889628Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sphinx-doc__sphinx-8474 — OK | 100% | 2784ms | 419+197 tokens
+[2m2026-03-26T15:54:09.674884Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.8s | 1/1 passed | 71 tok/s
+[2m2026-03-26T15:54:09.785141Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sphinx-doc__sphinx-8506 — OK | 100% | 2542ms | 403+181 tokens
+[2m2026-03-26T15:54:12.327704Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.5s | 1/1 passed | 71 tok/s
+[2m2026-03-26T15:54:12.481043Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sphinx-doc__sphinx-8595 — OK | 100% | 2250ms | 380+159 tokens
+[2m2026-03-26T15:54:14.731667Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.3s | 1/1 passed | 71 tok/s
+  [220/300] sphinx-doc__sphinx-8627 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:54:14.977326Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sphinx-doc__sphinx-8713 — OK | 100% | 3371ms | 466+245 tokens
+[2m2026-03-26T15:54:18.349613Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 3.4s | 1/1 passed | 73 tok/s
+  [222/300] sphinx-doc__sphinx-8721 — APPLIED (APPLIED:fuzzy_apply)  [223/300] sphinx-doc__sphinx-8801 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:54:18.602275Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-11400 — OK | 100% | 2456ms | 401+175 tokens
+[2m2026-03-26T15:54:21.059485Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.5s | 1/1 passed | 71 tok/s
+[2m2026-03-26T15:54:21.383456Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-11870 — OK | 100% | 11740ms | 1094+866 tokens
+[2m2026-03-26T15:54:33.124736Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 11.7s | 1/1 passed | 74 tok/s
+[2m2026-03-26T15:54:35.761321Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-11897 — OK | 100% | 10810ms | 1037+805 tokens
+[2m2026-03-26T15:54:46.506161Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 10.8s | 1/1 passed | 74 tok/s
+  [227/300] sympy__sympy-12171 — APPLIED (APPLIED:fuzzy_apply)  [228/300] sympy__sympy-12236 — APPLIED (APPLIED:fuzzy_apply)  [229/300] sympy__sympy-12419 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:54:47.284863Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-12454 — OK | 100% | 2528ms | 406+178 tokens
+[2m2026-03-26T15:54:49.813235Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.5s | 1/1 passed | 70 tok/s
+[2m2026-03-26T15:54:50.029827Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-12481 — OK | 100% | 4681ms | 578+344 tokens
+[2m2026-03-26T15:54:54.711321Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 4.7s | 1/1 passed | 73 tok/s
+[2m2026-03-26T15:54:54.946702Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-13031 — OK | 100% | 1366ms | 320+91 tokens
+[2m2026-03-26T15:54:56.314008Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 1.4s | 1/1 passed | 67 tok/s
+  [233/300] sympy__sympy-13043 — APPLIED (APPLIED:fuzzy_apply)  [234/300] sympy__sympy-13146 — APPLIED (APPLIED:fuzzy_apply)  [235/300] sympy__sympy-13177 — APPLIED (APPLIED:fuzzy_apply)  [236/300] sympy__sympy-13437 — APPLIED (APPLIED:fuzzy_apply)  [237/300] sympy__sympy-13471 — APPLIED (APPLIED:fuzzy_apply)  [238/300] sympy__sympy-13480 — APPLIED (APPLIED:fuzzy_apply)  [239/300] sympy__sympy-13647 — APPLIED (APPLIED:fuzzy_apply)  [240/300] sympy__sympy-13773 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:54:56.874537Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-13895 — OK | 100% | 3695ms | 497+269 tokens
+[2m2026-03-26T15:55:00.569975Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 3.7s | 1/1 passed | 73 tok/s
+  [242/300] sympy__sympy-13915 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:55:00.854066Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-13971 — OK | 100% | 3978ms | 517+288 tokens
+[2m2026-03-26T15:55:04.832812Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 4.0s | 1/1 passed | 72 tok/s
+  [244/300] sympy__sympy-14024 — APPLIED (APPLIED:fuzzy_apply)  [245/300] sympy__sympy-14308 — APPLIED (APPLIED:fuzzy_apply)  [246/300] sympy__sympy-14317 — APPLIED (APPLIED:fuzzy_apply)  [247/300] sympy__sympy-14396 — APPLIED (APPLIED:fuzzy_apply)  [248/300] sympy__sympy-14774 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:55:05.272474Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-14817 — OK | 100% | 2230ms | 385+156 tokens
+[2m2026-03-26T15:55:07.503038Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.2s | 1/1 passed | 70 tok/s
+  [250/300] sympy__sympy-15011 — APPLIED (APPLIED:fuzzy_apply)  [251/300] sympy__sympy-15308 — APPLIED (APPLIED:fuzzy_apply)  [252/300] sympy__sympy-15345 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:55:07.832690Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-15346 — OK | 100% | 3760ms | 504+275 tokens
+[2m2026-03-26T15:55:11.521730Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 3.8s | 1/1 passed | 73 tok/s
+[2m2026-03-26T15:55:11.759467Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-15609 — OK | 100% | 3993ms | 523+294 tokens
+[2m2026-03-26T15:55:15.753623Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 4.0s | 1/1 passed | 74 tok/s
+  [255/300] sympy__sympy-15678 — APPLIED (APPLIED:fuzzy_apply)  [256/300] sympy__sympy-16106 — APPLIED (APPLIED:fuzzy_apply)  [257/300] sympy__sympy-16281 — APPLIED (APPLIED:fuzzy_apply)  [258/300] sympy__sympy-16503 — APPLIED (APPLIED:fuzzy_apply)  [259/300] sympy__sympy-16792 — APPLIED (APPLIED:fuzzy_apply)  [260/300] sympy__sympy-16988 — APPLIED (APPLIED:fuzzy_apply)  [261/300] sympy__sympy-17022 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:55:16.280367Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-17139 — OK | 100% | 2335ms | 393+163 tokens
+[2m2026-03-26T15:55:18.616638Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.3s | 1/1 passed | 70 tok/s
+[2m2026-03-26T15:55:18.863043Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-17630 — OK | 100% | 3159ms | 456+227 tokens
+[2m2026-03-26T15:55:22.022697Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 3.2s | 1/1 passed | 72 tok/s
+  [264/300] sympy__sympy-17655 — APPLIED (APPLIED:fuzzy_apply)  [265/300] sympy__sympy-18057 — APPLIED (APPLIED:fuzzy_apply)  [266/300] sympy__sympy-18087 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:55:22.305969Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-18189 — OK | 100% | 2936ms | 437+209 tokens
+[2m2026-03-26T15:55:25.242800Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.9s | 1/1 passed | 71 tok/s
+[2m2026-03-26T15:55:25.429014Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-18199 — OK | 100% | 2371ms | 395+166 tokens
+[2m2026-03-26T15:55:27.800565Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.4s | 1/1 passed | 70 tok/s
+[2m2026-03-26T15:55:28.072996Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-18532 — OK | 100% | 3974ms | 516+288 tokens
+[2m2026-03-26T15:55:32.047333Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 4.0s | 1/1 passed | 72 tok/s
+[2m2026-03-26T15:55:32.336759Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-18621 — OK | 100% | 2623ms | 414+185 tokens
+[2m2026-03-26T15:55:34.960347Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.6s | 1/1 passed | 71 tok/s
+[2m2026-03-26T15:55:35.309543Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-18698 — OK | 100% | 5827ms | 661+425 tokens
+[2m2026-03-26T15:55:41.079377Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 5.8s | 1/1 passed | 73 tok/s
+  [272/300] sympy__sympy-18835 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:55:41.473743Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-19007 — OK | 100% | 6279ms | 699+470 tokens
+[2m2026-03-26T15:55:47.754111Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 6.3s | 1/1 passed | 75 tok/s
+  [274/300] sympy__sympy-19254 — APPLIED (APPLIED:fuzzy_apply)  [275/300] sympy__sympy-19487 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:55:48.148602Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-20049 — OK | 100% | 6467ms | 711+476 tokens
+[2m2026-03-26T15:55:54.616916Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 6.5s | 1/1 passed | 74 tok/s
+  [277/300] sympy__sympy-20154 — APPLIED (APPLIED:fuzzy_apply)  [278/300] sympy__sympy-20212 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:55:55.001775Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-20322 — OK | 100% | 6668ms | 723+493 tokens
+[2m2026-03-26T15:56:01.670573Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 6.7s | 1/1 passed | 74 tok/s
+  [280/300] sympy__sympy-20442 — APPLIED (APPLIED:fuzzy_apply)  [281/300] sympy__sympy-20590 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:56:02.005934Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-20639 — OK | 100% | 4643ms | 567+338 tokens
+[2m2026-03-26T15:56:06.649449Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 4.6s | 1/1 passed | 73 tok/s
+  [283/300] sympy__sympy-21055 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:56:06.880890Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-21171 — OK | 100% | 2510ms | 405+176 tokens
+[2m2026-03-26T15:56:09.391586Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.5s | 1/1 passed | 70 tok/s
+[2m2026-03-26T15:56:09.521645Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-21379 — OK | 100% | 3855ms | 508+279 tokens
+[2m2026-03-26T15:56:13.377932Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 3.9s | 1/1 passed | 72 tok/s
+  [286/300] sympy__sympy-21612 — APPLIED (APPLIED:fuzzy_apply)  [287/300] sympy__sympy-21614 — APPLIED (APPLIED:fuzzy_apply)  [288/300] sympy__sympy-21627 — APPLIED (APPLIED:fuzzy_apply)  [289/300] sympy__sympy-21847 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:56:13.841738Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-22005 — OK | 100% | 2733ms | 428+198 tokens
+[2m2026-03-26T15:56:16.575491Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2.7s | 1/1 passed | 72 tok/s
+  [291/300] sympy__sympy-22714 — APPLIED (APPLIED:fuzzy_apply)  [292/300] sympy__sympy-22840 — APPLIED (APPLIED:fuzzy_apply)  [293/300] sympy__sympy-23117 — APPLIED (APPLIED:fuzzy_apply)  [294/300] sympy__sympy-23191 — APPLIED (APPLIED:fuzzy_apply)[2m2026-03-26T15:56:16.919440Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 1 tasks, 1 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/1] retry-sympy__sympy-23262 — OK | 100% | 3180ms | 458+229 tokens
+[2m2026-03-26T15:56:20.100258Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 3.2s | 1/1 passed | 72 tok/s
+  [296/300] sympy__sympy-24066 — APPLIED (APPLIED:fuzzy_apply)  [297/300] sympy__sympy-24102 — APPLIED (APPLIED:fuzzy_apply)  [298/300] sympy__sympy-24152 — APPLIED (APPLIED:fuzzy_apply)  [299/300] sympy__sympy-24213 — APPLIED (APPLIED:fuzzy_apply)  [300/300] sympy__sympy-24909 — APPLIED (APPLIED:fuzzy_apply)
+Phase 3: 187/300 applied (113 retried, 0 retry successes) in 567.2s
+
+======================================================================
+SWE-BENCH TWO-PHASE RESULTS (with fuzzy apply + retry)
+======================================================================
+Patches generated: 297/300
+Patches applied:   187/300 (62%)
+Retry successes:   0/113
+Avg heuristic:     89.9%
+Throughput:        276 tok/s
+Total duration:    1025.0s
+======================================================================
+
+Reports saved. Run execution eval with:
+  python3 scripts/swebench_exec.py --tasks bench_results/swebench_lite_300.json --patches bench_results/swebench/two_phase/bench_report.json --concurrent 4 --timeout 600

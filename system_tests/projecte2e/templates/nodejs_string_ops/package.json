@@ -1,0 +1,11 @@
+{
+  "name": "nodejs_string_ops",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^1.0.0"
+  }
+}

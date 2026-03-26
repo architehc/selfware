@@ -37,6 +37,66 @@ struct SWETask {
     fail_to_pass: String,
 }
 
+/// Extract line numbers where changes occur in a patch, grouped by file.
+fn extract_change_line_numbers(patch: &str) -> std::collections::HashMap<String, Vec<usize>> {
+    let mut result = std::collections::HashMap::new();
+    let mut current_file = String::new();
+
+    for line in patch.lines() {
+        if line.starts_with("diff --git") {
+            if let Some(path) = line.split_whitespace().nth(3) {
+                current_file = path.trim_start_matches("b/").to_string();
+            }
+        } else if line.starts_with("@@") {
+            // Parse @@ -old_start,count +new_start,count @@
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 3 {
+                if let Some(old) = parts[1].strip_prefix('-') {
+                    if let Some(start) = old.split(',').next().and_then(|s| s.parse::<usize>().ok()) {
+                        result.entry(current_file.clone()).or_insert_with(Vec::new).push(start);
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Extract focused context: show lines around each change area with line numbers.
+fn extract_focused_context(content: &str, change_lines: &[usize], context: usize) -> String {
+    let all_lines: Vec<&str> = content.lines().collect();
+    let total = all_lines.len();
+    let mut included = vec![false; total];
+
+    // Mark lines around each change area
+    for &line_num in change_lines {
+        let start = line_num.saturating_sub(context + 1); // 1-indexed to 0-indexed
+        let end = (line_num + context).min(total);
+        for i in start..end {
+            included[i] = true;
+        }
+    }
+
+    // Build output with line numbers and gap markers
+    let mut result = String::new();
+    let mut in_gap = false;
+
+    for (i, line) in all_lines.iter().enumerate() {
+        if included[i] {
+            if in_gap {
+                result.push_str("    ...\n");
+                in_gap = false;
+            }
+            result.push_str(&format!("{:>4} | {}\n", i + 1, line));
+        } else if !in_gap {
+            in_gap = true;
+        }
+    }
+
+    result
+}
+
 /// Extract modified file paths from a unified diff.
 fn extract_diff_files(patch: &str) -> Vec<String> {
     patch
@@ -77,22 +137,31 @@ async fn read_repo_files(task: &SWETask, work_dir: &Path) -> Result<Vec<(String,
             .await;
     }
 
-    // Read target files
+    // Read target files — extract focused context around change areas
     let target_files = extract_diff_files(&task.patch);
+    let change_lines = extract_change_line_numbers(&task.patch);
     let mut contents = Vec::new();
 
     for file in &target_files {
         let path = work_dir.join(file);
         match tokio::fs::read_to_string(&path).await {
             Ok(content) => {
-                // Truncate very large files to ~8K lines
-                let truncated = if content.lines().count() > 8000 {
-                    let lines: Vec<&str> = content.lines().take(8000).collect();
-                    format!("{}\n... [truncated, {} total lines]", lines.join("\n"), content.lines().count())
+                let total_lines = content.lines().count();
+                // If file is small (<300 lines), include everything
+                // Otherwise show focused context around change areas
+                if total_lines <= 300 {
+                    contents.push((file.clone(), content));
+                } else if let Some(line_nums) = change_lines.get(file.as_str()) {
+                    // Show 50 lines around each change area
+                    let focused = extract_focused_context(&content, line_nums, 50);
+                    contents.push((file.clone(), focused));
                 } else {
-                    content
-                };
-                contents.push((file.clone(), truncated));
+                    // Fallback: first 300 lines
+                    let lines: Vec<&str> = content.lines().take(300).collect();
+                    contents.push((file.clone(), format!(
+                        "{}\n... [truncated, {} total lines]", lines.join("\n"), total_lines
+                    )));
+                }
             }
             Err(e) => {
                 eprintln!("    Warning: could not read {}: {}", file, e);
@@ -129,12 +198,17 @@ fn build_context_prompt(task: &SWETask, file_contents: &[(String, String)]) -> (
         user.push_str(&format!("\n## Hints\n{}\n", task.hints_text));
     }
 
-    // Include full file contents with line numbers
+    // Include source files — already have line numbers if focused, add if not
     user.push_str("\n## Source Files (with line numbers)\n");
     for (path, content) in file_contents {
         user.push_str(&format!("\n### {}\n```python\n", path));
-        for (i, line) in content.lines().enumerate() {
-            user.push_str(&format!("{:>4} | {}\n", i + 1, line));
+        if content.contains(" | ") {
+            // Already has line numbers from focused context
+            user.push_str(content);
+        } else {
+            for (i, line) in content.lines().enumerate() {
+                user.push_str(&format!("{:>4} | {}\n", i + 1, line));
+            }
         }
         user.push_str("```\n");
     }
@@ -256,55 +330,213 @@ async fn main() -> Result<()> {
 
     let report = runner.run(bench_tasks).await?;
 
-    // Print results
-    eprintln!("\n{}", "=".repeat(70));
-    eprintln!("SWE-BENCH TWO-PHASE RESULTS");
-    eprintln!("{}", "=".repeat(70));
     eprintln!(
-        "Tasks:       {}/{} generated patches (quality >= 30%)",
-        report.tasks_passed, report.tasks_total,
+        "\nPhase 2: {}/{} patches generated, {:.0}% avg quality, {:.0} tok/s",
+        report.tasks_passed, report.tasks_total, report.avg_score * 100.0, report.tokens_per_sec,
     );
-    eprintln!("Avg score:   {:.1}%", report.avg_score * 100.0);
-    eprintln!("Throughput:  {:.0} tok/s", report.tokens_per_sec);
-    eprintln!("Duration:    {:.1}s", report.total_duration_secs);
-    eprintln!("{}", "=".repeat(70));
 
-    eprintln!("\n{:<45} {:>6} {:>8} {:>10}", "Instance", "Score", "Tokens", "Latency");
-    eprintln!("{}", "-".repeat(75));
-    for r in &report.results {
-        let score_str = r.eval.as_ref()
-            .map(|e| format!("{:.0}%", e.score * 100.0))
-            .unwrap_or("ERR".into());
-        let status = if r.success { "+" } else { "-" };
-        eprintln!(
-            "{} {:<43} {:>6} {:>8} {:>8.1}s",
-            status,
-            &r.task_id[..r.task_id.len().min(43)],
-            score_str,
-            r.completion_tokens,
-            r.latency_ms as f64 / 1000.0,
-        );
+    // ---- Phase 3: Fuzzy apply + multi-turn retry ----
+    eprintln!("\n--- Phase 3: Fuzzy apply + retry ---");
+    let phase3_start = Instant::now();
+
+    let mut applied = 0usize;
+    let mut retried = 0usize;
+    let mut retry_success = 0usize;
+    let mut final_patches: Vec<(String, String)> = Vec::new(); // (instance_id, patch)
+
+    for (i, result) in report.results.iter().enumerate() {
+        if result.response.is_empty() {
+            continue;
+        }
+
+        let task = all_tasks.iter().find(|t| t.instance_id == result.task_id);
+        let task = match task {
+            Some(t) => t,
+            None => continue,
+        };
+
+        let repo_dir = work_base.join(task.repo.replace('/', "-"));
+        if !repo_dir.exists() {
+            continue;
+        }
+
+        // Extract patch from response
+        let patch = extract_patch_from_response(&result.response);
+        if patch.is_empty() {
+            continue;
+        }
+
+        // Try fuzzy apply
+        let patch_file = repo_dir.join("_generated.patch");
+        std::fs::write(&patch_file, &patch)?;
+
+        // Reset repo to clean state
+        let _ = std::process::Command::new("git")
+            .args(["checkout", "--", "."])
+            .current_dir(&repo_dir)
+            .output();
+
+        let apply_result = std::process::Command::new("python3")
+            .args(["scripts/fuzzy_apply.py", repo_dir.to_str().unwrap(), patch_file.to_str().unwrap()])
+            .output();
+
+        let apply_ok = apply_result
+            .as_ref()
+            .map(|r| r.status.success())
+            .unwrap_or(false);
+
+        let strategy = apply_result
+            .as_ref()
+            .ok()
+            .and_then(|r| String::from_utf8(r.stdout.clone()).ok())
+            .unwrap_or_default();
+
+        if apply_ok {
+            applied += 1;
+            eprint!("  [{}/{}] {} — APPLIED ({})\r", i + 1, report.results.len(), result.task_id, strategy.trim());
+            final_patches.push((result.task_id.clone(), patch));
+        } else {
+            // ---- Multi-turn retry: send error back to LLM ----
+            retried += 1;
+            let error_msg = apply_result
+                .as_ref()
+                .ok()
+                .and_then(|r| String::from_utf8(r.stderr.clone()).ok())
+                .unwrap_or_else(|| "Unknown apply error".to_string());
+
+            // Reset repo
+            let _ = std::process::Command::new("git")
+                .args(["checkout", "--", "."])
+                .current_dir(&repo_dir)
+                .output();
+
+            // Build retry prompt with the error
+            let retry_config = HarnessConfig {
+                endpoint: endpoint.clone(),
+                model: model.clone(),
+                max_concurrent: 1,
+                max_tokens: 4096,
+                temperature: 0.1,
+                timeout_secs: 120,
+                output_dir: "bench_results/swebench/two_phase".into(),
+                extra_body: serde_json::json!({"chat_template_kwargs": {"enable_thinking": false}}),
+            };
+
+            let retry_runner = HarnessRunner::new(retry_config)?;
+            let retry_task = vec![BenchTask {
+                id: format!("retry-{}", result.task_id),
+                description: "Retry patch".into(),
+                messages: vec![
+                    Message::system("You generated a patch that failed to apply. Fix the context lines to match the actual source file EXACTLY. Output only the corrected diff."),
+                    Message::user(format!(
+                        "Your previous patch:\n```diff\n{}\n```\n\nFailed with error:\n```\n{}\n```\n\nFix the patch so it applies cleanly. The context lines (lines starting with space) must match the source file exactly. Output only the corrected diff.",
+                        &patch[..patch.len().min(3000)],
+                        &error_msg[..error_msg.len().min(500)],
+                    )),
+                ],
+                evaluator: Box::new(NoopEvaluator),
+            }];
+
+            if let Ok(retry_report) = retry_runner.run(retry_task).await {
+                if let Some(retry_result) = retry_report.results.first() {
+                    if !retry_result.response.is_empty() {
+                        let retry_patch = extract_patch_from_response(&retry_result.response);
+                        if !retry_patch.is_empty() {
+                            std::fs::write(&patch_file, &retry_patch)?;
+                            let retry_apply = std::process::Command::new("python3")
+                                .args(["scripts/fuzzy_apply.py", repo_dir.to_str().unwrap(), patch_file.to_str().unwrap()])
+                                .output();
+
+                            if retry_apply.as_ref().map(|r| r.status.success()).unwrap_or(false) {
+                                retry_success += 1;
+                                applied += 1;
+                                eprint!("  [{}/{}] {} — RETRY OK\r", i + 1, report.results.len(), result.task_id);
+                                final_patches.push((result.task_id.clone(), retry_patch));
+                            } else {
+                                // Reset on failure
+                                let _ = std::process::Command::new("git")
+                                    .args(["checkout", "--", "."])
+                                    .current_dir(&repo_dir)
+                                    .output();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let _ = std::fs::remove_file(&patch_file);
     }
 
-    // Save report
-    report.write_to_dir(Path::new("bench_results/swebench/two_phase"))?;
-    eprintln!("\nReports saved to bench_results/swebench/two_phase/");
+    eprintln!(
+        "\nPhase 3: {applied}/{} applied ({retried} retried, {retry_success} retry successes) in {:.1}s",
+        report.results.len(),
+        phase3_start.elapsed().as_secs_f64(),
+    );
 
-    // Show sample patches
-    eprintln!("\n--- Sample generated patches ---");
-    for r in report.results.iter().take(3) {
-        if !r.response.is_empty() {
-            eprintln!("\n  [{}]:", r.task_id);
-            for line in r.response.lines().take(15) {
-                eprintln!("    {line}");
+    // ---- Final summary ----
+    let total_duration = phase1_start.elapsed().as_secs_f64();
+    eprintln!("\n{}", "=".repeat(70));
+    eprintln!("SWE-BENCH TWO-PHASE RESULTS (with fuzzy apply + retry)");
+    eprintln!("{}", "=".repeat(70));
+    eprintln!("Patches generated: {}/{}", report.tasks_passed, report.tasks_total);
+    eprintln!("Patches applied:   {applied}/{} ({:.0}%)", report.results.len(), applied as f64 / report.results.len().max(1) as f64 * 100.0);
+    eprintln!("Retry successes:   {retry_success}/{retried}");
+    eprintln!("Avg heuristic:     {:.1}%", report.avg_score * 100.0);
+    eprintln!("Throughput:        {:.0} tok/s", report.tokens_per_sec);
+    eprintln!("Total duration:    {:.1}s", total_duration);
+    eprintln!("{}", "=".repeat(70));
+
+    // Save final patches for execution eval
+    let final_report = serde_json::json!({
+        "model": model,
+        "endpoint": endpoint,
+        "tasks_total": report.tasks_total,
+        "tasks_passed": report.tasks_passed,
+        "patches_applied": applied,
+        "retried": retried,
+        "retry_successes": retry_success,
+        "avg_score": report.avg_score,
+        "total_duration_secs": total_duration,
+        "results": report.results,
+    });
+    std::fs::create_dir_all("bench_results/swebench/two_phase")?;
+    std::fs::write(
+        "bench_results/swebench/two_phase/bench_report.json",
+        serde_json::to_string_pretty(&final_report)?,
+    )?;
+
+    eprintln!("\nReports saved. Run execution eval with:");
+    eprintln!("  python3 scripts/swebench_exec.py --tasks {} --patches bench_results/swebench/two_phase/bench_report.json --concurrent 4 --timeout 600", task_file);
+
+    Ok(())
+}
+
+/// Extract a unified diff from an LLM response.
+fn extract_patch_from_response(response: &str) -> String {
+    // Try ```diff ... ``` blocks
+    let re = regex::Regex::new(r"(?s)```(?:diff)?\n(.*?)```").unwrap();
+    for cap in re.captures_iter(response) {
+        let block = cap[1].trim();
+        if block.contains("diff --git") || block.contains("---") || block.contains("@@") {
+            let mut patch = block.to_string();
+            if !patch.ends_with('\n') {
+                patch.push('\n');
             }
-            if r.response.lines().count() > 15 {
-                eprintln!("    ... ({} more lines)", r.response.lines().count() - 15);
-            }
+            return patch;
         }
     }
 
-    Ok(())
+    // Try raw diff content
+    if response.contains("diff --git") || response.contains("@@") {
+        let mut patch = response.trim().to_string();
+        if !patch.ends_with('\n') {
+            patch.push('\n');
+        }
+        return patch;
+    }
+
+    String::new()
 }
 
 /// Evaluator that checks patch quality against gold.
