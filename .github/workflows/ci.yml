@@ -168,6 +168,45 @@ jobs:
       - name: Compile benchmarks
         run: cargo bench --features extras --no-run
 
+  # Feature-gated module tests (L57)
+  feature-gated-tests:
+    name: Feature-Gated Tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-composite0-dev
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-features-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-features-
+
+      - name: Test bench-harness
+        run: cargo test --features bench-harness --verbose
+
+      - name: Test consolidation
+        run: cargo test --features consolidation --verbose
+
+      - name: Test vlm-bench
+        run: cargo test --features vlm-bench --verbose
+
+      - name: Test bench-harness + consolidation
+        run: cargo test --features bench-harness,consolidation --verbose
+
   # Documentation build
   docs:
     name: Documentation
