@@ -1,14 +1,11 @@
 //! Configuration Management
 //!
 //! Loads and manages agent configuration from TOML files.
-//! Configuration includes:
-//! - API settings (base URL, model selection)
-//! - Agent behavior (max iterations, context limits)
-//! - Safety settings (allowed paths, blocked commands)
-//! - Tool-specific options
 
+pub mod auto_config;
 pub mod resources;
 
+pub use auto_config::*;
 pub use resources::*;
 
 use anyhow::{bail, Context, Result};

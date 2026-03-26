@@ -1,0 +1,32 @@
+{
+  "endpoint": "https://crazyshit.ngrok.io/v1",
+  "failed": 0,
+  "model": "txn545/Qwen3.5-122B-A10B-NVFP4",
+  "passed": 2,
+  "results": [
+    {
+      "details": "backend=SGLang, model=txn545/Qwen3.5-122B-A10B-NVFP4, context=262144, fc=false, streaming=true, thinking=true, disable_thinking=true, text_concurrency=64, vision_concurrency=8",
+      "duration_secs": 2.831932726,
+      "errors": [],
+      "passed": true,
+      "step": "auto-config"
+    },
+    {
+      "details": "2/2 vision checks passed, detail=low, max_tokens=192, timeout=45s, analyze=1.8s, compare=0.7s",
+      "duration_secs": 4.7769508080000005,
+      "errors": [],
+      "passed": true,
+      "step": "vision-workflows"
+    }
+  ],
+  "self_healing": {
+    "executions": 0,
+    "failures": 0,
+    "success_rate": 0.0,
+    "successes": 0
+  },
+  "text_concurrency": 64,
+  "total_duration_secs": 7.742188308,
+  "vision_concurrency": 8,
+  "vision_only": true
+}

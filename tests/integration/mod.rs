@@ -27,5 +27,6 @@ mod smoke_tests;
 mod supervision_tests;
 mod test_agent_loop;
 mod tool_tests;
+mod vision_computer_tests;
 
 pub use helpers::*;

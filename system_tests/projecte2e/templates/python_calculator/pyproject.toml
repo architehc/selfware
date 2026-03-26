@@ -1,0 +1,4 @@
+[project]
+name = "python_calculator"
+version = "0.1.0"
+dependencies = ["pytest"]

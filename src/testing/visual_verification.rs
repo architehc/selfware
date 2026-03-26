@@ -164,7 +164,20 @@ pub struct VisualVerifier {
     model: String,
     /// HTTP request timeout in seconds.
     timeout_secs: u64,
+    /// Default max response tokens for ad hoc requests.
+    default_max_tokens: usize,
+    /// Deterministic JSON prompts use a low temperature by default.
+    temperature: f64,
+    /// Detail level passed to OpenAI-compatible vision endpoints.
+    image_detail: String,
+    /// Backend-specific request overrides, e.g. SGLang `chat_template_kwargs`.
+    extra_body: Option<serde_json::Map<String, serde_json::Value>>,
 }
+
+const VERIFICATION_MAX_TOKENS: usize = 192;
+const DIFF_MAX_TOKENS: usize = 160;
+const JSON_TEMPERATURE: f64 = 0.0;
+const DEFAULT_IMAGE_DETAIL: &str = "low";
 
 impl VisualVerifier {
     /// Create a new verifier with the given endpoint and model.
@@ -173,21 +186,70 @@ impl VisualVerifier {
             endpoint: endpoint.into(),
             model: model.into(),
             timeout_secs: default_visual_timeout(),
+            default_max_tokens: 4096,
+            temperature: JSON_TEMPERATURE,
+            image_detail: DEFAULT_IMAGE_DETAIL.to_string(),
+            extra_body: None,
         }
     }
 
     /// Create a verifier from a [`VisualVerificationConfig`].
     pub fn from_config(config: &VisualVerificationConfig) -> Self {
-        Self {
-            endpoint: config.endpoint.clone(),
-            model: config.model.clone(),
-            timeout_secs: config.timeout_secs,
-        }
+        Self::new(&config.endpoint, &config.model).with_timeout(config.timeout_secs)
+    }
+
+    /// Create a verifier from a named model profile.
+    pub fn from_model_profile(profile: &crate::config::ModelProfile) -> Self {
+        Self::new(&profile.endpoint, &profile.model)
+            .with_generation(profile.max_tokens, profile.temperature as f64)
+            .with_extra_body(profile.extra_body.clone())
+    }
+
+    /// Create a verifier from the main application config.
+    ///
+    /// Prefers `models.vision` when present, otherwise falls back to the
+    /// effective default model profile synthesized from the top-level config.
+    pub fn from_app_config(config: &crate::config::Config) -> Self {
+        let mut verifier = config
+            .models
+            .get("vision")
+            .map(Self::from_model_profile)
+            .or_else(|| config.resolve_model(None).map(Self::from_model_profile))
+            .unwrap_or_else(|| {
+                Self::new(&config.endpoint, &config.model)
+                    .with_generation(config.max_tokens, config.temperature as f64)
+                    .with_extra_body(config.extra_body.clone())
+            });
+
+        verifier.timeout_secs = config.agent.step_timeout_secs.max(1);
+        verifier
     }
 
     /// Override the request timeout.
     pub fn with_timeout(mut self, secs: u64) -> Self {
         self.timeout_secs = secs;
+        self
+    }
+
+    /// Override default generation settings for shared multimodal requests.
+    pub fn with_generation(mut self, max_tokens: usize, temperature: f64) -> Self {
+        self.default_max_tokens = max_tokens.max(1);
+        self.temperature = temperature;
+        self
+    }
+
+    /// Override the image detail level sent to the backend.
+    pub fn with_image_detail(mut self, detail: impl Into<String>) -> Self {
+        self.image_detail = detail.into();
+        self
+    }
+
+    /// Attach backend-specific request overrides.
+    pub fn with_extra_body(
+        mut self,
+        extra_body: Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Self {
+        self.extra_body = extra_body;
         self
     }
 
@@ -205,7 +267,8 @@ impl VisualVerifier {
         expected: &str,
     ) -> Result<VisualVerificationResult> {
         let prompt = build_verify_prompt(expected);
-        let body = self.build_single_image_request(&prompt, image_base64);
+        let body =
+            self.build_single_image_request_with_options(&prompt, image_base64, VERIFICATION_MAX_TOKENS);
         let raw = self.call_vlm(&body).await?;
         parse_verification_response(&raw)
     }
@@ -221,7 +284,8 @@ impl VisualVerifier {
         change_description: &str,
     ) -> Result<VisualDiffResult> {
         let prompt = build_compare_prompt(change_description);
-        let body = self.build_two_image_request(&prompt, before, after);
+        let body =
+            self.build_two_image_request_with_options(&prompt, before, after, DIFF_MAX_TOKENS);
         let raw = self.call_vlm(&body).await?;
         parse_diff_response(&raw)
     }
@@ -377,20 +441,31 @@ impl VisualVerifier {
 
     /// Build a chat-completion request body with a single image.
     fn build_single_image_request(&self, prompt: &str, image_base64: &str) -> Value {
+        self.build_single_image_request_with_options(prompt, image_base64, self.default_max_tokens)
+    }
+
+    fn build_single_image_request_with_options(
+        &self,
+        prompt: &str,
+        image_base64: &str,
+        max_tokens: usize,
+    ) -> Value {
         let data_uri = format!("data:image/png;base64,{}", image_base64);
-        json!({
+        let mut body = json!({
             "model": self.model,
             "messages": [{
                 "role": "user",
                 "content": [
                     { "type": "text", "text": prompt },
-                    { "type": "image_url", "image_url": { "url": data_uri } }
+                    { "type": "image_url", "image_url": { "url": data_uri, "detail": self.image_detail } }
                 ]
             }],
-            "max_tokens": 4096,
-            "temperature": 0.2,
+            "max_tokens": self.clamp_max_tokens(max_tokens),
+            "temperature": self.temperature,
             "stream": false
-        })
+        });
+        self.merge_extra_body(&mut body);
+        body
     }
 
     /// Build a chat-completion request body with two images (before/after).
@@ -400,22 +475,55 @@ impl VisualVerifier {
         before_base64: &str,
         after_base64: &str,
     ) -> Value {
+        self.build_two_image_request_with_options(
+            prompt,
+            before_base64,
+            after_base64,
+            self.default_max_tokens,
+        )
+    }
+
+    fn build_two_image_request_with_options(
+        &self,
+        prompt: &str,
+        before_base64: &str,
+        after_base64: &str,
+        max_tokens: usize,
+    ) -> Value {
         let uri_before = format!("data:image/png;base64,{}", before_base64);
         let uri_after = format!("data:image/png;base64,{}", after_base64);
-        json!({
+        let mut body = json!({
             "model": self.model,
             "messages": [{
                 "role": "user",
                 "content": [
                     { "type": "text", "text": prompt },
-                    { "type": "image_url", "image_url": { "url": uri_before } },
-                    { "type": "image_url", "image_url": { "url": uri_after } }
+                    { "type": "image_url", "image_url": { "url": uri_before, "detail": self.image_detail } },
+                    { "type": "image_url", "image_url": { "url": uri_after, "detail": self.image_detail } }
                 ]
             }],
-            "max_tokens": 4096,
-            "temperature": 0.2,
+            "max_tokens": self.clamp_max_tokens(max_tokens),
+            "temperature": self.temperature,
             "stream": false
-        })
+        });
+        self.merge_extra_body(&mut body);
+        body
+    }
+
+    fn clamp_max_tokens(&self, max_tokens: usize) -> usize {
+        max_tokens.min(self.default_max_tokens.max(1))
+    }
+
+    fn merge_extra_body(&self, body: &mut Value) {
+        let Some(extra_body) = &self.extra_body else {
+            return;
+        };
+        let Some(body_obj) = body.as_object_mut() else {
+            return;
+        };
+        for (key, value) in extra_body {
+            body_obj.insert(key.clone(), value.clone());
+        }
     }
 
     /// Send a request to the VLM endpoint and extract the response text.
@@ -454,6 +562,8 @@ impl VisualVerifier {
 
         let content = json_resp["choices"][0]["message"]["content"]
             .as_str()
+            .or_else(|| json_resp["choices"][0]["message"]["reasoning_content"].as_str())
+            .or_else(|| json_resp["choices"][0]["message"]["reasoning"].as_str())
             .unwrap_or("")
             .to_string();
 
@@ -472,15 +582,16 @@ impl VisualVerifier {
 /// Build the system prompt for screenshot verification.
 fn build_verify_prompt(expected: &str) -> String {
     format!(
-        "You are a visual verification assistant. Analyze the provided screenshot \
+        "You are a strict visual verification assistant. Analyze the provided screenshot \
          and determine if it matches the following expected description:\n\n\
          EXPECTED: {}\n\n\
          Respond ONLY with a JSON object (no markdown fences, no extra text) with these fields:\n\
          - \"passed\": boolean, true if the screenshot matches the expected description\n\
          - \"confidence\": number between 0.0 and 1.0 indicating your confidence\n\
-         - \"description\": string describing what you actually see in the screenshot\n\
-         - \"issues\": array of strings listing any mismatches or problems found\n\n\
-         If everything matches, set \"passed\" to true and \"issues\" to an empty array.",
+         - \"description\": short string, at most 16 words, describing what you actually see\n\
+         - \"issues\": array of at most 3 short strings listing mismatches or problems\n\n\
+         Keep the response compact. If everything matches, set \"passed\" to true and \"issues\" \
+         to an empty array.",
         expected
     )
 }
@@ -488,14 +599,15 @@ fn build_verify_prompt(expected: &str) -> String {
 /// Build the prompt for comparing two screenshots.
 fn build_compare_prompt(change_description: &str) -> String {
     format!(
-        "You are a visual diff assistant. Compare the two screenshots (image 1 = BEFORE, \
+        "You are a strict visual diff assistant. Compare the two screenshots (image 1 = BEFORE, \
          image 2 = AFTER) and determine whether the following expected change occurred:\n\n\
          EXPECTED CHANGE: {}\n\n\
          Respond ONLY with a JSON object (no markdown fences, no extra text) with these fields:\n\
          - \"changes_detected\": boolean, true if the images differ\n\
          - \"expected_change_found\": boolean, true if the specific expected change is visible\n\
-         - \"description\": string describing the differences between the images\n\
-         - \"unexpected_changes\": array of strings listing any changes NOT described above",
+         - \"description\": short string, at most 16 words, describing the main difference\n\
+         - \"unexpected_changes\": array of at most 3 short strings listing changes NOT described above\n\n\
+         Keep the response compact and specific.",
         change_description
     )
 }
@@ -591,8 +703,15 @@ fn parse_verification_response(raw: &str) -> Result<VisualVerificationResult> {
 
     Ok(VisualVerificationResult {
         passed: parsed["passed"].as_bool().unwrap_or(false),
-        confidence: parsed["confidence"].as_f64().unwrap_or(0.0).clamp(0.0, 1.0),
-        description: parsed["description"].as_str().unwrap_or("").to_string(),
+        confidence: parsed["confidence"]
+            .as_f64()
+            .unwrap_or_else(|| if parsed["passed"].as_bool().unwrap_or(false) { 1.0 } else { 0.0 })
+            .clamp(0.0, 1.0),
+        description: parsed["description"]
+            .as_str()
+            .or_else(|| parsed["summary"].as_str())
+            .unwrap_or("")
+            .to_string(),
         issues: parsed["issues"]
             .as_array()
             .map(|arr| {
@@ -614,10 +733,36 @@ fn parse_diff_response(raw: &str) -> Result<VisualDiffResult> {
         )
     })?;
 
+    let changes_detected = parsed["changes_detected"]
+        .as_bool()
+        .or_else(|| parsed["changed"].as_bool())
+        .unwrap_or(false);
+    let expected_change_found = parsed["expected_change_found"]
+        .as_bool()
+        .or_else(|| parsed["changed"].as_bool())
+        .unwrap_or(false);
+    let description = parsed["description"]
+        .as_str()
+        .map(String::from)
+        .or_else(|| {
+            parsed["change_kind"].as_str().map(|kind| {
+                let diffs: Vec<&str> = parsed["differences"]
+                    .as_array()
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).take(2).collect())
+                    .unwrap_or_default();
+                if diffs.is_empty() {
+                    kind.to_string()
+                } else {
+                    format!("{}: {}", kind, diffs.join("; "))
+                }
+            })
+        })
+        .unwrap_or_default();
+
     Ok(VisualDiffResult {
-        changes_detected: parsed["changes_detected"].as_bool().unwrap_or(false),
-        expected_change_found: parsed["expected_change_found"].as_bool().unwrap_or(false),
-        description: parsed["description"].as_str().unwrap_or("").to_string(),
+        changes_detected,
+        expected_change_found,
+        description,
         unexpected_changes: parsed["unexpected_changes"]
             .as_array()
             .map(|arr| {
@@ -869,6 +1014,7 @@ mod tests {
         assert!(prompt.contains("confidence"));
         assert!(prompt.contains("description"));
         assert!(prompt.contains("issues"));
+        assert!(prompt.contains("16 words"));
     }
 
     #[test]
@@ -878,6 +1024,7 @@ mod tests {
         assert!(prompt.contains("changes_detected"));
         assert!(prompt.contains("expected_change_found"));
         assert!(prompt.contains("unexpected_changes"));
+        assert!(prompt.contains("16 words"));
     }
 
     #[test]
@@ -963,8 +1110,17 @@ mod tests {
         let raw = r#"{"passed": true}"#;
         let result = parse_verification_response(raw).unwrap();
         assert!(result.passed);
-        assert!((result.confidence - 0.0).abs() < f64::EPSILON);
+        assert!((result.confidence - 1.0).abs() < f64::EPSILON);
         assert_eq!(result.description, "");
+        assert!(result.issues.is_empty());
+    }
+
+    #[test]
+    fn test_parse_verification_response_compact_schema() {
+        let raw = r#"{"passed": true, "summary": "Help panel visible", "visible_text": ["HELP", "EXIT"]}"#;
+        let result = parse_verification_response(raw).unwrap();
+        assert!(result.passed);
+        assert_eq!(result.description, "Help panel visible");
         assert!(result.issues.is_empty());
     }
 
@@ -983,6 +1139,15 @@ mod tests {
         let result = parse_diff_response(raw).unwrap();
         assert!(!result.changes_detected);
         assert!(!result.expected_change_found);
+    }
+
+    #[test]
+    fn test_parse_diff_response_compact_schema() {
+        let raw = r#"{"changed": true, "change_kind": "layout", "differences": ["Panel moved", "Footer changed"]}"#;
+        let result = parse_diff_response(raw).unwrap();
+        assert!(result.changes_detected);
+        assert!(result.expected_change_found);
+        assert!(result.description.contains("layout"));
     }
 
     #[test]
@@ -1095,7 +1260,7 @@ mod tests {
         let verifier = VisualVerifier::new("http://localhost:1234/v1", "test-model");
         let body = verifier.build_single_image_request("Describe this", "AAAA");
         assert_eq!(body["model"], "test-model");
-        assert_eq!(body["temperature"], 0.2);
+        assert_eq!(body["temperature"], 0.0);
         assert_eq!(body["stream"], false);
         let content = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content.len(), 2);
@@ -1106,6 +1271,7 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("data:image/png;base64,"));
+        assert_eq!(content[1]["image_url"]["detail"], "low");
     }
 
     #[test]
@@ -1121,6 +1287,49 @@ mod tests {
         let url2 = content[2]["image_url"]["url"].as_str().unwrap();
         assert!(url1.contains("BEFORE"));
         assert!(url2.contains("AFTER"));
+        assert_eq!(content[1]["image_url"]["detail"], "low");
+        assert_eq!(content[2]["image_url"]["detail"], "low");
+    }
+
+    #[test]
+    fn test_build_single_image_request_verification_budget() {
+        let verifier = VisualVerifier::new("http://localhost:1234/v1", "test-model");
+        let body =
+            verifier.build_single_image_request_with_options("Verify", "AAAA", VERIFICATION_MAX_TOKENS);
+        assert_eq!(body["max_tokens"], VERIFICATION_MAX_TOKENS);
+    }
+
+    #[test]
+    fn test_build_two_image_request_diff_budget() {
+        let verifier = VisualVerifier::new("http://localhost:1234/v1", "test-model");
+        let body = verifier.build_two_image_request_with_options(
+            "Compare",
+            "BEFORE",
+            "AFTER",
+            DIFF_MAX_TOKENS,
+        );
+        assert_eq!(body["max_tokens"], DIFF_MAX_TOKENS);
+    }
+
+    #[test]
+    fn test_build_single_image_request_merges_runtime_overrides() {
+        let mut extra_body = serde_json::Map::new();
+        extra_body.insert(
+            "chat_template_kwargs".to_string(),
+            json!({ "enable_thinking": false }),
+        );
+        let verifier = VisualVerifier::new("http://localhost:1234/v1", "test-model")
+            .with_generation(256, 0.25)
+            .with_image_detail("high")
+            .with_extra_body(Some(extra_body));
+        let body = verifier.build_single_image_request_with_options("Verify", "AAAA", 4096);
+        assert_eq!(body["max_tokens"], 256);
+        assert_eq!(body["temperature"], 0.25);
+        assert_eq!(body["messages"][0]["content"][1]["image_url"]["detail"], "high");
+        assert_eq!(
+            body["chat_template_kwargs"]["enable_thinking"],
+            json!(false)
+        );
     }
 
     // ---- Verifier construction ----
@@ -1131,6 +1340,10 @@ mod tests {
         assert_eq!(v.endpoint, "http://example.com/v1");
         assert_eq!(v.model, "model-x");
         assert_eq!(v.timeout_secs, 120);
+        assert_eq!(v.default_max_tokens, 4096);
+        assert_eq!(v.temperature, 0.0);
+        assert_eq!(v.image_detail, "low");
+        assert!(v.extra_body.is_none());
     }
 
     #[test]
@@ -1146,12 +1359,100 @@ mod tests {
         assert_eq!(v.endpoint, "http://myhost:5000/v1");
         assert_eq!(v.model, "llava");
         assert_eq!(v.timeout_secs, 30);
+        assert_eq!(v.default_max_tokens, 4096);
+        assert_eq!(v.temperature, 0.0);
     }
 
     #[test]
     fn test_verifier_with_timeout() {
         let v = VisualVerifier::new("http://localhost/v1", "m").with_timeout(45);
         assert_eq!(v.timeout_secs, 45);
+    }
+
+    #[test]
+    fn test_verifier_from_model_profile() {
+        let mut extra_body = serde_json::Map::new();
+        extra_body.insert(
+            "chat_template_kwargs".to_string(),
+            json!({ "enable_thinking": false }),
+        );
+        let profile = crate::config::ModelProfile {
+            endpoint: "https://vision.example/v1".to_string(),
+            model: "vision-model".to_string(),
+            api_key: None,
+            max_tokens: 192,
+            temperature: 0.0,
+            modalities: vec!["text".to_string(), "vision".to_string()],
+            context_length: 262_144,
+            extra_body: Some(extra_body.clone()),
+        };
+        let v = VisualVerifier::from_model_profile(&profile);
+        assert_eq!(v.endpoint, "https://vision.example/v1");
+        assert_eq!(v.model, "vision-model");
+        assert_eq!(v.default_max_tokens, 192);
+        assert_eq!(v.temperature, 0.0);
+        assert_eq!(
+            v.extra_body.as_ref().and_then(|m| m.get("chat_template_kwargs")),
+            extra_body.get("chat_template_kwargs")
+        );
+    }
+
+    #[test]
+    fn test_verifier_from_app_config_prefers_vision_profile() {
+        let mut config = crate::config::Config::default();
+        config.endpoint = "http://localhost:8000/v1".to_string();
+        config.model = "default-text".to_string();
+        config.max_tokens = 8192;
+        config.temperature = 0.2;
+        config.agent.step_timeout_secs = 45;
+
+        config.models.insert(
+            "default".to_string(),
+            crate::config::ModelProfile {
+                endpoint: "http://localhost:8000/v1".to_string(),
+                model: "default-text".to_string(),
+                api_key: None,
+                max_tokens: 8192,
+                temperature: 0.2,
+                modalities: vec!["text".to_string()],
+                context_length: 1_000_000,
+                extra_body: None,
+            },
+        );
+        config.models.insert(
+            "vision".to_string(),
+            crate::config::ModelProfile {
+                endpoint: "https://vision.example/v1".to_string(),
+                model: "remote-vision".to_string(),
+                api_key: None,
+                max_tokens: 192,
+                temperature: 0.0,
+                modalities: vec!["text".to_string(), "vision".to_string()],
+                context_length: 262_144,
+                extra_body: Some({
+                    let mut map = serde_json::Map::new();
+                    map.insert(
+                        "chat_template_kwargs".to_string(),
+                        json!({ "enable_thinking": false }),
+                    );
+                    map
+                }),
+            },
+        );
+
+        let v = VisualVerifier::from_app_config(&config);
+        assert_eq!(v.endpoint, "https://vision.example/v1");
+        assert_eq!(v.model, "remote-vision");
+        assert_eq!(v.default_max_tokens, 192);
+        assert_eq!(v.timeout_secs, 45);
+        assert_eq!(v.temperature, 0.0);
+        assert_eq!(
+            v.extra_body
+                .as_ref()
+                .and_then(|m| m.get("chat_template_kwargs"))
+                .and_then(|v| v.get("enable_thinking")),
+            Some(&json!(false))
+        );
     }
 
     // ---- Invalid JSON handling ----

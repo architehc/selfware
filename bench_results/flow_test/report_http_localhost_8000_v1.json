@@ -1,0 +1,54 @@
+{
+  "endpoint": "http://localhost:8000/v1",
+  "failed": 1,
+  "model": "qwen3.5-27b",
+  "passed": 4,
+  "results": [
+    {
+      "details": "backend=vLLM, model=qwen3.5-27b, context=1010000, fc=true, streaming=true, thinking=true, disable_thinking=true, text_concurrency=16, vision_concurrency=4",
+      "duration_secs": 6.545607109,
+      "errors": [],
+      "passed": true,
+      "step": "auto-config"
+    },
+    {
+      "details": "passed=16/16, tok/s=76, p50=0.6s, p95=0.8s, errors=0",
+      "duration_secs": 0.882711602,
+      "errors": [],
+      "passed": true,
+      "step": "throughput"
+    },
+    {
+      "details": "1/2 vision checks passed, detail=high, max_tokens=256 | self-heal retry switched to detail=high max_tokens=256",
+      "duration_secs": 34.298826717,
+      "errors": [
+        "Single-image analysis too weak: "
+      ],
+      "passed": false,
+      "step": "vision-workflows"
+    },
+    {
+      "details": "5/5 resilience tests passed | self-heal retry reran resilience checks",
+      "duration_secs": 7.35788481,
+      "errors": [],
+      "passed": true,
+      "step": "error-resilience"
+    },
+    {
+      "details": "0 issues found",
+      "duration_secs": 3.41385957,
+      "errors": [],
+      "passed": true,
+      "step": "tool-calling"
+    }
+  ],
+  "self_healing": {
+    "executions": 2,
+    "failures": 0,
+    "success_rate": 1.0,
+    "successes": 2
+  },
+  "text_concurrency": 16,
+  "total_duration_secs": 115.292353598,
+  "vision_concurrency": 4
+}

@@ -351,6 +351,67 @@ pub(super) fn hash_tool_args(args_str: &str) -> u64 {
     hasher.finish()
 }
 
+fn configured_vision_profile(
+    config: &crate::config::Config,
+) -> Option<&crate::config::ModelProfile> {
+    config
+        .models
+        .get("vision")
+        .or_else(|| config.resolve_model(None))
+}
+
+fn insert_missing_tool_arg(
+    obj: &mut serde_json::Map<String, Value>,
+    key: &str,
+    value: Value,
+) -> bool {
+    match obj.get(key) {
+        Some(existing) if !existing.is_null() => false,
+        _ => {
+            obj.insert(key.to_string(), value);
+            true
+        }
+    }
+}
+
+pub(super) fn inject_runtime_tool_defaults(
+    config: &crate::config::Config,
+    name: &str,
+    args_str: &str,
+) -> String {
+    if !matches!(name, "vision_analyze" | "vision_compare") {
+        return args_str.to_string();
+    }
+
+    let Some(profile) = configured_vision_profile(config) else {
+        return args_str.to_string();
+    };
+
+    let Ok(mut args) = serde_json::from_str::<Value>(args_str) else {
+        return args_str.to_string();
+    };
+    let Some(obj) = args.as_object_mut() else {
+        return args_str.to_string();
+    };
+
+    let mut changed = false;
+    changed |= insert_missing_tool_arg(obj, "endpoint", serde_json::json!(profile.endpoint));
+    changed |= insert_missing_tool_arg(obj, "model", serde_json::json!(profile.model));
+    changed |= insert_missing_tool_arg(obj, "max_tokens", serde_json::json!(profile.max_tokens));
+    changed |= insert_missing_tool_arg(obj, "temperature", serde_json::json!(profile.temperature));
+    changed |= insert_missing_tool_arg(obj, "detail", serde_json::json!("low"));
+
+    if let Some(extra_body) = &profile.extra_body {
+        changed |= insert_missing_tool_arg(obj, "extra_body", serde_json::json!(extra_body));
+    }
+
+    if changed {
+        serde_json::to_string(&args).unwrap_or_else(|_| args_str.to_string())
+    } else {
+        args_str.to_string()
+    }
+}
+
 impl Agent {
     pub(super) fn push_task_state_note(&mut self, note: String) {
         if self.task_state_notes.back() == Some(&note) {
@@ -756,6 +817,7 @@ impl Agent {
             if self.is_cancelled() {
                 break;
             }
+            let args_str = inject_runtime_tool_defaults(&self.config, &name, &args_str);
 
             let start_time = std::time::Instant::now();
             if let Some(warning) = self
@@ -1048,6 +1110,7 @@ impl Agent {
             );
         }
 
+        let args_str = inject_runtime_tool_defaults(&self.config, &name, &args_str);
         let (call_id, use_native_fc, fake_call) =
             self.build_tool_call_context(&name, &args_str, tool_call_id);
 

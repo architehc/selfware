@@ -1,83 +1,87 @@
-# =============================================================================
-# Docker Build Context Exclusions
-# =============================================================================
-# This file excludes unnecessary files from the Docker build context,
-# reducing build time and final image size.
-# =============================================================================
-
-# Build artifacts
-target/
-*.profraw
-*.profdata
-
 # Git
-.git/
+.git
 .gitignore
 .gitattributes
 
-# IDE and editor files
-.idea/
-.vscode/
+# Build artifacts
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# IDE
+.idea
+.vscode
 *.swp
 *.swo
 *~
-.editorconfig
 
-# Documentation (not needed in container)
-*.md
-!README.md
-docs/
-LICENSE
-
-# Coverage and testing artifacts
-coverage/
-tarpaulin-report.html
-lcov.info
-*.gcno
-*.gcda
-
-# Test projects (not needed for binary build)
-tests/e2e-projects/
-
-# Local configuration
-.env
-.env.*
-selfware-local.toml
-*.local
-
-# OS files
+# OS
 .DS_Store
 Thumbs.db
-desktop.ini
 
-# Docker files (avoid recursive context)
-Dockerfile*
+# Documentation (keep README.md)
+docs/
+kimi_docs/
+*.md
+!README.md
+!QUICKSTART.md
+
+# Test results and outputs
+results/
+batch_results/
+swebench_results/
+validation_results/
+test_results/
+websites/
+checkpoints/
+batch_tasks/
+
+# Large files
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.mp4
+*.mov
+*.avi
+screenshots/
+vlm_fixtures/
+
+# Experiment directories
+experiments/
+parallel_results/
+parallel_dev_tests/
+sab_results/
+test_single_*
+weather_appointments/
+
+# Docker files (don't need in context)
 docker-compose*.yml
+Dockerfile*
+docker-*.sh
 .dockerignore
 
-# CI/CD configuration
-.github/
-.gitlab-ci.yml
-.travis.yml
-.circleci/
-Jenkinsfile
+# Node modules (if any)
+node_modules/
 
-# Logs
-logs/
-*.log
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.venv
+venv/
 
 # Temporary files
 tmp/
+temp/
 *.tmp
-*.bak
-*.backup
+*.temp
+*.log
 
-# Package artifacts
-*.tar.gz
-*.zip
-*.deb
-*.rpm
+# Large data files
+knowledge_graph.json
+.evolution-log.jsonl
 
-# Rust specific
-**/*.rs.bk
-Cargo.lock.bak
+# Zed extension (built separately)
+zed-extension/target/

@@ -1,0 +1,50 @@
+# Selfware Docker Image - Using pre-built binary
+# Optimized for 2x RTX 4090 with local vLLM endpoint
+
+FROM ubuntu:24.04
+
+# Prevent interactive prompts during apt
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    libssl3 \
+    libsqlite3-0 \
+    libfontconfig1 \
+    libdbus-1-3 \
+    ca-certificates \
+    python3 \
+    python3-pip \
+    git \
+    curl \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Playwright for visual validation
+RUN pip3 install --break-system-packages playwright && \
+    playwright install chromium
+
+# Copy pre-built binary from host
+COPY target/release/selfware /usr/local/bin/selfware
+
+# Create working directory
+WORKDIR /workspace
+
+# Create config directory
+RUN mkdir -p /root/.config/selfware
+
+# Copy default config
+COPY selfware-stress-test.toml /root/.config/selfware/config.toml
+
+# Set environment variables for local vLLM endpoint
+ENV SELFWARE_ENDPOINT=http://host.docker.internal:8000/v1
+ENV SELFWARE_MODEL=qwen3.5-27b
+ENV SELFWARE_MAX_TOKENS=131072
+ENV RUST_LOG=info
+
+# Expose ports for dashboards
+EXPOSE 7777 8888 9999
+
+# Entry point
+ENTRYPOINT ["selfware"]
+CMD ["--help"]

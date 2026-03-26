@@ -147,6 +147,11 @@ impl Agent {
             ));
         }
 
+        // Workflow validator: reject test-only edits when task requires source changes
+        if let Some(msg) = self.validate_workflow_edits() {
+            return Some(msg);
+        }
+
         if self.config.agent.require_verification_before_completion {
             // Skip cargo verification entirely for non-Rust tasks
             if self.should_skip_cargo_verification() {
@@ -175,6 +180,80 @@ impl Agent {
                         .to_string(),
                 );
             }
+        }
+
+        None
+    }
+
+    /// Detect when the agent only edited test files without modifying source code.
+    /// This catches a common failure pattern where models write tests instead of fixes.
+    fn validate_workflow_edits(&self) -> Option<String> {
+        // Scan message history for successful file_edit/file_write tool results
+        // This is more reliable than checkpoints since messages are always up-to-date
+        let edited_files: Vec<String> = self
+            .messages
+            .iter()
+            .filter(|m| m.role == "assistant")
+            .filter_map(|m| m.tool_calls.as_ref())
+            .flatten()
+            .filter(|tc| matches!(tc.function.name.as_str(), "file_edit" | "file_write"))
+            .filter_map(|tc| {
+                serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
+                    .ok()
+                    .and_then(|v| v.get("path").and_then(|p| p.as_str().map(|s| s.to_string())))
+            })
+            .collect();
+
+        debug!(
+            "Workflow validator: found {} edited files from message history: {:?}",
+            edited_files.len(),
+            edited_files
+        );
+
+        // No file edits → no validation needed
+        if edited_files.is_empty() {
+            return None;
+        }
+
+        // Check if ALL edited files look like test files
+        let test_patterns = ["test_", "tests/", "tests.", "_test.", "_test/", "spec/", "spec.", "_spec."];
+        let all_test_files = edited_files.iter().all(|path| {
+            let lower = path.to_lowercase();
+            test_patterns.iter().any(|p| lower.contains(p))
+        });
+
+        // Check if the task description suggests source modification is needed
+        let task_desc = self
+            .current_checkpoint
+            .as_ref()
+            .map(|cp| cp.task_description.to_lowercase())
+            .unwrap_or_default();
+        let needs_source_change = task_desc.contains("fix")
+            || task_desc.contains("bug")
+            || task_desc.contains("implement")
+            || task_desc.contains("modify")
+            || task_desc.contains("change")
+            || task_desc.contains("update")
+            || task_desc.contains("patch")
+            || task_desc.contains("source code");
+
+        // Always reject test-only edits if task mentions fixing/implementing,
+        // OR if there are edits but none to source files (likely a mistake)
+        if all_test_files && (needs_source_change || edited_files.len() >= 1) {
+            warn!(
+                "Workflow validator: only test files edited ({:?}), task requires source changes",
+                edited_files
+            );
+            let files_str = edited_files.join(", ");
+            return Some(format!(
+                "You only modified test files ({files_str}) but the task requires fixing SOURCE CODE. \
+                 Do NOT only write tests. You MUST edit the actual source file(s) that contain the bug. \
+                 Read the relevant source file, find the bug, and use file_edit to fix it."
+            ));
+        }
+
+        if !all_test_files {
+            debug!("Workflow validator: source files edited, task OK");
         }
 
         None

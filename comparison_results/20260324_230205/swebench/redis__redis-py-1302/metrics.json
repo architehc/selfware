@@ -1,0 +1,9 @@
+{
+  "task_id": "redis__redis-py-1302",
+  "system": "swebench_pro",
+  "duration_ms": 1226,
+  "tokens_in": 2720,
+  "tokens_out": 2401,
+  "success": 1,
+  "timestamp": "2026-03-24T23:02:13-04:00"
+}

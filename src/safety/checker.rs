@@ -61,7 +61,12 @@ impl SafetyChecker {
     }
 
     pub fn check_tool_call(&self, call: &ToolCall) -> Result<()> {
-        match call.function.name.as_str() {
+        let raw_name = &call.function.name;
+        let tool_name = raw_name.trim();
+        if raw_name != tool_name {
+            tracing::debug!("Tool name had whitespace: '{}' -> '{}'", raw_name, tool_name);
+        }
+        match tool_name {
             "file_write" | "file_edit" | "file_read" | "file_delete" | "search"
             | "directory_tree" | "file_list" | "analyze" | "tech_debt_report" => {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
@@ -247,6 +252,11 @@ impl SafetyChecker {
             "computer_screen" | "computer_window" => {
                 // Screen capture returns base64 PNG in-memory; window list/focus/active
                 // are desktop queries. No filesystem or network side-effects to validate.
+            }
+            // Context management tools — virtual, no filesystem access
+            "context_status" | "context_focus" | "context_evict" | "context_recommend"
+            | "context_load_skeleton" | "context_bulk_read" | "context_summary" => {
+                // Context tools interact with the agent's internal state only
             }
             // Computer tools — system manipulation (medium risk)
             "computer_mouse" | "computer_keyboard" => {

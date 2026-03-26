@@ -92,6 +92,14 @@ pub mod evolution;
 #[cfg(feature = "vlm-bench")]
 pub mod vlm_bench;
 
+// Concurrent benchmark harness for throughput testing
+#[cfg(feature = "bench-harness")]
+pub mod bench_harness;
+
+// Memory consolidation ("sleep") system
+#[cfg(feature = "consolidation")]
+pub mod consolidation;
+
 // Backward-compatible re-exports for safety module
 pub use safety::redact;
 
@@ -115,6 +123,7 @@ pub use observability::telemetry;
 pub use orchestration::multiagent;
 pub use orchestration::planning;
 pub use orchestration::swarm;
+pub use orchestration::visual_loop;
 pub use orchestration::workflows;
 
 // Backward-compatible re-exports for devops module
@@ -123,6 +132,15 @@ pub use devops::process_manager;
 
 // Backward-compatible re-exports for testing module
 pub use testing::verification;
+
+// ============================================================================
+// New feature modules
+// ============================================================================
+pub mod batch;
+pub mod browser;
+pub mod profiles;
+pub mod swebench;
+pub mod validation;
 
 // ============================================================================
 // Utility modules

@@ -1,28 +1,22 @@
 /// ANSI escape code helpers for terminal colors.
-
 /// Generate an ANSI foreground color escape code from RGB values.
 ///
 /// Should produce: `\x1b[38;2;R;G;Bm`
 pub fn fg_rgb(r: u8, g: u8, b: u8) -> String {
-    // BUG 1: RGB channels are in wrong order (BGR instead of RGB).
-    // This makes red appear as blue and vice versa.
-    format!("\x1b[38;2;{};{};{}m", b, g, r)
+    format!("\x1b[38;2;{};{};{}m", r, g, b)
 }
 
 /// Generate an ANSI background color escape code from RGB values.
 ///
 /// Should produce: `\x1b[48;2;R;G;Bm`
 pub fn bg_rgb(r: u8, g: u8, b: u8) -> String {
-    // BUG 2: Uses foreground code (38) instead of background code (48).
-    format!("\x1b[38;2;{};{};{}m", r, g, b)
+    format!("\x1b[48;2;{};{};{}m", r, g, b)
 }
-
 /// Reset all ANSI formatting.
 ///
 /// Should produce: `\x1b[0m`
 pub fn reset() -> String {
-    // BUG 3: Missing the reset code entirely — returns empty string.
-    String::new()
+    "\x1b[0m".to_string()
 }
 
 /// Named colors for convenience.

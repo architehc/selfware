@@ -1,108 +1,32 @@
-# Set this to your OpenAI-compatible API endpoint (e.g., local vLLM/sglang server, ngrok tunnel, etc.)
-# You can set this via environment variable SELFWARE_ENDPOINT or in your config
+# Auto-configured by selfware auto-config
 endpoint = "http://localhost:8000/v1"
 model = "qwen3.5-27b"
-max_tokens = 8192
-# Qwen3.5 recommended: thinking mode for precise coding tasks
-temperature = 0.6
-# Context length: must match vLLM --max-model-len exactly
+max_tokens = 16384
 context_length = 1010000
+temperature = 0.6
 
-# Qwen3.5 sampling parameters for coding (thinking mode)
-[extra_body]
-top_p = 0.95
-top_k = 20
-min_p = 0.0
-
-# Concurrency settings for parallel requests
-[concurrency]
-max_parallel_requests = 8
-max_retries = 3
-timeout_secs = 120
-
-# Safety section is nested - that part was correct
 [safety]
-allowed_paths = ["./**", "~/**"]
-denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
-
+allowed_paths = ["./**", "/tmp/**"]
+denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**"]
+protected_branches = ["main"]
 
 [agent]
-streaming = false
-max_iterations = 100
-step_timeout_secs = 980
-# Enable native function calling — matches vLLM's --enable-auto-tool-choice --tool-call-parser qwen3_coder
 native_function_calling = true
-token_budget = 900000
-token_safety_margin = 100000
+streaming = true
+token_budget = 943616
+step_timeout_secs = 300
 
 [continuous_work]
 enabled = true
 checkpoint_interval_tools = 10
 checkpoint_interval_secs = 300
 auto_recovery = true
-max_recovery_attempts = 6
+max_recovery_attempts = 3
+
+[extra_body]
+chat_template_kwargs = { enable_thinking = false }
 
 [retry]
-max_retries = 8
+max_retries = 5
 base_delay_ms = 1000
-max_delay_ms = 70000
-
-# Remote 122B MoE for evolution hypotheses and architectural decisions
-# Runs on sglang with 64 concurrency — much stronger reasoning than local 27B
-[models.architect]
-# endpoint = "https://your-sglang-endpoint.example.com/v1"
-endpoint = "https://crazyshit.ngrok.io/v1"  # Ivo's remote — change to your own
-model = "txn545/Qwen3.5-122B-A10B-NVFP4"
-max_tokens = 65536
-context_length = 262144
-temperature = 0.7
-modalities = ["text", "vision"]
-
-[evolution]
-# Use the remote 122B for hypothesis generation (stronger reasoning)
-hypothesis_model = "architect"
-# Source files the evolution daemon is allowed to mutate
-
-# Prompt construction logic
-prompt_logic = [
-    "src/agent/planning.rs",
-    "src/agent/loop_control.rs",
-    "src/agent/learning.rs",
-    "src/orchestration/planning.rs",
-    "src/orchestration/swarm.rs",
-    "src/orchestration/multiagent.rs",
-    "src/agent/context.rs",
-]
-
-# Tool implementations
-tool_code = [
-    "src/tools/file.rs",
-    "src/tools/search.rs",
-    "src/tools/analyzer.rs",
-    "src/tools/shell.rs",
-    "src/tools/git.rs",
-    "src/tools/cargo.rs",
-    "src/tools/knowledge.rs",
-    "src/tools/fim.rs",
-    "src/tool_parser.rs",
-]
-
-# Cognitive architecture
-cognitive = [
-    "src/agent/execution.rs",
-    "src/agent/task_runner.rs",
-    "src/agent/context_management.rs",
-    "src/cognitive/memory_hierarchy.rs",
-    "src/cognitive/episodic.rs",
-    "src/cognitive/self_improvement.rs",
-    "src/cognitive/self_reference.rs",
-    "src/cognitive/intelligence.rs",
-    "src/cognitive/cognitive_system.rs",
-    "src/cognitive/state.rs",
-    "src/cognitive/rag.rs",
-    "src/cognitive/token_budget.rs",
-    "src/memory.rs",
-]
-
-# Config keys the agent may tune
-config_keys = ["temperature", "max_tokens", "token_budget"]
+max_delay_ms = 60000

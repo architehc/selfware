@@ -1,0 +1,9 @@
+[project]
+name = "python_json_merge"
+version = "0.1.0"
+description = "JSON merge utilities test template"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]

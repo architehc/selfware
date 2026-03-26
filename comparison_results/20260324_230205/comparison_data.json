@@ -1,0 +1,205 @@
+{"tasks": [
+{"task": "django__django-11133", "selfware": {
+  "task_id": "django__django-11133",
+  "system": "selfware",
+  "duration_ms": 830,
+  "tokens_in": 0,
+  "tokens_out": 0,
+  "success": 0,
+  "timestamp": "2026-03-24T23:02:06-04:00"
+}, "swebench": {
+  "task_id": "django__django-11133",
+  "system": "swebench_pro",
+  "duration_ms": 1820,
+  "tokens_in": 4875,
+  "tokens_out": 1662,
+  "success": 1,
+  "timestamp": "2026-03-24T23:02:07-04:00"
+}},
+{"task": "matplotlib__matplotlib-24149", "selfware": {
+  "task_id": "matplotlib__matplotlib-24149",
+  "system": "selfware",
+  "duration_ms": 927,
+  "tokens_in": 0,
+  "tokens_out": 0,
+  "success": 0,
+  "timestamp": "2026-03-24T23:02:06-04:00"
+}, "swebench": {
+  "task_id": "matplotlib__matplotlib-24149",
+  "system": "swebench_pro",
+  "duration_ms": 1744,
+  "tokens_in": 2435,
+  "tokens_out": 3374,
+  "success": 1,
+  "timestamp": "2026-03-24T23:02:06-04:00"
+}},
+{"task": "pytest-dev__pytest-7324", "selfware": {
+  "task_id": "pytest-dev__pytest-7324",
+  "system": "selfware",
+  "duration_ms": 902,
+  "tokens_in": 0,
+  "tokens_out": 0,
+  "success": 0,
+  "timestamp": "2026-03-24T23:02:06-04:00"
+}, "swebench": {
+  "task_id": "pytest-dev__pytest-7324",
+  "system": "swebench_pro",
+  "duration_ms": 1872,
+  "tokens_in": 3747,
+  "tokens_out": 2870,
+  "success": 0,
+  "timestamp": "2026-03-24T23:02:07-04:00"
+}},
+{"task": "pandas-dev__pandas-32377", "selfware": {
+  "task_id": "pandas-dev__pandas-32377",
+  "system": "selfware",
+  "duration_ms": 860,
+  "tokens_in": 0,
+  "tokens_out": 0,
+  "success": 0,
+  "timestamp": "2026-03-24T23:02:06-04:00"
+}, "swebench": {
+  "task_id": "pandas-dev__pandas-32377",
+  "system": "swebench_pro",
+  "duration_ms": 1625,
+  "tokens_in": 5349,
+  "tokens_out": 2866,
+  "success": 1,
+  "timestamp": "2026-03-24T23:02:06-04:00"
+}},
+{"task": "scikit-learn__scikit-learn-13241", "selfware": {
+  "task_id": "scikit-learn__scikit-learn-13241",
+  "system": "selfware",
+  "duration_ms": 905,
+  "tokens_in": 0,
+  "tokens_out": 0,
+  "success": 0,
+  "timestamp": "2026-03-24T23:02:09-04:00"
+}, "swebench": {
+  "task_id": "scikit-learn__scikit-learn-13241",
+  "system": "swebench_pro",
+  "duration_ms": 1392,
+  "tokens_in": 3716,
+  "tokens_out": 3841,
+  "success": 0,
+  "timestamp": "2026-03-24T23:02:10-04:00"
+}},
+{"task": "psf__requests-2679", "selfware": {
+  "task_id": "psf__requests-2679",
+  "system": "selfware",
+  "duration_ms": 733,
+  "tokens_in": 0,
+  "tokens_out": 0,
+  "success": 0,
+  "timestamp": "2026-03-24T23:02:09-04:00"
+}, "swebench": {
+  "task_id": "psf__requests-2679",
+  "system": "swebench_pro",
+  "duration_ms": 1193,
+  "tokens_in": 3488,
+  "tokens_out": 1830,
+  "success": 0,
+  "timestamp": "2026-03-24T23:02:10-04:00"
+}},
+{"task": "sphinx-doc__sphinx-8725", "selfware": {
+  "task_id": "sphinx-doc__sphinx-8725",
+  "system": "selfware",
+  "duration_ms": 843,
+  "tokens_in": 0,
+  "tokens_out": 0,
+  "success": 0,
+  "timestamp": "2026-03-24T23:02:09-04:00"
+}, "swebench": {
+  "task_id": "sphinx-doc__sphinx-8725",
+  "system": "swebench_pro",
+  "duration_ms": 990,
+  "tokens_in": 6844,
+  "tokens_out": 3412,
+  "success": 1,
+  "timestamp": "2026-03-24T23:02:10-04:00"
+}},
+{"task": "numpy__numpy-11993", "selfware": {
+  "task_id": "numpy__numpy-11993",
+  "system": "selfware",
+  "duration_ms": 879,
+  "tokens_in": 0,
+  "tokens_out": 0,
+  "success": 0,
+  "timestamp": "2026-03-24T23:02:09-04:00"
+}, "swebench": {
+  "task_id": "numpy__numpy-11993",
+  "system": "swebench_pro",
+  "duration_ms": 1115,
+  "tokens_in": 3668,
+  "tokens_out": 1587,
+  "success": 0,
+  "timestamp": "2026-03-24T23:02:10-04:00"
+}},
+{"task": "pallets__flask-4045", "selfware": {
+  "task_id": "pallets__flask-4045",
+  "system": "selfware",
+  "duration_ms": 945,
+  "tokens_in": 0,
+  "tokens_out": 0,
+  "success": 0,
+  "timestamp": "2026-03-24T23:02:13-04:00"
+}, "swebench": {
+  "task_id": "pallets__flask-4045",
+  "system": "swebench_pro",
+  "duration_ms": 1399,
+  "tokens_in": 5622,
+  "tokens_out": 1919,
+  "success": 1,
+  "timestamp": "2026-03-24T23:02:13-04:00"
+}},
+{"task": "tornadoweb__tornado-1540", "selfware": {
+  "task_id": "tornadoweb__tornado-1540",
+  "system": "selfware",
+  "duration_ms": 738,
+  "tokens_in": 0,
+  "tokens_out": 0,
+  "success": 0,
+  "timestamp": "2026-03-24T23:02:13-04:00"
+}, "swebench": {
+  "task_id": "tornadoweb__tornado-1540",
+  "system": "swebench_pro",
+  "duration_ms": 968,
+  "tokens_in": 2373,
+  "tokens_out": 2366,
+  "success": 0,
+  "timestamp": "2026-03-24T23:02:13-04:00"
+}},
+{"task": "celery__celery-4832", "selfware": {
+  "task_id": "celery__celery-4832",
+  "system": "selfware",
+  "duration_ms": 918,
+  "tokens_in": 0,
+  "tokens_out": 0,
+  "success": 0,
+  "timestamp": "2026-03-24T23:02:13-04:00"
+}, "swebench": {
+  "task_id": "celery__celery-4832",
+  "system": "swebench_pro",
+  "duration_ms": 1335,
+  "tokens_in": 3749,
+  "tokens_out": 1003,
+  "success": 1,
+  "timestamp": "2026-03-24T23:02:13-04:00"
+}},
+{"task": "redis__redis-py-1302", "selfware": {
+  "task_id": "redis__redis-py-1302",
+  "system": "selfware",
+  "duration_ms": 805,
+  "tokens_in": 0,
+  "tokens_out": 0,
+  "success": 0,
+  "timestamp": "2026-03-24T23:02:13-04:00"
+}, "swebench": {
+  "task_id": "redis__redis-py-1302",
+  "system": "swebench_pro",
+  "duration_ms": 1226,
+  "tokens_in": 2720,
+  "tokens_out": 2401,
+  "success": 1,
+  "timestamp": "2026-03-24T23:02:13-04:00"
+}}]}

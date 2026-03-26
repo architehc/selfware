@@ -156,10 +156,131 @@ mod tests {
     }
 
     #[test]
+    fn test_point_negative() {
+        let p = Point::new(-50, -100);
+        assert_eq!(p.x, -50);
+        assert_eq!(p.y, -100);
+    }
+
+    #[test]
+    fn test_point_serde_roundtrip() {
+        let p = Point::new(42, 84);
+        let json = serde_json::to_string(&p).unwrap();
+        let parsed: Point = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.x, 42);
+        assert_eq!(parsed.y, 84);
+    }
+
+    #[test]
     fn test_validate_coordinates() {
         let mouse = MouseController::new();
         assert!(mouse.validate_coordinates(100, 200).is_ok());
         assert!(mouse.validate_coordinates(-100, 200).is_ok());
         assert!(mouse.validate_coordinates(50000, 200).is_err());
+    }
+
+    #[test]
+    fn test_validate_coordinates_boundary() {
+        let mouse = MouseController::new();
+        // Exactly at the 32768 boundary
+        assert!(mouse.validate_coordinates(32768, 0).is_ok());
+        assert!(mouse.validate_coordinates(0, 32768).is_ok());
+        // Just over
+        assert!(mouse.validate_coordinates(32769, 0).is_err());
+        assert!(mouse.validate_coordinates(0, 32769).is_err());
+        // Negative boundary
+        assert!(mouse.validate_coordinates(-32768, 0).is_ok());
+        assert!(mouse.validate_coordinates(-32769, 0).is_err());
+    }
+
+    #[test]
+    fn test_validate_coordinates_both_out_of_range() {
+        let mouse = MouseController::new();
+        assert!(mouse.validate_coordinates(50000, 50000).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_move_to_valid() {
+        let mouse = MouseController::new();
+        assert!(mouse.move_to(100, 200).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_move_to_out_of_bounds() {
+        let mouse = MouseController::new();
+        assert!(mouse.move_to(50000, 200).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_click() {
+        let mouse = MouseController::new();
+        assert!(mouse.click(MouseButton::Left).await.is_ok());
+        assert!(mouse.click(MouseButton::Right).await.is_ok());
+        assert!(mouse.click(MouseButton::Middle).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_double_click() {
+        let mouse = MouseController::new();
+        assert!(mouse.double_click().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_click_at() {
+        let mouse = MouseController::new();
+        assert!(mouse.click_at(100, 200, MouseButton::Left).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_click_at_out_of_bounds() {
+        let mouse = MouseController::new();
+        assert!(mouse.click_at(50000, 200, MouseButton::Left).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_scroll() {
+        let mouse = MouseController::new();
+        assert!(mouse.scroll(0, -3).await.is_ok());
+        assert!(mouse.scroll(5, 5).await.is_ok());
+        assert!(mouse.scroll(0, 0).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_drag_valid() {
+        let mouse = MouseController::new();
+        let from = Point::new(10, 10);
+        let to = Point::new(200, 200);
+        assert!(mouse.drag(from, to, MouseButton::Left).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_drag_out_of_bounds() {
+        let mouse = MouseController::new();
+        let from = Point::new(10, 10);
+        let to = Point::new(50000, 200);
+        assert!(mouse.drag(from, to, MouseButton::Left).await.is_err());
+    }
+
+    #[test]
+    fn test_mouse_controller_default() {
+        let mouse = MouseController::default();
+        assert!(mouse.validate_coordinates(0, 0).is_ok());
+    }
+
+    #[test]
+    fn test_with_movement_profile() {
+        let mouse = MouseController::new()
+            .with_movement_profile(super::super::MovementProfile::Bezier);
+        assert!(mouse.validate_coordinates(0, 0).is_ok());
+    }
+
+    #[test]
+    fn test_mouse_button_serde() {
+        let buttons = vec![MouseButton::Left, MouseButton::Right, MouseButton::Middle];
+        for button in buttons {
+            let json = serde_json::to_string(&button).unwrap();
+            let parsed: MouseButton = serde_json::from_str(&json).unwrap();
+            let _ = format!("{:?}", parsed);
+        }
     }
 }

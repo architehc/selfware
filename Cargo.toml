@@ -153,11 +153,17 @@ vendored-openssl = ["dep:openssl"]
 # VLM benchmark suite for visual understanding evaluation
 vlm-bench = []
 
+# Concurrent benchmark harness for throughput testing
+bench-harness = []
+
+# Memory consolidation ("sleep") system
+consolidation = []
+
 # System-level E2E tests (require live LLM endpoint, run manually)
 system-tests = []
 
 # Convenience feature that enables all optional modules
-extras = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-analysis", "tokens", "self-improvement", "hot-reload", "vlm-bench"]
+extras = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-analysis", "tokens", "self-improvement", "hot-reload", "vlm-bench", "bench-harness", "consolidation"]
 
 [dev-dependencies]
 tokio-test = "0.4"

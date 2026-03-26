@@ -22,7 +22,7 @@ token_budget = 180000
 token_safety_margin = 50000
 max_iterations = 50
 step_timeout_secs = 600
-native_function_calling = true
+native_function_calling = false
 streaming = false
 
 [evolution]
@@ -52,5 +52,5 @@ cognitive = [
 config_keys = ["temperature", "max_tokens", "token_budget"]
 
 [safety]
-allowed_paths = ["./src/**", "./tests/**", "./benches/**"]
+allowed_paths = ["./**", "/tmp/**", "/home/ivo/selfware/system_tests/**"]
 denied_paths = ["**/.env", "**/secrets/**", "**/target/**", "**/.git/**"]

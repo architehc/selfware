@@ -1,0 +1,1079 @@
+warning: unused import: `AgentConfig`
+  --> src/config/auto_config.rs:13:13
+   |
+13 | use super::{AgentConfig, Config, RedactedString};
+   |             ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `warn`
+ --> src/batch/mod.rs:9:21
+  |
+9 | use tracing::{info, warn};
+  |                     ^^^^
+
+warning: unused imports: `error` and `warn`
+ --> src/validation/mod.rs:8:21
+  |
+8 | use tracing::{info, warn, error};
+  |                     ^^^^  ^^^^^
+
+warning: unused variable: `workflow`
+    --> src/cli.rs:1417:17
+     |
+1417 |             let workflow = ValidationWorkflow {
+     |                 ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_workflow`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `config` is never read
+  --> src/browser/mod.rs:28:5
+   |
+27 | pub struct BrowserSession {
+   |            -------------- field in this struct
+28 |     config: BrowserConfig,
+   |     ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `intent_without_action` is never used
+   --> src/output/mod.rs:671:15
+    |
+671 | pub(crate) fn intent_without_action() {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `selfware` (lib) generated 6 warnings (run `cargo fix --lib -p selfware` to apply 3 suggestions)
+warning: unused import: `Serialize`
+  --> examples/swebench_two_phase.rs:18:26
+   |
+18 | use serde::{Deserialize, Serialize};
+   |                          ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `test_patch` is never read
+  --> examples/swebench_two_phase.rs:32:5
+   |
+24 | struct SWETask {
+   |        ------- field in this struct
+...
+32 |     test_patch: String,
+   |     ^^^^^^^^^^
+   |
+   = note: `SWETask` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `selfware` (example "swebench_two_phase") generated 2 warnings (run `cargo fix --example "swebench_two_phase"` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.19s
+     Running `target/debug/examples/swebench_two_phase bench_results/swebench_lite_300.json --limit 300`
+
+=== SWE-bench Two-Phase Evaluation ===
+Endpoint: https://crazyshit.ngrok.io/v1
+Model: txn545/Qwen3.5-122B-A10B-NVFP4
+Concurrent: 16
+Tasks: 300
+
+--- Phase 1: Reading source files ---
+  astropy__astropy-12907 ... 1 files, 323 lines
+  astropy__astropy-14182 ... 1 files, 99 lines
+  astropy__astropy-14365 ... 1 files, 665 lines
+  astropy__astropy-14995 ... 1 files, 858 lines
+  astropy__astropy-6938 ... 1 files, 1412 lines
+  astropy__astropy-7746 ... 1 files, 3952 lines
+  django__django-10914 ... 1 files, 680 lines
+  django__django-10924 ... 1 files, 2963 lines
+  django__django-11001 ... 1 files, 2266 lines
+  django__django-11019 ... 1 files, 1279 lines
+  django__django-11039 ... 1 files, 83 lines
+  django__django-11049 ... 1 files, 2963 lines
+  django__django-11099 ... 1 files, 25 lines
+  django__django-11133 ... 1 files, 762 lines
+  django__django-11179 ... 1 files, 552 lines
+  django__django-11283 ... 1 files, 76 lines
+  django__django-11422 ... 1 files, 694 lines
+  django__django-11564 ... 1 files, 257 lines
+  django__django-11583 ... 1 files, 694 lines
+  django__django-11620 ... 1 files, 686 lines
+  django__django-11630 ... 1 files, 227 lines
+  django__django-11742 ... 1 files, 2963 lines
+  django__django-11797 ... 1 files, 824 lines
+  django__django-11815 ... 1 files, 427 lines
+  django__django-11848 ... 1 files, 397 lines
+  django__django-11905 ... 1 files, 824 lines
+  django__django-11910 ... 1 files, 2066 lines
+  django__django-11964 ... 1 files, 79 lines
+  django__django-11999 ... 1 files, 2963 lines
+  django__django-12113 ... 1 files, 158 lines
+  django__django-12125 ... 1 files, 427 lines
+  django__django-12184 ... 1 files, 842 lines
+  django__django-12284 ... 1 files, 2963 lines
+  django__django-12286 ... 1 files, 66 lines
+  django__django-12308 ... 1 files, 627 lines
+  django__django-12453 ... 1 files, 422 lines
+  django__django-12470 ... 1 files, 2266 lines
+  django__django-12497 ... 1 files, 2163 lines
+  django__django-12589 ... 1 files, 2881 lines
+  django__django-12700 ... 1 files, 686 lines
+  django__django-12708 ... 1 files, 2086 lines
+  django__django-12747 ... 1 files, 552 lines
+  django__django-12856 ... 1 files, 2566 lines
+  django__django-12908 ... 1 files, 3024 lines
+  django__django-12915 ... 1 files, 115 lines
+  django__django-12983 ... 1 files, 501 lines
+  django__django-13028 ... 1 files, 2881 lines
+  django__django-13033 ... 1 files, 2266 lines
+  django__django-13158 ... 1 files, 2881 lines
+  django__django-13220 ... 1 files, 265 lines
+  django__django-13230 ... 1 files, 235 lines
+  django__django-13265 ... 1 files, 2066 lines
+  django__django-13315 ... 1 files, 1716 lines
+  django__django-13321 ... 1 files, 528 lines
+  django__django-13401 ... 1 files, 2963 lines
+  django__django-13447 ... 1 files, 621 lines
+  django__django-13448 ... 1 files, 422 lines
+  django__django-13551 ... 1 files, 132 lines
+  django__django-13590 ... 1 files, 2881 lines
+  django__django-13658 ... 1 files, 443 lines
+  django__django-13660 ... 1 files, 283 lines
+  django__django-13710 ... 1 files, 2607 lines
+  django__django-13757 ... 1 files, 745 lines
+  django__django-13768 ... 1 files, 558 lines
+  django__django-13925 ... 1 files, 2566 lines
+  django__django-13933 ... 1 files, 1716 lines
+  django__django-13964 ... 1 files, 2566 lines
+  django__django-14016 ... 1 files, 554 lines
+  django__django-14017 ... 1 files, 554 lines
+  django__django-14155 ... 1 files, 842 lines
+  django__django-14238 ... 1 files, 2963 lines
+  django__django-14382 ... 1 files, 404 lines
+  django__django-14411 ... 1 files, 599 lines
+  django__django-14534 ... 1 files, 371 lines
+  django__django-14580 ... 1 files, 427 lines
+  django__django-14608 ... 1 files, 584 lines
+  django__django-14667 ... 1 files, 2881 lines
+  django__django-14672 ... 1 files, 405 lines
+  django__django-14730 ... 1 files, 2163 lines
+  django__django-14752 ... 1 files, 123 lines
+  django__django-14787 ... 1 files, 228 lines
+  django__django-14855 ... 1 files, 565 lines
+  django__django-14915 ... 1 files, 1716 lines
+  django__django-14997 ... 1 files, 270 lines
+  django__django-14999 ... 1 files, 1288 lines
+  django__django-15061 ... 1 files, 1279 lines
+  django__django-15202 ... 1 files, 677 lines
+  django__django-15213 ... 1 files, 2963 lines
+  django__django-15252 ... 1 files, 413 lines
+  django__django-15320 ... 1 files, 2232 lines
+  django__django-15347 ... 1 files, 248 lines
+  django__django-15388 ... 1 files, 61 lines
+  django__django-15400 ... 1 files, 455 lines
+  django__django-15498 ... 1 files, 122 lines
+  django__django-15695 ... 1 files, 1288 lines
+  django__django-15738 ... 1 files, 2066 lines
+  django__django-15781 ... 1 files, 713 lines
+  django__django-15789 ... 1 files, 534 lines
+  django__django-15790 ... 1 files, 12 lines
+  django__django-15814 ... 1 files, 2881 lines
+  django__django-15819 ... 1 files, 421 lines
+  django__django-15851 ... 1 files, 64 lines
+  django__django-15902 ... 1 files, 584 lines
+  django__django-15996 ... 1 files, 427 lines
+  django__django-16041 ... 1 files, 584 lines
+  django__django-16046 ... 1 files, 108 lines
+  django__django-16139 ... 1 files, 599 lines
+  django__django-16229 ... 1 files, 371 lines
+  django__django-16255 ... 1 files, 202 lines
+  django__django-16379 ... 1 files, 169 lines
+  django__django-16400 ... 1 files, 292 lines
+  django__django-16408 ... 1 files, 2266 lines
+  django__django-16527 ... 1 files, 152 lines
+  django__django-16595 ... 1 files, 357 lines
+  django__django-16816 ... 1 files, 1384 lines
+  django__django-16820 ... 1 files, 1288 lines
+  django__django-16873 ... 1 files, 996 lines
+  django__django-16910 ... 1 files, 2881 lines
+  django__django-17051 ... 1 files, 3024 lines
+  django__django-17087 ... 1 files, 427 lines
+  matplotlib__matplotlib-18869 ... 1 files, 1575 lines
+  matplotlib__matplotlib-22711 ... 1 files, 4440 lines
+  matplotlib__matplotlib-22835 ... 1 files, 1944 lines
+  matplotlib__matplotlib-23299 ... 1 files, 1575 lines
+  matplotlib__matplotlib-23314 ... 1 files, 4428 lines
+  matplotlib__matplotlib-23476 ... 1 files, 3787 lines
+  matplotlib__matplotlib-23562 ... 1 files, 1677 lines
+  matplotlib__matplotlib-23563 ... 1 files, 1677 lines
+  matplotlib__matplotlib-23913 ... 1 files, 1397 lines
+  matplotlib__matplotlib-23964 ... 1 files, 1473 lines
+  matplotlib__matplotlib-23987 ... 1 files, 3787 lines
+  matplotlib__matplotlib-24149 ... 1 files, 8001 lines
+  matplotlib__matplotlib-24265 ... 1 files, 27 lines
+  matplotlib__matplotlib-24334 ... 1 files, 2875 lines
+  matplotlib__matplotlib-24970 ... 1 files, 4269 lines
+  matplotlib__matplotlib-25079 ... 1 files, 4269 lines
+  matplotlib__matplotlib-25311 ... 1 files, 1688 lines
+  matplotlib__matplotlib-25332 ... 1 files, 2543 lines
+  matplotlib__matplotlib-25433 ... 1 files, 3787 lines
+  matplotlib__matplotlib-25442 ... 1 files, 1688 lines
+  matplotlib__matplotlib-25498 ... 1 files, 1565 lines
+  matplotlib__matplotlib-26011 ... 1 files, 2875 lines
+  matplotlib__matplotlib-26020 ... 1 files, 564 lines
+  mwaskom__seaborn-2848 ...     Warning: could not read seaborn/_oldcore.py: No such file or directory (os error 2)
+0 files, 0 lines
+  mwaskom__seaborn-3010 ... 1 files, 50 lines
+  mwaskom__seaborn-3190 ... 1 files, 1090 lines
+  mwaskom__seaborn-3407 ... 1 files, 2401 lines
+  pallets__flask-4045 ... 1 files, 128 lines
+  pallets__flask-4992 ... 1 files, 367 lines
+  pallets__flask-5063 ... 1 files, 1127 lines
+  psf__requests-1963 ...     Warning: could not read requests/sessions.py: No such file or directory (os error 2)
+0 files, 0 lines
+  psf__requests-2148 ...     Warning: could not read requests/models.py: No such file or directory (os error 2)
+0 files, 0 lines
+  psf__requests-2317 ...     Warning: could not read requests/sessions.py: No such file or directory (os error 2)
+0 files, 0 lines
+  psf__requests-2674 ...     Warning: could not read requests/adapters.py: No such file or directory (os error 2)
+0 files, 0 lines
+  psf__requests-3362 ...     Warning: could not read requests/utils.py: No such file or directory (os error 2)
+0 files, 0 lines
+  psf__requests-863 ...     Warning: could not read requests/models.py: No such file or directory (os error 2)
+0 files, 0 lines
+  pydata__xarray-3364 ...     Warning: could not read xarray/core/concat.py: No such file or directory (os error 2)
+0 files, 0 lines
+  pydata__xarray-4094 ... 1 files, 7732 lines
+  pydata__xarray-4248 ... 1 files, 1338 lines
+  pydata__xarray-4493 ... 1 files, 3148 lines
+  pydata__xarray-5131 ... 1 files, 1902 lines
+  pylint-dev__pylint-5859 ... 1 files, 192 lines
+  pylint-dev__pylint-6506 ... 1 files, 211 lines
+  pylint-dev__pylint-7080 ... 1 files, 185 lines
+  pylint-dev__pylint-7114 ... 1 files, 185 lines
+  pylint-dev__pylint-7228 ... 1 files, 499 lines
+  pylint-dev__pylint-7993 ... 1 files, 298 lines
+  pytest-dev__pytest-11143 ... 1 files, 1202 lines
+  pytest-dev__pytest-11148 ... 1 files, 1063 lines
+  pytest-dev__pytest-5103 ... 1 files, 1202 lines
+  pytest-dev__pytest-5221 ... 1 files, 1736 lines
+  pytest-dev__pytest-5227 ... 1 files, 960 lines
+  pytest-dev__pytest-5413 ... 1 files, 1571 lines
+  pytest-dev__pytest-5495 ... 1 files, 615 lines
+  pytest-dev__pytest-5692 ... 1 files, 695 lines
+  pytest-dev__pytest-6116 ... 1 files, 1202 lines
+  pytest-dev__pytest-7168 ... 1 files, 155 lines
+  pytest-dev__pytest-7220 ... 1 files, 764 lines
+  pytest-dev__pytest-7373 ...     Warning: could not read src/_pytest/mark/evaluate.py: No such file or directory (os error 2)
+0 files, 0 lines
+  pytest-dev__pytest-7432 ... 1 files, 321 lines
+  pytest-dev__pytest-7490 ... 1 files, 321 lines
+  pytest-dev__pytest-8365 ... 1 files, 315 lines
+  pytest-dev__pytest-8906 ... 1 files, 1736 lines
+  pytest-dev__pytest-9359 ... 1 files, 228 lines
+  scikit-learn__scikit-learn-10297 ...     Warning: could not read sklearn/linear_model/ridge.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-10508 ...     Warning: could not read sklearn/preprocessing/label.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-10949 ... 1 files, 2941 lines
+  scikit-learn__scikit-learn-11040 ...     Warning: could not read sklearn/neighbors/base.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-11281 ...     Warning: could not read sklearn/mixture/base.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-12471 ... 1 files, 1700 lines
+  scikit-learn__scikit-learn-13142 ...     Warning: could not read sklearn/mixture/base.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-13241 ...     Warning: could not read sklearn/decomposition/kernel_pca.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-13439 ... 1 files, 2172 lines
+  scikit-learn__scikit-learn-13496 ...     Warning: could not read sklearn/ensemble/iforest.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-13497 ...     Warning: could not read sklearn/feature_selection/mutual_info_.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-13584 ... 1 files, 462 lines
+  scikit-learn__scikit-learn-13779 ...     Warning: could not read sklearn/ensemble/voting.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-14087 ...     Warning: could not read sklearn/linear_model/logistic.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-14092 ...     Warning: could not read sklearn/neighbors/nca.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-14894 ...     Warning: could not read sklearn/svm/base.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-14983 ... 1 files, 3071 lines
+  scikit-learn__scikit-learn-15512 ... 1 files, 607 lines
+  scikit-learn__scikit-learn-15535 ... 1 files, 1342 lines
+  scikit-learn__scikit-learn-25500 ... 1 files, 515 lines
+  scikit-learn__scikit-learn-25570 ... 1 files, 1626 lines
+  scikit-learn__scikit-learn-25638 ... 1 files, 590 lines
+  scikit-learn__scikit-learn-25747 ... 1 files, 475 lines
+  sphinx-doc__sphinx-10325 ... 1 files, 253 lines
+  sphinx-doc__sphinx-10451 ... 1 files, 215 lines
+  sphinx-doc__sphinx-11445 ... 1 files, 115 lines
+  sphinx-doc__sphinx-7686 ... 1 files, 992 lines
+  sphinx-doc__sphinx-7738 ... 1 files, 1437 lines
+  sphinx-doc__sphinx-7975 ... 1 files, 267 lines
+  sphinx-doc__sphinx-8273 ... 1 files, 139 lines
+  sphinx-doc__sphinx-8282 ... 1 files, 253 lines
+  sphinx-doc__sphinx-8435 ... 1 files, 253 lines
+  sphinx-doc__sphinx-8474 ...     Warning: could not read sphinx/domains/std.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sphinx-doc__sphinx-8506 ...     Warning: could not read sphinx/domains/std.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sphinx-doc__sphinx-8595 ... 1 files, 253 lines
+  sphinx-doc__sphinx-8627 ... 1 files, 640 lines
+  sphinx-doc__sphinx-8713 ... 1 files, 1437 lines
+  sphinx-doc__sphinx-8721 ... 1 files, 417 lines
+  sphinx-doc__sphinx-8801 ... 1 files, 323 lines
+  sympy__sympy-11400 ...     Warning: could not read sympy/printing/ccode.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-11870 ... 1 files, 3777 lines
+  sympy__sympy-11897 ... 1 files, 3392 lines
+  sympy__sympy-12171 ... 1 files, 355 lines
+  sympy__sympy-12236 ... 1 files, 223 lines
+  sympy__sympy-12419 ... 1 files, 897 lines
+  sympy__sympy-12454 ... 1 files, 688 lines
+  sympy__sympy-12481 ... 1 files, 3135 lines
+  sympy__sympy-13031 ... 1 files, 473 lines
+  sympy__sympy-13043 ... 1 files, 1301 lines
+  sympy__sympy-13146 ... 1 files, 749 lines
+  sympy__sympy-13177 ... 1 files, 261 lines
+  sympy__sympy-13437 ... 1 files, 3203 lines
+  sympy__sympy-13471 ... 1 files, 4544 lines
+  sympy__sympy-13480 ... 1 files, 2328 lines
+  sympy__sympy-13647 ... 1 files, 3258 lines
+  sympy__sympy-13773 ... 1 files, 3258 lines
+  sympy__sympy-13895 ... 1 files, 4544 lines
+  sympy__sympy-13915 ... 1 files, 2222 lines
+  sympy__sympy-13971 ... 1 files, 3392 lines
+  sympy__sympy-14024 ... 1 files, 4544 lines
+  sympy__sympy-14308 ... 1 files, 2995 lines
+  sympy__sympy-14317 ... 1 files, 3392 lines
+  sympy__sympy-14396 ... 1 files, 794 lines
+  sympy__sympy-14774 ... 1 files, 3392 lines
+  sympy__sympy-14817 ... 1 files, 2995 lines
+  sympy__sympy-15011 ... 1 files, 1630 lines
+  sympy__sympy-15308 ... 1 files, 3392 lines
+  sympy__sympy-15345 ... 1 files, 355 lines
+  sympy__sympy-15346 ... 1 files, 1259 lines
+  sympy__sympy-15609 ... 1 files, 3392 lines
+  sympy__sympy-15678 ... 1 files, 733 lines
+  sympy__sympy-16106 ... 1 files, 2156 lines
+  sympy__sympy-16281 ... 1 files, 2995 lines
+  sympy__sympy-16503 ... 1 files, 2995 lines
+  sympy__sympy-16792 ... 1 files, 2238 lines
+  sympy__sympy-16988 ... 1 files, 2829 lines
+  sympy__sympy-17022 ... 1 files, 867 lines
+  sympy__sympy-17139 ... 1 files, 2116 lines
+  sympy__sympy-17630 ... 1 files, 897 lines
+  sympy__sympy-17655 ... 1 files, 1379 lines
+  sympy__sympy-18057 ... 1 files, 4226 lines
+  sympy__sympy-18087 ... 1 files, 1571 lines
+  sympy__sympy-18189 ...     Warning: could not read sympy/solvers/diophantine.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-18199 ... 1 files, 2022 lines
+  sympy__sympy-18532 ... 1 files, 2359 lines
+  sympy__sympy-18621 ... 1 files, 982 lines
+  sympy__sympy-18698 ... 1 files, 8001 lines
+  sympy__sympy-18835 ... 1 files, 3273 lines
+  sympy__sympy-19007 ... 1 files, 982 lines
+  sympy__sympy-19254 ... 1 files, 1657 lines
+  sympy__sympy-19487 ... 1 files, 1541 lines
+  sympy__sympy-20049 ... 1 files, 636 lines
+  sympy__sympy-20154 ... 1 files, 3273 lines
+  sympy__sympy-20212 ... 1 files, 1849 lines
+  sympy__sympy-20322 ... 1 files, 2222 lines
+  sympy__sympy-20442 ... 1 files, 266 lines
+  sympy__sympy-20590 ... 1 files, 66 lines
+  sympy__sympy-20639 ... 1 files, 2995 lines
+  sympy__sympy-21055 ... 1 files, 569 lines
+  sympy__sympy-21171 ... 1 files, 3392 lines
+  sympy__sympy-21379 ... 1 files, 261 lines
+  sympy__sympy-21612 ... 1 files, 1030 lines
+  sympy__sympy-21614 ... 1 files, 3435 lines
+  sympy__sympy-21627 ... 1 files, 1541 lines
+  sympy__sympy-21847 ... 1 files, 634 lines
+  sympy__sympy-22005 ... 1 files, 874 lines
+  sympy__sympy-22714 ... 1 files, 1379 lines
+  sympy__sympy-22840 ... 1 files, 946 lines
+  sympy__sympy-23117 ... 1 files, 609 lines
+  sympy__sympy-23191 ... 1 files, 2995 lines
+  sympy__sympy-23262 ... 1 files, 1630 lines
+  sympy__sympy-24066 ... 1 files, 207 lines
+  sympy__sympy-24102 ... 1 files, 1199 lines
+  sympy__sympy-24152 ... 1 files, 379 lines
+  sympy__sympy-24213 ... 1 files, 207 lines
+  sympy__sympy-24909 ... 1 files, 220 lines
+Phase 1 complete: 300/300 tasks with file context (9.3s)
+
+--- Phase 2: Generating patches (16 concurrent) ---
+[2m2026-03-26T04:03:43.654740Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 300 tasks, 16 concurrent streams, model=txn545/Qwen3.5-122B-A10B-NVFP4
+  [1/300] django__django-13590 — OK | 100% | 56243ms | 41623+125 tokens
+  [2/300] astropy__astropy-7746 — OK | 100% | 57006ms | 56881+137 tokens
+  [3/300] django__django-13033 — OK | 100% | 57006ms | 33233+140 tokens
+  [4/300] django__django-14238 — OK | 100% | 84984ms | 38582+151 tokens
+  [5/300] django__django-11039 — OK | 100% | 85111ms | 1760+154 tokens
+  [6/300] astropy__astropy-14182 — OK | 86% | 85848ms | 2065+161 tokens
+  [7/300] django__django-12470 — OK | 100% | 104532ms | 31549+168 tokens
+  [8/300] django__django-16400 — OK | 100% | 104854ms | 6150+176 tokens
+  [9/300] django__django-14997 — OK | 100% | 105194ms | 5393+177 tokens
+  [10/300] astropy__astropy-14995 — OK | 100% | 119186ms | 14775+196 tokens
+  [11/300] django__django-15789 — OK | 100% | 119485ms | 7785+200 tokens
+  [12/300] django__django-11564 — OK | 100% | 119486ms | 4803+200 tokens
+  [13/300] astropy__astropy-12907 — OK | 100% | 127642ms | 4900+290 tokens
+  [14/300] django__django-11910 — OK | 100% | 134241ms | 27743+317 tokens
+  [15/300] matplotlib__matplotlib-25311 — OK | 100% | 79603ms | 23283+181 tokens
+  [16/300] matplotlib__matplotlib-22835 — OK | 86% | 136655ms | 28923+327 tokens
+  [17/300] matplotlib__matplotlib-25498 — OK | 100% | 37030ms | 27011+197 tokens
+  [18/300] mwaskom__seaborn-2848 — OK | 57% | 22428ms | 857+176 tokens
+  [19/300] matplotlib__matplotlib-24970 — OK | 86% | 89036ms | 64508+262 tokens
+  [20/300] mwaskom__seaborn-3010 — OK | 100% | 26380ms | 2206+214 tokens
+  [21/300] mwaskom__seaborn-3190 — OK | 100% | 26452ms | 14942+215 tokens
+  [22/300] matplotlib__matplotlib-25442 — OK | 71% | 62711ms | 23637+264 tokens
+  [23/300] mwaskom__seaborn-3407 — OK | 100% | 21294ms | 34533+134 tokens
+  [24/300] matplotlib__matplotlib-25433 — OK | 100% | 64922ms | 55093+289 tokens
+  [25/300] pallets__flask-4045 — OK | 71% | 16026ms | 2083+139 tokens
+  [26/300] pallets__flask-5063 — OK | 57% | 14816ms | 15627+130 tokens
+  [27/300] matplotlib__matplotlib-26011 — OK | 100% | 93853ms | 43827+328 tokens
+  [28/300] astropy__astropy-14365 — OK | 100% | 203629ms | 10172+520 tokens
+  [29/300] matplotlib__matplotlib-26020 — OK | 100% | 102716ms | 16410+386 tokens
+  [30/300] psf__requests-3362 — OK | 71% | 62775ms | 612+149 tokens
+  [31/300] pydata__xarray-3364 — OK | 75% | 62018ms | 431+147 tokens
+  [32/300] psf__requests-2317 — OK | 100% | 66968ms | 615+187 tokens
+  [33/300] psf__requests-1963 — OK | 100% | 70685ms | 634+219 tokens
+  [34/300] psf__requests-863 — OK | 100% | 65926ms | 647+178 tokens
+  [35/300] pydata__xarray-4493 — OK | 71% | 66731ms | 45475+140 tokens
+  [36/300] pydata__xarray-4094 — OK | 100% | 68470ms | 124401+143 tokens
+  [37/300] psf__requests-2148 — OK | 100% | 77156ms | 1217+252 tokens
+  [38/300] psf__requests-2674 — OK | 80% | 81550ms | 2126+222 tokens
+  [39/300] pylint-dev__pylint-5859 — OK | 100% | 27255ms | 3327+154 tokens
+  [40/300] pallets__flask-4992 — OK | 86% | 94369ms | 5715+349 tokens
+  [41/300] pydata__xarray-5131 — OK | 100% | 38959ms | 27782+176 tokens
+  [42/300] matplotlib__matplotlib-25079 — OK | 71% | 183534ms | 64615+569 tokens
+  [43/300] pydata__xarray-4248 — OK | 75% | 93140ms | 19732+244 tokens
+  [44/300] matplotlib__matplotlib-25332 — OK | 86% | 159589ms | 36386+573 tokens
+  [45/300] pylint-dev__pylint-7080 — OK | 100% | 35900ms | 11742+166 tokens
+  [46/300] pylint-dev__pylint-6506 — OK | 100% | 38873ms | 3786+189 tokens
+  [47/300] pytest-dev__pytest-11148 — OK | 100% | 31444ms | 15914+138 tokens
+  [48/300] pylint-dev__pylint-7114 — OK | 100% | 40554ms | 3398+200 tokens
+  [49/300] pytest-dev__pytest-5495 — OK | 71% | 21811ms | 8988+115 tokens
+  [50/300] pytest-dev__pytest-5413 — OK | 100% | 28795ms | 23395+141 tokens
+  [51/300] pylint-dev__pylint-7228 — OK | 100% | 47559ms | 8122+228 tokens
+  [52/300] pytest-dev__pytest-6116 — OK | 100% | 21734ms | 17225+110 tokens
+  [53/300] pytest-dev__pytest-5692 — OK | 83% | 24693ms | 10449+142 tokens
+  [54/300] pytest-dev__pytest-5227 — OK | 100% | 42498ms | 13688+196 tokens
+  [55/300] pytest-dev__pytest-5221 — OK | 57% | 54489ms | 24765+247 tokens
+  [56/300] pylint-dev__pylint-7993 — OK | 100% | 61057ms | 5321+277 tokens
+  [57/300] pytest-dev__pytest-7220 — OK | 71% | 33227ms | 11182+150 tokens
+  [58/300] pytest-dev__pytest-7432 — OK | 100% | 34313ms | 4825+163 tokens
+  [59/300] pytest-dev__pytest-7490 — OK | 100% | 31972ms | 8950+157 tokens
+  [60/300] pytest-dev__pytest-7168 — OK | 100% | 40158ms | 5952+228 tokens
+  [61/300] scikit-learn__scikit-learn-11040 — OK | 100% | 18495ms | 1123+180 tokens
+  [62/300] pytest-dev__pytest-9359 — OK | 100% | 29078ms | 4293+205 tokens
+  [63/300] scikit-learn__scikit-learn-10508 — OK | 86% | 26482ms | 914+199 tokens
+  [64/300] pytest-dev__pytest-8906 — OK | 100% | 41244ms | 26181+242 tokens
+  [65/300] pytest-dev__pytest-7373 — OK | 100% | 49562ms | 659+309 tokens
+  [66/300] scikit-learn__scikit-learn-10297 — OK | 71% | 35961ms | 810+238 tokens
+  [67/300] scikit-learn__scikit-learn-13142 — OK | 67% | 18406ms | 1514+178 tokens
+  [68/300] pytest-dev__pytest-8365 — OK | 100% | 44781ms | 5215+286 tokens
+  [69/300] scikit-learn__scikit-learn-12471 — OK | 71% | 32133ms | 24992+200 tokens
+  [70/300] scikit-learn__scikit-learn-14087 — OK | 100% | 28672ms | 1358+230 tokens
+  [71/300] scikit-learn__scikit-learn-13439 — OK | 100% | 26285ms | 30283+169 tokens
+  [72/300] scikit-learn__scikit-learn-13497 — OK | 71% | 26100ms | 398+172 tokens
+  [73/300] scikit-learn__scikit-learn-11281 — OK | 100% | 47105ms | 557+342 tokens
+  [74/300] scikit-learn__scikit-learn-13779 — OK | 100% | 30722ms | 441+195 tokens
+  [75/300] scikit-learn__scikit-learn-13584 — OK | 100% | 31184ms | 7343+199 tokens
+  [76/300] scikit-learn__scikit-learn-15512 — OK | 100% | 20923ms | 9118+169 tokens
+  [77/300] pytest-dev__pytest-5103 — OK | 100% | 108135ms | 18860+629 tokens
+  [78/300] scikit-learn__scikit-learn-14983 — OK | 83% | 32971ms | 45785+195 tokens
+  [79/300] scikit-learn__scikit-learn-25747 — OK | 100% | 36650ms | 8771+212 tokens
+  [80/300] scikit-learn__scikit-learn-14092 — OK | 100% | 49982ms | 1664+331 tokens
+  [81/300] scikit-learn__scikit-learn-14894 — OK | 100% | 38625ms | 890+236 tokens
+  [82/300] scikit-learn__scikit-learn-15535 — OK | 100% | 28738ms | 20145+185 tokens
+  [83/300] sphinx-doc__sphinx-10325 — OK | 71% | 16302ms | 4004+146 tokens
+  [84/300] sphinx-doc__sphinx-7686 — OK | 71% | 15939ms | 13417+163 tokens
+  [85/300] sphinx-doc__sphinx-7738 — OK | 100% | 13923ms | 20413+155 tokens
+  [86/300] scikit-learn__scikit-learn-25638 — OK | 57% | 23792ms | 9532+224 tokens
+  [87/300] sphinx-doc__sphinx-7975 — OK | 86% | 13058ms | 3929+160 tokens
+  [88/300] sphinx-doc__sphinx-11445 — OK | 83% | 19917ms | 2544+201 tokens
+  [89/300] sphinx-doc__sphinx-8282 — OK | 57% | 16369ms | 3828+168 tokens
+  [90/300] scikit-learn__scikit-learn-25570 — OK | 100% | 38274ms | 24448+307 tokens
+  [91/300] sphinx-doc__sphinx-8595 — OK | 67% | 14285ms | 3786+172 tokens
+  [92/300] sphinx-doc__sphinx-8721 — OK | 100% | 11237ms | 6226+150 tokens
+  [93/300] sphinx-doc__sphinx-8627 — OK | 100% | 14453ms | 10733+165 tokens
+  [94/300] sphinx-doc__sphinx-10451 — OK | 100% | 33410ms | 4256+373 tokens
+  [95/300] sphinx-doc__sphinx-8474 — OK | 60% | 38499ms | 1819+236 tokens
+  [96/300] scikit-learn__scikit-learn-25500 — OK | 100% | 68199ms | 9272+439 tokens
+  [97/300] sphinx-doc__sphinx-8273 — OK | 100% | 52146ms | 2712+368 tokens
+  [98/300] scikit-learn__scikit-learn-13241 — OK | 100% | 104447ms | 4142+736 tokens
+  [99/300] sphinx-doc__sphinx-8435 — OK | 67% | 59511ms | 3825+330 tokens
+  [100/300] sphinx-doc__sphinx-8506 — OK | 57% | 58285ms | 1256+294 tokens
+  [101/300] sphinx-doc__sphinx-8713 — OK | 100% | 59344ms | 20515+288 tokens
+  [102/300] sympy__sympy-11400 — OK | 100% | 54804ms | 487+240 tokens
+  [103/300] sphinx-doc__sphinx-8801 — OK | 71% | 57544ms | 4838+285 tokens
+  [104/300] sympy__sympy-11897 — OK | 100% | 68752ms | 54799+195 tokens
+  [105/300] sympy__sympy-12481 — OK | 100% | 40652ms | 42657+158 tokens
+  [106/300] sympy__sympy-12236 — OK | 80% | 87501ms | 5982+222 tokens
+  [107/300] sympy__sympy-12454 — OK | 75% | 60994ms | 10957+188 tokens
+  [108/300] sympy__sympy-13146 — OK | 100% | 45823ms | 10851+132 tokens
+  [109/300] sympy__sympy-13043 — OK | 100% | 79641ms | 19701+225 tokens
+  [110/300] sympy__sympy-11870 — OK | 100% | 113978ms | 55678+253 tokens
+  [111/300] sympy__sympy-12171 — OK | 100% | 126755ms | 6381+309 tokens
+  [112/300] sympy__sympy-12419 — OK | 86% | 103032ms | 15137+293 tokens
+  [113/300] sympy__sympy-13031 — OK | 100% | 87984ms | 7766+265 tokens
+  [114/300] sympy__sympy-13437 — OK | 100% | 78221ms | 47616+187 tokens
+  [115/300] sympy__sympy-13177 — OK | 100% | 92467ms | 4226+208 tokens
+  [116/300] sympy__sympy-13471 — OK | 86% | 81748ms | 61494+201 tokens
+[2m2026-03-26T04:11:42.906309Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (https://crazyshit.ngrok.io/v1/chat/completions) [3mtask_id[0m[2m=[0mpytest-dev__pytest-11143
+  [117/300] pytest-dev__pytest-11143 — FAIL | N/A | 300002ms | 0+0 tokens
+  [118/300] sympy__sympy-13895 — OK | 83% | 72785ms | 62023+177 tokens
+  [119/300] sympy__sympy-13480 — OK | 100% | 103350ms | 33482+242 tokens
+  [120/300] sympy__sympy-14024 — OK | 100% | 81550ms | 61761+204 tokens
+  [121/300] sympy__sympy-13647 — OK | 100% | 139378ms | 44096+346 tokens
+  [122/300] sympy__sympy-13971 — OK | 100% | 87685ms | 53864+196 tokens
+[2m2026-03-26T04:12:26.577460Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (https://crazyshit.ngrok.io/v1/chat/completions) [3mtask_id[0m[2m=[0mscikit-learn__scikit-learn-10949
+  [123/300] scikit-learn__scikit-learn-10949 — FAIL | N/A | 300003ms | 0+0 tokens
+  [124/300] sympy__sympy-13773 — OK | 100% | 129803ms | 43652+314 tokens
+  [125/300] sympy__sympy-13915 — OK | 100% | 129284ms | 33218+315 tokens
+[2m2026-03-26T04:12:52.972324Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (https://crazyshit.ngrok.io/v1/chat/completions) [3mtask_id[0m[2m=[0mscikit-learn__scikit-learn-13496
+  [126/300] scikit-learn__scikit-learn-13496 — FAIL | N/A | 300001ms | 0+0 tokens
+  [127/300] sympy__sympy-14774 — OK | 100% | 107643ms | 53883+170 tokens
+  [128/300] sympy__sympy-14317 — OK | 100% | 114648ms | 53950+222 tokens
+  [129/300] sympy__sympy-15308 — OK | 100% | 89152ms | 53861+159 tokens
+  [130/300] sympy__sympy-14817 — OK | 100% | 117772ms | 44497+205 tokens
+  [131/300] sympy__sympy-15346 — OK | 100% | 110662ms | 21538+221 tokens
+  [132/300] sympy__sympy-15609 — OK | 100% | 93345ms | 53995+203 tokens
+  [133/300] sympy__sympy-15345 — OK | 80% | 104517ms | 6417+242 tokens
+  [134/300] sympy__sympy-16503 — OK | 43% | 64416ms | 44597+198 tokens
+  [135/300] sympy__sympy-15011 — OK | 100% | 125910ms | 24879+289 tokens
+  [136/300] sympy__sympy-16792 — OK | 86% | 75735ms | 31193+166 tokens
+  [137/300] sympy__sympy-16106 — OK | 100% | 95206ms | 31170+246 tokens
+  [138/300] sympy__sympy-15678 — OK | 100% | 107706ms | 10496+262 tokens
+  [139/300] sympy__sympy-16988 — OK | 100% | 66537ms | 36409+157 tokens
+  [140/300] sympy__sympy-17139 — OK | 100% | 88905ms | 30833+152 tokens
+  [141/300] sympy__sympy-18057 — OK | 100% | 73374ms | 60502+131 tokens
+  [142/300] sympy__sympy-14308 — OK | 100% | 206689ms | 43995+478 tokens
+  [143/300] sympy__sympy-16281 — OK | 100% | 138241ms | 44407+277 tokens
+  [144/300] sympy__sympy-17655 — OK | 100% | 93868ms | 18035+186 tokens
+  [145/300] sympy__sympy-17022 — OK | 100% | 122618ms | 12737+242 tokens
+  [146/300] sympy__sympy-18087 — OK | 57% | 90180ms | 22645+175 tokens
+  [147/300] sympy__sympy-18189 — OK | 100% | 92698ms | 1258+214 tokens
+  [148/300] sympy__sympy-18621 — OK | 100% | 76102ms | 14848+190 tokens
+  [149/300] sympy__sympy-18199 — OK | 86% | 96651ms | 28515+232 tokens
+  [150/300] sympy__sympy-20212 — OK | 100% | 29578ms | 27954+152 tokens
+  [151/300] sympy__sympy-19487 — OK | 100% | 58230ms | 22700+216 tokens
+  [152/300] sympy__sympy-18835 — OK | 43% | 96640ms | 46059+250 tokens
+  [153/300] sympy__sympy-18698 — OK | 57% | 100464ms | 108107+271 tokens
+  [154/300] sympy__sympy-20442 — OK | 100% | 30878ms | 6121+151 tokens
+  [155/300] sympy__sympy-18532 — OK | 100% | 114901ms | 33042+306 tokens
+  [156/300] sympy__sympy-20154 — OK | 100% | 68130ms | 45536+252 tokens
+  [157/300] sympy__sympy-20590 — OK | 100% | 43933ms | 1687+151 tokens
+  [158/300] sympy__sympy-14396 — OK | 100% | 288538ms | 10717+712 tokens
+  [159/300] sympy__sympy-21614 — OK | 100% | 25299ms | 48932+118 tokens
+  [160/300] sympy__sympy-21612 — OK | 100% | 32684ms | 15697+174 tokens
+  [161/300] sympy__sympy-19007 — OK | 100% | 129098ms | 14333+418 tokens
+  [162/300] sympy__sympy-21055 — OK | 86% | 47517ms | 8158+230 tokens
+  [163/300] sympy__sympy-20639 — OK | 100% | 68675ms | 44344+269 tokens
+  [164/300] sympy__sympy-21171 — OK | 100% | 60473ms | 56568+228 tokens
+  [165/300] sympy__sympy-20049 — OK | 86% | 108969ms | 9630+448 tokens
+  [166/300] sympy__sympy-22005 — OK | 67% | 34652ms | 13174+176 tokens
+  [167/300] sympy__sympy-22714 — OK | 100% | 33863ms | 17961+187 tokens
+  [168/300] sympy__sympy-21379 — OK | 100% | 58709ms | 7790+281 tokens
+  [169/300] sympy__sympy-24102 — OK | 100% | 23638ms | 17942+122 tokens
+  [170/300] sympy__sympy-23117 — OK | 86% | 41332ms | 9077+179 tokens
+  [171/300] sympy__sympy-23262 — OK | 100% | 37134ms | 25251+146 tokens
+  [172/300] sympy__sympy-20322 — OK | 86% | 111224ms | 35923+498 tokens
+  [173/300] sympy__sympy-21847 — OK | 100% | 72760ms | 10017+313 tokens
+  [174/300] sympy__sympy-22840 — OK | 100% | 57761ms | 17721+295 tokens
+  [175/300] sympy__sympy-21627 — OK | 100% | 80625ms | 20959+369 tokens
+  [176/300] sympy__sympy-24066 — OK | 100% | 51690ms | 3187+216 tokens
+  [177/300] sympy__sympy-19254 — OK | 100% | 163225ms | 23822+637 tokens
+  [178/300] sympy__sympy-24213 — OK | 100% | 52155ms | 3316+196 tokens
+  [179/300] astropy__astropy-6938 — OK | 100% | 62298ms | 21005+167 tokens
+  [180/300] django__django-13925 — OK | 80% | 75760ms | 35540+160 tokens
+  [181/300] sympy__sympy-24152 — OK | 100% | 87726ms | 6138+272 tokens
+  [182/300] sympy__sympy-24909 — OK | 100% | 84143ms | 4005+251 tokens
+  [183/300] django__django-13768 — OK | 86% | 67706ms | 7414+161 tokens
+  [184/300] django__django-13658 — OK | 100% | 79045ms | 6727+199 tokens
+  [185/300] django__django-13710 — OK | 100% | 78750ms | 35557+207 tokens
+  [186/300] matplotlib__matplotlib-23299 — OK | 100% | 65911ms | 22781+142 tokens
+  [187/300] matplotlib__matplotlib-23476 — OK | 100% | 50203ms | 54792+147 tokens
+  [188/300] matplotlib__matplotlib-23314 — OK | 100% | 66698ms | 67377+161 tokens
+  [189/300] django__django-13660 — OK | 100% | 81470ms | 4539+231 tokens
+[2m2026-03-26T04:17:49.816143Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (https://crazyshit.ngrok.io/v1/chat/completions) [3mtask_id[0m[2m=[0msympy__sympy-17630
+  [190/300] sympy__sympy-17630 — FAIL | N/A | 300004ms | 0+0 tokens
+  [191/300] sympy__sympy-23191 — OK | 86% | 168422ms | 44820+401 tokens
+  [192/300] matplotlib__matplotlib-23913 — OK | 100% | 127257ms | 20677+245 tokens
+  [193/300] django__django-15790 — OK | 33% | 72823ms | 573+158 tokens
+  [194/300] matplotlib__matplotlib-23562 — OK | 86% | 115323ms | 27122+227 tokens
+  [195/300] django__django-15814 — OK | 100% | 87446ms | 42531+159 tokens
+  [196/300] django__django-15851 — OK | 100% | 76436ms | 1262+136 tokens
+  [197/300] django__django-15996 — OK | 100% | 101179ms | 5951+215 tokens
+  [198/300] django__django-15902 — OK | 100% | 86394ms | 8280+125 tokens
+  [199/300] django__django-12747 — OK | 100% | 80808ms | 7930+143 tokens
+  [200/300] matplotlib__matplotlib-24265 — OK | 43% | 87183ms | 918+155 tokens
+  [201/300] django__django-13757 — OK | 100% | 162788ms | 10831+393 tokens
+  [202/300] matplotlib__matplotlib-23987 — OK | 80% | 92866ms | 53931+188 tokens
+  [203/300] matplotlib__matplotlib-23964 — OK | 100% | 102261ms | 23371+212 tokens
+  [204/300] django__django-15819 — OK | 100% | 109456ms | 6048+271 tokens
+  [205/300] django__django-13158 — OK | 100% | 32284ms | 41737+146 tokens
+  [206/300] django__django-12708 — OK | 100% | 40100ms | 29214+161 tokens
+  [207/300] matplotlib__matplotlib-23563 — OK | 100% | 144449ms | 80300+387 tokens
+  [208/300] matplotlib__matplotlib-24149 — OK | 100% | 112734ms | 121761+267 tokens
+  [209/300] django__django-13230 — OK | 100% | 29769ms | 3578+177 tokens
+  [210/300] django__django-13315 — OK | 100% | 41867ms | 24526+195 tokens
+  [211/300] django__django-12497 — OK | 100% | 71448ms | 29010+269 tokens
+  [212/300] django__django-13265 — OK | 57% | 41228ms | 28132+172 tokens
+  [213/300] django__django-11964 — OK | 83% | 39902ms | 1957+155 tokens
+  [214/300] django__django-12184 — OK | 100% | 45874ms | 11706+175 tokens
+  [215/300] django__django-12700 — OK | 100% | 75994ms | 10210+291 tokens
+  [216/300] django__django-15061 — OK | 100% | 24929ms | 16764+106 tokens
+  [217/300] django__django-12125 — OK | 100% | 31539ms | 6929+155 tokens
+  [218/300] django__django-11999 — OK | 100% | 61795ms | 39203+194 tokens
+  [219/300] django__django-12589 — OK | 100% | 98009ms | 42448+310 tokens
+  [220/300] django__django-12113 — OK | 100% | 57800ms | 4048+187 tokens
+  [221/300] django__django-15202 — OK | 100% | 49093ms | 9634+136 tokens
+  [222/300] django__django-15347 — OK | 100% | 56311ms | 3793+174 tokens
+  [223/300] django__django-13220 — OK | 100% | 79922ms | 3318+348 tokens
+  [224/300] django__django-14999 — OK | 86% | 60878ms | 16681+220 tokens
+  [225/300] django__django-15320 — OK | 100% | 46755ms | 29401+170 tokens
+  [226/300] django__django-14016 — OK | 100% | 43159ms | 7865+159 tokens
+  [227/300] django__django-11620 — OK | 100% | 16816ms | 10212+126 tokens
+  [228/300] django__django-10924 — OK | 100% | 47096ms | 39406+154 tokens
+  [229/300] django__django-15498 — OK | 100% | 19537ms | 1937+126 tokens
+  [230/300] django__django-13964 — OK | 100% | 47634ms | 34666+164 tokens
+  [231/300] django__django-15252 — OK | 100% | 73473ms | 8459+263 tokens
+  [232/300] django__django-10914 — OK | 100% | 54132ms | 11628+186 tokens
+  [233/300] django__django-15388 — OK | 100% | 40873ms | 1657+157 tokens
+  [234/300] django__django-11583 — OK | 100% | 47550ms | 11583+185 tokens
+  [235/300] django__django-15213 — OK | 43% | 88980ms | 38163+285 tokens
+  [236/300] django__django-13933 — OK | 100% | 81644ms | 23310+234 tokens
+  [237/300] django__django-15400 — OK | 100% | 47520ms | 6668+137 tokens
+  [238/300] django__django-11630 — OK | 100% | 56314ms | 3855+250 tokens
+  [239/300] django__django-11133 — OK | 100% | 47618ms | 10578+145 tokens
+  [240/300] django__django-11797 — OK | 100% | 52728ms | 12058+195 tokens
+  [241/300] django__django-11049 — OK | 100% | 43035ms | 37990+164 tokens
+  [242/300] django__django-12908 — OK | 100% | 35725ms | 41703+154 tokens
+  [243/300] django__django-16873 — OK | 100% | 36182ms | 13573+163 tokens
+  [244/300] django__django-11742 — OK | 100% | 104760ms | 37905+368 tokens
+  [245/300] django__django-16595 — OK | 100% | 36867ms | 5401+193 tokens
+  [246/300] django__django-12856 — OK | 100% | 59099ms | 34523+218 tokens
+  [247/300] django__django-11099 — OK | 100% | 68112ms | 774+245 tokens
+  [248/300] django__django-11815 — OK | 100% | 82381ms | 6870+331 tokens
+  [249/300] matplotlib__matplotlib-24334 — OK | 100% | 96929ms | 40809+312 tokens
+  [250/300] django__django-17087 — OK | 100% | 49363ms | 6695+186 tokens
+  [251/300] django__django-17051 — OK | 71% | 49106ms | 42143+155 tokens
+  [252/300] django__django-12915 — OK | 100% | 93988ms | 2022+362 tokens
+  [253/300] django__django-16046 — OK | 100% | 28556ms | 1852+132 tokens
+  [254/300] matplotlib__matplotlib-18869 — OK | 71% | 43847ms | 22865+179 tokens
+  [255/300] django__django-11848 — OK | 100% | 65629ms | 6886+288 tokens
+  [256/300] django__django-16255 — OK | 100% | 21778ms | 3285+158 tokens
+  [257/300] django__django-16910 — OK | 86% | 68386ms | 41966+283 tokens
+  [258/300] django__django-16139 — OK | 100% | 53008ms | 8303+257 tokens
+  [259/300] django__django-16820 — OK | 100% | 75649ms | 16850+349 tokens
+  [260/300] django__django-16816 — OK | 100% | 90308ms | 20552+420 tokens
+  [261/300] django__django-16408 — OK | 100% | 100442ms | 32159+462 tokens
+  [262/300] django__django-16379 — OK | 100% | 31763ms | 2803+186 tokens
+  [263/300] django__django-16229 — OK | 100% | 37311ms | 5556+227 tokens
+  [264/300] django__django-16041 — OK | 100% | 61783ms | 9207+323 tokens
+  [265/300] django__django-11001 — OK | 100% | 62818ms | 32324+341 tokens
+  [266/300] django__django-14534 — OK | 100% | 10487ms | 5693+125 tokens
+  [267/300] django__django-14411 — OK | 100% | 19566ms | 7989+137 tokens
+  [268/300] django__django-11905 — OK | 71% | 26866ms | 12445+193 tokens
+  [269/300] django__django-14017 — OK | 100% | 38641ms | 8292+225 tokens
+  [270/300] django__django-14382 — OK | 100% | 29307ms | 5908+148 tokens
+  [271/300] django__django-14580 — OK | 100% | 23901ms | 6477+181 tokens
+  [272/300] django__django-14667 — OK | 100% | 35074ms | 42866+217 tokens
+  [273/300] django__django-14672 — OK | 100% | 26837ms | 10513+127 tokens
+  [274/300] django__django-15781 — OK | 100% | 45308ms | 10587+241 tokens
+  [275/300] django__django-14608 — OK | 100% | 32981ms | 8216+196 tokens
+  [276/300] django__django-15695 — OK | 100% | 62537ms | 17268+350 tokens
+  [277/300] django__django-14915 — OK | 100% | 30192ms | 23195+122 tokens
+  [278/300] django__django-14855 — OK | 100% | 31958ms | 7892+146 tokens
+  [279/300] django__django-15738 — OK | 100% | 70690ms | 28498+409 tokens
+  [280/300] django__django-14787 — OK | 100% | 43084ms | 3401+225 tokens
+  [281/300] matplotlib__matplotlib-22711 — OK | 86% | 106593ms | 65285+589 tokens
+  [282/300] django__django-13447 — OK | 100% | 34715ms | 8591+232 tokens
+  [283/300] django__django-14730 — OK | 100% | 44742ms | 29069+249 tokens
+  [284/300] django__django-14155 — OK | 86% | 43883ms | 11472+251 tokens
+  [285/300] django__django-11179 — OK | 100% | 29200ms | 8001+159 tokens
+  [286/300] django__django-13551 — OK | 71% | 25239ms | 2113+158 tokens
+  [287/300] django__django-12983 — OK | 57% | 24032ms | 6916+137 tokens
+  [288/300] django__django-13321 — OK | 100% | 42903ms | 13561+220 tokens
+  [289/300] django__django-14752 — OK | 100% | 62999ms | 2522+375 tokens
+  [290/300] django__django-11019 — OK | 71% | 33132ms | 20468+216 tokens
+  [291/300] django__django-13028 — OK | 100% | 25779ms | 42416+163 tokens
+  [292/300] django__django-12286 — OK | 100% | 19761ms | 1367+163 tokens
+  [293/300] django__django-12284 — OK | 100% | 20894ms | 39060+199 tokens
+  [294/300] django__django-11422 — OK | 86% | 12660ms | 10252+212 tokens
+  [295/300] django__django-12308 — OK | 100% | 22064ms | 8758+236 tokens
+  [296/300] django__django-13448 — OK | 100% | 46024ms | 7957+445 tokens
+  [297/300] django__django-11283 — OK | 86% | 46482ms | 2822+460 tokens
+  [298/300] django__django-12453 — OK | 100% | 28121ms | 6971+386 tokens
+  [299/300] django__django-13401 — OK | 100% | 57454ms | 38107+557 tokens
+  [300/300] django__django-16527 — OK | 100% | 257513ms | 2539+4096 tokens
+[2m2026-03-26T04:24:52.549727Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 1362.9s | 296/300 passed | 53 tok/s
+
+======================================================================
+SWE-BENCH TWO-PHASE RESULTS
+======================================================================
+Tasks:       296/300 generated patches (quality >= 30%)
+Avg score:   93.2%
+Throughput:  53 tok/s
+Duration:    1362.9s
+======================================================================
+
+Instance                                       Score   Tokens    Latency
+---------------------------------------------------------------------------
++ astropy__astropy-12907                        100%      290    127.6s
++ astropy__astropy-14182                         86%      161     85.8s
++ astropy__astropy-14365                        100%      520    203.6s
++ astropy__astropy-14995                        100%      196    119.2s
++ astropy__astropy-6938                         100%      167     62.3s
++ astropy__astropy-7746                         100%      137     57.0s
++ django__django-10914                          100%      186     54.1s
++ django__django-10924                          100%      154     47.1s
++ django__django-11001                          100%      341     62.8s
++ django__django-11019                           71%      216     33.1s
++ django__django-11039                          100%      154     85.1s
++ django__django-11049                          100%      164     43.0s
++ django__django-11099                          100%      245     68.1s
++ django__django-11133                          100%      145     47.6s
++ django__django-11179                          100%      159     29.2s
++ django__django-11283                           86%      460     46.5s
++ django__django-11422                           86%      212     12.7s
++ django__django-11564                          100%      200    119.5s
++ django__django-11583                          100%      185     47.5s
++ django__django-11620                          100%      126     16.8s
++ django__django-11630                          100%      250     56.3s
++ django__django-11742                          100%      368    104.8s
++ django__django-11797                          100%      195     52.7s
++ django__django-11815                          100%      331     82.4s
++ django__django-11848                          100%      288     65.6s
++ django__django-11905                           71%      193     26.9s
++ django__django-11910                          100%      317    134.2s
++ django__django-11964                           83%      155     39.9s
++ django__django-11999                          100%      194     61.8s
++ django__django-12113                          100%      187     57.8s
++ django__django-12125                          100%      155     31.5s
++ django__django-12184                          100%      175     45.9s
++ django__django-12284                          100%      199     20.9s
++ django__django-12286                          100%      163     19.8s
++ django__django-12308                          100%      236     22.1s
++ django__django-12453                          100%      386     28.1s
++ django__django-12470                          100%      168    104.5s
++ django__django-12497                          100%      269     71.4s
++ django__django-12589                          100%      310     98.0s
++ django__django-12700                          100%      291     76.0s
++ django__django-12708                          100%      161     40.1s
++ django__django-12747                          100%      143     80.8s
++ django__django-12856                          100%      218     59.1s
++ django__django-12908                          100%      154     35.7s
++ django__django-12915                          100%      362     94.0s
++ django__django-12983                           57%      137     24.0s
++ django__django-13028                          100%      163     25.8s
++ django__django-13033                          100%      140     57.0s
++ django__django-13158                          100%      146     32.3s
++ django__django-13220                          100%      348     79.9s
++ django__django-13230                          100%      177     29.8s
++ django__django-13265                           57%      172     41.2s
++ django__django-13315                          100%      195     41.9s
++ django__django-13321                          100%      220     42.9s
++ django__django-13401                          100%      557     57.5s
++ django__django-13447                          100%      232     34.7s
++ django__django-13448                          100%      445     46.0s
++ django__django-13551                           71%      158     25.2s
++ django__django-13590                          100%      125     56.2s
++ django__django-13658                          100%      199     79.0s
++ django__django-13660                          100%      231     81.5s
++ django__django-13710                          100%      207     78.8s
++ django__django-13757                          100%      393    162.8s
++ django__django-13768                           86%      161     67.7s
++ django__django-13925                           80%      160     75.8s
++ django__django-13933                          100%      234     81.6s
++ django__django-13964                          100%      164     47.6s
++ django__django-14016                          100%      159     43.2s
++ django__django-14017                          100%      225     38.6s
++ django__django-14155                           86%      251     43.9s
++ django__django-14238                          100%      151     85.0s
++ django__django-14382                          100%      148     29.3s
++ django__django-14411                          100%      137     19.6s
++ django__django-14534                          100%      125     10.5s
++ django__django-14580                          100%      181     23.9s
++ django__django-14608                          100%      196     33.0s
++ django__django-14667                          100%      217     35.1s
++ django__django-14672                          100%      127     26.8s
++ django__django-14730                          100%      249     44.7s
++ django__django-14752                          100%      375     63.0s
++ django__django-14787                          100%      225     43.1s
++ django__django-14855                          100%      146     32.0s
++ django__django-14915                          100%      122     30.2s
++ django__django-14997                          100%      177    105.2s
++ django__django-14999                           86%      220     60.9s
++ django__django-15061                          100%      106     24.9s
++ django__django-15202                          100%      136     49.1s
++ django__django-15213                           43%      285     89.0s
++ django__django-15252                          100%      263     73.5s
++ django__django-15320                          100%      170     46.8s
++ django__django-15347                          100%      174     56.3s
++ django__django-15388                          100%      157     40.9s
++ django__django-15400                          100%      137     47.5s
++ django__django-15498                          100%      126     19.5s
++ django__django-15695                          100%      350     62.5s
++ django__django-15738                          100%      409     70.7s
++ django__django-15781                          100%      241     45.3s
++ django__django-15789                          100%      200    119.5s
++ django__django-15790                           33%      158     72.8s
++ django__django-15814                          100%      159     87.4s
++ django__django-15819                          100%      271    109.5s
++ django__django-15851                          100%      136     76.4s
++ django__django-15902                          100%      125     86.4s
++ django__django-15996                          100%      215    101.2s
++ django__django-16041                          100%      323     61.8s
++ django__django-16046                          100%      132     28.6s
++ django__django-16139                          100%      257     53.0s
++ django__django-16229                          100%      227     37.3s
++ django__django-16255                          100%      158     21.8s
++ django__django-16379                          100%      186     31.8s
++ django__django-16400                          100%      176    104.9s
++ django__django-16408                          100%      462    100.4s
++ django__django-16527                          100%     4096    257.5s
++ django__django-16595                          100%      193     36.9s
++ django__django-16816                          100%      420     90.3s
++ django__django-16820                          100%      349     75.6s
++ django__django-16873                          100%      163     36.2s
++ django__django-16910                           86%      283     68.4s
++ django__django-17051                           71%      155     49.1s
++ django__django-17087                          100%      186     49.4s
++ matplotlib__matplotlib-18869                   71%      179     43.8s
++ matplotlib__matplotlib-22711                   86%      589    106.6s
++ matplotlib__matplotlib-22835                   86%      327    136.7s
++ matplotlib__matplotlib-23299                  100%      142     65.9s
++ matplotlib__matplotlib-23314                  100%      161     66.7s
++ matplotlib__matplotlib-23476                  100%      147     50.2s
++ matplotlib__matplotlib-23562                   86%      227    115.3s
++ matplotlib__matplotlib-23563                  100%      387    144.4s
++ matplotlib__matplotlib-23913                  100%      245    127.3s
++ matplotlib__matplotlib-23964                  100%      212    102.3s
++ matplotlib__matplotlib-23987                   80%      188     92.9s
++ matplotlib__matplotlib-24149                  100%      267    112.7s
++ matplotlib__matplotlib-24265                   43%      155     87.2s
++ matplotlib__matplotlib-24334                  100%      312     96.9s
++ matplotlib__matplotlib-24970                   86%      262     89.0s
++ matplotlib__matplotlib-25079                   71%      569    183.5s
++ matplotlib__matplotlib-25311                  100%      181     79.6s
++ matplotlib__matplotlib-25332                   86%      573    159.6s
++ matplotlib__matplotlib-25433                  100%      289     64.9s
++ matplotlib__matplotlib-25442                   71%      264     62.7s
++ matplotlib__matplotlib-25498                  100%      197     37.0s
++ matplotlib__matplotlib-26011                  100%      328     93.9s
++ matplotlib__matplotlib-26020                  100%      386    102.7s
++ mwaskom__seaborn-2848                          57%      176     22.4s
++ mwaskom__seaborn-3010                         100%      214     26.4s
++ mwaskom__seaborn-3190                         100%      215     26.5s
++ mwaskom__seaborn-3407                         100%      134     21.3s
++ pallets__flask-4045                            71%      139     16.0s
++ pallets__flask-4992                            86%      349     94.4s
++ pallets__flask-5063                            57%      130     14.8s
++ psf__requests-1963                            100%      219     70.7s
++ psf__requests-2148                            100%      252     77.2s
++ psf__requests-2317                            100%      187     67.0s
++ psf__requests-2674                             80%      222     81.5s
++ psf__requests-3362                             71%      149     62.8s
++ psf__requests-863                             100%      178     65.9s
++ pydata__xarray-3364                            75%      147     62.0s
++ pydata__xarray-4094                           100%      143     68.5s
++ pydata__xarray-4248                            75%      244     93.1s
++ pydata__xarray-4493                            71%      140     66.7s
++ pydata__xarray-5131                           100%      176     39.0s
++ pylint-dev__pylint-5859                       100%      154     27.3s
++ pylint-dev__pylint-6506                       100%      189     38.9s
++ pylint-dev__pylint-7080                       100%      166     35.9s
++ pylint-dev__pylint-7114                       100%      200     40.6s
++ pylint-dev__pylint-7228                       100%      228     47.6s
++ pylint-dev__pylint-7993                       100%      277     61.1s
+- pytest-dev__pytest-11143                       ERR        0    300.0s
++ pytest-dev__pytest-11148                      100%      138     31.4s
++ pytest-dev__pytest-5103                       100%      629    108.1s
++ pytest-dev__pytest-5221                        57%      247     54.5s
++ pytest-dev__pytest-5227                       100%      196     42.5s
++ pytest-dev__pytest-5413                       100%      141     28.8s
++ pytest-dev__pytest-5495                        71%      115     21.8s
++ pytest-dev__pytest-5692                        83%      142     24.7s
++ pytest-dev__pytest-6116                       100%      110     21.7s
++ pytest-dev__pytest-7168                       100%      228     40.2s
++ pytest-dev__pytest-7220                        71%      150     33.2s
++ pytest-dev__pytest-7373                       100%      309     49.6s
++ pytest-dev__pytest-7432                       100%      163     34.3s
++ pytest-dev__pytest-7490                       100%      157     32.0s
++ pytest-dev__pytest-8365                       100%      286     44.8s
++ pytest-dev__pytest-8906                       100%      242     41.2s
++ pytest-dev__pytest-9359                       100%      205     29.1s
++ scikit-learn__scikit-learn-10297               71%      238     36.0s
++ scikit-learn__scikit-learn-10508               86%      199     26.5s
+- scikit-learn__scikit-learn-10949               ERR        0    300.0s
++ scikit-learn__scikit-learn-11040              100%      180     18.5s
++ scikit-learn__scikit-learn-11281              100%      342     47.1s
++ scikit-learn__scikit-learn-12471               71%      200     32.1s
++ scikit-learn__scikit-learn-13142               67%      178     18.4s
++ scikit-learn__scikit-learn-13241              100%      736    104.4s
++ scikit-learn__scikit-learn-13439              100%      169     26.3s
+- scikit-learn__scikit-learn-13496               ERR        0    300.0s
++ scikit-learn__scikit-learn-13497               71%      172     26.1s
++ scikit-learn__scikit-learn-13584              100%      199     31.2s
++ scikit-learn__scikit-learn-13779              100%      195     30.7s
++ scikit-learn__scikit-learn-14087              100%      230     28.7s
++ scikit-learn__scikit-learn-14092              100%      331     50.0s
++ scikit-learn__scikit-learn-14894              100%      236     38.6s
++ scikit-learn__scikit-learn-14983               83%      195     33.0s
++ scikit-learn__scikit-learn-15512              100%      169     20.9s
++ scikit-learn__scikit-learn-15535              100%      185     28.7s
++ scikit-learn__scikit-learn-25500              100%      439     68.2s
++ scikit-learn__scikit-learn-25570              100%      307     38.3s
++ scikit-learn__scikit-learn-25638               57%      224     23.8s
++ scikit-learn__scikit-learn-25747              100%      212     36.6s
++ sphinx-doc__sphinx-10325                       71%      146     16.3s
++ sphinx-doc__sphinx-10451                      100%      373     33.4s
++ sphinx-doc__sphinx-11445                       83%      201     19.9s
++ sphinx-doc__sphinx-7686                        71%      163     15.9s
++ sphinx-doc__sphinx-7738                       100%      155     13.9s
++ sphinx-doc__sphinx-7975                        86%      160     13.1s
++ sphinx-doc__sphinx-8273                       100%      368     52.1s
++ sphinx-doc__sphinx-8282                        57%      168     16.4s
++ sphinx-doc__sphinx-8435                        67%      330     59.5s
++ sphinx-doc__sphinx-8474                        60%      236     38.5s
++ sphinx-doc__sphinx-8506                        57%      294     58.3s
++ sphinx-doc__sphinx-8595                        67%      172     14.3s
++ sphinx-doc__sphinx-8627                       100%      165     14.5s
++ sphinx-doc__sphinx-8713                       100%      288     59.3s
++ sphinx-doc__sphinx-8721                       100%      150     11.2s
++ sphinx-doc__sphinx-8801                        71%      285     57.5s
++ sympy__sympy-11400                            100%      240     54.8s
++ sympy__sympy-11870                            100%      253    114.0s
++ sympy__sympy-11897                            100%      195     68.8s
++ sympy__sympy-12171                            100%      309    126.8s
++ sympy__sympy-12236                             80%      222     87.5s
++ sympy__sympy-12419                             86%      293    103.0s
++ sympy__sympy-12454                             75%      188     61.0s
++ sympy__sympy-12481                            100%      158     40.7s
++ sympy__sympy-13031                            100%      265     88.0s
++ sympy__sympy-13043                            100%      225     79.6s
++ sympy__sympy-13146                            100%      132     45.8s
++ sympy__sympy-13177                            100%      208     92.5s
++ sympy__sympy-13437                            100%      187     78.2s
++ sympy__sympy-13471                             86%      201     81.7s
++ sympy__sympy-13480                            100%      242    103.3s
++ sympy__sympy-13647                            100%      346    139.4s
++ sympy__sympy-13773                            100%      314    129.8s
++ sympy__sympy-13895                             83%      177     72.8s
++ sympy__sympy-13915                            100%      315    129.3s
++ sympy__sympy-13971                            100%      196     87.7s
++ sympy__sympy-14024                            100%      204     81.5s
++ sympy__sympy-14308                            100%      478    206.7s
++ sympy__sympy-14317                            100%      222    114.6s
++ sympy__sympy-14396                            100%      712    288.5s
++ sympy__sympy-14774                            100%      170    107.6s
++ sympy__sympy-14817                            100%      205    117.8s
++ sympy__sympy-15011                            100%      289    125.9s
++ sympy__sympy-15308                            100%      159     89.2s
++ sympy__sympy-15345                             80%      242    104.5s
++ sympy__sympy-15346                            100%      221    110.7s
++ sympy__sympy-15609                            100%      203     93.3s
++ sympy__sympy-15678                            100%      262    107.7s
++ sympy__sympy-16106                            100%      246     95.2s
++ sympy__sympy-16281                            100%      277    138.2s
++ sympy__sympy-16503                             43%      198     64.4s
++ sympy__sympy-16792                             86%      166     75.7s
++ sympy__sympy-16988                            100%      157     66.5s
++ sympy__sympy-17022                            100%      242    122.6s
++ sympy__sympy-17139                            100%      152     88.9s
+- sympy__sympy-17630                             ERR        0    300.0s
++ sympy__sympy-17655                            100%      186     93.9s
++ sympy__sympy-18057                            100%      131     73.4s
++ sympy__sympy-18087                             57%      175     90.2s
++ sympy__sympy-18189                            100%      214     92.7s
++ sympy__sympy-18199                             86%      232     96.7s
++ sympy__sympy-18532                            100%      306    114.9s
++ sympy__sympy-18621                            100%      190     76.1s
++ sympy__sympy-18698                             57%      271    100.5s
++ sympy__sympy-18835                             43%      250     96.6s
++ sympy__sympy-19007                            100%      418    129.1s
++ sympy__sympy-19254                            100%      637    163.2s
++ sympy__sympy-19487                            100%      216     58.2s
++ sympy__sympy-20049                             86%      448    109.0s
++ sympy__sympy-20154                            100%      252     68.1s
++ sympy__sympy-20212                            100%      152     29.6s
++ sympy__sympy-20322                             86%      498    111.2s
++ sympy__sympy-20442                            100%      151     30.9s
++ sympy__sympy-20590                            100%      151     43.9s
++ sympy__sympy-20639                            100%      269     68.7s
++ sympy__sympy-21055                             86%      230     47.5s
++ sympy__sympy-21171                            100%      228     60.5s
++ sympy__sympy-21379                            100%      281     58.7s
++ sympy__sympy-21612                            100%      174     32.7s
++ sympy__sympy-21614                            100%      118     25.3s
++ sympy__sympy-21627                            100%      369     80.6s
++ sympy__sympy-21847                            100%      313     72.8s
++ sympy__sympy-22005                             67%      176     34.7s
++ sympy__sympy-22714                            100%      187     33.9s
++ sympy__sympy-22840                            100%      295     57.8s
++ sympy__sympy-23117                             86%      179     41.3s
++ sympy__sympy-23191                             86%      401    168.4s
++ sympy__sympy-23262                            100%      146     37.1s
++ sympy__sympy-24066                            100%      216     51.7s
++ sympy__sympy-24102                            100%      122     23.6s
++ sympy__sympy-24152                            100%      272     87.7s
++ sympy__sympy-24213                            100%      196     52.2s
++ sympy__sympy-24909                            100%      251     84.1s
+
+Reports saved to bench_results/swebench/two_phase/
+
+--- Sample generated patches ---
+
+  [astropy__astropy-12907]:
+    ```diff
+    diff --git a/astropy/modeling/separable.py b/astropy/modeling/separable.py
+    index 1234567..89abcde 100644
+    --- a/astropy/modeling/separable.py
+    +++ b/astropy/modeling/separable.py
+    @@ -231,15 +231,15 @@ def _cstack(left, right):
+         """
+         noutp = _compute_n_outputs(left, right)
+     
+    -    if isinstance(left, Model):
+    +    if isinstance(left, Model) and not isinstance(left, np.ndarray):
+             cleft = _coord_matrix(left, "left", noutp)
+         else:
+             cleft = np.zeros((noutp, left.shape[1]))
+             cleft[: left.shape[0], : left.shape[1]] = left
+    ... (9 more lines)
+
+  [astropy__astropy-14182]:
+    ```diff
+    diff --git a/astropy/io/ascii/rst.py b/astropy/io/ascii/rst.py
+    --- a/astropy/io/ascii/rst.py
+    +++ b/astropy/io/ascii/rst.py
+    @@ -71,7 +71,7 @@ class RST(FixedWidth):
+         _description = "reStructuredText simple table"
+         data_class = SimpleRSTData
+         header_class = SimpleRSTHeader
+     
+    -    def __init__(self, header_rows=None):
+    +    def __init__(self, header_rows=None, **kwargs):
+             super().__init__(delimiter_pad=None, bookend=False, header_rows=header_rows)
+     
+         def write(self, lines):
+    ```
+
+  [astropy__astropy-14365]:
+    ```diff
+    diff --git a/astropy/io/ascii/qdp.py b/astropy/io/ascii/qdp.py
+    --- a/astropy/io/ascii/qdp.py
+    +++ b/astropy/io/ascii/qdp.py
+    @@ -63,7 +63,7 @@ def _line_type(line, delimiter=None):
+         ValueError: Unrecognized QDP line...
+         """
+         _decimal_re = r"[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?"
+    -    _command_re = r"READ [TS]ERR(\s+[0-9]+)+"
+    +    _command_re = r"READ [TS]ERR(\s+[0-9]+)+"
+     
+         sep = delimiter
+         if delimiter is None:
+    @@ -71,7 +71,7 @@ def _line_type(line, delimiter=None):
+         _new_re = rf"NO({sep}NO)+"
+    ... (18 more lines)

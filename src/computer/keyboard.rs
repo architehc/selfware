@@ -123,17 +123,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_all_blocked_combos_rejected() {
+        let kb = KeyboardController::new();
+        for combo in &["ctrl+alt+delete", "cmd+q", "alt+f4", "ctrl+alt+f1", "ctrl+alt+f2", "ctrl+alt+f3"] {
+            let result = kb.key_combo(combo).await;
+            assert!(result.is_err(), "Expected '{}' to be blocked", combo);
+        }
+    }
+
+    #[tokio::test]
     async fn test_safe_combo_allowed() {
         let kb = KeyboardController::new();
-        let result = kb.key_combo("ctrl+c").await;
-        assert!(result.is_ok());
+        assert!(kb.key_combo("ctrl+c").await.is_ok());
+        assert!(kb.key_combo("ctrl+v").await.is_ok());
+        assert!(kb.key_combo("ctrl+s").await.is_ok());
+        assert!(kb.key_combo("ctrl+shift+t").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_type_text_success() {
+        let kb = KeyboardController::new();
+        assert!(kb.type_text("hello world").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_type_text_empty() {
+        let kb = KeyboardController::new();
+        assert!(kb.type_text("").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_type_text_at_limit() {
+        let kb = KeyboardController::new();
+        let text = "x".repeat(10_000);
+        assert!(kb.type_text(&text).await.is_ok());
     }
 
     #[tokio::test]
     async fn test_type_text_length_limit() {
         let kb = KeyboardController::new();
-        let long_text = "x".repeat(20_000);
+        let long_text = "x".repeat(10_001);
         let result = kb.type_text(&long_text).await;
         assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("10000"));
+    }
+
+    #[tokio::test]
+    async fn test_press_key() {
+        let kb = KeyboardController::new();
+        assert!(kb.press_key("Enter").await.is_ok());
+        assert!(kb.press_key("Tab").await.is_ok());
+        assert!(kb.press_key("Escape").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_key_down_up() {
+        let kb = KeyboardController::new();
+        assert!(kb.key_down("Shift").await.is_ok());
+        assert!(kb.key_up("Shift").await.is_ok());
+    }
+
+    #[test]
+    fn test_keyboard_controller_default() {
+        let kb = KeyboardController::default();
+        let _ = format!("{:?}", kb.typing_profile);
+    }
+
+    #[test]
+    fn test_with_typing_profile() {
+        let profile = TypingProfile {
+            base_delay_ms: 50,
+            variation_ms: 10,
+        };
+        let kb = KeyboardController::new().with_typing_profile(profile);
+        assert_eq!(kb.typing_profile.base_delay_ms, 50);
+    }
+
+    #[tokio::test]
+    async fn test_type_text_with_delay_profile() {
+        let profile = TypingProfile {
+            base_delay_ms: 1, // 1ms delay per char for fast test
+            variation_ms: 0,
+        };
+        let kb = KeyboardController::new().with_typing_profile(profile);
+        assert!(kb.type_text("hi").await.is_ok());
     }
 }

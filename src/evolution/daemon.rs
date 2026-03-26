@@ -806,15 +806,21 @@ SOURCE CODE FORMAT:
 - Each file is shown with line numbers like "  42| fn foo() {{"
 - Line numbers are for your reference only — do NOT include them in search/replace strings
 - Some files are truncated — only modify code you can see in full
+- CRITICAL: The search string must match EXACT line content from the source files, NOT paraphrased or reformatted code
 
 EDIT FORMAT (critical — edits that can't be found are discarded):
 - Each hypothesis has an "edits" array of search-and-replace operations
-- "search" must be an EXACT substring of the target file (copy-paste accuracy)
+- "search" must be an EXACT substring of the target file (copy-paste accuracy required)
 - "replace" is what replaces that exact substring
 - Keep edits small and focused — change the minimum necessary code
 - The search string must be unique in the file (not ambiguous)
 - Use \n for newlines inside strings (JSON escaped)
 - Do NOT include line number prefixes (like "42| ") in search/replace strings
+- CRITICAL: When constructing search strings, copy the EXACT text from the source code including:
+  - Exact whitespace (spaces vs tabs, indentation level)
+  - Exact punctuation and formatting
+  - Exact line breaks
+  - Do NOT reformat or paraphrase the code you're searching for
 
 RULES:
 1. Each hypothesis must target files from the provided source code

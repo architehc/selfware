@@ -1,0 +1,126 @@
+{
+  "task_id": "search-extract",
+  "task_name": "Search and Extract",
+  "started_at": "2026-03-25T11:49:43.326330562Z",
+  "ended_at": "2026-03-25T11:49:43.421434126Z",
+  "actions": [
+    {
+      "timestamp": "2026-03-25T11:49:43.421027961Z",
+      "action": {
+        "Navigate": {
+          "url": "https://html.duckduckgo.com/html/"
+        }
+      },
+      "outcome": {
+        "Success": {
+          "output": "HTTP 200 OK, 2916 bytes"
+        }
+      },
+      "screenshot_before": null,
+      "screenshot_after": null,
+      "duration_ms": 94
+    },
+    {
+      "timestamp": "2026-03-25T11:49:43.421032865Z",
+      "action": {
+        "Fill": {
+          "selector": "input[name='q']",
+          "value": "Rust programming language"
+        }
+      },
+      "outcome": {
+        "Success": {
+          "output": "Fill input[name='q'] = Rust programming language (HTTP mode, tracked)"
+        }
+      },
+      "screenshot_before": null,
+      "screenshot_after": null,
+      "duration_ms": 0
+    },
+    {
+      "timestamp": "2026-03-25T11:49:43.421040811Z",
+      "action": {
+        "Click": {
+          "selector": "input[type='submit']"
+        }
+      },
+      "outcome": {
+        "Success": {
+          "output": "Click simulated on input[type='submit'] (HTTP mode)"
+        }
+      },
+      "screenshot_before": null,
+      "screenshot_after": null,
+      "duration_ms": 0
+    },
+    {
+      "timestamp": "2026-03-25T11:49:43.421126510Z",
+      "action": {
+        "WaitFor": {
+          "selector": ".result__title",
+          "timeout_ms": 10000
+        }
+      },
+      "outcome": {
+        "Success": {
+          "output": "WaitFor '.result__title' skipped (HTTP mode)"
+        }
+      },
+      "screenshot_before": null,
+      "screenshot_after": null,
+      "duration_ms": 0
+    },
+    {
+      "timestamp": "2026-03-25T11:49:43.421321085Z",
+      "action": {
+        "Screenshot": {
+          "label": "search_results"
+        }
+      },
+      "outcome": {
+        "Success": {
+          "output": "Screenshot 'search_results' captured"
+        }
+      },
+      "screenshot_before": null,
+      "screenshot_after": "bench_results/browser/screenshots/search-extract/search_results.html",
+      "duration_ms": 0
+    },
+    {
+      "timestamp": "2026-03-25T11:49:43.421406574Z",
+      "action": {
+        "Extract": {
+          "selector": ".result__title",
+          "expected": "Rust"
+        }
+      },
+      "outcome": {
+        "Failed": {
+          "error": "Expected content 'Rust' not found in page"
+        }
+      },
+      "screenshot_before": null,
+      "screenshot_after": null,
+      "duration_ms": 0
+    }
+  ],
+  "screenshots": [
+    {
+      "path": "bench_results/browser/screenshots/search-extract/search_results.html",
+      "timestamp": "2026-03-25T11:49:43.421318704Z",
+      "label": "search_results",
+      "dimensions": [
+        0,
+        0
+      ]
+    }
+  ],
+  "final_outcome": {
+    "Failed": {
+      "reasons": [
+        "Criterion not met: PageContains(\"Rust\")"
+      ]
+    }
+  },
+  "total_duration_ms": 95
+}

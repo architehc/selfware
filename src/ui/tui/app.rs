@@ -396,8 +396,8 @@ impl App {
             AppState::Palette => "↑/↓: navigate │ Enter: select │ Esc: close │ Type: filter",
             AppState::RunningTask => "Task running... │ Esc: cancel (if possible)",
             AppState::Confirming(_) => "y: yes │ n: no │ Enter: confirm │ Esc: cancel",
-            AppState::FileBrowser => "↑/↓: navigate │ Enter: open │ Esc: back │ Ctrl+C: quit",
-            AppState::Help => "↑/↓: scroll │ Esc: back │ Ctrl+C: quit",
+            AppState::FileBrowser => "arrows: navigate | Enter: open | Esc: close",
+            AppState::Help => "Esc: close help",
             AppState::GardenView => "arrows: navigate | Enter: expand | r: refresh | Ctrl+G: exit garden",
         };
 

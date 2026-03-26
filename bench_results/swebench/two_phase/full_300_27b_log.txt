@@ -1,0 +1,1179 @@
+warning: unused import: `AgentConfig`
+  --> src/config/auto_config.rs:13:13
+   |
+13 | use super::{AgentConfig, Config, RedactedString};
+   |             ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `warn`
+ --> src/batch/mod.rs:9:21
+  |
+9 | use tracing::{info, warn};
+  |                     ^^^^
+
+warning: unused imports: `error` and `warn`
+ --> src/validation/mod.rs:8:21
+  |
+8 | use tracing::{info, warn, error};
+  |                     ^^^^  ^^^^^
+
+warning: unused variable: `workflow`
+    --> src/cli.rs:1417:17
+     |
+1417 |             let workflow = ValidationWorkflow {
+     |                 ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_workflow`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `config` is never read
+  --> src/browser/mod.rs:28:5
+   |
+27 | pub struct BrowserSession {
+   |            -------------- field in this struct
+28 |     config: BrowserConfig,
+   |     ^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `intent_without_action` is never used
+   --> src/output/mod.rs:671:15
+    |
+671 | pub(crate) fn intent_without_action() {
+    |               ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `selfware` (lib) generated 6 warnings (run `cargo fix --lib -p selfware` to apply 3 suggestions)
+warning: unused import: `Serialize`
+  --> examples/swebench_two_phase.rs:18:26
+   |
+18 | use serde::{Deserialize, Serialize};
+   |                          ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `test_patch` is never read
+  --> examples/swebench_two_phase.rs:32:5
+   |
+24 | struct SWETask {
+   |        ------- field in this struct
+...
+32 |     test_patch: String,
+   |     ^^^^^^^^^^
+   |
+   = note: `SWETask` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `selfware` (example "swebench_two_phase") generated 2 warnings (run `cargo fix --example "swebench_two_phase"` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running `target/debug/examples/swebench_two_phase bench_results/swebench_lite_300.json --limit 300`
+
+=== SWE-bench Two-Phase Evaluation ===
+Endpoint: http://localhost:8000/v1
+Model: qwen3.5-27b
+Concurrent: 16
+Tasks: 300
+
+--- Phase 1: Reading source files ---
+  astropy__astropy-12907 ... 1 files, 323 lines
+  astropy__astropy-14182 ... 1 files, 99 lines
+  astropy__astropy-14365 ... 1 files, 665 lines
+  astropy__astropy-14995 ... 1 files, 858 lines
+  astropy__astropy-6938 ... 1 files, 1412 lines
+  astropy__astropy-7746 ... 1 files, 3952 lines
+  django__django-10914 ... 1 files, 680 lines
+  django__django-10924 ... 1 files, 2963 lines
+  django__django-11001 ... 1 files, 2266 lines
+  django__django-11019 ... 1 files, 1279 lines
+  django__django-11039 ... 1 files, 83 lines
+  django__django-11049 ... 1 files, 2963 lines
+  django__django-11099 ... 1 files, 25 lines
+  django__django-11133 ... 1 files, 762 lines
+  django__django-11179 ... 1 files, 552 lines
+  django__django-11283 ... 1 files, 76 lines
+  django__django-11422 ... 1 files, 694 lines
+  django__django-11564 ... 1 files, 257 lines
+  django__django-11583 ... 1 files, 694 lines
+  django__django-11620 ... 1 files, 686 lines
+  django__django-11630 ... 1 files, 227 lines
+  django__django-11742 ... 1 files, 2963 lines
+  django__django-11797 ... 1 files, 824 lines
+  django__django-11815 ... 1 files, 427 lines
+  django__django-11848 ... 1 files, 397 lines
+  django__django-11905 ... 1 files, 824 lines
+  django__django-11910 ... 1 files, 2066 lines
+  django__django-11964 ... 1 files, 79 lines
+  django__django-11999 ... 1 files, 2963 lines
+  django__django-12113 ... 1 files, 158 lines
+  django__django-12125 ... 1 files, 427 lines
+  django__django-12184 ... 1 files, 842 lines
+  django__django-12284 ... 1 files, 2963 lines
+  django__django-12286 ... 1 files, 66 lines
+  django__django-12308 ... 1 files, 627 lines
+  django__django-12453 ... 1 files, 422 lines
+  django__django-12470 ... 1 files, 2266 lines
+  django__django-12497 ... 1 files, 2163 lines
+  django__django-12589 ... 1 files, 2881 lines
+  django__django-12700 ... 1 files, 686 lines
+  django__django-12708 ... 1 files, 2086 lines
+  django__django-12747 ... 1 files, 552 lines
+  django__django-12856 ... 1 files, 2566 lines
+  django__django-12908 ... 1 files, 3024 lines
+  django__django-12915 ... 1 files, 115 lines
+  django__django-12983 ... 1 files, 501 lines
+  django__django-13028 ... 1 files, 2881 lines
+  django__django-13033 ... 1 files, 2266 lines
+  django__django-13158 ... 1 files, 2881 lines
+  django__django-13220 ... 1 files, 265 lines
+  django__django-13230 ... 1 files, 235 lines
+  django__django-13265 ... 1 files, 2066 lines
+  django__django-13315 ... 1 files, 1716 lines
+  django__django-13321 ... 1 files, 528 lines
+  django__django-13401 ... 1 files, 2963 lines
+  django__django-13447 ... 1 files, 621 lines
+  django__django-13448 ... 1 files, 422 lines
+  django__django-13551 ... 1 files, 132 lines
+  django__django-13590 ... 1 files, 2881 lines
+  django__django-13658 ... 1 files, 443 lines
+  django__django-13660 ... 1 files, 283 lines
+  django__django-13710 ... 1 files, 2607 lines
+  django__django-13757 ... 1 files, 745 lines
+  django__django-13768 ... 1 files, 558 lines
+  django__django-13925 ... 1 files, 2566 lines
+  django__django-13933 ... 1 files, 1716 lines
+  django__django-13964 ... 1 files, 2566 lines
+  django__django-14016 ... 1 files, 554 lines
+  django__django-14017 ... 1 files, 554 lines
+  django__django-14155 ... 1 files, 842 lines
+  django__django-14238 ... 1 files, 2963 lines
+  django__django-14382 ... 1 files, 404 lines
+  django__django-14411 ... 1 files, 599 lines
+  django__django-14534 ... 1 files, 371 lines
+  django__django-14580 ... 1 files, 427 lines
+  django__django-14608 ... 1 files, 584 lines
+  django__django-14667 ... 1 files, 2881 lines
+  django__django-14672 ... 1 files, 405 lines
+  django__django-14730 ... 1 files, 2163 lines
+  django__django-14752 ... 1 files, 123 lines
+  django__django-14787 ... 1 files, 228 lines
+  django__django-14855 ... 1 files, 565 lines
+  django__django-14915 ... 1 files, 1716 lines
+  django__django-14997 ... 1 files, 270 lines
+  django__django-14999 ... 1 files, 1288 lines
+  django__django-15061 ... 1 files, 1279 lines
+  django__django-15202 ... 1 files, 677 lines
+  django__django-15213 ... 1 files, 2963 lines
+  django__django-15252 ... 1 files, 413 lines
+  django__django-15320 ... 1 files, 2232 lines
+  django__django-15347 ... 1 files, 248 lines
+  django__django-15388 ... 1 files, 61 lines
+  django__django-15400 ... 1 files, 455 lines
+  django__django-15498 ... 1 files, 122 lines
+  django__django-15695 ... 1 files, 1288 lines
+  django__django-15738 ... 1 files, 2066 lines
+  django__django-15781 ... 1 files, 713 lines
+  django__django-15789 ... 1 files, 534 lines
+  django__django-15790 ... 1 files, 12 lines
+  django__django-15814 ... 1 files, 2881 lines
+  django__django-15819 ... 1 files, 421 lines
+  django__django-15851 ... 1 files, 64 lines
+  django__django-15902 ... 1 files, 584 lines
+  django__django-15996 ... 1 files, 427 lines
+  django__django-16041 ... 1 files, 584 lines
+  django__django-16046 ... 1 files, 108 lines
+  django__django-16139 ... 1 files, 599 lines
+  django__django-16229 ... 1 files, 371 lines
+  django__django-16255 ... 1 files, 202 lines
+  django__django-16379 ... 1 files, 169 lines
+  django__django-16400 ... 1 files, 292 lines
+  django__django-16408 ... 1 files, 2266 lines
+  django__django-16527 ... 1 files, 152 lines
+  django__django-16595 ... 1 files, 357 lines
+  django__django-16816 ... 1 files, 1384 lines
+  django__django-16820 ... 1 files, 1288 lines
+  django__django-16873 ... 1 files, 996 lines
+  django__django-16910 ... 1 files, 2881 lines
+  django__django-17051 ... 1 files, 3024 lines
+  django__django-17087 ... 1 files, 427 lines
+  matplotlib__matplotlib-18869 ... 1 files, 1575 lines
+  matplotlib__matplotlib-22711 ... 1 files, 4440 lines
+  matplotlib__matplotlib-22835 ... 1 files, 1944 lines
+  matplotlib__matplotlib-23299 ... 1 files, 1575 lines
+  matplotlib__matplotlib-23314 ... 1 files, 4428 lines
+  matplotlib__matplotlib-23476 ... 1 files, 3787 lines
+  matplotlib__matplotlib-23562 ... 1 files, 1677 lines
+  matplotlib__matplotlib-23563 ... 1 files, 1677 lines
+  matplotlib__matplotlib-23913 ... 1 files, 1397 lines
+  matplotlib__matplotlib-23964 ... 1 files, 1473 lines
+  matplotlib__matplotlib-23987 ... 1 files, 3787 lines
+  matplotlib__matplotlib-24149 ... 1 files, 8001 lines
+  matplotlib__matplotlib-24265 ... 1 files, 27 lines
+  matplotlib__matplotlib-24334 ... 1 files, 2875 lines
+  matplotlib__matplotlib-24970 ... 1 files, 4269 lines
+  matplotlib__matplotlib-25079 ... 1 files, 4269 lines
+  matplotlib__matplotlib-25311 ... 1 files, 1688 lines
+  matplotlib__matplotlib-25332 ... 1 files, 2543 lines
+  matplotlib__matplotlib-25433 ... 1 files, 3787 lines
+  matplotlib__matplotlib-25442 ... 1 files, 1688 lines
+  matplotlib__matplotlib-25498 ... 1 files, 1565 lines
+  matplotlib__matplotlib-26011 ... 1 files, 2875 lines
+  matplotlib__matplotlib-26020 ... 1 files, 564 lines
+  mwaskom__seaborn-2848 ...     Warning: could not read seaborn/_oldcore.py: No such file or directory (os error 2)
+0 files, 0 lines
+  mwaskom__seaborn-3010 ... 1 files, 50 lines
+  mwaskom__seaborn-3190 ... 1 files, 1090 lines
+  mwaskom__seaborn-3407 ... 1 files, 2401 lines
+  pallets__flask-4045 ... 1 files, 128 lines
+  pallets__flask-4992 ... 1 files, 367 lines
+  pallets__flask-5063 ... 1 files, 1127 lines
+  psf__requests-1963 ...     Warning: could not read requests/sessions.py: No such file or directory (os error 2)
+0 files, 0 lines
+  psf__requests-2148 ...     Warning: could not read requests/models.py: No such file or directory (os error 2)
+0 files, 0 lines
+  psf__requests-2317 ...     Warning: could not read requests/sessions.py: No such file or directory (os error 2)
+0 files, 0 lines
+  psf__requests-2674 ...     Warning: could not read requests/adapters.py: No such file or directory (os error 2)
+0 files, 0 lines
+  psf__requests-3362 ...     Warning: could not read requests/utils.py: No such file or directory (os error 2)
+0 files, 0 lines
+  psf__requests-863 ...     Warning: could not read requests/models.py: No such file or directory (os error 2)
+0 files, 0 lines
+  pydata__xarray-3364 ...     Warning: could not read xarray/core/concat.py: No such file or directory (os error 2)
+0 files, 0 lines
+  pydata__xarray-4094 ... 1 files, 7732 lines
+  pydata__xarray-4248 ... 1 files, 1338 lines
+  pydata__xarray-4493 ... 1 files, 3148 lines
+  pydata__xarray-5131 ... 1 files, 1902 lines
+  pylint-dev__pylint-5859 ... 1 files, 192 lines
+  pylint-dev__pylint-6506 ... 1 files, 211 lines
+  pylint-dev__pylint-7080 ... 1 files, 185 lines
+  pylint-dev__pylint-7114 ... 1 files, 185 lines
+  pylint-dev__pylint-7228 ... 1 files, 499 lines
+  pylint-dev__pylint-7993 ... 1 files, 298 lines
+  pytest-dev__pytest-11143 ... 1 files, 1202 lines
+  pytest-dev__pytest-11148 ... 1 files, 1063 lines
+  pytest-dev__pytest-5103 ... 1 files, 1202 lines
+  pytest-dev__pytest-5221 ... 1 files, 1736 lines
+  pytest-dev__pytest-5227 ... 1 files, 960 lines
+  pytest-dev__pytest-5413 ... 1 files, 1571 lines
+  pytest-dev__pytest-5495 ... 1 files, 615 lines
+  pytest-dev__pytest-5692 ... 1 files, 695 lines
+  pytest-dev__pytest-6116 ... 1 files, 1202 lines
+  pytest-dev__pytest-7168 ... 1 files, 155 lines
+  pytest-dev__pytest-7220 ... 1 files, 764 lines
+  pytest-dev__pytest-7373 ...     Warning: could not read src/_pytest/mark/evaluate.py: No such file or directory (os error 2)
+0 files, 0 lines
+  pytest-dev__pytest-7432 ... 1 files, 321 lines
+  pytest-dev__pytest-7490 ... 1 files, 321 lines
+  pytest-dev__pytest-8365 ... 1 files, 315 lines
+  pytest-dev__pytest-8906 ... 1 files, 1736 lines
+  pytest-dev__pytest-9359 ... 1 files, 228 lines
+  scikit-learn__scikit-learn-10297 ...     Warning: could not read sklearn/linear_model/ridge.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-10508 ...     Warning: could not read sklearn/preprocessing/label.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-10949 ... 1 files, 2941 lines
+  scikit-learn__scikit-learn-11040 ...     Warning: could not read sklearn/neighbors/base.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-11281 ...     Warning: could not read sklearn/mixture/base.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-12471 ... 1 files, 1700 lines
+  scikit-learn__scikit-learn-13142 ...     Warning: could not read sklearn/mixture/base.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-13241 ...     Warning: could not read sklearn/decomposition/kernel_pca.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-13439 ... 1 files, 2172 lines
+  scikit-learn__scikit-learn-13496 ...     Warning: could not read sklearn/ensemble/iforest.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-13497 ...     Warning: could not read sklearn/feature_selection/mutual_info_.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-13584 ... 1 files, 462 lines
+  scikit-learn__scikit-learn-13779 ...     Warning: could not read sklearn/ensemble/voting.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-14087 ...     Warning: could not read sklearn/linear_model/logistic.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-14092 ...     Warning: could not read sklearn/neighbors/nca.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-14894 ...     Warning: could not read sklearn/svm/base.py: No such file or directory (os error 2)
+0 files, 0 lines
+  scikit-learn__scikit-learn-14983 ... 1 files, 3071 lines
+  scikit-learn__scikit-learn-15512 ... 1 files, 607 lines
+  scikit-learn__scikit-learn-15535 ... 1 files, 1342 lines
+  scikit-learn__scikit-learn-25500 ... 1 files, 515 lines
+  scikit-learn__scikit-learn-25570 ... 1 files, 1626 lines
+  scikit-learn__scikit-learn-25638 ... 1 files, 590 lines
+  scikit-learn__scikit-learn-25747 ... 1 files, 475 lines
+  sphinx-doc__sphinx-10325 ... 1 files, 253 lines
+  sphinx-doc__sphinx-10451 ... 1 files, 215 lines
+  sphinx-doc__sphinx-11445 ... 1 files, 115 lines
+  sphinx-doc__sphinx-7686 ... 1 files, 992 lines
+  sphinx-doc__sphinx-7738 ... 1 files, 1437 lines
+  sphinx-doc__sphinx-7975 ... 1 files, 267 lines
+  sphinx-doc__sphinx-8273 ... 1 files, 139 lines
+  sphinx-doc__sphinx-8282 ... 1 files, 253 lines
+  sphinx-doc__sphinx-8435 ... 1 files, 253 lines
+  sphinx-doc__sphinx-8474 ...     Warning: could not read sphinx/domains/std.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sphinx-doc__sphinx-8506 ...     Warning: could not read sphinx/domains/std.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sphinx-doc__sphinx-8595 ... 1 files, 253 lines
+  sphinx-doc__sphinx-8627 ... 1 files, 640 lines
+  sphinx-doc__sphinx-8713 ... 1 files, 1437 lines
+  sphinx-doc__sphinx-8721 ... 1 files, 417 lines
+  sphinx-doc__sphinx-8801 ... 1 files, 323 lines
+  sympy__sympy-11400 ...     Warning: could not read sympy/printing/ccode.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-11870 ...     Warning: could not read sympy/functions/elementary/trigonometric.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-11897 ...     Warning: could not read sympy/printing/latex.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-12171 ...     Warning: could not read sympy/printing/mathematica.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-12236 ...     Warning: could not read sympy/polys/domains/polynomialring.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-12419 ...     Warning: could not read sympy/matrices/expressions/matexpr.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-12454 ...     Warning: could not read sympy/matrices/matrices.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-12481 ...     Warning: could not read sympy/combinatorics/permutations.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-13031 ...     Warning: could not read sympy/matrices/sparse.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-13043 ...     Warning: could not read sympy/integrals/intpoly.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-13146 ...     Warning: could not read sympy/core/operations.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-13177 ...     Warning: could not read sympy/core/mod.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-13437 ...     Warning: could not read sympy/functions/combinatorial/numbers.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-13471 ...     Warning: could not read sympy/core/numbers.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-13480 ...     Warning: could not read sympy/functions/elementary/hyperbolic.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-13647 ...     Warning: could not read sympy/matrices/common.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-13773 ...     Warning: could not read sympy/matrices/common.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-13895 ...     Warning: could not read sympy/core/numbers.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-13915 ...     Warning: could not read sympy/core/mul.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-13971 ...     Warning: could not read sympy/printing/latex.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-14024 ...     Warning: could not read sympy/core/numbers.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-14308 ...     Warning: could not read sympy/printing/pretty/pretty.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-14317 ...     Warning: could not read sympy/printing/latex.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-14396 ...     Warning: could not read sympy/polys/polyoptions.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-14774 ...     Warning: could not read sympy/printing/latex.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-14817 ...     Warning: could not read sympy/printing/pretty/pretty.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-15011 ...     Warning: could not read sympy/utilities/lambdify.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-15308 ...     Warning: could not read sympy/printing/latex.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-15345 ...     Warning: could not read sympy/printing/mathematica.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-15346 ...     Warning: could not read sympy/simplify/trigsimp.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-15609 ...     Warning: could not read sympy/printing/latex.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-15678 ...     Warning: could not read sympy/geometry/util.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-16106 ...     Warning: could not read sympy/printing/mathml.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-16281 ...     Warning: could not read sympy/printing/pretty/pretty.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-16503 ...     Warning: could not read sympy/printing/pretty/pretty.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-16792 ...     Warning: could not read sympy/utilities/codegen.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-16988 ...     Warning: could not read sympy/sets/sets.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-17022 ...     Warning: could not read sympy/printing/pycode.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-17139 ...     Warning: could not read sympy/simplify/fu.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-17630 ...     Warning: could not read sympy/matrices/expressions/matexpr.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-17655 ...     Warning: could not read sympy/geometry/point.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-18057 ...     Warning: could not read sympy/core/expr.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-18087 ...     Warning: could not read sympy/core/exprtools.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-18189 ...     Warning: could not read sympy/solvers/diophantine.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-18199 ...     Warning: could not read sympy/ntheory/residue_ntheory.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-18532 ...     Warning: could not read sympy/core/basic.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-18621 ...     Warning: could not read sympy/matrices/expressions/blockmatrix.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-18698 ...     Warning: could not read sympy/polys/polytools.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-18835 ...     Warning: could not read sympy/utilities/iterables.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-19007 ...     Warning: could not read sympy/matrices/expressions/blockmatrix.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-19254 ...     Warning: could not read sympy/polys/factortools.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-19487 ...     Warning: could not read sympy/functions/elementary/complexes.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-20049 ...     Warning: could not read sympy/physics/vector/point.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-20154 ...     Warning: could not read sympy/utilities/iterables.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-20212 ...     Warning: could not read sympy/core/power.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-20322 ...     Warning: could not read sympy/core/mul.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-20442 ...     Warning: could not read sympy/physics/units/util.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-20590 ...     Warning: could not read sympy/core/_print_helpers.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-20639 ...     Warning: could not read sympy/printing/pretty/pretty.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-21055 ...     Warning: could not read sympy/assumptions/refine.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-21171 ...     Warning: could not read sympy/printing/latex.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-21379 ...     Warning: could not read sympy/core/mod.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-21612 ...     Warning: could not read sympy/printing/str.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-21614 ...     Warning: could not read sympy/core/function.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-21627 ...     Warning: could not read sympy/functions/elementary/complexes.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-21847 ...     Warning: could not read sympy/polys/monomials.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-22005 ...     Warning: could not read sympy/solvers/polysys.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-22714 ...     Warning: could not read sympy/geometry/point.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-22840 ...     Warning: could not read sympy/simplify/cse_main.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-23117 ...     Warning: could not read sympy/tensor/array/ndim_array.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-23191 ...     Warning: could not read sympy/printing/pretty/pretty.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-23262 ...     Warning: could not read sympy/utilities/lambdify.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-24066 ...     Warning: could not read sympy/physics/units/unitsystem.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-24102 ...     Warning: could not read sympy/parsing/mathematica.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-24152 ...     Warning: could not read sympy/physics/quantum/tensorproduct.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-24213 ...     Warning: could not read sympy/physics/units/unitsystem.py: No such file or directory (os error 2)
+0 files, 0 lines
+  sympy__sympy-24909 ...     Warning: could not read sympy/physics/units/prefixes.py: No such file or directory (os error 2)
+0 files, 0 lines
+Phase 1 complete: 300/300 tasks with file context (0.1s)
+
+--- Phase 2: Generating patches (16 concurrent) ---
+[2m2026-03-26T04:03:42.196337Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Starting benchmark: 300 tasks, 16 concurrent streams, model=qwen3.5-27b
+  [1/300] django__django-12983 — OK | 57% | 70967ms | 6916+161 tokens
+  [2/300] astropy__astropy-14182 — OK | 86% | 74385ms | 2065+166 tokens
+  [3/300] django__django-15400 — OK | 100% | 74385ms | 6668+151 tokens
+  [4/300] django__django-12470 — OK | 80% | 83297ms | 31549+143 tokens
+  [5/300] django__django-10914 — OK | 100% | 90647ms | 11628+184 tokens
+  [6/300] django__django-15388 — OK | 100% | 94939ms | 1657+212 tokens
+  [7/300] django__django-11422 — OK | 86% | 104757ms | 10252+196 tokens
+  [8/300] astropy__astropy-14995 — OK | 100% | 111816ms | 14775+227 tokens
+  [9/300] django__django-11039 — OK | 100% | 121595ms | 1760+209 tokens
+  [10/300] django__django-11283 — OK | 86% | 125472ms | 2822+305 tokens
+  [11/300] astropy__astropy-12907 — OK | 100% | 131209ms | 4900+350 tokens
+  [12/300] django__django-13710 — OK | 100% | 137593ms | 35557+277 tokens
+  [13/300] django__django-13028 — OK | 100% | 154885ms | 42416+186 tokens
+  [14/300] django__django-11999 — OK | 100% | 181618ms | 39203+384 tokens
+  [15/300] django__django-10924 — OK | 100% | 132075ms | 39406+174 tokens
+  [16/300] django__django-14667 — OK | 100% | 216672ms | 42866+294 tokens
+  [17/300] django__django-11019 — OK | 71% | 159171ms | 20468+219 tokens
+  [18/300] django__django-16046 — OK | 100% | 168325ms | 1852+199 tokens
+  [19/300] django__django-16255 — OK | 100% | 152165ms | 3285+206 tokens
+  [20/300] django__django-16229 — OK | 100% | 161983ms | 5556+226 tokens
+  [21/300] django__django-16379 — OK | 100% | 152115ms | 2803+223 tokens
+  [22/300] django__django-16400 — OK | 100% | 146364ms | 6150+292 tokens
+  [23/300] django__django-11001 — OK | 100% | 197599ms | 32324+337 tokens
+  [24/300] django__django-16527 — OK | 100% | 142834ms | 2539+228 tokens
+  [25/300] django__django-16595 — OK | 100% | 149543ms | 5401+255 tokens
+  [26/300] django__django-16139 — OK | 100% | 202757ms | 8303+436 tokens
+[2m2026-03-26T04:08:22.771036Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0mdjango__django-11742
+  [27/300] django__django-11742 — FAIL | N/A | 300003ms | 0+0 tokens
+  [28/300] django__django-16408 — OK | 100% | 189245ms | 32159+421 tokens
+  [29/300] django__django-16873 — OK | 100% | 131407ms | 13573+227 tokens
+  [30/300] django__django-17051 — OK | 71% | 115779ms | 42143+163 tokens
+  [31/300] django__django-16910 — OK | 86% | 139409ms | 41966+200 tokens
+  [32/300] django__django-17087 — OK | 100% | 137131ms | 6695+210 tokens
+  [33/300] matplotlib__matplotlib-18869 — OK | 100% | 135581ms | 22865+159 tokens
+  [34/300] matplotlib__matplotlib-22835 — OK | 57% | 149148ms | 28923+135 tokens
+  [35/300] matplotlib__matplotlib-23299 — OK | 100% | 158621ms | 22781+166 tokens
+  [36/300] matplotlib__matplotlib-22711 — OK | 86% | 190642ms | 65285+486 tokens
+[2m2026-03-26T04:10:46.039446Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0mdjango__django-16816
+  [37/300] django__django-16816 — FAIL | N/A | 300004ms | 0+0 tokens
+[2m2026-03-26T04:11:10.679607Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0mdjango__django-16820
+  [38/300] django__django-16820 — FAIL | N/A | 300003ms | 0+0 tokens
+  [39/300] matplotlib__matplotlib-23314 — OK | 100% | 223066ms | 67377+182 tokens
+  [40/300] matplotlib__matplotlib-23476 — OK | 100% | 237747ms | 54792+174 tokens
+  [41/300] matplotlib__matplotlib-23913 — OK | 86% | 249833ms | 20677+137 tokens
+  [42/300] matplotlib__matplotlib-23562 — OK | 100% | 267843ms | 27122+332 tokens
+  [43/300] matplotlib__matplotlib-23964 — OK | 100% | 259092ms | 23371+223 tokens
+  [44/300] matplotlib__matplotlib-23563 — OK | 100% | 282304ms | 80300+255 tokens
+  [45/300] matplotlib__matplotlib-23987 — OK | 80% | 290631ms | 53931+171 tokens
+[2m2026-03-26T04:13:47.900148Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0mmatplotlib__matplotlib-24149
+  [46/300] matplotlib__matplotlib-24149 — FAIL | N/A | 300008ms | 0+0 tokens
+[2m2026-03-26T04:13:52.563094Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0mmatplotlib__matplotlib-24265
+  [47/300] matplotlib__matplotlib-24265 — FAIL | N/A | 300002ms | 0+0 tokens
+[2m2026-03-26T04:14:23.116677Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0mmatplotlib__matplotlib-24334
+  [48/300] matplotlib__matplotlib-24334 — FAIL | N/A | 300003ms | 0+0 tokens
+[2m2026-03-26T04:14:26.867228Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0mmatplotlib__matplotlib-24970
+  [49/300] matplotlib__matplotlib-24970 — FAIL | N/A | 300005ms | 0+0 tokens
+[2m2026-03-26T04:14:45.361106Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0mmatplotlib__matplotlib-25079
+  [50/300] matplotlib__matplotlib-25079 — FAIL | N/A | 300006ms | 0+0 tokens
+[2m2026-03-26T04:14:58.858368Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0mmatplotlib__matplotlib-25311
+  [51/300] matplotlib__matplotlib-25311 — FAIL | N/A | 300002ms | 0+0 tokens
+[2m2026-03-26T04:15:17.729353Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0mmatplotlib__matplotlib-25332
+  [52/300] matplotlib__matplotlib-25332 — FAIL | N/A | 300003ms | 0+0 tokens
+[2m2026-03-26T04:15:25.054620Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0mmatplotlib__matplotlib-25433
+  [53/300] matplotlib__matplotlib-25433 — FAIL | N/A | 300004ms | 0+0 tokens
+[2m2026-03-26T04:15:49.709002Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0mmatplotlib__matplotlib-25442
+  [54/300] matplotlib__matplotlib-25442 — FAIL | N/A | 300005ms | 0+0 tokens
+[2m2026-03-26T04:16:03.137739Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0mmatplotlib__matplotlib-25498
+  [55/300] matplotlib__matplotlib-25498 — FAIL | N/A | 300005ms | 0+0 tokens
+[2m2026-03-26T04:16:17.767355Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0mmatplotlib__matplotlib-26011
+  [56/300] matplotlib__matplotlib-26011 — FAIL | N/A | 300004ms | 0+0 tokens
+[2m2026-03-26T04:16:53.748290Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0mmatplotlib__matplotlib-26020
+  [57/300] matplotlib__matplotlib-26020 — FAIL | N/A | 300004ms | 0+0 tokens
+[2m2026-03-26T04:16:58.888094Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0mmwaskom__seaborn-2848
+  [58/300] mwaskom__seaborn-2848 — FAIL | N/A | 300001ms | 0+0 tokens
+  [59/300] mwaskom__seaborn-3407 — OK | 100% | 238280ms | 34533+144 tokens
+[2m2026-03-26T04:17:15.627260Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0mmwaskom__seaborn-3010
+  [60/300] mwaskom__seaborn-3010 — FAIL | N/A | 300002ms | 0+0 tokens
+  [61/300] psf__requests-1963 — OK | 100% | 182631ms | 634+146 tokens
+[2m2026-03-26T04:17:17.524958Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0mmwaskom__seaborn-3190
+  [62/300] mwaskom__seaborn-3190 — FAIL | N/A | 300002ms | 0+0 tokens
+  [63/300] psf__requests-3362 — OK | 57% | 129983ms | 612+147 tokens
+  [64/300] pydata__xarray-3364 — OK | 50% | 102255ms | 431+167 tokens
+  [65/300] pallets__flask-4992 — OK | 86% | 243145ms | 5715+185 tokens
+  [66/300] pallets__flask-4045 — OK | 71% | 250522ms | 2083+200 tokens
+  [67/300] psf__requests-2148 — OK | 100% | 191748ms | 1217+205 tokens
+  [68/300] psf__requests-863 — OK | 100% | 124682ms | 647+208 tokens
+  [69/300] psf__requests-2317 — OK | 100% | 181623ms | 615+220 tokens
+  [70/300] psf__requests-2674 — OK | 100% | 161881ms | 2126+232 tokens
+  [71/300] pydata__xarray-4094 — OK | 100% | 111899ms | 124401+197 tokens
+  [72/300] pallets__flask-5063 — OK | 57% | 241081ms | 15627+385 tokens
+  [73/300] pydata__xarray-4248 — OK | 100% | 122990ms | 19732+260 tokens
+  [74/300] pylint-dev__pylint-7114 — OK | 100% | 98910ms | 3398+165 tokens
+  [75/300] pydata__xarray-5131 — OK | 100% | 110032ms | 27782+177 tokens
+  [76/300] pylint-dev__pylint-5859 — OK | 100% | 110422ms | 3327+178 tokens
+  [77/300] pylint-dev__pylint-7080 — OK | 100% | 112218ms | 11742+175 tokens
+  [78/300] pylint-dev__pylint-7228 — OK | 100% | 95868ms | 8122+177 tokens
+  [79/300] pylint-dev__pylint-7993 — OK | 100% | 99264ms | 5321+183 tokens
+  [80/300] pydata__xarray-4493 — OK | 71% | 154091ms | 45475+256 tokens
+  [81/300] pylint-dev__pylint-6506 — OK | 100% | 154886ms | 3786+271 tokens
+  [82/300] pytest-dev__pytest-5221 — OK | 57% | 130635ms | 24765+113 tokens
+  [83/300] pytest-dev__pytest-11143 — OK | 100% | 155755ms | 20712+330 tokens
+  [84/300] pytest-dev__pytest-5227 — OK | 100% | 136966ms | 13688+189 tokens
+  [85/300] pytest-dev__pytest-11148 — OK | 100% | 158146ms | 15914+349 tokens
+  [86/300] pytest-dev__pytest-5413 — OK | 100% | 141235ms | 23395+193 tokens
+  [87/300] pytest-dev__pytest-7220 — OK | 71% | 97055ms | 11182+170 tokens
+  [88/300] pytest-dev__pytest-5692 — OK | 83% | 130310ms | 10449+330 tokens
+  [89/300] pytest-dev__pytest-7432 — OK | 100% | 104699ms | 4825+188 tokens
+  [90/300] pytest-dev__pytest-7168 — OK | 100% | 124246ms | 5952+299 tokens
+  [91/300] pytest-dev__pytest-7490 — OK | 100% | 105249ms | 8950+191 tokens
+  [92/300] pytest-dev__pytest-7373 — OK | 100% | 132047ms | 659+276 tokens
+  [93/300] pytest-dev__pytest-5103 — OK | 100% | 214331ms | 18860+492 tokens
+  [94/300] scikit-learn__scikit-learn-10508 — OK | 86% | 70864ms | 914+211 tokens
+  [95/300] pytest-dev__pytest-5495 — OK | 71% | 223470ms | 8988+558 tokens
+  [96/300] pytest-dev__pytest-9359 — OK | 100% | 140527ms | 4293+344 tokens
+  [97/300] pytest-dev__pytest-8906 — OK | 100% | 97208ms | 26181+285 tokens
+  [98/300] scikit-learn__scikit-learn-13439 — OK | 100% | 86054ms | 30283+171 tokens
+  [99/300] scikit-learn__scikit-learn-10297 — OK | 71% | 111208ms | 810+362 tokens
+  [100/300] scikit-learn__scikit-learn-10949 — OK | 86% | 107629ms | 42182+334 tokens
+  [101/300] scikit-learn__scikit-learn-13497 — OK | 71% | 75363ms | 398+212 tokens
+  [102/300] scikit-learn__scikit-learn-13779 — OK | 100% | 73564ms | 441+187 tokens
+  [103/300] scikit-learn__scikit-learn-15512 — OK | 100% | 77099ms | 9118+229 tokens
+  [104/300] pytest-dev__pytest-8365 — OK | 100% | 195208ms | 5215+630 tokens
+  [105/300] scikit-learn__scikit-learn-13584 — OK | 100% | 89248ms | 7343+239 tokens
+  [106/300] pytest-dev__pytest-6116 — FAIL | 0% | 241811ms | 17225+797 tokens
+  [107/300] scikit-learn__scikit-learn-14087 — OK | 100% | 97505ms | 1358+286 tokens
+  [108/300] scikit-learn__scikit-learn-13142 — OK | 100% | 128422ms | 1514+380 tokens
+  [109/300] scikit-learn__scikit-learn-14894 — OK | 100% | 69684ms | 890+199 tokens
+  [110/300] scikit-learn__scikit-learn-14983 — OK | 83% | 76900ms | 45785+172 tokens
+  [111/300] scikit-learn__scikit-learn-14092 — OK | 86% | 104130ms | 1664+365 tokens
+  [112/300] scikit-learn__scikit-learn-11281 — OK | 100% | 160797ms | 557+510 tokens
+  [113/300] sphinx-doc__sphinx-11445 — OK | 50% | 58003ms | 2544+187 tokens
+  [114/300] scikit-learn__scikit-learn-13496 — OK | 100% | 147629ms | 701+496 tokens
+  [115/300] scikit-learn__scikit-learn-15535 — OK | 100% | 75359ms | 20145+236 tokens
+  [116/300] scikit-learn__scikit-learn-25500 — OK | 71% | 69586ms | 9272+251 tokens
+  [117/300] sphinx-doc__sphinx-7686 — OK | 57% | 50133ms | 13417+181 tokens
+  [118/300] scikit-learn__scikit-learn-25747 — OK | 100% | 65709ms | 8771+231 tokens
+  [119/300] scikit-learn__scikit-learn-25638 — OK | 57% | 74321ms | 9532+265 tokens
+  [120/300] scikit-learn__scikit-learn-25570 — OK | 100% | 89637ms | 24448+320 tokens
+  [121/300] sphinx-doc__sphinx-7738 — OK | 100% | 54748ms | 20413+185 tokens
+  [122/300] sphinx-doc__sphinx-7975 — OK | 86% | 62305ms | 3929+200 tokens
+  [123/300] sphinx-doc__sphinx-8474 — OK | 100% | 81395ms | 1819+250 tokens
+  [124/300] sphinx-doc__sphinx-8435 — OK | 67% | 58914ms | 3825+195 tokens
+  [125/300] sphinx-doc__sphinx-8506 — FAIL | 29% | 55222ms | 1256+214 tokens
+  [126/300] astropy__astropy-6938 — OK | 100% | 58400ms | 21005+203 tokens
+  [127/300] sphinx-doc__sphinx-8273 — OK | 100% | 86757ms | 2712+324 tokens
+  [128/300] sphinx-doc__sphinx-8595 — OK | 67% | 69816ms | 3786+220 tokens
+  [129/300] astropy__astropy-7746 — OK | 100% | 66000ms | 56881+162 tokens
+  [130/300] scikit-learn__scikit-learn-13241 — OK | 100% | 250574ms | 4142+953 tokens
+  [131/300] sphinx-doc__sphinx-8627 — OK | 100% | 63797ms | 10733+190 tokens
+  [132/300] sympy__sympy-11897 — OK | 100% | 50366ms | 1343+150 tokens
+[2m2026-03-26T04:25:08.632078Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0mscikit-learn__scikit-learn-11040
+  [133/300] scikit-learn__scikit-learn-11040 — FAIL | N/A | 300000ms | 0+0 tokens
+  [134/300] sphinx-doc__sphinx-8721 — OK | 100% | 51297ms | 6226+191 tokens
+  [135/300] sphinx-doc__sphinx-8801 — OK | 71% | 33725ms | 4838+204 tokens
+  [136/300] sympy__sympy-12171 — OK | 100% | 43661ms | 498+259 tokens
+  [137/300] sympy__sympy-12481 — OK | 75% | 27689ms | 335+271 tokens
+  [138/300] sympy__sympy-11870 — OK | 86% | 63985ms | 670+348 tokens
+  [139/300] sphinx-doc__sphinx-8713 — OK | 100% | 68731ms | 20515+345 tokens
+  [140/300] sympy__sympy-13043 — OK | 80% | 15119ms | 347+163 tokens
+  [141/300] sympy__sympy-12454 — OK | 100% | 21739ms | 898+254 tokens
+  [142/300] sympy__sympy-13437 — OK | 71% | 18303ms | 406+208 tokens
+[2m2026-03-26T04:25:27.102572Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0mscikit-learn__scikit-learn-12471
+  [143/300] scikit-learn__scikit-learn-12471 — FAIL | N/A | 300003ms | 0+0 tokens
+  [144/300] sympy__sympy-13895 — OK | 50% | 19230ms | 1015+221 tokens
+  [145/300] sympy__sympy-13471 — OK | 86% | 18013ms | 486+201 tokens
+  [146/300] sympy__sympy-13480 — OK | 100% | 17256ms | 468+183 tokens
+  [147/300] sympy__sympy-13177 — OK | 100% | 9949ms | 618+151 tokens
+  [148/300] sympy__sympy-13146 — OK | 75% | 18222ms | 616+197 tokens
+  [149/300] sympy__sympy-12419 — OK | 86% | 43914ms | 3292+471 tokens
+  [150/300] sympy__sympy-13647 — OK | 100% | 14140ms | 962+219 tokens
+  [151/300] sympy__sympy-13031 — OK | 71% | 32117ms | 1271+407 tokens
+  [152/300] sympy__sympy-13971 — OK | 100% | 15035ms | 408+169 tokens
+  [153/300] sphinx-doc__sphinx-8282 — OK | 43% | 150628ms | 3828+939 tokens
+  [154/300] sympy__sympy-13773 — OK | 86% | 18715ms | 518+222 tokens
+  [155/300] sympy__sympy-14024 — OK | 75% | 17731ms | 753+201 tokens
+  [156/300] sympy__sympy-14308 — OK | 43% | 16426ms | 411+180 tokens
+  [157/300] sympy__sympy-14317 — OK | 86% | 16730ms | 494+189 tokens
+  [158/300] sympy__sympy-14774 — OK | 100% | 18329ms | 427+210 tokens
+  [159/300] sympy__sympy-15011 — OK | 71% | 16519ms | 586+183 tokens
+  [160/300] sympy__sympy-15345 — OK | 80% | 10255ms | 534+154 tokens
+  [161/300] sympy__sympy-14817 — OK | 75% | 20343ms | 913+246 tokens
+  [162/300] sympy__sympy-14396 — OK | 86% | 22523ms | 1126+274 tokens
+  [163/300] sympy__sympy-15678 — OK | 100% | 19113ms | 554+285 tokens
+  [164/300] sympy__sympy-15308 — OK | 100% | 25823ms | 405+318 tokens
+  [165/300] sympy__sympy-16106 — OK | 100% | 15254ms | 1329+226 tokens
+  [166/300] sympy__sympy-16988 — OK | 100% | 10517ms | 351+142 tokens
+  [167/300] sympy__sympy-16503 — OK | 57% | 14328ms | 1013+204 tokens
+  [168/300] sympy__sympy-17139 — OK | 100% | 12546ms | 930+179 tokens
+  [169/300] sympy__sympy-15609 — OK | 100% | 22266ms | 539+350 tokens
+  [170/300] sympy__sympy-18057 — OK | 100% | 9460ms | 989+155 tokens
+  [171/300] sympy__sympy-16792 — OK | 57% | 24266ms | 736+311 tokens
+  [172/300] sympy__sympy-17655 — OK | 100% | 16411ms | 814+181 tokens
+  [173/300] sympy__sympy-18087 — OK | 57% | 15875ms | 1330+179 tokens
+  [174/300] sympy__sympy-18199 — OK | 86% | 15361ms | 360+175 tokens
+  [175/300] sympy__sympy-17022 — OK | 86% | 27420ms | 568+335 tokens
+  [176/300] sympy__sympy-17630 — OK | 50% | 21741ms | 1364+243 tokens
+  [177/300] sympy__sympy-18189 — OK | 100% | 19201ms | 1258+214 tokens
+  [178/300] sympy__sympy-18621 — OK | 100% | 19049ms | 1159+190 tokens
+  [179/300] sympy__sympy-18698 — OK | 86% | 18017ms | 2179+253 tokens
+  [180/300] sympy__sympy-20154 — OK | 100% | 12067ms | 364+176 tokens
+  [181/300] sympy__sympy-18835 — OK | 57% | 20269ms | 887+277 tokens
+  [182/300] sympy__sympy-20212 — OK | 100% | 10267ms | 372+150 tokens
+  [183/300] sympy__sympy-18532 — OK | 100% | 32210ms | 1128+388 tokens
+  [184/300] sympy__sympy-19487 — OK | 100% | 23212ms | 2491+341 tokens
+  [185/300] sympy__sympy-20590 — OK | 67% | 8229ms | 760+126 tokens
+  [186/300] sympy__sympy-20442 — OK | 100% | 15086ms | 2280+219 tokens
+  [187/300] sympy__sympy-19254 — OK | 100% | 35068ms | 403+508 tokens
+  [188/300] sympy__sympy-21171 — OK | 100% | 15265ms | 3112+206 tokens
+  [189/300] sympy__sympy-21055 — OK | 86% | 19260ms | 488+282 tokens
+  [190/300] sympy__sympy-20049 — OK | 86% | 39798ms | 1099+588 tokens
+  [191/300] sympy__sympy-20639 — OK | 57% | 22584ms | 760+333 tokens
+  [192/300] sympy__sympy-21612 — OK | 100% | 12149ms | 1070+174 tokens
+  [193/300] sympy__sympy-21614 — OK | 100% | 12757ms | 509+165 tokens
+  [194/300] sympy__sympy-19007 — OK | 86% | 47501ms | 644+667 tokens
+  [195/300] sympy__sympy-21379 — OK | 100% | 25509ms | 4182+328 tokens
+  [196/300] sympy__sympy-20322 — OK | 86% | 38377ms | 4482+499 tokens
+  [197/300] sympy__sympy-22714 — OK | 100% | 13499ms | 740+166 tokens
+  [198/300] sympy__sympy-22005 — OK | 67% | 14091ms | 1093+177 tokens
+  [199/300] sympy__sympy-23191 — FAIL | 29% | 12586ms | 1236+182 tokens
+  [200/300] sympy__sympy-21627 — OK | 100% | 21141ms | 750+298 tokens
+  [201/300] sympy__sympy-21847 — OK | 100% | 28428ms | 926+309 tokens
+  [202/300] sympy__sympy-23117 — OK | 100% | 28410ms | 720+325 tokens
+[2m2026-03-26T04:27:29.025798Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0msphinx-doc__sphinx-10325
+  [203/300] sphinx-doc__sphinx-10325 — FAIL | N/A | 300002ms | 0+0 tokens
+[2m2026-03-26T04:27:31.983609Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0msphinx-doc__sphinx-10451
+  [204/300] sphinx-doc__sphinx-10451 — FAIL | N/A | 300002ms | 0+0 tokens
+  [205/300] sympy__sympy-24213 — OK | 100% | 26688ms | 535+195 tokens
+  [206/300] sympy__sympy-24066 — OK | 80% | 42953ms | 406+340 tokens
+  [207/300] django__django-11564 — OK | 100% | 30083ms | 4803+161 tokens
+  [208/300] sympy__sympy-24152 — OK | 86% | 43367ms | 878+274 tokens
+  [209/300] sympy__sympy-23262 — OK | 75% | 51976ms | 958+374 tokens
+  [210/300] sympy__sympy-24909 — OK | 86% | 60090ms | 994+249 tokens
+  [211/300] django__django-14997 — OK | 100% | 50124ms | 5393+176 tokens
+  [212/300] django__django-11583 — OK | 100% | 69795ms | 11583+261 tokens
+  [213/300] django__django-14752 — OK | 86% | 45347ms | 2522+154 tokens
+[2m2026-03-26T04:28:34.369783Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0msympy__sympy-11400
+  [214/300] sympy__sympy-11400 — FAIL | N/A | 300001ms | 0+0 tokens
+  [215/300] django__django-11620 — OK | 100% | 75386ms | 10212+276 tokens
+  [216/300] django__django-11630 — OK | 100% | 76427ms | 3855+284 tokens
+  [217/300] django__django-14672 — OK | 100% | 65535ms | 10513+241 tokens
+  [218/300] django__django-14787 — OK | 100% | 60193ms | 3401+204 tokens
+  [219/300] django__django-14855 — OK | 100% | 47820ms | 7892+189 tokens
+  [220/300] sympy__sympy-24102 — OK | 100% | 117278ms | 697+560 tokens
+  [221/300] django__django-14730 — OK | 100% | 77109ms | 29069+302 tokens
+  [222/300] django__django-11797 — OK | 100% | 44524ms | 12058+186 tokens
+  [223/300] django__django-14915 — OK | 100% | 55956ms | 23195+211 tokens
+  [224/300] astropy__astropy-14365 — OK | 75% | 57396ms | 10172+203 tokens
+[2m2026-03-26T04:29:28.209522Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0msympy__sympy-12236
+  [225/300] sympy__sympy-12236 — FAIL | N/A | 300002ms | 0+0 tokens
+  [226/300] django__django-13321 — OK | 100% | 61672ms | 13561+232 tokens
+  [227/300] django__django-13033 — OK | 100% | 69176ms | 33233+165 tokens
+  [228/300] django__django-11815 — OK | 100% | 92559ms | 6870+347 tokens
+[2m2026-03-26T04:30:05.281287Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0msympy__sympy-13915
+  [229/300] sympy__sympy-13915 — FAIL | N/A | 300020ms | 0+0 tokens
+  [230/300] django__django-11848 — OK | 100% | 107553ms | 6886+447 tokens
+  [231/300] django__django-15213 — OK | 71% | 95205ms | 38163+302 tokens
+[2m2026-03-26T04:30:24.628737Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0msympy__sympy-15346
+  [232/300] sympy__sympy-15346 — FAIL | N/A | 300002ms | 0+0 tokens
+[2m2026-03-26T04:30:28.009903Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0msympy__sympy-16281
+  [233/300] sympy__sympy-16281 — FAIL | N/A | 300001ms | 0+0 tokens
+  [234/300] django__django-13158 — OK | 100% | 96977ms | 41737+137 tokens
+  [235/300] django__django-15320 — OK | 100% | 113378ms | 29401+192 tokens
+  [236/300] django__django-15061 — OK | 100% | 108789ms | 16764+140 tokens
+  [237/300] django__django-13230 — OK | 100% | 105331ms | 3578+170 tokens
+  [238/300] django__django-13220 — OK | 86% | 123180ms | 3318+196 tokens
+  [239/300] django__django-14999 — OK | 57% | 160131ms | 16681+434 tokens
+  [240/300] django__django-15252 — OK | 100% | 150242ms | 8459+244 tokens
+[2m2026-03-26T04:31:36.701122Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0msympy__sympy-22840
+  [241/300] sympy__sympy-22840 — FAIL | N/A | 300001ms | 0+0 tokens
+  [242/300] django__django-13768 — OK | 86% | 96991ms | 7414+152 tokens
+  [243/300] django__django-15202 — OK | 100% | 148738ms | 9634+273 tokens
+  [244/300] django__django-15347 — OK | 100% | 112845ms | 3793+196 tokens
+  [245/300] django__django-13551 — OK | 71% | 104381ms | 2113+194 tokens
+  [246/300] django__django-14017 — OK | 100% | 128870ms | 8292+230 tokens
+  [247/300] django__django-13401 — OK | 100% | 97959ms | 38107+143 tokens
+  [248/300] django__django-13757 — OK | 100% | 139254ms | 10831+328 tokens
+  [249/300] django__django-13925 — OK | 100% | 124576ms | 35540+292 tokens
+  [250/300] django__django-13265 — OK | 57% | 132811ms | 28132+215 tokens
+  [251/300] django__django-13933 — OK | 83% | 125676ms | 23310+192 tokens
+  [252/300] django__django-13447 — OK | 100% | 115671ms | 8591+164 tokens
+  [253/300] django__django-14411 — OK | 100% | 88096ms | 7989+129 tokens
+  [254/300] django__django-13964 — OK | 100% | 109448ms | 34666+171 tokens
+  [255/300] django__django-14534 — OK | 100% | 83554ms | 5693+148 tokens
+  [256/300] django__django-14016 — OK | 100% | 109126ms | 7865+189 tokens
+  [257/300] django__django-14580 — OK | 100% | 103633ms | 6477+181 tokens
+  [258/300] django__django-14608 — OK | 100% | 107820ms | 8216+238 tokens
+  [259/300] django__django-14238 — OK | 100% | 109079ms | 38582+148 tokens
+  [260/300] django__django-14155 — OK | 100% | 130442ms | 11472+295 tokens
+  [261/300] django__django-13315 — OK | 100% | 161645ms | 24526+404 tokens
+  [262/300] django__django-13448 — OK | 100% | 160864ms | 7957+327 tokens
+  [263/300] django__django-14382 — OK | 100% | 130269ms | 5908+171 tokens
+  [264/300] django__django-13658 — OK | 100% | 115624ms | 6727+166 tokens
+  [265/300] django__django-12708 — OK | 60% | 123928ms | 29214+186 tokens
+  [266/300] django__django-15790 — OK | 83% | 107876ms | 573+179 tokens
+  [267/300] django__django-13590 — OK | 100% | 106091ms | 41623+138 tokens
+  [268/300] django__django-15498 — OK | 100% | 98855ms | 1937+151 tokens
+  [269/300] django__django-12497 — OK | 100% | 137818ms | 29010+252 tokens
+  [270/300] django__django-12700 — OK | 100% | 117527ms | 10210+193 tokens
+  [271/300] django__django-11099 — OK | 100% | 117020ms | 774+284 tokens
+  [272/300] django__django-12589 — OK | 100% | 138073ms | 42448+322 tokens
+  [273/300] django__django-15781 — OK | 100% | 119988ms | 10587+234 tokens
+  [274/300] django__django-15789 — OK | 100% | 115361ms | 7785+232 tokens
+  [275/300] django__django-11049 — OK | 100% | 116896ms | 37990+217 tokens
+  [276/300] django__django-15851 — OK | 100% | 118983ms | 1262+161 tokens
+  [277/300] django__django-13660 — OK | 100% | 128899ms | 4539+261 tokens
+  [278/300] django__django-15996 — OK | 100% | 119134ms | 5951+238 tokens
+  [279/300] django__django-12284 — OK | 100% | 118568ms | 39060+227 tokens
+  [280/300] django__django-15902 — OK | 100% | 119448ms | 8280+146 tokens
+  [281/300] django__django-15814 — OK | 100% | 124506ms | 42531+177 tokens
+  [282/300] django__django-12113 — OK | 100% | 124009ms | 4048+186 tokens
+  [283/300] django__django-12125 — OK | 100% | 122640ms | 6929+175 tokens
+  [284/300] django__django-11133 — OK | 100% | 110520ms | 10578+166 tokens
+  [285/300] django__django-12184 — OK | 100% | 109910ms | 11706+205 tokens
+  [286/300] django__django-12308 — OK | 100% | 97110ms | 8758+205 tokens
+  [287/300] django__django-11179 — OK | 100% | 90532ms | 8001+152 tokens
+  [288/300] django__django-12747 — OK | 100% | 78897ms | 7930+161 tokens
+  [289/300] django__django-12286 — OK | 100% | 81267ms | 1367+177 tokens
+  [290/300] django__django-15819 — OK | 100% | 136413ms | 6048+440 tokens
+  [291/300] django__django-12908 — OK | 100% | 83890ms | 41703+187 tokens
+  [292/300] django__django-12915 — OK | 86% | 84655ms | 2022+215 tokens
+  [293/300] django__django-11964 — OK | 83% | 80902ms | 1957+179 tokens
+  [294/300] django__django-16041 — OK | 100% | 72562ms | 9207+213 tokens
+  [295/300] django__django-12856 — OK | 80% | 159918ms | 34523+699 tokens
+  [296/300] django__django-11905 — OK | 71% | 80641ms | 12445+283 tokens
+[2m2026-03-26T04:37:56.599030Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0mdjango__django-15695
+  [297/300] django__django-15695 — FAIL | N/A | 300004ms | 0+0 tokens
+  [298/300] django__django-11910 — OK | 100% | 112600ms | 27743+471 tokens
+[2m2026-03-26T04:38:26.982440Z[0m [31mERROR[0m [2mselfware::bench_harness::runner[0m[2m:[0m Request failed: error sending request for url (http://localhost:8000/v1/chat/completions) [3mtask_id[0m[2m=[0mdjango__django-15738
+  [299/300] django__django-15738 — FAIL | N/A | 300004ms | 0+0 tokens
+  [300/300] django__django-12453 — OK | 100% | 204342ms | 6971+2561 tokens
+[2m2026-03-26T04:39:07.864753Z[0m [32m INFO[0m [2mselfware::bench_harness::runner[0m[2m:[0m Benchmark complete: 2285.4s | 267/300 passed | 31 tok/s
+
+======================================================================
+SWE-BENCH TWO-PHASE RESULTS
+======================================================================
+Tasks:       267/300 generated patches (quality >= 30%)
+Avg score:   90.5%
+Throughput:  31 tok/s
+Duration:    2285.4s
+======================================================================
+
+Instance                                       Score   Tokens    Latency
+---------------------------------------------------------------------------
++ astropy__astropy-12907                        100%      350    131.2s
++ astropy__astropy-14182                         86%      166     74.4s
++ astropy__astropy-14365                         75%      203     57.4s
++ astropy__astropy-14995                        100%      227    111.8s
++ astropy__astropy-6938                         100%      203     58.4s
++ astropy__astropy-7746                         100%      162     66.0s
++ django__django-10914                          100%      184     90.6s
++ django__django-10924                          100%      174    132.1s
++ django__django-11001                          100%      337    197.6s
++ django__django-11019                           71%      219    159.2s
++ django__django-11039                          100%      209    121.6s
++ django__django-11049                          100%      217    116.9s
++ django__django-11099                          100%      284    117.0s
++ django__django-11133                          100%      166    110.5s
++ django__django-11179                          100%      152     90.5s
++ django__django-11283                           86%      305    125.5s
++ django__django-11422                           86%      196    104.8s
++ django__django-11564                          100%      161     30.1s
++ django__django-11583                          100%      261     69.8s
++ django__django-11620                          100%      276     75.4s
++ django__django-11630                          100%      284     76.4s
+- django__django-11742                           ERR        0    300.0s
++ django__django-11797                          100%      186     44.5s
++ django__django-11815                          100%      347     92.6s
++ django__django-11848                          100%      447    107.6s
++ django__django-11905                           71%      283     80.6s
++ django__django-11910                          100%      471    112.6s
++ django__django-11964                           83%      179     80.9s
++ django__django-11999                          100%      384    181.6s
++ django__django-12113                          100%      186    124.0s
++ django__django-12125                          100%      175    122.6s
++ django__django-12184                          100%      205    109.9s
++ django__django-12284                          100%      227    118.6s
++ django__django-12286                          100%      177     81.3s
++ django__django-12308                          100%      205     97.1s
++ django__django-12453                          100%     2561    204.3s
++ django__django-12470                           80%      143     83.3s
++ django__django-12497                          100%      252    137.8s
++ django__django-12589                          100%      322    138.1s
++ django__django-12700                          100%      193    117.5s
++ django__django-12708                           60%      186    123.9s
++ django__django-12747                          100%      161     78.9s
++ django__django-12856                           80%      699    159.9s
++ django__django-12908                          100%      187     83.9s
++ django__django-12915                           86%      215     84.7s
++ django__django-12983                           57%      161     71.0s
++ django__django-13028                          100%      186    154.9s
++ django__django-13033                          100%      165     69.2s
++ django__django-13158                          100%      137     97.0s
++ django__django-13220                           86%      196    123.2s
++ django__django-13230                          100%      170    105.3s
++ django__django-13265                           57%      215    132.8s
++ django__django-13315                          100%      404    161.6s
++ django__django-13321                          100%      232     61.7s
++ django__django-13401                          100%      143     98.0s
++ django__django-13447                          100%      164    115.7s
++ django__django-13448                          100%      327    160.9s
++ django__django-13551                           71%      194    104.4s
++ django__django-13590                          100%      138    106.1s
++ django__django-13658                          100%      166    115.6s
++ django__django-13660                          100%      261    128.9s
++ django__django-13710                          100%      277    137.6s
++ django__django-13757                          100%      328    139.3s
++ django__django-13768                           86%      152     97.0s
++ django__django-13925                          100%      292    124.6s
++ django__django-13933                           83%      192    125.7s
++ django__django-13964                          100%      171    109.4s
++ django__django-14016                          100%      189    109.1s
++ django__django-14017                          100%      230    128.9s
++ django__django-14155                          100%      295    130.4s
++ django__django-14238                          100%      148    109.1s
++ django__django-14382                          100%      171    130.3s
++ django__django-14411                          100%      129     88.1s
++ django__django-14534                          100%      148     83.6s
++ django__django-14580                          100%      181    103.6s
++ django__django-14608                          100%      238    107.8s
++ django__django-14667                          100%      294    216.7s
++ django__django-14672                          100%      241     65.5s
++ django__django-14730                          100%      302     77.1s
++ django__django-14752                           86%      154     45.3s
++ django__django-14787                          100%      204     60.2s
++ django__django-14855                          100%      189     47.8s
++ django__django-14915                          100%      211     56.0s
++ django__django-14997                          100%      176     50.1s
++ django__django-14999                           57%      434    160.1s
++ django__django-15061                          100%      140    108.8s
++ django__django-15202                          100%      273    148.7s
++ django__django-15213                           71%      302     95.2s
++ django__django-15252                          100%      244    150.2s
++ django__django-15320                          100%      192    113.4s
++ django__django-15347                          100%      196    112.8s
++ django__django-15388                          100%      212     94.9s
++ django__django-15400                          100%      151     74.4s
++ django__django-15498                          100%      151     98.9s
+- django__django-15695                           ERR        0    300.0s
+- django__django-15738                           ERR        0    300.0s
++ django__django-15781                          100%      234    120.0s
++ django__django-15789                          100%      232    115.4s
++ django__django-15790                           83%      179    107.9s
++ django__django-15814                          100%      177    124.5s
++ django__django-15819                          100%      440    136.4s
++ django__django-15851                          100%      161    119.0s
++ django__django-15902                          100%      146    119.4s
++ django__django-15996                          100%      238    119.1s
++ django__django-16041                          100%      213     72.6s
++ django__django-16046                          100%      199    168.3s
++ django__django-16139                          100%      436    202.8s
++ django__django-16229                          100%      226    162.0s
++ django__django-16255                          100%      206    152.2s
++ django__django-16379                          100%      223    152.1s
++ django__django-16400                          100%      292    146.4s
++ django__django-16408                          100%      421    189.2s
++ django__django-16527                          100%      228    142.8s
++ django__django-16595                          100%      255    149.5s
+- django__django-16816                           ERR        0    300.0s
+- django__django-16820                           ERR        0    300.0s
++ django__django-16873                          100%      227    131.4s
++ django__django-16910                           86%      200    139.4s
++ django__django-17051                           71%      163    115.8s
++ django__django-17087                          100%      210    137.1s
++ matplotlib__matplotlib-18869                  100%      159    135.6s
++ matplotlib__matplotlib-22711                   86%      486    190.6s
++ matplotlib__matplotlib-22835                   57%      135    149.1s
++ matplotlib__matplotlib-23299                  100%      166    158.6s
++ matplotlib__matplotlib-23314                  100%      182    223.1s
++ matplotlib__matplotlib-23476                  100%      174    237.7s
++ matplotlib__matplotlib-23562                  100%      332    267.8s
++ matplotlib__matplotlib-23563                  100%      255    282.3s
++ matplotlib__matplotlib-23913                   86%      137    249.8s
++ matplotlib__matplotlib-23964                  100%      223    259.1s
++ matplotlib__matplotlib-23987                   80%      171    290.6s
+- matplotlib__matplotlib-24149                   ERR        0    300.0s
+- matplotlib__matplotlib-24265                   ERR        0    300.0s
+- matplotlib__matplotlib-24334                   ERR        0    300.0s
+- matplotlib__matplotlib-24970                   ERR        0    300.0s
+- matplotlib__matplotlib-25079                   ERR        0    300.0s
+- matplotlib__matplotlib-25311                   ERR        0    300.0s
+- matplotlib__matplotlib-25332                   ERR        0    300.0s
+- matplotlib__matplotlib-25433                   ERR        0    300.0s
+- matplotlib__matplotlib-25442                   ERR        0    300.0s
+- matplotlib__matplotlib-25498                   ERR        0    300.0s
+- matplotlib__matplotlib-26011                   ERR        0    300.0s
+- matplotlib__matplotlib-26020                   ERR        0    300.0s
+- mwaskom__seaborn-2848                          ERR        0    300.0s
+- mwaskom__seaborn-3010                          ERR        0    300.0s
+- mwaskom__seaborn-3190                          ERR        0    300.0s
++ mwaskom__seaborn-3407                         100%      144    238.3s
++ pallets__flask-4045                            71%      200    250.5s
++ pallets__flask-4992                            86%      185    243.1s
++ pallets__flask-5063                            57%      385    241.1s
++ psf__requests-1963                            100%      146    182.6s
++ psf__requests-2148                            100%      205    191.7s
++ psf__requests-2317                            100%      220    181.6s
++ psf__requests-2674                            100%      232    161.9s
++ psf__requests-3362                             57%      147    130.0s
++ psf__requests-863                             100%      208    124.7s
++ pydata__xarray-3364                            50%      167    102.3s
++ pydata__xarray-4094                           100%      197    111.9s
++ pydata__xarray-4248                           100%      260    123.0s
++ pydata__xarray-4493                            71%      256    154.1s
++ pydata__xarray-5131                           100%      177    110.0s
++ pylint-dev__pylint-5859                       100%      178    110.4s
++ pylint-dev__pylint-6506                       100%      271    154.9s
++ pylint-dev__pylint-7080                       100%      175    112.2s
++ pylint-dev__pylint-7114                       100%      165     98.9s
++ pylint-dev__pylint-7228                       100%      177     95.9s
++ pylint-dev__pylint-7993                       100%      183     99.3s
++ pytest-dev__pytest-11143                      100%      330    155.8s
++ pytest-dev__pytest-11148                      100%      349    158.1s
++ pytest-dev__pytest-5103                       100%      492    214.3s
++ pytest-dev__pytest-5221                        57%      113    130.6s
++ pytest-dev__pytest-5227                       100%      189    137.0s
++ pytest-dev__pytest-5413                       100%      193    141.2s
++ pytest-dev__pytest-5495                        71%      558    223.5s
++ pytest-dev__pytest-5692                        83%      330    130.3s
+- pytest-dev__pytest-6116                         0%      797    241.8s
++ pytest-dev__pytest-7168                       100%      299    124.2s
++ pytest-dev__pytest-7220                        71%      170     97.1s
++ pytest-dev__pytest-7373                       100%      276    132.0s
++ pytest-dev__pytest-7432                       100%      188    104.7s
++ pytest-dev__pytest-7490                       100%      191    105.2s
++ pytest-dev__pytest-8365                       100%      630    195.2s
++ pytest-dev__pytest-8906                       100%      285     97.2s
++ pytest-dev__pytest-9359                       100%      344    140.5s
++ scikit-learn__scikit-learn-10297               71%      362    111.2s
++ scikit-learn__scikit-learn-10508               86%      211     70.9s
++ scikit-learn__scikit-learn-10949               86%      334    107.6s
+- scikit-learn__scikit-learn-11040               ERR        0    300.0s
++ scikit-learn__scikit-learn-11281              100%      510    160.8s
+- scikit-learn__scikit-learn-12471               ERR        0    300.0s
++ scikit-learn__scikit-learn-13142              100%      380    128.4s
++ scikit-learn__scikit-learn-13241              100%      953    250.6s
++ scikit-learn__scikit-learn-13439              100%      171     86.1s
++ scikit-learn__scikit-learn-13496              100%      496    147.6s
++ scikit-learn__scikit-learn-13497               71%      212     75.4s
++ scikit-learn__scikit-learn-13584              100%      239     89.2s
++ scikit-learn__scikit-learn-13779              100%      187     73.6s
++ scikit-learn__scikit-learn-14087              100%      286     97.5s
++ scikit-learn__scikit-learn-14092               86%      365    104.1s
++ scikit-learn__scikit-learn-14894              100%      199     69.7s
++ scikit-learn__scikit-learn-14983               83%      172     76.9s
++ scikit-learn__scikit-learn-15512              100%      229     77.1s
++ scikit-learn__scikit-learn-15535              100%      236     75.4s
++ scikit-learn__scikit-learn-25500               71%      251     69.6s
++ scikit-learn__scikit-learn-25570              100%      320     89.6s
++ scikit-learn__scikit-learn-25638               57%      265     74.3s
++ scikit-learn__scikit-learn-25747              100%      231     65.7s
+- sphinx-doc__sphinx-10325                       ERR        0    300.0s
+- sphinx-doc__sphinx-10451                       ERR        0    300.0s
++ sphinx-doc__sphinx-11445                       50%      187     58.0s
++ sphinx-doc__sphinx-7686                        57%      181     50.1s
++ sphinx-doc__sphinx-7738                       100%      185     54.7s
++ sphinx-doc__sphinx-7975                        86%      200     62.3s
++ sphinx-doc__sphinx-8273                       100%      324     86.8s
++ sphinx-doc__sphinx-8282                        43%      939    150.6s
++ sphinx-doc__sphinx-8435                        67%      195     58.9s
++ sphinx-doc__sphinx-8474                       100%      250     81.4s
+- sphinx-doc__sphinx-8506                        29%      214     55.2s
++ sphinx-doc__sphinx-8595                        67%      220     69.8s
++ sphinx-doc__sphinx-8627                       100%      190     63.8s
++ sphinx-doc__sphinx-8713                       100%      345     68.7s
++ sphinx-doc__sphinx-8721                       100%      191     51.3s
++ sphinx-doc__sphinx-8801                        71%      204     33.7s
+- sympy__sympy-11400                             ERR        0    300.0s
++ sympy__sympy-11870                             86%      348     64.0s
++ sympy__sympy-11897                            100%      150     50.4s
++ sympy__sympy-12171                            100%      259     43.7s
+- sympy__sympy-12236                             ERR        0    300.0s
++ sympy__sympy-12419                             86%      471     43.9s
++ sympy__sympy-12454                            100%      254     21.7s
++ sympy__sympy-12481                             75%      271     27.7s
++ sympy__sympy-13031                             71%      407     32.1s
++ sympy__sympy-13043                             80%      163     15.1s
++ sympy__sympy-13146                             75%      197     18.2s
++ sympy__sympy-13177                            100%      151      9.9s
++ sympy__sympy-13437                             71%      208     18.3s
++ sympy__sympy-13471                             86%      201     18.0s
++ sympy__sympy-13480                            100%      183     17.3s
++ sympy__sympy-13647                            100%      219     14.1s
++ sympy__sympy-13773                             86%      222     18.7s
++ sympy__sympy-13895                             50%      221     19.2s
+- sympy__sympy-13915                             ERR        0    300.0s
++ sympy__sympy-13971                            100%      169     15.0s
++ sympy__sympy-14024                             75%      201     17.7s
++ sympy__sympy-14308                             43%      180     16.4s
++ sympy__sympy-14317                             86%      189     16.7s
++ sympy__sympy-14396                             86%      274     22.5s
++ sympy__sympy-14774                            100%      210     18.3s
++ sympy__sympy-14817                             75%      246     20.3s
++ sympy__sympy-15011                             71%      183     16.5s
++ sympy__sympy-15308                            100%      318     25.8s
++ sympy__sympy-15345                             80%      154     10.3s
+- sympy__sympy-15346                             ERR        0    300.0s
++ sympy__sympy-15609                            100%      350     22.3s
++ sympy__sympy-15678                            100%      285     19.1s
++ sympy__sympy-16106                            100%      226     15.3s
+- sympy__sympy-16281                             ERR        0    300.0s
++ sympy__sympy-16503                             57%      204     14.3s
++ sympy__sympy-16792                             57%      311     24.3s
++ sympy__sympy-16988                            100%      142     10.5s
++ sympy__sympy-17022                             86%      335     27.4s
++ sympy__sympy-17139                            100%      179     12.5s
++ sympy__sympy-17630                             50%      243     21.7s
++ sympy__sympy-17655                            100%      181     16.4s
++ sympy__sympy-18057                            100%      155      9.5s
++ sympy__sympy-18087                             57%      179     15.9s
++ sympy__sympy-18189                            100%      214     19.2s
++ sympy__sympy-18199                             86%      175     15.4s
++ sympy__sympy-18532                            100%      388     32.2s
++ sympy__sympy-18621                            100%      190     19.0s
++ sympy__sympy-18698                             86%      253     18.0s
++ sympy__sympy-18835                             57%      277     20.3s
++ sympy__sympy-19007                             86%      667     47.5s
++ sympy__sympy-19254                            100%      508     35.1s
++ sympy__sympy-19487                            100%      341     23.2s
++ sympy__sympy-20049                             86%      588     39.8s
++ sympy__sympy-20154                            100%      176     12.1s
++ sympy__sympy-20212                            100%      150     10.3s
++ sympy__sympy-20322                             86%      499     38.4s
++ sympy__sympy-20442                            100%      219     15.1s
++ sympy__sympy-20590                             67%      126      8.2s
++ sympy__sympy-20639                             57%      333     22.6s
++ sympy__sympy-21055                             86%      282     19.3s
++ sympy__sympy-21171                            100%      206     15.3s
++ sympy__sympy-21379                            100%      328     25.5s
++ sympy__sympy-21612                            100%      174     12.1s
++ sympy__sympy-21614                            100%      165     12.8s
++ sympy__sympy-21627                            100%      298     21.1s
++ sympy__sympy-21847                            100%      309     28.4s
++ sympy__sympy-22005                             67%      177     14.1s
++ sympy__sympy-22714                            100%      166     13.5s
+- sympy__sympy-22840                             ERR        0    300.0s
++ sympy__sympy-23117                            100%      325     28.4s
+- sympy__sympy-23191                             29%      182     12.6s
++ sympy__sympy-23262                             75%      374     52.0s
++ sympy__sympy-24066                             80%      340     43.0s
++ sympy__sympy-24102                            100%      560    117.3s
++ sympy__sympy-24152                             86%      274     43.4s
++ sympy__sympy-24213                            100%      195     26.7s
++ sympy__sympy-24909                             86%      249     60.1s
+
+Reports saved to bench_results/swebench/two_phase/
+
+--- Sample generated patches ---
+
+  [astropy__astropy-12907]:
+    ```diff
+    diff --git a/astropy/modeling/separable.py b/astropy/modeling/separable.py
+    index 8c4c0e6..7e5f5a5 100644
+    --- a/astropy/modeling/separable.py
+    +++ b/astropy/modeling/separable.py
+    @@ -233,14 +233,14 @@ def _cstack(left, right):
+     
+         if isinstance(left, Model):
+             cleft = _coord_matrix(left, "left", noutp)
+    -    else:
+    -        cleft = np.zeros((noutp, left.shape[1]))
+    -        cleft[: left.shape[0], : left.shape[1]] = left
+    -    if isinstance(right, Model):
+    +    elif isinstance(left, np.ndarray):
+    +        cleft = np.zeros((noutp, left.shape[1]))
+    ... (12 more lines)
+
+  [astropy__astropy-14182]:
+    ```diff
+    diff --git a/astropy/io/ascii/rst.py b/astropy/io/ascii/rst.py
+    index 123456..abcdef 100644
+    --- a/astropy/io/ascii/rst.py
+    +++ b/astropy/io/ascii/rst.py
+    @@ -72,7 +72,7 @@ class RST(FixedWidth):
+         data_class = SimpleRSTData
+         header_class = SimpleRSTHeader
+     
+    -    def __init__(self, header_rows=None):
+    +    def __init__(self, *args, **kwargs):
+             super().__init__(delimiter_pad=None, bookend=False, header_rows=header_rows)
+     
+         def write(self, lines):
+    ```
+
+  [astropy__astropy-14365]:
+    ```diff
+    diff --git a/astropy/io/ascii/qdp.py b/astropy/io/ascii/qdp.py
+    index 7c3a8e8..f5e3b2a 100644
+    --- a/astropy/io/ascii/qdp.py
+    +++ b/astropy/io/ascii/qdp.py
+    @@ -63,7 +63,7 @@ def _line_type(line, delimiter=None):
+         ValueError: Unrecognized QDP line...
+         """
+         _decimal_re = r"[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?"
+    -    _command_re = r"READ [TS]ERR(\s+[0-9]+)+"
+    +    _command_re = r"READ\s+[TS]ERR(\s+[0-9]+)+"
+     
+         sep = delimiter
+         if delimiter is None:
+    ```
