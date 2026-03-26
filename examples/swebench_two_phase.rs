@@ -52,8 +52,12 @@ fn extract_change_line_numbers(patch: &str) -> std::collections::HashMap<String,
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 3 {
                 if let Some(old) = parts[1].strip_prefix('-') {
-                    if let Some(start) = old.split(',').next().and_then(|s| s.parse::<usize>().ok()) {
-                        result.entry(current_file.clone()).or_insert_with(Vec::new).push(start);
+                    if let Some(start) = old.split(',').next().and_then(|s| s.parse::<usize>().ok())
+                    {
+                        result
+                            .entry(current_file.clone())
+                            .or_insert_with(Vec::new)
+                            .push(start);
                     }
                 }
             }
@@ -102,7 +106,11 @@ fn extract_diff_files(patch: &str) -> Vec<String> {
     patch
         .lines()
         .filter(|l| l.starts_with("diff --git"))
-        .filter_map(|l| l.split_whitespace().nth(3).map(|p| p.trim_start_matches("b/").to_string()))
+        .filter_map(|l| {
+            l.split_whitespace()
+                .nth(3)
+                .map(|p| p.trim_start_matches("b/").to_string())
+        })
         .collect()
 }
 
@@ -111,7 +119,12 @@ async fn read_repo_files(task: &SWETask, work_dir: &Path) -> Result<Vec<(String,
     // Clone if not already there
     if !work_dir.exists() {
         let output = tokio::process::Command::new("git")
-            .args(["clone", "--depth=1", &format!("https://github.com/{}.git", task.repo), work_dir.to_str().unwrap()])
+            .args([
+                "clone",
+                "--depth=1",
+                &format!("https://github.com/{}.git", task.repo),
+                work_dir.to_str().unwrap(),
+            ])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .output()
@@ -120,7 +133,11 @@ async fn read_repo_files(task: &SWETask, work_dir: &Path) -> Result<Vec<(String,
         if !output.status.success() {
             // Try full clone for specific commits
             let _ = tokio::process::Command::new("git")
-                .args(["clone", &format!("https://github.com/{}.git", task.repo), work_dir.to_str().unwrap()])
+                .args([
+                    "clone",
+                    &format!("https://github.com/{}.git", task.repo),
+                    work_dir.to_str().unwrap(),
+                ])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .output()
@@ -158,9 +175,14 @@ async fn read_repo_files(task: &SWETask, work_dir: &Path) -> Result<Vec<(String,
                 } else {
                     // Fallback: first 300 lines
                     let lines: Vec<&str> = content.lines().take(300).collect();
-                    contents.push((file.clone(), format!(
-                        "{}\n... [truncated, {} total lines]", lines.join("\n"), total_lines
-                    )));
+                    contents.push((
+                        file.clone(),
+                        format!(
+                            "{}\n... [truncated, {} total lines]",
+                            lines.join("\n"),
+                            total_lines
+                        ),
+                    ));
                 }
             }
             Err(e) => {
@@ -235,17 +257,19 @@ async fn main() -> Result<()> {
 
     let endpoint = std::env::var("SELFWARE_ENDPOINT")
         .unwrap_or_else(|_| "http://localhost:8000/v1".to_string());
-    let model = std::env::var("SELFWARE_MODEL")
-        .unwrap_or_else(|_| "qwen3.5-27b".to_string());
+    let model = std::env::var("SELFWARE_MODEL").unwrap_or_else(|_| "qwen3.5-27b".to_string());
     let concurrent: usize = std::env::var("SELFWARE_CONCURRENT")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(16);
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(16);
     let limit: usize = std::env::args()
         .skip_while(|a| a != "--limit")
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(20);
 
-    let task_file = std::env::args().nth(1)
+    let task_file = std::env::args()
+        .nth(1)
         .unwrap_or_else(|| "bench_results/swebench_lite_20.json".to_string());
 
     let content = std::fs::read_to_string(&task_file)?;
@@ -316,10 +340,7 @@ async fn main() -> Result<()> {
             BenchTask {
                 id: task.instance_id.clone(),
                 description: format!("{}: {}", task.repo, task.instance_id),
-                messages: vec![
-                    Message::system(system),
-                    Message::user(user),
-                ],
+                messages: vec![Message::system(system), Message::user(user)],
                 evaluator: Box::new(PatchEvaluator {
                     gold_files,
                     gold_patch: task.patch.clone(),
@@ -332,7 +353,10 @@ async fn main() -> Result<()> {
 
     eprintln!(
         "\nPhase 2: {}/{} patches generated, {:.0}% avg quality, {:.0} tok/s",
-        report.tasks_passed, report.tasks_total, report.avg_score * 100.0, report.tokens_per_sec,
+        report.tasks_passed,
+        report.tasks_total,
+        report.avg_score * 100.0,
+        report.tokens_per_sec,
     );
 
     // ---- Phase 3: Fuzzy apply + multi-turn retry ----
@@ -377,7 +401,11 @@ async fn main() -> Result<()> {
             .output();
 
         let apply_result = std::process::Command::new("python3")
-            .args(["scripts/fuzzy_apply.py", repo_dir.to_str().unwrap(), patch_file.to_str().unwrap()])
+            .args([
+                "scripts/fuzzy_apply.py",
+                repo_dir.to_str().unwrap(),
+                patch_file.to_str().unwrap(),
+            ])
             .output();
 
         let apply_ok = apply_result
@@ -393,7 +421,13 @@ async fn main() -> Result<()> {
 
         if apply_ok {
             applied += 1;
-            eprint!("  [{}/{}] {} — APPLIED ({})\r", i + 1, report.results.len(), result.task_id, strategy.trim());
+            eprint!(
+                "  [{}/{}] {} — APPLIED ({})\r",
+                i + 1,
+                report.results.len(),
+                result.task_id,
+                strategy.trim()
+            );
             final_patches.push((result.task_id.clone(), patch));
         } else {
             // ---- Multi-turn retry: send error back to LLM ----
@@ -444,13 +478,26 @@ async fn main() -> Result<()> {
                         if !retry_patch.is_empty() {
                             std::fs::write(&patch_file, &retry_patch)?;
                             let retry_apply = std::process::Command::new("python3")
-                                .args(["scripts/fuzzy_apply.py", repo_dir.to_str().unwrap(), patch_file.to_str().unwrap()])
+                                .args([
+                                    "scripts/fuzzy_apply.py",
+                                    repo_dir.to_str().unwrap(),
+                                    patch_file.to_str().unwrap(),
+                                ])
                                 .output();
 
-                            if retry_apply.as_ref().map(|r| r.status.success()).unwrap_or(false) {
+                            if retry_apply
+                                .as_ref()
+                                .map(|r| r.status.success())
+                                .unwrap_or(false)
+                            {
                                 retry_success += 1;
                                 applied += 1;
-                                eprint!("  [{}/{}] {} — RETRY OK\r", i + 1, report.results.len(), result.task_id);
+                                eprint!(
+                                    "  [{}/{}] {} — RETRY OK\r",
+                                    i + 1,
+                                    report.results.len(),
+                                    result.task_id
+                                );
                                 final_patches.push((result.task_id.clone(), retry_patch));
                             } else {
                                 // Reset on failure
@@ -479,8 +526,15 @@ async fn main() -> Result<()> {
     eprintln!("\n{}", "=".repeat(70));
     eprintln!("SWE-BENCH TWO-PHASE RESULTS (with fuzzy apply + retry)");
     eprintln!("{}", "=".repeat(70));
-    eprintln!("Patches generated: {}/{}", report.tasks_passed, report.tasks_total);
-    eprintln!("Patches applied:   {applied}/{} ({:.0}%)", report.results.len(), applied as f64 / report.results.len().max(1) as f64 * 100.0);
+    eprintln!(
+        "Patches generated: {}/{}",
+        report.tasks_passed, report.tasks_total
+    );
+    eprintln!(
+        "Patches applied:   {applied}/{} ({:.0}%)",
+        report.results.len(),
+        applied as f64 / report.results.len().max(1) as f64 * 100.0
+    );
     eprintln!("Retry successes:   {retry_success}/{retried}");
     eprintln!("Avg heuristic:     {:.1}%", report.avg_score * 100.0);
     eprintln!("Throughput:        {:.0} tok/s", report.tokens_per_sec);
@@ -549,14 +603,17 @@ impl TaskEvaluator for PatchEvaluator {
     fn evaluate(&self, response: &str) -> EvalResult {
         let mut details = Vec::new();
 
-        let has_diff = response.contains("diff --git")
-            || response.contains("---")
-            || response.contains("@@");
+        let has_diff =
+            response.contains("diff --git") || response.contains("---") || response.contains("@@");
         details.push(EvalDetail {
             criterion: "contains_patch".into(),
             score: if has_diff { 1.0 } else { 0.0 },
             passed: has_diff,
-            message: if has_diff { "Has patch".into() } else { "No patch".into() },
+            message: if has_diff {
+                "Has patch".into()
+            } else {
+                "No patch".into()
+            },
         });
 
         for file in &self.gold_files {
@@ -566,11 +623,17 @@ impl TaskEvaluator for PatchEvaluator {
                 criterion: format!("file:{short}"),
                 score: if found { 1.0 } else { 0.0 },
                 passed: found,
-                message: if found { format!("Targets {file}") } else { format!("Missing {file}") },
+                message: if found {
+                    format!("Targets {file}")
+                } else {
+                    format!("Missing {file}")
+                },
             });
         }
 
-        let gold_lines: Vec<&str> = self.gold_patch.lines()
+        let gold_lines: Vec<&str> = self
+            .gold_patch
+            .lines()
             .filter(|l| l.starts_with('+') && !l.starts_with("+++"))
             .map(|l| l.trim_start_matches('+').trim())
             .filter(|l| l.len() > 10)
@@ -583,21 +646,32 @@ impl TaskEvaluator for PatchEvaluator {
                 .filter(|t| t.len() > 3)
                 .take(3)
                 .collect();
-            let found = key_tokens.iter()
-                .filter(|t| response.contains(**t))
-                .count() >= key_tokens.len().max(1) / 2;
+            let found = key_tokens.iter().filter(|t| response.contains(**t)).count()
+                >= key_tokens.len().max(1) / 2;
             details.push(EvalDetail {
                 criterion: format!("code:{}", &line[..line.len().min(30)]),
                 score: if found { 1.0 } else { 0.0 },
                 passed: found,
-                message: if found { "Match".into() } else { "Missing".into() },
+                message: if found {
+                    "Match".into()
+                } else {
+                    "Missing".into()
+                },
             });
         }
 
         let total = details.len();
         let passed = details.iter().filter(|d| d.passed).count();
-        let score = if total > 0 { passed as f64 / total as f64 } else { 0.0 };
+        let score = if total > 0 {
+            passed as f64 / total as f64
+        } else {
+            0.0
+        };
 
-        EvalResult { score, passed: score >= 0.3, details }
+        EvalResult {
+            score,
+            passed: score >= 0.3,
+            details,
+        }
     }
 }

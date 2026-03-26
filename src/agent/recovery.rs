@@ -182,7 +182,11 @@ impl Agent {
             || error_lower.contains("endpoint")
             || error_lower.contains("network unreachable")
         {
-            warn!("Endpoint error detected for tool '{}': {}", tool_name, &error[..error.len().min(200)]);
+            warn!(
+                "Endpoint error detected for tool '{}': {}",
+                tool_name,
+                &error[..error.len().min(200)]
+            );
             return format!(
                 "ERROR RECOVERY: Endpoint/connection issue detected for '{}'. \
                  The LLM backend may be temporarily unavailable or overloaded. \
@@ -200,7 +204,11 @@ impl Agent {
             || error_lower.contains("429")
             || error_lower.contains("quota exceeded")
         {
-            warn!("Rate limit detected for tool '{}': {}", tool_name, &error[..error.len().min(200)]);
+            warn!(
+                "Rate limit detected for tool '{}': {}",
+                tool_name,
+                &error[..error.len().min(200)]
+            );
             return format!(
                 "ERROR RECOVERY: Rate limit or quota exceeded. \
                  Wait a moment, then continue with smaller requests. \
@@ -444,10 +452,8 @@ Try ONE of these strategies:\
 
         // For shorter content, check for intent patterns
         let lower = effective_content.to_lowercase();
-        let intent_phrases = [
-            "let me", "i'll ", "i will", "let's ", "going to",
-        ];
-        
+        let intent_phrases = ["let me", "i'll ", "i will", "let's ", "going to"];
+
         intent_phrases.iter().any(|p| lower.contains(p))
     }
 
@@ -577,13 +583,8 @@ Try ONE of these strategies:\
         // Try to extract a file path the model mentioned wanting to read.
         if let Some(path) = extract_mentioned_path(&stripped) {
             let p = std::path::Path::new(&path);
-            if self.context_map.level_of(p)
-                != Some(super::context_map::ContextLevel::Full)
-            {
-                return (
-                    "file_read".to_string(),
-                    format!(r#"{{"path":"{}"}}"#, path),
-                );
+            if self.context_map.level_of(p) != Some(super::context_map::ContextLevel::Full) {
+                return ("file_read".to_string(), format!(r#"{{"path":"{}"}}"#, path));
             }
         }
 

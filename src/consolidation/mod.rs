@@ -43,7 +43,9 @@ pub mod multimodal;
 pub mod store;
 pub mod temporal;
 
-pub use collector::{CollectedBatch, CollectedItem, EpisodeData, MemoryEntryData, ShortTermCollector, SourceType};
+pub use collector::{
+    CollectedBatch, CollectedItem, EpisodeData, MemoryEntryData, ShortTermCollector, SourceType,
+};
 pub use compactor::MemoryCompactor;
 pub use config::ConsolidationConfig;
 pub use multimodal::MultimodalRef;
@@ -93,8 +95,14 @@ impl ConsolidationEngine {
     /// 1. Collect short-term data from all sources
     /// 2. Compact via parallel LLM summarization
     /// 3. Store in long-term storage
-    pub async fn consolidate_episodes(&mut self, episodes: Vec<EpisodeData>) -> Result<ConsolidationReport> {
-        info!("Starting consolidation cycle with {} episodes", episodes.len());
+    pub async fn consolidate_episodes(
+        &mut self,
+        episodes: Vec<EpisodeData>,
+    ) -> Result<ConsolidationReport> {
+        info!(
+            "Starting consolidation cycle with {} episodes",
+            episodes.len()
+        );
 
         // 1. Collect and normalize
         let items = self.collector.collect_episodes(&episodes);
@@ -134,7 +142,10 @@ impl ConsolidationEngine {
     }
 
     /// Run one consolidation cycle with raw collected items.
-    pub async fn consolidate_items(&mut self, items: Vec<CollectedItem>) -> Result<ConsolidationReport> {
+    pub async fn consolidate_items(
+        &mut self,
+        items: Vec<CollectedItem>,
+    ) -> Result<ConsolidationReport> {
         if items.is_empty() {
             let now = chrono::Utc::now();
             return Ok(ConsolidationReport {

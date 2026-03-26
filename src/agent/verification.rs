@@ -200,7 +200,10 @@ impl Agent {
             .filter_map(|tc| {
                 serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
                     .ok()
-                    .and_then(|v| v.get("path").and_then(|p| p.as_str().map(|s| s.to_string())))
+                    .and_then(|v| {
+                        v.get("path")
+                            .and_then(|p| p.as_str().map(|s| s.to_string()))
+                    })
             })
             .collect();
 
@@ -216,7 +219,9 @@ impl Agent {
         }
 
         // Check if ALL edited files look like test files
-        let test_patterns = ["test_", "tests/", "tests.", "_test.", "_test/", "spec/", "spec.", "_spec."];
+        let test_patterns = [
+            "test_", "tests/", "tests.", "_test.", "_test/", "spec/", "spec.", "_spec.",
+        ];
         let all_test_files = edited_files.iter().all(|path| {
             let lower = path.to_lowercase();
             test_patterns.iter().any(|p| lower.contains(p))

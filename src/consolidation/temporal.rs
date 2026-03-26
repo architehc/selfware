@@ -181,7 +181,10 @@ mod tests {
         TemporalRecord {
             id: "test-001".into(),
             created_at: now,
-            source_timestamps: vec![now - chrono::Duration::hours(2), now - chrono::Duration::hours(1)],
+            source_timestamps: vec![
+                now - chrono::Duration::hours(2),
+                now - chrono::Duration::hours(1),
+            ],
             sequence_order: 1,
             causal_parents: vec![],
             causal_children: vec![],
@@ -235,7 +238,10 @@ mod tests {
         plain.created_at = record.created_at;
         plain.last_accessed = plain.created_at;
         let plain_score = plain.decay_score_at(Utc::now(), 24.0);
-        assert!(score > plain_score, "Accessed score {score} should be > plain {plain_score}");
+        assert!(
+            score > plain_score,
+            "Accessed score {score} should be > plain {plain_score}"
+        );
     }
 
     #[test]

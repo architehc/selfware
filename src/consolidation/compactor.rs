@@ -58,7 +58,10 @@ impl MemoryCompactor {
     }
 
     /// Compact a collected batch into consolidated temporal records.
-    pub async fn compact(&self, batch: CollectedBatch) -> Result<(Vec<TemporalRecord>, ConsolidationReport)> {
+    pub async fn compact(
+        &self,
+        batch: CollectedBatch,
+    ) -> Result<(Vec<TemporalRecord>, ConsolidationReport)> {
         let start = Instant::now();
         let started_at = Utc::now();
         let episodes_processed = batch.items.len();
@@ -157,12 +160,10 @@ impl MemoryCompactor {
             let gap = (item.timestamp - last_ts).num_seconds().abs();
 
             // Also check if items are causally related
-            let causally_related = current_group
-                .iter()
-                .any(|existing| {
-                    item.related_ids.contains(&existing.source_id)
-                        || existing.related_ids.contains(&item.source_id)
-                });
+            let causally_related = current_group.iter().any(|existing| {
+                item.related_ids.contains(&existing.source_id)
+                    || existing.related_ids.contains(&item.source_id)
+            });
 
             if gap <= window_secs || causally_related {
                 current_group.push(item);
@@ -235,10 +236,7 @@ Produce a JSON response with these fields:
 Respond with only valid JSON, no markdown fences."#
     );
 
-    let url = format!(
-        "{}/chat/completions",
-        config.endpoint.trim_end_matches('/')
-    );
+    let url = format!("{}/chat/completions", config.endpoint.trim_end_matches('/'));
 
     let body = json!({
         "model": config.model,
@@ -251,7 +249,10 @@ Respond with only valid JSON, no markdown fences."#
         "stream": false,
     });
 
-    debug!("Sending consolidation request for {} items", group.items.len());
+    debug!(
+        "Sending consolidation request for {} items",
+        group.items.len()
+    );
 
     let response = client
         .post(&url)
@@ -261,7 +262,10 @@ Respond with only valid JSON, no markdown fences."#
         .context("Consolidation LLM request failed")?;
 
     let status = response.status();
-    let body_text = response.text().await.context("Failed to read response body")?;
+    let body_text = response
+        .text()
+        .await
+        .context("Failed to read response body")?;
 
     if !status.is_success() {
         return Err(anyhow::anyhow!("HTTP {status}: {body_text}"));
@@ -452,7 +456,7 @@ mod tests {
         let compactor = MemoryCompactor::new(config).unwrap();
 
         let items = vec![
-            make_item("a", 10),  // recent cluster
+            make_item("a", 10), // recent cluster
             make_item("b", 8),
             make_item("c", 120), // separate cluster (2h gap)
             make_item("d", 118),
@@ -511,9 +515,6 @@ mod tests {
             extract_json("text\n```json\n{\"a\":1}\n```\nmore"),
             r#"{"a":1}"#
         );
-        assert_eq!(
-            extract_json("before {\"x\":2} after"),
-            r#"{"x":2}"#
-        );
+        assert_eq!(extract_json("before {\"x\":2} after"), r#"{"x":2}"#);
     }
 }

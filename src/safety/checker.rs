@@ -64,7 +64,11 @@ impl SafetyChecker {
         let raw_name = &call.function.name;
         let tool_name = raw_name.trim();
         if raw_name != tool_name {
-            tracing::debug!("Tool name had whitespace: '{}' -> '{}'", raw_name, tool_name);
+            tracing::debug!(
+                "Tool name had whitespace: '{}' -> '{}'",
+                raw_name,
+                tool_name
+            );
         }
         match tool_name {
             "file_write" | "file_edit" | "file_read" | "file_delete" | "search"
@@ -254,8 +258,13 @@ impl SafetyChecker {
                 // are desktop queries. No filesystem or network side-effects to validate.
             }
             // Context management tools — virtual, no filesystem access
-            "context_status" | "context_focus" | "context_evict" | "context_recommend"
-            | "context_load_skeleton" | "context_bulk_read" | "context_summary" => {
+            "context_status"
+            | "context_focus"
+            | "context_evict"
+            | "context_recommend"
+            | "context_load_skeleton"
+            | "context_bulk_read"
+            | "context_summary" => {
                 // Context tools interact with the agent's internal state only
             }
             // Computer tools — system manipulation (medium risk)

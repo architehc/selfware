@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 #[derive(Debug)]
 struct EndpointInfo {
     endpoint: String,
-    backend: String,       // "vllm", "sglang", "ollama", "openai", "unknown"
+    backend: String, // "vllm", "sglang", "ollama", "openai", "unknown"
     model_id: String,
     model_root: String,
     max_model_len: usize,
@@ -32,10 +32,15 @@ async fn probe_models(base_url: &str) -> Result<Value> {
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
 
-    let resp = client.get(&url).send().await
+    let resp = client
+        .get(&url)
+        .send()
+        .await
         .with_context(|| format!("Failed to connect to {url}"))?;
 
-    let body: Value = resp.json().await
+    let body: Value = resp
+        .json()
+        .await
         .context("Failed to parse /models response")?;
 
     Ok(body)
@@ -131,14 +136,18 @@ async fn probe_endpoint(base_url: &str) -> Result<EndpointInfo> {
     let model_id = model_data["id"].as_str().unwrap_or("unknown").to_string();
     let model_root = model_data["root"].as_str().unwrap_or(&model_id).to_string();
     let max_model_len = model_data["max_model_len"].as_u64().unwrap_or(0) as usize;
-    let owned_by = model_data["owned_by"].as_str().unwrap_or("unknown").to_string();
+    let owned_by = model_data["owned_by"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_string();
 
     let backend = match owned_by.as_str() {
         "vllm" => "vllm",
         "sglang" => "sglang",
         _ if owned_by.contains("ollama") => "ollama",
         _ => "unknown",
-    }.to_string();
+    }
+    .to_string();
 
     eprintln!("    Model: {model_id}");
     eprintln!("    Root: {model_root}");
@@ -148,7 +157,9 @@ async fn probe_endpoint(base_url: &str) -> Result<EndpointInfo> {
     // 2. Test basic chat (with thinking)
     eprintln!("  [2/5] Testing chat (thinking mode)...");
     let think_result = test_chat(base_url, &model_id, None).await?;
-    let content = think_result["choices"][0]["message"]["content"].as_str().unwrap_or("");
+    let content = think_result["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("");
     let reasoning = think_result["choices"][0]["message"]["reasoning_content"]
         .as_str()
         .or_else(|| think_result["choices"][0]["message"]["reasoning"].as_str());
@@ -165,14 +176,20 @@ async fn probe_endpoint(base_url: &str) -> Result<EndpointInfo> {
     // 3. Test chat without thinking
     eprintln!("  [3/5] Testing chat (no-thinking mode)...");
     let no_think_result = test_chat(
-        base_url, &model_id,
+        base_url,
+        &model_id,
         Some(json!({"chat_template_kwargs": {"enable_thinking": false}})),
-    ).await?;
+    )
+    .await?;
     let no_think_content = no_think_result["choices"][0]["message"]["content"]
-        .as_str().unwrap_or("");
+        .as_str()
+        .unwrap_or("");
     let no_think_works = !no_think_content.is_empty() && no_think_content.contains("HELLO");
 
-    eprintln!("    No-thinking response: {}", &no_think_content[..no_think_content.len().min(80)]);
+    eprintln!(
+        "    No-thinking response: {}",
+        &no_think_content[..no_think_content.len().min(80)]
+    );
     eprintln!("    Works correctly: {no_think_works}");
 
     // 4. Test native tool calling
@@ -227,8 +244,10 @@ async fn probe_endpoint(base_url: &str) -> Result<EndpointInfo> {
 fn generate_toml(info: &EndpointInfo) -> String {
     let mut toml = String::new();
 
-    toml.push_str(&format!("# Auto-configured for {} ({}) on {}\n",
-        info.model_id, info.backend, info.endpoint));
+    toml.push_str(&format!(
+        "# Auto-configured for {} ({}) on {}\n",
+        info.model_id, info.backend, info.endpoint
+    ));
     toml.push_str(&format!("endpoint = \"{}\"\n", info.endpoint));
     toml.push_str(&format!("model = \"{}\"\n", info.model_id));
     toml.push_str(&format!("max_tokens = {}\n", info.recommended_max_tokens));
@@ -244,7 +263,10 @@ fn generate_toml(info: &EndpointInfo) -> String {
     toml.push_str("[agent]\n");
     toml.push_str("max_iterations = 50\n");
     toml.push_str("step_timeout_secs = 300\n");
-    toml.push_str(&format!("native_function_calling = {}\n", info.native_tool_calling));
+    toml.push_str(&format!(
+        "native_function_calling = {}\n",
+        info.native_tool_calling
+    ));
     toml.push_str("\n");
 
     toml.push_str("[continuous_work]\n");
@@ -293,15 +315,20 @@ async fn main() -> Result<()> {
                 eprintln!("Model:              {}", info.model_id);
                 eprintln!("Root:               {}", info.model_root);
                 eprintln!("Max context:        {} tokens", info.max_model_len);
-                eprintln!("Thinking:           {}", if info.supports_thinking { "yes" } else { "no" });
+                eprintln!(
+                    "Thinking:           {}",
+                    if info.supports_thinking { "yes" } else { "no" }
+                );
                 eprintln!("Thinking eats all:  {}", info.thinking_uses_all_tokens);
                 eprintln!("Native FC:          {}", info.native_tool_calling);
                 eprintln!("Recommended tokens: {}", info.recommended_max_tokens);
                 eprintln!("Recommended temp:   {}", info.recommended_temperature);
 
                 let toml = generate_toml(&info);
-                let filename = format!("selfware-auto-{}.toml",
-                    info.model_id.replace('/', "-").replace('.', "-"));
+                let filename = format!(
+                    "selfware-auto-{}.toml",
+                    info.model_id.replace('/', "-").replace('.', "-")
+                );
 
                 eprintln!("\n--- Generated: {filename} ---\n");
                 println!("{toml}");

@@ -188,7 +188,11 @@ mod tests {
             None,
         );
 
-        recorder.record_screenshot("after_nav", PathBuf::from("/tmp/screenshots/s1.png"), (1920, 1080));
+        recorder.record_screenshot(
+            "after_nav",
+            PathBuf::from("/tmp/screenshots/s1.png"),
+            (1920, 1080),
+        );
 
         let trace = recorder.finish(TaskOutcome::Passed);
 

@@ -310,10 +310,7 @@ mod tests {
     #[test]
     fn test_extract_json_block() {
         assert_eq!(extract_json_block(r#"{"a":1}"#), r#"{"a":1}"#);
-        assert_eq!(
-            extract_json_block("```json\n{\"a\":1}\n```"),
-            r#"{"a":1}"#
-        );
+        assert_eq!(extract_json_block("```json\n{\"a\":1}\n```"), r#"{"a":1}"#);
         assert_eq!(
             extract_json_block("Some text\n```\n{\"a\":1}\n```\nmore"),
             r#"{"a":1}"#

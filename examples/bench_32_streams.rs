@@ -2,8 +2,8 @@
 //!
 //! Run with: cargo run --features bench-harness --example bench_32_streams
 
-use selfware::bench_harness::*;
 use selfware::api::types::Message;
+use selfware::bench_harness::*;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -91,14 +91,19 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("\n{}", "=".repeat(60));
     eprintln!("RESULTS");
     eprintln!("{}", "=".repeat(60));
-    eprintln!("Tasks:       {}/{} passed", report.tasks_passed, report.tasks_total);
+    eprintln!(
+        "Tasks:       {}/{} passed",
+        report.tasks_passed, report.tasks_total
+    );
     eprintln!("Throughput:  {:.0} tok/s", report.tokens_per_sec);
     eprintln!("Avg score:   {:.0}%", report.avg_score * 100.0);
     eprintln!("Latency p50: {}ms", report.latency_p50_ms);
     eprintln!("Latency p95: {}ms", report.latency_p95_ms);
     eprintln!("Latency p99: {}ms", report.latency_p99_ms);
-    eprintln!("Total tokens: {} prompt + {} completion",
-        report.total_prompt_tokens, report.total_completion_tokens);
+    eprintln!(
+        "Total tokens: {} prompt + {} completion",
+        report.total_prompt_tokens, report.total_completion_tokens
+    );
     eprintln!("Duration:    {:.1}s", report.total_duration_secs);
     eprintln!("{}", "=".repeat(60));
 

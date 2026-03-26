@@ -17,12 +17,12 @@ pub enum WebAction {
     /// Take a screenshot with a label.
     Screenshot { label: String },
     /// Wait for an element to appear.
-    WaitFor {
-        selector: String,
-        timeout_ms: u64,
-    },
+    WaitFor { selector: String, timeout_ms: u64 },
     /// Scroll the page.
-    Scroll { direction: ScrollDirection, amount: i32 },
+    Scroll {
+        direction: ScrollDirection,
+        amount: i32,
+    },
     /// Press a keyboard key.
     Press { key: String },
     /// Hover over an element.

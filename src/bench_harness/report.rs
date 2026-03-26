@@ -137,29 +137,21 @@ impl HarnessReport {
     pub fn to_markdown(&self) -> String {
         let mut md = String::new();
 
-        md.push_str(&format!(
-            "# Benchmark Report — {}\n",
-            self.model
-        ));
+        md.push_str(&format!("# Benchmark Report — {}\n", self.model));
         md.push_str(&format!(
             "**Date**: {} | **Endpoint**: {} | **Concurrency**: {}\n\n",
             self.timestamp, self.endpoint, self.max_concurrent,
         ));
 
         md.push_str("## Summary\n\n");
-        md.push_str(&format!(
-            "| Metric | Value |\n|--------|-------|\n"
-        ));
+        md.push_str(&format!("| Metric | Value |\n|--------|-------|\n"));
         md.push_str(&format!(
             "| Tasks | {}/{} passed ({:.0}% error rate) |\n",
             self.tasks_passed,
             self.tasks_total,
             self.error_rate * 100.0,
         ));
-        md.push_str(&format!(
-            "| Avg Score | {:.1}% |\n",
-            self.avg_score * 100.0,
-        ));
+        md.push_str(&format!("| Avg Score | {:.1}% |\n", self.avg_score * 100.0,));
         md.push_str(&format!(
             "| Throughput | {:.0} tok/s |\n",
             self.tokens_per_sec,
@@ -197,12 +189,7 @@ impl HarnessReport {
                 .unwrap_or_else(|| "N/A".into());
             md.push_str(&format!(
                 "| {} | {} | {} | {}ms | {}+{} |\n",
-                r.task_id,
-                status,
-                score,
-                r.latency_ms,
-                r.prompt_tokens,
-                r.completion_tokens,
+                r.task_id, status, score, r.latency_ms, r.prompt_tokens, r.completion_tokens,
             ));
         }
 
@@ -259,11 +246,7 @@ mod tests {
                 passed: success,
                 details: vec![],
             }),
-            error: if success {
-                None
-            } else {
-                Some("error".into())
-            },
+            error: if success { None } else { Some("error".into()) },
         }
     }
 

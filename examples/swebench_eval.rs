@@ -35,9 +35,8 @@ impl TaskEvaluator for PatchEvaluator {
         let mut details = Vec::new();
 
         // 1. Check if response contains a diff/patch
-        let has_diff = response.contains("diff --git")
-            || response.contains("---")
-            || response.contains("@@");
+        let has_diff =
+            response.contains("diff --git") || response.contains("---") || response.contains("@@");
         details.push(EvalDetail {
             criterion: "contains_patch".into(),
             score: if has_diff { 1.0 } else { 0.0 },
@@ -89,10 +88,7 @@ impl TaskEvaluator for PatchEvaluator {
                 .take(3)
                 .collect();
 
-            let found = key_tokens
-                .iter()
-                .filter(|t| response.contains(**t))
-                .count()
+            let found = key_tokens.iter().filter(|t| response.contains(**t)).count()
                 >= key_tokens.len().max(1) / 2;
 
             if found {
@@ -247,7 +243,10 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("{}", "=".repeat(70));
 
     // Per-task breakdown
-    eprintln!("\n{:<45} {:>6} {:>8} {:>10}", "Instance", "Score", "Tokens", "Latency");
+    eprintln!(
+        "\n{:<45} {:>6} {:>8} {:>10}",
+        "Instance", "Score", "Tokens", "Latency"
+    );
     eprintln!("{}", "-".repeat(75));
     for r in &report.results {
         let score_str = r

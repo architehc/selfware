@@ -125,7 +125,7 @@ impl AutoConfigurator {
     /// Run capability detection tests against a model.
     pub async fn run_tests(&self, model: &str) -> Result<DetectionResults> {
         let models = self.fetch_models().await?;
-        
+
         // Validate model name exists in available models
         let model_info = models.iter().find(|m| m.id == model);
         if model_info.is_none() {
@@ -149,11 +149,7 @@ impl AutoConfigurator {
         let chat_works = chat_result.is_ok();
         println!(
             "         Chat: {}",
-            if chat_works {
-                "OK"
-            } else {
-                "FAILED"
-            }
+            if chat_works { "OK" } else { "FAILED" }
         );
 
         println!("   [2/4] Testing thinking mode...");
@@ -275,9 +271,7 @@ impl AutoConfigurator {
         println!();
         println!("[safety]");
         println!("allowed_paths = [\"./**\", \"/tmp/**\"]");
-        println!(
-            "denied_paths = [\"**/.env\", \"**/secrets/**\", \"**/.ssh/**\"]"
-        );
+        println!("denied_paths = [\"**/.env\", \"**/secrets/**\", \"**/.ssh/**\"]");
         println!("protected_branches = [\"main\"]");
         println!();
         println!("[agent]");
@@ -300,10 +294,8 @@ impl AutoConfigurator {
             println!("[extra_body]");
             for (k, v) in extra {
                 if let Some(obj) = v.as_object() {
-                    let inner: Vec<String> = obj
-                        .iter()
-                        .map(|(ik, iv)| format!("{ik} = {iv}"))
-                        .collect();
+                    let inner: Vec<String> =
+                        obj.iter().map(|(ik, iv)| format!("{ik} = {iv}")).collect();
                     println!("{k} = {{ {} }}", inner.join(", "));
                 } else {
                     println!("{k} = {v}");

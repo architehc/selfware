@@ -183,10 +183,7 @@ mod tests {
     #[test]
     fn test_collect_episodes_filters_by_age() {
         let collector = ShortTermCollector::new(86400, 1); // 24 hours, min importance 1
-        let episodes = vec![
-            make_episode("recent", 1, 2),
-            make_episode("old", 48, 2),
-        ];
+        let episodes = vec![make_episode("recent", 1, 2), make_episode("old", 48, 2)];
 
         let collected = collector.collect_episodes(&episodes);
         assert_eq!(collected.len(), 1);

@@ -96,10 +96,7 @@ impl HarnessRunner {
                 .unwrap_or_else(|| "N/A".into());
             eprintln!(
                 "  [{completed}/{total_tasks}] {} — {status} | {score_str} | {}ms | {}+{} tokens",
-                result.task_id,
-                result.latency_ms,
-                result.prompt_tokens,
-                result.completion_tokens,
+                result.task_id, result.latency_ms, result.prompt_tokens, result.completion_tokens,
             );
             results.push(result);
         }
@@ -113,11 +110,8 @@ impl HarnessRunner {
 
         let total_duration = run_start.elapsed();
 
-        let report = HarnessReport::from_results(
-            &self.config,
-            results,
-            total_duration.as_secs_f64(),
-        );
+        let report =
+            HarnessReport::from_results(&self.config, results, total_duration.as_secs_f64());
 
         info!(
             "Benchmark complete: {:.1}s | {}/{} passed | {:.0} tok/s",
@@ -150,8 +144,7 @@ async fn execute_task(
     });
 
     // Merge extra_body fields (e.g., chat_template_kwargs for Qwen thinking mode)
-    if let (Some(body_obj), Some(extra_obj)) =
-        (body.as_object_mut(), config.extra_body.as_object())
+    if let (Some(body_obj), Some(extra_obj)) = (body.as_object_mut(), config.extra_body.as_object())
     {
         for (k, v) in extra_obj {
             body_obj.insert(k.clone(), v.clone());

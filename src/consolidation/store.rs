@@ -35,9 +35,7 @@ impl LongTermStore {
         let mut errors = Vec::new();
 
         for record in records {
-            let path = self
-                .storage_dir
-                .join(format!("{}.json", record.id));
+            let path = self.storage_dir.join(format!("{}.json", record.id));
 
             match serde_json::to_string_pretty(record) {
                 Ok(json) => {

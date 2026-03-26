@@ -165,10 +165,11 @@ async fn main() -> anyhow::Result<()> {
 
     let endpoint = std::env::var("SELFWARE_ENDPOINT")
         .unwrap_or_else(|_| "http://localhost:8000/v1".to_string());
-    let model = std::env::var("SELFWARE_MODEL")
-        .unwrap_or_else(|_| "qwen3.5-27b".to_string());
+    let model = std::env::var("SELFWARE_MODEL").unwrap_or_else(|_| "qwen3.5-27b".to_string());
     let concurrent: usize = std::env::var("SELFWARE_CONCURRENT")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(12);
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(12);
 
     let config = HarnessConfig {
         endpoint: endpoint.clone(),
@@ -192,20 +193,32 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("\n=== Multi-Language Coding Benchmark ===");
     eprintln!("Endpoint: {endpoint}");
     eprintln!("Model: {model}");
-    eprintln!("Tasks: {} (Rust={}, Python={}, JS/TS={}, Go={})",
-        all_tasks.len(), 3, 3, 3, 3);
+    eprintln!(
+        "Tasks: {} (Rust={}, Python={}, JS/TS={}, Go={})",
+        all_tasks.len(),
+        3,
+        3,
+        3,
+        3
+    );
     eprintln!("Concurrent: {concurrent}");
     eprintln!();
 
     let report = runner.run(all_tasks).await?;
 
     // Group results by language
-    let mut by_lang: std::collections::HashMap<&str, Vec<&StreamResult>> = std::collections::HashMap::new();
+    let mut by_lang: std::collections::HashMap<&str, Vec<&StreamResult>> =
+        std::collections::HashMap::new();
     for r in &report.results {
-        let lang = if r.task_id.starts_with("rust") { "Rust" }
-            else if r.task_id.starts_with("python") { "Python" }
-            else if r.task_id.starts_with("js") || r.task_id.starts_with("ts") { "JS/TS" }
-            else { "Go" };
+        let lang = if r.task_id.starts_with("rust") {
+            "Rust"
+        } else if r.task_id.starts_with("python") {
+            "Python"
+        } else if r.task_id.starts_with("js") || r.task_id.starts_with("ts") {
+            "JS/TS"
+        } else {
+            "Go"
+        };
         by_lang.entry(lang).or_default().push(r);
     }
 
@@ -216,22 +229,45 @@ async fn main() -> anyhow::Result<()> {
     for lang in &["Rust", "Python", "JS/TS", "Go"] {
         if let Some(results) = by_lang.get(lang) {
             let passed = results.iter().filter(|r| r.success).count();
-            let avg_score: f64 = results.iter()
+            let avg_score: f64 = results
+                .iter()
                 .filter_map(|r| r.eval.as_ref().map(|e| e.score))
-                .sum::<f64>() / results.len() as f64;
-            eprintln!("\n  {} — {}/{} passed, {:.0}% avg", lang, passed, results.len(), avg_score * 100.0);
+                .sum::<f64>()
+                / results.len() as f64;
+            eprintln!(
+                "\n  {} — {}/{} passed, {:.0}% avg",
+                lang,
+                passed,
+                results.len(),
+                avg_score * 100.0
+            );
             for r in results {
-                let score = r.eval.as_ref().map(|e| format!("{:.0}%", e.score * 100.0)).unwrap_or("ERR".into());
+                let score = r
+                    .eval
+                    .as_ref()
+                    .map(|e| format!("{:.0}%", e.score * 100.0))
+                    .unwrap_or("ERR".into());
                 let status = if r.success { "+" } else { "-" };
-                eprintln!("    {} {} {:>6} {:>6}tok {:>6.1}s",
-                    status, r.task_id, score, r.completion_tokens, r.latency_ms as f64 / 1000.0);
+                eprintln!(
+                    "    {} {} {:>6} {:>6}tok {:>6.1}s",
+                    status,
+                    r.task_id,
+                    score,
+                    r.completion_tokens,
+                    r.latency_ms as f64 / 1000.0
+                );
             }
         }
     }
 
-    eprintln!("\n  Overall: {}/{} passed, {:.0}% avg, {:.0} tok/s, {:.1}s",
-        report.tasks_passed, report.tasks_total,
-        report.avg_score * 100.0, report.tokens_per_sec, report.total_duration_secs);
+    eprintln!(
+        "\n  Overall: {}/{} passed, {:.0}% avg, {:.0} tok/s, {:.1}s",
+        report.tasks_passed,
+        report.tasks_total,
+        report.avg_score * 100.0,
+        report.tokens_per_sec,
+        report.total_duration_secs
+    );
     eprintln!("{}", "=".repeat(60));
 
     report.write_to_dir(std::path::Path::new("bench_results/multilang"))?;

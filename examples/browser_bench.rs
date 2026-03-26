@@ -3,9 +3,7 @@
 //!
 //! Run with: cargo run --features bench-harness --example browser_bench
 
-use selfware::bench_harness::computer_control::{
-    BrowserBenchConfig, BrowserBenchRunner,
-};
+use selfware::bench_harness::computer_control::{BrowserBenchConfig, BrowserBenchRunner};
 use selfware::bench_harness::HarnessConfig;
 
 #[tokio::main]
@@ -49,9 +47,15 @@ async fn main() -> anyhow::Result<()> {
     eprintln!("\n{}", "=".repeat(60));
     eprintln!("BROWSER BENCHMARK RESULTS");
     eprintln!("{}", "=".repeat(60));
-    eprintln!("Web tasks:   {}/{} passed", report.tasks_passed, report.tasks_total);
+    eprintln!(
+        "Web tasks:   {}/{} passed",
+        report.tasks_passed, report.tasks_total
+    );
     if let Some(llm) = &report.llm_report {
-        eprintln!("LLM analysis: {}/{} passed", llm.tasks_passed, llm.tasks_total);
+        eprintln!(
+            "LLM analysis: {}/{} passed",
+            llm.tasks_passed, llm.tasks_total
+        );
         eprintln!("Throughput:  {:.0} tok/s", llm.tokens_per_sec);
         eprintln!("Avg score:   {:.0}%", llm.avg_score * 100.0);
     }

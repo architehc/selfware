@@ -81,7 +81,10 @@ impl BrowserBenchReport {
     pub fn to_markdown(&self) -> String {
         let mut md = String::new();
         md.push_str("# Browser Benchmark Report\n\n");
-        md.push_str(&format!("**Date**: {} | **Duration**: {:.1}s\n\n", self.timestamp, self.total_duration_secs));
+        md.push_str(&format!(
+            "**Date**: {} | **Duration**: {:.1}s\n\n",
+            self.timestamp, self.total_duration_secs
+        ));
 
         md.push_str("## Web Task Results\n\n");
         md.push_str("| Task | Status | Actions | Duration |\n");
@@ -104,17 +107,12 @@ impl BrowserBenchReport {
 
         if let Some(llm) = &self.llm_report {
             md.push_str("\n## LLM Analysis\n\n");
+            md.push_str(&format!("| Metric | Value |\n|--------|-------|\n"));
+            md.push_str(&format!("| Tasks analyzed | {} |\n", llm.tasks_total));
+            md.push_str(&format!("| Avg score | {:.0}% |\n", llm.avg_score * 100.0));
             md.push_str(&format!(
-                "| Metric | Value |\n|--------|-------|\n"
-            ));
-            md.push_str(&format!(
-                "| Tasks analyzed | {} |\n", llm.tasks_total
-            ));
-            md.push_str(&format!(
-                "| Avg score | {:.0}% |\n", llm.avg_score * 100.0
-            ));
-            md.push_str(&format!(
-                "| Throughput | {:.0} tok/s |\n", llm.tokens_per_sec
+                "| Throughput | {:.0} tok/s |\n",
+                llm.tokens_per_sec
             ));
         }
 
@@ -183,9 +181,7 @@ impl BrowserBenchRunner {
         for trace in &traces {
             let status = match &trace.final_outcome {
                 TaskOutcome::Passed => "PASS",
-                TaskOutcome::Failed { reasons } => {
-                    &format!("FAIL: {}", reasons.join("; "))
-                }
+                TaskOutcome::Failed { reasons } => &format!("FAIL: {}", reasons.join("; ")),
                 TaskOutcome::Timeout => "TIMEOUT",
                 TaskOutcome::Error { message } => message,
             };
@@ -198,11 +194,7 @@ impl BrowserBenchRunner {
             );
         }
 
-        eprintln!(
-            "\nWeb tasks: {}/{} passed",
-            tasks_passed,
-            traces.len(),
-        );
+        eprintln!("\nWeb tasks: {}/{} passed", tasks_passed, traces.len(),);
 
         // Phase 2: LLM analysis of captured page content
         let llm_report = if self.config.llm_analysis {
@@ -235,10 +227,7 @@ impl BrowserBenchRunner {
                 let path = traces_dir.join(format!("{}.json", trace.task_id));
                 std::fs::write(&path, serde_json::to_string_pretty(trace)?)?;
             }
-            eprintln!(
-                "\nTraces saved to {}",
-                traces_dir.display(),
-            );
+            eprintln!("\nTraces saved to {}", traces_dir.display(),);
         }
 
         let report = BrowserBenchReport {
@@ -252,9 +241,7 @@ impl BrowserBenchRunner {
 
         info!(
             "Browser benchmark complete: {}/{} passed in {:.1}s",
-            report.tasks_passed,
-            report.tasks_total,
-            report.total_duration_secs,
+            report.tasks_passed, report.tasks_total, report.total_duration_secs,
         );
 
         Ok(report)
@@ -311,7 +298,8 @@ impl BrowserBenchRunner {
                  - \"navigation_quality\": Score 0-100 for how well the task navigated\n\
                  - \"content_relevance\": Score 0-100 for relevance to the task description\n\
                  \nRespond with only valid JSON.",
-                trace.task_name, trace.task_id,
+                trace.task_name,
+                trace.task_id,
                 &content_summary[..content_summary.len().min(6000)],
             );
 

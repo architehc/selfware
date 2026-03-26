@@ -9,9 +9,7 @@ use anyhow::{Context, Result};
 use tokio::sync::Semaphore;
 use tracing::{debug, warn};
 
-use super::recorder::{
-    ActionOutcome, InteractionRecorder, InteractionTrace, TaskOutcome,
-};
+use super::recorder::{ActionOutcome, InteractionRecorder, InteractionTrace, TaskOutcome};
 use super::tasks::{SuccessCriterion, WebAction, WebTask};
 
 /// Executes web tasks using reqwest-based HTTP fetching.
@@ -48,11 +46,7 @@ impl WebTaskExecutor {
         let task_screenshot_dir = self.screenshot_dir.join(&task.id);
         let _ = std::fs::create_dir_all(&task_screenshot_dir);
 
-        let mut recorder = InteractionRecorder::new(
-            &task.id,
-            &task.name,
-            task_screenshot_dir,
-        );
+        let mut recorder = InteractionRecorder::new(&task.id, &task.name, task_screenshot_dir);
 
         let mut current_url = String::new();
         let mut current_body = String::new();
@@ -86,9 +80,7 @@ impl WebTaskExecutor {
             let screenshot_after = match action {
                 WebAction::Screenshot { label } => {
                     // Record screenshot reference
-                    let ss_path = recorder
-                        .screenshot_dir()
-                        .join(format!("{}.html", label));
+                    let ss_path = recorder.screenshot_dir().join(format!("{}.html", label));
                     // Save page content as HTML for later analysis
                     if !current_body.is_empty() {
                         let _ = std::fs::write(&ss_path, &current_body);
@@ -191,28 +183,26 @@ impl WebTaskExecutor {
         _recorder: &InteractionRecorder,
     ) -> ActionOutcome {
         match action {
-            WebAction::Navigate { url } => {
-                match self.client.get(url).send().await {
-                    Ok(resp) => {
-                        let status = resp.status();
-                        *current_url = resp.url().to_string();
-                        match resp.text().await {
-                            Ok(body) => {
-                                *current_body = body;
-                                ActionOutcome::Success {
-                                    output: format!("HTTP {status}, {} bytes", current_body.len()),
-                                }
+            WebAction::Navigate { url } => match self.client.get(url).send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    *current_url = resp.url().to_string();
+                    match resp.text().await {
+                        Ok(body) => {
+                            *current_body = body;
+                            ActionOutcome::Success {
+                                output: format!("HTTP {status}, {} bytes", current_body.len()),
                             }
-                            Err(e) => ActionOutcome::Failed {
-                                error: format!("Body read error: {e}"),
-                            },
                         }
+                        Err(e) => ActionOutcome::Failed {
+                            error: format!("Body read error: {e}"),
+                        },
                     }
-                    Err(e) => ActionOutcome::Failed {
-                        error: format!("Request error: {e}"),
-                    },
                 }
-            }
+                Err(e) => ActionOutcome::Failed {
+                    error: format!("Request error: {e}"),
+                },
+            },
 
             WebAction::Click { selector } => {
                 // In HTTP mode, we can't click elements.
@@ -252,8 +242,13 @@ impl WebTaskExecutor {
                 }
             }
 
-            WebAction::Extract { selector: _, expected } => {
-                let found = current_body.to_lowercase().contains(&expected.to_lowercase());
+            WebAction::Extract {
+                selector: _,
+                expected,
+            } => {
+                let found = current_body
+                    .to_lowercase()
+                    .contains(&expected.to_lowercase());
                 if found {
                     ActionOutcome::Success {
                         output: format!("Found expected content '{expected}'"),
@@ -272,7 +267,10 @@ impl WebTaskExecutor {
                 }
             }
 
-            WebAction::WaitFor { selector, timeout_ms: _ } => {
+            WebAction::WaitFor {
+                selector,
+                timeout_ms: _,
+            } => {
                 // In HTTP mode, check if content matching the selector pattern exists
                 let has_content = !current_body.is_empty()
                     && (current_body.contains(selector)
@@ -288,23 +286,17 @@ impl WebTaskExecutor {
                 }
             }
 
-            WebAction::Scroll { direction, amount } => {
-                ActionOutcome::Success {
-                    output: format!("Scroll {direction:?} by {amount} (HTTP mode, no-op)"),
-                }
-            }
+            WebAction::Scroll { direction, amount } => ActionOutcome::Success {
+                output: format!("Scroll {direction:?} by {amount} (HTTP mode, no-op)"),
+            },
 
-            WebAction::Press { key } => {
-                ActionOutcome::Success {
-                    output: format!("Press '{key}' (HTTP mode, no-op)"),
-                }
-            }
+            WebAction::Press { key } => ActionOutcome::Success {
+                output: format!("Press '{key}' (HTTP mode, no-op)"),
+            },
 
-            WebAction::Hover { selector } => {
-                ActionOutcome::Success {
-                    output: format!("Hover '{selector}' (HTTP mode, no-op)"),
-                }
-            }
+            WebAction::Hover { selector } => ActionOutcome::Success {
+                output: format!("Hover '{selector}' (HTTP mode, no-op)"),
+            },
         }
     }
 }
@@ -314,12 +306,8 @@ fn evaluate_criterion(criterion: &SuccessCriterion, url: &str, body: &str) -> bo
     match criterion {
         SuccessCriterion::UrlContains(s) => url.to_lowercase().contains(&s.to_lowercase()),
         SuccessCriterion::PageContains(s) => body.to_lowercase().contains(&s.to_lowercase()),
-        SuccessCriterion::ElementVisible(selector) => {
-            selector_likely_matches(body, selector)
-        }
-        SuccessCriterion::ExtractedDataMatches { key: _, expected } => {
-            body.contains(expected)
-        }
+        SuccessCriterion::ElementVisible(selector) => selector_likely_matches(body, selector),
+        SuccessCriterion::ExtractedDataMatches { key: _, expected } => body.contains(expected),
         SuccessCriterion::VisualSimilarity { .. } => {
             // Can't evaluate visual similarity in HTTP mode
             true
@@ -365,7 +353,11 @@ fn resolve_url(base: &str, href: &str) -> String {
     }
 
     // Fallback: just concatenate
-    format!("{}/{}", base.trim_end_matches('/'), href.trim_start_matches('/'))
+    format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        href.trim_start_matches('/')
+    )
 }
 
 /// Check if a CSS selector pattern likely matches content in the HTML body.
@@ -446,10 +438,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_navigate() {
         // This test requires network access, so we use httpbin
-        let executor = WebTaskExecutor::new(
-            1,
-            PathBuf::from("/tmp/selfware_bench_test"),
-        ).unwrap();
+        let executor = WebTaskExecutor::new(1, PathBuf::from("/tmp/selfware_bench_test")).unwrap();
 
         let task = WebTask::new("test-nav", "Test Navigate")
             .with_action(WebAction::Navigate {

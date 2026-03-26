@@ -139,10 +139,7 @@ mod tests {
     fn test_spatial_layout_ref() {
         let r = MultimodalRef::SpatialLayout {
             description: "Dashboard layout".into(),
-            element_positions: vec![
-                ("header".into(), 50.0, 5.0),
-                ("sidebar".into(), 10.0, 50.0),
-            ],
+            element_positions: vec![("header".into(), 50.0, 5.0), ("sidebar".into(), 10.0, 50.0)],
             hierarchy: vec![("main".into(), vec!["header".into(), "sidebar".into()])],
         };
         assert_eq!(r.type_name(), "spatial_layout");

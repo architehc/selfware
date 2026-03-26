@@ -75,10 +75,15 @@ fn build_agent_prompt(task: &SWETask, work_dir: &Path) -> String {
     }
 
     // Extract target source files from the gold patch
-    let target_files: Vec<String> = task.patch
+    let target_files: Vec<String> = task
+        .patch
         .lines()
         .filter(|l| l.starts_with("diff --git"))
-        .filter_map(|l| l.split_whitespace().nth(3).map(|p| p.trim_start_matches("b/").to_string()))
+        .filter_map(|l| {
+            l.split_whitespace()
+                .nth(3)
+                .map(|p| p.trim_start_matches("b/").to_string())
+        })
         .filter(|p| !p.contains("test"))
         .collect();
 
@@ -87,7 +92,9 @@ fn build_agent_prompt(task: &SWETask, work_dir: &Path) -> String {
         for f in &target_files {
             prompt.push_str(&format!("- {f}\n"));
         }
-        prompt.push_str("\nStart by reading these files with file_read. Do NOT explore the directory tree.\n");
+        prompt.push_str(
+            "\nStart by reading these files with file_read. Do NOT explore the directory tree.\n",
+        );
     }
 
     // Parse FAIL_TO_PASS tests
@@ -118,13 +125,21 @@ CRITICAL RULES:
 - Make the MINIMUM change needed to fix the bug
 - Work in: {}"#,
         if task.repo.contains("django") {
-            format!("shell_exec: cd {} && python tests/runtests.py --parallel=1 --verbosity=2 {}",
+            format!(
+                "shell_exec: cd {} && python tests/runtests.py --parallel=1 --verbosity=2 {}",
                 work_dir.display(),
-                extract_django_test_labels(&task.fail_to_pass))
+                extract_django_test_labels(&task.fail_to_pass)
+            )
         } else {
-            format!("shell_exec: cd {} && python -m pytest -xvs {}",
+            format!(
+                "shell_exec: cd {} && python -m pytest -xvs {}",
                 work_dir.display(),
-                test_ids.iter().map(|t| format!("\"{}\"", t)).collect::<Vec<_>>().join(" "))
+                test_ids
+                    .iter()
+                    .map(|t| format!("\"{}\"", t))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
         },
         work_dir.display(),
     ));
@@ -161,14 +176,21 @@ async fn setup_repo(task: &SWETask, base_dir: &Path) -> Result<PathBuf> {
     eprintln!("  Cloning {} at {}...", task.repo, &task.base_commit[..8]);
 
     let output = tokio::process::Command::new("git")
-        .args(["clone", &format!("https://github.com/{}.git", task.repo), work_dir.to_str().unwrap()])
+        .args([
+            "clone",
+            &format!("https://github.com/{}.git", task.repo),
+            work_dir.to_str().unwrap(),
+        ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .output()
         .await?;
 
     if !output.status.success() {
-        anyhow::bail!("git clone failed: {}", String::from_utf8_lossy(&output.stderr));
+        anyhow::bail!(
+            "git clone failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     let output = tokio::process::Command::new("git")
@@ -180,7 +202,10 @@ async fn setup_repo(task: &SWETask, base_dir: &Path) -> Result<PathBuf> {
         .await?;
 
     if !output.status.success() {
-        anyhow::bail!("git checkout failed: {}", String::from_utf8_lossy(&output.stderr));
+        anyhow::bail!(
+            "git checkout failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     // Apply test patch if present (adds the failing tests)
@@ -222,7 +247,10 @@ async fn setup_repo(task: &SWETask, base_dir: &Path) -> Result<PathBuf> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        eprintln!("    Warning: install may have failed: {}", &stderr[..stderr.len().min(200)]);
+        eprintln!(
+            "    Warning: install may have failed: {}",
+            &stderr[..stderr.len().min(200)]
+        );
     }
 
     Ok(work_dir)
@@ -254,8 +282,7 @@ async fn run_single_task(task: &SWETask, base_dir: &Path) -> AgentResult {
     // Use environment variable to select endpoint, default to local vLLM
     let endpoint = std::env::var("SELFWARE_ENDPOINT")
         .unwrap_or_else(|_| "http://localhost:8000/v1".to_string());
-    let model = std::env::var("SELFWARE_MODEL")
-        .unwrap_or_else(|_| "qwen3.5-27b".to_string());
+    let model = std::env::var("SELFWARE_MODEL").unwrap_or_else(|_| "qwen3.5-27b".to_string());
     let native_fc = std::env::var("SELFWARE_NATIVE_FC")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(true);
@@ -264,7 +291,9 @@ async fn run_single_task(task: &SWETask, base_dir: &Path) -> AgentResult {
     config.model = model;
     config.max_tokens = 16384;
     config.context_length = std::env::var("SELFWARE_CONTEXT_LENGTH")
-        .ok().and_then(|v| v.parse().ok()).unwrap_or(262144);
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(262144);
     config.temperature = 0.6;
     config.execution_mode = ExecutionMode::Yolo;
     config.compact_mode = true;
@@ -324,7 +353,10 @@ async fn run_single_task(task: &SWETask, base_dir: &Path) -> AgentResult {
 
     let result = match agent.run_task(&prompt).await {
         Ok(()) => {
-            eprintln!("  [{instance_id}] Agent completed in {:.1}s", start.elapsed().as_secs_f64());
+            eprintln!(
+                "  [{instance_id}] Agent completed in {:.1}s",
+                start.elapsed().as_secs_f64()
+            );
             AgentResult {
                 instance_id,
                 repo,
@@ -357,7 +389,9 @@ async fn main() -> Result<()> {
         .init();
 
     // Load tasks
-    let task_file = std::env::args().nth(1).unwrap_or_else(|| "bench_results/swebench_lite_20.json".to_string());
+    let task_file = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "bench_results/swebench_lite_20.json".to_string());
     if !Path::new(&task_file).exists() {
         eprintln!("Task file not found: {task_file}");
         eprintln!("Usage: swebench_agent [task_file.json] [--limit N]");
