@@ -363,6 +363,12 @@ fn spawn_esc_listener(
 }
 
 impl Agent {
+    /// Start the interactive REPL loop (readline-based with tool-name autocomplete).
+    ///
+    /// Reads user input line-by-line, dispatches slash commands (e.g. `/help`,
+    /// `/swarm`, `/copy`), and routes regular messages through `run_task`.
+    /// Falls back to a basic `stdin` reader when the terminal is not interactive
+    /// or reedline initialisation fails.
     pub async fn interactive(&mut self) -> Result<()> {
         use std::io::IsTerminal;
         if !std::io::stdin().is_terminal() {

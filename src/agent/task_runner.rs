@@ -55,6 +55,12 @@ impl Agent {
         Ok(PlannedToolExecution::Continued)
     }
 
+    /// Execute a single task end-to-end: plan → execute → verify → complete.
+    ///
+    /// Resets loop state, creates a checkpoint, builds the context map, then
+    /// enters the execution loop. A Ctrl+C handler is installed to allow
+    /// graceful cancellation with checkpoint persistence. The task string is
+    /// added as a user message and drives all subsequent LLM turns.
     pub async fn run_task(&mut self, task: &str) -> Result<()> {
         // Reset loop state so queued tasks don't inherit the previous
         // task's iteration counter and hit the max-iterations limit.

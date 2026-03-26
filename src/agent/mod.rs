@@ -1,3 +1,31 @@
+//! Core agent module: LLM-driven task execution with tool orchestration.
+//!
+//! ## Agent lifecycle
+//!
+//! 1. **Initialization** (`Agent::new`): builds the API client, tool registry,
+//!    safety checker, cognitive state, verification gate, and context map from
+//!    a [`Config`]. Loads persisted episodic memory and self-improvement state
+//!    so the agent benefits from prior sessions. Connects to any configured MCP
+//!    servers and registers their tools.
+//!
+//! 2. **Planning** (`run_task` entry): the user's task is added as a message,
+//!    a checkpoint is created, and the cognitive state is set to the Plan phase.
+//!    The hierarchical context map is populated with the project tree.
+//!
+//! 3. **Execution loop** (`run_execution_loop`): the agent streams an LLM
+//!    response, extracts tool calls, validates them through the safety checker,
+//!    executes them via the `ToolRegistry`, and feeds results back. Loop control
+//!    (`AgentLoop`) tracks iteration count and state transitions (Planning →
+//!    Executing → Verifying → Completed/Failed).
+//!
+//! 4. **Verification**: after implementation, the `VerificationGate` runs
+//!    project-type-specific checks (e.g. `cargo check` for Rust) to confirm
+//!    the changes compile and pass tests.
+//!
+//! 5. **Completion / Failure**: the loop exits when the model produces a final
+//!    text response with no tool calls, the iteration limit is reached, or the
+//!    user cancels via Ctrl+C. Checkpoints are persisted for resumption.
+
 use anyhow::Result;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{
@@ -343,6 +371,13 @@ pub struct Agent {
 }
 
 impl Agent {
+    /// Construct a fully-initialised agent from the given configuration.
+    ///
+    /// Sets up the API client, tool registry (with built-in + MCP tools),
+    /// safety checker, cognitive state (with persisted episodic memory),
+    /// verification gate tuned to the detected project type, and the
+    /// context compression pipeline. Returns an error if the API client
+    /// cannot be created (e.g. missing API key).
     pub async fn new(config: Config) -> Result<Self> {
         let cache_config = config.cache.clone();
         let client = ApiClient::new(&config)?;
