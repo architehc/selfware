@@ -1,0 +1,5 @@
+CalculatorTest.Add 2 0.000645287
+CalculatorTest.Subtract 2 0.000593433
+CalculatorTest.Multiply 2 0.000598259
+CalculatorTest.Divide 2 0.000627174
+---

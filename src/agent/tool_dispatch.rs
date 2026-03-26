@@ -1920,11 +1920,15 @@ impl Agent {
                 );
 
                 let verification_result = self.maybe_verify_file_change(name, args).await;
+                let visual_verification_result = self.maybe_verify_visual_change(name, args).await;
                 let enhanced_result = self.maybe_enhance_tool_result(name, &result_str);
-                let final_result = match verification_result {
-                    Some(ver_msg) => format!("{}{}", enhanced_result, ver_msg),
-                    None => enhanced_result,
-                };
+                let mut final_result = enhanced_result;
+                if let Some(ver_msg) = verification_result {
+                    final_result.push_str(&ver_msg);
+                }
+                if let Some(ver_msg) = visual_verification_result {
+                    final_result.push_str(&ver_msg);
+                }
                 Ok((true, final_result, summary))
             }
             Ok(Err(e)) => {

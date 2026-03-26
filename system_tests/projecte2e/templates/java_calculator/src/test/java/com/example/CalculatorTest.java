@@ -2,6 +2,7 @@ package com.example;
 
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
+import java.util.ArithmeticException;
 
 /**
  * Tests for Calculator class.
@@ -35,6 +36,6 @@ public class CalculatorTest {
     void testDivide() {
         assertEquals(5.0, calc.divide(10, 2));
         assertEquals(2.5, calc.divide(5, 2));
-        assertNull(calc.divide(10, 0));
+        assertThrows(ArithmeticException.class, () -> calc.divide(10, 0));
     }
 }

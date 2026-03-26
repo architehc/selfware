@@ -99,10 +99,10 @@
 
 | ID | Severity | File | Issue |
 |----|----------|------|-------|
-| L38 | P0 | `src/agent/interactive.rs:217,226` | `std::thread::sleep()` in async context — blocks tokio runtime thread |
-| L39 | P0 | `src/agent/execution.rs:3868` | `std::thread::sleep(5ms)` in async retry loop — blocks runtime |
-| L40 | P0 | `src/cli.rs:682` | `std::thread::spawn()` for TUI event loop inside async context |
-| L41 | P2 | `src/agent/context_map.rs:1694` | `std::thread::sleep(10ms)` in test setup (async context) |
+| L38 | ~P0~ RESOLVED | `src/agent/interactive.rs:217,226` | Inside `spawn_blocking` — correct, not blocking async runtime |
+| L39 | ~P0~ RESOLVED | `src/agent/execution.rs:3868` | Test code only — skipped |
+| L40 | P1 | `src/cli.rs:682` | `std::thread::spawn()` for TUI — consider `tokio::spawn_blocking` |
+| L41 | ~P2~ RESOLVED | `src/agent/context_map.rs:1694` | Test code only — skipped |
 
 ## 11. Configuration Management
 

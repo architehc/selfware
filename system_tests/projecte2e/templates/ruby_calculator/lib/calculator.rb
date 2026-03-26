@@ -5,8 +5,7 @@ class Calculator
   # @param b [Integer] Second number
   # @return [Integer] Sum
   def add(a, b)
-    # TODO: Implement
-    nil
+    a + b
   end
 
   # Subtract b from a
@@ -14,8 +13,7 @@ class Calculator
   # @param b [Integer] Second number
   # @return [Integer] Difference
   def subtract(a, b)
-    # TODO: Implement
-    nil
+    a - b
   end
 
   # Multiply two numbers
@@ -23,8 +21,7 @@ class Calculator
   # @param b [Integer] Second number
   # @return [Integer] Product
   def multiply(a, b)
-    # TODO: Implement
-    nil
+    a * b
   end
 
   # Divide a by b
@@ -32,7 +29,7 @@ class Calculator
   # @param b [Integer] Divisor
   # @return [Float, nil] Quotient or nil if b is 0
   def divide(a, b)
-    # TODO: Implement
-    nil
+    return nil if b == 0
+    a.to_f / b
   end
 end

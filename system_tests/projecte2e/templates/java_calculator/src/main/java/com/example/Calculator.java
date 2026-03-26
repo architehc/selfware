@@ -12,8 +12,7 @@ public class Calculator {
      * @return Sum of a and b
      */
     public int add(int a, int b) {
-        // TODO: Implement
-        return 0;
+        return a + b;
     }
 
     /**
@@ -23,8 +22,7 @@ public class Calculator {
      * @return Difference (a - b)
      */
     public int subtract(int a, int b) {
-        // TODO: Implement
-        return 0;
+        return a - b;
     }
 
     /**
@@ -34,18 +32,20 @@ public class Calculator {
      * @return Product of a and b
      */
     public int multiply(int a, int b) {
-        // TODO: Implement
-        return 0;
+        return a * b;
     }
 
     /**
      * Divides a by b.
      * @param a Dividend
      * @param b Divisor
-     * @return Quotient, or null if b is 0
+     * @return Quotient (a / b)
+     * @throws ArithmeticException if b is zero
      */
-    public Double divide(int a, int b) {
-        // TODO: Implement
-        return null;
+    public double divide(int a, int b) {
+        if (b == 0) {
+            throw new ArithmeticException("Division by zero");
+        }
+        return (double) a / b;
     }
 }

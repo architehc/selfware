@@ -4,6 +4,8 @@ use tracing::{debug, info, warn};
 use super::*;
 use crate::cognitive::CyclePhase;
 
+const EXPECTED_VISUAL_ARG: &str = "expected_visual";
+
 /// Detect responses that contain framework self-reference instead of task output.
 /// Returns true if the content references multiple internal implementation details,
 /// indicating the model is confused and reasoning about the framework itself.
@@ -22,6 +24,66 @@ pub(super) fn is_confused_response(content: &str) -> bool {
         .filter(|m| lower.contains(&m.to_lowercase()))
         .count()
         >= 2
+}
+
+fn truncate_visual_note(input: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    let mut chars = input.chars();
+    for _ in 0..max_chars {
+        let Some(ch) = chars.next() else {
+            return out;
+        };
+        out.push(ch);
+    }
+    if chars.next().is_some() {
+        out.push_str("...");
+    }
+    out
+}
+
+fn visual_verification_expectation(tool_name: &str, args: &Value) -> Option<String> {
+    if let Some(expected) = args.get(EXPECTED_VISUAL_ARG).and_then(|v| v.as_str()) {
+        let trimmed = expected.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    if tool_name != "computer_window" {
+        return None;
+    }
+
+    match args.get("action").and_then(|v| v.as_str()) {
+        Some("launch") => args
+            .get("app_name")
+            .and_then(|v| v.as_str())
+            .map(|app_name| {
+                format!(
+                    "A visible {} application window should now be open and usable on screen.",
+                    app_name
+                )
+            }),
+        Some("focus") => Some(
+            "The requested application window should now be focused and clearly visible on screen."
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
+fn configured_visual_verifier(
+    config: &crate::config::Config,
+) -> Option<crate::testing::visual_verification::VisualVerifier> {
+    let profile = config
+        .models
+        .get("vision")
+        .or_else(|| config.resolve_model(None))?;
+
+    if !profile.supports_vision() {
+        return None;
+    }
+
+    Some(crate::testing::visual_verification::VisualVerifier::from_model_profile(profile))
 }
 
 impl Agent {
@@ -315,11 +377,158 @@ impl Agent {
         }
     }
 
+    pub(super) async fn maybe_verify_visual_change(
+        &mut self,
+        tool_name: &str,
+        args: &Value,
+    ) -> Option<String> {
+        if !matches!(
+            tool_name,
+            "computer_mouse" | "computer_keyboard" | "computer_window"
+        ) {
+            return None;
+        }
+
+        let expectation = visual_verification_expectation(tool_name, args)?;
+        let Some(verifier) = configured_visual_verifier(&self.config) else {
+            return None;
+        };
+
+        info!(
+            "Running visual verification after {} with expectation: {}",
+            tool_name, expectation
+        );
+        self.cognitive_state.set_phase(CyclePhase::Verify);
+        let spinner = crate::ui::spinner::TerminalSpinner::start("Visual verifying...");
+
+        let captured = match crate::computer::screen::ScreenCapture::capture_full().await {
+            Ok(captured) => captured,
+            Err(e) => {
+                spinner.stop_error("Visual verification unavailable");
+                let msg = format!(
+                    "Visual verification could not capture the screen after `{}`: {}",
+                    tool_name,
+                    truncate_visual_note(&e.to_string(), 160)
+                );
+                warn!("{}", msg);
+                self.push_task_state_note(msg.clone());
+                self.pending_failure_hint = Some(format!(
+                    "Visual verification could not capture the screen after `{}`. Re-check the UI manually or retry with `computer_screen` before continuing.",
+                    tool_name
+                ));
+                return Some(format!(
+                    "\n\n<visual_verification_unavailable>\n{}\n</visual_verification_unavailable>",
+                    msg
+                ));
+            }
+        };
+
+        match verifier
+            .verify_screenshot(&captured.base64_png, &expectation)
+            .await
+        {
+            Ok(report) if report.passed => {
+                spinner.stop_success("Visual verification passed");
+                self.push_task_state_note(format!(
+                    "Visual verification passed after `{}` ({:.0}% confidence)",
+                    tool_name,
+                    report.confidence * 100.0
+                ));
+                None
+            }
+            Ok(report) => {
+                spinner.stop_error("Visual verification failed");
+                let issues = if report.issues.is_empty() {
+                    "No specific mismatches listed".to_string()
+                } else {
+                    report.issues.join("; ")
+                };
+                let note = format!(
+                    "Visual verification failed after `{}`: expected `{}`, observed `{}`",
+                    tool_name,
+                    truncate_visual_note(&expectation, 120),
+                    truncate_visual_note(&report.description, 120)
+                );
+                self.push_task_state_note(note);
+                self.pending_failure_hint = Some(format!(
+                    "Visual verification after `{}` did not match the expected UI state. Expected: {}. Observed: {}. Issues: {}. Re-check the screen before continuing.",
+                    tool_name,
+                    truncate_visual_note(&expectation, 200),
+                    truncate_visual_note(&report.description, 200),
+                    truncate_visual_note(&issues, 200)
+                ));
+                Some(format!(
+                    "\n\n<visual_verification_failed>\nexpected: {}\nobserved: {}\nconfidence: {:.2}\nissues: {}\n</visual_verification_failed>",
+                    expectation,
+                    report.description,
+                    report.confidence,
+                    issues
+                ))
+            }
+            Err(e) => {
+                spinner.stop_error("Visual verification unavailable");
+                let msg = format!(
+                    "Visual verification request failed after `{}`: {}",
+                    tool_name,
+                    truncate_visual_note(&e.to_string(), 160)
+                );
+                warn!("{}", msg);
+                self.push_task_state_note(msg.clone());
+                self.pending_failure_hint = Some(format!(
+                    "Visual verification could not complete after `{}`. Verify the screen with `computer_screen` or troubleshoot the vision endpoint before continuing.",
+                    tool_name
+                ));
+                Some(format!(
+                    "\n\n<visual_verification_unavailable>\n{}\n</visual_verification_unavailable>",
+                    msg
+                ))
+            }
+        }
+    }
+
     pub(super) fn maybe_enhance_tool_result(&self, name: &str, result_str: &str) -> String {
         if name == "cargo_check" && result_str.contains("\"success\":false") {
             self.enhance_cargo_errors(result_str)
         } else {
             result_str.to_string()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn explicit_visual_expectation_takes_priority() {
+        let args = json!({
+            "action": "click",
+            "expected_visual": "A confirmation dialog should be visible."
+        });
+        assert_eq!(
+            visual_verification_expectation("computer_mouse", &args).as_deref(),
+            Some("A confirmation dialog should be visible.")
+        );
+    }
+
+    #[test]
+    fn computer_window_launch_has_default_expectation() {
+        let args = json!({
+            "action": "launch",
+            "app_name": "Firefox"
+        });
+        let expectation = visual_verification_expectation("computer_window", &args).unwrap();
+        assert!(expectation.contains("Firefox"));
+        assert!(expectation.contains("visible"));
+    }
+
+    #[test]
+    fn non_window_actions_without_expectation_skip_visual_gate() {
+        let args = json!({
+            "action": "type",
+            "text": "hello"
+        });
+        assert!(visual_verification_expectation("computer_keyboard", &args).is_none());
     }
 }

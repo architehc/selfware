@@ -1663,15 +1663,21 @@ async fn handle_command(
 
             // 2. Throughput benchmark
             if suite.contains("throughput") || suite.contains("e2e") || suite.contains("all") {
-                println!("{} Running throughput benchmark ({concurrent} concurrent)...", "⏳".dimmed());
+                println!(
+                    "{} Running throughput benchmark ({concurrent} concurrent)...",
+                    "⏳".dimmed()
+                );
 
-                let ep = endpoint.as_ref().map(|s| s.as_str()).unwrap_or(&config.endpoint);
+                let ep = endpoint
+                    .as_ref()
+                    .map(|s| s.as_str())
+                    .unwrap_or(&config.endpoint);
                 let model_name = config.model.clone();
 
                 #[cfg(feature = "bench-harness")]
                 {
-                    use crate::bench_harness::*;
                     use crate::api::types::Message;
+                    use crate::bench_harness::*;
 
                     let bench_config = HarnessConfig {
                         endpoint: ep.to_string(),
@@ -1707,11 +1713,13 @@ async fn handle_command(
 
                     match runner.run(tasks).await {
                         Ok(report) => {
-                            println!("{} Throughput: {:.0} tok/s | p50: {:.1}s | {}/{} passed\n",
+                            println!(
+                                "{} Throughput: {:.0} tok/s | p50: {:.1}s | {}/{} passed\n",
                                 "✓".green(),
                                 report.tokens_per_sec,
                                 report.latency_p50_ms as f64 / 1000.0,
-                                report.tasks_passed, report.tasks_total,
+                                report.tasks_passed,
+                                report.tasks_total,
                             );
                         }
                         Err(e) => println!("{} Throughput test failed: {}\n", "✗".red(), e),
@@ -1720,7 +1728,10 @@ async fn handle_command(
 
                 #[cfg(not(feature = "bench-harness"))]
                 {
-                    println!("{} Benchmark requires --features bench-harness\n", "✗".red());
+                    println!(
+                        "{} Benchmark requires --features bench-harness\n",
+                        "✗".red()
+                    );
                 }
             }
 
@@ -1730,10 +1741,13 @@ async fn handle_command(
 
                 #[cfg(feature = "bench-harness")]
                 {
-                    use crate::bench_harness::*;
                     use crate::api::types::Message;
+                    use crate::bench_harness::*;
 
-                    let ep = endpoint.as_ref().map(|s| s.as_str()).unwrap_or(&config.endpoint);
+                    let ep = endpoint
+                        .as_ref()
+                        .map(|s| s.as_str())
+                        .unwrap_or(&config.endpoint);
 
                     let bench_config = HarnessConfig {
                         endpoint: ep.to_string(),
@@ -1772,13 +1786,24 @@ async fn handle_command(
 
                     match runner.run(tasks).await {
                         Ok(report) => {
-                            println!("{} Multi-lang: {}/{} passed | {:.0} tok/s\n",
+                            println!(
+                                "{} Multi-lang: {}/{} passed | {:.0} tok/s\n",
                                 "✓".green(),
-                                report.tasks_passed, report.tasks_total, report.tokens_per_sec,
+                                report.tasks_passed,
+                                report.tasks_total,
+                                report.tokens_per_sec,
                             );
                             for r in &report.results {
-                                let score = r.eval.as_ref().map(|e| format!("{:.0}%", e.score * 100.0)).unwrap_or("ERR".into());
-                                let icon = if r.success { "✓".green().to_string() } else { "✗".red().to_string() };
+                                let score = r
+                                    .eval
+                                    .as_ref()
+                                    .map(|e| format!("{:.0}%", e.score * 100.0))
+                                    .unwrap_or("ERR".into());
+                                let icon = if r.success {
+                                    "✓".green().to_string()
+                                } else {
+                                    "✗".red().to_string()
+                                };
                                 println!("     {} {} {}", icon, r.task_id, score);
                             }
                             println!();
@@ -1788,7 +1813,10 @@ async fn handle_command(
                 }
 
                 #[cfg(not(feature = "bench-harness"))]
-                println!("{} Benchmark requires --features bench-harness\n", "✗".red());
+                println!(
+                    "{} Benchmark requires --features bench-harness\n",
+                    "✗".red()
+                );
             }
 
             let elapsed = start_time.elapsed();

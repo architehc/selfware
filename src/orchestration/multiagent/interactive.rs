@@ -1,0 +1,287 @@
+//! Multi-Agent Interactive Mode
+//!
+//! Interactive CLI for the multi-agent chat system.
+
+use std::io::{self, Write};
+use std::time::Instant;
+
+use anyhow::Result;
+use colored::Colorize;
+use tokio::sync::mpsc;
+
+use crate::config::Config;
+use crate::swarm::AgentRole;
+
+use super::chat::MultiAgentChat;
+use super::config::MultiAgentConfig;
+use super::types::{AgentInstance, AgentStatus, MultiAgentEvent, MAX_CONCURRENT_AGENTS};
+
+impl MultiAgentChat {
+    /// Run interactive multi-agent chat
+    pub async fn interactive(&mut self) -> Result<()> {
+        println!("{}", "🤖 Multi-Agent Chat System".bright_cyan().bold());
+        println!(
+            "Agents: {} | Max Concurrency: {}",
+            self.config.roles.len(),
+            self.config.max_concurrency
+        );
+        println!("Type 'exit' to quit, '/help' for commands\n");
+
+        self.initialize_agents().await?;
+
+        loop {
+            print!("{} ", "🤖 ❯".bright_green());
+            io::stdout().flush()?;
+
+            let mut input = String::new();
+            // Use block_in_place to prevent blocking the async runtime
+            if tokio::task::block_in_place(|| io::stdin().read_line(&mut input)).is_err() {
+                continue;
+            }
+
+            let input = input.trim();
+
+            if matches!(input, "exit" | "quit" | "/exit" | "/quit" | "q" | "/q") {
+                break;
+            }
+
+            if input == "/help" {
+                println!("Commands:");
+                println!("  /help        - Show this help");
+                println!("  /agents      - List active agents");
+                println!("  /status      - Show system status");
+                println!("  /parallel N  - Set max concurrency (1-16)");
+                println!("  /add <role>  - Add an agent (coder/tester/reviewer/etc)");
+                println!("  /remove N    - Remove agent by ID");
+                println!("  /clear       - Reset all agents");
+                println!("  exit         - Exit chat");
+                continue;
+            }
+
+            if input == "/agents" {
+                let agents = self.agents.read().await;
+                println!("Active agents:");
+                for agent in agents.iter() {
+                    println!(
+                        "  [{:2}] {} ({}) - {:?}",
+                        agent.id,
+                        agent.name,
+                        agent.role.name(),
+                        agent.status
+                    );
+                }
+                continue;
+            }
+
+            if input == "/status" {
+                let agents = self.agents.read().await;
+                let results = self.results.lock().await;
+                println!("Status:");
+                println!("  Agents: {}", agents.len());
+                println!("  Max Concurrency: {}", self.config.max_concurrency);
+                println!("  Completed Tasks: {}", results.len());
+                continue;
+            }
+
+            if input.starts_with("/parallel ") {
+                if let Some(value) = input.strip_prefix("/parallel ").map(str::trim) {
+                    if let Ok(n) = value.parse::<usize>() {
+                        let n = n.clamp(1, MAX_CONCURRENT_AGENTS);
+                        self.config.max_concurrency = n;
+                        self.semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(n));
+                        println!("Max concurrency set to {}", n);
+                    }
+                } else {
+                    println!("Usage: /parallel <1-{ }>", MAX_CONCURRENT_AGENTS);
+                }
+                continue;
+            }
+
+            if input.starts_with("/add ") {
+                let Some(role_str) = input.strip_prefix("/add ").map(str::trim) else {
+                    println!("Usage: /add <role>");
+                    continue;
+                };
+                let role_str = role_str.to_lowercase();
+                let role = match role_str.as_str() {
+                    "architect" => Some(AgentRole::Architect),
+                    "coder" => Some(AgentRole::Coder),
+                    "tester" => Some(AgentRole::Tester),
+                    "reviewer" => Some(AgentRole::Reviewer),
+                    "documenter" => Some(AgentRole::Documenter),
+                    "devops" => Some(AgentRole::DevOps),
+                    "security" => Some(AgentRole::Security),
+                    "performance" => Some(AgentRole::Performance),
+                    "general" => Some(AgentRole::General),
+                    _ => None,
+                };
+                if let Some(role) = role {
+                    let mut agents = self.agents.write().await;
+                    let id = agents.len();
+                    agents.push(AgentInstance {
+                        id,
+                        role,
+                        name: format!("Agent-{}-{}", id, role.name()),
+                        messages: vec![crate::api::types::Message::system(role.system_prompt())],
+                        status: AgentStatus::Idle,
+                        last_heartbeat: Instant::now(),
+                    });
+                    println!("Added Agent-{}-{}", id, role.name());
+                } else {
+                    println!("Unknown role. Available: architect, coder, tester, reviewer, documenter, devops, security, performance, general");
+                }
+                continue;
+            }
+
+            if input.starts_with("/remove ") {
+                if let Some(value) = input.strip_prefix("/remove ").map(str::trim) {
+                    if let Ok(id) = value.parse::<usize>() {
+                        let mut agents = self.agents.write().await;
+                        if id < agents.len() {
+                            let removed = agents.remove(id);
+                            // Re-index remaining agents
+                            for (i, agent) in agents.iter_mut().enumerate() {
+                                agent.id = i;
+                            }
+                            println!("Removed {}", removed.name);
+                        } else {
+                            println!("Invalid agent ID");
+                        }
+                    }
+                } else {
+                    println!("Usage: /remove <id>");
+                }
+                continue;
+            }
+
+            if input == "/clear" {
+                self.initialize_agents().await?;
+                let mut results = self.results.lock().await;
+                results.clear();
+                println!("All agents reset");
+                continue;
+            }
+
+            if input.is_empty() {
+                continue;
+            }
+
+            // Run task across all agents
+            println!("{}", "Running task across all agents...".bright_yellow());
+
+            let start = Instant::now();
+
+            // Create event channel for this run
+            let (tx, mut rx) = mpsc::channel::<MultiAgentEvent>(1000);
+            self.event_tx = Some(tx);
+
+            // Spawn event handler
+            let handle = tokio::spawn(async move {
+                while let Some(event) = rx.recv().await {
+                    match event {
+                        MultiAgentEvent::AgentStarted { name, .. } => {
+                            println!("  {} {} started", "▶".bright_blue(), name);
+                        }
+                        MultiAgentEvent::AgentToolCall { agent_id, tool } => {
+                            println!(
+                                "  {} Agent-{} calling {}",
+                                "🔧".bright_yellow(),
+                                agent_id,
+                                tool
+                            );
+                        }
+                        MultiAgentEvent::AgentCompleted { result, .. } => {
+                            let status = if result.success {
+                                "✓".bright_green()
+                            } else {
+                                "✗".bright_red()
+                            };
+                            println!(
+                                "  {} {} completed in {:.2}s",
+                                status,
+                                result.agent_name,
+                                result.duration.as_secs_f64()
+                            );
+                        }
+                        MultiAgentEvent::AgentFailed { agent_id, error } => {
+                            println!(
+                                "  {} Agent-{} failed: {}",
+                                "✗".bright_red(),
+                                agent_id,
+                                error
+                            );
+                        }
+                        MultiAgentEvent::AllCompleted {
+                            results,
+                            total_duration,
+                        } => {
+                            let success_count = results.iter().filter(|r| r.success).count();
+                            println!(
+                                "\n{} {}/{} agents completed in {:.2}s",
+                                "Summary:".bright_cyan(),
+                                success_count,
+                                results.len(),
+                                total_duration.as_secs_f64()
+                            );
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            });
+
+            let results = self.run_task(input).await?;
+
+            // Wait for event handler
+            let _ = handle.await;
+
+            // Print results
+            println!("\n{}", "Agent Responses:".bright_cyan().bold());
+            for result in &results {
+                if result.success {
+                    println!(
+                        "\n{} {} ({}):",
+                        "━━━".bright_blue(),
+                        result.agent_name.bright_white(),
+                        result.role.name()
+                    );
+                    // Truncate long responses for display (UTF-8 safe)
+                    let preview = if result.content.len() > 500 {
+                        let mut end = 500;
+                        while end > 0 && !result.content.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        format!(
+                            "{}...\n[{} more chars]",
+                            &result.content[..end],
+                            result.content.len() - end
+                        )
+                    } else {
+                        result.content.clone()
+                    };
+                    println!("{}", preview);
+                }
+            }
+
+            println!(
+                "\n{} Total time: {:.2}s",
+                "⏱".bright_yellow(),
+                start.elapsed().as_secs_f64()
+            );
+        }
+
+        Ok(())
+    }
+}
+
+/// Quick helper to run a task with default multi-agent config
+pub async fn run_multiagent_task(
+    config: &Config,
+    task: &str,
+    concurrency: usize,
+) -> Result<Vec<crate::orchestration::multiagent::types::AgentResult>> {
+    let agent_config = MultiAgentConfig::default().with_concurrency(concurrency);
+
+    let chat = MultiAgentChat::new(config, agent_config)?;
+    chat.run_task(task).await
+}

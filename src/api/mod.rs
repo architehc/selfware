@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use futures::StreamExt;
 use once_cell::sync::Lazy;
@@ -99,6 +99,51 @@ fn attach_tools_to_body(
             body["tool_choice"] = serde_json::json!("auto");
         }
     }
+}
+
+const RESERVED_EXTRA_BODY_KEYS: &[&str] = &[
+    "model",
+    "messages",
+    "tools",
+    "tool_choice",
+    "stream",
+    "max_tokens",
+    "temperature",
+    "thinking",
+];
+
+fn merge_extra_body(
+    body: &mut serde_json::Value,
+    extra_body: Option<&serde_json::Map<String, serde_json::Value>>,
+    context: &str,
+) -> Result<()> {
+    let Some(extra_body) = extra_body else {
+        return Ok(());
+    };
+
+    let body_obj = body
+        .as_object_mut()
+        .context("request body must be a JSON object")?;
+
+    let reserved: Vec<&str> = extra_body
+        .keys()
+        .map(|key| key.as_str())
+        .filter(|key| RESERVED_EXTRA_BODY_KEYS.contains(key))
+        .collect();
+
+    if !reserved.is_empty() {
+        bail!(
+            "{} extra_body cannot override reserved top-level keys: {}",
+            context,
+            reserved.join(", ")
+        );
+    }
+
+    for (key, value) in extra_body {
+        body_obj.insert(key.clone(), value.clone());
+    }
+
+    Ok(())
 }
 
 /// Trait abstraction over the LLM API client, enabling test mocking.
@@ -712,14 +757,12 @@ impl ApiClient {
             });
         }
 
-        // Merge extra_body fields (e.g. chat_template_kwargs for SGLang)
-        if let Some(ref extra) = self.config.extra_body {
-            if let Some(obj) = body.as_object_mut() {
-                for (k, v) in extra {
-                    obj.insert(k.clone(), v.clone());
-                }
-            }
-        }
+        // Merge backend-specific request extensions while rejecting core field overrides.
+        merge_extra_body(
+            &mut body,
+            self.config.extra_body.as_ref(),
+            "default chat request",
+        )?;
 
         self.send_with_retry(&body).await
     }
@@ -800,14 +843,12 @@ impl ApiClient {
             });
         }
 
-        // Merge extra_body fields (e.g. chat_template_kwargs for SGLang)
-        if let Some(ref extra) = self.config.extra_body {
-            if let Some(obj) = body.as_object_mut() {
-                for (k, v) in extra {
-                    obj.insert(k.clone(), v.clone());
-                }
-            }
-        }
+        // Merge backend-specific request extensions while rejecting core field overrides.
+        merge_extra_body(
+            &mut body,
+            self.config.extra_body.as_ref(),
+            "streaming chat request",
+        )?;
 
         let url = format!("{}/chat/completions", self.base_url);
         debug!("Starting streaming request to {}", url);
@@ -1025,14 +1066,12 @@ impl ApiClient {
             });
         }
 
-        // Merge extra_body fields from profile (e.g. chat_template_kwargs for SGLang)
-        if let Some(ref extra) = profile.extra_body {
-            if let Some(obj) = body.as_object_mut() {
-                for (k, v) in extra {
-                    obj.insert(k.clone(), v.clone());
-                }
-            }
-        }
+        // Merge backend-specific request extensions while rejecting core field overrides.
+        merge_extra_body(
+            &mut body,
+            profile.extra_body.as_ref(),
+            "model profile chat request",
+        )?;
 
         self.send_request_with_retry(&body, &profile.endpoint, profile.api_key.as_ref())
             .await
@@ -3400,6 +3439,88 @@ mod tests {
         let result = (delay_ms as i64).saturating_add(jitter).max(1) as u64;
         let capped = result.min(max_delay_ms);
         assert_eq!(capped, 30000);
+    }
+
+    #[test]
+    fn test_merge_extra_body_allows_backend_specific_keys() {
+        let mut body = serde_json::json!({
+            "model": "text-model",
+            "messages": [],
+            "temperature": 0.0,
+            "max_tokens": 128,
+            "stream": false,
+            "tools": [],
+            "tool_choice": "auto",
+            "thinking": {
+                "type": "enabled",
+                "budget_tokens": 64
+            }
+        });
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "chat_template_kwargs".to_string(),
+            serde_json::json!({ "enable_thinking": false }),
+        );
+        extra.insert("backend_flag".to_string(), serde_json::json!(true));
+
+        merge_extra_body(&mut body, Some(&extra), "default chat request").unwrap();
+
+        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
+        assert_eq!(body["backend_flag"], true);
+        assert_eq!(body["model"], "text-model");
+    }
+
+    #[test]
+    fn test_merge_extra_body_rejects_reserved_keys_for_default_chat_request() {
+        let mut body = serde_json::json!({
+            "model": "text-model",
+            "messages": [],
+            "temperature": 0.0,
+            "max_tokens": 128,
+            "stream": false
+        });
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "chat_template_kwargs".to_string(),
+            serde_json::json!({ "enable_thinking": false }),
+        );
+        extra.insert("max_tokens".to_string(), serde_json::json!(256));
+
+        let err = merge_extra_body(&mut body, Some(&extra), "default chat request")
+            .expect_err("reserved top-level keys must be rejected");
+        let err_text = err.to_string();
+
+        assert!(err_text.contains("default chat request"));
+        assert!(err_text.contains("max_tokens"));
+        assert!(body.get("chat_template_kwargs").is_none());
+    }
+
+    #[test]
+    fn test_merge_extra_body_rejects_reserved_keys_for_profile_chat_request() {
+        let mut body = serde_json::json!({
+            "model": "profile-model",
+            "messages": [],
+            "temperature": 0.0,
+            "max_tokens": 128,
+            "stream": false
+        });
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "chat_template_kwargs".to_string(),
+            serde_json::json!({ "enable_thinking": false }),
+        );
+        extra.insert(
+            "thinking".to_string(),
+            serde_json::json!({ "budget_tokens": 32 }),
+        );
+
+        let err = merge_extra_body(&mut body, Some(&extra), "model profile chat request")
+            .expect_err("reserved top-level keys must be rejected");
+        let err_text = err.to_string();
+
+        assert!(err_text.contains("model profile chat request"));
+        assert!(err_text.contains("thinking"));
+        assert!(body.get("chat_template_kwargs").is_none());
     }
 
     // ============================================

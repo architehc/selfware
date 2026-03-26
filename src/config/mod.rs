@@ -636,7 +636,7 @@ fn default_token_budget() -> usize {
     0 // sentinel: 0 means "derive from max_tokens at load time"
 }
 fn default_token_safety_margin() -> usize {
-    100_000 // 100K token safety margin for tool definitions + output + overhead
+    8_192 // 8K token safety margin for tool definitions + output + overhead
 }
 fn default_context_content_ratio() -> f32 {
     0.75
@@ -996,12 +996,10 @@ impl Config {
             );
         }
 
-        // If token_budget was not explicitly set (sentinel value 0), derive it
-        // from max_tokens.  Local models have varying context sizes — defaulting
-        // to 500k was wrong because it misrepresents the actual capacity.
-        if config.agent.token_budget == 0 {
-            config.agent.token_budget = config.max_tokens;
-        }
+        // Normalize agent token limits so derived defaults and explicit values
+        // both satisfy validation.  Local models have varying context sizes —
+        // defaulting to 500k was wrong because it misrepresents the actual capacity.
+        config.normalize_agent_limits();
 
         // Validate the loaded configuration
         config.validate()?;
@@ -1173,6 +1171,27 @@ impl Config {
         }
 
         Ok(())
+    }
+
+    /// Normalize agent token limits so load-time defaults always satisfy the
+    /// validation invariant `token_safety_margin < token_budget`.
+    fn normalize_agent_limits(&mut self) {
+        if self.agent.token_budget == 0 {
+            self.agent.token_budget = self.max_tokens;
+        }
+
+        if self.agent.token_safety_margin >= self.agent.token_budget {
+            let clamped_margin = self.agent.token_budget.saturating_sub(1);
+            if self.agent.token_safety_margin != clamped_margin {
+                warn!(
+                    token_budget = self.agent.token_budget,
+                    token_safety_margin = self.agent.token_safety_margin,
+                    normalized_token_safety_margin = clamped_margin,
+                    "Config normalization: clamping token_safety_margin to stay below token_budget"
+                );
+            }
+            self.agent.token_safety_margin = clamped_margin;
+        }
     }
 
     /// Apply UI settings to the global theme and output systems
@@ -2820,11 +2839,39 @@ temperature = 0.3
         assert_eq!(config.endpoint, "http://localhost:9999/v1");
         assert_eq!(config.model, "loaded-model");
         assert_eq!(config.max_tokens, 2048);
+        assert_eq!(config.agent.token_budget, 2048);
+        assert_eq!(config.agent.token_safety_margin, 2047);
         assert!((config.temperature - 0.3).abs() < f32::EPSILON);
         assert!(config.models.contains_key("default"));
         let default_prof = &config.models["default"];
         assert_eq!(default_prof.endpoint, "http://localhost:9999/v1");
         assert_eq!(default_prof.model, "loaded-model");
+    }
+
+    #[test]
+    fn test_config_load_preserves_valid_token_limits() {
+        clear_selfware_env_vars();
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("valid_limits.toml");
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        write!(
+            file,
+            r#"
+endpoint = "http://localhost:9999/v1"
+model = "loaded-model"
+max_tokens = 4096
+
+[agent]
+token_budget = 200000
+token_safety_margin = 8192
+"#
+        )
+        .unwrap();
+
+        let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+        assert_eq!(config.agent.token_budget, 200000);
+        assert_eq!(config.agent.token_safety_margin, 8192);
     }
 
     #[test]
