@@ -340,13 +340,19 @@ mod tests {
         let tool = ComputerMouseTool;
         let result = tool.execute(json!({"action": "teleport"})).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unknown mouse action"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown mouse action"));
     }
 
     #[tokio::test]
     async fn test_mouse_tool_move_to() {
         let tool = ComputerMouseTool;
-        let result = tool.execute(json!({"action": "move_to", "x": 100, "y": 200})).await.unwrap();
+        let result = tool
+            .execute(json!({"action": "move_to", "x": 100, "y": 200}))
+            .await
+            .unwrap();
         assert_eq!(result["status"], "ok");
         assert_eq!(result["action"], "move_to");
         assert_eq!(result["x"], 100);
@@ -356,7 +362,10 @@ mod tests {
     #[tokio::test]
     async fn test_mouse_tool_click() {
         let tool = ComputerMouseTool;
-        let result = tool.execute(json!({"action": "click", "x": 50, "y": 50})).await.unwrap();
+        let result = tool
+            .execute(json!({"action": "click", "x": 50, "y": 50}))
+            .await
+            .unwrap();
         assert_eq!(result["status"], "ok");
         assert_eq!(result["action"], "click");
     }
@@ -364,7 +373,10 @@ mod tests {
     #[tokio::test]
     async fn test_mouse_tool_double_click() {
         let tool = ComputerMouseTool;
-        let result = tool.execute(json!({"action": "double_click", "x": 50, "y": 50})).await.unwrap();
+        let result = tool
+            .execute(json!({"action": "double_click", "x": 50, "y": 50}))
+            .await
+            .unwrap();
         assert_eq!(result["status"], "ok");
         assert_eq!(result["action"], "double_click");
     }
@@ -372,7 +384,10 @@ mod tests {
     #[tokio::test]
     async fn test_mouse_tool_right_click() {
         let tool = ComputerMouseTool;
-        let result = tool.execute(json!({"action": "right_click", "x": 10, "y": 20})).await.unwrap();
+        let result = tool
+            .execute(json!({"action": "right_click", "x": 10, "y": 20}))
+            .await
+            .unwrap();
         assert_eq!(result["status"], "ok");
         assert_eq!(result["action"], "right_click");
     }
@@ -380,7 +395,10 @@ mod tests {
     #[tokio::test]
     async fn test_mouse_tool_scroll() {
         let tool = ComputerMouseTool;
-        let result = tool.execute(json!({"action": "scroll", "delta_x": 0, "delta_y": -3})).await.unwrap();
+        let result = tool
+            .execute(json!({"action": "scroll", "delta_x": 0, "delta_y": -3}))
+            .await
+            .unwrap();
         assert_eq!(result["status"], "ok");
         assert_eq!(result["action"], "scroll");
         assert_eq!(result["delta_y"], -3);
@@ -397,9 +415,12 @@ mod tests {
     #[tokio::test]
     async fn test_mouse_tool_drag() {
         let tool = ComputerMouseTool;
-        let result = tool.execute(json!({
-            "action": "drag", "x": 10, "y": 20, "end_x": 100, "end_y": 200
-        })).await.unwrap();
+        let result = tool
+            .execute(json!({
+                "action": "drag", "x": 10, "y": 20, "end_x": 100, "end_y": 200
+            }))
+            .await
+            .unwrap();
         assert_eq!(result["status"], "ok");
         assert_eq!(result["action"], "drag");
     }
@@ -449,13 +470,19 @@ mod tests {
         let tool = ComputerKeyboardTool;
         let result = tool.execute(json!({"action": "smash"})).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unknown keyboard action"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown keyboard action"));
     }
 
     #[tokio::test]
     async fn test_keyboard_tool_type() {
         let tool = ComputerKeyboardTool;
-        let result = tool.execute(json!({"action": "type", "text": "hello"})).await.unwrap();
+        let result = tool
+            .execute(json!({"action": "type", "text": "hello"}))
+            .await
+            .unwrap();
         assert_eq!(result["status"], "ok");
         assert_eq!(result["chars"], 5);
     }
@@ -471,7 +498,10 @@ mod tests {
     #[tokio::test]
     async fn test_keyboard_tool_press() {
         let tool = ComputerKeyboardTool;
-        let result = tool.execute(json!({"action": "press", "key": "Enter"})).await.unwrap();
+        let result = tool
+            .execute(json!({"action": "press", "key": "Enter"}))
+            .await
+            .unwrap();
         assert_eq!(result["status"], "ok");
         assert_eq!(result["key"], "Enter");
     }
@@ -486,7 +516,10 @@ mod tests {
     #[tokio::test]
     async fn test_keyboard_tool_combo() {
         let tool = ComputerKeyboardTool;
-        let result = tool.execute(json!({"action": "combo", "keys": "ctrl+s"})).await.unwrap();
+        let result = tool
+            .execute(json!({"action": "combo", "keys": "ctrl+s"}))
+            .await
+            .unwrap();
         assert_eq!(result["status"], "ok");
         assert_eq!(result["keys"], "ctrl+s");
     }
@@ -535,7 +568,10 @@ mod tests {
         let tool = ComputerScreenTool;
         let result = tool.execute(json!({"action": "3d_scan"})).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unknown screen action"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown screen action"));
     }
 
     // ── Window tool tests ─────────────────────────────────────────────
@@ -576,7 +612,10 @@ mod tests {
         let tool = ComputerWindowTool;
         let result = tool.execute(json!({"action": "explode"})).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unknown window action"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown window action"));
     }
 
     #[tokio::test]
@@ -598,7 +637,10 @@ mod tests {
     #[tokio::test]
     async fn test_window_tool_focus_with_id() {
         let tool = ComputerWindowTool;
-        let result = tool.execute(json!({"action": "focus", "window_id": 1})).await.unwrap();
+        let result = tool
+            .execute(json!({"action": "focus", "window_id": 1}))
+            .await
+            .unwrap();
         assert_eq!(result["status"], "ok");
     }
 

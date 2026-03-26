@@ -471,13 +471,31 @@ mod tests {
             iterations: 5,
             threshold_met: false,
             score_history: vec![
-                VisualScore { overall: 30.0, ..Default::default() },
-                VisualScore { overall: 45.0, ..Default::default() },
-                VisualScore { overall: 55.0, ..Default::default() },
-                VisualScore { overall: 60.0, ..Default::default() },
-                VisualScore { overall: 65.0, ..Default::default() },
+                VisualScore {
+                    overall: 30.0,
+                    ..Default::default()
+                },
+                VisualScore {
+                    overall: 45.0,
+                    ..Default::default()
+                },
+                VisualScore {
+                    overall: 55.0,
+                    ..Default::default()
+                },
+                VisualScore {
+                    overall: 60.0,
+                    ..Default::default()
+                },
+                VisualScore {
+                    overall: 65.0,
+                    ..Default::default()
+                },
             ],
-            final_score: VisualScore { overall: 65.0, ..Default::default() },
+            final_score: VisualScore {
+                overall: 65.0,
+                ..Default::default()
+            },
         };
         let json = serde_json::to_string(&result).unwrap();
         let parsed: VisualLoopResult = serde_json::from_str(&json).unwrap();

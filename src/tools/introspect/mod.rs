@@ -119,7 +119,8 @@ impl CodeIntrospect {
 
         // If we have a query, rank files by relevance
         let ranked_files: Vec<(PathBuf, f64)> = if let Some(ref query) = args.query {
-            let files_with_score: Vec<(PathBuf, f64)> = files.into_iter().map(|f| (f, 1.0)).collect();
+            let files_with_score: Vec<(PathBuf, f64)> =
+                files.into_iter().map(|f| (f, 1.0)).collect();
             let engine = CodeQueryEngine::new();
             engine.rank_files(&files_with_score, query).await
         } else {
@@ -137,7 +138,7 @@ impl CodeIntrospect {
 
             // Check if we can afford this file at requested depth
             let estimate = budget.estimate_file(&file_path, &depth).await?;
-            
+
             // Skip if can't afford even at minimum depth
             if estimate.min_tokens > budget.remaining() {
                 continue;
@@ -156,8 +157,9 @@ impl CodeIntrospect {
                 let language = Language::detect(&file_path, args.language.as_deref());
                 let parsed = parser::parse(&content, language);
                 let symbols = parser::extract_at_depth(&parsed, &actual_depth);
-                
-                let symbol_tokens: usize = symbols.iter()
+
+                let symbol_tokens: usize = symbols
+                    .iter()
                     .map(|s| estimate_content_tokens(&s.render()))
                     .sum();
 
@@ -228,7 +230,8 @@ impl CodeIntrospect {
         &'a self,
         dir: &'a Path,
         depth: usize,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<PathBuf>>> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<PathBuf>>> + Send + 'a>>
+    {
         Box::pin(async move {
             if depth == 0 {
                 return Ok(Vec::new());
@@ -239,11 +242,14 @@ impl CodeIntrospect {
 
             while let Some(entry) = entries.next_entry().await? {
                 let path = entry.path();
-                
+
                 // Skip common non-source directories
                 if let Some(name) = path.file_name() {
                     let name = name.to_string_lossy();
-                    if matches!(name.as_ref(), "target" | "node_modules" | ".git" | "__pycache__" | ".venv") {
+                    if matches!(
+                        name.as_ref(),
+                        "target" | "node_modules" | ".git" | "__pycache__" | ".venv"
+                    ) {
                         continue;
                     }
                 }
@@ -279,7 +285,7 @@ impl CodeIntrospect {
 
         if included < total {
             let coverage = (included as f64 / total as f64) * 100.0;
-            
+
             if coverage < 50.0 && !matches!(depth, Depth::Overview) {
                 suggestions.push(format!(
                     "Only {:.0}% coverage. Use 'depth: overview' for broader coverage.",
@@ -288,9 +294,8 @@ impl CodeIntrospect {
             }
 
             if !has_query && included > 20 {
-                suggestions.push(
-                    "Add a 'query' parameter to prioritize most relevant files.".to_string()
-                );
+                suggestions
+                    .push("Add a 'query' parameter to prioritize most relevant files.".to_string());
             }
         }
 
@@ -494,10 +499,13 @@ impl CodeQuery {
         let mut entries = tokio::fs::read_dir(dir).await?;
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
-            
+
             if let Some(name) = path.file_name() {
                 let name = name.to_string_lossy();
-                if matches!(name.as_ref(), "target" | "node_modules" | ".git" | "__pycache__") {
+                if matches!(
+                    name.as_ref(),
+                    "target" | "node_modules" | ".git" | "__pycache__"
+                ) {
                     continue;
                 }
             }

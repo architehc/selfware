@@ -1628,7 +1628,10 @@ mod tests {
             context_length = 1010000
         "#;
         let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.context_length, 1010000, "context_length should be parsed from TOML");
+        assert_eq!(
+            config.context_length, 1010000,
+            "context_length should be parsed from TOML"
+        );
     }
 
     #[test]
@@ -1637,7 +1640,10 @@ mod tests {
             endpoint = "http://localhost:8000/v1"
         "#;
         let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.context_length, 131072, "context_length should use default when not specified");
+        assert_eq!(
+            config.context_length, 131072,
+            "context_length should use default when not specified"
+        );
     }
 
     #[test]

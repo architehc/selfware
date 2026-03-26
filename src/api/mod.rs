@@ -674,7 +674,7 @@ impl ApiClient {
             .map(|t| estimate_tool_definitions_tokens(t))
             .unwrap_or(0);
         let input_tokens = message_tokens + tool_tokens;
-        
+
         // Hard limit: context_length must match vLLM --max-model-len exactly.
         let hard_limit = self.config.context_length;
         let min_output = 512_usize;
@@ -690,7 +690,10 @@ impl ApiClient {
 
         // Cap output tokens to what the model can actually produce
         let available_for_output = hard_limit.saturating_sub(input_tokens);
-        let max_tokens = self.config.max_tokens.min(available_for_output.max(min_output));
+        let max_tokens = self
+            .config
+            .max_tokens
+            .min(available_for_output.max(min_output));
 
         let mut body = serde_json::json!({
             "model": self.config.model,
@@ -759,7 +762,7 @@ impl ApiClient {
             .map(|t| estimate_tool_definitions_tokens(t))
             .unwrap_or(0);
         let input_tokens = message_tokens + tool_tokens;
-        
+
         // Hard limit: context_length must match vLLM --max-model-len exactly.
         let hard_limit = self.config.context_length;
         let min_output = 512_usize;
@@ -775,7 +778,10 @@ impl ApiClient {
 
         // Cap output tokens to what the model can actually produce
         let available_for_output = hard_limit.saturating_sub(input_tokens);
-        let max_tokens = self.config.max_tokens.min(available_for_output.max(min_output));
+        let max_tokens = self
+            .config
+            .max_tokens
+            .min(available_for_output.max(min_output));
 
         let mut body = serde_json::json!({
             "model": self.config.model,

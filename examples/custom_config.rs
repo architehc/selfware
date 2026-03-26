@@ -22,7 +22,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Check environment for API key
     if let Ok(api_key) = env::var("SELFWARE_API_KEY") {
-        println!("API Key: {}***", &api_key[..std::cmp::min(4, api_key.len())]);
+        println!(
+            "API Key: {}***",
+            &api_key[..std::cmp::min(4, api_key.len())]
+        );
     } else {
         println!("No API key set (use SELFWARE_API_KEY environment variable)");
     }

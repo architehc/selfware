@@ -121,7 +121,7 @@ impl App {
             garden_view: super::GardenView::new(),
         }
     }
-    
+
     /// Toggle garden view
     pub fn toggle_garden_view(&mut self) {
         self.state = if self.state == AppState::GardenView {
@@ -211,11 +211,14 @@ impl App {
 
         // Handle garden view as full-screen overlay
         if self.state == AppState::GardenView {
-            self.render_header(frame, Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(3)])
-                .split(area)[0]);
-            
+            self.render_header(
+                frame,
+                Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(3)])
+                    .split(area)[0],
+            );
+
             let main_area = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -224,9 +227,9 @@ impl App {
                     Constraint::Length(1), // Status bar
                 ])
                 .split(area)[1];
-            
+
             self.garden_view.render(frame, main_area);
-            
+
             let status_area = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -398,7 +401,9 @@ impl App {
             AppState::Confirming(_) => "y: yes │ n: no │ Enter: confirm │ Esc: cancel",
             AppState::FileBrowser => "arrows: navigate | Enter: open | Esc: close",
             AppState::Help => "Esc: close help",
-            AppState::GardenView => "arrows: navigate | Enter: expand | r: refresh | Ctrl+G: exit garden",
+            AppState::GardenView => {
+                "arrows: navigate | Enter: expand | r: refresh | Ctrl+G: exit garden"
+            }
         };
 
         let status_line = Line::from(vec![

@@ -548,7 +548,7 @@ pub fn run_tui(model: &str) -> Result<Vec<String>> {
                 }
                 continue;
             }
-            
+
             match key.code {
                 KeyCode::Enter => {
                     if let Some(input) = app.on_enter() {
@@ -569,7 +569,9 @@ pub fn run_tui(model: &str) -> Result<Vec<String>> {
                 KeyCode::Char('g') if key.modifiers == KeyModifiers::CONTROL => {
                     app.toggle_garden_view();
                     if app.state == AppState::GardenView {
-                        app.status = "Garden view: ↑↓ navigate, Enter expand, r refresh, Esc/Ctrl+G exit".to_string();
+                        app.status =
+                            "Garden view: ↑↓ navigate, Enter expand, r refresh, Esc/Ctrl+G exit"
+                                .to_string();
                     }
                 }
                 KeyCode::Char(c) => app.on_char(c),

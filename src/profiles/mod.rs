@@ -48,171 +48,189 @@ impl ProfileManager {
     /// Create with built-in profiles
     pub fn new() -> Self {
         let mut profiles = HashMap::new();
-        
+
         // Single powerful agent (architect mode)
-        profiles.insert("architect".to_string(), Profile {
-            name: "Architect".to_string(),
-            description: "Deep thinking, single agent for complex design tasks".to_string(),
-            config_overrides: ConfigOverrides {
-                max_tokens: Some(8192),
-                temperature: Some(0.7),
-                max_iterations: Some(100),
-                step_timeout_secs: Some(900),
-                concurrency: Some(ConcurrencyOverrides {
-                    max_parallel_requests: Some(4),
-                    timeout_secs: Some(120),
-                }),
-                agent: Some(AgentOverrides {
-                    streaming: Some(false),
-                    native_function_calling: Some(true),
-                    enable_thinking: Some(true),
-                }),
+        profiles.insert(
+            "architect".to_string(),
+            Profile {
+                name: "Architect".to_string(),
+                description: "Deep thinking, single agent for complex design tasks".to_string(),
+                config_overrides: ConfigOverrides {
+                    max_tokens: Some(8192),
+                    temperature: Some(0.7),
+                    max_iterations: Some(100),
+                    step_timeout_secs: Some(900),
+                    concurrency: Some(ConcurrencyOverrides {
+                        max_parallel_requests: Some(4),
+                        timeout_secs: Some(120),
+                    }),
+                    agent: Some(AgentOverrides {
+                        streaming: Some(false),
+                        native_function_calling: Some(true),
+                        enable_thinking: Some(true),
+                    }),
+                },
             },
-        });
-        
+        );
+
         // 8-agent swarm
-        profiles.insert("swarm-8".to_string(), Profile {
-            name: "Swarm-8".to_string(),
-            description: "8 concurrent agents for collaborative tasks".to_string(),
-            config_overrides: ConfigOverrides {
-                max_tokens: Some(4096),
-                temperature: Some(0.6),
-                max_iterations: Some(50),
-                step_timeout_secs: Some(600),
-                concurrency: Some(ConcurrencyOverrides {
-                    max_parallel_requests: Some(16),
-                    timeout_secs: Some(300),
-                }),
-                agent: Some(AgentOverrides {
-                    streaming: Some(false),
-                    native_function_calling: Some(true),
-                    enable_thinking: Some(false),
-                }),
+        profiles.insert(
+            "swarm-8".to_string(),
+            Profile {
+                name: "Swarm-8".to_string(),
+                description: "8 concurrent agents for collaborative tasks".to_string(),
+                config_overrides: ConfigOverrides {
+                    max_tokens: Some(4096),
+                    temperature: Some(0.6),
+                    max_iterations: Some(50),
+                    step_timeout_secs: Some(600),
+                    concurrency: Some(ConcurrencyOverrides {
+                        max_parallel_requests: Some(16),
+                        timeout_secs: Some(300),
+                    }),
+                    agent: Some(AgentOverrides {
+                        streaming: Some(false),
+                        native_function_calling: Some(true),
+                        enable_thinking: Some(false),
+                    }),
+                },
             },
-        });
-        
+        );
+
         // 16-agent batch (sweet spot for 2x4090)
-        profiles.insert("batch-16".to_string(), Profile {
-            name: "Batch-16".to_string(),
-            description: "16 concurrent agents - optimal for 2x RTX 4090".to_string(),
-            config_overrides: ConfigOverrides {
-                max_tokens: Some(4096),
-                temperature: Some(0.6),
-                max_iterations: Some(30),
-                step_timeout_secs: Some(900),
-                concurrency: Some(ConcurrencyOverrides {
-                    max_parallel_requests: Some(24),
-                    timeout_secs: Some(600),
-                }),
-                agent: Some(AgentOverrides {
-                    streaming: Some(false),
-                    native_function_calling: Some(true),
-                    enable_thinking: Some(false),
-                }),
+        profiles.insert(
+            "batch-16".to_string(),
+            Profile {
+                name: "Batch-16".to_string(),
+                description: "16 concurrent agents - optimal for 2x RTX 4090".to_string(),
+                config_overrides: ConfigOverrides {
+                    max_tokens: Some(4096),
+                    temperature: Some(0.6),
+                    max_iterations: Some(30),
+                    step_timeout_secs: Some(900),
+                    concurrency: Some(ConcurrencyOverrides {
+                        max_parallel_requests: Some(24),
+                        timeout_secs: Some(600),
+                    }),
+                    agent: Some(AgentOverrides {
+                        streaming: Some(false),
+                        native_function_calling: Some(true),
+                        enable_thinking: Some(false),
+                    }),
+                },
             },
-        });
-        
+        );
+
         // 32-way batch (direct API only)
-        profiles.insert("batch-32".to_string(), Profile {
-            name: "Batch-32".to_string(),
-            description: "Maximum throughput for simple tasks".to_string(),
-            config_overrides: ConfigOverrides {
-                max_tokens: Some(2048),
-                temperature: Some(0.5),
-                max_iterations: Some(10),
-                step_timeout_secs: Some(300),
-                concurrency: Some(ConcurrencyOverrides {
-                    max_parallel_requests: Some(32),
-                    timeout_secs: Some(120),
-                }),
-                agent: Some(AgentOverrides {
-                    streaming: Some(false),
-                    native_function_calling: Some(false),
-                    enable_thinking: Some(false),
-                }),
+        profiles.insert(
+            "batch-32".to_string(),
+            Profile {
+                name: "Batch-32".to_string(),
+                description: "Maximum throughput for simple tasks".to_string(),
+                config_overrides: ConfigOverrides {
+                    max_tokens: Some(2048),
+                    temperature: Some(0.5),
+                    max_iterations: Some(10),
+                    step_timeout_secs: Some(300),
+                    concurrency: Some(ConcurrencyOverrides {
+                        max_parallel_requests: Some(32),
+                        timeout_secs: Some(120),
+                    }),
+                    agent: Some(AgentOverrides {
+                        streaming: Some(false),
+                        native_function_calling: Some(false),
+                        enable_thinking: Some(false),
+                    }),
+                },
             },
-        });
-        
+        );
+
         // Visual validation mode
-        profiles.insert("visual".to_string(), Profile {
-            name: "Visual".to_string(),
-            description: "Website building with visual validation".to_string(),
-            config_overrides: ConfigOverrides {
-                max_tokens: Some(4096),
-                temperature: Some(0.6),
-                max_iterations: Some(50),
-                step_timeout_secs: Some(600),
-                concurrency: Some(ConcurrencyOverrides {
-                    max_parallel_requests: Some(8),
-                    timeout_secs: Some(300),
-                }),
-                agent: Some(AgentOverrides {
-                    streaming: Some(false),
-                    native_function_calling: Some(true),
-                    enable_thinking: Some(false),
-                }),
+        profiles.insert(
+            "visual".to_string(),
+            Profile {
+                name: "Visual".to_string(),
+                description: "Website building with visual validation".to_string(),
+                config_overrides: ConfigOverrides {
+                    max_tokens: Some(4096),
+                    temperature: Some(0.6),
+                    max_iterations: Some(50),
+                    step_timeout_secs: Some(600),
+                    concurrency: Some(ConcurrencyOverrides {
+                        max_parallel_requests: Some(8),
+                        timeout_secs: Some(300),
+                    }),
+                    agent: Some(AgentOverrides {
+                        streaming: Some(false),
+                        native_function_calling: Some(true),
+                        enable_thinking: Some(false),
+                    }),
+                },
             },
-        });
-        
+        );
+
         // Quick mode (fastest)
-        profiles.insert("quick".to_string(), Profile {
-            name: "Quick".to_string(),
-            description: "Fast responses, minimal verification".to_string(),
-            config_overrides: ConfigOverrides {
-                max_tokens: Some(2048),
-                temperature: Some(0.5),
-                max_iterations: Some(10),
-                step_timeout_secs: Some(120),
-                concurrency: Some(ConcurrencyOverrides {
-                    max_parallel_requests: Some(32),
-                    timeout_secs: Some(60),
-                }),
-                agent: Some(AgentOverrides {
-                    streaming: Some(false),
-                    native_function_calling: Some(false),
-                    enable_thinking: Some(false),
-                }),
+        profiles.insert(
+            "quick".to_string(),
+            Profile {
+                name: "Quick".to_string(),
+                description: "Fast responses, minimal verification".to_string(),
+                config_overrides: ConfigOverrides {
+                    max_tokens: Some(2048),
+                    temperature: Some(0.5),
+                    max_iterations: Some(10),
+                    step_timeout_secs: Some(120),
+                    concurrency: Some(ConcurrencyOverrides {
+                        max_parallel_requests: Some(32),
+                        timeout_secs: Some(60),
+                    }),
+                    agent: Some(AgentOverrides {
+                        streaming: Some(false),
+                        native_function_calling: Some(false),
+                        enable_thinking: Some(false),
+                    }),
+                },
             },
-        });
-        
+        );
+
         Self { profiles }
     }
-    
+
     /// Get a profile by name
     pub fn get(&self, name: &str) -> Option<&Profile> {
         self.profiles.get(name)
     }
-    
+
     /// List all available profiles
     pub fn list(&self) -> Vec<&Profile> {
         self.profiles.values().collect()
     }
-    
+
     /// Apply profile to config
     pub fn apply_profile(&self, config: &mut Config, profile_name: &str) -> Result<()> {
-        let profile = self.get(profile_name)
+        let profile = self
+            .get(profile_name)
             .ok_or_else(|| anyhow::anyhow!("Profile '{}' not found", profile_name))?;
-        
+
         // Apply overrides
         if let Some(max_tokens) = profile.config_overrides.max_tokens {
             config.max_tokens = max_tokens;
         }
-        
+
         if let Some(temperature) = profile.config_overrides.temperature {
             config.temperature = temperature;
         }
-        
+
         // Note: In real implementation, would apply all overrides
         // This is simplified for demonstration
-        
+
         Ok(())
     }
-    
+
     /// Get profile description
     pub fn describe(&self, name: &str) -> Option<String> {
-        self.get(name).map(|p| {
-            format!("{}: {}", p.name, p.description)
-        })
+        self.get(name)
+            .map(|p| format!("{}: {}", p.name, p.description))
     }
 }
 

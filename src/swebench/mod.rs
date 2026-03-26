@@ -87,21 +87,19 @@ impl SWEBenchEvaluator {
     /// Load tasks from SWE-bench Pro dataset
     pub fn load_tasks(&self, dataset: &str) -> Result<Vec<SWEBenchTask>> {
         info!("Loading SWE-bench Pro tasks from: {}", dataset);
-        
+
         // In real implementation, would load from JSON file
-        let tasks = vec![
-            SWEBenchTask {
-                repo: "example/repo".to_string(),
-                instance_id: "test-001".to_string(),
-                problem_statement: "Fix the authentication bug in login.py".to_string(),
-                base_commit: "abc123".to_string(),
-                solution_commit: Some("def456".to_string()),
-                test_files: vec!["tests/test_auth.py".to_string()],
-                target_files: vec!["auth/login.py".to_string()],
-                difficulty: TaskDifficulty::Medium,
-            },
-        ];
-        
+        let tasks = vec![SWEBenchTask {
+            repo: "example/repo".to_string(),
+            instance_id: "test-001".to_string(),
+            problem_statement: "Fix the authentication bug in login.py".to_string(),
+            base_commit: "abc123".to_string(),
+            solution_commit: Some("def456".to_string()),
+            test_files: vec!["tests/test_auth.py".to_string()],
+            target_files: vec!["auth/login.py".to_string()],
+            difficulty: TaskDifficulty::Medium,
+        }];
+
         info!("Loaded {} tasks", tasks.len());
         Ok(tasks)
     }
@@ -114,9 +112,9 @@ impl SWEBenchEvaluator {
     ) -> Result<TestResult> {
         info!("Evaluating task: {}", task.instance_id);
         let start = std::time::Instant::now();
-        
+
         let mut trajectory = Vec::new();
-        
+
         // Step 1: Clone repository and checkout base commit
         trajectory.push(TrajectoryStep {
             step: 1,
@@ -124,7 +122,7 @@ impl SWEBenchEvaluator {
             observation: format!("Cloning {} at commit {}", task.repo, task.base_commit),
             timestamp: chrono::Local::now().to_rfc3339(),
         });
-        
+
         // Step 2: Run initial tests to confirm failure
         trajectory.push(TrajectoryStep {
             step: 2,
@@ -132,7 +130,7 @@ impl SWEBenchEvaluator {
             observation: "Running test to confirm bug exists".to_string(),
             timestamp: chrono::Local::now().to_rfc3339(),
         });
-        
+
         // Step 3: Selfware solves the problem
         let _task_prompt = format!(
             "SWE-bench Pro Task: {}\n\nRepository: {}\nProblem: {}\n\nFiles to modify: {:?}\n\nPlease implement a fix for this issue.",
@@ -141,19 +139,19 @@ impl SWEBenchEvaluator {
             task.problem_statement,
             task.target_files
         );
-        
+
         trajectory.push(TrajectoryStep {
             step: 3,
             action: "agent_solve".to_string(),
             observation: "Selfware agent working on solution".to_string(),
             timestamp: chrono::Local::now().to_rfc3339(),
         });
-        
+
         // In real implementation, would actually run the agent
         // let result = agent.execute(&task_prompt).await?;
-        
+
         let duration = start.elapsed().as_secs_f64();
-        
+
         Ok(TestResult {
             instance_id: task.instance_id.clone(),
             success: true,
@@ -175,23 +173,23 @@ impl SWEBenchEvaluator {
         agent: &crate::agent::Agent,
     ) -> Result<EvaluationReport> {
         info!("Running full evaluation on {} tasks", tasks.len());
-        
+
         let mut results = Vec::new();
         let mut total_resolved = 0;
-        
+
         for (i, task) in tasks.iter().enumerate() {
             info!("Task {}/{}: {}", i + 1, tasks.len(), task.instance_id);
-            
+
             let result = self.evaluate_task(task, agent).await?;
             if result.resolved {
                 total_resolved += 1;
             }
             results.push(result);
         }
-        
+
         let total_tasks = tasks.len();
         let resolution_rate = total_resolved as f64 / total_tasks as f64;
-        
+
         Ok(EvaluationReport {
             total_tasks,
             resolved: total_resolved,
@@ -204,26 +202,29 @@ impl SWEBenchEvaluator {
     /// Generate evaluation report
     pub fn generate_report(&self, report: &EvaluationReport) -> String {
         let mut output = String::new();
-        
+
         output.push_str("# SWE-bench Pro Evaluation Report\n\n");
         output.push_str(&format!("**Timestamp:** {}\n\n", report.timestamp));
         output.push_str(&format!("**Total Tasks:** {}\n", report.total_tasks));
         output.push_str(&format!("**Resolved:** {}\n", report.resolved));
-        output.push_str(&format!("**Resolution Rate:** {:.2}%\n\n", report.resolution_rate * 100.0));
-        
+        output.push_str(&format!(
+            "**Resolution Rate:** {:.2}%\n\n",
+            report.resolution_rate * 100.0
+        ));
+
         output.push_str("## Results by Task\n\n");
         for result in &report.results {
-            let status = if result.resolved { "✅ RESOLVED" } else { "❌ FAILED" };
-            output.push_str(&format!(
-                "### {} - {}\n",
-                result.instance_id,
-                status
-            ));
+            let status = if result.resolved {
+                "✅ RESOLVED"
+            } else {
+                "❌ FAILED"
+            };
+            output.push_str(&format!("### {} - {}\n", result.instance_id, status));
             output.push_str(&format!("- Duration: {:.2}s\n", result.duration_secs));
             output.push_str(&format!("- Tokens: {}\n", result.tokens_used));
             output.push_str(&format!("- Iterations: {}\n\n", result.iterations));
         }
-        
+
         output
     }
 }
@@ -248,7 +249,7 @@ impl LocalDevWorkflow {
     /// Test selfware local development workflow
     pub async fn test_workflow(&self) -> Result<WorkflowReport> {
         info!("Testing local development workflow");
-        
+
         let tests = vec![
             ("Code generation", test_code_generation()),
             ("File editing", test_file_editing()),
@@ -257,10 +258,10 @@ impl LocalDevWorkflow {
             ("Visual validation", test_visual_validation()),
             ("Browser automation", test_browser_automation()),
         ];
-        
+
         let mut results = HashMap::new();
         let mut all_passed = true;
-        
+
         for (name, result) in tests {
             match result {
                 Ok(_) => {
@@ -274,7 +275,7 @@ impl LocalDevWorkflow {
                 }
             }
         }
-        
+
         Ok(WorkflowReport {
             all_passed,
             results,

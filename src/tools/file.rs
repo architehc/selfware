@@ -451,14 +451,22 @@ impl Tool for DirectoryTree {
             // filter_map would skip the hidden entry from output but still walk its children.
             /// Directories to never descend into — build artifacts, caches, VCS internals.
             const SKIP_DIRS: &[&str] = &[
-                "target", "node_modules", "dist", "build", "__pycache__",
-                ".worktrees", "vendor", "pkg", "out", "cmake-build-debug",
+                "target",
+                "node_modules",
+                "dist",
+                "build",
+                "__pycache__",
+                ".worktrees",
+                "vendor",
+                "pkg",
+                "out",
+                "cmake-build-debug",
             ];
 
             /// Source file extensions shown first in output for quick scanning.
             const SOURCE_EXTS: &[&str] = &[
-                "rs", "toml", "md", "py", "ts", "tsx", "js", "jsx",
-                "go", "java", "c", "cpp", "h", "yaml", "yml", "json",
+                "rs", "toml", "md", "py", "ts", "tsx", "js", "jsx", "go", "java", "c", "cpp", "h",
+                "yaml", "yml", "json",
             ];
 
             let walker = walkdir::WalkDir::new(&walk_path)
@@ -473,8 +481,7 @@ impl Tool for DirectoryTree {
                     }
                     let name = e.file_name().to_str().unwrap_or("");
                     // Skip hidden entries and known-large directories
-                    !name.starts_with('.')
-                        && !SKIP_DIRS.contains(&name)
+                    !name.starts_with('.') && !SKIP_DIRS.contains(&name)
                 });
 
             let mut source_entries = vec![];

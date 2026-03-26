@@ -860,14 +860,14 @@ mod tests {
 }
 
 /// Standalone function for grep search (for use in tests and other modules)
-/// 
+///
 /// # Arguments
 /// * `pattern` - Regex pattern to search for
 /// * `path` - File or directory to search in
 /// * `recursive` - Whether to search recursively
 /// * `max_matches` - Maximum number of matches to return
 /// * `offset` - Number of matches to skip
-/// 
+///
 /// # Returns
 /// A GrepSearchResult containing matches and metadata
 pub fn grep_search(
@@ -888,12 +888,12 @@ pub fn grep_search(
         // Search single file
         let content = std::fs::read_to_string(path).unwrap_or_default();
         let lines: Vec<&str> = content.lines().collect();
-        
+
         for (line_idx, line) in lines.iter().enumerate() {
             if re.is_match(line) {
                 let line_num = (line_idx + 1) as u32;
                 let column = line.find(re.as_str()).map_or(1, |i| i + 1) as u32;
-                
+
                 matches.push(GrepMatch {
                     file: path.to_string(),
                     line: line_num,
@@ -912,12 +912,12 @@ pub fn grep_search(
                 let path_str = entry.path().to_string_lossy();
                 let content = std::fs::read_to_string(entry.path()).unwrap_or_default();
                 let lines: Vec<&str> = content.lines().collect();
-                
+
                 for (line_idx, line) in lines.iter().enumerate() {
                     if re.is_match(line) {
                         let line_num = (line_idx + 1) as u32;
                         let column = line.find(re.as_str()).map_or(1, |i| i + 1) as u32;
-                        
+
                         matches.push(GrepMatch {
                             file: path_str.to_string(),
                             line: line_num,

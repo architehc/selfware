@@ -10,11 +10,9 @@
 //! The tests gracefully skip when the model endpoint is unreachable.
 
 use selfware::swebench::*;
-use selfware::tools::Tool;
-use selfware::tools::computer::{
-    ComputerKeyboardTool, ComputerMouseTool, ComputerWindowTool,
-};
+use selfware::tools::computer::{ComputerKeyboardTool, ComputerMouseTool, ComputerWindowTool};
 use selfware::tools::vision::{VisionAnalyze, VisionCompare};
+use selfware::tools::Tool;
 use serde_json::json;
 use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -27,20 +25,16 @@ use crate::helpers::require_llm_endpoint_url;
 // ---------------------------------------------------------------------------
 
 fn vision_endpoint() -> String {
-    std::env::var("SELFWARE_ENDPOINT")
-        .unwrap_or_else(|_| "http://localhost:8000/v1".to_string())
+    std::env::var("SELFWARE_ENDPOINT").unwrap_or_else(|_| "http://localhost:8000/v1".to_string())
 }
 
 fn vision_model() -> String {
-    std::env::var("SELFWARE_MODEL")
-        .unwrap_or_else(|_| "qwen3.5-27b".to_string())
+    std::env::var("SELFWARE_MODEL").unwrap_or_else(|_| "qwen3.5-27b".to_string())
 }
 
 /// Spawn a mock OpenAI-compatible /chat/completions endpoint that returns
 /// a canned response.
-async fn spawn_mock_vision_server(
-    response_content: &str,
-) -> (tokio::task::JoinHandle<()>, String) {
+async fn spawn_mock_vision_server(response_content: &str) -> (tokio::task::JoinHandle<()>, String) {
     let body = serde_json::json!({
         "id": "chatcmpl-test",
         "object": "chat.completion",
@@ -88,17 +82,14 @@ async fn spawn_mock_vision_server(
 /// Create a minimal valid PNG in a temp file and return the path.
 /// Uses .png suffix so image::open can detect the format.
 fn create_test_png() -> tempfile::NamedTempFile {
-    let tmp = tempfile::Builder::new()
-        .suffix(".png")
-        .tempfile()
-        .unwrap();
+    let tmp = tempfile::Builder::new().suffix(".png").tempfile().unwrap();
     // Minimal 1x1 red PNG
     let png_bytes: &[u8] = &[
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
-        0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
-        0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
-        0x9C, 0x63, 0xF8, 0xCF, 0xC0, 0xF0, 0x1F, 0x00, 0x05, 0x00, 0x01, 0xFF, 0x89, 0x99,
-        0x3D, 0x1D, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0xF8,
+        0xCF, 0xC0, 0xF0, 0x1F, 0x00, 0x05, 0x00, 0x01, 0xFF, 0x89, 0x99, 0x3D, 0x1D, 0x00, 0x00,
+        0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
     std::fs::write(tmp.path(), png_bytes).unwrap();
     tmp
@@ -115,19 +106,31 @@ async fn test_computer_control_chain() {
     let keyboard = ComputerKeyboardTool;
 
     // Move mouse
-    let r = mouse.execute(json!({"action": "move_to", "x": 500, "y": 300})).await.unwrap();
+    let r = mouse
+        .execute(json!({"action": "move_to", "x": 500, "y": 300}))
+        .await
+        .unwrap();
     assert_eq!(r["status"], "ok");
 
     // Click
-    let r = mouse.execute(json!({"action": "click", "x": 500, "y": 300})).await.unwrap();
+    let r = mouse
+        .execute(json!({"action": "click", "x": 500, "y": 300}))
+        .await
+        .unwrap();
     assert_eq!(r["status"], "ok");
 
     // Type text
-    let r = keyboard.execute(json!({"action": "type", "text": "ls -la"})).await.unwrap();
+    let r = keyboard
+        .execute(json!({"action": "type", "text": "ls -la"}))
+        .await
+        .unwrap();
     assert_eq!(r["status"], "ok");
 
     // Press Enter
-    let r = keyboard.execute(json!({"action": "press", "key": "Enter"})).await.unwrap();
+    let r = keyboard
+        .execute(json!({"action": "press", "key": "Enter"}))
+        .await
+        .unwrap();
     assert_eq!(r["status"], "ok");
 }
 
@@ -142,24 +145,31 @@ async fn test_window_management_chain() {
     assert!(r["windows"].is_array());
 
     // Focus a window
-    let r = window.execute(json!({"action": "focus", "window_id": 0})).await.unwrap();
+    let r = window
+        .execute(json!({"action": "focus", "window_id": 0}))
+        .await
+        .unwrap();
     assert_eq!(r["status"], "ok");
 }
 
 /// Test the vision_analyze tool with a mock server (no real LLM needed).
 #[tokio::test]
 async fn test_vision_analyze_with_mock() {
-    let (handle, endpoint) = spawn_mock_vision_server("This is a screenshot of a terminal with code.").await;
+    let (handle, endpoint) =
+        spawn_mock_vision_server("This is a screenshot of a terminal with code.").await;
 
     let tool = VisionAnalyze;
-    let result = tool.execute(json!({
-        "prompt": "Describe what you see",
-        "endpoint": endpoint,
-        "model": "mock-model",
-        "image_base64": "iVBORw0KGgo=",
-        "detail": "low",
-        "max_tokens": 100
-    })).await.unwrap();
+    let result = tool
+        .execute(json!({
+            "prompt": "Describe what you see",
+            "endpoint": endpoint,
+            "model": "mock-model",
+            "image_base64": "iVBORw0KGgo=",
+            "detail": "low",
+            "max_tokens": 100
+        }))
+        .await
+        .unwrap();
 
     assert_eq!(result["success"], true);
     assert!(result["analysis"].as_str().unwrap().contains("terminal"));
@@ -175,11 +185,14 @@ async fn test_vision_compare_identical_images() {
     let path = img.path().to_str().unwrap();
 
     let tool = VisionCompare;
-    let result = tool.execute(json!({
-        "image_a": path,
-        "image_b": path,
-        "threshold": 90.0
-    })).await.unwrap();
+    let result = tool
+        .execute(json!({
+            "image_a": path,
+            "image_b": path,
+            "threshold": 90.0
+        }))
+        .await
+        .unwrap();
 
     assert_eq!(result["success"], true);
     assert_eq!(result["passed"], true);
@@ -196,16 +209,22 @@ async fn test_vision_compare_with_semantic_mock() {
     let path = img.path().to_str().unwrap();
 
     let tool = VisionCompare;
-    let result = tool.execute(json!({
-        "image_a": path,
-        "image_b": path,
-        "threshold": 90.0,
-        "endpoint": endpoint,
-        "model": "mock-model"
-    })).await.unwrap();
+    let result = tool
+        .execute(json!({
+            "image_a": path,
+            "image_b": path,
+            "threshold": 90.0,
+            "endpoint": endpoint,
+            "model": "mock-model"
+        }))
+        .await
+        .unwrap();
 
     assert_eq!(result["success"], true);
-    assert!(result["semantic_comparison"].as_str().unwrap().contains("identical"));
+    assert!(result["semantic_comparison"]
+        .as_str()
+        .unwrap()
+        .contains("identical"));
 
     handle.abort();
 }
@@ -221,23 +240,34 @@ async fn test_control_then_analyze_chain() {
     let mouse = ComputerMouseTool;
     let keyboard = ComputerKeyboardTool;
 
-    mouse.execute(json!({"action": "click", "x": 100, "y": 100})).await.unwrap();
-    keyboard.execute(json!({"action": "type", "text": "vim main.py"})).await.unwrap();
-    keyboard.execute(json!({"action": "press", "key": "Enter"})).await.unwrap();
+    mouse
+        .execute(json!({"action": "click", "x": 100, "y": 100}))
+        .await
+        .unwrap();
+    keyboard
+        .execute(json!({"action": "type", "text": "vim main.py"}))
+        .await
+        .unwrap();
+    keyboard
+        .execute(json!({"action": "press", "key": "Enter"}))
+        .await
+        .unwrap();
 
     // Step 2: Analyze the "screen" via vision
     let vision = VisionAnalyze;
-    let result = vision.execute(json!({
-        "prompt": "Evaluate this code editor view",
-        "endpoint": endpoint,
-        "model": "mock-model",
-        "image_base64": "iVBORw0KGgo="
-    })).await.unwrap();
+    let result = vision
+        .execute(json!({
+            "prompt": "Evaluate this code editor view",
+            "endpoint": endpoint,
+            "model": "mock-model",
+            "image_base64": "iVBORw0KGgo="
+        }))
+        .await
+        .unwrap();
 
     // Step 3: Parse the response as a VisualScore
     let analysis = result["analysis"].as_str().unwrap();
-    let score: selfware::visual_loop::VisualScore =
-        serde_json::from_str(analysis).unwrap();
+    let score: selfware::visual_loop::VisualScore = serde_json::from_str(analysis).unwrap();
     assert!(score.overall > 80.0);
     assert_eq!(score.suggestions.len(), 1);
 
@@ -325,12 +355,15 @@ async fn test_visual_feedback_loop_chain() {
 
         // Call mock VLM
         let vision = VisionAnalyze;
-        let result = vision.execute(json!({
-            "prompt": prompt,
-            "endpoint": &endpoint,
-            "model": "mock-model",
-            "image_base64": "iVBORw0KGgo="
-        })).await.unwrap();
+        let result = vision
+            .execute(json!({
+                "prompt": prompt,
+                "endpoint": &endpoint,
+                "model": "mock-model",
+                "image_base64": "iVBORw0KGgo="
+            }))
+            .await
+            .unwrap();
 
         let response_text = result["analysis"].as_str().unwrap();
         let mut score = parse_critic_response(response_text).unwrap();
@@ -368,7 +401,10 @@ async fn test_visual_feedback_loop_chain() {
 async fn test_live_vision_analyze() {
     let endpoint = vision_endpoint();
     if !require_llm_endpoint_url(&endpoint).await {
-        eprintln!("SKIPPED: test_live_vision_analyze - endpoint not available at {}", endpoint);
+        eprintln!(
+            "SKIPPED: test_live_vision_analyze - endpoint not available at {}",
+            endpoint
+        );
         return;
     }
 
@@ -376,14 +412,16 @@ async fn test_live_vision_analyze() {
     let png = create_test_png();
     let b64 = selfware::tools::vision::encode_image_file(png.path().to_str().unwrap()).unwrap();
 
-    let result = tool.execute(json!({
-        "prompt": "What do you see in this image? Describe the color and size.",
-        "endpoint": endpoint,
-        "model": vision_model(),
-        "image_base64": b64,
-        "detail": "low",
-        "max_tokens": 256
-    })).await;
+    let result = tool
+        .execute(json!({
+            "prompt": "What do you see in this image? Describe the color and size.",
+            "endpoint": endpoint,
+            "model": vision_model(),
+            "image_base64": b64,
+            "detail": "low",
+            "max_tokens": 256
+        }))
+        .await;
 
     match result {
         Ok(val) => {
@@ -391,14 +429,19 @@ async fn test_live_vision_analyze() {
             let analysis = val["analysis"].as_str().unwrap_or("");
             // Model may return empty for very small images — log but don't fail
             if analysis.is_empty() {
-                eprintln!("Note: Vision model returned empty analysis for 1x1 test image (acceptable)");
+                eprintln!(
+                    "Note: Vision model returned empty analysis for 1x1 test image (acceptable)"
+                );
             } else {
                 println!("Live vision analysis: {}", analysis);
             }
         }
         Err(e) => {
             // Some vLLM configs may not support vision — skip gracefully
-            eprintln!("SKIPPED: vision endpoint error (may not support vision): {}", e);
+            eprintln!(
+                "SKIPPED: vision endpoint error (may not support vision): {}",
+                e
+            );
         }
     }
 }
@@ -415,8 +458,14 @@ async fn test_live_control_capture_analyze_chain() {
     // Step 1: Computer control actions
     let mouse = ComputerMouseTool;
     let keyboard = ComputerKeyboardTool;
-    mouse.execute(json!({"action": "move_to", "x": 500, "y": 500})).await.unwrap();
-    keyboard.execute(json!({"action": "type", "text": "echo hello"})).await.unwrap();
+    mouse
+        .execute(json!({"action": "move_to", "x": 500, "y": 500}))
+        .await
+        .unwrap();
+    keyboard
+        .execute(json!({"action": "type", "text": "echo hello"}))
+        .await
+        .unwrap();
 
     // Step 2: Use a test PNG as our "screenshot"
     let png = create_test_png();
@@ -424,18 +473,23 @@ async fn test_live_control_capture_analyze_chain() {
 
     // Step 3: Send to live vision model
     let vision = VisionAnalyze;
-    let result = vision.execute(json!({
-        "prompt": "Describe the content of this screenshot. Is there any text visible?",
-        "endpoint": endpoint,
-        "model": vision_model(),
-        "image_base64": b64,
-        "max_tokens": 256
-    })).await;
+    let result = vision
+        .execute(json!({
+            "prompt": "Describe the content of this screenshot. Is there any text visible?",
+            "endpoint": endpoint,
+            "model": vision_model(),
+            "image_base64": b64,
+            "max_tokens": 256
+        }))
+        .await;
 
     match result {
         Ok(val) => {
             assert_eq!(val["success"], true);
-            println!("Live chain analysis: {}", val["analysis"].as_str().unwrap_or("(empty)"));
+            println!(
+                "Live chain analysis: {}",
+                val["analysis"].as_str().unwrap_or("(empty)")
+            );
         }
         Err(e) => {
             eprintln!("SKIPPED: vision chain error: {}", e);
@@ -457,7 +511,11 @@ async fn test_live_visual_feedback_loop() {
     let png = create_test_png();
     let b64 = selfware::tools::vision::encode_image_file(png.path().to_str().unwrap()).unwrap();
 
-    let prompt = build_critic_prompt("Evaluate a minimal red pixel image for visual quality", None, 0);
+    let prompt = build_critic_prompt(
+        "Evaluate a minimal red pixel image for visual quality",
+        None,
+        0,
+    );
 
     let vision = VisionAnalyze;
     let result = vision.execute(json!({
@@ -537,12 +595,17 @@ async fn test_live_swebench_prompt_construction() {
     match response {
         Ok(r) if r.status().is_success() => {
             let json: serde_json::Value = r.json().await.unwrap();
-            let content = json["choices"][0]["message"]["content"].as_str().unwrap_or("");
+            let content = json["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or("");
             if content.is_empty() {
                 // Some model configs may return empty for short prompts — not a failure
                 eprintln!("Note: Model returned empty response (acceptable for some configs)");
             } else {
-                println!("Live SWE-bench strategy: {}", &content[..content.len().min(500)]);
+                println!(
+                    "Live SWE-bench strategy: {}",
+                    &content[..content.len().min(500)]
+                );
             }
         }
         Ok(r) => {

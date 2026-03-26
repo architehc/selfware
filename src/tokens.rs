@@ -383,8 +383,7 @@ pub fn estimate_tool_definitions_tokens(tools: &[crate::api::types::ToolDefiniti
         total += estimate_tokens(&tool.function.name);
         total += estimate_tokens(&tool.function.description);
         // Parameter schema JSON — serialize and estimate
-        let schema_str = serde_json::to_string(&tool.function.parameters)
-            .unwrap_or_default();
+        let schema_str = serde_json::to_string(&tool.function.parameters).unwrap_or_default();
         total += estimate_tokens(&schema_str);
     }
     total

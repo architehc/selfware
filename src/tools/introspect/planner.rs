@@ -117,7 +117,12 @@ pub struct EvolutionPlanner {
 
 impl EvolutionPlanner {
     /// Create a new planner
-    pub fn new(goal: String, max_iterations: usize, max_tokens: usize, codebase_root: PathBuf) -> Self {
+    pub fn new(
+        goal: String,
+        max_iterations: usize,
+        max_tokens: usize,
+        codebase_root: PathBuf,
+    ) -> Self {
         Self {
             goal,
             budget: PlanBudget::new(max_iterations, max_tokens),
@@ -129,29 +134,25 @@ impl EvolutionPlanner {
     pub async fn generate_plan(&self) -> Result<EvolutionPlan> {
         // Extract keywords from goal to understand intent
         let keywords = extract_keywords(&self.goal);
-        
+
         // Analyze goal to determine strategy
         let strategy = self.determine_strategy(&keywords);
-        
+
         // Find relevant files
         let relevant_files = self.find_relevant_files(&keywords).await?;
-        
+
         // Generate phases based on strategy
         let phases = match strategy {
             PlanningStrategy::IntrospectionFirst => {
                 self.plan_introspection_first(&relevant_files).await?
             }
-            PlanningStrategy::TargetedChange => {
-                self.plan_targeted_change(&relevant_files).await?
-            }
-            PlanningStrategy::Exploratory => {
-                self.plan_exploratory(&relevant_files).await?
-            }
+            PlanningStrategy::TargetedChange => self.plan_targeted_change(&relevant_files).await?,
+            PlanningStrategy::Exploratory => self.plan_exploratory(&relevant_files).await?,
         };
 
         // Calculate estimates
         let estimated_tokens = phases.iter().map(|p| p.estimated_tokens).sum();
-        
+
         // Assess risk
         let risk = self.assess_risk(&phases, &relevant_files);
 
@@ -174,11 +175,20 @@ impl EvolutionPlanner {
         let goal_lower = self.goal.to_lowercase();
 
         // Check for specific patterns
-        if keywords.iter().any(|k| ["improve", "optimize", "refactor"].contains(&k.as_str())) {
+        if keywords
+            .iter()
+            .any(|k| ["improve", "optimize", "refactor"].contains(&k.as_str()))
+        {
             PlanningStrategy::IntrospectionFirst
-        } else if keywords.iter().any(|k| ["fix", "bug", "error", "issue"].contains(&k.as_str())) {
+        } else if keywords
+            .iter()
+            .any(|k| ["fix", "bug", "error", "issue"].contains(&k.as_str()))
+        {
             PlanningStrategy::TargetedChange
-        } else if keywords.iter().any(|k| ["add", "implement", "create"].contains(&k.as_str())) {
+        } else if keywords
+            .iter()
+            .any(|k| ["add", "implement", "create"].contains(&k.as_str()))
+        {
             PlanningStrategy::TargetedChange
         } else if goal_lower.contains("understand") || goal_lower.contains("explore") {
             PlanningStrategy::Exploratory
@@ -194,14 +204,17 @@ impl EvolutionPlanner {
 
         // Walk the codebase
         let mut entries = tokio::fs::read_dir(&self.codebase_root).await?;
-        
+
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
-            
+
             // Skip non-source directories
             if let Some(name) = path.file_name() {
                 let name = name.to_string_lossy();
-                if matches!(name.as_ref(), "target" | "node_modules" | ".git" | "__pycache__") {
+                if matches!(
+                    name.as_ref(),
+                    "target" | "node_modules" | ".git" | "__pycache__"
+                ) {
                     continue;
                 }
             }
@@ -217,7 +230,7 @@ impl EvolutionPlanner {
         if !keywords.is_empty() {
             let query = keywords.join(" ");
             let related = find_related_symbols(&query, &files, 20).await?;
-            
+
             // Extract unique file paths from results
             let mut relevant: Vec<PathBuf> = related
                 .into_iter()
@@ -225,10 +238,10 @@ impl EvolutionPlanner {
                 .collect::<std::collections::HashSet<_>>()
                 .into_iter()
                 .collect();
-            
+
             // Sort by path for consistency
             relevant.sort();
-            
+
             if !relevant.is_empty() {
                 return Ok(relevant);
             }
@@ -240,17 +253,21 @@ impl EvolutionPlanner {
     fn collect_source_files<'a>(
         &'a self,
         dir: &'a PathBuf,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<PathBuf>>> + Send + 'a>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<PathBuf>>> + Send + 'a>>
+    {
         Box::pin(async move {
             let mut files = Vec::new();
-            
+
             if let Ok(mut entries) = tokio::fs::read_dir(dir).await {
                 while let Ok(Some(entry)) = entries.next_entry().await {
                     let path = entry.path();
-                    
+
                     if let Some(name) = path.file_name() {
                         let name = name.to_string_lossy();
-                        if matches!(name.as_ref(), "target" | "node_modules" | ".git" | "__pycache__") {
+                        if matches!(
+                            name.as_ref(),
+                            "target" | "node_modules" | ".git" | "__pycache__"
+                        ) {
                             continue;
                         }
                     }
@@ -293,7 +310,8 @@ impl EvolutionPlanner {
                     ]
                     .into_iter()
                     .collect(),
-                    reason: "Understand the structure of the codebase area relevant to the goal".to_string(),
+                    reason: "Understand the structure of the codebase area relevant to the goal"
+                        .to_string(),
                     estimated_tokens: 1000,
                     dependencies: vec![],
                 });
@@ -309,7 +327,10 @@ impl EvolutionPlanner {
                 action: ActionType::Query,
                 target: keywords.join(", "),
                 params: [
-                    ("scope".to_string(), self.codebase_root.to_string_lossy().to_string()),
+                    (
+                        "scope".to_string(),
+                        self.codebase_root.to_string_lossy().to_string(),
+                    ),
                     ("max_results".to_string(), "10".to_string()),
                 ]
                 .into_iter()
@@ -334,7 +355,10 @@ impl EvolutionPlanner {
                 ]
                 .into_iter()
                 .collect(),
-                reason: format!("Understand the API of {}", file.file_name().unwrap_or_default().to_string_lossy()),
+                reason: format!(
+                    "Understand the API of {}",
+                    file.file_name().unwrap_or_default().to_string_lossy()
+                ),
                 estimated_tokens: 1000,
                 dependencies: vec![phase_num - 1],
             });
@@ -342,19 +366,18 @@ impl EvolutionPlanner {
         }
 
         // Phase 4: Impact analysis if modifying
-        if self.goal.to_lowercase().contains("modify") || 
-           self.goal.to_lowercase().contains("change") ||
-           self.goal.to_lowercase().contains("fix") {
+        if self.goal.to_lowercase().contains("modify")
+            || self.goal.to_lowercase().contains("change")
+            || self.goal.to_lowercase().contains("fix")
+        {
             if let Some(target_file) = files.first() {
                 phases.push(PlanPhase {
                     phase: phase_num,
                     action: ActionType::ImpactAnalysis,
                     target: target_file.to_string_lossy().to_string(),
-                    params: [
-                        ("change_type".to_string(), "modify".to_string()),
-                    ]
-                    .into_iter()
-                    .collect(),
+                    params: [("change_type".to_string(), "modify".to_string())]
+                        .into_iter()
+                        .collect(),
                     reason: "Understand what code depends on the target file".to_string(),
                     estimated_tokens: 800,
                     dependencies: vec![phase_num - 1],
@@ -367,12 +390,13 @@ impl EvolutionPlanner {
         phases.push(PlanPhase {
             phase: phase_num,
             action: ActionType::Modify,
-            target: files.first().map(|f| f.to_string_lossy().to_string()).unwrap_or_default(),
-            params: [
-                ("goal".to_string(), self.goal.clone()),
-            ]
-            .into_iter()
-            .collect(),
+            target: files
+                .first()
+                .map(|f| f.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            params: [("goal".to_string(), self.goal.clone())]
+                .into_iter()
+                .collect(),
             reason: "Apply the necessary changes to achieve the goal".to_string(),
             estimated_tokens: 2000,
             dependencies: vec![phase_num - 1],
@@ -427,9 +451,16 @@ impl EvolutionPlanner {
                 ]
                 .into_iter()
                 .collect(),
-                reason: format!("Understand {}", file.file_name().unwrap_or_default().to_string_lossy()),
+                reason: format!(
+                    "Understand {}",
+                    file.file_name().unwrap_or_default().to_string_lossy()
+                ),
                 estimated_tokens: 800,
-                dependencies: if phase_num > 1 { vec![phase_num - 1] } else { vec![] },
+                dependencies: if phase_num > 1 {
+                    vec![phase_num - 1]
+                } else {
+                    vec![]
+                },
             });
             phase_num += 1;
         }
@@ -440,7 +471,9 @@ impl EvolutionPlanner {
                 phase: phase_num,
                 action: ActionType::Modify,
                 target: target.to_string_lossy().to_string(),
-                params: [("goal".to_string(), self.goal.clone())].into_iter().collect(),
+                params: [("goal".to_string(), self.goal.clone())]
+                    .into_iter()
+                    .collect(),
                 reason: "Apply the fix/change".to_string(),
                 estimated_tokens: 1500,
                 dependencies: vec![phase_num - 1],
@@ -490,7 +523,10 @@ impl EvolutionPlanner {
                 action: ActionType::Query,
                 target: keywords.join(", "),
                 params: [
-                    ("scope".to_string(), self.codebase_root.to_string_lossy().to_string()),
+                    (
+                        "scope".to_string(),
+                        self.codebase_root.to_string_lossy().to_string(),
+                    ),
                     ("max_results".to_string(), "15".to_string()),
                 ]
                 .into_iter()
@@ -518,7 +554,7 @@ impl EvolutionPlanner {
     /// Assess risk level for the plan
     fn assess_risk(&self, _phases: &[PlanPhase], files: &[PathBuf]) -> RiskLevel {
         let goal_lower = self.goal.to_lowercase();
-        
+
         // Critical: Modifying core/safety/evolution
         let critical_patterns = ["safety", "evolution", "core", "verification"];
         if files.iter().any(|f| {
@@ -553,11 +589,17 @@ impl EvolutionPlanner {
             "Existing tests pass".to_string(),
         ];
 
-        if keywords.iter().any(|k| k.contains("fix") || k.contains("bug")) {
+        if keywords
+            .iter()
+            .any(|k| k.contains("fix") || k.contains("bug"))
+        {
             criteria.push("The specific issue is resolved".to_string());
         }
 
-        if keywords.iter().any(|k| k.contains("optimize") || k.contains("performance")) {
+        if keywords
+            .iter()
+            .any(|k| k.contains("optimize") || k.contains("performance"))
+        {
             criteria.push("Performance metrics improve".to_string());
         }
 
@@ -611,25 +653,26 @@ pub async fn analyze_impact(
 
     // Get target file content
     let _target_content = tokio::fs::read_to_string(target_file).await?;
-    let target_name = target_file.file_stem()
+    let target_name = target_file
+        .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
 
     // Walk codebase to find references
     let mut entries = tokio::fs::read_dir(codebase_root).await?;
-    
+
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        
+
         if path.is_file() && path != *target_file {
             if let Ok(content) = tokio::fs::read_to_string(&path).await {
                 // Check for imports/references to target
                 let file_name = path.to_string_lossy().to_lowercase();
-                
+
                 // Simple text-based search for references
-                if content.contains(&target_name) || 
-                   (symbol.is_some() && content.contains(symbol.unwrap())) {
-                    
+                if content.contains(&target_name)
+                    || (symbol.is_some() && content.contains(symbol.unwrap()))
+                {
                     let info = CallerInfo {
                         file: path.to_string_lossy().to_string(),
                         line: 1, // Would need line-by-line analysis
@@ -675,10 +718,10 @@ mod tests {
             10000,
             PathBuf::from("."),
         );
-        
+
         let keywords = extract_keywords("Optimize the agent loop");
         let strategy = planner.determine_strategy(&keywords);
-        
+
         // Should detect introspection-first for "optimize"
         match strategy {
             PlanningStrategy::IntrospectionFirst => (),
@@ -688,16 +731,11 @@ mod tests {
 
     #[test]
     fn test_risk_assessment() {
-        let planner = EvolutionPlanner::new(
-            "Fix bug".to_string(),
-            20,
-            10000,
-            PathBuf::from("."),
-        );
+        let planner = EvolutionPlanner::new("Fix bug".to_string(), 20, 10000, PathBuf::from("."));
 
         let phases = vec![];
         let files = vec![PathBuf::from("src/main.rs")];
-        
+
         let risk = planner.assess_risk(&phases, &files);
         assert!(matches!(risk, RiskLevel::Low | RiskLevel::Medium));
     }

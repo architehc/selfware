@@ -60,13 +60,14 @@ impl OutputRenderer {
 
         // Group files by directory
         let mut dir_groups: HashMap<String, Vec<&FileInfo>> = HashMap::new();
-        
+
         for file in files {
             let path = std::path::Path::new(&file.path);
-            let dir = path.parent()
+            let dir = path
+                .parent()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| ".".to_string());
-            
+
             dir_groups.entry(dir).or_default().push(file);
         }
 
@@ -76,7 +77,7 @@ impl OutputRenderer {
 
         for dir in dirs {
             output.push_str(&format!("📂 {}\n", dir));
-            
+
             if let Some(files) = dir_groups.get(&dir) {
                 let mut sorted_files = files.clone();
                 sorted_files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -89,21 +90,26 @@ impl OutputRenderer {
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| file.path.clone());
 
-                    output.push_str(&format!("    {} 📄 {} [{}]\n", 
-                        branch, file_name, file.depth));
+                    output.push_str(&format!(
+                        "    {} 📄 {} [{}]\n",
+                        branch, file_name, file.depth
+                    ));
 
                     // Show symbols for this file
                     if !file.symbols.is_empty() {
                         for (j, symbol) in file.symbols.iter().enumerate() {
                             let sym_last = j == file.symbols.len() - 1;
-                            let sym_branch = if sym_last { "    └──" } else { "    ├──" };
-                            output.push_str(&format!("    │   {} ◆ {}\n", 
-                                sym_branch, symbol));
+                            let sym_branch = if sym_last {
+                                "    └──"
+                            } else {
+                                "    ├──"
+                            };
+                            output.push_str(&format!("    │   {} ◆ {}\n", sym_branch, symbol));
                         }
                     }
                 }
             }
-            
+
             output.push('\n');
         }
 
@@ -140,7 +146,7 @@ impl OutputRenderer {
             for symbol in &file.symbols {
                 output.push_str(&format!("  • {}\n", symbol));
             }
-            
+
             output.push('\n');
         }
 
@@ -159,7 +165,7 @@ impl OutputRenderer {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| file.path.clone());
-            
+
             let node_id = format!("F{}", i);
             output.push_str(&format!("    {}[\"{}\"]\n", node_id, file_name));
         }
@@ -169,21 +175,26 @@ impl OutputRenderer {
             let path = std::path::Path::new(&file.path);
             if let Some(parent) = path.parent() {
                 let parent_str = parent.to_string_lossy().to_string();
-                
+
                 // Find parent file (mod.rs, lib.rs, etc.)
                 for (j, other) in files.iter().enumerate() {
                     if i != j {
                         let other_path = std::path::Path::new(&other.path);
-                        let other_parent = other_path.parent()
+                        let other_parent = other_path
+                            .parent()
                             .map(|p| p.to_string_lossy().to_string())
                             .unwrap_or_default();
-                        
+
                         if other_parent == parent_str {
-                            let other_name = other_path.file_name()
+                            let other_name = other_path
+                                .file_name()
                                 .map(|n| n.to_string_lossy().to_string())
                                 .unwrap_or_default();
-                            
-                            if other_name == "mod.rs" || other_name == "lib.rs" || other_name == "__init__.py" {
+
+                            if other_name == "mod.rs"
+                                || other_name == "lib.rs"
+                                || other_name == "__init__.py"
+                            {
                                 output.push_str(&format!("    F{} --> F{}\n", j, i));
                             }
                         }
@@ -215,8 +226,7 @@ impl OutputRenderer {
              ───────────────────────\n\
              Files: {}/{} ({:.1}%)\n\
              Tokens: {} used, {} remaining\n",
-            files_included, files_total, coverage,
-            tokens_used, tokens_remaining
+            files_included, files_total, coverage, tokens_used, tokens_remaining
         )
     }
 
@@ -229,11 +239,11 @@ impl OutputRenderer {
         let mut output = String::new();
         output.push_str("💡 Suggestions\n");
         output.push_str("─────────────\n");
-        
+
         for suggestion in suggestions {
             output.push_str(&format!("  • {}\n", suggestion));
         }
-        
+
         output.push('\n');
         output
     }
@@ -242,14 +252,14 @@ impl OutputRenderer {
 /// Render symbols in a compact format
 pub fn render_symbols_compact(symbols: &[Symbol]) -> String {
     let mut output = String::new();
-    
+
     for symbol in symbols {
         let vis = match symbol.visibility {
             super::parser::Visibility::Public => "pub ",
             super::parser::Visibility::PublicCrate => "pub(crate) ",
             _ => "",
         };
-        
+
         let kind_emoji = match symbol.kind {
             super::parser::SymbolKind::Function | super::parser::SymbolKind::Method => "🔧",
             super::parser::SymbolKind::Struct | super::parser::SymbolKind::Class => "📦",
@@ -260,12 +270,19 @@ pub fn render_symbols_compact(symbols: &[Symbol]) -> String {
             _ => "•",
         };
 
-        output.push_str(&format!("{} {}{}{}\n", 
-            kind_emoji, vis, symbol.name, 
-            if symbol.signature.contains('(') { "(...)" } else { "" }
+        output.push_str(&format!(
+            "{} {}{}{}\n",
+            kind_emoji,
+            vis,
+            symbol.name,
+            if symbol.signature.contains('(') {
+                "(...)"
+            } else {
+                ""
+            }
         ));
     }
-    
+
     output
 }
 
@@ -273,33 +290,34 @@ pub fn render_symbols_compact(symbols: &[Symbol]) -> String {
 pub fn truncate_output(output: &str, max_tokens: usize) -> String {
     // Rough estimate: 4 chars per token
     let max_chars = max_tokens * 4;
-    
+
     if output.len() <= max_chars {
         output.to_string()
     } else {
         let truncated = &output[..max_chars];
-        format!("{}\n\n[... truncated, {} total characters]", 
-            truncated, output.len())
+        format!(
+            "{}\n\n[... truncated, {} total characters]",
+            truncated,
+            output.len()
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::parser::{SymbolKind, Visibility};
+    use super::*;
 
     #[test]
     fn test_render_tree() {
         let renderer = OutputRenderer::new("tree");
-        
-        let files = vec![
-            FileInfo {
-                path: "src/main.rs".to_string(),
-                depth: "signatures".to_string(),
-                tokens: 500,
-                symbols: vec!["main".to_string(), "helper".to_string()],
-            },
-        ];
+
+        let files = vec![FileInfo {
+            path: "src/main.rs".to_string(),
+            depth: "signatures".to_string(),
+            tokens: 500,
+            symbols: vec!["main".to_string(), "helper".to_string()],
+        }];
 
         let result = renderer.render_tree(&files, &[]).unwrap();
         assert!(result.contains("main.rs"));
@@ -309,15 +327,13 @@ mod tests {
     #[test]
     fn test_render_flat() {
         let renderer = OutputRenderer::new("flat");
-        
-        let files = vec![
-            FileInfo {
-                path: "src/lib.rs".to_string(),
-                depth: "full".to_string(),
-                tokens: 1000,
-                symbols: vec!["foo".to_string()],
-            },
-        ];
+
+        let files = vec![FileInfo {
+            path: "src/lib.rs".to_string(),
+            depth: "full".to_string(),
+            tokens: 1000,
+            symbols: vec!["foo".to_string()],
+        }];
 
         let result = renderer.render_flat(&files, &[]).unwrap();
         assert!(result.contains("lib.rs"));
@@ -328,7 +344,7 @@ mod tests {
     fn test_truncate_output() {
         let long_text = "a".repeat(10000);
         let truncated = truncate_output(&long_text, 100); // ~400 chars
-        
+
         assert!(truncated.len() < long_text.len());
         assert!(truncated.contains("truncated"));
     }

@@ -133,7 +133,7 @@ impl TokenBudget {
         };
 
         let total_tokens = estimate_content_tokens(&content);
-        
+
         let estimate = match depth {
             Depth::Overview => {
                 // Overview is roughly 5% of file content (imports, module structure)
@@ -178,7 +178,7 @@ impl TokenBudget {
     /// Suggest optimal depth level based on file count and budget
     pub fn suggest_depth(&self, files: &[FileMeta]) -> Depth {
         let available = self.remaining();
-        
+
         if files.is_empty() {
             // Default to signatures when we don't know file count
             return Depth::Signatures;
@@ -294,7 +294,7 @@ mod tests {
         budget.reserve(20); // Reserve 200 tokens
 
         assert_eq!(budget.remaining(), 800);
-        
+
         let granted = budget.allocate(500);
         assert_eq!(granted, 500);
         assert_eq!(budget.used(), 500);
@@ -308,7 +308,7 @@ mod tests {
 
         budget.allocate(800); // Use all available
         assert!(budget.exhausted());
-        
+
         // Further allocations return 0
         let granted = budget.allocate(100);
         assert_eq!(granted, 0);
@@ -326,7 +326,7 @@ mod tests {
     fn test_plan_budget_iterations() {
         let mut budget = PlanBudget::new(10, 10000);
         assert_eq!(budget.iterations_remaining(), 10);
-        
+
         budget.next_iteration();
         assert_eq!(budget.current_iteration, 1);
         assert_eq!(budget.iterations_remaining(), 9);

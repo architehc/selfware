@@ -655,9 +655,9 @@ To call a tool, use this EXACT XML structure:
         // chat template formatting, and estimation variance (~10-20%).
         let model_context_limit = config.context_length;
         let max_context_tokens = model_context_limit
-            .saturating_sub(config.max_tokens)      // reserve for output tokens
-            .saturating_sub(200_000);                // tools + template + estimation safety
-        
+            .saturating_sub(config.max_tokens) // reserve for output tokens
+            .saturating_sub(200_000); // tools + template + estimation safety
+
         if max_context_tokens == 0 {
             tracing::error!(
                 "max_context_tokens is 0! context_length ({}) is too small for max_tokens ({}) + 200K overhead. \
@@ -667,7 +667,9 @@ To call a tool, use this EXACT XML structure:
         }
         tracing::info!(
             "Context limits: model={}, max_context_tokens={}, token_budget={}",
-            model_context_limit, max_context_tokens, config.agent.token_budget
+            model_context_limit,
+            max_context_tokens,
+            config.agent.token_budget
         );
 
         // Extract context map config before moving `config` into the struct.

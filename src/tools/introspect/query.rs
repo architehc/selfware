@@ -61,7 +61,7 @@ impl CodeQueryEngine {
             if let Ok(content) = tokio::fs::read_to_string(path).await {
                 let language = Language::detect(path, None);
                 let parsed = parse(&content, language);
-                
+
                 // Calculate BM25 score
                 let score = self.bm25_score(&parsed, &query_terms, content.len());
                 let combined_score = score * base_score;
@@ -97,10 +97,10 @@ impl CodeQueryEngine {
             if let Ok(content) = tokio::fs::read_to_string(path).await {
                 let language = Language::detect(path, None);
                 let parsed = parse(&content, language);
-                
+
                 // Calculate relevance score before consuming symbols
                 let score = self.bm25_score(&parsed, &query_terms, content.len());
-                
+
                 // Find matching symbols
                 let matched: Vec<Symbol> = parsed
                     .symbols
@@ -109,9 +109,9 @@ impl CodeQueryEngine {
                     .collect();
 
                 if !matched.is_empty() {
-                    
                     // Calculate token cost
-                    let symbol_tokens: usize = matched.iter()
+                    let symbol_tokens: usize = matched
+                        .iter()
                         .map(|s| estimate_content_tokens(&s.render()))
                         .sum();
 
@@ -163,9 +163,8 @@ impl CodeQueryEngine {
     fn idf(&self, term: &str) -> f64 {
         let doc_freq = self.doc_freq.get(term).copied().unwrap_or(1);
         let n = self.total_docs.max(doc_freq);
-        
-        ((n as f64 - doc_freq as f64 + 0.5) / (doc_freq as f64 + 0.5) + 1.0)
-            .ln()
+
+        ((n as f64 - doc_freq as f64 + 0.5) / (doc_freq as f64 + 0.5) + 1.0).ln()
     }
 
     /// Count term frequency in parsed file
@@ -218,7 +217,7 @@ impl CodeQueryEngine {
             if let Ok(content) = tokio::fs::read_to_string(path).await {
                 total_len += content.len();
                 let terms = tokenize(&content);
-                
+
                 // Count unique terms per document
                 let mut seen = std::collections::HashSet::new();
                 for term in terms {
@@ -264,9 +263,9 @@ pub async fn find_related_symbols(
 ) -> Result<Vec<(PathBuf, Symbol)>> {
     let engine = CodeQueryEngine::new();
     let budget = TokenBudget::new(usize::MAX); // No budget limit for this search
-    
+
     let results = engine.search(query, files, &budget).await?;
-    
+
     let mut all_symbols = Vec::new();
     for result in results.results {
         for symbol in result.matched_symbols {
@@ -276,7 +275,7 @@ pub async fn find_related_symbols(
 
     // Sort by relevance (we could add more sophisticated ranking here)
     all_symbols.truncate(max_results);
-    
+
     Ok(all_symbols)
 }
 
@@ -284,19 +283,18 @@ pub async fn find_related_symbols(
 pub fn extract_keywords(query: &str) -> Vec<String> {
     // Remove common stop words
     let stop_words: std::collections::HashSet<&str> = [
-        "the", "a", "an", "is", "are", "was", "were", "be", "been",
-        "being", "have", "has", "had", "do", "does", "did", "will",
-        "would", "could", "should", "may", "might", "must", "shall",
-        "can", "need", "dare", "ought", "used", "to", "of", "in",
-        "for", "on", "with", "at", "by", "from", "as", "into",
-        "through", "during", "before", "after", "above", "below",
-        "between", "under", "and", "but", "or", "yet", "so", "if",
-        "because", "although", "though", "while", "where", "when",
-        "that", "which", "who", "whom", "whose", "what", "this",
-        "these", "those", "i", "you", "he", "she", "it", "we", "they",
-        "me", "him", "her", "us", "them", "my", "your", "his", "its",
-        "our", "their", "how", "does", "work", "use", "using", "get",
-    ].iter().cloned().collect();
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+        "do", "does", "did", "will", "would", "could", "should", "may", "might", "must", "shall",
+        "can", "need", "dare", "ought", "used", "to", "of", "in", "for", "on", "with", "at", "by",
+        "from", "as", "into", "through", "during", "before", "after", "above", "below", "between",
+        "under", "and", "but", "or", "yet", "so", "if", "because", "although", "though", "while",
+        "where", "when", "that", "which", "who", "whom", "whose", "what", "this", "these", "those",
+        "i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "us", "them", "my",
+        "your", "his", "its", "our", "their", "how", "does", "work", "use", "using", "get",
+    ]
+    .iter()
+    .cloned()
+    .collect();
 
     tokenize(query)
         .into_iter()

@@ -165,8 +165,16 @@ impl Agent {
                 }
                 !matches!(
                     name.as_ref(),
-                    "target" | "node_modules" | ".venv" | "__pycache__" | ".mypy_cache"
-                        | "vendor" | "dist" | "build" | "out" | "pkg"
+                    "target"
+                        | "node_modules"
+                        | ".venv"
+                        | "__pycache__"
+                        | ".mypy_cache"
+                        | "vendor"
+                        | "dist"
+                        | "build"
+                        | "out"
+                        | "pkg"
                 )
             })
         {
@@ -355,7 +363,9 @@ impl Agent {
                 let estimate = self.context_map.can_load(&path, ContextLevel::Full);
                 if !estimate.fits {
                     // Try to compress existing content to make room.
-                    let needed = estimate.estimated_tokens.saturating_sub(self.context_map.remaining());
+                    let needed = estimate
+                        .estimated_tokens
+                        .saturating_sub(self.context_map.remaining());
                     let freed = self.context_map.compress_to_fit(needed);
                     if freed < needed {
                         skipped += 1;
@@ -393,7 +403,11 @@ impl Agent {
             BTreeMap::new();
 
         let stats = self.context_map.stats();
-        for level in [ContextLevel::Full, ContextLevel::Skeleton, ContextLevel::Tree] {
+        for level in [
+            ContextLevel::Full,
+            ContextLevel::Skeleton,
+            ContextLevel::Tree,
+        ] {
             for path in self.context_map.files_at_level(level) {
                 let module = path
                     .components()
@@ -402,10 +416,7 @@ impl Agent {
                     .to_string_lossy()
                     .to_string();
 
-                modules
-                    .entry(module)
-                    .or_default()
-                    .push((path, level, 0));
+                modules.entry(module).or_default().push((path, level, 0));
             }
         }
 
@@ -3026,7 +3037,8 @@ mod tests {
         // Real configs (e.g. context_length=1010000) get meaningful budgets.
         // default context_length (131072) - default max_tokens (65536) - 200K = 0 (saturated)
         let default_config = crate::config::Config::default();
-        let expected = default_config.context_length
+        let expected = default_config
+            .context_length
             .saturating_sub(default_config.max_tokens)
             .saturating_sub(200_000);
         assert_eq!(

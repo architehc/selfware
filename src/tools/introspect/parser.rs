@@ -204,13 +204,22 @@ pub fn parse_rust(content: &str) -> ParsedFile {
 
     for cap in fn_regex.captures_iter(content) {
         let vis_str = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
-        let name = cap.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
-        let _generics = cap.get(3).map(|m| m.as_str().to_string()).unwrap_or_default();
-        let params = cap.get(4).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let name = cap
+            .get(2)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
+        let _generics = cap
+            .get(3)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
+        let params = cap
+            .get(4)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
         let ret = cap.get(5).map(|m| m.as_str().trim().to_string());
 
         let visibility = parse_visibility(vis_str);
-        
+
         let signature = if let Some(ret) = ret {
             format!("fn {}({}) -> {}", name, params, ret)
         } else {
@@ -231,10 +240,14 @@ pub fn parse_rust(content: &str) -> ParsedFile {
     }
 
     // Extract structs
-    let struct_regex = Regex::new(r"(?m)^\s*((?:pub(?:\s*\([^)]*\))?\s+)?)(?:struct|enum)\s+(\w+)").unwrap();
+    let struct_regex =
+        Regex::new(r"(?m)^\s*((?:pub(?:\s*\([^)]*\))?\s+)?)(?:struct|enum)\s+(\w+)").unwrap();
     for cap in struct_regex.captures_iter(content) {
         let vis_str = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
-        let name = cap.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let name = cap
+            .get(2)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
         let visibility = parse_visibility(vis_str);
 
         symbols.push(Symbol {
@@ -254,7 +267,10 @@ pub fn parse_rust(content: &str) -> ParsedFile {
     let trait_regex = Regex::new(r"(?m)^\s*((?:pub(?:\s*\([^)]*\))?\s+)?)trait\s+(\w+)").unwrap();
     for cap in trait_regex.captures_iter(content) {
         let vis_str = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
-        let name = cap.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let name = cap
+            .get(2)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
         let visibility = parse_visibility(vis_str);
 
         symbols.push(Symbol {
@@ -305,11 +321,12 @@ fn parse_python(content: &str) -> ParsedFile {
     let import_regex = Regex::new(r"^\s*(?:from\s+(\S+)\s+import\s+(.+)|import\s+(.+))$").unwrap();
     for line in content.lines() {
         if let Some(cap) = import_regex.captures(line) {
-            let path = cap.get(1)
+            let path = cap
+                .get(1)
                 .or_else(|| cap.get(3))
                 .map(|m| m.as_str().to_string())
                 .unwrap_or_default();
-            
+
             imports.push(Import {
                 path,
                 alias: None,
@@ -321,7 +338,10 @@ fn parse_python(content: &str) -> ParsedFile {
     // Extract class definitions
     let class_regex = Regex::new(r"(?m)^\s*class\s+(\w+)(?:\(([^)]*)\))?:").unwrap();
     for cap in class_regex.captures_iter(content) {
-        let name = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let name = cap
+            .get(1)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
         let parents = cap.get(2).map(|m| m.as_str().to_string());
 
         let signature = if let Some(parents) = parents {
@@ -346,8 +366,14 @@ fn parse_python(content: &str) -> ParsedFile {
     // Extract function definitions
     let fn_regex = Regex::new(r"(?m)^\s*def\s+(\w+)\s*\(([^)]*)\)(?:\s*->\s*([^:]+))?:").unwrap();
     for cap in fn_regex.captures_iter(content) {
-        let name = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
-        let params = cap.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let name = cap
+            .get(1)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
+        let params = cap
+            .get(2)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
         let ret = cap.get(3).map(|m| m.as_str().to_string());
 
         let signature = if let Some(ret) = ret {
@@ -383,10 +409,16 @@ fn parse_typescript(content: &str) -> ParsedFile {
 
     // Extract functions
     let fn_regex = Regex::new(r"(?m)^\s*(?:export\s+)?(?:async\s+)?(?:function|const)\s+(\w+)\s*(?:=\s*)?(?:<[^>]*>)?\s*\(([^)]*)\)(?:\s*:\s*([^\{=]+))?").unwrap();
-    
+
     for cap in fn_regex.captures_iter(content) {
-        let name = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
-        let params = cap.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
+        let name = cap
+            .get(1)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
+        let params = cap
+            .get(2)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
         let ret = cap.get(3).map(|m| m.as_str().trim().to_string());
 
         let signature = if let Some(ret) = ret {
@@ -411,8 +443,11 @@ fn parse_typescript(content: &str) -> ParsedFile {
     // Extract interfaces and types
     let type_regex = Regex::new(r"(?m)^\s*(?:export\s+)?(?:interface|type)\s+(\w+)").unwrap();
     for cap in type_regex.captures_iter(content) {
-        let name = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
-        
+        let name = cap
+            .get(1)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
+
         symbols.push(Symbol {
             name: name.clone(),
             kind: SymbolKind::TypeAlias,
@@ -438,7 +473,7 @@ fn parse_typescript(content: &str) -> ParsedFile {
 fn parse_generic(_content: &str) -> ParsedFile {
     // Simple line-based extraction for unknown languages
     let symbols = Vec::new();
-    
+
     ParsedFile {
         language: Language::Unknown,
         imports: Vec::new(),
@@ -513,7 +548,7 @@ fn extract_full(parsed: &ParsedFile) -> Vec<Symbol> {
 fn extract_dependencies(parsed: &ParsedFile) -> Vec<Symbol> {
     // Return imports plus symbols that reference external types
     let mut result = Vec::new();
-    
+
     for imp in &parsed.imports {
         result.push(Symbol {
             name: imp.path.clone(),
@@ -544,7 +579,7 @@ pub async fn process_data(input: String) -> Result<(), Error> {
 "#;
         let parsed = parse_rust(code);
         assert!(!parsed.symbols.is_empty());
-        
+
         let func = &parsed.symbols[0];
         assert_eq!(func.name, "process_data");
         assert!(func.signature.contains("process_data"));
@@ -559,7 +594,7 @@ class DataProcessor:
 "#;
         let parsed = parse_python(code);
         assert!(!parsed.symbols.is_empty());
-        
+
         let has_class = parsed.symbols.iter().any(|s| s.kind == SymbolKind::Class);
         assert!(has_class);
     }
@@ -573,9 +608,11 @@ pub struct PublicStruct;
 "#;
         let parsed = parse_rust(code);
         let sigs = extract_signatures(&parsed);
-        
+
         // Should only get public items
         assert_eq!(sigs.len(), 2);
-        assert!(sigs.iter().all(|s| matches!(s.visibility, Visibility::Public)));
+        assert!(sigs
+            .iter()
+            .all(|s| matches!(s.visibility, Visibility::Public)));
     }
 }

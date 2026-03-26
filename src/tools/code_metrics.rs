@@ -112,7 +112,7 @@ impl CodeMetricsTool {
     fn calculate_complexity(function_body: &str) -> u32 {
         let mut complexity: u32 = 1;
         let body_lower = function_body.to_lowercase();
-        
+
         // Count decision points
         complexity += body_lower.matches("if ").count() as u32;
         complexity += body_lower.matches("else").count() as u32;
@@ -124,7 +124,7 @@ impl CodeMetricsTool {
         complexity += body_lower.matches(" || ").count() as u32;
         complexity += body_lower.matches("?").count() as u32;
         complexity += body_lower.matches("return ").count() as u32;
-        
+
         complexity
     }
 
@@ -132,7 +132,7 @@ impl CodeMetricsTool {
     fn analyze_function(name: &str, body: &str, line_number: usize) -> FunctionMetrics {
         let complexity = Self::calculate_complexity(body);
         let level = ComplexityLevel::from_score(complexity);
-        
+
         FunctionMetrics {
             name: name.to_string(),
             line_number,
@@ -188,10 +188,10 @@ impl Tool for CodeMetricsTool {
 
         // Use the introspection parser to get function information
         let parsed = crate::tools::introspect::parser::parse_rust(&content);
-        
+
         // Extract and analyze functions
         let mut functions: Vec<FunctionMetrics> = Vec::new();
-        
+
         for symbol in &parsed.symbols {
             if let crate::tools::introspect::parser::SymbolKind::Function = symbol.kind {
                 // Get function body from signature
@@ -203,7 +203,7 @@ impl Tool for CodeMetricsTool {
                 } else {
                     symbol.signature.clone()
                 };
-                
+
                 let metrics = Self::analyze_function(&symbol.name, &body, symbol.line_start);
                 functions.push(metrics);
             }
@@ -295,7 +295,7 @@ mod tests {
         let tool = CodeMetricsTool::new();
         assert_eq!(tool.name(), "code_metrics");
         assert!(!tool.description().is_empty());
-        
+
         let schema = tool.schema();
         assert!(schema.get("required").is_some());
         assert!(schema.get("properties").unwrap().get("file_path").is_some());

@@ -125,7 +125,14 @@ mod tests {
     #[tokio::test]
     async fn test_all_blocked_combos_rejected() {
         let kb = KeyboardController::new();
-        for combo in &["ctrl+alt+delete", "cmd+q", "alt+f4", "ctrl+alt+f1", "ctrl+alt+f2", "ctrl+alt+f3"] {
+        for combo in &[
+            "ctrl+alt+delete",
+            "cmd+q",
+            "alt+f4",
+            "ctrl+alt+f1",
+            "ctrl+alt+f2",
+            "ctrl+alt+f3",
+        ] {
             let result = kb.key_combo(combo).await;
             assert!(result.is_err(), "Expected '{}' to be blocked", combo);
         }

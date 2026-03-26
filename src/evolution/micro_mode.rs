@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 /// Detect if we should use micro mode based on model name
 pub fn is_micro_model(model_name: &str) -> bool {
     let name_lower = model_name.to_lowercase();
-    name_lower.contains("0.8b") 
+    name_lower.contains("0.8b")
         || name_lower.contains("1.5b")
         || name_lower.contains("1b")
         || name_lower.contains("2b")
@@ -43,8 +43,9 @@ pub const MICRO_MAX_EDITS: usize = 2;
 pub fn build_micro_system_prompt(population_size: usize) -> String {
     // Clamp population for micro mode - sequential evaluation
     let n = population_size.min(3);
-    
-    format!(r#"You are a code improvement engine. Generate {n} code mutations.
+
+    format!(
+        r#"You are a code improvement engine. Generate {n} code mutations.
 
 FORMAT:
 Return a JSON array like this:
@@ -56,15 +57,13 @@ RULES:
 3. Never modify src/evolution/, src/safety/, or benches/
 4. Keep edits small - change only what's needed
 
-/no_think"#)
+/no_think"#
+    )
 }
 
 /// Filter and limit mutation targets for micro mode
 /// Returns the smallest files first, limited by MICRO_MAX_FILES
-pub fn select_micro_targets(
-    all_targets: &[PathBuf],
-    repo_root: &Path,
-) -> Vec<(PathBuf, String)> {
+pub fn select_micro_targets(all_targets: &[PathBuf], repo_root: &Path) -> Vec<(PathBuf, String)> {
     let files_with_content: Vec<(PathBuf, usize, String)> = all_targets
         .iter()
         .filter_map(|p| {
@@ -76,15 +75,15 @@ pub fn select_micro_targets(
             Some((p.clone(), size, content))
         })
         .collect();
-    
+
     // Sort by size (smallest first)
     let mut files_sorted = files_with_content;
     files_sorted.sort_by_key(|(_, size, _)| *size);
-    
+
     // Take top N smallest files that fit in budget
     let mut selected = Vec::new();
     let mut total_chars = 0usize;
-    
+
     for (path, _size, content) in files_sorted.into_iter().take(MICRO_MAX_FILES) {
         if total_chars + content.len() > MICRO_MAX_CONTEXT_CHARS {
             break;
@@ -92,16 +91,14 @@ pub fn select_micro_targets(
         total_chars += content.len();
         selected.push((path, content));
     }
-    
+
     selected
 }
 
 /// Build micro-mode context with aggressive truncation
-pub fn build_micro_context(
-    targets: &[(PathBuf, String)],
-) -> String {
+pub fn build_micro_context(targets: &[(PathBuf, String)]) -> String {
     let mut context = String::with_capacity(MICRO_MAX_CONTEXT_CHARS);
-    
+
     for (path, content) in targets {
         // Add line numbers for reference
         let numbered: String = content
@@ -109,10 +106,10 @@ pub fn build_micro_context(
             .enumerate()
             .map(|(i, line)| format!("{:3}| {}\n", i + 1, line))
             .collect();
-        
+
         context.push_str(&format!("\n=== {} ===\n{}", path.display(), numbered));
     }
-    
+
     context
 }
 
@@ -128,7 +125,7 @@ pub fn validate_micro_hypothesis(hypothesis: &Hypothesis) -> Result<(), String> 
             return Ok(());
         }
     };
-    
+
     if edits.len() > MICRO_MAX_EDITS {
         return Err(format!(
             "Micro mode: hypothesis has {} edits, max is {}",
@@ -136,27 +133,29 @@ pub fn validate_micro_hypothesis(hypothesis: &Hypothesis) -> Result<(), String> 
             MICRO_MAX_EDITS
         ));
     }
-    
+
     for (i, edit) in edits.iter().enumerate() {
         let search = edit["search"].as_str().unwrap_or("");
         let replace = edit["replace"].as_str().unwrap_or("");
-        
+
         // Limit search/replace size to prevent ambiguous matches
         if search.len() > 500 {
             return Err(format!(
                 "Micro mode: edit {} search too long ({} chars, max 500)",
-                i, search.len()
+                i,
+                search.len()
             ));
         }
-        
+
         if replace.len() > 1000 {
             return Err(format!(
                 "Micro mode: edit {} replace too long ({} chars, max 1000)",
-                i, replace.len()
+                i,
+                replace.len()
             ));
         }
     }
-    
+
     Ok(())
 }
 

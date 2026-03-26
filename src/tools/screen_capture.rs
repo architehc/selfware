@@ -247,10 +247,12 @@ mod tests {
     #[tokio::test]
     async fn test_screen_capture_region_missing_width() {
         let tool = ScreenCapture;
-        let result = tool.execute(json!({
-            "target": "region",
-            "region": {"x": 0, "y": 0, "height": 100}
-        })).await;
+        let result = tool
+            .execute(json!({
+                "target": "region",
+                "region": {"x": 0, "y": 0, "height": 100}
+            }))
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("width"));
     }
@@ -258,10 +260,12 @@ mod tests {
     #[tokio::test]
     async fn test_screen_capture_region_missing_height() {
         let tool = ScreenCapture;
-        let result = tool.execute(json!({
-            "target": "region",
-            "region": {"x": 0, "y": 0, "width": 100}
-        })).await;
+        let result = tool
+            .execute(json!({
+                "target": "region",
+                "region": {"x": 0, "y": 0, "width": 100}
+            }))
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("height"));
     }
@@ -269,10 +273,12 @@ mod tests {
     #[tokio::test]
     async fn test_screen_capture_region_coords_out_of_range() {
         let tool = ScreenCapture;
-        let result = tool.execute(json!({
-            "target": "region",
-            "region": {"x": 200000, "y": 0, "width": 100, "height": 100}
-        })).await;
+        let result = tool
+            .execute(json!({
+                "target": "region",
+                "region": {"x": 200000, "y": 0, "width": 100, "height": 100}
+            }))
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("out of range"));
     }
@@ -280,20 +286,24 @@ mod tests {
     #[tokio::test]
     async fn test_screen_capture_region_y_out_of_range() {
         let tool = ScreenCapture;
-        let result = tool.execute(json!({
-            "target": "region",
-            "region": {"x": 0, "y": -200000, "width": 100, "height": 100}
-        })).await;
+        let result = tool
+            .execute(json!({
+                "target": "region",
+                "region": {"x": 0, "y": -200000, "width": 100, "height": 100}
+            }))
+            .await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_screen_capture_region_dimensions_out_of_range() {
         let tool = ScreenCapture;
-        let result = tool.execute(json!({
-            "target": "region",
-            "region": {"x": 0, "y": 0, "width": 200000, "height": 100}
-        })).await;
+        let result = tool
+            .execute(json!({
+                "target": "region",
+                "region": {"x": 0, "y": 0, "width": 200000, "height": 100}
+            }))
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("out of range"));
     }
@@ -312,10 +322,12 @@ mod tests {
     async fn test_screen_capture_region_default_coords() {
         let tool = ScreenCapture;
         // x and y default to 0 when missing
-        let _result = tool.execute(json!({
-            "target": "region",
-            "region": {"width": 100, "height": 100}
-        })).await;
+        let _result = tool
+            .execute(json!({
+                "target": "region",
+                "region": {"width": 100, "height": 100}
+            }))
+            .await;
         // Verifies defaults are applied without panic
     }
 }

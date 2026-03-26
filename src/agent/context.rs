@@ -10,7 +10,7 @@ const MESSAGE_OVERHEAD_TOKENS: usize = 4;
 
 /// Estimate the token cost of a single message, including text, images,
 /// per-message overhead, and tool calls. This is the single source of truth
-/// for message-level token estimation — both `ContextCompressor` and 
+/// for message-level token estimation — both `ContextCompressor` and
 /// `trim_message_history` use it.
 pub fn estimate_message_tokens(m: &Message) -> usize {
     let mut total = estimate_tokens_with_overhead(&m.content.text_all(), MESSAGE_OVERHEAD_TOKENS)

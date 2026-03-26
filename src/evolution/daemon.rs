@@ -482,7 +482,7 @@ fn generate_hypotheses(
 ) -> Vec<Hypothesis> {
     // Check if we should use micro mode for small models
     let use_micro_mode = super::micro_mode::is_micro_model(&config.llm.model);
-    
+
     if use_micro_mode {
         log_phase("Micro mode: Using simplified prompts for small model");
         generate_micro_hypotheses(config, telemetry_prompt, history_prompt, repo_root)
@@ -529,7 +529,7 @@ fn generate_micro_hypotheses(
     repo_root: &Path,
 ) -> Vec<Hypothesis> {
     use super::micro_mode;
-    
+
     // Collect all target paths
     let all_paths: Vec<PathBuf> = config
         .mutation_targets
@@ -539,23 +539,23 @@ fn generate_micro_hypotheses(
         .chain(config.mutation_targets.cognitive.iter())
         .cloned()
         .collect();
-    
+
     // Select small subset of files
     let selected = micro_mode::select_micro_targets(&all_paths, repo_root);
     if selected.is_empty() {
         log_warning("Micro mode: No suitable target files found");
         return vec![];
     }
-    
+
     log_phase(&format!(
         "Micro mode: Using {} files ({} chars)",
         selected.len(),
         selected.iter().map(|(_, c)| c.len()).sum::<usize>()
     ));
-    
+
     let source_context = micro_mode::build_micro_context(&selected);
     let micro_population = config.population_size.min(3); // Clamp for micro mode
-    
+
     let system_prompt = micro_mode::build_micro_system_prompt(micro_population);
     let user_prompt = build_user_prompt(telemetry_prompt, history_prompt, &source_context);
 
@@ -566,17 +566,15 @@ fn generate_micro_hypotheses(
                 response.len()
             ));
             let hypotheses = parse_hypotheses_response(&response);
-            
+
             // Validate micro-safety
             hypotheses
                 .into_iter()
-                .filter(|h| {
-                    match micro_mode::validate_micro_hypothesis(h) {
-                        Ok(()) => true,
-                        Err(e) => {
-                            log_warning(&format!("Micro mode: Rejected hypothesis: {}", e));
-                            false
-                        }
+                .filter(|h| match micro_mode::validate_micro_hypothesis(h) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        log_warning(&format!("Micro mode: Rejected hypothesis: {}", e));
+                        false
                     }
                 })
                 .take(micro_population)
@@ -597,10 +595,10 @@ fn extract_function_signatures(source: &str) -> Vec<String> {
     let mut signatures = Vec::new();
     let mut in_impl_block = false;
     let mut impl_context = String::new();
-    
+
     for line in source.lines() {
         let trimmed = line.trim();
-        
+
         // Track impl blocks for context
         if trimmed.starts_with("impl ") || trimmed.starts_with("pub impl ") {
             in_impl_block = true;
@@ -612,29 +610,30 @@ fn extract_function_signatures(source: &str) -> Vec<String> {
             impl_context.clear();
             continue;
         }
-        
+
         // Match function signatures (fn or pub fn)
-        if (trimmed.starts_with("fn ") || trimmed.starts_with("pub fn ")) 
-            && !trimmed.starts_with("fn main()") // Skip main functions in tests
+        if (trimmed.starts_with("fn ") || trimmed.starts_with("pub fn "))
+            && !trimmed.starts_with("fn main()")
+        // Skip main functions in tests
         {
             let mut sig = trimmed.to_string();
-            
+
             // Add impl context if available
             if !impl_context.is_empty() {
                 sig = format!("// In: {}\n{}", impl_context, sig);
             }
-            
+
             // Extract just the signature line (stop at opening brace)
             if let Some(brace_pos) = sig.find('{') {
                 sig = sig[..brace_pos].to_string();
             }
-            
+
             if !sig.is_empty() {
                 signatures.push(sig);
             }
         }
     }
-    
+
     signatures
 }
 
@@ -645,7 +644,7 @@ fn get_recent_git_changes(repo_root: &Path, max_commits: usize) -> Option<String
         .arg(format!("-{}", max_commits))
         .current_dir(repo_root)
         .output();
-    
+
     match output {
         Ok(o) if o.status.success() => {
             let log = String::from_utf8_lossy(&o.stdout);
@@ -739,7 +738,7 @@ pub fn read_mutation_targets(targets: &super::MutationTargets, repo_root: &Path)
         } else {
             files_full += 1;
         }
-        
+
         total_signatures += signatures.len();
 
         // Add function signatures as a summary before the source
@@ -750,7 +749,11 @@ pub fn read_mutation_targets(targets: &super::MutationTargets, repo_root: &Path)
                 .map(|s| format!("  {}", s))
                 .collect::<Vec<_>>()
                 .join("\n");
-            format!("\n// Function signatures ({} total):\n{}\n", signatures.len(), sigs)
+            format!(
+                "\n// Function signatures ({} total):\n{}\n",
+                signatures.len(),
+                sigs
+            )
         } else {
             String::new()
         };
@@ -1491,9 +1494,18 @@ mod tests {
         #[allow(unused_imports)]
         use crate::tools::search::grep_search;
         let results = grep_search("pub fn format_evolution_history", ".", true, 10, 0);
-        assert!(results.total_matches > 0, "Should find at least one match for pub fn format_evolution_history");
-        let match_found = results.matches.iter().any(|m| m.content.contains("format_evolution_history"));
-        assert!(match_found, "Should find the format_evolution_history function definition");
+        assert!(
+            results.total_matches > 0,
+            "Should find at least one match for pub fn format_evolution_history"
+        );
+        let match_found = results
+            .matches
+            .iter()
+            .any(|m| m.content.contains("format_evolution_history"));
+        assert!(
+            match_found,
+            "Should find the format_evolution_history function definition"
+        );
     }
 
     #[test]

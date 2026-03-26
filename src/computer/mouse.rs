@@ -269,8 +269,8 @@ mod tests {
 
     #[test]
     fn test_with_movement_profile() {
-        let mouse = MouseController::new()
-            .with_movement_profile(super::super::MovementProfile::Bezier);
+        let mouse =
+            MouseController::new().with_movement_profile(super::super::MovementProfile::Bezier);
         assert!(mouse.validate_coordinates(0, 0).is_ok());
     }
 
