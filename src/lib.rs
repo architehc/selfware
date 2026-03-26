@@ -132,6 +132,7 @@ pub use devops::process_manager;
 
 // Backward-compatible re-exports for testing module
 pub use testing::verification;
+pub use testing::visual_verification;
 
 // ============================================================================
 // New feature modules

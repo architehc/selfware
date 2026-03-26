@@ -267,8 +267,11 @@ impl VisualVerifier {
         expected: &str,
     ) -> Result<VisualVerificationResult> {
         let prompt = build_verify_prompt(expected);
-        let body =
-            self.build_single_image_request_with_options(&prompt, image_base64, VERIFICATION_MAX_TOKENS);
+        let body = self.build_single_image_request_with_options(
+            &prompt,
+            image_base64,
+            VERIFICATION_MAX_TOKENS,
+        );
         let raw = self.call_vlm(&body).await?;
         parse_verification_response(&raw)
     }
@@ -705,7 +708,13 @@ fn parse_verification_response(raw: &str) -> Result<VisualVerificationResult> {
         passed: parsed["passed"].as_bool().unwrap_or(false),
         confidence: parsed["confidence"]
             .as_f64()
-            .unwrap_or_else(|| if parsed["passed"].as_bool().unwrap_or(false) { 1.0 } else { 0.0 })
+            .unwrap_or_else(|| {
+                if parsed["passed"].as_bool().unwrap_or(false) {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
             .clamp(0.0, 1.0),
         description: parsed["description"]
             .as_str()
@@ -1294,8 +1303,11 @@ mod tests {
     #[test]
     fn test_build_single_image_request_verification_budget() {
         let verifier = VisualVerifier::new("http://localhost:1234/v1", "test-model");
-        let body =
-            verifier.build_single_image_request_with_options("Verify", "AAAA", VERIFICATION_MAX_TOKENS);
+        let body = verifier.build_single_image_request_with_options(
+            "Verify",
+            "AAAA",
+            VERIFICATION_MAX_TOKENS,
+        );
         assert_eq!(body["max_tokens"], VERIFICATION_MAX_TOKENS);
     }
 
@@ -1325,7 +1337,10 @@ mod tests {
         let body = verifier.build_single_image_request_with_options("Verify", "AAAA", 4096);
         assert_eq!(body["max_tokens"], 256);
         assert_eq!(body["temperature"], 0.25);
-        assert_eq!(body["messages"][0]["content"][1]["image_url"]["detail"], "high");
+        assert_eq!(
+            body["messages"][0]["content"][1]["image_url"]["detail"],
+            "high"
+        );
         assert_eq!(
             body["chat_template_kwargs"]["enable_thinking"],
             json!(false)
@@ -1392,7 +1407,9 @@ mod tests {
         assert_eq!(v.default_max_tokens, 192);
         assert_eq!(v.temperature, 0.0);
         assert_eq!(
-            v.extra_body.as_ref().and_then(|m| m.get("chat_template_kwargs")),
+            v.extra_body
+                .as_ref()
+                .and_then(|m| m.get("chat_template_kwargs")),
             extra_body.get("chat_template_kwargs")
         );
     }

@@ -21,9 +21,9 @@ use selfware::api::types::Message;
 use selfware::bench_harness::*;
 use selfware::config::auto_config::AutoConfigurator;
 use selfware::self_healing::{ErrorOccurrence, SelfHealingConfig, SelfHealingEngine};
-use selfware::testing::visual_verification::VisualVerifier;
 use selfware::tools::vision::{encode_image_file, VisionCompare};
 use selfware::tools::Tool;
+use selfware::visual_verification::{VisualDiffResult, VisualVerifier};
 
 #[derive(Debug)]
 struct FlowResult {
@@ -88,11 +88,19 @@ fn is_local_endpoint(endpoint: &str) -> bool {
 }
 
 fn infer_text_concurrency(endpoint: &str) -> usize {
-    if is_local_endpoint(endpoint) { 16 } else { 64 }
+    if is_local_endpoint(endpoint) {
+        16
+    } else {
+        64
+    }
 }
 
 fn infer_vision_concurrency(endpoint: &str) -> usize {
-    if is_local_endpoint(endpoint) { 4 } else { 8 }
+    if is_local_endpoint(endpoint) {
+        4
+    } else {
+        8
+    }
 }
 
 fn infer_vision_timeout(endpoint: &str) -> Duration {
@@ -239,7 +247,12 @@ async fn test_auto_config(endpoint: &str) -> FlowResult {
     if errors.is_empty() {
         FlowResult::ok("auto-config", start.elapsed().as_secs_f64(), &details)
     } else {
-        FlowResult::fail("auto-config", start.elapsed().as_secs_f64(), &details, errors)
+        FlowResult::fail(
+            "auto-config",
+            start.elapsed().as_secs_f64(),
+            &details,
+            errors,
+        )
     }
 }
 
@@ -319,7 +332,12 @@ async fn test_throughput(endpoint: &str, model: &str, concurrent: usize) -> Flow
     let timeouts = report
         .results
         .iter()
-        .filter(|r| r.error.as_ref().map(|e| e.contains("timeout")).unwrap_or(false))
+        .filter(|r| {
+            r.error
+                .as_ref()
+                .map(|e| e.contains("timeout"))
+                .unwrap_or(false)
+        })
         .count();
     if timeouts > 0 {
         errors.push(format!("{timeouts} tasks timed out"));
@@ -344,11 +362,7 @@ async fn test_throughput(endpoint: &str, model: &str, concurrent: usize) -> Flow
         .filter(|r| {
             r.error
                 .as_ref()
-                .map(|e| {
-                    e.contains("connection")
-                        || e.contains("refused")
-                        || e.contains("reset")
-                })
+                .map(|e| e.contains("connection") || e.contains("refused") || e.contains("reset"))
                 .unwrap_or(false)
         })
         .count();
@@ -371,14 +385,22 @@ async fn test_throughput(endpoint: &str, model: &str, concurrent: usize) -> Flow
         if let Some(err) = &r.error {
             eprintln!("  [{}] ERROR: {}", r.task_id, &err[..err.len().min(100)]);
         } else if r.response.is_empty() {
-            eprintln!("  [{}] WARN: empty response (tokens: {}+{})", r.task_id, r.prompt_tokens, r.completion_tokens);
+            eprintln!(
+                "  [{}] WARN: empty response (tokens: {}+{})",
+                r.task_id, r.prompt_tokens, r.completion_tokens
+            );
         }
     }
 
     if errors.is_empty() {
         FlowResult::ok("throughput", start.elapsed().as_secs_f64(), &details)
     } else {
-        FlowResult::fail("throughput", start.elapsed().as_secs_f64(), &details, errors)
+        FlowResult::fail(
+            "throughput",
+            start.elapsed().as_secs_f64(),
+            &details,
+            errors,
+        )
     }
 }
 
@@ -499,7 +521,10 @@ async fn test_error_resilience(endpoint: &str, model: &str, burst_size: usize) -
                 eprintln!("    OK: HTTP {} for large prompt", status);
                 tests_passed += 1;
             } else {
-                errors.push(format!("Large prompt unexpected: HTTP {status}: {}", &body[..body.len().min(200)]));
+                errors.push(format!(
+                    "Large prompt unexpected: HTTP {status}: {}",
+                    &body[..body.len().min(200)]
+                ));
             }
         }
         Err(e) => {
@@ -705,7 +730,12 @@ async fn test_tool_calling(endpoint: &str, model: &str) -> FlowResult {
     if errors.is_empty() {
         FlowResult::ok("tool-calling", start.elapsed().as_secs_f64(), &details)
     } else {
-        FlowResult::fail("tool-calling", start.elapsed().as_secs_f64(), &details, errors)
+        FlowResult::fail(
+            "tool-calling",
+            start.elapsed().as_secs_f64(),
+            &details,
+            errors,
+        )
     }
 }
 
@@ -834,7 +864,7 @@ async fn test_vision_workflows(
                 Ok(Ok(result)) => result,
                 Ok(Err(e)) => {
                     errors.push(format!("Structured semantic compare failed: {e}"));
-                    selfware::testing::visual_verification::VisualDiffResult {
+                    VisualDiffResult {
                         changes_detected: false,
                         expected_change_found: false,
                         description: String::new(),
@@ -846,7 +876,7 @@ async fn test_vision_workflows(
                         "Structured semantic compare timed out after {}s",
                         request_timeout.as_secs()
                     ));
-                    selfware::testing::visual_verification::VisualDiffResult {
+                    VisualDiffResult {
                         changes_detected: false,
                         expected_change_found: false,
                         description: String::new(),
@@ -868,16 +898,13 @@ async fn test_vision_workflows(
             if pixel_similarity < 99.9 && semantic_ok {
                 eprintln!(
                     "    OK: pixel_similarity={:.1}, semantic={}",
-                    pixel_similarity,
-                    semantic_preview
+                    pixel_similarity, semantic_preview
                 );
                 tests_passed += 1;
             } else {
                 errors.push(format!(
                     "Image comparison too weak: pixel_similarity={:.1}, semantic={}{}",
-                    pixel_similarity,
-                    semantic_preview,
-                    unexpected
+                    pixel_similarity, semantic_preview, unexpected
                 ));
             }
         }
@@ -1017,105 +1044,105 @@ async fn main() -> Result<()> {
             };
             results.push(vision);
         } else {
-        // Step 2: Throughput with self-heal fallback
-        let throughput = test_throughput(&target.endpoint, &model, target.concurrent).await;
-        let throughput = if throughput.passed {
-            throughput
-        } else {
-            let fallback_concurrent = (target.concurrent / 2).max(4);
-            match retry_after_self_heal(
-                &healer,
-                &target.endpoint,
-                "throughput",
-                &throughput.errors,
-                || async {
-                    test_throughput(&target.endpoint, &model, fallback_concurrent)
-                        .await
-                        .with_note(format!(
-                            "self-heal retry reduced concurrency to {fallback_concurrent}"
-                        ))
-                },
-            )
-            .await
-            {
-                Some(recovered) => recovered,
-                None => throughput.with_note("self-heal exhausted"),
-            }
-        };
-        results.push(throughput);
+            // Step 2: Throughput with self-heal fallback
+            let throughput = test_throughput(&target.endpoint, &model, target.concurrent).await;
+            let throughput = if throughput.passed {
+                throughput
+            } else {
+                let fallback_concurrent = (target.concurrent / 2).max(4);
+                match retry_after_self_heal(
+                    &healer,
+                    &target.endpoint,
+                    "throughput",
+                    &throughput.errors,
+                    || async {
+                        test_throughput(&target.endpoint, &model, fallback_concurrent)
+                            .await
+                            .with_note(format!(
+                                "self-heal retry reduced concurrency to {fallback_concurrent}"
+                            ))
+                    },
+                )
+                .await
+                {
+                    Some(recovered) => recovered,
+                    None => throughput.with_note("self-heal exhausted"),
+                }
+            };
+            results.push(throughput);
 
-        // Step 3: Vision workflows with self-heal fallback
-        let vision = test_vision_workflows(&target.endpoint, &model, "low", 192).await;
-        let vision = if vision.passed {
-            vision
-        } else {
-            match retry_after_self_heal(
-                &healer,
-                &target.endpoint,
-                "vision-workflows",
-                &vision.errors,
-                || async {
-                    test_vision_workflows(&target.endpoint, &model, "high", 256)
-                        .await
-                        .with_note("self-heal retry switched to detail=high max_tokens=256")
-                },
-            )
-            .await
-            {
-                Some(recovered) => recovered,
-                None => vision.with_note("self-heal exhausted"),
-            }
-        };
-        results.push(vision);
+            // Step 3: Vision workflows with self-heal fallback
+            let vision = test_vision_workflows(&target.endpoint, &model, "low", 192).await;
+            let vision = if vision.passed {
+                vision
+            } else {
+                match retry_after_self_heal(
+                    &healer,
+                    &target.endpoint,
+                    "vision-workflows",
+                    &vision.errors,
+                    || async {
+                        test_vision_workflows(&target.endpoint, &model, "high", 256)
+                            .await
+                            .with_note("self-heal retry switched to detail=high max_tokens=256")
+                    },
+                )
+                .await
+                {
+                    Some(recovered) => recovered,
+                    None => vision.with_note("self-heal exhausted"),
+                }
+            };
+            results.push(vision);
 
-        // Step 4: Error resilience with self-heal retry
-        let error_resilience =
-            test_error_resilience(&target.endpoint, &model, target.concurrent).await;
-        let error_resilience = if error_resilience.passed {
-            error_resilience
-        } else {
-            match retry_after_self_heal(
-                &healer,
-                &target.endpoint,
-                "error-resilience",
-                &error_resilience.errors,
-                || async {
-                    test_error_resilience(&target.endpoint, &model, target.concurrent)
-                        .await
-                        .with_note("self-heal retry reran resilience checks")
-                },
-            )
-            .await
-            {
-                Some(recovered) => recovered,
-                None => error_resilience.with_note("self-heal exhausted"),
-            }
-        };
-        results.push(error_resilience);
+            // Step 4: Error resilience with self-heal retry
+            let error_resilience =
+                test_error_resilience(&target.endpoint, &model, target.concurrent).await;
+            let error_resilience = if error_resilience.passed {
+                error_resilience
+            } else {
+                match retry_after_self_heal(
+                    &healer,
+                    &target.endpoint,
+                    "error-resilience",
+                    &error_resilience.errors,
+                    || async {
+                        test_error_resilience(&target.endpoint, &model, target.concurrent)
+                            .await
+                            .with_note("self-heal retry reran resilience checks")
+                    },
+                )
+                .await
+                {
+                    Some(recovered) => recovered,
+                    None => error_resilience.with_note("self-heal exhausted"),
+                }
+            };
+            results.push(error_resilience);
 
-        // Step 5: Tool calling with self-heal retry
-        let tool_calling = test_tool_calling(&target.endpoint, &model).await;
-        let tool_calling = if tool_calling.passed {
-            tool_calling
-        } else {
-            match retry_after_self_heal(
-                &healer,
-                &target.endpoint,
-                "tool-calling",
-                &tool_calling.errors,
-                || async {
-                    test_tool_calling(&target.endpoint, &model)
-                        .await
-                        .with_note("self-heal retry reran tool-calling checks")
-                },
-            )
-            .await
-            {
-                Some(recovered) => recovered,
-                None => tool_calling.with_note("self-heal exhausted"),
-            }
-        };
-        results.push(tool_calling);
+            // Step 5: Tool calling with self-heal retry
+            let tool_calling = test_tool_calling(&target.endpoint, &model).await;
+            let tool_calling = if tool_calling.passed {
+                tool_calling
+            } else {
+                match retry_after_self_heal(
+                    &healer,
+                    &target.endpoint,
+                    "tool-calling",
+                    &tool_calling.errors,
+                    || async {
+                        test_tool_calling(&target.endpoint, &model)
+                            .await
+                            .with_note("self-heal retry reran tool-calling checks")
+                    },
+                )
+                .await
+                {
+                    Some(recovered) => recovered,
+                    None => tool_calling.with_note("self-heal exhausted"),
+                }
+            };
+            results.push(tool_calling);
         }
 
         // Print summary

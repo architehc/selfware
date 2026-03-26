@@ -495,6 +495,8 @@ mod tests {
         assert!(schema["properties"]["image_base64"].is_object());
         assert!(schema["properties"]["detail"].is_object());
         assert!(schema["properties"]["max_tokens"].is_object());
+        assert!(schema["properties"]["temperature"].is_object());
+        assert!(schema["properties"]["extra_body"].is_object());
         let required = schema["required"].as_array().unwrap();
         assert!(required.contains(&json!("prompt")));
         assert!(required.contains(&json!("endpoint")));
@@ -505,46 +507,57 @@ mod tests {
 
     #[tokio::test]
     async fn test_vision_analyze_missing_prompt() {
-        let result = VisionAnalyze.execute(json!({
-            "endpoint": "http://localhost:8000/v1",
-            "model": "test",
-            "image_base64": "iVBOR"
-        })).await;
+        let result = VisionAnalyze
+            .execute(json!({
+                "endpoint": "http://localhost:8000/v1",
+                "model": "test",
+                "image_base64": "iVBOR"
+            }))
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("prompt"));
     }
 
     #[tokio::test]
     async fn test_vision_analyze_missing_endpoint() {
-        let result = VisionAnalyze.execute(json!({
-            "prompt": "what is this",
-            "model": "test",
-            "image_base64": "iVBOR"
-        })).await;
+        let result = VisionAnalyze
+            .execute(json!({
+                "prompt": "what is this",
+                "model": "test",
+                "image_base64": "iVBOR"
+            }))
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("endpoint"));
     }
 
     #[tokio::test]
     async fn test_vision_analyze_missing_model() {
-        let result = VisionAnalyze.execute(json!({
-            "prompt": "what is this",
-            "endpoint": "http://localhost:8000/v1",
-            "image_base64": "iVBOR"
-        })).await;
+        let result = VisionAnalyze
+            .execute(json!({
+                "prompt": "what is this",
+                "endpoint": "http://localhost:8000/v1",
+                "image_base64": "iVBOR"
+            }))
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("model"));
     }
 
     #[tokio::test]
     async fn test_vision_analyze_missing_image() {
-        let result = VisionAnalyze.execute(json!({
-            "prompt": "what is this",
-            "endpoint": "http://localhost:8000/v1",
-            "model": "test"
-        })).await;
+        let result = VisionAnalyze
+            .execute(json!({
+                "prompt": "what is this",
+                "endpoint": "http://localhost:8000/v1",
+                "model": "test"
+            }))
+            .await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("image_path or image_base64"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("image_path or image_base64"));
     }
 
     // ── VisionCompare schema & metadata ───────────────────────────────
@@ -570,6 +583,10 @@ mod tests {
         assert!(schema["properties"]["threshold"].is_object());
         assert!(schema["properties"]["endpoint"].is_object());
         assert!(schema["properties"]["model"].is_object());
+        assert!(schema["properties"]["detail"].is_object());
+        assert!(schema["properties"]["max_tokens"].is_object());
+        assert!(schema["properties"]["temperature"].is_object());
+        assert!(schema["properties"]["extra_body"].is_object());
         let required = schema["required"].as_array().unwrap();
         assert!(required.contains(&json!("image_a")));
         assert!(required.contains(&json!("image_b")));
@@ -579,29 +596,60 @@ mod tests {
 
     #[tokio::test]
     async fn test_vision_compare_missing_image_a() {
-        let result = VisionCompare.execute(json!({
-            "image_b": "/tmp/b.png"
-        })).await;
+        let result = VisionCompare
+            .execute(json!({
+                "image_b": "/tmp/b.png"
+            }))
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("image_a"));
     }
 
     #[tokio::test]
     async fn test_vision_compare_missing_image_b() {
-        let result = VisionCompare.execute(json!({
-            "image_a": "/tmp/a.png"
-        })).await;
+        let result = VisionCompare
+            .execute(json!({
+                "image_a": "/tmp/a.png"
+            }))
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("image_b"));
     }
 
     #[tokio::test]
     async fn test_vision_compare_nonexistent_files() {
-        let result = VisionCompare.execute(json!({
-            "image_a": "/nonexistent/a.png",
-            "image_b": "/nonexistent/b.png"
-        })).await;
+        let result = VisionCompare
+            .execute(json!({
+                "image_a": "/nonexistent/a.png",
+                "image_b": "/nonexistent/b.png"
+            }))
+            .await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_merge_extra_body() {
+        let mut body = json!({
+            "model": "vision",
+            "stream": false
+        });
+        let extra = json!({
+            "chat_template_kwargs": { "enable_thinking": false }
+        });
+        merge_extra_body(&mut body, Some(&extra)).unwrap();
+        assert_eq!(
+            body["chat_template_kwargs"]["enable_thinking"],
+            json!(false)
+        );
+    }
+
+    #[test]
+    fn test_merge_extra_body_rejects_non_object() {
+        let mut body = json!({ "model": "vision" });
+        let extra = json!(["bad"]);
+        let result = merge_extra_body(&mut body, Some(&extra));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("extra_body"));
     }
 
     // ── guess_mime ────────────────────────────────────────────────────
@@ -677,7 +725,10 @@ mod tests {
         let text_data = b"Hello, world!";
         let result = validate_image_magic(text_data, "test.txt");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("unrecognized magic bytes"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unrecognized magic bytes"));
     }
 
     #[test]
@@ -715,7 +766,10 @@ mod tests {
         let args = json!({ "prompt": "analyze" });
         let result = resolve_image_data_uri(&args);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("image_path or image_base64"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("image_path or image_base64"));
     }
 
     #[test]
@@ -730,8 +784,8 @@ mod tests {
         // Create a temp PNG file
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let png_bytes: Vec<u8> = vec![
-            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
-            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52,
         ];
         std::fs::write(tmp.path(), &png_bytes).unwrap();
         let args = json!({ "image_path": tmp.path().to_str().unwrap() });
@@ -754,21 +808,26 @@ mod tests {
         std::fs::write(tmp.path(), b"not an image file content here").unwrap();
         let result = encode_image_file(tmp.path().to_str().unwrap());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("unrecognized magic bytes"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("unrecognized magic bytes"));
     }
 
     #[test]
     fn test_encode_image_file_valid_png() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let png_bytes: Vec<u8> = vec![
-            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
-            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52,
         ];
         std::fs::write(tmp.path(), &png_bytes).unwrap();
         let result = encode_image_file(tmp.path().to_str().unwrap()).unwrap();
         // Should be valid base64
         assert!(!result.is_empty());
-        base64::engine::general_purpose::STANDARD.decode(&result).unwrap();
+        base64::engine::general_purpose::STANDARD
+            .decode(&result)
+            .unwrap();
     }
 
     // ── compute_pixel_similarity ─────────────────────────────────────
@@ -785,7 +844,10 @@ mod tests {
         let white = image::RgbaImage::from_pixel(10, 10, image::Rgba([255, 255, 255, 255]));
         let black = image::RgbaImage::from_pixel(10, 10, image::Rgba([0, 0, 0, 0]));
         let sim = compute_pixel_similarity(&white, &black);
-        assert!(sim < 1.0, "Opposite images should have near-zero similarity");
+        assert!(
+            sim < 1.0,
+            "Opposite images should have near-zero similarity"
+        );
     }
 
     #[test]
@@ -793,7 +855,11 @@ mod tests {
         let img_a = image::RgbaImage::from_pixel(10, 10, image::Rgba([100, 100, 100, 255]));
         let img_b = image::RgbaImage::from_pixel(10, 10, image::Rgba([110, 110, 110, 255]));
         let sim = compute_pixel_similarity(&img_a, &img_b);
-        assert!(sim > 95.0, "Similar images should have high similarity: {}", sim);
+        assert!(
+            sim > 95.0,
+            "Similar images should have high similarity: {}",
+            sim
+        );
         assert!(sim < 100.0, "Non-identical should be < 100");
     }
 

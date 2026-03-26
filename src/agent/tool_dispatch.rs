@@ -29,11 +29,20 @@ const TOOL_RESULTS_DIR: &str = ".selfware/tool_results";
 /// - Key statistics extracted from the result
 /// - A reference path to the raw data on disk
 /// - Enough context for the agent to decide whether to drill down
-fn summarize_and_spill(tool_name: &str, call_id: &str, raw: &str, estimated_tokens: usize) -> String {
+fn summarize_and_spill(
+    tool_name: &str,
+    call_id: &str,
+    raw: &str,
+    estimated_tokens: usize,
+) -> String {
     // Save raw result to disk
     let spill_dir = std::path::Path::new(TOOL_RESULTS_DIR);
     let _ = std::fs::create_dir_all(spill_dir);
-    let spill_file = spill_dir.join(format!("{}_{}.json", tool_name, &call_id[..call_id.len().min(12)]));
+    let spill_file = spill_dir.join(format!(
+        "{}_{}.json",
+        tool_name,
+        &call_id[..call_id.len().min(12)]
+    ));
     let spill_path = spill_file.display().to_string();
     if let Err(e) = std::fs::write(&spill_file, raw) {
         warn!("Failed to spill tool result to {}: {}", spill_path, e);
@@ -120,7 +129,10 @@ fn summarize_directory_tree(raw: &str) -> String {
         }
         summary
     } else {
-        format!("Directory: {} — {} entries (parse failed, see raw file)", root, total)
+        format!(
+            "Directory: {} — {} entries (parse failed, see raw file)",
+            root, total
+        )
     }
 }
 
@@ -131,18 +143,35 @@ fn summarize_file_read(raw: &str) -> String {
 
     // Show first 100 and last 50 lines
     let lines: Vec<&str> = content.lines().collect();
-    let head: String = lines.iter().take(100).cloned().collect::<Vec<_>>().join("\n");
+    let head: String = lines
+        .iter()
+        .take(100)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
     let tail: String = if lines.len() > 150 {
-        lines.iter().rev().take(50).rev().cloned().collect::<Vec<_>>().join("\n")
+        lines
+            .iter()
+            .rev()
+            .take(50)
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     } else {
         String::new()
     };
 
-    let mut summary = format!("File: {} total lines\n\n--- First 100 lines ---\n{}", total_lines, head);
+    let mut summary = format!(
+        "File: {} total lines\n\n--- First 100 lines ---\n{}",
+        total_lines, head
+    );
     if !tail.is_empty() {
         summary.push_str(&format!(
             "\n\n--- Last 50 lines (lines {}–{}) ---\n{}",
-            lines.len() - 50, lines.len(), tail
+            lines.len() - 50,
+            lines.len(),
+            tail
         ));
     }
     if lines.len() > 150 {
@@ -187,7 +216,9 @@ fn summarize_git_diff(raw: &str) -> String {
 
     let mut summary = format!(
         "Diff: {} files changed, +{} -{}\n\n",
-        files.len(), total_added, total_removed
+        files.len(),
+        total_added,
+        total_removed
     );
     for (path, a, r) in &files {
         summary.push_str(&format!("  {:<60} +{:<5} -{}\n", path, a, r));
@@ -217,14 +248,28 @@ fn summarize_shell_exec(raw: &str) -> String {
 
     let mut summary = format!(
         "Exit code: {}\nStdout: {} lines, Stderr: {} lines\n",
-        exit_code, stdout_lines.len(), stderr_lines.len()
+        exit_code,
+        stdout_lines.len(),
+        stderr_lines.len()
     );
 
     // Show first 80 + last 20 lines of stdout
-    let head: String = stdout_lines.iter().take(80).cloned().collect::<Vec<_>>().join("\n");
+    let head: String = stdout_lines
+        .iter()
+        .take(80)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
     summary.push_str(&format!("\n--- stdout (first 80 lines) ---\n{}", head));
     if stdout_lines.len() > 100 {
-        let tail: String = stdout_lines.iter().rev().take(20).rev().cloned().collect::<Vec<_>>().join("\n");
+        let tail: String = stdout_lines
+            .iter()
+            .rev()
+            .take(20)
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
         summary.push_str(&format!(
             "\n\n--- stdout (last 20 lines) ---\n{}\n[{} lines omitted]",
             tail,
@@ -233,8 +278,16 @@ fn summarize_shell_exec(raw: &str) -> String {
     }
 
     if !stderr.is_empty() {
-        let stderr_head: String = stderr_lines.iter().take(30).cloned().collect::<Vec<_>>().join("\n");
-        summary.push_str(&format!("\n\n--- stderr (first 30 lines) ---\n{}", stderr_head));
+        let stderr_head: String = stderr_lines
+            .iter()
+            .take(30)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        summary.push_str(&format!(
+            "\n\n--- stderr (first 30 lines) ---\n{}",
+            stderr_head
+        ));
     }
     summary
 }
@@ -272,7 +325,7 @@ pub enum ToolErrorKind {
 
 impl ToolErrorKind {
     /// Classify an error message into a ToolErrorKind.
-    /// 
+    ///
     /// Uses keyword heuristics to categorize error messages.
     pub fn classify(error: &str) -> Self {
         let error_lower = error.to_lowercase();
@@ -280,9 +333,15 @@ impl ToolErrorKind {
             Self::SafetyViolation
         } else if error_lower.contains("not found") || error_lower.contains("no such file") {
             Self::ResourceNotFound
-        } else if error_lower.contains("permission") || error_lower.contains("denied") || error_lower.contains("not permitted") {
+        } else if error_lower.contains("permission")
+            || error_lower.contains("denied")
+            || error_lower.contains("not permitted")
+        {
             Self::PermissionDenied
-        } else if error_lower.contains("parse") || error_lower.contains("json") || error_lower.contains("invalid") {
+        } else if error_lower.contains("parse")
+            || error_lower.contains("json")
+            || error_lower.contains("invalid")
+        {
             Self::ArgumentError
         } else if error_lower.contains("timeout") || error_lower.contains("timed out") {
             Self::Timeout
@@ -304,28 +363,18 @@ impl ToolErrorKind {
     }
 
     /// Get a recovery hint specific to this error kind.
-    /// 
+    ///
     /// The hint guides the agent toward appropriate corrective actions.
     pub fn recovery_hint(&self) -> &'static str {
         match self {
             Self::SafetyViolation => {
                 "Try a different approach that doesn't modify protected files."
             }
-            Self::ResourceNotFound => {
-                "Check the path exists or create the resource first."
-            }
-            Self::PermissionDenied => {
-                "Use sudo or check file permissions before retrying."
-            }
-            Self::ArgumentError => {
-                "Review the tool schema and fix the arguments."
-            }
-            Self::Timeout => {
-                "Consider breaking the task into smaller steps."
-            }
-            Self::ExecutionError => {
-                "Review the error and adjust your approach."
-            }
+            Self::ResourceNotFound => "Check the path exists or create the resource first.",
+            Self::PermissionDenied => "Use sudo or check file permissions before retrying.",
+            Self::ArgumentError => "Review the tool schema and fix the arguments.",
+            Self::Timeout => "Consider breaking the task into smaller steps.",
+            Self::ExecutionError => "Review the error and adjust your approach.",
         }
     }
 }
@@ -430,14 +479,17 @@ impl Agent {
 
     fn remember_failed_tool(&mut self, tool_name: &str, error: &str) {
         let error_preview = truncate_chars(error, TOOL_FAILURE_HINT_PREVIEW_CHARS);
-        
+
         // Classify the error and generate contextual recovery hint
         let error_kind = ToolErrorKind::classify(error);
         let recovery_hint = error_kind.recovery_hint();
-        
+
         self.pending_failure_hint = Some(format!(
             "⚠️  Tool failure [{}]: `{}` failed.\n   Error: {}\n   Recovery: {}",
-            error_kind.as_str(), tool_name, error_preview, recovery_hint
+            error_kind.as_str(),
+            tool_name,
+            error_preview,
+            recovery_hint
         ));
     }
 
@@ -731,7 +783,8 @@ impl Agent {
         // Read-only tools with no path conflicts go into the parallel batch.
         let mut parallel_batch: Vec<super::execution::CollectedToolCall> = Vec::new();
         let mut sequential_batch: Vec<super::execution::CollectedToolCall> = Vec::new();
-        let mut parallel_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut parallel_paths: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         for call in &tool_calls {
             let (name, args_str, _) = call;
@@ -740,9 +793,7 @@ impl Agent {
                 let path = serde_json::from_str::<serde_json::Value>(args_str)
                     .ok()
                     .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(String::from));
-                let has_conflict = path
-                    .as_ref()
-                    .is_some_and(|p| parallel_paths.contains(p));
+                let has_conflict = path.as_ref().is_some_and(|p| parallel_paths.contains(p));
                 if has_conflict {
                     sequential_batch.push(call.clone());
                 } else {
@@ -839,7 +890,11 @@ impl Agent {
                 self.build_tool_call_context(&name, &args_str, tool_call_id);
 
             if self.suppress_repeated_failed_tool_retry(
-                &name, &args_str, &call_id, use_native_fc, start_time,
+                &name,
+                &args_str,
+                &call_id,
+                use_native_fc,
+                start_time,
             ) {
                 self.emit_event(AgentEvent::ToolCompleted {
                     name: name.clone(),
@@ -862,16 +917,31 @@ impl Agent {
                 continue;
             }
 
-            let args = match self.parse_tool_args(&name, &args_str, &call_id, use_native_fc, start_time) {
-                Some(args) => args,
-                None => continue,
-            };
+            let args =
+                match self.parse_tool_args(&name, &args_str, &call_id, use_native_fc, start_time) {
+                    Some(args) => args,
+                    None => continue,
+                };
 
-            if !self.validate_tool_args(&name, &args_str, &args, &call_id, use_native_fc, start_time) {
+            if !self.validate_tool_args(
+                &name,
+                &args_str,
+                &args,
+                &call_id,
+                use_native_fc,
+                start_time,
+            ) {
                 continue;
             }
 
-            if self.maybe_block_redundant_reread(&name, &args_str, &args, &call_id, use_native_fc, start_time) {
+            if self.maybe_block_redundant_reread(
+                &name,
+                &args_str,
+                &args,
+                &call_id,
+                use_native_fc,
+                start_time,
+            ) {
                 continue;
             }
 
@@ -911,8 +981,7 @@ impl Agent {
         }
 
         // Execute all validated tools concurrently using the tool registry
-        let mut results: Vec<(usize, (bool, String, String))> =
-            Vec::with_capacity(validated.len());
+        let mut results: Vec<(usize, (bool, String, String))> = Vec::with_capacity(validated.len());
 
         {
             use futures::stream::{FuturesUnordered, StreamExt};
@@ -937,8 +1006,8 @@ impl Agent {
                     let elapsed = start.elapsed().as_millis() as u64;
                     match execution {
                         Ok(Ok(result)) => {
-                            let result_str = serde_json::to_string(&result)
-                                .unwrap_or_else(|_| "{}".to_string());
+                            let result_str =
+                                serde_json::to_string(&result).unwrap_or_else(|_| "{}".to_string());
                             let summary = crate::output::semantic_summary(
                                 &tool_name,
                                 &tool_args,
@@ -1007,7 +1076,11 @@ impl Agent {
                 });
             }
 
-            let tool_outcome = if success { Outcome::Success } else { Outcome::Failure };
+            let tool_outcome = if success {
+                Outcome::Success
+            } else {
+                Outcome::Failure
+            };
             let tool_error = (!success).then(|| result_str.clone());
             self.self_improvement.record_tool(
                 &vt.name,
@@ -1043,9 +1116,12 @@ impl Agent {
                         {
                             self.file_tracker.context_files.push(path_str.clone());
                         }
-                        if let Some(content) = serde_json::from_str::<serde_json::Value>(&result_str)
-                            .ok()
-                            .and_then(|v| v.get("content").and_then(|c| c.as_str()).map(String::from))
+                        if let Some(content) =
+                            serde_json::from_str::<serde_json::Value>(&result_str)
+                                .ok()
+                                .and_then(|v| {
+                                    v.get("content").and_then(|c| c.as_str()).map(String::from)
+                                })
                         {
                             self.track_file_read_in_context_map(&path_str, &content);
                         }
@@ -1053,7 +1129,13 @@ impl Agent {
                 }
             }
 
-            self.push_tool_result_message(vt.use_native_fc, &vt.call_id, &vt.name, success, &result_str);
+            self.push_tool_result_message(
+                vt.use_native_fc,
+                &vt.call_id,
+                &vt.name,
+                success,
+                &result_str,
+            );
             if !success {
                 self.remember_failed_tool(&vt.name, &result_str);
             }
@@ -1078,7 +1160,14 @@ impl Agent {
                 logger.log_tool_execution(&vt.name, &args_hash, success, duration_ms, None);
             }
 
-            self.log_tool_call(&vt.name, &vt.args_str, &result_str, success, vt.start_time, true);
+            self.log_tool_call(
+                &vt.name,
+                &vt.args_str,
+                &result_str,
+                success,
+                vt.start_time,
+                true,
+            );
         }
 
         Ok(())
@@ -1159,27 +1248,20 @@ impl Agent {
             return Ok(());
         }
 
-        let args =
-            match self.parse_tool_args(&name, &args_str, &call_id, use_native_fc, start_time) {
-                Some(args) => args,
-                None => {
-                    self.emit_event(AgentEvent::ToolCompleted {
-                        name: name.clone(),
-                        success: false,
-                        duration_ms: start_time.elapsed().as_millis() as u64,
-                    });
-                    return Ok(());
-                }
-            };
+        let args = match self.parse_tool_args(&name, &args_str, &call_id, use_native_fc, start_time)
+        {
+            Some(args) => args,
+            None => {
+                self.emit_event(AgentEvent::ToolCompleted {
+                    name: name.clone(),
+                    success: false,
+                    duration_ms: start_time.elapsed().as_millis() as u64,
+                });
+                return Ok(());
+            }
+        };
 
-        if !self.validate_tool_args(
-            &name,
-            &args_str,
-            &args,
-            &call_id,
-            use_native_fc,
-            start_time,
-        ) {
+        if !self.validate_tool_args(&name, &args_str, &args, &call_id, use_native_fc, start_time) {
             self.emit_event(AgentEvent::ToolCompleted {
                 name: name.clone(),
                 success: false,
@@ -1298,12 +1380,11 @@ impl Agent {
                         {
                             self.file_tracker.context_files.push(path_str.clone());
                         }
-                        if let Some(content) =
-                            serde_json::from_str::<serde_json::Value>(&result)
-                                .ok()
-                                .and_then(|v| {
-                                    v.get("content").and_then(|c| c.as_str()).map(String::from)
-                                })
+                        if let Some(content) = serde_json::from_str::<serde_json::Value>(&result)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("content").and_then(|c| c.as_str()).map(String::from)
+                            })
                         {
                             self.track_file_read_in_context_map(&path_str, &content);
                         }
@@ -1364,10 +1445,8 @@ impl Agent {
                     .get("pattern")
                     .and_then(|v| v.as_str())
                     .unwrap_or("src/**/*.rs");
-                let max_files = args
-                    .get("max_files")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(20) as usize;
+                let max_files =
+                    args.get("max_files").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
 
                 // Collect matching files from context map.
                 let root = super::current_project_root();
@@ -1950,7 +2029,10 @@ impl Agent {
             let formatted = if success {
                 format!("<tool_result>{}</tool_result>", result_to_store)
             } else {
-                format!("<tool_result><error>{}</error></tool_result>", result_to_store)
+                format!(
+                    "<tool_result><error>{}</error></tool_result>",
+                    result_to_store
+                )
             };
             self.messages.push(Message::user(formatted));
         }
@@ -1992,7 +2074,6 @@ impl Agent {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -2098,10 +2179,7 @@ mod tests {
             ToolErrorKind::classify("Unknown error occurred"),
             ToolErrorKind::ExecutionError
         );
-        assert_eq!(
-            ToolErrorKind::classify(""),
-            ToolErrorKind::ExecutionError
-        );
+        assert_eq!(ToolErrorKind::classify(""), ToolErrorKind::ExecutionError);
     }
 
     #[test]
@@ -2111,10 +2189,7 @@ mod tests {
             ToolErrorKind::classify("SAFETY VIOLATION"),
             ToolErrorKind::SafetyViolation
         );
-        assert_eq!(
-            ToolErrorKind::classify("Timeout"),
-            ToolErrorKind::Timeout
-        );
+        assert_eq!(ToolErrorKind::classify("Timeout"), ToolErrorKind::Timeout);
         assert_eq!(
             ToolErrorKind::classify("JSON error"),
             ToolErrorKind::ArgumentError
@@ -2128,8 +2203,14 @@ mod tests {
     #[test]
     fn test_tool_error_kind_as_str() {
         assert_eq!(ToolErrorKind::SafetyViolation.as_str(), "SAFETY_VIOLATION");
-        assert_eq!(ToolErrorKind::ResourceNotFound.as_str(), "RESOURCE_NOT_FOUND");
-        assert_eq!(ToolErrorKind::PermissionDenied.as_str(), "PERMISSION_DENIED");
+        assert_eq!(
+            ToolErrorKind::ResourceNotFound.as_str(),
+            "RESOURCE_NOT_FOUND"
+        );
+        assert_eq!(
+            ToolErrorKind::PermissionDenied.as_str(),
+            "PERMISSION_DENIED"
+        );
         assert_eq!(ToolErrorKind::ArgumentError.as_str(), "ARGUMENT_ERROR");
         assert_eq!(ToolErrorKind::Timeout.as_str(), "TIMEOUT");
         assert_eq!(ToolErrorKind::ExecutionError.as_str(), "EXECUTION_ERROR");
@@ -2225,7 +2306,7 @@ mod tests {
                 "Failed to classify '{}' correctly",
                 error_msg
             );
-            
+
             // Verify we can get string representation and hint
             let _ = classified.as_str();
             let _ = classified.recovery_hint();
@@ -2301,5 +2382,76 @@ mod tests {
         // The current implementation uses serde_json which preserves order
         // This test documents current behavior
         let _ = (hash1, hash2);
+    }
+
+    #[test]
+    fn test_inject_runtime_tool_defaults_uses_vision_profile() {
+        let mut config = crate::config::Config::default();
+        config.models.insert(
+            "vision".to_string(),
+            crate::config::ModelProfile {
+                endpoint: "https://vision.example/v1".to_string(),
+                model: "remote-vision".to_string(),
+                api_key: None,
+                max_tokens: 192,
+                temperature: 0.0,
+                modalities: vec!["text".to_string(), "vision".to_string()],
+                context_length: 262_144,
+                extra_body: Some({
+                    let mut map = serde_json::Map::new();
+                    map.insert(
+                        "chat_template_kwargs".to_string(),
+                        serde_json::json!({ "enable_thinking": false }),
+                    );
+                    map
+                }),
+            },
+        );
+
+        let effective = inject_runtime_tool_defaults(
+            &config,
+            "vision_analyze",
+            r#"{"prompt":"describe","image_base64":"AAAA"}"#,
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&effective).unwrap();
+        assert_eq!(parsed["endpoint"], "https://vision.example/v1");
+        assert_eq!(parsed["model"], "remote-vision");
+        assert_eq!(parsed["max_tokens"], 192);
+        assert_eq!(parsed["temperature"], 0.0);
+        assert_eq!(parsed["detail"], "low");
+        assert_eq!(
+            parsed["extra_body"]["chat_template_kwargs"]["enable_thinking"],
+            serde_json::json!(false)
+        );
+    }
+
+    #[test]
+    fn test_inject_runtime_tool_defaults_preserves_explicit_values() {
+        let mut config = crate::config::Config::default();
+        config.models.insert(
+            "vision".to_string(),
+            crate::config::ModelProfile {
+                endpoint: "https://vision.example/v1".to_string(),
+                model: "remote-vision".to_string(),
+                api_key: None,
+                max_tokens: 192,
+                temperature: 0.0,
+                modalities: vec!["text".to_string(), "vision".to_string()],
+                context_length: 262_144,
+                extra_body: None,
+            },
+        );
+
+        let effective = inject_runtime_tool_defaults(
+            &config,
+            "vision_compare",
+            r#"{"image_a":"a.png","image_b":"b.png","endpoint":"http://custom/v1","model":"custom-model","max_tokens":512,"temperature":0.5,"detail":"high"}"#,
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&effective).unwrap();
+        assert_eq!(parsed["endpoint"], "http://custom/v1");
+        assert_eq!(parsed["model"], "custom-model");
+        assert_eq!(parsed["max_tokens"], 512);
+        assert_eq!(parsed["temperature"], 0.5);
+        assert_eq!(parsed["detail"], "high");
     }
 }
