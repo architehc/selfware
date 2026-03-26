@@ -186,7 +186,7 @@ enum Commands {
     },
 
     /// Run comprehensive benchmark suite
-    #[command(alias = "b")]
+    #[command(alias = "bm")]
     Bench {
         /// Endpoint URL to benchmark (defaults to config)
         #[arg(short, long)]
