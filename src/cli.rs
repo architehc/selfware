@@ -1668,11 +1668,11 @@ async fn handle_command(
                     "⏳".dimmed()
                 );
 
-                let _ep = endpoint
+                let ep = endpoint
                     .as_ref()
                     .map(|s| s.as_str())
                     .unwrap_or(&config.endpoint);
-                let _model_name = config.model.clone();
+                let model_name = config.model.clone();
 
                 #[cfg(feature = "bench-harness")]
                 {
