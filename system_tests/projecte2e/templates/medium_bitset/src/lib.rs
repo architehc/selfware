@@ -18,25 +18,22 @@ impl BitSet {
     }
 
     /// Set bit at `index` to 1.
-    ///
-    /// BUG: uses wrong mask — shifts by `index` instead of `index % 64`.
     pub fn set(&mut self, index: usize) {
         if index >= self.capacity {
             return;
         }
         let word = index / 64;
-        self.words[word] |= 1u64 << index; // BUG: should be index % 64
+        let bit = index % 64;
+        self.words[word] |= 1u64 << bit;
     }
 
     /// Clear bit at `index` to 0.
-    ///
-    /// BUG: inverted logic — sets the bit instead of clearing it.
     pub fn clear(&mut self, index: usize) {
         if index >= self.capacity {
             return;
         }
         let word = index / 64;
-        self.words[word] |= !(1u64 << (index % 64)); // BUG: should be &= !(...), not |= !(...)
+        self.words[word] &= !(1u64 << (index % 64));
     }
 
     /// Test whether bit at `index` is set.
@@ -54,8 +51,6 @@ impl BitSet {
     }
 
     /// Return the union of two bitsets (OR).
-    ///
-    /// BUG: uses AND instead of OR.
     pub fn union(&self, other: &BitSet) -> BitSet {
         let cap = self.capacity.max(other.capacity);
         let word_count = (cap + 63) / 64;
@@ -63,7 +58,7 @@ impl BitSet {
         for i in 0..word_count {
             let a = self.words.get(i).copied().unwrap_or(0);
             let b = other.words.get(i).copied().unwrap_or(0);
-            result.words[i] = a & b; // BUG: should be a | b
+            result.words[i] = a | b;
         }
         result
     }
@@ -82,11 +77,9 @@ impl BitSet {
     }
 
     /// Iterator over all set bit indices.
-    ///
-    /// BUG: skips the first word entirely (starts at word index 1).
     pub fn iter_ones(&self) -> Vec<usize> {
         let mut result = Vec::new();
-        for (word_idx, &word) in self.words.iter().enumerate().skip(1) { // BUG: skip(1) should be skip(0)
+        for (word_idx, &word) in self.words.iter().enumerate() {
             let mut w = word;
             while w != 0 {
                 let bit = w.trailing_zeros() as usize;

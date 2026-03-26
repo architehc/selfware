@@ -1,0 +1,40 @@
+diff --git a/app.py b/app.py
+new file mode 100644
+index 0000000..85b8c3d
+--- /dev/null
++++ b/app.py
+@@ -0,0 +1,32 @@
++"""Flask application with send_file() issue using pathlib.Path"""
++from flask import Flask, send_file
++from pathlib import Path
++
++app = Flask(__name__)
++
++# Store the base directory for static files
++STATIC_DIR = Path(__file__).parent / "static"
++
++
++@app.route('/file')
++def get_file():
++    """Send a file using pathlib.Path - this demonstrates the issue."""
++    file_path = STATIC_DIR / "test.txt"
++    # Issue: send_file() may not properly handle pathlib.Path objects in older Flask
++    # FIX: Convert Path to string for compatibility
++    return send_file(str(file_path))
++
++
++@app.route('/file/<filename>')
++def get_file_by_name(filename: str):
++    """Send a file by name using pathlib.Path."""
++    file_path = STATIC_DIR / filename
++    if not file_path.exists():
++        return "File not found", 404
++    # Issue: send_file() may not properly handle pathlib.Path objects
++    # FIX: Convert Path to string for compatibility
++    return send_file(str(file_path))
++
++
++if __name__ == '__main__':
++    app.run(debug=True)
+```
+

@@ -1,0 +1,18 @@
+diff --git a/mymodule.py b/mymodule.py
+index 6d169c1..832ea94 100644
+--- a/mymodule.py
++++ b/mymodule.py
+@@ -1,8 +1,11 @@
+ """My module with decorated functions."""
+ 
++import functools
++
+ 
+ def my_decorator(func):
+     """A simple decorator that wraps a function."""
++    @functools.wraps(func)
+     def wrapper(*args, **kwargs):
+         """Wrapper function."""
+         return func(*args, **kwargs)
+```
+

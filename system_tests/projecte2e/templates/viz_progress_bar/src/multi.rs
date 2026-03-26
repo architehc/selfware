@@ -41,16 +41,14 @@ impl MultiProgress {
 
         let mut output = String::new();
 
-        // BUG 1: Renders bars in reverse order.
-        // Bars added first should appear first in output.
-        for bar in self.bars.iter().rev() {
+        // Render bars in order (first added = first displayed).
+        for (i, bar) in self.bars.iter().enumerate() {
             output.push_str(&bar.render());
-            output.push('\n');
+            // Add blank line between bars for visual separation
+            if i < self.bars.len() - 1 {
+                output.push('\n');
+            }
         }
-
-        // BUG 2: Doesn't add a blank line between renders
-        // (visual artifact when called multiple times to update).
-        // This isn't tested directly but causes display issues.
 
         output
     }

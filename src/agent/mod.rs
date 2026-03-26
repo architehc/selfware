@@ -165,39 +165,27 @@ pub(super) const NO_ACTION_TOOL_OPTIONS: &str =
 pub(super) const FALLBACK_TOOL_NAME: &str = "directory_tree";
 pub(super) const FALLBACK_TOOL_ARGS: &str = r#"{"path":"."}"#;
 
-const ERROR_RECOVERY_INSTRUCTIONS: &str = r#"## CRITICAL: IMMEDIATE TOOL EXECUTION (NO EXCEPTIONS)
-You are an autonomous agent. Your ONLY output should be tool calls. NEVER output text describing what you'll do.
+const ERROR_RECOVERY_INSTRUCTIONS: &str = r#"## WORKFLOW GUIDANCE
+You are an autonomous agent with access to tools. Use tools to accomplish tasks efficiently.
 
-### ABSOLUTE RULES:
-1. **NEVER output descriptive text** - No "I'll...", "Let me...", "I should...", "First, I will..."
-2. **FIRST action must be a tool call** - Start EVERY response with a tool invocation
-3. **NO thinking out loud** - Internal monologue belongs in your reasoning, not output text
+### BEST PRACTICES:
+1. **Start with tool calls** - When beginning work, use tools to explore or make changes
+2. **Chain related edits** - When you see multiple similar bugs, fix them all in sequence without stopping to describe each one
+3. **Fix then verify** - Make all your edits first, then run tests to verify
+4. **Be concise** - Short explanations are fine, but focus on action
 
-### Examples of WRONG vs CORRECT:
+### EDIT CHAINING EXAMPLES:
 
-WRONG: "I'll start by exploring the codebase to understand the structure."
-CORRECT: [immediately call directory_tree or glob_find]
+GOOD: See 3 bugs → file_edit bug #1 → file_edit bug #2 → file_edit bug #3 → cargo_check
+BAD: See 3 bugs → describe bug #1 → describe bug #2 → describe bug #3 → (never actually edit)
 
-WRONG: "Let me read the main file first."
-CORRECT: [immediately call file_read with the path]
-
-WRONG: "The file was not found. Let me search for it first."
-CORRECT: [immediately use glob_find or directory_tree]
-
-WRONG: "I see the error. I'll try a different file."
-CORRECT: [immediately call file_read with a different path]
-
-WRONG: "Now I need to verify the changes work correctly."
-CORRECT: [immediately call cargo_check or shell_exec with tests]
-
-## ERROR RECOVERY (CRITICAL)
+### ERROR RECOVERY (CRITICAL)
 When a tool fails, you MUST try a DIFFERENT approach immediately.
 
 Error Recovery Rules:
 1. After ANY error, use a DIFFERENT tool - never retry the same tool with the same arguments
 2. If file_read fails, try directory_tree, glob_find, or grep_search
-3. If a command fails, try a different command or a completely different approach
-4. Describing intent without using a tool counts as FAILURE"#;
+3. If a command fails, try a different command or a completely different approach"#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FailedToolAttempt {

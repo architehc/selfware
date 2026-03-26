@@ -6,11 +6,10 @@ use super::*;
 use crate::api::types::Message;
 
 /// Maximum consecutive no-action prompts before aborting.
-pub(super) const MAX_NO_ACTION_PROMPTS: usize = 5;
+pub(super) const MAX_NO_ACTION_PROMPTS: usize = 6;
 /// After this many text-only reprompts, force a deterministic fallback tool call
 /// instead of sending another text correction the model will ignore.
-/// Set to 2: one text correction, then immediate force-fallback.
-/// Weak models (qwen3.5-27b) rarely respond to text corrections.
+/// Set to 2: one warning, then immediate force-fallback.
 pub(super) const FORCE_FALLBACK_AFTER: usize = 2;
 /// Absolute lifetime cap on total no-action prompts across the entire task.
 /// Prevents infinite cycling when the consecutive counter gets reset by
@@ -174,6 +173,59 @@ impl Agent {
     pub(super) fn build_error_recovery_hint(&self, tool_name: &str, error: &str) -> String {
         let error_lower = error.to_lowercase();
 
+        // Endpoint / connection errors — self-healing
+        if error_lower.contains("connection refused")
+            || error_lower.contains("connection reset")
+            || error_lower.contains("timed out")
+            || error_lower.contains("502 bad gateway")
+            || error_lower.contains("503 service unavailable")
+            || error_lower.contains("endpoint")
+            || error_lower.contains("network unreachable")
+        {
+            warn!("Endpoint error detected for tool '{}': {}", tool_name, &error[..error.len().min(200)]);
+            return format!(
+                "ERROR RECOVERY: Endpoint/connection issue detected for '{}'. \
+                 The LLM backend may be temporarily unavailable or overloaded. \
+                 This is NOT a code problem — it's an infrastructure issue. \
+                 Continue working with tools that don't require the LLM endpoint \
+                 (file_read, directory_tree, shell_exec, git_status). \
+                 The connection may recover automatically on the next attempt.",
+                tool_name
+            );
+        }
+
+        // Rate limit / token budget errors
+        if error_lower.contains("rate limit")
+            || error_lower.contains("too many requests")
+            || error_lower.contains("429")
+            || error_lower.contains("quota exceeded")
+        {
+            warn!("Rate limit detected for tool '{}': {}", tool_name, &error[..error.len().min(200)]);
+            return format!(
+                "ERROR RECOVERY: Rate limit or quota exceeded. \
+                 Wait a moment, then continue with smaller requests. \
+                 Reduce the scope of your next action — read smaller files, \
+                 make smaller edits, or use grep_search instead of reading entire files.",
+            );
+        }
+
+        // Regression detection — tests that were passing now fail
+        if (error_lower.contains("test") || error_lower.contains("assert"))
+            && (error_lower.contains("fail") || error_lower.contains("error"))
+            && tool_name.contains("test")
+        {
+            warn!("Possible regression detected in test output");
+            return format!(
+                "ERROR RECOVERY: Tests are failing after your change. This may be a regression. \
+                 Steps to fix:\
+                 1. Read the test error output carefully\
+                 2. Use git_diff to review your changes\
+                 3. If your edit introduced the failure, use file_edit to fix it\
+                 4. Run the tests again to verify\
+                 Do NOT add more tests — fix the source code that caused the regression.",
+            );
+        }
+
         // File not found errors - suggest alternatives
         if error_lower.contains("file not found") || error_lower.contains("no such file") {
             return format!(
@@ -323,8 +375,6 @@ Try ONE of these strategies:\
             return Err(error_msg);
         }
 
-        crate::output::intent_without_action();
-
         // After FORCE_FALLBACK_AFTER text corrections the model still isn't
         // calling tools — force a deterministic safe action instead of hoping
         // yet another text prompt will work.
@@ -386,11 +436,18 @@ Try ONE of these strategies:\
             return false; // Long content with no think blocks — genuine
         }
 
-        let intent_phrases = [
-            "let me", "i'll ", "i will", "let's", "first,", "starting", "begin by", "going to",
-            "need to", "start by", "help you",
-        ];
+        // DETECTION: Only flag short content that contains clear intent phrases
+        // Content over 300 chars is likely a genuine response
+        if effective_len >= 300 {
+            return false;
+        }
+
+        // For shorter content, check for intent patterns
         let lower = effective_content.to_lowercase();
+        let intent_phrases = [
+            "let me", "i'll ", "i will", "let's ", "going to",
+        ];
+        
         intent_phrases.iter().any(|p| lower.contains(p))
     }
 

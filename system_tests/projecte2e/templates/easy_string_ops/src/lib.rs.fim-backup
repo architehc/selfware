@@ -1,0 +1,39 @@
+/// Reverse a string.
+///
+/// Reverses characters properly, handling multi-byte UTF-8.
+pub fn reverse(s: &str) -> String {
+    s.chars().rev().collect()
+}
+
+/// Truncate a string to at most `max_len` characters, appending "..." if truncated.
+pub fn truncate(s: &str, max_len: usize) -> String {
+    if s.chars().count() > max_len {
+        let prefix: String = s.chars().take(max_len).collect();
+        format!("{}...", prefix)
+    } else {
+        s.to_string()
+    }
+}
+
+/// Title-case: capitalize the first letter of each word.
+pub fn title_case(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut new_word = true;
+    for ch in s.chars() {
+        if ch.is_whitespace() {
+            result.push(ch);
+            new_word = true;
+        } else if new_word && ch.is_alphabetic() {
+            result.extend(ch.to_uppercase());
+            new_word = false;
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+/// Count the number of words in a string (split on whitespace).
+pub fn word_count(s: &str) -> usize {
+    s.split_whitespace().count()
+}

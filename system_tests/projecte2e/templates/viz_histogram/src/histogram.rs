@@ -58,12 +58,10 @@ impl Histogram {
 
         let mut entries = self.entries.clone();
 
-        // BUG 4: Sorts descending instead of ascending when sort_ascending is true.
-        // The comparison is inverted.
         if self.sort_ascending {
-            entries.sort_by(|a, b| b.value.partial_cmp(&a.value).unwrap_or(std::cmp::Ordering::Equal));
-        } else {
             entries.sort_by(|a, b| a.value.partial_cmp(&b.value).unwrap_or(std::cmp::Ordering::Equal));
+        } else {
+            entries.sort_by(|a, b| b.value.partial_cmp(&a.value).unwrap_or(std::cmp::Ordering::Equal));
         }
 
         // Find the maximum value for scaling
@@ -72,27 +70,27 @@ impl Histogram {
             .map(|e| e.value)
             .fold(f64::NEG_INFINITY, f64::max);
 
-        // BUG 5: Division by zero when all values are zero.
-        // max_value will be 0.0 if all entries have value 0.
-        let scale = self.max_bar_width as f64 / max_value;
+        // Handle division by zero when all values are zero
+        let scale = if max_value <= 0.0 {
+            0.0
+        } else {
+            self.max_bar_width as f64 / max_value
+        };
 
         // Find the longest label for padding
         let max_label_len = entries.iter().map(|e| e.label.len()).max().unwrap_or(0);
-
-        // BUG 6: Label padding truncates labels longer than 10 characters.
-        let label_width = max_label_len.min(10);
+        let label_width = max_label_len;
 
         let mut output = String::new();
 
         for entry in &entries {
             let bar_width = (entry.value * scale).round() as usize;
 
-            // BUG 7: Color is applied but never reset, causing color to leak
-            // into subsequent lines and the rest of the terminal output.
+            let bar = self.bar_char.to_string().repeat(bar_width);
             let colored_bar = format!(
                 "{}{}{}",
                 color::named_fg(&entry.color),
-                self.bar_char.to_string().repeat(bar_width),
+                bar,
                 color::reset(),
             );
 

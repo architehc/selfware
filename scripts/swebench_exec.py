@@ -221,8 +221,14 @@ fi
 echo "=== Applying solution patch ==="
 cd /repo
 git apply /tmp/patch.diff 2>&1 && echo "PATCH_APPLIED_OK" || {{
-    echo "git apply failed, trying patch -p1..."
-    patch -p1 < /tmp/patch.diff 2>&1 && echo "PATCH_APPLIED_OK" || echo "PATCH_APPLY_FAILED"
+    echo "git apply strict failed, trying --3way..."
+    git apply --3way /tmp/patch.diff 2>&1 && echo "PATCH_APPLIED_OK" || {{
+        echo "git apply --3way failed, trying patch -p1..."
+        patch -p1 < /tmp/patch.diff 2>&1 && echo "PATCH_APPLIED_OK" || {{
+            echo "patch -p1 failed, trying patch --fuzz=3..."
+            patch -p1 --fuzz=3 < /tmp/patch.diff 2>&1 && echo "PATCH_APPLIED_OK" || echo "PATCH_APPLY_FAILED"
+        }}
+    }}
 }}
 
 echo "=== Post-patch test (should PASS) ==="

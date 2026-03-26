@@ -394,6 +394,56 @@ fn try_parse_xml(content: &str) -> Option<Vec<(Result<ParsedToolCall>, String)>>
             .collect();
     }
 
+    // Try <tool_call> with inline JSON format (Qwen3.5 122B / sglang)
+    // Format: <tool_call>\n{"name": "tool", "arguments": {...}}\n</tool_call>
+    if results.is_empty() {
+        static TOOL_CALL_JSON_REGEX: once_cell::sync::OnceCell<Regex> =
+            once_cell::sync::OnceCell::new();
+        let tc_regex = TOOL_CALL_JSON_REGEX.get_or_init(|| {
+            Regex::new(r"(?s)<tool_call>\s*(\{.*?\})\s*</tool_call>")
+                .expect("Invalid tool_call JSON regex")
+        });
+
+        results = tc_regex
+            .captures_iter(content)
+            .filter_map(|cap| {
+                let raw = cap[0].to_string();
+                let json_str = cap[1].trim();
+
+                match serde_json::from_str::<serde_json::Value>(json_str) {
+                    Ok(json) => {
+                        let name = json
+                            .get("name")
+                            .or(json.get("tool"))
+                            .or(json.get("function"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())?;
+                        let arguments = json
+                            .get("arguments")
+                            .or(json.get("args"))
+                            .or(json.get("parameters"))
+                            .cloned()
+                            .unwrap_or(serde_json::json!({}));
+
+                        Some((
+                            Ok(ParsedToolCall {
+                                tool_name: name,
+                                arguments,
+                                raw_text: raw.clone(),
+                                parse_method: ParseMethod::Json,
+                            }),
+                            raw,
+                        ))
+                    }
+                    Err(e) => Some((
+                        Err(anyhow::anyhow!("Invalid JSON in <tool_call>: {}", e)),
+                        raw,
+                    )),
+                }
+            })
+            .collect();
+    }
+
     // If still no matches, try OpenAI function format with inline JSON
     // Format: <function=name>{"key": "value"}</function>
     // This MUST come before the bare function regex because both share the

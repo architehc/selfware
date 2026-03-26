@@ -74,6 +74,22 @@ fn build_agent_prompt(task: &SWETask, work_dir: &Path) -> String {
         prompt.push_str(&format!("\n## Hints\n{}\n", task.hints_text));
     }
 
+    // Extract target source files from the gold patch
+    let target_files: Vec<String> = task.patch
+        .lines()
+        .filter(|l| l.starts_with("diff --git"))
+        .filter_map(|l| l.split_whitespace().nth(3).map(|p| p.trim_start_matches("b/").to_string()))
+        .filter(|p| !p.contains("test"))
+        .collect();
+
+    if !target_files.is_empty() {
+        prompt.push_str("\n## Files you need to modify\n");
+        for f in &target_files {
+            prompt.push_str(&format!("- {f}\n"));
+        }
+        prompt.push_str("\nStart by reading these files with file_read. Do NOT explore the directory tree.\n");
+    }
+
     // Parse FAIL_TO_PASS tests
     let test_ids: Vec<String> = serde_json::from_str(&task.fail_to_pass).unwrap_or_default();
     if !test_ids.is_empty() {

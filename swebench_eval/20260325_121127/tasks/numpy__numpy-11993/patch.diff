@@ -1,0 +1,100 @@
+diff --git a/array_utils.py b/array_utils.py
+new file mode 100644
+index 0000000..ccb3836
+--- /dev/null
++++ b/array_utils.py
+@@ -0,0 +1,87 @@
++"""
++Array utilities module with slicing functionality.
++"""
++
++def safe_slice(arr, start=None, end=None):
++    """
++    Safely slice an array with support for negative indices.
++    
++    Args:
++        arr: The array to slice
++        start: Start index (inclusive), supports negative indices
++        end: End index (exclusive), supports negative indices
++    
++    Returns:
++        A new list containing the sliced elements
++    """
++    if start is None:
++        start = 0
++    if end is None:
++        end = len(arr)
++    
++    # Handle negative indices by converting to positive indices
++    if start < 0:
++        start = max(0, len(arr) + start)
++    if end < 0:
++        end = max(0, len(arr) + end)
++    
++    return arr[start:end]
++
++
++def get_last_n_elements(arr, n):
++    """
++    Get the last n elements of an array.
++    
++    Args:
++        arr: The array
++        n: Number of elements from the end
++    
++    Returns:
++        Last n elements of the array
++    """
++    if n <= 0:
++        return []
++    return safe_slice(arr, -n, None)
++
++
++def get_first_n_elements(arr, n):
++    """
++    Get the first n elements of an array.
++    
++    Args:
++        arr: The array
++        n: Number of elements from the start
++    
++    Returns:
++        First n elements of the array
++    """
++    if n <= 0:
++        return []
++    return safe_slice(arr, 0, n)
++
++
++def remove_range(arr, start, end):
++    """
++    Remove elements in the range [start, end) from the array.
++    Supports negative indices.
++    
++    Args:
++        arr: The array
++        start: Start index (inclusive), supports negative indices
++        end: End index (exclusive), supports negative indices
++    
++    Returns:
++        New array with the range removed
++    """
++    if start is None:
++        start = 0
++    if end is None:
++        end = len(arr)
++    
++    # Handle negative indices by converting to positive indices
++    if start < 0:
++        start = max(0, len(arr) + start)
++    if end < 0:
++        end = max(0, len(arr) + end)
++    
++    return arr[:start] + arr[end:]
+
+diff --git a/test_array_utils.py b/test_array_utils.py
+new file mode 100644
+index 0000000..112326b
+--- /dev/null
++++ b/test_array_utils.py
+@@ -0,0 +1,71 @@

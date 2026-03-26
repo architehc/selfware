@@ -125,7 +125,22 @@ impl AutoConfigurator {
     /// Run capability detection tests against a model.
     pub async fn run_tests(&self, model: &str) -> Result<DetectionResults> {
         let models = self.fetch_models().await?;
+        
+        // Validate model name exists in available models
         let model_info = models.iter().find(|m| m.id == model);
+        if model_info.is_none() {
+            let available: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+            if !available.is_empty() {
+                tracing::warn!(
+                    "Model '{}' not found in endpoint. Available models: {:?}",
+                    model,
+                    available
+                );
+                println!("⚠️  Warning: Model '{}' not found in endpoint", model);
+                println!("   Available models: {:?}", available);
+                println!("   Continuing with detection, but this may fail...\n");
+            }
+        }
 
         let backend_type = model_info.map(|m| detect_backend(&m.owned_by));
 

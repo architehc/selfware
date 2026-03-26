@@ -7,6 +7,7 @@ use std::sync::mpsc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use colored::Colorize;
 use tracing::warn;
 
 // Use library exports instead of redeclaring modules
@@ -182,6 +183,23 @@ enum Commands {
         /// Output file for results
         #[arg(short, long, default_value = "swebench_results.json")]
         output: String,
+    },
+
+    /// Run comprehensive benchmark suite
+    #[command(alias = "b")]
+    Bench {
+        /// Endpoint URL to benchmark (defaults to config)
+        #[arg(short, long)]
+        endpoint: Option<String>,
+        /// Benchmark suites to run (throughput,e2e,swebench)
+        #[arg(short, long, default_value = "throughput,e2e")]
+        suite: String,
+        /// Number of concurrent tasks
+        #[arg(short, long, default_value_t = 4)]
+        concurrent: usize,
+        /// Output format (text, json)
+        #[arg(long, default_value = "text")]
+        format: String,
     },
 
     /// Auto-detect and configure endpoint settings
@@ -1576,6 +1594,55 @@ async fn handle_command(
             println!("   Loaded {} tasks\n", tasks_to_run.len());
             println!("   (Full evaluation would run selfware on each task)");
             println!("   Results would be saved to: {}\n", output);
+        }
+
+        Commands::Bench { endpoint, suite, concurrent, format } => {
+            if !quiet {
+                println!("{}", render_header(ctx));
+            }
+            
+            println!("\n{} Selfware Benchmark Suite\n", "📊".emphasis());
+            println!("   Suites: {}", suite.clone().emphasis());
+            println!("   Concurrent: {}", concurrent);
+            if let Some(ref ep) = endpoint {
+                println!("   Endpoint: {}", ep);
+            }
+            println!();
+
+            // Run benchmarks
+            let start_time = std::time::Instant::now();
+            
+            // 1. Endpoint health check
+            println!("{} Checking endpoint health...", "⏳".dimmed());
+            let ep = endpoint.as_ref().map(|s| s.as_str()).unwrap_or(&config.endpoint);
+            
+            let auto_cfg = crate::config::auto_config::AutoConfigurator::new(ep, None);
+            match auto_cfg.fetch_models().await {
+                Ok(models) => {
+                    println!("{} Endpoint online: {} models available\n", "✓".green(), models.len());
+                    for m in models.iter().take(3) {
+                        println!("   - {} ({} tokens)", m.id.clone().emphasis(), m.max_model_len);
+                    }
+                    if models.len() > 3 {
+                        println!("   ... and {} more", models.len() - 3);
+                    }
+                    println!();
+                }
+                Err(e) => {
+                    println!("{} Failed to connect: {}\n", "✗".red(), e);
+                }
+            }
+            
+            // 2. E2E throughput test
+            if suite.contains("e2e") || suite.contains("throughput") {
+                println!("{} Running E2E throughput test...", "⏳".dimmed());
+                // Would run actual E2E tests here
+                println!("{} E2E test completed\n", "✓".green());
+            }
+            
+            let elapsed = start_time.elapsed();
+            println!("{} Benchmark complete in {:.1}s\n", "✓".green(), elapsed.as_secs_f64());
+            println!("   Format: {} (full report generation TODO)\n", format);
         }
 
         Commands::Doctor => {

@@ -1,0 +1,38 @@
+{
+  "concurrent": 16,
+  "endpoint": "http://localhost:8000/v1",
+  "failed": 0,
+  "model": "qwen3.5-27b",
+  "passed": 4,
+  "results": [
+    {
+      "details": "backend=vLLM, model=qwen3.5-27b, context=1010000, fc=true, streaming=true, thinking=true",
+      "duration_secs": 6.132552087,
+      "errors": [],
+      "passed": true,
+      "step": "auto-config"
+    },
+    {
+      "details": "passed=16/16, tok/s=71, p50=0.5s, p95=0.7s, errors=0",
+      "duration_secs": 0.751655715,
+      "errors": [],
+      "passed": true,
+      "step": "throughput"
+    },
+    {
+      "details": "5/5 resilience tests passed",
+      "duration_secs": 24.466478393,
+      "errors": [],
+      "passed": true,
+      "step": "error-resilience"
+    },
+    {
+      "details": "0 issues found",
+      "duration_secs": 3.175998848,
+      "errors": [],
+      "passed": true,
+      "step": "tool-calling"
+    }
+  ],
+  "total_duration_secs": 34.551132393
+}

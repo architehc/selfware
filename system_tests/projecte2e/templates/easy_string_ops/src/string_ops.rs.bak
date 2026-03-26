@@ -1,0 +1,38 @@
+/// Reverse a string, properly handling Unicode characters
+pub fn reverse(input: &str) -> String {
+    input.chars().rev().collect()
+}
+
+/// Truncate string to max_len bytes, adding "..." if truncated
+/// The total output length (including "...") will not exceed max_len
+pub fn truncate(input: &str, max_len: usize) -> String {
+    if input.len() <= max_len {
+        input.to_string()
+    } else {
+        // Reserve 3 chars for "..."
+        let trunc_len = max_len.saturating_sub(3);
+        let mut result: String = input.chars().take(trunc_len).collect();
+        result.push_str("...");
+        result
+    }
+}
+
+/// Convert string to title case (capitalize first letter of each word)
+pub fn title_case(input: &str) -> String {
+    input
+        .split_whitespace()
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Count the number of words in a string (whitespace-separated)
+pub fn word_count(input: &str) -> usize {
+    input.split_whitespace().count()
+}

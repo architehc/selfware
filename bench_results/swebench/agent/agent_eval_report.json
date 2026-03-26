@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-03-25T16:14:53.056345324+00:00",
+  "timestamp": "2026-03-25T23:30:26.397122132+00:00",
   "model": "qwen3.5-27b",
   "total_tasks": 1,
   "completed": 0,
@@ -8,9 +8,9 @@
       "instance_id": "django__django-11133",
       "repo": "django/django",
       "completed": false,
-      "duration_secs": 271.921402761,
+      "duration_secs": 114.947233488,
       "error": "Agent failed: Max iterations exceeded"
     }
   ],
-  "total_duration_secs": 271.924044264
+  "total_duration_secs": 114.952333542
 }

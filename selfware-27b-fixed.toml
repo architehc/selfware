@@ -1,0 +1,18 @@
+# Fixed config for local 27B endpoint
+endpoint = "http://localhost:8000/v1"
+model = "qwen3.5-27b"
+max_tokens = 4096
+context_length = 50000
+temperature = 0.3
+
+[agent]
+max_iterations = 50
+step_timeout_secs = 300
+native_function_calling = false
+streaming = false
+token_budget = 30000
+token_safety_margin = 10000
+
+[safety]
+allowed_paths = ["./**", "/tmp/**"]
+denied_paths = ["**/.env", "**/secrets/**"]

@@ -1,0 +1,39 @@
+diff --git a/numpy/random/mtrand.pyx b/numpy/random/mtrand.pyx
+index 987d3ed..beebfb5 100644
+--- a/numpy/random/mtrand.pyx
++++ b/numpy/random/mtrand.pyx
+@@ -4662,9 +4662,9 @@ def shuffle(self, object x):
+                     j = random_interval(&self._bitgen, i)
+                     if i == j:
+                         continue  # i == j is not needed and memcpy is undefined.
+-                    buf[...] = x[j]
+-                    x[j] = x[i]
+-                    x[i] = buf
++                    buf[...] = x[j, ...]
++                    x[j, ...] = x[i, ...]
++                    x[i, ...] = buf
+         else:
+             # Untyped path.
+             if not isinstance(x, Sequence):
+diff --git a/numpy/random/tests/test_randomstate.py b/numpy/random/tests/test_randomstate.py
+index 63ffb5a..e9d6938 100644
+--- a/numpy/random/tests/test_randomstate.py
++++ b/numpy/random/tests/test_randomstate.py
+@@ -726,6 +726,14 @@ def test_shuffle_masked(self):
+             assert_equal(
+                 sorted(b.data[~b.mask]), sorted(b_orig.data[~b_orig.mask]))
+ 
++        # gh-XXXXX: Ensure all data values are preserved, including at masked positions
++        # The shuffle should preserve the underlying data array, not just the visible values
++        c = np.ma.masked_array([1, 2, 3, 4, 5], mask=[0, 1, 0, 1, 0])
++        c_orig = c.copy()
++        random.shuffle(c)
++        assert_equal(sorted(c.data), sorted(c_orig.data))
++        assert_equal(np.sum(c.mask), np.sum(c_orig.mask))
++
+         def test_shuffle_invalid_objects(self):
+             x = np.array(3)
+             assert_raises(TypeError, random.shuffle, x)
+```
+✅ Task completed successfully!
+

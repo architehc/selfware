@@ -6,7 +6,7 @@ pub fn merge_json(base: &Value, patch: &Value) -> Value {
             let mut merged = base_map.clone();
             for (key, patch_value) in patch_map {
                 if merged.contains_key(key) {
-                    let base_value = merged.get(key).unwrap();
+                    let base_value = merged.get(key).expect("key exists after contains_key check");
                     merged.insert(key.clone(), merge_json(base_value, patch_value));
                 } else {
                     merged.insert(key.clone(), patch_value.clone());
