@@ -1,0 +1,66 @@
+name: Live Vision Regression
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * *"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-vision-regression
+  cancel-in-progress: false
+
+jobs:
+  live-vision-dispatch:
+    name: Live vision dispatch regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      SELFWARE_RUN_LIVE_VISION_DISPATCH: "1"
+      SELFWARE_VISION_ENDPOINT: ${{ secrets.SELFWARE_VISION_ENDPOINT }}
+      SELFWARE_VISION_MODEL: ${{ secrets.SELFWARE_VISION_MODEL }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Check workflow configuration
+        id: config
+        shell: bash
+        run: |
+          if [[ -z "${SELFWARE_VISION_ENDPOINT}" || -z "${SELFWARE_VISION_MODEL}" ]]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "Live vision regression skipped: configure SELFWARE_VISION_ENDPOINT and SELFWARE_VISION_MODEL secrets."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install system dependencies
+        if: steps.config.outputs.configured == 'true'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-composite0-dev
+
+      - name: Install Rust stable
+        if: steps.config.outputs.configured == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        if: steps.config.outputs.configured == 'true'
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-live-vision-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-live-vision-
+
+      - name: Run live vision dispatch regression
+        if: steps.config.outputs.configured == 'true'
+        run: cargo test --features integration --test integration vision_computer_tests::test_live_tool_dispatch_uses_models_vision_profile -- --exact --nocapture
