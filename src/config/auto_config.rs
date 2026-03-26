@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use tracing::debug;
 
-use super::{AgentConfig, Config, RedactedString};
+use super::{Config, RedactedString};
 
 /// Detected backend type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

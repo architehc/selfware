@@ -25,12 +25,12 @@ impl Default for BrowserConfig {
 
 /// Browser session for automation
 pub struct BrowserSession {
-    config: BrowserConfig,
+    _config: BrowserConfig,
 }
 
 impl BrowserSession {
     pub fn new(config: BrowserConfig) -> Self {
-        Self { config }
+        Self { _config: config }
     }
 
     pub async fn goto(&self, url: &str) -> Result<PageInfo> {

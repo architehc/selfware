@@ -668,6 +668,7 @@ pub(crate) fn thinking_prefix() {
 }
 
 /// Print intent detection message
+#[cfg(test)]
 pub(crate) fn intent_without_action() {
     if is_tui_active() {
         return;
@@ -676,8 +677,7 @@ pub(crate) fn intent_without_action() {
         let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         print!(
             "\r\x1b[2K{}\n",
-            "🔄 Model described intent but didn't act - prompting for action..."
-                .bright_yellow()
+            "🔄 Model described intent but didn't act - prompting for action...".bright_yellow()
         );
         io::stdout().flush().ok();
     }

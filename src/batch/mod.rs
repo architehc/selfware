@@ -5,8 +5,8 @@
 use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{Semaphore, Mutex};
-use tracing::{info, warn};
+use tokio::sync::{Mutex, Semaphore};
+use tracing::info;
 
 /// Configuration for batch execution
 #[derive(Debug, Clone)]
@@ -67,26 +67,35 @@ impl BatchExecutor {
     /// Execute a list of tasks in parallel
     pub async fn execute_tasks(&self, tasks: Vec<String>) -> Result<Vec<BatchTaskResult>> {
         let total_tasks = tasks.len();
-        info!("Starting batch execution of {} tasks with {} workers", total_tasks, self.config.max_workers);
-        
+        info!(
+            "Starting batch execution of {} tasks with {} workers",
+            total_tasks, self.config.max_workers
+        );
+
         let start_time = std::time::Instant::now();
         let mut handles = Vec::new();
-        
+
         // Spawn all tasks limited by semaphore
         for (task_id, task) in tasks.into_iter().enumerate() {
             let permit = self.semaphore.clone().acquire_owned().await?;
             let results = self.results.clone();
             let config = self.config.clone();
-            
+
             let handle = tokio::spawn(async move {
                 let _permit = permit;
                 let task_start = std::time::Instant::now();
-                
-                info!("[Task {}/{}] Starting: {}", task_id + 1, total_tasks, &task[..50.min(task.len())]);
-                
+
+                info!(
+                    "[Task {}/{}] Starting: {}",
+                    task_id + 1,
+                    total_tasks,
+                    &task[..50.min(task.len())]
+                );
+
                 // Simulate task execution - would integrate with Agent here
-                let result = Self::execute_single_task(task_id, task.clone(), config.timeout_secs).await;
-                
+                let result =
+                    Self::execute_single_task(task_id, task.clone(), config.timeout_secs).await;
+
                 let duration = task_start.elapsed().as_secs_f64();
                 let result = match result {
                     Ok(output) => BatchTaskResult {
@@ -106,20 +115,23 @@ impl BatchExecutor {
                         duration_secs: duration,
                     },
                 };
-                
+
                 results.lock().await.push(result.clone());
-                
-                info!("[Task {}/{}] Completed in {:.2}s - {}", 
-                    task_id + 1, total_tasks, duration,
+
+                info!(
+                    "[Task {}/{}] Completed in {:.2}s - {}",
+                    task_id + 1,
+                    total_tasks,
+                    duration,
                     if result.success { "✓" } else { "✗" }
                 );
-                
+
                 result
             });
-            
+
             handles.push(handle);
         }
-        
+
         // Wait for all tasks
         let mut results = Vec::new();
         for handle in handles {
@@ -127,15 +139,18 @@ impl BatchExecutor {
                 results.push(result);
             }
         }
-        
+
         let total_duration = start_time.elapsed().as_secs_f64();
         let success_count = results.iter().filter(|r| r.success).count();
-        
-        info!("Batch complete: {}/{} succeeded in {:.2}s", success_count, total_tasks, total_duration);
-        
+
+        info!(
+            "Batch complete: {}/{} succeeded in {:.2}s",
+            success_count, total_tasks, total_duration
+        );
+
         // Sort by task_id
         results.sort_by_key(|r| r.task_id);
-        
+
         Ok(results)
     }
 
@@ -155,28 +170,34 @@ impl BatchExecutor {
         let mut output = String::new();
         output.push_str("# Batch Execution Results\n\n");
         output.push_str(&format!("Total tasks: {}\n", results.len()));
-        output.push_str(&format!("Successful: {}\n", results.iter().filter(|r| r.success).count()));
-        output.push_str(&format!("Failed: {}\n\n", results.iter().filter(|r| !r.success).count()));
-        
+        output.push_str(&format!(
+            "Successful: {}\n",
+            results.iter().filter(|r| r.success).count()
+        ));
+        output.push_str(&format!(
+            "Failed: {}\n\n",
+            results.iter().filter(|r| !r.success).count()
+        ));
+
         for result in results {
             output.push_str(&format!("## Task {} ", result.task_id));
             output.push_str(&format!("{}", if result.success { "✓" } else { "✗" }));
             output.push('\n');
             output.push_str(&format!("**Task:** {}\n", result.task));
             output.push_str(&format!("**Duration:** {:.2}s\n", result.duration_secs));
-            
+
             if !result.success {
                 if let Some(ref error) = result.error {
                     output.push_str(&format!("**Error:** {}\n", error));
                 }
             }
-            
+
             output.push_str("**Output:**\n");
             output.push_str("```\n");
             output.push_str(&result.output);
             output.push_str("\n```\n\n");
         }
-        
+
         output
     }
 }

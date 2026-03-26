@@ -5,7 +5,7 @@
 use anyhow::Result;
 use std::path::PathBuf;
 use std::process::Command;
-use tracing::{info, warn, error};
+use tracing::info;
 
 /// Device configuration for screenshots
 #[derive(Debug, Clone)]
@@ -94,28 +94,32 @@ impl VisualValidator {
     /// Capture screenshots for all devices
     pub async fn capture_screenshots(&self) -> Result<Vec<ScreenshotResult>> {
         std::fs::create_dir_all(&self.config.output_dir)?;
-        
+
         let mut results = Vec::new();
-        
+
         for device in &self.config.devices {
-            info!("Capturing screenshot for {} ({}x{})", device.name, device.width, device.height);
-            
+            info!(
+                "Capturing screenshot for {} ({}x{})",
+                device.name, device.width, device.height
+            );
+
             let result = self.capture_single_device(device).await;
             results.push(result);
         }
-        
+
         Ok(results)
     }
 
     /// Capture screenshot for a single device
     async fn capture_single_device(&self, device: &Device) -> ScreenshotResult {
-        let filename = format!("{}_{}x{}.png", 
+        let filename = format!(
+            "{}_{}x{}.png",
             sanitize_filename(&device.name),
             device.width,
             device.height
         );
         let path = self.config.output_dir.join(&filename);
-        
+
         // Try playwright first
         if let Ok(_) = self.capture_with_playwright(device, &path).await {
             return ScreenshotResult {
@@ -125,7 +129,7 @@ impl VisualValidator {
                 error: None,
             };
         }
-        
+
         // Fallback to error
         ScreenshotResult {
             device: device.name.clone(),
@@ -158,17 +162,16 @@ with sync_playwright() as p:
             path.display(),
             self.config.full_page
         );
-        
-        let output = Command::new("python3")
-            .arg("-c")
-            .arg(&script)
-            .output()?;
-        
+
+        let output = Command::new("python3").arg("-c").arg(&script).output()?;
+
         if output.status.success() {
             Ok(())
         } else {
-            Err(anyhow::anyhow!("Playwright failed: {}", 
-                String::from_utf8_lossy(&output.stderr)))
+            Err(anyhow::anyhow!(
+                "Playwright failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
         }
     }
 
@@ -177,12 +180,10 @@ with sync_playwright() as p:
         // This would integrate with the vision model
         // For now, return a placeholder
         info!("Analyzing screenshot: {}", path.display());
-        
+
         Ok(AnalysisResult {
             score: 7.5,
-            issues: vec![
-                "Consider increasing contrast for better accessibility".to_string(),
-            ],
+            issues: vec!["Consider increasing contrast for better accessibility".to_string()],
             suggestions: vec![
                 "Add hover effects to interactive elements".to_string(),
                 "Consider adding dark mode toggle".to_string(),
@@ -232,17 +233,17 @@ impl ValidationWorkflow {
     /// Run the validation workflow
     pub async fn run(&self) -> Result<ValidationReport> {
         info!("Starting visual validation workflow");
-        
+
         let mut iterations = Vec::new();
         let mut current_score = 0.0;
-        
+
         for i in 0..self.max_iterations {
             info!("Iteration {}/{}", i + 1, self.max_iterations);
-            
+
             // Capture screenshots
             let validator = VisualValidator::new(self.screenshot_config.clone());
             let screenshots = validator.capture_screenshots().await?;
-            
+
             // Analyze (placeholder - would use vision model)
             let analysis = AnalysisResult {
                 score: 7.0 + (i as f32 * 0.5),
@@ -250,22 +251,22 @@ impl ValidationWorkflow {
                 suggestions: vec!["Improve typography".to_string()],
                 summary: format!("Iteration {} analysis", i + 1),
             };
-            
+
             current_score = analysis.score;
-            
+
             iterations.push(IterationResult {
                 iteration: i + 1,
                 screenshots,
                 analysis,
             });
-            
+
             // Check if we've reached target
             if current_score >= self.target_score {
                 info!("Target score reached: {}", current_score);
                 break;
             }
         }
-        
+
         Ok(ValidationReport {
             final_score: current_score,
             iterations,

@@ -1419,7 +1419,7 @@ async fn handle_command(
 
             use crate::validation::{Device, ScreenshotConfig, ValidationWorkflow};
 
-            let workflow = ValidationWorkflow {
+            let _workflow = ValidationWorkflow {
                 url: url.clone(),
                 local_dir: dir.map(|d| d.into()),
                 max_iterations: iterations,
