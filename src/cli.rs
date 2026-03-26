@@ -391,7 +391,7 @@ enum Commands {
     Lsp,
 
     /// Execute multiple tasks in parallel (batch mode)
-    #[command(alias = "b")]
+    #[command(alias = "bat")]
     Batch {
         /// File containing tasks (one per line)
         #[arg(short, long)]
@@ -1308,7 +1308,11 @@ async fn handle_command(
                     if let Some(profile) = hypothesis_profile {
                         tracing::info!(
                             "Evolution using '{}' model profile for hypothesis generation: {}",
-                            config.evolution.hypothesis_model.as_deref().unwrap_or("default"),
+                            config
+                                .evolution
+                                .hypothesis_model
+                                .as_deref()
+                                .unwrap_or("default"),
                             profile.model
                         );
                         LlmConfig {
@@ -1374,8 +1378,8 @@ async fn handle_command(
             println!("   Output: {}", output);
             println!();
 
-            use crate::batch::{BatchConfig, BatchExecutor, parse_tasks_file};
-            
+            use crate::batch::{parse_tasks_file, BatchConfig, BatchExecutor};
+
             let tasks = parse_tasks_file(&file.into())?;
             println!("   Loaded {} tasks\n", tasks.len());
 
@@ -1391,7 +1395,8 @@ async fn handle_command(
             let results = executor.execute_tasks(tasks).await?;
 
             println!("\n✓ Batch Complete\n");
-            println!("   Successful: {}/{}", 
+            println!(
+                "   Successful: {}/{}",
                 results.iter().filter(|r| r.success).count(),
                 results.len()
             );
@@ -1412,8 +1417,8 @@ async fn handle_command(
             println!("   Iterations: {}", iterations);
             println!("   Target score: {:.1}/10\n", target);
 
-            use crate::validation::{ValidationWorkflow, ScreenshotConfig, Device};
-            
+            use crate::validation::{Device, ScreenshotConfig, ValidationWorkflow};
+
             let workflow = ValidationWorkflow {
                 url: url.clone(),
                 local_dir: dir.map(|d| d.into()),
@@ -1554,22 +1559,29 @@ async fn handle_command(
             println!("   Format: {}\n", format);
 
             use crate::swebench::LocalDevWorkflow;
-            
+
             let workflow = LocalDevWorkflow {
                 test_patterns: vec![pattern_clone],
                 endpoints: vec![config.endpoint.clone()],
             };
-            
+
             let report = workflow.test_workflow().await?;
-            
-            println!("\n{} Test Results\n", if report.all_passed { "✓" } else { "✗" });
+
+            println!(
+                "\n{} Test Results\n",
+                if report.all_passed { "✓" } else { "✗" }
+            );
             for (name, passed) in &report.results {
                 let icon = if *passed { "✓" } else { "✗" };
                 println!("   {} {}", icon, name);
             }
         }
 
-        Commands::SWEBench { dataset, limit, output } => {
+        Commands::SWEBench {
+            dataset,
+            limit,
+            output,
+        } => {
             if !quiet {
                 println!("{}", render_header(ctx));
             }
@@ -1582,25 +1594,30 @@ async fn handle_command(
             println!("   Output: {}\n", output);
 
             use crate::swebench::{SWEBenchEvaluator, SWEBenchTask};
-            
+
             let evaluator = SWEBenchEvaluator::new(std::path::PathBuf::from("./swebench_work"));
             let tasks = evaluator.load_tasks(&dataset_clone)?;
-            
+
             let tasks_to_run: Vec<SWEBenchTask> = match limit {
                 Some(n) => tasks.into_iter().take(n).collect(),
                 None => tasks,
             };
-            
+
             println!("   Loaded {} tasks\n", tasks_to_run.len());
             println!("   (Full evaluation would run selfware on each task)");
             println!("   Results would be saved to: {}\n", output);
         }
 
-        Commands::Bench { endpoint, suite, concurrent, format } => {
+        Commands::Bench {
+            endpoint,
+            suite,
+            concurrent,
+            format,
+        } => {
             if !quiet {
                 println!("{}", render_header(ctx));
             }
-            
+
             println!("\n{} Selfware Benchmark Suite\n", "📊".emphasis());
             println!("   Suites: {}", suite.clone().emphasis());
             println!("   Concurrent: {}", concurrent);
@@ -1611,17 +1628,28 @@ async fn handle_command(
 
             // Run benchmarks
             let start_time = std::time::Instant::now();
-            
+
             // 1. Endpoint health check
             println!("{} Checking endpoint health...", "⏳".dimmed());
-            let ep = endpoint.as_ref().map(|s| s.as_str()).unwrap_or(&config.endpoint);
-            
+            let ep = endpoint
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or(&config.endpoint);
+
             let auto_cfg = crate::config::auto_config::AutoConfigurator::new(ep, None);
             match auto_cfg.fetch_models().await {
                 Ok(models) => {
-                    println!("{} Endpoint online: {} models available\n", "✓".green(), models.len());
+                    println!(
+                        "{} Endpoint online: {} models available\n",
+                        "✓".green(),
+                        models.len()
+                    );
                     for m in models.iter().take(3) {
-                        println!("   - {} ({} tokens)", m.id.clone().emphasis(), m.max_model_len);
+                        println!(
+                            "   - {} ({} tokens)",
+                            m.id.clone().emphasis(),
+                            m.max_model_len
+                        );
                     }
                     if models.len() > 3 {
                         println!("   ... and {} more", models.len() - 3);
@@ -1632,16 +1660,20 @@ async fn handle_command(
                     println!("{} Failed to connect: {}\n", "✗".red(), e);
                 }
             }
-            
+
             // 2. E2E throughput test
             if suite.contains("e2e") || suite.contains("throughput") {
                 println!("{} Running E2E throughput test...", "⏳".dimmed());
                 // Would run actual E2E tests here
                 println!("{} E2E test completed\n", "✓".green());
             }
-            
+
             let elapsed = start_time.elapsed();
-            println!("{} Benchmark complete in {:.1}s\n", "✓".green(), elapsed.as_secs_f64());
+            println!(
+                "{} Benchmark complete in {:.1}s\n",
+                "✓".green(),
+                elapsed.as_secs_f64()
+            );
             println!("   Format: {} (full report generation TODO)\n", format);
         }
 
@@ -1653,19 +1685,27 @@ async fn handle_command(
             report.print();
         }
 
-        Commands::AutoConfig { endpoint, model, api_key, toml, save } => {
+        Commands::AutoConfig {
+            endpoint,
+            model,
+            api_key,
+            toml,
+            save,
+        } => {
             use crate::config::auto_config::AutoConfigurator;
             use colored::Colorize;
-            
+
             let endpoint = endpoint.unwrap_or_else(|| config.endpoint.clone());
-            let api_key = api_key.as_deref().or(config.api_key.as_ref().map(|k| k.expose()));
-            
+            let api_key = api_key
+                .as_deref()
+                .or(config.api_key.as_ref().map(|k| k.expose()));
+
             println!("{}", render_header(ctx));
             println!("\n{} Auto-Configuration Detection\n", "⚙️".emphasis());
             println!("   Endpoint: {}", endpoint.clone().emphasis());
-            
+
             let configurator = AutoConfigurator::new(&endpoint, api_key);
-            
+
             let models = match configurator.fetch_models().await {
                 Ok(m) => m,
                 Err(e) => {
@@ -1673,17 +1713,17 @@ async fn handle_command(
                     std::process::exit(1);
                 }
             };
-            
+
             if models.is_empty() {
                 println!("\n{} No models found at endpoint", "✗".red().bold());
                 std::process::exit(1);
             }
-            
+
             println!("   Found {} model(s)", models.len());
-            
+
             let model_to_test = model.unwrap_or_else(|| models[0].id.clone());
             println!("   Testing model: {}\n", model_to_test.clone().emphasis());
-            
+
             let results = match configurator.run_tests(&model_to_test).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -1691,7 +1731,7 @@ async fn handle_command(
                     std::process::exit(1);
                 }
             };
-            
+
             let detected_config = match configurator.generate_config(&model_to_test).await {
                 Ok(c) => c,
                 Err(e) => {
@@ -1699,27 +1739,48 @@ async fn handle_command(
                     std::process::exit(1);
                 }
             };
-            
+
             println!("\n{} Detection Results:\n", "📊".emphasis());
-            println!("   Backend: {}", 
-                results.backend_type.map(|b| b.name()).unwrap_or("Unknown").emphasis()
+            println!(
+                "   Backend: {}",
+                results
+                    .backend_type
+                    .map(|b| b.name())
+                    .unwrap_or("Unknown")
+                    .emphasis()
             );
-            println!("   Function Calling: {}", 
-                if results.function_calling { "✓ Supported".green().to_string() } else { "✗ Not detected".yellow().to_string() }
+            println!(
+                "   Function Calling: {}",
+                if results.function_calling {
+                    "✓ Supported".green().to_string()
+                } else {
+                    "✗ Not detected".yellow().to_string()
+                }
             );
-            println!("   Streaming: {}", 
-                if results.streaming { "✓ Supported".green().to_string() } else { "✗ Not detected".yellow().to_string() }
+            println!(
+                "   Streaming: {}",
+                if results.streaming {
+                    "✓ Supported".green().to_string()
+                } else {
+                    "✗ Not detected".yellow().to_string()
+                }
             );
-            println!("   Chat API: {}", 
-                if results.chat_works { "✓ Working".green().to_string() } else { "✗ Failed".red().to_string() }
+            println!(
+                "   Chat API: {}",
+                if results.chat_works {
+                    "✓ Working".green().to_string()
+                } else {
+                    "✗ Failed".red().to_string()
+                }
             );
-            
+
             if toml || save {
                 configurator.print_config_toml(&detected_config);
             }
-            
+
             if save {
-                let mut toml_str = format!(r#"# Auto-configured by selfware auto-config
+                let mut toml_str = format!(
+                    r#"# Auto-configured by selfware auto-config
 endpoint = "{}"
 model = "{}"
 max_tokens = {}
@@ -1760,10 +1821,8 @@ max_recovery_attempts = 3
                     toml_str.push_str("\n[extra_body]\n");
                     for (k, v) in extra {
                         if let Some(obj) = v.as_object() {
-                            let inner: Vec<String> = obj
-                                .iter()
-                                .map(|(ik, iv)| format!("{ik} = {iv}"))
-                                .collect();
+                            let inner: Vec<String> =
+                                obj.iter().map(|(ik, iv)| format!("{ik} = {iv}")).collect();
                             toml_str.push_str(&format!("{k} = {{ {} }}\n", inner.join(", ")));
                         } else {
                             toml_str.push_str(&format!("{k} = {v}\n"));
@@ -1771,12 +1830,14 @@ max_recovery_attempts = 3
                     }
                 }
 
-                toml_str.push_str("\n[retry]\nmax_retries = 5\nbase_delay_ms = 1000\nmax_delay_ms = 60000\n");
+                toml_str.push_str(
+                    "\n[retry]\nmax_retries = 5\nbase_delay_ms = 1000\nmax_delay_ms = 60000\n",
+                );
 
                 std::fs::write("selfware.toml", &toml_str)?;
                 println!("{} Configuration saved to selfware.toml", "✓".green());
             }
-            
+
             println!();
         }
 
@@ -2355,6 +2416,12 @@ mod tests {
         let cli = Cli::try_parse_from(["selfware"]).unwrap();
         // No subcommand → defaults to Chat { yolo: false }
         assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn cli_command_tree_has_no_duplicate_aliases() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
     }
 
     // ── resolve_config_path tests ──
