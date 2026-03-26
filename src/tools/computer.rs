@@ -36,7 +36,11 @@ impl Tool for ComputerMouseTool {
                 "end_x": { "type": "integer", "description": "End X for drag" },
                 "end_y": { "type": "integer", "description": "End Y for drag" },
                 "delta_x": { "type": "integer", "description": "Scroll X delta" },
-                "delta_y": { "type": "integer", "description": "Scroll Y delta (positive=up, negative=down)" }
+                "delta_y": { "type": "integer", "description": "Scroll Y delta (positive=up, negative=down)" },
+                "expected_visual": {
+                    "type": "string",
+                    "description": "Optional expected on-screen result after the action. Used for post-action visual verification."
+                }
             },
             "required": ["action"]
         })
@@ -120,7 +124,11 @@ impl Tool for ComputerKeyboardTool {
                 },
                 "text": { "type": "string", "description": "Text to type (for 'type' action)" },
                 "key": { "type": "string", "description": "Key name (for 'press' action)" },
-                "keys": { "type": "string", "description": "Key combo like 'ctrl+c' (for 'combo' action)" }
+                "keys": { "type": "string", "description": "Key combo like 'ctrl+c' (for 'combo' action)" },
+                "expected_visual": {
+                    "type": "string",
+                    "description": "Optional expected on-screen result after the action. Used for post-action visual verification."
+                }
             },
             "required": ["action"]
         })
@@ -248,7 +256,11 @@ impl Tool for ComputerWindowTool {
                     "description": "Window action to perform"
                 },
                 "window_id": { "type": "integer", "description": "Window ID (for focus)" },
-                "app_name": { "type": "string", "description": "Application name (for launch)" }
+                "app_name": { "type": "string", "description": "Application name (for launch)" },
+                "expected_visual": {
+                    "type": "string",
+                    "description": "Optional expected on-screen result after the action. Used for post-action visual verification."
+                }
             },
             "required": ["action"]
         })
@@ -323,6 +335,7 @@ mod tests {
         assert!(actions.contains(&json!("right_click")));
         assert!(actions.contains(&json!("scroll")));
         assert!(actions.contains(&json!("drag")));
+        assert!(schema["properties"]["expected_visual"].is_object());
         let required = schema["required"].as_array().unwrap();
         assert!(required.contains(&json!("action")));
     }
@@ -456,6 +469,7 @@ mod tests {
         assert!(actions.contains(&json!("type")));
         assert!(actions.contains(&json!("press")));
         assert!(actions.contains(&json!("combo")));
+        assert!(schema["properties"]["expected_visual"].is_object());
     }
 
     #[tokio::test]
@@ -598,6 +612,7 @@ mod tests {
         assert!(actions.contains(&json!("focus")));
         assert!(actions.contains(&json!("active")));
         assert!(actions.contains(&json!("launch")));
+        assert!(schema["properties"]["expected_visual"].is_object());
     }
 
     #[tokio::test]
