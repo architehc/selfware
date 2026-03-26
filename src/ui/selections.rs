@@ -1584,7 +1584,7 @@ mod tests {
             selected: vec![],
             custom_input: Some("Ruby on Rails".to_string()),
         };
-        let (template, language, framework) = parse_template_result(&result);
+        let (template, language, _framework) = parse_template_result(&result);
         assert_eq!(template, "Ruby on Rails");
         assert_eq!(language, "Ruby on Rails");
     }
@@ -1595,7 +1595,7 @@ mod tests {
             selected: vec![],
             custom_input: None,
         };
-        let (template, language, framework) = parse_template_result(&result);
+        let (template, _language, _framework) = parse_template_result(&result);
         // Falls back to Rust + Axum
         assert_eq!(template, "Rust + Axum");
     }

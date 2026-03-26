@@ -16,6 +16,13 @@ fn test_cli_help() {
 
 #[allow(deprecated)]
 #[test]
+fn test_cli_chat_help() {
+    let mut cmd = Command::cargo_bin("selfware").unwrap();
+    cmd.arg("chat").arg("--help").assert().success();
+}
+
+#[allow(deprecated)]
+#[test]
 fn test_cli_headless_requires_prompt() {
     let mut cmd = Command::cargo_bin("selfware").unwrap();
     cmd.arg("-p").assert().failure();

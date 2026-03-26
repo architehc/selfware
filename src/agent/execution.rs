@@ -3037,6 +3037,55 @@ mod tests {
         server.stop().await;
     }
 
+    #[tokio::test]
+    async fn test_execute_tool_batch_vision_analyze_uses_configured_vision_profile() {
+        let server = MockLlmServer::builder()
+            .with_response(r#"{"seen":"ok"}"#)
+            .build()
+            .await;
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.models.insert(
+            "vision".to_string(),
+            crate::config::ModelProfile {
+                endpoint: format!("{}/v1", server.url()),
+                model: "mock-vision-model".to_string(),
+                api_key: None,
+                max_tokens: 192,
+                temperature: 0.0,
+                modalities: vec!["text".to_string(), "vision".to_string()],
+                context_length: 262_144,
+                extra_body: Some({
+                    let mut extra = serde_json::Map::new();
+                    extra.insert(
+                        "chat_template_kwargs".to_string(),
+                        serde_json::json!({ "enable_thinking": false }),
+                    );
+                    extra
+                }),
+            },
+        );
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let batch: Vec<CollectedToolCall> = vec![(
+            "vision_analyze".to_string(),
+            serde_json::json!({
+                "prompt": "Describe this test image.",
+                "image_base64": "iVBORw0KGgo="
+            })
+            .to_string(),
+            None,
+        )];
+
+        agent.execute_tool_batch(batch).await.unwrap();
+
+        assert!(agent.messages.last().is_some_and(|message| {
+            let text = message.content.text();
+            text.contains("\"success\":true") && text.contains("\"model\":\"mock-vision-model\"")
+        }));
+
+        server.stop().await;
+    }
+
     // =========================================================================
     // maybe_verify_file_change tests
     // =========================================================================

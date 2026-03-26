@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn test_window_manager_default() {
-        let wm = WindowManager::default();
+        let _wm = WindowManager::default();
         let _ = format!("{:?}", "WindowManager created");
     }
 

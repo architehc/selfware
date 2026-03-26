@@ -913,7 +913,6 @@ fn session_to_context(session: InterviewSession, task: &str) -> InterviewContext
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn test_analyze_task_web_api() {

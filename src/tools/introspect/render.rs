@@ -305,7 +305,6 @@ pub fn truncate_output(output: &str, max_tokens: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::super::parser::{SymbolKind, Visibility};
     use super::*;
 
     #[test]

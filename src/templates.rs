@@ -1314,7 +1314,7 @@ mod tests {
         let project_dir = dir.path().join("project");
         std::fs::create_dir_all(&project_dir).unwrap();
 
-        let files = engine
+        let _files = engine
             .scaffold_project("rust", "overridden", &project_dir, &opts)
             .unwrap();
 

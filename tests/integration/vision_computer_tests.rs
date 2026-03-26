@@ -9,12 +9,18 @@
 //!
 //! The tests gracefully skip when the model endpoint is unreachable.
 
+use selfware::agent::Agent;
+use selfware::config::{AgentConfig, Config, ExecutionMode, ModelProfile, SafetyConfig};
 use selfware::swebench::*;
 use selfware::tools::computer::{ComputerKeyboardTool, ComputerMouseTool, ComputerWindowTool};
 use selfware::tools::vision::{VisionAnalyze, VisionCompare};
 use selfware::tools::Tool;
 use serde_json::json;
 use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -30,6 +36,20 @@ fn vision_endpoint() -> String {
 
 fn vision_model() -> String {
     std::env::var("SELFWARE_MODEL").unwrap_or_else(|_| "qwen3.5-27b".to_string())
+}
+
+fn vision_dispatch_opt_in() -> bool {
+    std::env::var("SELFWARE_RUN_LIVE_VISION_DISPATCH")
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn vision_dispatch_endpoint() -> String {
+    std::env::var("SELFWARE_VISION_ENDPOINT").unwrap_or_else(|_| vision_endpoint())
+}
+
+fn vision_dispatch_model() -> String {
+    std::env::var("SELFWARE_VISION_MODEL").unwrap_or_else(|_| vision_model())
 }
 
 /// Spawn a mock OpenAI-compatible /chat/completions endpoint that returns
@@ -65,6 +85,68 @@ async fn spawn_mock_vision_server(response_content: &str) -> (tokio::task::JoinH
             tokio::spawn(async move {
                 let mut buf = [0u8; 8192];
                 let _ = stream.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            });
+        }
+    });
+
+    (handle, format!("http://127.0.0.1:{}", addr.port()))
+}
+
+/// Spawn a mock OpenAI-compatible chat server that returns queued JSON bodies
+/// for successive /v1/chat/completions requests.
+async fn spawn_mock_chat_sequence_server(
+    responses: Vec<String>,
+) -> (tokio::task::JoinHandle<()>, String) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let responses = Arc::new(responses);
+    let response_idx = Arc::new(AtomicUsize::new(0));
+
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            let responses = Arc::clone(&responses);
+            let response_idx = Arc::clone(&response_idx);
+
+            tokio::spawn(async move {
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf).await;
+
+                let idx = response_idx.fetch_add(1, Ordering::SeqCst);
+                let body = responses
+                    .get(idx)
+                    .or_else(|| responses.last())
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        json!({
+                            "id": "chatcmpl-fallback",
+                            "object": "chat.completion",
+                            "choices": [{
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": "done"
+                                },
+                                "finish_reason": "stop"
+                            }],
+                            "usage": {
+                                "prompt_tokens": 1,
+                                "completion_tokens": 1,
+                                "total_tokens": 2
+                            }
+                        })
+                        .to_string()
+                    });
+
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
@@ -495,6 +577,163 @@ async fn test_live_control_capture_analyze_chain() {
             eprintln!("SKIPPED: vision chain error: {}", e);
         }
     }
+}
+
+/// End-to-end regression for `models.vision` injection through tool dispatch.
+///
+/// Uses a mock text model to force a deterministic `vision_analyze` tool call
+/// without endpoint/model arguments, while the actual vision request goes to
+/// the real vision endpoint configured via `models.vision`.
+#[tokio::test]
+async fn test_live_tool_dispatch_uses_models_vision_profile() {
+    if !vision_dispatch_opt_in() {
+        eprintln!(
+            "SKIPPED: set SELFWARE_RUN_LIVE_VISION_DISPATCH=1 to run live vision dispatch regression"
+        );
+        return;
+    }
+
+    let endpoint = vision_dispatch_endpoint();
+    if !require_llm_endpoint_url(&endpoint).await {
+        eprintln!(
+            "SKIPPED: live vision dispatch endpoint not available at {}",
+            endpoint
+        );
+        return;
+    }
+
+    let png = create_test_png();
+    let image_base64 = selfware::tools::vision::encode_image_file(png.path().to_str().unwrap())
+        .expect("test png should encode");
+    let tool_args = json!({
+        "prompt": "Describe the dominant color in this tiny test image in one short sentence.",
+        "image_base64": image_base64,
+        "detail": "low",
+        "max_tokens": 192
+    })
+    .to_string();
+
+    let tool_call_response = json!({
+        "id": "chatcmpl-tool",
+        "object": "chat.completion",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_vision_dispatch",
+                    "type": "function",
+                    "function": {
+                        "name": "vision_analyze",
+                        "arguments": tool_args
+                    }
+                }]
+            },
+            "finish_reason": "tool_calls"
+        }],
+        "usage": {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15
+        }
+    })
+    .to_string();
+    let final_response = json!({
+        "id": "chatcmpl-final",
+        "object": "chat.completion",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "done"
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 5,
+            "completion_tokens": 1,
+            "total_tokens": 6
+        }
+    })
+    .to_string();
+
+    let (mock_handle, mock_url) =
+        spawn_mock_chat_sequence_server(vec![tool_call_response, final_response]).await;
+
+    let mut config = Config {
+        endpoint: format!("{}/v1", mock_url),
+        model: "mock-text-model".to_string(),
+        max_tokens: 1024,
+        temperature: 0.0,
+        safety: SafetyConfig {
+            allowed_paths: vec!["./**".to_string(), "/tmp/**".to_string()],
+            ..Default::default()
+        },
+        agent: AgentConfig {
+            max_iterations: 4,
+            step_timeout_secs: 90,
+            token_budget: 4096,
+            native_function_calling: true,
+            streaming: false,
+            min_completion_steps: 0,
+            require_verification_before_completion: false,
+            ..Default::default()
+        },
+        execution_mode: ExecutionMode::Yolo,
+        ..Default::default()
+    };
+    config.models.insert(
+        "vision".to_string(),
+        ModelProfile {
+            endpoint: endpoint.clone(),
+            model: vision_dispatch_model(),
+            api_key: None,
+            max_tokens: 192,
+            temperature: 0.0,
+            modalities: vec!["text".to_string(), "vision".to_string()],
+            context_length: 262_144,
+            extra_body: Some({
+                let mut extra = serde_json::Map::new();
+                extra.insert(
+                    "chat_template_kwargs".to_string(),
+                    json!({ "enable_thinking": false }),
+                );
+                extra
+            }),
+        },
+    );
+
+    let mut agent = Agent::new(config).await.expect("agent should initialize");
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        agent.run_task("Use the vision tool on the provided image."),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => panic!("live vision dispatch task failed: {err}"),
+        Err(_) => panic!("live vision dispatch task timed out"),
+    }
+
+    let tool_result = agent
+        .retrieve_last_tool_output()
+        .map(|output| output.full_output)
+        .unwrap_or_default();
+
+    assert!(
+        tool_result.contains("\"success\":true"),
+        "expected successful tool result, got: {}",
+        tool_result
+    );
+    assert!(
+        tool_result.contains(&vision_dispatch_model()),
+        "expected injected vision model in tool result, got: {}",
+        tool_result
+    );
+
+    mock_handle.abort();
 }
 
 /// Live visual feedback loop with the real endpoint: build prompt → analyze → score.

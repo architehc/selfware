@@ -69,8 +69,6 @@ impl Tool for McpTool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_mcp_tool_name() {
         // We can't easily test execute without a real MCP server,
