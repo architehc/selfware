@@ -1661,11 +1661,134 @@ async fn handle_command(
                 }
             }
 
-            // 2. E2E throughput test
-            if suite.contains("e2e") || suite.contains("throughput") {
-                println!("{} Running E2E throughput test...", "⏳".dimmed());
-                // Would run actual E2E tests here
-                println!("{} E2E test completed\n", "✓".green());
+            // 2. Throughput benchmark
+            if suite.contains("throughput") || suite.contains("e2e") || suite.contains("all") {
+                println!("{} Running throughput benchmark ({concurrent} concurrent)...", "⏳".dimmed());
+
+                let ep = endpoint.as_ref().map(|s| s.as_str()).unwrap_or(&config.endpoint);
+                let model_name = config.model.clone();
+
+                #[cfg(feature = "bench-harness")]
+                {
+                    use crate::bench_harness::*;
+                    use crate::api::types::Message;
+
+                    let bench_config = HarnessConfig {
+                        endpoint: ep.to_string(),
+                        model: model_name.clone(),
+                        max_concurrent: concurrent,
+                        max_tokens: 256,
+                        temperature: 0.7,
+                        timeout_secs: 120,
+                        output_dir: "bench_results/cli_bench".into(),
+                        extra_body: serde_json::json!({"chat_template_kwargs": {"enable_thinking": false}}),
+                    };
+
+                    let runner = HarnessRunner::new(bench_config)?;
+                    let tasks: Vec<BenchTask> = (0..concurrent)
+                        .map(|i| {
+                            let prompts = [
+                                "What is 2+2? Answer with just the number.",
+                                "Name the capital of France in one word.",
+                                "Is Rust a compiled language? Yes or no.",
+                                "What color is the sky? One word.",
+                            ];
+                            BenchTask {
+                                id: format!("bench-{i}"),
+                                description: format!("Quick test {i}"),
+                                messages: vec![
+                                    Message::system("Answer concisely."),
+                                    Message::user(prompts[i % prompts.len()]),
+                                ],
+                                evaluator: Box::new(NoopEvaluator),
+                            }
+                        })
+                        .collect();
+
+                    match runner.run(tasks).await {
+                        Ok(report) => {
+                            println!("{} Throughput: {:.0} tok/s | p50: {:.1}s | {}/{} passed\n",
+                                "✓".green(),
+                                report.tokens_per_sec,
+                                report.latency_p50_ms as f64 / 1000.0,
+                                report.tasks_passed, report.tasks_total,
+                            );
+                        }
+                        Err(e) => println!("{} Throughput test failed: {}\n", "✗".red(), e),
+                    }
+                }
+
+                #[cfg(not(feature = "bench-harness"))]
+                {
+                    println!("{} Benchmark requires --features bench-harness\n", "✗".red());
+                }
+            }
+
+            // 3. Multi-language coding benchmark
+            if suite.contains("multilang") || suite.contains("all") {
+                println!("{} Running multi-language benchmark...", "⏳".dimmed());
+
+                #[cfg(feature = "bench-harness")]
+                {
+                    use crate::bench_harness::*;
+                    use crate::api::types::Message;
+
+                    let ep = endpoint.as_ref().map(|s| s.as_str()).unwrap_or(&config.endpoint);
+
+                    let bench_config = HarnessConfig {
+                        endpoint: ep.to_string(),
+                        model: config.model.clone(),
+                        max_concurrent: concurrent,
+                        max_tokens: 2048,
+                        temperature: 0.3,
+                        timeout_secs: 120,
+                        output_dir: "bench_results/cli_bench".into(),
+                        extra_body: serde_json::json!({"chat_template_kwargs": {"enable_thinking": false}}),
+                    };
+
+                    let runner = HarnessRunner::new(bench_config)?;
+                    let tasks = vec![
+                        BenchTask {
+                            id: "rust".into(), description: "Rust fibonacci".into(),
+                            messages: vec![Message::system("Output ONLY code."), Message::user("Write a Rust function `fn fibonacci(n: u64) -> u64` iteratively.")],
+                            evaluator: Box::new(KeywordEvaluator::new(vec!["fn fibonacci".into(), "u64".into()])),
+                        },
+                        BenchTask {
+                            id: "python".into(), description: "Python merge sort".into(),
+                            messages: vec![Message::system("Output ONLY code."), Message::user("Write a Python function `def merge_sort(arr): ...`")],
+                            evaluator: Box::new(KeywordEvaluator::new(vec!["def merge_sort".into(), "merge".into()])),
+                        },
+                        BenchTask {
+                            id: "javascript".into(), description: "JS debounce".into(),
+                            messages: vec![Message::system("Output ONLY code."), Message::user("Write a JavaScript `function debounce(fn, delay)` that returns a debounced function.")],
+                            evaluator: Box::new(KeywordEvaluator::new(vec!["function debounce".into(), "setTimeout".into()])),
+                        },
+                        BenchTask {
+                            id: "go".into(), description: "Go worker pool".into(),
+                            messages: vec![Message::system("Output ONLY code."), Message::user("Write a Go worker pool with `func NewPool(workers int)`, `Submit(task func())`, `Wait()`.")],
+                            evaluator: Box::new(KeywordEvaluator::new(vec!["func NewPool".into(), "chan".into()])),
+                        },
+                    ];
+
+                    match runner.run(tasks).await {
+                        Ok(report) => {
+                            println!("{} Multi-lang: {}/{} passed | {:.0} tok/s\n",
+                                "✓".green(),
+                                report.tasks_passed, report.tasks_total, report.tokens_per_sec,
+                            );
+                            for r in &report.results {
+                                let score = r.eval.as_ref().map(|e| format!("{:.0}%", e.score * 100.0)).unwrap_or("ERR".into());
+                                let icon = if r.success { "✓".green().to_string() } else { "✗".red().to_string() };
+                                println!("     {} {} {}", icon, r.task_id, score);
+                            }
+                            println!();
+                        }
+                        Err(e) => println!("{} Multi-lang test failed: {}\n", "✗".red(), e),
+                    }
+                }
+
+                #[cfg(not(feature = "bench-harness"))]
+                println!("{} Benchmark requires --features bench-harness\n", "✗".red());
             }
 
             let elapsed = start_time.elapsed();
@@ -1674,7 +1797,6 @@ async fn handle_command(
                 "✓".green(),
                 elapsed.as_secs_f64()
             );
-            println!("   Format: {} (full report generation TODO)\n", format);
         }
 
         Commands::Doctor => {
