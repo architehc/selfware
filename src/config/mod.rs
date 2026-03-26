@@ -1074,9 +1074,9 @@ impl Config {
                 self.temperature
             );
         }
-        if self.temperature > 10.0 {
-            eprintln!(
-                "Config warning: temperature {} is unusually high (typical range 0.0-2.0)",
+        if self.temperature > 2.0 {
+            bail!(
+                "Config error: temperature must be between 0.0 and 2.0, got: {}",
                 self.temperature
             );
         }

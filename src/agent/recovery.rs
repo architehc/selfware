@@ -639,18 +639,3 @@ fn extract_mentioned_path(content: &str) -> Option<String> {
     None
 }
 
-/// Extract a quoted string from content (single or double quotes, or backticks).
-#[allow(dead_code)]
-fn extract_quoted_string(content: &str) -> Option<String> {
-    for delim in ['"', '\'', '`'] {
-        if let Some(start) = content.find(delim) {
-            if let Some(end) = content[start + 1..].find(delim) {
-                let inner = &content[start + 1..start + 1 + end];
-                if !inner.is_empty() && inner.len() < 200 {
-                    return Some(inner.to_string());
-                }
-            }
-        }
-    }
-    None
-}

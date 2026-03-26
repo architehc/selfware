@@ -30,7 +30,20 @@ pub fn is_private_network_host(host: &str) -> bool {
     if host == "localhost" || host.ends_with(".localhost") {
         return true;
     }
-    let bare_host = host.trim_start_matches('[').trim_end_matches(']');
+    let bare_host = if host.starts_with('[') && host.ends_with(']') {
+        let inner = &host[1..host.len() - 1];
+        // Basic IPv6 validation: must contain a colon and only valid hex/colon chars
+        if !inner.contains(':')
+            || !inner
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+        {
+            return false;
+        }
+        inner
+    } else {
+        host
+    };
     if let Ok(ip) = bare_host.parse::<IpAddr>() {
         return is_private_or_internal_ip(&ip);
     }
@@ -40,7 +53,19 @@ pub fn is_private_network_host(host: &str) -> bool {
 /// Returns `true` for the handful of loopback/unspecified addresses that are
 /// considered "trusted local" (i.e. traffic stays on the machine).
 pub(crate) fn is_trusted_local_network_host(host: &str) -> bool {
-    let bare_host = host.trim_start_matches('[').trim_end_matches(']');
+    let bare_host = if host.starts_with('[') && host.ends_with(']') {
+        let inner = &host[1..host.len() - 1];
+        if !inner.contains(':')
+            || !inner
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.')
+        {
+            return false;
+        }
+        inner
+    } else {
+        host
+    };
     matches!(bare_host, "localhost" | "127.0.0.1" | "::1" | "0.0.0.0")
         || bare_host.ends_with(".localhost")
 }
@@ -144,6 +169,13 @@ mod tests {
     fn test_private_network_host_ipv6_bracket() {
         assert!(is_private_network_host("[::1]"));
         assert!(!is_private_network_host("[2606:4700::1111]"));
+    }
+
+    #[test]
+    fn test_private_network_host_ipv6_bracket_invalid() {
+        // Garbage inside brackets should not be treated as a valid host
+        assert!(!is_private_network_host("[not-valid-ipv6]"));
+        assert!(!is_private_network_host("[12345]"));
     }
 
     #[test]
