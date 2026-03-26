@@ -19,11 +19,6 @@ impl LocalFirstCoordinator {
         }
     }
 
-    /// Get the cache for direct manipulation
-    pub fn cache(&mut self) -> &mut LocalCache<String> {
-        &mut self.response_cache
-    }
-
     /// Cache a response
     pub fn cache_response(&mut self, key: &str, response: String, size_bytes: usize) {
         let entry = LocalCacheEntry {
@@ -63,7 +58,7 @@ pub struct LocalCache<T> {
 }
 
 #[derive(Debug, Clone)]
-struct LocalCacheEntry<T> {
+pub struct LocalCacheEntry<T> {
     key: String,
     value: T,
     size_bytes: usize,

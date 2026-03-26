@@ -845,7 +845,7 @@ async fn handle_command(
             focus,
             depth,
             max_nodes,
-            format,
+            _format,
         } => {
             if !quiet {
                 println!("{}", render_header(ctx));
@@ -1668,11 +1668,11 @@ async fn handle_command(
                     "⏳".dimmed()
                 );
 
-                let ep = endpoint
+                let _ep = endpoint
                     .as_ref()
                     .map(|s| s.as_str())
                     .unwrap_or(&config.endpoint);
-                let model_name = config.model.clone();
+                let _model_name = config.model.clone();
 
                 #[cfg(feature = "bench-harness")]
                 {

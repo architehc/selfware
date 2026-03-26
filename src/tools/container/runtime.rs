@@ -2,7 +2,7 @@
 //!
 //! Detects and manages Docker and Podman container runtimes.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::process::Stdio;
 use tokio::process::Command;
 
