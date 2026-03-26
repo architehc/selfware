@@ -40,6 +40,7 @@ macro_rules! cli_println {
     };
 }
 
+mod assistant_response;
 mod checkpointing;
 pub mod context;
 mod context_management;
@@ -49,11 +50,13 @@ mod interactive;
 pub mod last_tool;
 mod learning;
 pub mod loop_control;
+mod plan_step;
 pub mod planning;
 mod recovery;
 mod session_log;
 mod streaming;
 mod task_runner;
+mod tool_collect;
 mod tool_dispatch;
 pub mod tui_events;
 mod verification;
