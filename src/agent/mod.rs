@@ -343,6 +343,10 @@ pub struct Agent {
     esc_pause_ack: Arc<AtomicBool>,
     /// Last tool output for progressive disclosure via `/last`.
     last_tool_output: Option<last_tool::LastToolOutput>,
+    /// Recent screenshot hashes for visual stuck-loop detection.
+    recent_screenshot_hashes: std::collections::VecDeque<u64>,
+    /// Whether a visual stuck loop was detected on the most recent screenshot.
+    visual_stuck_loop_active: bool,
     /// Hierarchical context map for token-aware codebase ingestion.
     context_map: context_map::ContextMap,
 }
@@ -734,6 +738,8 @@ To call a tool, use this EXACT XML structure:
             esc_paused: Arc::new(AtomicBool::new(false)),
             esc_pause_ack: Arc::new(AtomicBool::new(false)),
             last_tool_output: None,
+            recent_screenshot_hashes: std::collections::VecDeque::new(),
+            visual_stuck_loop_active: false,
             context_map: ctx_map,
         };
 

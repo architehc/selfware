@@ -1,3 +1,5 @@
+use std::hash::{Hash, Hasher};
+
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
@@ -423,7 +425,15 @@ impl Agent {
             }
         };
 
-        match verifier
+        // Compute screenshot hash and check for visual stuck loop
+        let screenshot_hash = {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            captured.base64_png.hash(&mut hasher);
+            hasher.finish()
+        };
+        let visual_stuck = self.detect_visual_stuck_loop(screenshot_hash);
+
+        let verification_result = match verifier
             .verify_screenshot(&captured.base64_png, &expectation)
             .await
         {
@@ -483,6 +493,23 @@ impl Agent {
                     msg
                 ))
             }
+        };
+
+        // If visual stuck loop detected, append warning to the result
+        if visual_stuck {
+            let stuck_msg = "\n\n<visual_stuck_loop>\n\
+                VISUAL STUCK LOOP DETECTED: The screen has not changed after multiple actions. \
+                Your actions are not having an effect. Try a completely different approach.\n\
+                </visual_stuck_loop>";
+            Some(match verification_result {
+                Some(mut existing) => {
+                    existing.push_str(stuck_msg);
+                    existing
+                }
+                None => stuck_msg.to_string(),
+            })
+        } else {
+            verification_result
         }
     }
 

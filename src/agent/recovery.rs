@@ -123,6 +123,48 @@ impl Agent {
         self.last_no_action_prompt_hash = None;
     }
 
+    /// Track a screenshot hash and detect visual stuck loops.
+    ///
+    /// Maintains a sliding window of the last 10 screenshot hashes.
+    /// Returns `true` if the same hash appears 3+ times in the last 5
+    /// screenshots, meaning the screen has not changed despite actions.
+    pub(super) fn detect_visual_stuck_loop(&mut self, screenshot_hash: u64) -> bool {
+        const MAX_HASHES: usize = 10;
+        const WINDOW: usize = 5;
+        const THRESHOLD: usize = 3;
+
+        self.recent_screenshot_hashes.push_back(screenshot_hash);
+        if self.recent_screenshot_hashes.len() > MAX_HASHES {
+            self.recent_screenshot_hashes.pop_front();
+        }
+
+        // Check the last WINDOW entries for repeated hashes
+        let len = self.recent_screenshot_hashes.len();
+        let start = if len > WINDOW { len - WINDOW } else { 0 };
+        let window: Vec<u64> = self.recent_screenshot_hashes.iter().skip(start).copied().collect();
+
+        let count = window.iter().filter(|&&h| h == screenshot_hash).count();
+        let stuck = count >= THRESHOLD;
+        self.visual_stuck_loop_active = stuck;
+
+        if stuck {
+            warn!(
+                "Visual stuck loop detected: screenshot hash {} appeared {} times in last {} captures",
+                screenshot_hash, count, window.len()
+            );
+            self.cognitive_state.episodic_memory.what_failed(
+                "visual_stuck_loop",
+                &format!(
+                    "Screen unchanged after {} actions — same visual state repeated {} times",
+                    window.len(),
+                    count
+                ),
+            );
+        }
+
+        stuck
+    }
+
     fn no_action_failure_context(&self) -> Option<String> {
         self.recent_failed_tool_attempts.back().map(|failure| {
             format!(
@@ -540,14 +582,25 @@ Try ONE of these strategies:\
                 );
                 self.recent_tool_calls.clear();
                 self.recent_tool_batches.clear();
+
+                // Escalate more aggressively when both tool repetition AND visual
+                // stuck loop are active — the screen hasn't changed either.
+                let visual_escalation = if self.visual_stuck_loop_active {
+                    "\n\nCRITICAL: The screen has ALSO not changed after your recent actions. \
+                     Both your tool calls AND the visual state are stuck. \
+                     You MUST abandon your current strategy entirely and try something fundamentally different."
+                } else {
+                    ""
+                };
+
                 return Some(format!(
                     "STUCK LOOP DETECTED: You have called `{}` {} times with the exact same arguments. \
                      This is not making progress. STOP and try a DIFFERENT approach:\n\
                      - If file_edit fails with 'old_str not found', re-read the file first to see current content\n\
                      - If file_write keeps writing the same content, your output is wrong — re-read the test expectations\n\
                      - If file_read keeps reading the same file, you already have the content — make your edit now\n\
-                     - Consider using a completely different tool or strategy",
-                    name, repeat_count
+                     - Consider using a completely different tool or strategy{}",
+                    name, repeat_count, visual_escalation
                 ));
             }
         }

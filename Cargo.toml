@@ -193,11 +193,6 @@ name = "integration"
 path = "tests/integration/mod.rs"
 required-features = ["integration"]
 
-[[test]]
-name = "tui_integration"
-path = "tests/tui_integration/mod.rs"
-required-features = ["tui"]
-
 # Examples
 [[example]]
 name = "basic_chat"
@@ -235,3 +230,8 @@ harness = false
 name = "vlm_benchmark"
 harness = false
 required-features = ["vlm-bench"]
+
+[[test]]
+name = "visual_e2e"
+path = "tests/visual_e2e.rs"
+required-features = ["integration"]

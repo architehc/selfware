@@ -1498,4 +1498,65 @@ mod tests {
         let raw = "garbage";
         assert!(parse_layout_response(raw).is_err());
     }
+
+    // ---- Visual verifier edge cases ----
+
+    #[test]
+    fn test_visual_verifier_handles_invalid_image() {
+        // Garbage base64 should still produce a valid request body without panicking.
+        // The actual VLM call would fail, but construction must be graceful.
+        let verifier = VisualVerifier::new("http://localhost:1234/v1", "test-model");
+        let garbage = "not-valid-base64-!@#$%^&*()";
+        let body = verifier.build_single_image_request("Check this", garbage);
+        // The body is constructed; the data URI contains the garbage verbatim
+        let url = body["messages"][0]["content"][1]["image_url"]["url"]
+            .as_str()
+            .unwrap();
+        assert!(url.starts_with("data:image/png;base64,"));
+        assert!(url.contains(garbage));
+
+        // Parsing a verification response that would come from invalid image
+        // input should also be handled — the VLM would return an error string,
+        // which fails JSON parsing gracefully.
+        let bad_response = "Error: invalid image data";
+        assert!(parse_verification_response(bad_response).is_err());
+    }
+
+    #[test]
+    fn test_visual_verifier_handles_empty_expectation() {
+        // An empty expected description should not panic during prompt construction.
+        let prompt = build_verify_prompt("");
+        assert!(prompt.contains("EXPECTED:"));
+        // The prompt still contains the structural JSON instructions
+        assert!(prompt.contains("passed"));
+        assert!(prompt.contains("confidence"));
+
+        // Parsing a response for an empty-expectation query should work normally
+        let raw = r#"{"passed": true, "confidence": 0.5, "description": "Blank screen", "issues": []}"#;
+        let result = parse_verification_response(raw).unwrap();
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn test_visual_verification_result_serde_roundtrip() {
+        let original = VisualVerificationResult {
+            passed: false,
+            confidence: 0.73,
+            description: "Dashboard with charts".to_string(),
+            issues: vec!["Missing legend".to_string(), "Colors too similar".to_string()],
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let roundtripped: VisualVerificationResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtripped.passed, original.passed);
+        assert!((roundtripped.confidence - original.confidence).abs() < f64::EPSILON);
+        assert_eq!(roundtripped.description, original.description);
+        assert_eq!(roundtripped.issues, original.issues);
+
+        // Also test via serde_json::Value to confirm field names
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(value.get("passed").is_some());
+        assert!(value.get("confidence").is_some());
+        assert!(value.get("description").is_some());
+        assert!(value.get("issues").is_some());
+    }
 }
