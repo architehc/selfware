@@ -651,6 +651,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_window_tool_focus_with_id() {
+        // Skip test if window management tools aren't available
+        if std::process::Command::new("wmctrl").arg("-l").output().is_err()
+            && std::process::Command::new("xdotool").args(["search", "--class", "."]).output().is_err()
+        {
+            eprintln!("Skipping test: neither wmctrl nor xdotool available");
+            return;
+        }
         let tool = ComputerWindowTool;
         let result = tool
             .execute(json!({"action": "focus", "window_id": 1}))

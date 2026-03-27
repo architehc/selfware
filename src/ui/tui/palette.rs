@@ -32,13 +32,14 @@ pub struct PaletteCommand {
 
 /// Command categories
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)]
 pub enum CommandCategory {
     Chat,
     File,
+    #[allow(dead_code)]
     Git,
     Tool,
     Navigation,
+    #[allow(dead_code)]
     Settings,
 }
 

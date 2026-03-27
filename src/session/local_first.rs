@@ -34,10 +34,7 @@ impl LocalFirstCoordinator {
         let cache_stats = self.response_cache.stats();
         LocalFirstStats {
             offline_status: OfflineStatus::Online,
-            pending_ops: 0,
             bandwidth_saved_bytes: cache_stats.total_size_bytes,
-            edge_tasks_pending: 0,
-            edge_tasks_completed: 0,
             cache_stats,
         }
     }
@@ -60,6 +57,7 @@ pub struct LocalCache<T> {
 #[derive(Debug, Clone)]
 pub struct LocalCacheEntry<T> {
     key: String,
+    #[allow(dead_code)]
     value: T,
     size_bytes: usize,
 }
@@ -108,8 +106,10 @@ impl Default for LocalCache<String> {
 #[derive(Debug, Clone)]
 pub struct CacheStats {
     pub entry_count: usize,
+    #[allow(dead_code)]
     pub max_entries: usize,
     pub total_size_bytes: usize,
+    #[allow(dead_code)]
     pub max_size_bytes: usize,
     pub hit_rate: f64,
 }
@@ -118,6 +118,7 @@ pub struct CacheStats {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OfflineStatus {
     Online,
+    #[allow(dead_code)]
     Offline,
 }
 
@@ -134,10 +135,7 @@ impl std::fmt::Display for OfflineStatus {
 #[derive(Debug, Clone)]
 pub struct LocalFirstStats {
     pub offline_status: OfflineStatus,
-    pub pending_ops: usize,
     pub bandwidth_saved_bytes: usize,
-    pub edge_tasks_pending: usize,
-    pub edge_tasks_completed: usize,
     pub cache_stats: CacheStats,
 }
 

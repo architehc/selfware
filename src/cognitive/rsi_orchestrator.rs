@@ -674,6 +674,7 @@ path = "src/lib.rs"
         fs::write(
             root.join("src/lib.rs"),
             r#"pub fn demo() -> usize {
+    // TODO: remove this marker
     42
 }
 
@@ -693,7 +694,12 @@ mod tests {
             r#"#!/usr/bin/env bash
 set -euo pipefail
 mkdir -p system_tests/projecte2e/reports/latest
-score="0.90"
+# Detect if running in sandbox (path contains .selfware-sandbox)
+if pwd | grep -q ".selfware-sandbox"; then
+    score="0.95"  # Higher score in sandbox to simulate improvement
+else
+    score="0.90"  # Baseline score
+fi
 cat > system_tests/projecte2e/reports/latest/results.tsv <<EOF
 scenario|type|difficulty|baseline|post|agent|timeout|duration|score|changed|error|notes
 todo_cleanup|unit|easy|0|0|selfware|0|0|${score}|yes||

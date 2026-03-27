@@ -444,7 +444,7 @@ async fn main() -> Result<()> {
     eprintln!("{}", "=".repeat(60));
 
     for r in &results {
-        let status = if r.completed { "DONE" } else { "FAIL" };
+        let _status = if r.completed { "DONE" } else { "FAIL" };
         eprintln!(
             "  {} {:<40} {:.1}s {}",
             if r.completed { "+" } else { "-" },

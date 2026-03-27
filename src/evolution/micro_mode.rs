@@ -16,11 +16,12 @@ use std::path::{Path, PathBuf};
 /// Detect if we should use micro mode based on model name
 pub fn is_micro_model(model_name: &str) -> bool {
     let name_lower = model_name.to_lowercase();
+    // Check for micro model sizes - use negative checks to avoid matching "32b" as "2b" or "3b"
     name_lower.contains("0.8b")
         || name_lower.contains("1.5b")
-        || name_lower.contains("1b")
-        || name_lower.contains("2b")
-        || name_lower.contains("3b")
+        || (name_lower.contains("1b") && !name_lower.contains("10b") && !name_lower.contains("11b") && !name_lower.contains("12b") && !name_lower.contains("13b") && !name_lower.contains("14b") && !name_lower.contains("15b") && !name_lower.contains("16b") && !name_lower.contains("17b") && !name_lower.contains("18b") && !name_lower.contains("19b"))
+        || (name_lower.contains("2b") && !name_lower.contains("20b") && !name_lower.contains("21b") && !name_lower.contains("22b") && !name_lower.contains("23b") && !name_lower.contains("24b") && !name_lower.contains("25b") && !name_lower.contains("26b") && !name_lower.contains("27b") && !name_lower.contains("28b") && !name_lower.contains("29b") && !name_lower.contains("12b") && !name_lower.contains("32b"))
+        || (name_lower.contains("3b") && !name_lower.contains("30b") && !name_lower.contains("31b") && !name_lower.contains("32b") && !name_lower.contains("33b") && !name_lower.contains("34b") && !name_lower.contains("35b") && !name_lower.contains("36b") && !name_lower.contains("37b") && !name_lower.contains("38b") && !name_lower.contains("39b") && !name_lower.contains("13b") && !name_lower.contains("23b"))
         || name_lower.contains("tiny")
         || name_lower.contains("small")
 }

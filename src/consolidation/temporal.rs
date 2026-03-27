@@ -45,17 +45,13 @@ impl CompactedContent {
 
 /// Importance level for temporal records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum RecordImportance {
     Low = 1,
+    #[default]
     Normal = 2,
     High = 3,
     Critical = 4,
-}
-
-impl Default for RecordImportance {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 /// A consolidated long-term memory record with rich temporal and multimodal metadata.

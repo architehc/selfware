@@ -15,12 +15,13 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use selfware::api::types::Message;
 use selfware::bench_harness::*;
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 struct SWETask {
     repo: String,
     instance_id: String,
@@ -77,8 +78,8 @@ fn extract_focused_context(content: &str, change_lines: &[usize], context: usize
     for &line_num in change_lines {
         let start = line_num.saturating_sub(context + 1); // 1-indexed to 0-indexed
         let end = (line_num + context).min(total);
-        for i in start..end {
-            included[i] = true;
+        for item in included.iter_mut().take(end).skip(start) {
+            *item = true;
         }
     }
 
@@ -617,7 +618,7 @@ impl TaskEvaluator for PatchEvaluator {
         });
 
         for file in &self.gold_files {
-            let short = file.split('/').last().unwrap_or(file);
+            let short = file.split('/').next_back().unwrap_or(file);
             let found = response.contains(file.as_str()) || response.contains(short);
             details.push(EvalDetail {
                 criterion: format!("file:{short}"),

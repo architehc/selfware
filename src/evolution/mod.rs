@@ -250,11 +250,7 @@ pub fn is_protected(path: &std::path::Path) -> bool {
         // Check if the path starts with the protected prefix (for relative paths)
         // or contains the protected prefix (for canonical/absolute paths)
         // This handles both cases: "src/evolution/daemon.rs" and "/home/user/project/src/evolution/daemon.rs"
-        if path_str.starts_with(protected_prefix) || path_str.contains(protected_prefix) {
-            true
-        } else {
-            false
-        }
+        path_str.starts_with(protected_prefix) || path_str.contains(protected_prefix)
     })
 }
 

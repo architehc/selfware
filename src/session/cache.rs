@@ -330,10 +330,10 @@ impl LlmCache {
 
             if similarity >= self.config.similarity_threshold {
                 if let Some(entry) = entries.get(id) {
-                    if entry.context_hash == context_hash {
-                        if best_match.is_none() || similarity > best_match.as_ref().unwrap().1 {
-                            best_match = Some((id.clone(), similarity));
-                        }
+                    if entry.context_hash == context_hash
+                        && (best_match.is_none() || similarity > best_match.as_ref().unwrap().1)
+                    {
+                        best_match = Some((id.clone(), similarity));
                     }
                 }
             }

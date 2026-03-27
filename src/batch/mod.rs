@@ -181,7 +181,7 @@ impl BatchExecutor {
 
         for result in results {
             output.push_str(&format!("## Task {} ", result.task_id));
-            output.push_str(&format!("{}", if result.success { "✓" } else { "✗" }));
+            output.push_str(if result.success { "✓" } else { "✗" });
             output.push('\n');
             output.push_str(&format!("**Task:** {}\n", result.task));
             output.push_str(&format!("**Duration:** {:.2}s\n", result.duration_secs));

@@ -17,7 +17,9 @@ struct EndpointInfo {
     model_id: String,
     model_root: String,
     max_model_len: usize,
+    #[allow(dead_code)]
     owned_by: String,
+    #[allow(dead_code)]
     supports_tools: bool,
     native_tool_calling: bool,
     supports_thinking: bool,
@@ -253,7 +255,7 @@ fn generate_toml(info: &EndpointInfo) -> String {
     toml.push_str(&format!("max_tokens = {}\n", info.recommended_max_tokens));
     toml.push_str(&format!("context_length = {}\n", info.max_model_len));
     toml.push_str(&format!("temperature = {}\n", info.recommended_temperature));
-    toml.push_str("\n");
+    toml.push('\n');
 
     toml.push_str("[safety]\n");
     toml.push_str("allowed_paths = [\"./**\", \"/tmp/**\"]\n");
@@ -267,7 +269,7 @@ fn generate_toml(info: &EndpointInfo) -> String {
         "native_function_calling = {}\n",
         info.native_tool_calling
     ));
-    toml.push_str("\n");
+    toml.push('\n');
 
     toml.push_str("[continuous_work]\n");
     toml.push_str("enabled = true\n");
@@ -327,7 +329,7 @@ async fn main() -> Result<()> {
                 let toml = generate_toml(&info);
                 let filename = format!(
                     "selfware-auto-{}.toml",
-                    info.model_id.replace('/', "-").replace('.', "-")
+                    info.model_id.replace(['/', '.'], "-")
                 );
 
                 eprintln!("\n--- Generated: {filename} ---\n");

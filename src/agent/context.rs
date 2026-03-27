@@ -70,7 +70,7 @@ impl ContextCompressor {
     }
 
     pub fn estimate_tokens(&self, messages: &[Message]) -> usize {
-        messages.iter().map(|m| estimate_message_tokens(m)).sum()
+        messages.iter().map(estimate_message_tokens).sum()
     }
 
     pub fn compression_threshold(&self) -> usize {

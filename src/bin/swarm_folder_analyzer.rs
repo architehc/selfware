@@ -339,7 +339,7 @@ impl FolderAnalyzer {
                 output.push_str("- 📚 Has documentation\n");
             }
 
-            output.push_str(&format!("\n**Stats**:\n"));
+            output.push_str("\n**Stats**:\n");
             output.push_str(&format!("- Files: {}\n", folder.file_count));
             output.push_str(&format!(
                 "- Size: {:.2} MB\n",

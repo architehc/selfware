@@ -714,6 +714,43 @@ impl Agent {
                         // Visual assertion failure: provide specific recovery guidance
                         warn!("Visual assertion failure detected — entering visual recovery mode");
                         
+                        // Use pending visual assertion for smarter recovery if available
+                        // First, extract the data we need from the checkpoint
+                        let assertion_data = self.current_checkpoint.as_ref().and_then(|cp| {
+                            cp.pending_visual_assertion.as_ref().map(|a| {
+                                let hash = a.verification_result.as_ref()
+                                    .map(|vr| vr.screenshot_hash.clone())
+                                    .unwrap_or_default();
+                                let tool = a.tool_name.clone().unwrap_or_else(|| "unknown".to_string());
+                                let expected = a.expected.clone().unwrap_or_else(|| "unknown".to_string());
+                                let observed = a.observed.clone().unwrap_or_else(|| "unknown".to_string());
+                                (hash, tool, expected, observed)
+                            })
+                        });
+                        
+                        // Check for visual stuck loop if we have assertion data with a hash
+                        let stuck_recovery = if let Some((hash, tool, _, _)) = assertion_data.as_ref() {
+                            if !hash.is_empty() {
+                                self.detect_visual_stuck_loop_advanced(hash, tool, false)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        
+                        // Format stuck loop info using the dedicated handler
+                        let stuck_info = stuck_recovery.as_ref()
+                            .map(|strategy| self.handle_visual_stuck_loop(strategy));
+                        
+                        let pending_assertion_info = assertion_data.map(|(_, tool, expected, observed)| {
+                            format!(
+                                "\nPending assertion details:\n- Tool: {}\n- Expected: {}\n- Observed: {}{}",
+                                tool, expected, observed,
+                                stuck_info.as_deref().map(|s| format!("\n{}", s)).unwrap_or_default()
+                            )
+                        });
+                        
                         // Clear the pending visual assertion since we're handling the recovery
                         if let Some(ref mut checkpoint) = self.current_checkpoint {
                             checkpoint.clear_pending_visual_assertion();
@@ -721,7 +758,7 @@ impl Agent {
                         
                         cli_println!("{}", "🖥️ Visual assertion failed — action did not produce expected UI state".bright_red());
                         
-                        self.messages.push(Message::user(format!(
+                        let recovery_msg = format!(
                             "VISUAL ASSERTION FAILED: The previous action did not produce the expected visual result.\n\n\
                             This is a HARD GATE — the UI state must be correct before continuing.\n\n\
                             RECOVERY STRATEGY:\n\
@@ -729,9 +766,12 @@ impl Agent {
                             2. Analyze what actually happened vs what was expected\n\
                             3. Try a different approach — the previous action did not work\n\
                             4. Consider: was the element not clickable? Was the window not ready?\n\n\
-                            Error: {}\n\n{}",
-                            error, self.cognitive_state.summary()
-                        )));
+                            Error: {}\n{}\n{}",
+                            error,
+                            pending_assertion_info.as_deref().unwrap_or(""),
+                            self.cognitive_state.summary()
+                        );
+                        self.messages.push(Message::user(recovery_msg));
                     } else {
                         let cognitive_summary = self.cognitive_state.summary();
                         self.messages.push(Message::user(format!(
@@ -797,6 +837,10 @@ mod tests {
         Config {
             endpoint,
             model: "mock-model".to_string(),
+            // Set context_length high enough that max_context_tokens doesn't become 0
+            // after subtracting max_tokens and safety margin
+            context_length: 500_000,
+            max_tokens: 8192,
             agent: AgentConfig {
                 max_iterations: 8,
                 step_timeout_secs: 30,

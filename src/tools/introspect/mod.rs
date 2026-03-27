@@ -108,7 +108,7 @@ impl CodeIntrospect {
 
         // Determine depth - auto-select if not specified
         let depth = if let Some(d) = args.depth {
-            Depth::from_str(&d)?
+            Depth::parse(&d)?
         } else {
             budget.suggest_depth(&[])
         };
@@ -166,7 +166,7 @@ impl CodeIntrospect {
                 if budget.allocate(symbol_tokens) > 0 {
                     files_included.push(FileInfo {
                         path: file_path.to_string_lossy().to_string(),
-                        depth: actual_depth.to_string(),
+                        depth: actual_depth.as_str().to_string(),
                         tokens: symbol_tokens,
                         symbols: symbols.iter().map(|s| s.name.clone()).collect(),
                     });
@@ -226,6 +226,7 @@ impl CodeIntrospect {
         Ok(files)
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn collect_files_recursive<'a>(
         &'a self,
         dir: &'a Path,

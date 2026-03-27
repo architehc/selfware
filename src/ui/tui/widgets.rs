@@ -220,8 +220,7 @@ impl Widget for ToolOutput {
 }
 
 /// Render a keyboard shortcut hint
-#[allow(dead_code)]
-pub fn render_shortcut(frame: &mut Frame, area: Rect, key: &str, action: &str) {
+pub fn _render_shortcut(frame: &mut Frame, area: Rect, key: &str, action: &str) {
     let line = Line::from(vec![
         Span::styled(
             format!(" {} ", key),
@@ -239,8 +238,7 @@ pub fn render_shortcut(frame: &mut Frame, area: Rect, key: &str, action: &str) {
 }
 
 /// Render a help bar at the bottom
-#[allow(dead_code)]
-pub fn render_help_bar(frame: &mut Frame, area: Rect, hints: &[(&str, &str)]) {
+pub fn _render_help_bar(frame: &mut Frame, area: Rect, hints: &[(&str, &str)]) {
     let spans: Vec<Span> = hints
         .iter()
         .flat_map(|(key, action)| {

@@ -15,10 +15,10 @@ pub struct SelfwarePrompt {
     /// Context usage percentage (0.0 - 100.0)
     context_pct: f64,
     /// Left prompt style
-    #[allow(dead_code)] // For future styled prompts
+    #[allow(dead_code)]
     left_style: Style,
     /// Right prompt style
-    #[allow(dead_code)] // For future styled prompts
+    #[allow(dead_code)]
     right_style: Style,
 }
 

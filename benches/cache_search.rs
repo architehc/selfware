@@ -4,8 +4,8 @@
 //! - HNSW approximate nearest neighbor search: O(log N)
 //! - Linear scan (brute force): O(N)
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use std::time::{SystemTime, UNIX_EPOCH};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::hint::black_box;
 
 // Simulate the old O(N) brute force search
 fn brute_force_search(
@@ -17,10 +17,10 @@ fn brute_force_search(
 
     for (id, entry_embedding) in embeddings.iter() {
         let similarity = cosine_similarity(query, entry_embedding);
-        if similarity >= threshold {
-            if best_match.is_none() || similarity > best_match.as_ref().unwrap().1 {
-                best_match = Some((id.clone(), similarity));
-            }
+        if similarity >= threshold
+            && (best_match.is_none() || similarity > best_match.as_ref().unwrap().1)
+        {
+            best_match = Some((id.clone(), similarity));
         }
     }
 
@@ -98,7 +98,7 @@ fn benchmark_cache_search(c: &mut Criterion) {
         use hnsw_rs::anndists::dist::distances::DistDot;
         use hnsw_rs::hnsw::{Hnsw, Neighbour};
 
-        let mut hnsw = Hnsw::new(32, size.max(100), 16, 100, DistDot {});
+        let hnsw = Hnsw::new(32, size.max(100), 16, 100, DistDot {});
         let mut id_mapping: std::collections::HashMap<usize, String> =
             std::collections::HashMap::new();
 
@@ -149,7 +149,7 @@ fn benchmark_insertion(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("hnsw_insert", size), &size, |b, _| {
             b.iter(|| {
-                let mut hnsw = Hnsw::new(32, size.max(100), 16, 100, DistDot {});
+                let hnsw = Hnsw::new(32, size.max(100), 16, 100, DistDot {});
                 for (i, mut emb) in embeddings.clone().into_iter().enumerate() {
                     l2_normalize(&mut emb);
                     hnsw.insert((&emb, i));

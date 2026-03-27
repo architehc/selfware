@@ -46,7 +46,7 @@ impl Agent {
         let token_counts: Vec<usize> = self
             .messages
             .iter()
-            .map(|m| estimate_message_tokens(m))
+            .map(estimate_message_tokens)
             .collect();
         let pinned_critical: std::collections::HashSet<usize> = self
             .messages

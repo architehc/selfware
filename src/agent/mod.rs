@@ -63,7 +63,7 @@ mod tool_dispatch;
 pub mod tui_events;
 mod verification;
 
-use crate::errors::{is_confirmation_error, is_no_action_error, is_visual_assertion_error};
+use crate::errors::{is_confirmation_error, is_no_action_error};
 use context::ContextCompressor;
 use loop_control::{AgentLoop, AgentState};
 use planning::Planner;
@@ -289,7 +289,6 @@ pub struct Agent {
     /// Whether at least one checkpoint has been persisted in this session
     checkpoint_persisted_once: bool,
     /// Event emitter for real-time updates (TUI or other)
-    #[allow(dead_code)]
     events: Arc<dyn EventEmitter>,
     /// Edit history for undo support
     edit_history: EditHistory,
@@ -780,8 +779,7 @@ To call a tool, use this EXACT XML structure:
 
     /// Build LSP-enriched context for a file, helping smaller models understand code semantics.
     /// Returns a summary of symbols (functions, structs, etc.) with their signatures.
-    #[allow(dead_code)]
-    async fn build_lsp_context(&self, file_path: &str) -> Option<String> {
+    async fn _build_lsp_context(&self, file_path: &str) -> Option<String> {
         // Use the lsp_document_symbols tool to get file structure
         let args = serde_json::json!({
             "file": file_path

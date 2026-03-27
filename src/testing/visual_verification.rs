@@ -1898,11 +1898,13 @@ mod tests {
 
     #[test]
     fn test_verifier_from_app_config_prefers_vision_profile() {
-        let mut config = crate::config::Config::default();
-        config.endpoint = "http://localhost:8000/v1".to_string();
-        config.model = "default-text".to_string();
-        config.max_tokens = 8192;
-        config.temperature = 0.2;
+        let mut config = crate::config::Config {
+            endpoint: "http://localhost:8000/v1".to_string(),
+            model: "default-text".to_string(),
+            max_tokens: 8192,
+            temperature: 0.2,
+            ..Default::default()
+        };
         config.agent.step_timeout_secs = 45;
 
         config.models.insert(
@@ -2101,11 +2103,8 @@ mod tests {
             LoopDetectionResult::Stuck { loop_pattern, suggested_recovery } => {
                 assert_eq!(loop_pattern.len(), 2);
                 // Should suggest recovery strategy
-                match suggested_recovery {
-                    RecoveryStrategy::TryDifferentAction { alternatives } => {
-                        assert!(!alternatives.is_empty());
-                    }
-                    _ => {} // Other strategies are also valid
+                if let RecoveryStrategy::TryDifferentAction { alternatives } = suggested_recovery {
+                    assert!(!alternatives.is_empty());
                 }
             }
             _ => panic!("Expected Stuck result, got {:?}", result),

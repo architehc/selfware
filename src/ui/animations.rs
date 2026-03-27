@@ -470,8 +470,7 @@ impl Animation for PulseAnimation {
 pub struct MatrixRainAnimation {
     width: usize,
     height: usize,
-
-    #[allow(dead_code)] // Tracks column drop positions for tick() animation
+    #[allow(dead_code)]
     columns: Vec<usize>,
 }
 

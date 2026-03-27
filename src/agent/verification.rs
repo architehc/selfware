@@ -7,7 +7,6 @@ use crate::checkpoint::VisualAssertion;
 use crate::cognitive::CyclePhase;
 
 /// Result of visual verification including whether it should hard-gate execution.
-#[allow(dead_code)]
 pub(super) struct VisualVerificationResult {
     /// Message to append to the tool result (always present on non-pass).
     pub message: String,
@@ -319,7 +318,7 @@ impl Agent {
 
         // Always reject test-only edits if task mentions fixing/implementing,
         // OR if there are edits but none to source files (likely a mistake)
-        if all_test_files && (needs_source_change || edited_files.len() >= 1) {
+        if all_test_files && (needs_source_change || !edited_files.is_empty()) {
             warn!(
                 "Workflow validator: only test files edited ({:?}), task requires source changes",
                 edited_files
@@ -403,9 +402,7 @@ impl Agent {
         }
 
         let expectation = visual_verification_expectation(tool_name, args)?;
-        let Some(verifier) = configured_visual_verifier(&self.config) else {
-            return None;
-        };
+        let verifier = configured_visual_verifier(&self.config)?;
 
         info!(
             "Running visual verification after {} with expectation: {}",
@@ -440,6 +437,44 @@ impl Agent {
             }
         };
 
+        // Save screenshot to temp file and compute perceptual hash for stale-screen detection
+        let screenshot_result: Option<(std::path::PathBuf, String)> = {
+            use base64::Engine as _;
+            match base64::engine::general_purpose::STANDARD.decode(&captured.base64_png) {
+                Ok(png_bytes) => {
+                    // Compute perceptual hash from bytes
+                    let hash = crate::testing::visual_verification::compute_perceptual_hash_from_bytes(&png_bytes)
+                        .unwrap_or_default();
+                    
+                    // Also track with simple hash for basic stuck-loop detection
+                    let simple_hash = super::recovery::hash_text_signature(&hash);
+                    let _ = self.detect_visual_stuck_loop(simple_hash);
+                    
+                    // Save to temp file for reference
+                    match tempfile::NamedTempFile::with_suffix(".png") {
+                        Ok(mut tmp) => {
+                            use std::io::Write;
+                            if tmp.write_all(&png_bytes).is_ok() {
+                                // Try to persist the temp file, fall back to keeping it as temp
+                                match tmp.keep() {
+                                    Ok((_, path)) => Some((path, hash)),
+                                    Err(e) => {
+                                        // If keep fails, try to get the path before it's lost
+                                        let path = e.file.path().to_path_buf();
+                                        Some((path, hash))
+                                    }
+                                }
+                            } else {
+                                None
+                            }
+                        }
+                        Err(_) => None,
+                    }
+                }
+                Err(_) => None,
+            }
+        };
+
         let require_hard_gate = self.config.agent.require_visual_verification;
         let current_step = self.loop_control.current_step();
 
@@ -454,16 +489,20 @@ impl Agent {
                     tool_name,
                     report.confidence * 100.0
                 ));
+                let (screenshot_path, screenshot_hash) = screenshot_result
+                    .as_ref()
+                    .map(|(p, h)| (Some(p.clone()), h.clone()))
+                    .unwrap_or((None, String::new()));
                 let assertion = VisualAssertion {
                     id: format!("va-{}-{}", current_step, uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("")),
                     description: expectation.clone(),
-                    screenshot_path: None,
+                    screenshot_path,
                     verified: true,
                     verification_result: Some(crate::session::checkpoint::VerificationResult {
                         passed: true,
                         confidence: report.confidence as f32,
                         explanation: report.description.clone(),
-                        screenshot_hash: String::new(),
+                        screenshot_hash,
                     }),
                     created_at: Utc::now(),
                     verified_at: Some(Utc::now()),
@@ -521,16 +560,20 @@ impl Agent {
                         issues
                     )
                 };
+                let (screenshot_path, screenshot_hash) = screenshot_result
+                    .as_ref()
+                    .map(|(p, h)| (Some(p.clone()), h.clone()))
+                    .unwrap_or((None, String::new()));
                 let assertion = VisualAssertion {
                     id: format!("va-{}-{}", current_step, uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("")),
                     description: expectation.clone(),
-                    screenshot_path: None,
+                    screenshot_path,
                     verified: true,
                     verification_result: Some(crate::session::checkpoint::VerificationResult {
                         passed: false,
                         confidence: report.confidence as f32,
                         explanation: report.description.clone(),
-                        screenshot_hash: String::new(),
+                        screenshot_hash,
                     }),
                     created_at: Utc::now(),
                     verified_at: Some(Utc::now()),

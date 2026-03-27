@@ -577,7 +577,9 @@ pub async fn run() -> Result<()> {
     config.execution_mode = exec_mode;
 
     if config.execution_mode == ExecutionMode::Daemon {
-        let addr = "127.0.0.1:9090".parse().unwrap();
+        let addr = "127.0.0.1:9090"
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Failed to parse Prometheus address: {}", e))?;
         if let Err(e) = crate::telemetry::start_prometheus_exporter(addr) {
             tracing::warn!("Failed to start prometheus exporter: {}", e);
         } else {
@@ -1991,7 +1993,7 @@ max_recovery_attempts = 3
         Commands::Init { template } => {
             tokio::task::spawn_blocking(move || run_init_wizard(template))
                 .await
-                .unwrap()?;
+                .map_err(|e| anyhow::anyhow!("Task panicked: {}", e))??;
         }
     }
 
@@ -2492,7 +2494,7 @@ mod tests {
         assert_ne!(hash_prefix, 0);
         let max_errors: usize = MAX_JOURNAL_ERRORS_DISPLAY;
         assert_ne!(max_errors, 0);
-        assert!(!DEFAULT_WORKFLOW_NAME.is_empty());
+        assert_ne!(DEFAULT_WORKFLOW_NAME, "");
     }
 
     // ── CLI flag parsing tests ──

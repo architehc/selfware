@@ -26,7 +26,7 @@ impl Language {
     /// Detect language from file path and optional override
     pub fn detect(path: &Path, override_lang: Option<&str>) -> Self {
         if let Some(lang) = override_lang {
-            return Self::from_str(lang);
+            return Self::parse(lang);
         }
 
         match path.extension().and_then(|e| e.to_str()) {
@@ -43,7 +43,7 @@ impl Language {
         }
     }
 
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "rust" | "rs" => Self::Rust,
             "python" | "py" => Self::Python,

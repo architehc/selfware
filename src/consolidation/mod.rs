@@ -61,6 +61,7 @@ use tracing::info;
 pub struct ConsolidationEngine {
     #[allow(dead_code)]
     config: ConsolidationConfig,
+    #[allow(dead_code)]
     collector: ShortTermCollector,
     compactor: MemoryCompactor,
     store: LongTermStore,

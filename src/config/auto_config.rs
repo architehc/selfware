@@ -233,12 +233,14 @@ impl AutoConfigurator {
             0.7
         };
 
-        let mut config = Config::default();
-        config.endpoint = self.endpoint.clone();
-        config.model = model.to_string();
-        config.max_tokens = max_tokens;
-        config.context_length = max_model_len;
-        config.temperature = temperature;
+        let mut config = Config {
+            endpoint: self.endpoint.clone(),
+            model: model.to_string(),
+            max_tokens,
+            context_length: max_model_len,
+            temperature,
+            ..Default::default()
+        };
 
         if let Some(ref key) = self.api_key {
             config.api_key = Some(RedactedString::new(key));

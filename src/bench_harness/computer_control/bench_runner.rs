@@ -107,7 +107,7 @@ impl BrowserBenchReport {
 
         if let Some(llm) = &self.llm_report {
             md.push_str("\n## LLM Analysis\n\n");
-            md.push_str(&format!("| Metric | Value |\n|--------|-------|\n"));
+            md.push_str("| Metric | Value |\n|--------|-------|\n");
             md.push_str(&format!("| Tasks analyzed | {} |\n", llm.tasks_total));
             md.push_str(&format!("| Avg score | {:.0}% |\n", llm.avg_score * 100.0));
             md.push_str(&format!(

@@ -38,7 +38,7 @@ pub enum Depth {
 }
 
 impl Depth {
-    pub fn from_str(s: &str) -> Result<Self> {
+    pub fn parse(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "overview" => Ok(Self::Overview),
             "signatures" => Ok(Self::Signatures),
@@ -48,15 +48,23 @@ impl Depth {
         }
     }
 
-    pub fn to_string(&self) -> String {
+    pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Overview => "overview".to_string(),
-            Self::Signatures => "signatures".to_string(),
-            Self::Full => "full".to_string(),
-            Self::Dependencies => "dependencies".to_string(),
+            Self::Overview => "overview",
+            Self::Signatures => "signatures",
+            Self::Full => "full",
+            Self::Dependencies => "dependencies",
         }
     }
+}
 
+impl std::fmt::Display for Depth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl Depth {
     /// Default token cost per file at this depth
     pub fn default_tokens(&self) -> usize {
         match self {
@@ -137,7 +145,7 @@ impl TokenBudget {
         let estimate = match depth {
             Depth::Overview => {
                 // Overview is roughly 5% of file content (imports, module structure)
-                let tokens = (total_tokens / 20).max(20).min(100);
+                let tokens = (total_tokens / 20).clamp(20, 100);
                 FileEstimate {
                     min_tokens: 10,
                     tokens,
@@ -146,7 +154,7 @@ impl TokenBudget {
             }
             Depth::Signatures => {
                 // Signatures are roughly 20% of file (function signatures without bodies)
-                let tokens = (total_tokens / 5).max(50).min(500);
+                let tokens = (total_tokens / 5).clamp(50, 500);
                 FileEstimate {
                     min_tokens: 20,
                     tokens,
@@ -163,7 +171,7 @@ impl TokenBudget {
             }
             Depth::Dependencies => {
                 // Dependencies require parsing imports and calls
-                let tokens = (total_tokens / 10).max(50).min(500);
+                let tokens = (total_tokens / 10).clamp(50, 500);
                 FileEstimate {
                     min_tokens: 30,
                     tokens,

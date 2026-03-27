@@ -761,8 +761,7 @@ impl ContextMap {
             ContextLevel::Tree => 2,
         });
 
-        let mut shown = 0;
-        for entry in &sorted {
+        for (shown, entry) in sorted.iter().enumerate() {
             if shown >= MAX_TREE_LINES {
                 lines.push(format!(
                     "\n  ... and {} more files (use directory_tree for full listing)",
@@ -787,7 +786,6 @@ impl ContextMap {
                 size_str,
                 entry.current_tokens
             ));
-            shown += 1;
         }
 
         lines.push(String::new());
@@ -1487,7 +1485,7 @@ fn extract_fn_name(line: &str) -> String {
     if let Some(fn_idx) = line.find("fn ") {
         let after_fn = &line[fn_idx + 3..];
         let end = after_fn
-            .find(|c: char| c == '(' || c == '<' || c == ' ')
+            .find(|c: char| ['(', '<', ' '].contains(&c))
             .unwrap_or(after_fn.len());
         after_fn[..end].to_string()
     } else {
@@ -1525,7 +1523,7 @@ fn extract_name_after(line: &str, keyword: &str) -> String {
     if let Some(idx) = line.find(keyword) {
         let after = &line[idx + keyword.len()..];
         let end = after
-            .find(|c: char| c == '<' || c == '{' || c == '(' || c == ';' || c == ' ')
+            .find(|c: char| ['<', '{', '(', ';', ' '].contains(&c))
             .unwrap_or(after.len());
         after[..end].trim().to_string()
     } else {
@@ -1566,13 +1564,15 @@ fn extract_const_parts(line: &str) -> (String, String) {
 fn extract_impl_target(line: &str) -> String {
     // "impl<T> Agent for Foo {" → "Agent for Foo"
     // "impl Agent {" → "Agent"
-    let after_impl = if line.starts_with("impl<") {
+    let after_impl = if let Some(rest) = line.strip_prefix("impl<") {
         // Skip generic params.
-        if let Some(gt) = line.find('>') {
-            line[gt + 1..].trim()
+        if let Some(gt_pos) = rest.find('>') {
+            &rest[gt_pos + 1..]
         } else {
-            &line[5..]
+            rest
         }
+    } else if let Some(rest) = line.strip_prefix("impl ") {
+        rest
     } else {
         &line[5..]
     };

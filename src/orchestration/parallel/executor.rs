@@ -43,8 +43,10 @@ impl ParallelExecutor {
     }
 
     pub fn with_concurrency(max_concurrency: usize) -> Self {
-        let mut config = ParallelConfig::default();
-        config.max_concurrency = max_concurrency;
+        let config = ParallelConfig {
+            max_concurrency,
+            ..Default::default()
+        };
         Self::new(config)
     }
 
@@ -248,18 +250,16 @@ impl ParallelExecutor {
                 }
 
                 let level_results = futures::future::join_all(handles).await;
-                for result in level_results {
-                    if let Ok((id, tool_name, res, duration)) = result {
-                        results.insert(
-                            id.clone(),
-                            ParallelResult {
-                                tool_name,
-                                tool_call_id: id,
-                                result: res,
-                                duration_ms: duration,
-                            },
-                        );
-                    }
+                for (id, tool_name, res, duration) in level_results.into_iter().flatten() {
+                    results.insert(
+                        id.clone(),
+                        ParallelResult {
+                            tool_name,
+                            tool_call_id: id,
+                            result: res,
+                            duration_ms: duration,
+                        },
+                    );
                 }
             }
         }
