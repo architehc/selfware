@@ -7,16 +7,16 @@ pub mod conflicts;
 pub mod executor;
 pub mod types;
 
-pub use conflicts::{Conflict, ConflictDetector, ConflictResolver, ConflictType, ToolCallRef};
+pub use conflicts::{Conflict, ConflictDetector, ConflictResolver, ConflictType};
 pub use executor::ParallelExecutor;
 pub use types::{
-    BatchConfig, DependencyGraph, DependencyNode, ExecutionRecord, ExecutionStats,
-    ExecutionStatsSummary, NodeStatus, ParallelConfig, ParallelResult, PoolStats, ToolBatch,
+    DependencyGraph, NodeStatus, ParallelConfig, ParallelResult,
 };
 
-use crate::tools::ToolRegistry;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+
 
 /// Manages parallel execution of tool calls
 pub struct ParallelManager {
@@ -80,6 +80,6 @@ impl Default for ParallelManager {
 pub mod prelude {
     pub use super::{
         Conflict, ConflictDetector, ConflictResolver, ConflictType, DependencyGraph, NodeStatus,
-        ParallelConfig, ParallelExecutor, ParallelManager, ParallelResult,
+        ParallelConfig, ParallelResult,
     };
 }

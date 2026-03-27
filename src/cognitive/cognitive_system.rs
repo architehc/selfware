@@ -15,8 +15,8 @@ use crate::token_count::estimate_tokens_with_overhead;
 use crate::vector_store::EmbeddingBackend;
 
 use super::memory_hierarchy::{
-    ChangeType, CodeContext, CodeModification, Episode, EpisodeType, HierarchicalMemory,
-    Importance, MemoryConfig, MemoryStats, SelfImprovementContext, SelfModel, TokenBudget,
+    CodeContext, CodeModification, Episode, EpisodeType, HierarchicalMemory,
+    Importance, MemoryConfig, MemoryStats, SelfImprovementContext, SelfModel,
     WorkingContext, TOTAL_CONTEXT_TOKENS,
 };
 use super::self_reference::{SelfReferenceSystem, SourceRetrievalOptions};
@@ -160,7 +160,7 @@ impl CognitiveSystem {
 
         // Get working memory context
         let working = {
-            let memory = self.memory.read().await;
+            let _memory = self.memory.read().await;
             WorkingContext::new("You are Selfware, an AI assistant.")
         };
 
@@ -566,7 +566,7 @@ fn format_timestamp(timestamp: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cognitive::memory_hierarchy::{FileContext, MemoryMetrics, MemoryUsage};
+    use crate::cognitive::memory_hierarchy::{FileContext, MemoryMetrics, MemoryUsage, TokenBudget};
 
     // ========================================================================
     // Helper functions

@@ -3,9 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock as StdRwLock};
+use std::sync::RwLock as StdRwLock;
 
-use crate::tool_parser::ParsedToolCall;
 
 /// Configuration for parallel execution
 #[derive(Debug, Clone)]

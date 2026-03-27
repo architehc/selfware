@@ -259,10 +259,8 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::types::{ToolCall as ApiToolCall, ToolFunction};
     use crate::checkpoint::ToolCallLog;
     use crate::testing::mock_api::MockLlmServer;
-    use crate::tool_parser::parse_tool_calls;
     use chrono::Utc;
     use std::hash::{Hash, Hasher};
     use tempfile::tempdir;

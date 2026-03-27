@@ -1,13 +1,13 @@
 //! Parallel Execution Engine
 
 use super::types::{
-    DependencyGraph, ExecutionRecord, ExecutionStats, NodeStatus, ParallelConfig, ParallelResult,
+    DependencyGraph, ExecutionRecord, ExecutionStats, ParallelConfig, ParallelResult,
 };
 use crate::tools::ToolRegistry;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
-use tokio::sync::{Mutex, RwLock, Semaphore};
+use tokio::sync::{RwLock, Semaphore};
 
 /// Parallel executor for tool calls
 pub struct ParallelExecutor {

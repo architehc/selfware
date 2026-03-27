@@ -43,7 +43,7 @@ impl Agent {
                     role: "assistant".to_string(),
                     content: content.into(),
                     reasoning_content: reasoning,
-                    tool_calls: tool_calls,
+                    tool_calls,
                     tool_call_id: None,
                     name: None,
                 },

@@ -3,7 +3,6 @@
 //! This module provides capabilities for the system to introspect on itself,
 //! understand its own state, capabilities, and propose modifications.
 
-use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -19,7 +18,7 @@ pub use types::{
     RiskLevel, SelfReference, SelfReferenceRecord, ValidationResult,
 };
 
-use crate::cognitive::memory_hierarchy::{CodeContext, SelfModel, SemanticMemory};
+use crate::cognitive::memory_hierarchy::{SelfModel, SemanticMemory};
 
 /// Options for retrieving source code
 #[derive(Debug, Clone, Default)]

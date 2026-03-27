@@ -1637,10 +1637,7 @@ async fn handle_command(
 
             // 1. Endpoint health check
             println!("{} Checking endpoint health...", "⏳".dimmed());
-            let ep = endpoint
-                .as_ref()
-                .map(|s| s.as_str())
-                .unwrap_or(&config.endpoint);
+            let ep = endpoint.as_deref().unwrap_or(&config.endpoint);
 
             let auto_cfg = crate::config::auto_config::AutoConfigurator::new(ep, None);
             match auto_cfg.fetch_models().await {
@@ -1674,11 +1671,8 @@ async fn handle_command(
                     "⏳".dimmed()
                 );
 
-                let ep = endpoint
-                    .as_ref()
-                    .map(|s| s.as_str())
-                    .unwrap_or(&config.endpoint);
-                let model_name = config.model.clone();
+                let _ep = endpoint.as_deref().unwrap_or(&config.endpoint);
+                let _model_name = config.model.clone();
 
                 #[cfg(feature = "bench-harness")]
                 {
@@ -1686,8 +1680,8 @@ async fn handle_command(
                     use crate::bench_harness::*;
 
                     let bench_config = HarnessConfig {
-                        endpoint: ep.to_string(),
-                        model: model_name.clone(),
+                        endpoint: _ep.to_string(),
+                        model: _model_name.clone(),
                         max_concurrent: concurrent,
                         max_tokens: 256,
                         temperature: 0.7,
@@ -1750,10 +1744,7 @@ async fn handle_command(
                     use crate::api::types::Message;
                     use crate::bench_harness::*;
 
-                    let ep = endpoint
-                        .as_ref()
-                        .map(|s| s.as_str())
-                        .unwrap_or(&config.endpoint);
+                    let ep = endpoint.as_deref().unwrap_or(&config.endpoint);
 
                     let bench_config = HarnessConfig {
                         endpoint: ep.to_string(),
