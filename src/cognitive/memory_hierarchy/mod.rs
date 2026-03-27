@@ -102,8 +102,85 @@ impl SemanticMemory {
         })
     }
 
-    pub async fn index_codebase(&self, _path: &std::path::Path) -> anyhow::Result<()> {
-        // Stub implementation
+    /// Index file paths from a codebase directory into semantic memory.
+    ///
+    /// Walks the directory tree and records each source file as a `FileContext`
+    /// entry. Only indexes paths (no full content) to keep memory footprint low.
+    ///
+    /// TODO: Add content summarization per file once an LLM summarizer is wired in.
+    /// TODO: Extract symbol-level context (functions, structs) for richer queries.
+    pub async fn index_codebase(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        use walkdir::WalkDir;
+
+        let source_extensions = ["rs", "toml", "yaml", "yml", "json", "md", "py", "ts", "js"];
+        let mut files = Vec::new();
+        let mut total_tokens = 0usize;
+
+        for entry in WalkDir::new(path)
+            .max_depth(8)
+            .into_iter()
+            .filter_entry(|e| {
+                let name = e.file_name().to_string_lossy();
+                // Skip hidden dirs, target, node_modules
+                !name.starts_with('.') && name != "target" && name != "node_modules"
+            })
+        {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let ext = entry
+                .path()
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            if !source_extensions.contains(&ext) {
+                continue;
+            }
+
+            let rel_path = entry
+                .path()
+                .strip_prefix(path)
+                .unwrap_or(entry.path())
+                .to_string_lossy()
+                .to_string();
+
+            // Estimate ~2 tokens per path component as lightweight index
+            let path_tokens = rel_path.len() / 4 + 1;
+            total_tokens += path_tokens;
+
+            let lang = match ext {
+                "rs" => "rust",
+                "py" => "python",
+                "ts" | "js" => "javascript",
+                "toml" => "toml",
+                "yaml" | "yml" => "yaml",
+                "json" => "json",
+                "md" => "markdown",
+                _ => "unknown",
+            };
+
+            files.push(types::FileContext {
+                path: rel_path,
+                content: String::new(), // Path-only index; content loaded on demand
+                language: lang.to_string(),
+                estimated_tokens: path_tokens,
+                relevance_score: 0.5, // Neutral until queried
+            });
+        }
+
+        let mut ctx = self.code_context.write().await;
+        ctx.files = files;
+        ctx.total_tokens = total_tokens;
+        tracing::info!(
+            file_count = ctx.files.len(),
+            total_tokens,
+            "Indexed codebase into semantic memory"
+        );
+
         Ok(())
     }
 }
@@ -167,10 +244,22 @@ impl HierarchicalMemory {
         .await
     }
 
-    /// Add a message to working memory
-    pub fn add_message(&mut self, message: crate::api::types::Message, _importance: f32) {
+    /// Add a message to working memory, triggering compression if over budget
+    pub fn add_message(&mut self, message: crate::api::types::Message, importance: f32) {
         let tokens = crate::token_count::estimate_content_tokens(message.content.text());
         self.working.add_message(message, tokens);
+        self.usage.working_tokens += tokens;
+        self.usage.total_used += tokens;
+
+        // Store as a memory entry with the given importance
+        let id = self.index.next_id();
+        let entry = MemoryEntry::new(id, format!("[msg] {tokens} tokens"), MemoryTier::Working)
+            .with_importance(importance);
+        // Fire-and-forget store (working memory is append-heavy)
+        let working = self.working.clone();
+        tokio::spawn(async move {
+            let _ = working.store(entry).await;
+        });
     }
 
     /// Record an episode
@@ -184,10 +273,77 @@ impl HierarchicalMemory {
         self.stats.read().await.clone()
     }
 
-    /// Compress memory if over budget
+    /// Compress memory if over budget.
+    ///
+    /// Checks each layer against its token budget and evicts the least-important,
+    /// oldest-accessed entries until the layer fits. Returns `true` if any
+    /// evictions occurred.
     pub async fn compress_if_needed(&mut self) -> anyhow::Result<bool> {
-        // Stub implementation
-        Ok(false)
+        let mut compressed = false;
+
+        // --- Working memory compression ---
+        if self.usage.working_tokens > self.budget.working_memory {
+            let mut entries = self.working.entries().await;
+            // Sort by importance ASC, then accessed_at ASC (evict least important & oldest first)
+            entries.sort_by(|a, b| {
+                a.importance
+                    .partial_cmp(&b.importance)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.accessed_at.cmp(&b.accessed_at))
+            });
+
+            let mut tokens_to_free =
+                self.usage.working_tokens.saturating_sub(self.budget.working_memory);
+            for entry in &entries {
+                if tokens_to_free == 0 {
+                    break;
+                }
+                let entry_tokens = crate::token_count::estimate_content_tokens(&entry.content);
+                // Demote to short-term instead of dropping
+                if let Some(mut removed) = self.working.remove(entry.id).await {
+                    removed.tier = MemoryTier::ShortTerm;
+                    let _ = self.short_term.store(removed).await;
+                    let freed = entry_tokens.min(tokens_to_free);
+                    tokens_to_free = tokens_to_free.saturating_sub(freed);
+                    self.usage.working_tokens =
+                        self.usage.working_tokens.saturating_sub(entry_tokens);
+                    compressed = true;
+                }
+            }
+        }
+
+        // --- Short-term memory compression (evict to long-term) ---
+        let st_count = self.short_term.count().await;
+        let config = self.config.read().await;
+        let st_cap = config.short_term_capacity;
+        drop(config);
+
+        if st_count > st_cap {
+            let mut entries = self.short_term.entries().await;
+            entries.sort_by(|a, b| {
+                a.importance
+                    .partial_cmp(&b.importance)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.accessed_at.cmp(&b.accessed_at))
+            });
+
+            let to_evict = st_count.saturating_sub(st_cap);
+            for entry in entries.iter().take(to_evict) {
+                if let Some(mut removed) = self.short_term.remove(entry.id).await {
+                    removed.tier = MemoryTier::LongTerm;
+                    let _ = self.long_term.store(removed).await;
+                    compressed = true;
+                }
+            }
+        }
+
+        // Recalculate total usage
+        self.usage.total_used = self.usage.working_tokens
+            + self.usage.episodic_tokens
+            + self.usage.semantic_tokens
+            + self.usage.self_tokens;
+
+        Ok(compressed)
     }
 
     /// Check if memory is within budget

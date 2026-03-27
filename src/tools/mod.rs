@@ -193,11 +193,11 @@ impl ToolRegistry {
         registry.register(DirectoryTree::new());
 
         // Git operations
-        registry.register(GitStatus);
-        registry.register(GitDiff);
-        registry.register(GitCommit);
-        registry.register(GitPush);
-        registry.register(GitCheckpoint);
+        registry.register(GitStatus::new());
+        registry.register(GitDiff::new());
+        registry.register(GitCommit::new());
+        registry.register(GitPush::new());
+        registry.register(GitCheckpoint::new());
 
         // Cargo/Build operations
         registry.register(CargoTest);

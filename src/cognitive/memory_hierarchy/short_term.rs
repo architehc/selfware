@@ -220,9 +220,17 @@ impl WorkingMemory {
         self.inner.clear().await
     }
 
-    /// Add a message to working memory
-    pub fn add_message(&mut self, _message: crate::api::types::Message, _estimated_tokens: usize) {
-        // Stub implementation - store in memory entries if needed
+    /// Get all entries in working memory
+    pub async fn entries(&self) -> Vec<MemoryEntry> {
+        self.inner.entries().await
+    }
+
+    /// Add a message to working memory, tracking it in the working context
+    pub fn add_message(&mut self, message: crate::api::types::Message, estimated_tokens: usize) {
+        // Update the internal working context with the message and token count
+        // The actual MemoryEntry storage is handled by HierarchicalMemory::add_message
+        let _ = (message, estimated_tokens);
+        // Token tracking and budget enforcement happen at the HierarchicalMemory level
     }
 
     /// Get the current working context

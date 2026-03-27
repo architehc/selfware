@@ -1,4 +1,6 @@
+use super::file::{resolve_safety_config, validate_tool_path};
 use super::Tool;
+use crate::config::SafetyConfig;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use git2::{Repository, StatusOptions};
@@ -62,11 +64,91 @@ fn write_commit_message_file(message: &str) -> Option<PathBuf> {
     }
 }
 
-pub struct GitStatus;
-pub struct GitDiff;
-pub struct GitCommit;
-pub struct GitPush;
-pub struct GitCheckpoint;
+/// Validate that a repo/working-directory path is within the allowed paths.
+fn validate_git_path(path: &str, safety_config: Option<&SafetyConfig>) -> Result<()> {
+    let safety = resolve_safety_config(safety_config);
+    validate_tool_path(path, &safety)
+}
+
+#[derive(Default)]
+pub struct GitStatus {
+    pub safety_config: Option<SafetyConfig>,
+}
+
+#[derive(Default)]
+pub struct GitDiff {
+    pub safety_config: Option<SafetyConfig>,
+}
+
+#[derive(Default)]
+pub struct GitCommit {
+    pub safety_config: Option<SafetyConfig>,
+}
+
+#[derive(Default)]
+pub struct GitPush {
+    pub safety_config: Option<SafetyConfig>,
+}
+
+#[derive(Default)]
+pub struct GitCheckpoint {
+    pub safety_config: Option<SafetyConfig>,
+}
+
+impl GitStatus {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
+
+impl GitDiff {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
+
+impl GitCommit {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
+
+impl GitPush {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
+
+impl GitCheckpoint {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn with_safety_config(config: SafetyConfig) -> Self {
+        Self {
+            safety_config: Some(config),
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for GitCheckpoint {
@@ -101,6 +183,9 @@ impl Tool for GitCheckpoint {
             .get("auto_branch")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
+
+        // Validate cwd is within allowed paths
+        validate_git_path(".", self.safety_config.as_ref())?;
 
         // Check current branch
         let branch_output = tokio::process::Command::new("git")
@@ -219,6 +304,8 @@ impl Tool for GitStatus {
             .and_then(|v| v.as_str())
             .unwrap_or(".");
 
+        validate_git_path(repo_path, self.safety_config.as_ref())?;
+
         let repo = Repository::open(repo_path)?;
         let head = repo.head()?;
         let branch = head.shorthand().unwrap_or("HEAD");
@@ -285,6 +372,8 @@ impl Tool for GitDiff {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        validate_git_path(repo_path, self.safety_config.as_ref())?;
+
         let mut cmd = tokio::process::Command::new("git");
         cmd.arg("-C").arg(repo_path).arg("diff");
         if staged {
@@ -334,6 +423,15 @@ impl Tool for GitCommit {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
+
+        validate_git_path(repo_path, self.safety_config.as_ref())?;
+
+        // Validate individual file paths
+        for file in &files {
+            if let Some(f) = file.as_str() {
+                validate_git_path(f, self.safety_config.as_ref())?;
+            }
+        }
 
         // Stage files
         if files.is_empty() {
@@ -437,6 +535,9 @@ impl Tool for GitPush {
             .unwrap_or("origin");
         let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
 
+        // Validate cwd is within allowed paths
+        validate_git_path(".", self.safety_config.as_ref())?;
+
         // Determine branch
         let branch = if let Some(b) = args.get("branch").and_then(|v| v.as_str()) {
             b.to_string()
@@ -481,38 +582,38 @@ mod tests {
 
     #[test]
     fn test_git_status_name() {
-        let tool = GitStatus;
+        let tool = GitStatus::new();
         assert_eq!(tool.name(), "git_status");
     }
 
     #[test]
     fn test_git_status_description() {
-        let tool = GitStatus;
+        let tool = GitStatus::new();
         assert!(tool.description().contains("status"));
     }
 
     #[test]
     fn test_git_status_schema() {
-        let tool = GitStatus;
+        let tool = GitStatus::new();
         let schema = tool.schema();
         assert_eq!(schema["type"], "object");
     }
 
     #[test]
     fn test_git_diff_name() {
-        let tool = GitDiff;
+        let tool = GitDiff::new();
         assert_eq!(tool.name(), "git_diff");
     }
 
     #[test]
     fn test_git_diff_description() {
-        let tool = GitDiff;
+        let tool = GitDiff::new();
         assert!(tool.description().contains("diff"));
     }
 
     #[test]
     fn test_git_diff_schema() {
-        let tool = GitDiff;
+        let tool = GitDiff::new();
         let schema = tool.schema();
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["staged"].is_object());
@@ -520,19 +621,19 @@ mod tests {
 
     #[test]
     fn test_git_commit_name() {
-        let tool = GitCommit;
+        let tool = GitCommit::new();
         assert_eq!(tool.name(), "git_commit");
     }
 
     #[test]
     fn test_git_commit_description() {
-        let tool = GitCommit;
+        let tool = GitCommit::new();
         assert!(tool.description().contains("commit"));
     }
 
     #[test]
     fn test_git_commit_schema() {
-        let tool = GitCommit;
+        let tool = GitCommit::new();
         let schema = tool.schema();
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["message"].is_object());
@@ -541,20 +642,20 @@ mod tests {
 
     #[test]
     fn test_git_checkpoint_name() {
-        let tool = GitCheckpoint;
+        let tool = GitCheckpoint::new();
         assert_eq!(tool.name(), "git_checkpoint");
     }
 
     #[test]
     fn test_git_checkpoint_description() {
-        let tool = GitCheckpoint;
+        let tool = GitCheckpoint::new();
         assert!(tool.description().contains("checkpoint"));
         assert!(tool.description().contains("rollback"));
     }
 
     #[test]
     fn test_git_checkpoint_schema() {
-        let tool = GitCheckpoint;
+        let tool = GitCheckpoint::new();
         let schema = tool.schema();
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["message"].is_object());
@@ -564,7 +665,7 @@ mod tests {
 
     #[test]
     fn test_git_checkpoint_schema_required() {
-        let tool = GitCheckpoint;
+        let tool = GitCheckpoint::new();
         let schema = tool.schema();
         let required = schema["required"].as_array().unwrap();
         assert!(required.contains(&serde_json::json!("message")));
@@ -572,7 +673,7 @@ mod tests {
 
     #[test]
     fn test_git_commit_schema_required() {
-        let tool = GitCommit;
+        let tool = GitCommit::new();
         let schema = tool.schema();
         let required = schema["required"].as_array().unwrap();
         assert!(required.contains(&serde_json::json!("message")));
@@ -580,7 +681,7 @@ mod tests {
 
     #[test]
     fn test_git_commit_schema_commit_types() {
-        let tool = GitCommit;
+        let tool = GitCommit::new();
         let schema = tool.schema();
         let commit_type = &schema["properties"]["commit_type"];
         let enum_values = commit_type["enum"].as_array().unwrap();
@@ -592,7 +693,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_git_status_execute() {
-        let tool = GitStatus;
+        let tool = GitStatus::new();
         let args = serde_json::json!({});
 
         // This will work in a git repo (like this project)
@@ -605,7 +706,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_git_diff_execute_unstaged() {
-        let tool = GitDiff;
+        let tool = GitDiff::new();
         let args = serde_json::json!({"staged": false});
 
         let result = tool.execute(args).await;
@@ -617,7 +718,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_git_diff_execute_staged() {
-        let tool = GitDiff;
+        let tool = GitDiff::new();
         let args = serde_json::json!({"staged": true});
 
         let result = tool.execute(args).await;
@@ -626,7 +727,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_git_commit_with_message() {
-        let tool = GitCommit;
+        let tool = GitCommit::new();
         // This test creates a real commit - only check that it handles the case
         // when there's nothing to commit gracefully
         let args = serde_json::json!({
@@ -642,7 +743,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_git_checkpoint_execute() {
-        let tool = GitCheckpoint;
+        let tool = GitCheckpoint::new();
         let args = serde_json::json!({
             "message": "Test checkpoint"
         });
@@ -655,7 +756,7 @@ mod tests {
 
     #[test]
     fn test_git_diff_schema_properties() {
-        let tool = GitDiff;
+        let tool = GitDiff::new();
         let schema = tool.schema();
 
         assert!(schema["properties"]["staged"].is_object());
@@ -665,7 +766,7 @@ mod tests {
 
     #[test]
     fn test_git_checkpoint_schema_defaults() {
-        let tool = GitCheckpoint;
+        let tool = GitCheckpoint::new();
         let schema = tool.schema();
 
         let auto_branch = &schema["properties"]["auto_branch"];
@@ -674,7 +775,7 @@ mod tests {
 
     #[test]
     fn test_git_status_schema_properties() {
-        let tool = GitStatus;
+        let tool = GitStatus::new();
         let schema = tool.schema();
 
         assert!(schema["properties"]["repo_path"].is_object());
@@ -682,7 +783,7 @@ mod tests {
 
     #[test]
     fn test_git_commit_schema_files_array() {
-        let tool = GitCommit;
+        let tool = GitCommit::new();
         let schema = tool.schema();
 
         let files = &schema["properties"]["files"];
@@ -696,7 +797,7 @@ mod tests {
         use tempfile::TempDir;
         let temp_dir = TempDir::new().unwrap();
 
-        let tool = GitStatus;
+        let tool = GitStatus::new();
         let args = serde_json::json!({
             "repo_path": temp_dir.path().to_str().unwrap()
         });
@@ -708,7 +809,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_git_status_with_explicit_current_dir() {
-        let tool = GitStatus;
+        let tool = GitStatus::new();
         let args = serde_json::json!({
             "repo_path": "."  // Explicit current dir
         });
@@ -720,7 +821,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_git_diff_with_specific_path() {
-        let tool = GitDiff;
+        let tool = GitDiff::new();
         let args = serde_json::json!({
             "path": ".",
             "staged": false
@@ -737,7 +838,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_git_commit_with_specific_files() {
-        let tool = GitCommit;
+        let tool = GitCommit::new();
         let args = serde_json::json!({
             "message": "Test specific files",
             "files": ["nonexistent_file_12345.txt"]  // File doesn't exist
@@ -751,7 +852,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_git_checkpoint_with_tag() {
-        let tool = GitCheckpoint;
+        let tool = GitCheckpoint::new();
         let args = serde_json::json!({
             "message": "Test checkpoint with tag",
             "tag": "test-checkpoint-tag"
@@ -764,7 +865,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_git_checkpoint_disable_auto_branch() {
-        let tool = GitCheckpoint;
+        let tool = GitCheckpoint::new();
         let args = serde_json::json!({
             "message": "Test no auto branch",
             "auto_branch": false
@@ -777,7 +878,7 @@ mod tests {
 
     #[test]
     fn test_git_status_schema_has_repo_path() {
-        let tool = GitStatus;
+        let tool = GitStatus::new();
         let schema = tool.schema();
 
         let repo_path = &schema["properties"]["repo_path"];
@@ -786,7 +887,7 @@ mod tests {
 
     #[test]
     fn test_git_diff_schema_has_base() {
-        let tool = GitDiff;
+        let tool = GitDiff::new();
         let schema = tool.schema();
 
         let base = &schema["properties"]["base"];
@@ -795,7 +896,7 @@ mod tests {
 
     #[test]
     fn test_git_checkpoint_message_required() {
-        let tool = GitCheckpoint;
+        let tool = GitCheckpoint::new();
         let schema = tool.schema();
 
         let required = schema["required"].as_array().unwrap();
@@ -807,19 +908,19 @@ mod tests {
 
     #[test]
     fn test_git_push_name() {
-        let tool = GitPush;
+        let tool = GitPush::new();
         assert_eq!(tool.name(), "git_push");
     }
 
     #[test]
     fn test_git_push_description() {
-        let tool = GitPush;
+        let tool = GitPush::new();
         assert!(tool.description().contains("Push"));
     }
 
     #[test]
     fn test_git_push_schema() {
-        let tool = GitPush;
+        let tool = GitPush::new();
         let schema = tool.schema();
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["remote"].is_object());
@@ -829,7 +930,7 @@ mod tests {
 
     #[test]
     fn test_git_push_schema_defaults() {
-        let tool = GitPush;
+        let tool = GitPush::new();
         let schema = tool.schema();
         assert_eq!(schema["properties"]["remote"]["default"], "origin");
         assert_eq!(schema["properties"]["force"]["default"], false);
@@ -837,7 +938,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_git_push_execute() {
-        let tool = GitPush;
+        let tool = GitPush::new();
         // Push to nonexistent remote will fail, but shouldn't panic
         let args = serde_json::json!({
             "remote": "nonexistent_remote_test",

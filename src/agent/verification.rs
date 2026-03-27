@@ -1,5 +1,6 @@
 use chrono::Utc;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 use super::*;
@@ -437,38 +438,54 @@ impl Agent {
             }
         };
 
-        // Save screenshot to temp file and compute perceptual hash for stale-screen detection
+        let current_step = self.loop_control.current_step();
+
+        // Save screenshot to durable storage and compute SHA-256 hash for forensics
         let screenshot_result: Option<(std::path::PathBuf, String)> = {
             use base64::Engine as _;
             match base64::engine::general_purpose::STANDARD.decode(&captured.base64_png) {
                 Ok(png_bytes) => {
-                    // Compute perceptual hash from bytes
-                    let hash = crate::testing::visual_verification::compute_perceptual_hash_from_bytes(&png_bytes)
-                        .unwrap_or_default();
-                    
+                    // Compute SHA-256 hash of raw screenshot bytes for stable hashing
+                    let sha_hash = {
+                        let mut hasher = Sha256::new();
+                        hasher.update(&png_bytes);
+                        format!("{:x}", hasher.finalize())
+                    };
+
                     // Also track with simple hash for basic stuck-loop detection
-                    let simple_hash = super::recovery::hash_text_signature(&hash);
+                    let simple_hash = super::recovery::hash_text_signature(&sha_hash);
                     let _ = self.detect_visual_stuck_loop(simple_hash);
-                    
-                    // Save to temp file for reference
-                    match tempfile::NamedTempFile::with_suffix(".png") {
-                        Ok(mut tmp) => {
-                            use std::io::Write;
-                            if tmp.write_all(&png_bytes).is_ok() {
-                                // Try to persist the temp file, fall back to keeping it as temp
-                                match tmp.keep() {
-                                    Ok((_, path)) => Some((path, hash)),
-                                    Err(e) => {
-                                        // If keep fails, try to get the path before it's lost
-                                        let path = e.file.path().to_path_buf();
-                                        Some((path, hash))
-                                    }
+
+                    // Build durable evidence directory: ~/.selfware/visual_evidence/{task_id}/
+                    let task_id = self
+                        .current_checkpoint
+                        .as_ref()
+                        .map(|cp| cp.task_id.clone())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let evidence_dir = dirs::home_dir()
+                        .unwrap_or_else(|| std::path::PathBuf::from("."))
+                        .join(".selfware")
+                        .join("visual_evidence")
+                        .join(&task_id);
+
+                    match std::fs::create_dir_all(&evidence_dir) {
+                        Ok(()) => {
+                            let timestamp = Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
+                            let filename =
+                                format!("step_{}_{}.png", current_step, timestamp);
+                            let filepath = evidence_dir.join(&filename);
+                            match std::fs::write(&filepath, &png_bytes) {
+                                Ok(()) => Some((filepath, sha_hash)),
+                                Err(e) => {
+                                    warn!("Failed to write screenshot to {}: {}", filepath.display(), e);
+                                    None
                                 }
-                            } else {
-                                None
                             }
                         }
-                        Err(_) => None,
+                        Err(e) => {
+                            warn!("Failed to create evidence dir {}: {}", evidence_dir.display(), e);
+                            None
+                        }
                     }
                 }
                 Err(_) => None,
@@ -476,7 +493,6 @@ impl Agent {
         };
 
         let require_hard_gate = self.config.agent.require_visual_verification;
-        let current_step = self.loop_control.current_step();
 
         match verifier
             .verify_screenshot(&captured.base64_png, &expectation)

@@ -361,7 +361,7 @@ impl Agent {
                                         reasoning.push_str(trimmed);
                                     }
                                 }
-                                display_buf = display_buf[end..].to_string();
+                                display_buf.drain(..end);
                                 suppressed_tag_idx = None;
                             } else {
                                 break; // Wait for more data
@@ -384,7 +384,7 @@ impl Agent {
                                         io::stdout().flush().ok();
                                     }
                                 }
-                                display_buf = display_buf[start_pos..].to_string();
+                                display_buf.drain(..start_pos);
                                 suppressed_tag_idx = Some(tag_idx);
                             } else if has_partial_tag_at_end(&display_buf) {
                                 // Partial opening tag at end — buffer it
