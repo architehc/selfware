@@ -1399,7 +1399,7 @@ mod tests {
 
         let prompt = ctx.to_prompt();
         assert!(
-            prompt.contains("Self-Improvement Task"),
+            prompt.contains("Self-Improvement Context"),
             "Prompt should contain self-improvement section"
         );
         assert!(prompt.contains("Optimize token counting"));
@@ -1664,7 +1664,7 @@ mod tests {
         assert!(prompt.contains("## Relevant Past Experiences"));
         assert!(prompt.contains("[conversation]"));
         assert!(prompt.contains("Critical event"));
-        assert!(prompt.contains("Self-Improvement Task"));
+        assert!(prompt.contains("Self-Improvement Context"));
         assert!(prompt.contains("Better memory"));
         assert!(prompt.contains("## Relevant Code"));
         assert!(prompt.contains("src/semantic.rs"));
@@ -2401,7 +2401,7 @@ mod tests {
         };
 
         let prompt = ctx.to_prompt();
-        assert!(prompt.contains("Self-Improvement Task"));
+        assert!(prompt.contains("Self-Improvement Context"));
         assert!(prompt.contains("Minimal goal"));
         assert!(prompt.contains("Suggestions to Consider"));
     }

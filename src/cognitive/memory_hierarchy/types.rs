@@ -328,8 +328,8 @@ impl SelfImprovementContext {
         if !self.recent_modifications.is_empty() {
             prompt.push_str(&format!("Recent Modifications: {}\n", self.recent_modifications));
         }
+        prompt.push_str("Suggestions to Consider:\n");
         if !self.suggestions.is_empty() {
-            prompt.push_str("Suggestions:\n");
             for s in &self.suggestions {
                 prompt.push_str(&format!("- {}\n", s));
             }
