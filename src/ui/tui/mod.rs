@@ -5,14 +5,14 @@
 // Feature-gated module - dead_code lint disabled at crate level
 
 pub mod animation;
-mod app;
-mod dashboard_widgets;
+pub mod app;
+pub mod dashboard_widgets;
 pub mod garden_view;
-mod layout;
+pub mod layout;
 mod markdown;
-mod palette;
+pub mod palette;
 mod swarm_app;
-mod swarm_state;
+pub mod swarm_state;
 mod swarm_widgets;
 mod widgets;
 

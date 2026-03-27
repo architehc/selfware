@@ -9,8 +9,10 @@ pub mod conflicts;
 pub mod executor;
 pub mod types;
 
+#[allow(unused_imports)]
 pub use conflicts::{Conflict, ConflictDetector, ConflictResolver, ConflictType};
 pub use executor::ParallelExecutor;
+#[allow(unused_imports)]
 pub use types::{
     DependencyGraph, NodeStatus, ParallelConfig, ParallelResult,
 };

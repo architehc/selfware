@@ -1,10 +1,21 @@
-use std::hash::{Hash, Hasher};
-
+use chrono::Utc;
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
 use super::*;
+use crate::checkpoint::VisualAssertion;
 use crate::cognitive::CyclePhase;
+
+/// Result of visual verification including whether it should hard-gate execution.
+#[allow(dead_code)]
+pub(super) struct VisualVerificationResult {
+    /// Message to append to the tool result (always present on non-pass).
+    pub message: String,
+    /// True when the verification failed with high confidence and should block.
+    pub hard_failure: bool,
+    /// The assertion record to log to the checkpoint.
+    pub assertion: Option<VisualAssertion>,
+}
 
 const EXPECTED_VISUAL_ARG: &str = "expected_visual";
 
@@ -383,7 +394,7 @@ impl Agent {
         &mut self,
         tool_name: &str,
         args: &Value,
-    ) -> Option<String> {
+    ) -> Option<VisualVerificationResult> {
         if !matches!(
             tool_name,
             "computer_mouse" | "computer_keyboard" | "computer_window"
@@ -418,22 +429,21 @@ impl Agent {
                     "Visual verification could not capture the screen after `{}`. Re-check the UI manually or retry with `computer_screen` before continuing.",
                     tool_name
                 ));
-                return Some(format!(
-                    "\n\n<visual_verification_unavailable>\n{}\n</visual_verification_unavailable>",
-                    msg
-                ));
+                return Some(VisualVerificationResult {
+                    message: format!(
+                        "\n\n<visual_verification_unavailable>\n{}\n</visual_verification_unavailable>",
+                        msg
+                    ),
+                    hard_failure: false,
+                    assertion: None,
+                });
             }
         };
 
-        // Compute screenshot hash and check for visual stuck loop
-        let screenshot_hash = {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            captured.base64_png.hash(&mut hasher);
-            hasher.finish()
-        };
-        let visual_stuck = self.detect_visual_stuck_loop(screenshot_hash);
+        let require_hard_gate = self.config.agent.require_visual_verification;
+        let current_step = self.loop_control.current_step();
 
-        let verification_result = match verifier
+        match verifier
             .verify_screenshot(&captured.base64_png, &expectation)
             .await
         {
@@ -444,7 +454,21 @@ impl Agent {
                     tool_name,
                     report.confidence * 100.0
                 ));
-                None
+                let assertion = VisualAssertion {
+                    step: current_step,
+                    tool_name: tool_name.to_string(),
+                    expected: expectation.clone(),
+                    observed: report.description.clone(),
+                    passed: true,
+                    confidence: report.confidence,
+                    screenshot_hash: None,
+                    timestamp: Utc::now(),
+                };
+                Some(VisualVerificationResult {
+                    message: String::new(),
+                    hard_failure: false,
+                    assertion: Some(assertion),
+                })
             }
             Ok(report) => {
                 spinner.stop_error("Visual verification failed");
@@ -467,13 +491,39 @@ impl Agent {
                     truncate_visual_note(&report.description, 200),
                     truncate_visual_note(&issues, 200)
                 ));
-                Some(format!(
-                    "\n\n<visual_verification_failed>\nexpected: {}\nobserved: {}\nconfidence: {:.2}\nissues: {}\n</visual_verification_failed>",
-                    expectation,
-                    report.description,
-                    report.confidence,
-                    issues
-                ))
+                let hard_failure = require_hard_gate && report.confidence > 0.6;
+                let message = if hard_failure {
+                    format!(
+                        "\n\n<visual_verification_failed hard_gate=\"true\">\nVISUAL VERIFICATION HARD FAILURE — this action did NOT produce the expected result.\nexpected: {}\nobserved: {}\nconfidence: {:.2}\nissues: {}\nYou MUST retry this action or take a different approach before continuing.\n</visual_verification_failed>",
+                        expectation,
+                        report.description,
+                        report.confidence,
+                        issues
+                    )
+                } else {
+                    format!(
+                        "\n\n<visual_verification_failed>\nexpected: {}\nobserved: {}\nconfidence: {:.2}\nissues: {}\n</visual_verification_failed>",
+                        expectation,
+                        report.description,
+                        report.confidence,
+                        issues
+                    )
+                };
+                let assertion = VisualAssertion {
+                    step: current_step,
+                    tool_name: tool_name.to_string(),
+                    expected: expectation.clone(),
+                    observed: report.description.clone(),
+                    passed: false,
+                    confidence: report.confidence,
+                    screenshot_hash: None,
+                    timestamp: Utc::now(),
+                };
+                Some(VisualVerificationResult {
+                    message,
+                    hard_failure,
+                    assertion: Some(assertion),
+                })
             }
             Err(e) => {
                 spinner.stop_error("Visual verification unavailable");
@@ -488,28 +538,15 @@ impl Agent {
                     "Visual verification could not complete after `{}`. Verify the screen with `computer_screen` or troubleshoot the vision endpoint before continuing.",
                     tool_name
                 ));
-                Some(format!(
-                    "\n\n<visual_verification_unavailable>\n{}\n</visual_verification_unavailable>",
-                    msg
-                ))
+                Some(VisualVerificationResult {
+                    message: format!(
+                        "\n\n<visual_verification_unavailable>\n{}\n</visual_verification_unavailable>",
+                        msg
+                    ),
+                    hard_failure: false,
+                    assertion: None,
+                })
             }
-        };
-
-        // If visual stuck loop detected, append warning to the result
-        if visual_stuck {
-            let stuck_msg = "\n\n<visual_stuck_loop>\n\
-                VISUAL STUCK LOOP DETECTED: The screen has not changed after multiple actions. \
-                Your actions are not having an effect. Try a completely different approach.\n\
-                </visual_stuck_loop>";
-            Some(match verification_result {
-                Some(mut existing) => {
-                    existing.push_str(stuck_msg);
-                    existing
-                }
-                None => stuck_msg.to_string(),
-            })
-        } else {
-            verification_result
         }
     }
 

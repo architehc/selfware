@@ -2,23 +2,134 @@
 //!
 //! Loads and manages agent configuration from TOML files.
 
-pub mod agent;
 pub mod auto_config;
-pub mod model;
 pub mod resources;
-pub mod safety;
 
-pub use agent::*;
 pub use auto_config::*;
-pub use model::*;
 pub use resources::*;
-pub use safety::*;
 
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::warn;
+
+/// A string wrapper that prevents accidental logging of secrets.
+///
+/// `Display` and `Debug` both emit `[REDACTED]`.  To access the
+/// underlying value, call [`expose()`](RedactedString::expose).
+///
+/// Serializes / deserializes transparently as a plain string so that
+/// existing TOML config files continue to work unchanged.
+#[derive(Clone)]
+pub struct RedactedString(String);
+
+impl RedactedString {
+    /// Create a new `RedactedString` wrapping the given secret.
+    pub fn new(secret: impl Into<String>) -> Self {
+        Self(secret.into())
+    }
+
+    /// Return a reference to the underlying secret.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for RedactedString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[REDACTED]")
+    }
+}
+
+impl std::fmt::Debug for RedactedString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[REDACTED]")
+    }
+}
+
+impl PartialEq for RedactedString {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for RedactedString {}
+
+impl PartialEq<str> for RedactedString {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl Serialize for RedactedString {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RedactedString {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(RedactedString(s))
+    }
+}
+
+impl From<String> for RedactedString {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
+impl From<&str> for RedactedString {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+/// A named model profile, allowing multiple LLM backends (e.g. a text coder
+/// and a vision critic) to coexist in a single selfware config.
+///
+/// Profiles are defined under `[models.<name>]` in selfware.toml.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelProfile {
+    /// API endpoint (e.g. `"http://192.168.1.170:1234/v1"`)
+    pub endpoint: String,
+    /// Model identifier
+    pub model: String,
+    /// Optional API key for this specific model
+    pub api_key: Option<RedactedString>,
+    /// Max response tokens
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: usize,
+    /// Sampling temperature
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    /// Supported modalities: `["text"]` or `["text", "vision"]`
+    #[serde(default = "default_modalities")]
+    pub modalities: Vec<String>,
+    /// Context window length in tokens
+    #[serde(default = "default_context_length")]
+    pub context_length: usize,
+    /// Extra fields merged into every chat-completion request body.
+    #[serde(default)]
+    pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+impl ModelProfile {
+    /// Returns `true` if this model profile lists `"vision"` among its modalities.
+    pub fn supports_vision(&self) -> bool {
+        self.modalities.iter().any(|m| m == "vision")
+    }
+}
+
+fn default_modalities() -> Vec<String> {
+    vec!["text".to_string()]
+}
+
+pub fn default_context_length() -> usize {
+    131072
+}
 
 /// Execution mode for tool approval
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
@@ -352,11 +463,93 @@ impl Default for YoloFileConfig {
     }
 }
 
-pub(crate) fn default_true() -> bool {
+fn default_true() -> bool {
     true
 }
 fn default_status_interval() -> usize {
     100
+}
+
+/// Safety guardrails: allowed/denied paths, protected branches, and confirmation rules.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SafetyConfig {
+    #[serde(default = "default_allowed_paths")]
+    pub allowed_paths: Vec<String>,
+    #[serde(default = "default_denied_paths")]
+    pub denied_paths: Vec<String>,
+    #[serde(default = "default_protected_branches")]
+    pub protected_branches: Vec<String>,
+    #[serde(default = "default_require_confirmation")]
+    pub require_confirmation: Vec<String>,
+    /// When true, config files with overly permissive permissions (group- or
+    /// world-readable, i.e. mode & 0o077 != 0) cause a hard error instead of a
+    /// warning.  Can also be activated via `SELFWARE_STRICT_PERMISSIONS=1`.
+    /// Default: false (backward compatible -- warn only).
+    #[serde(default)]
+    pub strict_permissions: bool,
+    /// Pre-authorized permission grants for tool execution.
+    /// Reduces confirmation prompts for trusted operations.
+    #[serde(default)]
+    pub permissions: Vec<crate::safety::permissions::PermissionGrant>,
+}
+
+/// Agent behavior settings: iteration limits, timeouts, token budgets, and calling mode.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentConfig {
+    #[serde(default = "default_max_iterations")]
+    pub max_iterations: usize,
+    #[serde(default = "default_step_timeout")]
+    pub step_timeout_secs: u64,
+    #[serde(default = "default_token_budget")]
+    pub token_budget: usize,
+    /// Safety margin subtracted from token_budget to prevent exceeding model context limit.
+    /// Accounts for tool definitions, system prompt overhead, and output tokens.
+    #[serde(default = "default_token_safety_margin")]
+    pub token_safety_margin: usize,
+    /// Enable native function calling (requires backend support like sglang --tool-call-parser)
+    /// When true, tools are passed via API and tool_calls are returned in response
+    /// When false (default), tools are embedded in system prompt and parsed from content
+    #[serde(default)]
+    pub native_function_calling: bool,
+    /// Enable streaming responses for real-time output
+    /// When true, LLM responses are displayed as they arrive
+    #[serde(default = "default_true")]
+    pub streaming: bool,
+    /// Minimum number of execution steps before accepting task completion.
+    /// Prevents early self-termination by requiring the agent to do meaningful work.
+    #[serde(default = "default_min_completion_steps")]
+    pub min_completion_steps: usize,
+    /// Require at least one successful verification (cargo_check/cargo_test/cargo_clippy)
+    /// before accepting task completion.
+    ///
+    /// This gate is project-type-aware: it is automatically skipped when the working
+    /// directory has no `Cargo.toml` or when only non-Rust tools (browser, vision,
+    /// computer control, web fetch, etc.) were used during the task.
+    #[serde(default = "default_true")]
+    pub require_verification_before_completion: bool,
+    /// When true, visual verification failures with confidence > 0.6 act as hard
+    /// gates — the tool result is marked as needing retry and the assertion is
+    /// logged to the checkpoint.  When false (default), failures are advisory only.
+    #[serde(default)]
+    pub require_visual_verification: bool,
+    /// Fraction of token_budget reserved for content (files, conversation, tool results).
+    /// Compression triggers when content exceeds this fraction.
+    #[serde(default = "default_context_content_ratio")]
+    pub context_content_ratio: f32,
+    /// Fraction of token_budget reserved as compression headroom.
+    /// Ensures compression always has room to work.
+    #[serde(default = "default_context_compression_ratio")]
+    pub context_compression_ratio: f32,
+    /// Fraction of token_budget reserved for model thinking/reasoning blocks.
+    #[serde(default = "default_context_thinking_ratio")]
+    pub context_thinking_ratio: f32,
+    /// Compression detail level: "names", "signatures", or "full".
+    /// Controls how much information is preserved when downgrading context levels.
+    /// - "names": only module/function/struct names (~90% reduction)
+    /// - "signatures": full function signatures and struct field types (~70% reduction)
+    /// - "full": current behavior, summarize everything via LLM (~50% reduction)
+    #[serde(default = "default_compression_detail")]
+    pub compression_detail: String,
 }
 
 impl Default for Config {
@@ -391,20 +584,98 @@ impl Default for Config {
     }
 }
 
+impl Default for SafetyConfig {
+    fn default() -> Self {
+        Self {
+            allowed_paths: default_allowed_paths(),
+            denied_paths: default_denied_paths(),
+            protected_branches: default_protected_branches(),
+            require_confirmation: default_require_confirmation(),
+            strict_permissions: false,
+            permissions: Vec::new(),
+        }
+    }
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: default_max_iterations(),
+            step_timeout_secs: default_step_timeout(),
+            token_budget: default_max_tokens(), // matches max_tokens; overridden by Config::load() when user sets max_tokens
+            token_safety_margin: default_token_safety_margin(),
+            native_function_calling: false,
+            streaming: true,
+            min_completion_steps: default_min_completion_steps(),
+            require_verification_before_completion: true,
+            require_visual_verification: false,
+            context_content_ratio: default_context_content_ratio(),
+            context_compression_ratio: default_context_compression_ratio(),
+            context_thinking_ratio: default_context_thinking_ratio(),
+            compression_detail: default_compression_detail(),
+        }
+    }
+}
+
 fn default_endpoint() -> String {
     "http://localhost:8000/v1".to_string()
 }
 fn default_model() -> String {
     "qwen3.5-27b".to_string()
 }
-pub(crate) fn default_max_tokens() -> usize {
+fn default_max_tokens() -> usize {
     65536
 }
-pub fn default_context_length() -> usize {
-    131072
-}
-pub(crate) fn default_temperature() -> f32 {
+fn default_temperature() -> f32 {
     1.0
+}
+fn default_max_iterations() -> usize {
+    100
+}
+fn default_step_timeout() -> u64 {
+    300
+}
+fn default_min_completion_steps() -> usize {
+    3
+}
+fn default_token_budget() -> usize {
+    0 // sentinel: 0 means "derive from max_tokens at load time"
+}
+fn default_token_safety_margin() -> usize {
+    8_192 // 8K token safety margin for tool definitions + output + overhead
+}
+fn default_context_content_ratio() -> f32 {
+    0.75
+}
+fn default_context_compression_ratio() -> f32 {
+    0.20
+}
+fn default_context_thinking_ratio() -> f32 {
+    0.05
+}
+fn default_compression_detail() -> String {
+    "signatures".to_string()
+}
+fn default_allowed_paths() -> Vec<String> {
+    vec!["./**".to_string()]
+}
+fn default_denied_paths() -> Vec<String> {
+    vec![
+        "**/.env".to_string(),
+        "**/.env.local".to_string(),
+        "**/.ssh/**".to_string(),
+        "**/secrets/**".to_string(),
+    ]
+}
+fn default_protected_branches() -> Vec<String> {
+    vec!["main".to_string(), "master".to_string()]
+}
+fn default_require_confirmation() -> Vec<String> {
+    vec![
+        "git_push".to_string(),
+        "file_delete".to_string(),
+        "shell_exec".to_string(),
+    ]
 }
 
 /// Evolution daemon configuration (loaded from `[evolution]` in selfware.toml)

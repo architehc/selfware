@@ -150,6 +150,19 @@ pub struct ToolCallLog {
     pub duration_ms: Option<u64>,
 }
 
+/// Result of a visual assertion check after a computer-control tool call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VisualAssertion {
+    pub step: usize,
+    pub tool_name: String,
+    pub expected: String,
+    pub observed: String,
+    pub passed: bool,
+    pub confidence: f64,
+    pub screenshot_hash: Option<String>,
+    pub timestamp: DateTime<Utc>,
+}
+
 /// Log of an error during execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorLog {
@@ -187,6 +200,7 @@ pub struct CheckpointDelta {
     pub new_memory_entries: Vec<MemoryEntry>,
     pub new_tool_calls: Vec<ToolCallLog>,
     pub new_errors: Vec<ErrorLog>,
+    pub new_visual_assertions: Vec<VisualAssertion>,
 
     pub updated_tokens: Option<usize>,
     pub git_checkpoint: Option<GitCheckpointInfo>,
@@ -214,6 +228,10 @@ pub struct TaskCheckpoint {
     // Execution log
     pub tool_calls: Vec<ToolCallLog>,
     pub errors: Vec<ErrorLog>,
+
+    // Visual assertions
+    #[serde(default)]
+    pub visual_assertions: Vec<VisualAssertion>,
 
     // Git state
     pub git_checkpoint: Option<GitCheckpointInfo>,
@@ -267,6 +285,12 @@ impl TaskCheckpoint {
         } else {
             return None;
         };
+        let new_visual_assertions =
+            if self.visual_assertions.len() >= base.visual_assertions.len() {
+                self.visual_assertions[base.visual_assertions.len()..].to_vec()
+            } else {
+                return None;
+            };
 
         let has_changes = status.is_some()
             || current_step.is_some()
@@ -275,6 +299,7 @@ impl TaskCheckpoint {
             || !new_memory_entries.is_empty()
             || !new_tool_calls.is_empty()
             || !new_errors.is_empty()
+            || !new_visual_assertions.is_empty()
             || updated_tokens.is_some()
             || git_checkpoint.is_some();
 
@@ -294,6 +319,7 @@ impl TaskCheckpoint {
             new_memory_entries,
             new_tool_calls,
             new_errors,
+            new_visual_assertions,
             updated_tokens,
             git_checkpoint,
         })
@@ -328,6 +354,8 @@ impl TaskCheckpoint {
         self.memory_entries.extend(delta.new_memory_entries.clone());
         self.tool_calls.extend(delta.new_tool_calls.clone());
         self.errors.extend(delta.new_errors.clone());
+        self.visual_assertions
+            .extend(delta.new_visual_assertions.clone());
 
         if let Some(tokens) = delta.updated_tokens {
             self.estimated_tokens = tokens;
@@ -371,6 +399,7 @@ impl TaskCheckpoint {
             estimated_tokens: 0,
             tool_calls: Vec::new(),
             errors: Vec::new(),
+            visual_assertions: Vec::new(),
             git_checkpoint: None,
         }
     }
@@ -392,6 +421,12 @@ impl TaskCheckpoint {
     /// Add a tool call log entry
     pub fn log_tool_call(&mut self, log: ToolCallLog) {
         self.tool_calls.push(log);
+        self.touch();
+    }
+
+    /// Add a visual assertion log entry
+    pub fn log_visual_assertion(&mut self, assertion: VisualAssertion) {
+        self.visual_assertions.push(assertion);
         self.touch();
     }
 

@@ -344,7 +344,7 @@ impl Agent {
     /// session data into structured temporal records.
     #[cfg(feature = "consolidation")]
     fn consolidate_session_memory(&self) {
-        use crate::consolidation::{CollectedItem, LongTermStore, SourceType};
+        use crate::consolidation::{CollectedItem, SourceType, LongTermStore};
 
         let checkpoint = match self.current_checkpoint.as_ref() {
             Some(cp) => cp,
@@ -400,8 +400,8 @@ impl Agent {
 
         // Convert items to temporal records directly (skip LLM summarization for speed)
         let now = chrono::Utc::now();
-        let records: Vec<crate::consolidation::TemporalRecord> =
-            vec![crate::consolidation::TemporalRecord {
+        let records: Vec<crate::consolidation::TemporalRecord> = vec![
+            crate::consolidation::TemporalRecord {
                 id: format!("session-{}", &task_id[..task_id.len().min(16)]),
                 created_at: now,
                 source_timestamps: items.iter().map(|i| i.timestamp).collect(),
@@ -412,7 +412,10 @@ impl Agent {
                 access_count: 0,
                 last_accessed: now,
                 content: crate::consolidation::CompactedContent {
-                    summary: format!("Session {} with {} tool calls", task_id, item_count),
+                    summary: format!(
+                        "Session {} with {} tool calls",
+                        task_id, item_count
+                    ),
                     key_facts: items
                         .iter()
                         .filter(|i| !i.tags.is_empty())
@@ -435,7 +438,8 @@ impl Agent {
                 importance: crate::consolidation::RecordImportance::Normal,
                 session_id: Some(task_id),
                 metadata: std::collections::HashMap::new(),
-            }];
+            },
+        ];
 
         // Save in background
         tokio::spawn(async move {
@@ -1353,6 +1357,7 @@ mod tests {
             new_memory_entries: vec![],
             new_tool_calls: vec![],
             new_errors: vec![],
+            new_visual_assertions: vec![],
             updated_tokens: None,
             git_checkpoint: None,
         };
@@ -1380,6 +1385,7 @@ mod tests {
             new_memory_entries: vec![],
             new_tool_calls: vec![],
             new_errors: vec![],
+            new_visual_assertions: vec![],
             updated_tokens: None,
             git_checkpoint: None,
         };
@@ -1426,6 +1432,7 @@ mod tests {
                 error: "applied error".to_string(),
                 recovered: true,
             }],
+            new_visual_assertions: vec![],
             updated_tokens: Some(9999),
             git_checkpoint: Some(GitCheckpointInfo {
                 branch: "dev".to_string(),
@@ -1471,6 +1478,7 @@ mod tests {
             new_memory_entries: vec![],
             new_tool_calls: vec![],
             new_errors: vec![],
+            new_visual_assertions: vec![],
             updated_tokens: None, // should not change
             git_checkpoint: None,
         };
@@ -1503,6 +1511,7 @@ mod tests {
             new_memory_entries: vec![],
             new_tool_calls: vec![],
             new_errors: vec![],
+            new_visual_assertions: vec![],
             updated_tokens: Some(15000),
             git_checkpoint: None,
         };

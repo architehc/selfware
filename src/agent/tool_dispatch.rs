@@ -1926,10 +1926,25 @@ impl Agent {
                 if let Some(ver_msg) = verification_result {
                     final_result.push_str(&ver_msg);
                 }
-                if let Some(ver_msg) = visual_verification_result {
-                    final_result.push_str(&ver_msg);
+                let mut needs_retry = false;
+                if let Some(vvr) = visual_verification_result {
+                    if !vvr.message.is_empty() {
+                        final_result.push_str(&vvr.message);
+                    }
+                    if let Some(assertion) = vvr.assertion {
+                        if let Some(ref mut checkpoint) = self.current_checkpoint {
+                            checkpoint.log_visual_assertion(assertion);
+                        }
+                    }
+                    if vvr.hard_failure {
+                        needs_retry = true;
+                    }
                 }
-                Ok((true, final_result, summary))
+                if needs_retry {
+                    Ok((false, final_result, summary))
+                } else {
+                    Ok((true, final_result, summary))
+                }
             }
             Ok(Err(e)) => {
                 let elapsed = start_time.elapsed().as_millis() as u64;
