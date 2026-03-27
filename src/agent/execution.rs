@@ -263,7 +263,6 @@ mod tests {
     use crate::testing::mock_api::MockLlmServer;
     use chrono::Utc;
     use std::hash::{Hash, Hasher};
-    use tempfile::tempdir;
 
     // =========================================================================
     // Helper: mirrors should_prompt_for_action logic for standalone testing

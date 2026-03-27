@@ -1,5 +1,7 @@
 //! Parallel Execution Engine
 
+#![allow(dead_code)]
+
 use super::types::{
     DependencyGraph, ExecutionRecord, ExecutionStats, ParallelConfig, ParallelResult,
 };

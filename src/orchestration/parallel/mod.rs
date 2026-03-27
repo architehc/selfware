@@ -3,6 +3,8 @@
 //! This module provides tools for executing tool calls in parallel,
 //! detecting conflicts, and managing dependencies between operations.
 
+#![allow(dead_code)]
+
 pub mod conflicts;
 pub mod executor;
 pub mod types;
@@ -77,9 +79,5 @@ impl Default for ParallelManager {
 }
 
 /// Re-export commonly used types
-pub mod prelude {
-    pub use super::{
-        Conflict, ConflictDetector, ConflictResolver, ConflictType, DependencyGraph, NodeStatus,
-        ParallelConfig, ParallelResult,
-    };
-}
+#[allow(dead_code)]
+pub mod prelude {}

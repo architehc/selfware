@@ -1,5 +1,7 @@
 //! Conflict Detection and Resolution
 
+#![allow(dead_code)]
+
 use crate::tool_parser::ParsedToolCall;
 use std::collections::{HashMap, HashSet};
 

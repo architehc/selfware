@@ -118,7 +118,7 @@ impl LongTermMemory {
             .map(|e| e.id)
             .collect();
 
-        let mut merged = 0;
+        let merged = 0;
         let mut removed = 0;
 
         for id in &to_consolidate {

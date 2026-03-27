@@ -280,7 +280,7 @@ impl HierarchicalMemory {
 
     /// Promote an entry to a higher tier
     pub async fn promote(&self, id: u64) -> anyhow::Result<()> {
-        if let Some(entry) = self.working.retrieve(id).await {
+        if self.working.retrieve(id).await.is_some() {
             return Ok(());
         }
 
