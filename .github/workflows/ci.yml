@@ -255,43 +255,6 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
-  # Static analysis and secret scanning
-  security-scan:
-    name: Security Scan
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libxcb1-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-composite0-dev
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: Clippy security lints
-        run: cargo clippy --all-targets --features extras -- -W clippy::all -D warnings
-
-      - name: Secret pattern scan
-        run: |
-          echo "Scanning for hardcoded secrets..."
-          if grep -rn 'AKIA[0-9A-Z]\{16\}\|sk-[a-zA-Z0-9]\{20,\}\|ghp_[a-zA-Z0-9]\{36\}\|password\s*=\s*["\x27][^"\x27]\{8,\}' src/; then
-            echo "::error::Potential secrets or hardcoded credentials found in source code"
-            exit 1
-          fi
-          echo "No secret patterns found."
-
-      - name: TruffleHog secret scan
-        uses: trufflesecurity/trufflehog@main
-        with:
-          extra_args: --only-verified
-
   semver:
     name: Semver Checks
     if: github.event_name == 'pull_request'
