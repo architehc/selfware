@@ -455,14 +455,26 @@ impl Agent {
                     report.confidence * 100.0
                 ));
                 let assertion = VisualAssertion {
-                    step: current_step,
-                    tool_name: tool_name.to_string(),
-                    expected: expectation.clone(),
-                    observed: report.description.clone(),
-                    passed: true,
-                    confidence: report.confidence,
-                    screenshot_hash: None,
-                    timestamp: Utc::now(),
+                    id: format!("va-{}-{}", current_step, uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("")),
+                    description: expectation.clone(),
+                    screenshot_path: None,
+                    verified: true,
+                    verification_result: Some(crate::session::checkpoint::VerificationResult {
+                        passed: true,
+                        confidence: report.confidence as f32,
+                        explanation: report.description.clone(),
+                        screenshot_hash: String::new(),
+                    }),
+                    created_at: Utc::now(),
+                    verified_at: Some(Utc::now()),
+                    step: Some(current_step),
+                    tool_name: Some(tool_name.to_string()),
+                    expected: Some(expectation.clone()),
+                    observed: Some(report.description.clone()),
+                    passed: Some(true),
+                    confidence: Some(report.confidence),
+                    screenshot_hash_legacy: None,
+                    timestamp: Some(Utc::now()),
                 };
                 Some(VisualVerificationResult {
                     message: String::new(),
@@ -510,14 +522,26 @@ impl Agent {
                     )
                 };
                 let assertion = VisualAssertion {
-                    step: current_step,
-                    tool_name: tool_name.to_string(),
-                    expected: expectation.clone(),
-                    observed: report.description.clone(),
-                    passed: false,
-                    confidence: report.confidence,
-                    screenshot_hash: None,
-                    timestamp: Utc::now(),
+                    id: format!("va-{}-{}", current_step, uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("")),
+                    description: expectation.clone(),
+                    screenshot_path: None,
+                    verified: true,
+                    verification_result: Some(crate::session::checkpoint::VerificationResult {
+                        passed: false,
+                        confidence: report.confidence as f32,
+                        explanation: report.description.clone(),
+                        screenshot_hash: String::new(),
+                    }),
+                    created_at: Utc::now(),
+                    verified_at: Some(Utc::now()),
+                    step: Some(current_step),
+                    tool_name: Some(tool_name.to_string()),
+                    expected: Some(expectation.clone()),
+                    observed: Some(report.description.clone()),
+                    passed: Some(false),
+                    confidence: Some(report.confidence),
+                    screenshot_hash_legacy: None,
+                    timestamp: Some(Utc::now()),
                 };
                 Some(VisualVerificationResult {
                     message,

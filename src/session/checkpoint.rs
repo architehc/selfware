@@ -150,17 +150,35 @@ pub struct ToolCallLog {
     pub duration_ms: Option<u64>,
 }
 
-/// Result of a visual assertion check after a computer-control tool call.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VisualAssertion {
-    pub step: usize,
-    pub tool_name: String,
-    pub expected: String,
-    pub observed: String,
+/// Result of a visual verification check (used for verification results)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VerificationResult {
     pub passed: bool,
-    pub confidence: f64,
-    pub screenshot_hash: Option<String>,
-    pub timestamp: DateTime<Utc>,
+    pub confidence: f32,              // VLM confidence score
+    pub explanation: String,          // Why it passed/failed
+    pub screenshot_hash: String,      // For detecting stale screens
+}
+
+/// A persistent visual assertion that gates task progression.
+/// Can be used both for pending assertions (to verify) and completed assertions (in history).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VisualAssertion {
+    pub id: String,                   // Unique identifier for this assertion
+    pub description: String,          // What to look for
+    pub screenshot_path: Option<PathBuf>, // Path to reference screenshot
+    pub verified: bool,               // Whether this assertion has been verified
+    pub verification_result: Option<VerificationResult>,
+    pub created_at: DateTime<Utc>,
+    pub verified_at: Option<DateTime<Utc>>,
+    // Legacy fields for backward compatibility
+    pub step: Option<usize>,
+    pub tool_name: Option<String>,
+    pub expected: Option<String>,
+    pub observed: Option<String>,
+    pub passed: Option<bool>,
+    pub confidence: Option<f64>,
+    pub screenshot_hash_legacy: Option<String>,
+    pub timestamp: Option<DateTime<Utc>>,
 }
 
 /// Log of an error during execution
@@ -204,6 +222,9 @@ pub struct CheckpointDelta {
 
     pub updated_tokens: Option<usize>,
     pub git_checkpoint: Option<GitCheckpointInfo>,
+
+    // Visual assertion state (changes are always recorded, None means no change)
+    pub pending_visual_assertion: Option<Option<VisualAssertion>>,
 }
 
 /// A complete checkpoint of task state
@@ -232,6 +253,8 @@ pub struct TaskCheckpoint {
     // Visual assertions
     #[serde(default)]
     pub visual_assertions: Vec<VisualAssertion>,
+    #[serde(default)]
+    pub pending_visual_assertion: Option<VisualAssertion>, // Current assertion to verify
 
     // Git state
     pub git_checkpoint: Option<GitCheckpointInfo>,
@@ -292,6 +315,10 @@ impl TaskCheckpoint {
                 return None;
             };
 
+        // Check if pending visual assertion changed
+        let pending_changed = self.pending_visual_assertion != base.pending_visual_assertion;
+        let pending_visual_assertion = pending_changed.then_some(self.pending_visual_assertion.clone());
+
         let has_changes = status.is_some()
             || current_step.is_some()
             || current_iteration.is_some()
@@ -301,7 +328,8 @@ impl TaskCheckpoint {
             || !new_errors.is_empty()
             || !new_visual_assertions.is_empty()
             || updated_tokens.is_some()
-            || git_checkpoint.is_some();
+            || git_checkpoint.is_some()
+            || pending_changed;
 
         if !has_changes {
             return None;
@@ -322,6 +350,7 @@ impl TaskCheckpoint {
             new_visual_assertions,
             updated_tokens,
             git_checkpoint,
+            pending_visual_assertion,
         })
     }
 
@@ -356,6 +385,10 @@ impl TaskCheckpoint {
         self.errors.extend(delta.new_errors.clone());
         self.visual_assertions
             .extend(delta.new_visual_assertions.clone());
+
+        if let Some(ref pending) = delta.pending_visual_assertion {
+            self.pending_visual_assertion = pending.clone();
+        }
 
         if let Some(tokens) = delta.updated_tokens {
             self.estimated_tokens = tokens;
@@ -400,6 +433,7 @@ impl TaskCheckpoint {
             tool_calls: Vec::new(),
             errors: Vec::new(),
             visual_assertions: Vec::new(),
+            pending_visual_assertion: None,
             git_checkpoint: None,
         }
     }
@@ -427,6 +461,31 @@ impl TaskCheckpoint {
     /// Add a visual assertion log entry
     pub fn log_visual_assertion(&mut self, assertion: VisualAssertion) {
         self.visual_assertions.push(assertion);
+        self.touch();
+    }
+
+    /// Set a pending visual assertion that must be verified before continuing
+    pub fn set_pending_visual_assertion(&mut self, assertion: VisualAssertion) {
+        self.pending_visual_assertion = Some(assertion);
+        self.touch();
+    }
+
+    /// Mark a pending visual assertion as verified and move it to the history
+    pub fn mark_assertion_verified(&mut self, assertion_id: &str, result: VerificationResult) {
+        if let Some(mut pending) = self.pending_visual_assertion.take() {
+            if pending.id == assertion_id {
+                pending.verified = true;
+                pending.verification_result = Some(result);
+                pending.verified_at = Some(Utc::now());
+                self.visual_assertions.push(pending);
+            }
+        }
+        self.touch();
+    }
+
+    /// Clear the pending visual assertion (e.g., after recovery)
+    pub fn clear_pending_visual_assertion(&mut self) {
+        self.pending_visual_assertion = None;
         self.touch();
     }
 

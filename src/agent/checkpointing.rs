@@ -1358,6 +1358,7 @@ mod tests {
             new_tool_calls: vec![],
             new_errors: vec![],
             new_visual_assertions: vec![],
+            pending_visual_assertion: None,
             updated_tokens: None,
             git_checkpoint: None,
         };
@@ -1386,6 +1387,7 @@ mod tests {
             new_tool_calls: vec![],
             new_errors: vec![],
             new_visual_assertions: vec![],
+            pending_visual_assertion: None,
             updated_tokens: None,
             git_checkpoint: None,
         };
@@ -1433,6 +1435,7 @@ mod tests {
                 recovered: true,
             }],
             new_visual_assertions: vec![],
+            pending_visual_assertion: None,
             updated_tokens: Some(9999),
             git_checkpoint: Some(GitCheckpointInfo {
                 branch: "dev".to_string(),
@@ -1479,6 +1482,7 @@ mod tests {
             new_tool_calls: vec![],
             new_errors: vec![],
             new_visual_assertions: vec![],
+            pending_visual_assertion: None,
             updated_tokens: None, // should not change
             git_checkpoint: None,
         };
@@ -1512,6 +1516,7 @@ mod tests {
             new_tool_calls: vec![],
             new_errors: vec![],
             new_visual_assertions: vec![],
+            pending_visual_assertion: None,
             updated_tokens: Some(15000),
             git_checkpoint: None,
         };

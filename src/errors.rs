@@ -60,6 +60,17 @@ pub enum AgentError {
 
     #[error("Task failed: {message}")]
     TaskFailed { message: String },
+
+    #[error("Visual assertion failed: {description}. Expected: {expected}, Got: {actual}. Recovery hint: {recovery_hint}")]
+    VisualAssertionFailed {
+        description: String,
+        expected: String,
+        actual: String,
+        recovery_hint: String,
+    },
+
+    #[error("Visual verification error: {0}")]
+    VisualVerificationError(String),
 }
 
 #[derive(Error, Debug)]

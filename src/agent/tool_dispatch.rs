@@ -1933,7 +1933,12 @@ impl Agent {
                     }
                     if let Some(assertion) = vvr.assertion {
                         if let Some(ref mut checkpoint) = self.current_checkpoint {
-                            checkpoint.log_visual_assertion(assertion);
+                            // On hard failure, set as pending assertion to gate progression
+                            if vvr.hard_failure {
+                                checkpoint.set_pending_visual_assertion(assertion.clone());
+                            } else {
+                                checkpoint.log_visual_assertion(assertion);
+                            }
                         }
                     }
                     if vvr.hard_failure {
@@ -1941,10 +1946,19 @@ impl Agent {
                     }
                 }
                 if needs_retry {
-                    Ok((false, final_result, summary))
-                } else {
-                    Ok((true, final_result, summary))
+                    // Return an error to trigger error recovery flow
+                    return Err(crate::errors::AgentError::VisualAssertionFailed {
+                        description: format!("Visual verification failed after {}", name),
+                        expected: "Expected UI state".to_string(),
+                        actual: "Actual UI state did not match".to_string(),
+                        recovery_hint: format!(
+                            "The {} action did not produce the expected visual result. \
+                             Retry the action with different parameters or try a different approach.",
+                            name
+                        ),
+                    }.into());
                 }
+                Ok((true, final_result, summary))
             }
             Ok(Err(e)) => {
                 let elapsed = start_time.elapsed().as_millis() as u64;
