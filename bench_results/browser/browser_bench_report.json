@@ -1,16 +1,16 @@
 {
-  "timestamp": "2026-03-25T11:50:12.632307724+00:00",
+  "timestamp": "2026-03-27T22:26:37.056225988+00:00",
   "tasks_total": 4,
   "tasks_passed": 2,
   "traces": [
     {
       "task_id": "search-extract",
       "task_name": "Search and Extract",
-      "started_at": "2026-03-25T11:49:43.326330562Z",
-      "ended_at": "2026-03-25T11:49:43.421434126Z",
+      "started_at": "2026-03-27T22:26:36.797231698Z",
+      "ended_at": "2026-03-27T22:26:36.885940515Z",
       "actions": [
         {
-          "timestamp": "2026-03-25T11:49:43.421027961Z",
+          "timestamp": "2026-03-27T22:26:36.885619319Z",
           "action": {
             "Navigate": {
               "url": "https://html.duckduckgo.com/html/"
@@ -23,10 +23,10 @@
           },
           "screenshot_before": null,
           "screenshot_after": null,
-          "duration_ms": 94
+          "duration_ms": 88
         },
         {
-          "timestamp": "2026-03-25T11:49:43.421032865Z",
+          "timestamp": "2026-03-27T22:26:36.885622606Z",
           "action": {
             "Fill": {
               "selector": "input[name='q']",
@@ -43,7 +43,7 @@
           "duration_ms": 0
         },
         {
-          "timestamp": "2026-03-25T11:49:43.421040811Z",
+          "timestamp": "2026-03-27T22:26:36.885627087Z",
           "action": {
             "Click": {
               "selector": "input[type='submit']"
@@ -59,7 +59,7 @@
           "duration_ms": 0
         },
         {
-          "timestamp": "2026-03-25T11:49:43.421126510Z",
+          "timestamp": "2026-03-27T22:26:36.885700382Z",
           "action": {
             "WaitFor": {
               "selector": ".result__title",
@@ -76,7 +76,7 @@
           "duration_ms": 0
         },
         {
-          "timestamp": "2026-03-25T11:49:43.421321085Z",
+          "timestamp": "2026-03-27T22:26:36.885823929Z",
           "action": {
             "Screenshot": {
               "label": "search_results"
@@ -92,7 +92,7 @@
           "duration_ms": 0
         },
         {
-          "timestamp": "2026-03-25T11:49:43.421406574Z",
+          "timestamp": "2026-03-27T22:26:36.885913913Z",
           "action": {
             "Extract": {
               "selector": ".result__title",
@@ -112,7 +112,7 @@
       "screenshots": [
         {
           "path": "bench_results/browser/screenshots/search-extract/search_results.html",
-          "timestamp": "2026-03-25T11:49:43.421318704Z",
+          "timestamp": "2026-03-27T22:26:36.885822108Z",
           "label": "search_results",
           "dimensions": [
             0,
@@ -127,16 +127,16 @@
           ]
         }
       },
-      "total_duration_ms": 95
+      "total_duration_ms": 88
     },
     {
       "task_id": "multi-step-nav",
       "task_name": "Multi-Step Navigation",
-      "started_at": "2026-03-25T11:49:43.326355711Z",
-      "ended_at": "2026-03-25T11:49:43.450612704Z",
+      "started_at": "2026-03-27T22:26:36.797264890Z",
+      "ended_at": "2026-03-27T22:26:36.914292932Z",
       "actions": [
         {
-          "timestamp": "2026-03-25T11:49:43.431123587Z",
+          "timestamp": "2026-03-27T22:26:36.894858783Z",
           "action": {
             "Navigate": {
               "url": "https://en.wikipedia.org/wiki/Rust_(programming_language)"
@@ -144,15 +144,15 @@
           },
           "outcome": {
             "Success": {
-              "output": "HTTP 200 OK, 592053 bytes"
+              "output": "HTTP 200 OK, 591846 bytes"
             }
           },
           "screenshot_before": null,
           "screenshot_after": null,
-          "duration_ms": 104
+          "duration_ms": 97
         },
         {
-          "timestamp": "2026-03-25T11:49:43.435064881Z",
+          "timestamp": "2026-03-27T22:26:36.899044792Z",
           "action": {
             "WaitFor": {
               "selector": "#firstHeading",
@@ -166,10 +166,10 @@
           },
           "screenshot_before": null,
           "screenshot_after": null,
-          "duration_ms": 3
+          "duration_ms": 4
         },
         {
-          "timestamp": "2026-03-25T11:49:43.435543167Z",
+          "timestamp": "2026-03-27T22:26:36.901192213Z",
           "action": {
             "Screenshot": {
               "label": "wiki_rust_page"
@@ -185,7 +185,7 @@
           "duration_ms": 0
         },
         {
-          "timestamp": "2026-03-25T11:49:43.437393361Z",
+          "timestamp": "2026-03-27T22:26:36.902758495Z",
           "action": {
             "Extract": {
               "selector": "#firstHeading",
@@ -202,7 +202,7 @@
           "duration_ms": 1
         },
         {
-          "timestamp": "2026-03-25T11:49:43.448979115Z",
+          "timestamp": "2026-03-27T22:26:36.912360006Z",
           "action": {
             "Click": {
               "selector": "a[href='/wiki/Memory_safety']"
@@ -215,10 +215,10 @@
           },
           "screenshot_before": null,
           "screenshot_after": null,
-          "duration_ms": 11
+          "duration_ms": 9
         },
         {
-          "timestamp": "2026-03-25T11:49:43.450000260Z",
+          "timestamp": "2026-03-27T22:26:36.913303253Z",
           "action": {
             "WaitFor": {
               "selector": "#firstHeading",
@@ -232,10 +232,10 @@
           },
           "screenshot_before": null,
           "screenshot_after": null,
-          "duration_ms": 1
+          "duration_ms": 0
         },
         {
-          "timestamp": "2026-03-25T11:49:43.450317850Z",
+          "timestamp": "2026-03-27T22:26:36.914015089Z",
           "action": {
             "Screenshot": {
               "label": "wiki_memory_safety"
@@ -254,7 +254,7 @@
       "screenshots": [
         {
           "path": "bench_results/browser/screenshots/multi-step-nav/wiki_rust_page.html",
-          "timestamp": "2026-03-25T11:49:43.435541481Z",
+          "timestamp": "2026-03-27T22:26:36.901189522Z",
           "label": "wiki_rust_page",
           "dimensions": [
             0,
@@ -263,7 +263,7 @@
         },
         {
           "path": "bench_results/browser/screenshots/multi-step-nav/wiki_memory_safety.html",
-          "timestamp": "2026-03-25T11:49:43.450317244Z",
+          "timestamp": "2026-03-27T22:26:36.914013717Z",
           "label": "wiki_memory_safety",
           "dimensions": [
             0,
@@ -272,16 +272,16 @@
         }
       ],
       "final_outcome": "Passed",
-      "total_duration_ms": 124
+      "total_duration_ms": 117
     },
     {
       "task_id": "form-fill",
       "task_name": "Form Interaction",
-      "started_at": "2026-03-25T11:49:43.326401019Z",
-      "ended_at": "2026-03-25T11:49:43.537569608Z",
+      "started_at": "2026-03-27T22:26:36.797323526Z",
+      "ended_at": "2026-03-27T22:26:37.006856997Z",
       "actions": [
         {
-          "timestamp": "2026-03-25T11:49:43.537443165Z",
+          "timestamp": "2026-03-27T22:26:37.006482407Z",
           "action": {
             "Navigate": {
               "url": "https://httpbin.org/forms/post"
@@ -294,10 +294,10 @@
           },
           "screenshot_before": null,
           "screenshot_after": null,
-          "duration_ms": 211
+          "duration_ms": 209
         },
         {
-          "timestamp": "2026-03-25T11:49:43.537449303Z",
+          "timestamp": "2026-03-27T22:26:37.006493201Z",
           "action": {
             "WaitFor": {
               "selector": "form",
@@ -314,7 +314,7 @@
           "duration_ms": 0
         },
         {
-          "timestamp": "2026-03-25T11:49:43.537450593Z",
+          "timestamp": "2026-03-27T22:26:37.006495326Z",
           "action": {
             "Fill": {
               "selector": "input[name='custname']",
@@ -331,7 +331,7 @@
           "duration_ms": 0
         },
         {
-          "timestamp": "2026-03-25T11:49:43.537450979Z",
+          "timestamp": "2026-03-27T22:26:37.006496006Z",
           "action": {
             "Fill": {
               "selector": "input[name='custtel']",
@@ -348,7 +348,7 @@
           "duration_ms": 0
         },
         {
-          "timestamp": "2026-03-25T11:49:43.537451629Z",
+          "timestamp": "2026-03-27T22:26:37.006497001Z",
           "action": {
             "Fill": {
               "selector": "input[name='custemail']",
@@ -365,7 +365,7 @@
           "duration_ms": 0
         },
         {
-          "timestamp": "2026-03-25T11:49:43.537526196Z",
+          "timestamp": "2026-03-27T22:26:37.006719315Z",
           "action": {
             "Screenshot": {
               "label": "form_filled"
@@ -381,7 +381,7 @@
           "duration_ms": 0
         },
         {
-          "timestamp": "2026-03-25T11:49:43.537531685Z",
+          "timestamp": "2026-03-27T22:26:37.006724927Z",
           "action": {
             "Click": {
               "selector": "button[type='submit'], input[type='submit']"
@@ -397,7 +397,7 @@
           "duration_ms": 0
         },
         {
-          "timestamp": "2026-03-25T11:49:43.537532963Z",
+          "timestamp": "2026-03-27T22:26:37.006727670Z",
           "action": {
             "WaitFor": {
               "selector": "body",
@@ -414,7 +414,7 @@
           "duration_ms": 0
         },
         {
-          "timestamp": "2026-03-25T11:49:43.537554774Z",
+          "timestamp": "2026-03-27T22:26:37.006836037Z",
           "action": {
             "Screenshot": {
               "label": "form_submitted"
@@ -433,7 +433,7 @@
       "screenshots": [
         {
           "path": "bench_results/browser/screenshots/form-fill/form_filled.html",
-          "timestamp": "2026-03-25T11:49:43.537525193Z",
+          "timestamp": "2026-03-27T22:26:37.006717201Z",
           "label": "form_filled",
           "dimensions": [
             0,
@@ -442,7 +442,7 @@
         },
         {
           "path": "bench_results/browser/screenshots/form-fill/form_submitted.html",
-          "timestamp": "2026-03-25T11:49:43.537554531Z",
+          "timestamp": "2026-03-27T22:26:37.006834760Z",
           "label": "form_submitted",
           "dimensions": [
             0,
@@ -457,16 +457,16 @@
           ]
         }
       },
-      "total_duration_ms": 211
+      "total_duration_ms": 209
     },
     {
       "task_id": "data-extract",
       "task_name": "Data Extraction",
-      "started_at": "2026-03-25T11:49:43.326447186Z",
-      "ended_at": "2026-03-25T11:49:43.800068843Z",
+      "started_at": "2026-03-27T22:26:36.797440764Z",
+      "ended_at": "2026-03-27T22:26:36.867343268Z",
       "actions": [
         {
-          "timestamp": "2026-03-25T11:49:43.799780712Z",
+          "timestamp": "2026-03-27T22:26:36.867142363Z",
           "action": {
             "Navigate": {
               "url": "https://httpbin.org/json"
@@ -479,10 +479,10 @@
           },
           "screenshot_before": null,
           "screenshot_after": null,
-          "duration_ms": 473
+          "duration_ms": 69
         },
         {
-          "timestamp": "2026-03-25T11:49:43.799798356Z",
+          "timestamp": "2026-03-27T22:26:36.867158109Z",
           "action": {
             "WaitFor": {
               "selector": "body",
@@ -499,7 +499,7 @@
           "duration_ms": 0
         },
         {
-          "timestamp": "2026-03-25T11:49:43.799801078Z",
+          "timestamp": "2026-03-27T22:26:36.867160528Z",
           "action": {
             "Extract": {
               "selector": "body",
@@ -516,7 +516,7 @@
           "duration_ms": 0
         },
         {
-          "timestamp": "2026-03-25T11:49:43.800064005Z",
+          "timestamp": "2026-03-27T22:26:36.867338871Z",
           "action": {
             "Screenshot": {
               "label": "json_data"
@@ -535,7 +535,7 @@
       "screenshots": [
         {
           "path": "bench_results/browser/screenshots/data-extract/json_data.html",
-          "timestamp": "2026-03-25T11:49:43.800060676Z",
+          "timestamp": "2026-03-27T22:26:36.867336557Z",
           "label": "json_data",
           "dimensions": [
             0,
@@ -544,143 +544,75 @@
         }
       ],
       "final_outcome": "Passed",
-      "total_duration_ms": 473
+      "total_duration_ms": 69
     }
   ],
   "llm_report": {
-    "timestamp": "2026-03-25T11:50:12.631596918+00:00",
+    "timestamp": "2026-03-27T22:26:37.055464162+00:00",
     "model": "qwen3.5-27b",
     "endpoint": "http://localhost:8000/v1",
     "max_concurrent": 16,
     "tasks_total": 4,
-    "tasks_passed": 4,
-    "tasks_failed": 0,
-    "total_prompt_tokens": 2515,
-    "total_completion_tokens": 582,
-    "tokens_per_sec": 20.01765938718949,
-    "latency_p50_ms": 25002,
-    "latency_p95_ms": 29073,
-    "latency_p99_ms": 29073,
-    "latency_avg_ms": 22243.5,
-    "latency_min_ms": 13684,
-    "latency_max_ms": 29073,
-    "avg_score": 1.0,
-    "total_duration_secs": 29.074328259,
-    "error_rate": 0.0,
+    "tasks_passed": 0,
+    "tasks_failed": 4,
+    "total_prompt_tokens": 0,
+    "total_completion_tokens": 0,
+    "tokens_per_sec": 0.0,
+    "latency_p50_ms": 0,
+    "latency_p95_ms": 0,
+    "latency_p99_ms": 0,
+    "latency_avg_ms": 0.0,
+    "latency_min_ms": 0,
+    "latency_max_ms": 0,
+    "avg_score": 0.0,
+    "total_duration_secs": 0.00122856,
+    "error_rate": 1.0,
     "results": [
       {
         "task_id": "llm-data-extract",
         "stream_id": 3,
-        "success": true,
-        "response": "{\n  \"summary\": \"The page contains a JSON object representing a slideshow with metadata and slide details, successfully captured during a benchmark task.\",\n  \"data_extracted\": [\n    \"Slideshow Title: Sample Slide Show\",\n    \"Author: Yours Truly\",\n    \"Date: date of publication\",\n    \"Slide 1 Title: Wake up to WonderWidgets!\",\n    \"Slide 2 Title: Overview\",\n    \"Slide 2 Items: Why WonderWidgets are great, Who buys WonderWidgets\"\n  ],\n  \"navigation_quality\": 100,\n  \"content_relevance\": 100\n}",
-        "prompt_tokens": 277,
-        "completion_tokens": 136,
-        "latency_ms": 21215,
-        "eval": {
-          "score": 1.0,
-          "passed": true,
-          "details": [
-            {
-              "criterion": "keyword:summary",
-              "score": 1.0,
-              "passed": true,
-              "message": "Found 'summary'"
-            },
-            {
-              "criterion": "keyword:data_extracted",
-              "score": 1.0,
-              "passed": true,
-              "message": "Found 'data_extracted'"
-            }
-          ]
-        },
-        "error": null
+        "success": false,
+        "response": "",
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "latency_ms": 0,
+        "eval": null,
+        "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
       },
       {
         "task_id": "llm-form-fill",
         "stream_id": 2,
-        "success": true,
-        "response": "{\n  \"summary\": \"The page contains a pizza ordering form where user details, size, toppings, and delivery preferences can be entered. The benchmark log shows the successful filling of customer fields and submission of the order.\",\n  \"data_extracted\": [\n    \"Customer name: Selfware Test\",\n    \"Telephone: 555-0123\",\n    \"E-mail address: test@selfware.dev\",\n    \"Pizza Size options: Small, Medium, Large\",\n    \"Toppings: Bacon, Extra Cheese, Onion, Mushroom\",\n    \"Fields: Preferred delivery time, Delivery instructions\"\n  ],\n  \"navigation_quality\": 95,\n  \"content_relevance\": 100\n}",
-        "prompt_tokens": 350,
-        "completion_tokens": 159,
-        "latency_ms": 25002,
-        "eval": {
-          "score": 1.0,
-          "passed": true,
-          "details": [
-            {
-              "criterion": "keyword:summary",
-              "score": 1.0,
-              "passed": true,
-              "message": "Found 'summary'"
-            },
-            {
-              "criterion": "keyword:data_extracted",
-              "score": 1.0,
-              "passed": true,
-              "message": "Found 'data_extracted'"
-            }
-          ]
-        },
-        "error": null
+        "success": false,
+        "response": "",
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "latency_ms": 0,
+        "eval": null,
+        "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
       },
       {
         "task_id": "llm-multi-step-nav",
         "stream_id": 1,
-        "success": true,
-        "response": "{\n  \"summary\": \"The captured content represents a successful multi-step navigation task starting from the Rust Wikipedia page and following a link to the Memory safety article. The text includes full table of contents and introductory paragraphs for both pages, confirming the transition and content retrieval.\",\n  \"data_extracted\": [\n    \"Rust (programming language)\",\n    \"Memory safety\",\n    \"https://en.wikipedia.org/wiki/Memory_safety\",\n    \"Stable release 1.94.0\",\n    \"Paradigms: Concurrent, functional, generic, imperative, structured\",\n    \"Buffer overflows\",\n    \"Dangling pointers\",\n    \"Garbage collection\",\n    \"Static analysis\"\n  ],\n  \"navigation_quality\": 100,\n  \"content_relevance\": 100\n}",
-        "prompt_tokens": 1645,
-        "completion_tokens": 178,
-        "latency_ms": 29073,
-        "eval": {
-          "score": 1.0,
-          "passed": true,
-          "details": [
-            {
-              "criterion": "keyword:summary",
-              "score": 1.0,
-              "passed": true,
-              "message": "Found 'summary'"
-            },
-            {
-              "criterion": "keyword:data_extracted",
-              "score": 1.0,
-              "passed": true,
-              "message": "Found 'data_extracted'"
-            }
-          ]
-        },
-        "error": null
+        "success": false,
+        "response": "",
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "latency_ms": 0,
+        "eval": null,
+        "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
       },
       {
         "task_id": "llm-search-extract",
         "stream_id": 0,
-        "success": true,
-        "response": "{\n  \"summary\": \"The page is a DuckDuckGo search interface that failed to load results, instead displaying a message stating the browser is not supported and redirecting to a lite version.\",\n  \"data_extracted\": [\n    \"DuckDuckGo\",\n    \"This browser is not supported\",\n    \"Please visit /lite\",\n    \"Rust programming language\"\n  ],\n  \"navigation_quality\": 20,\n  \"content_relevance\": 10\n}",
-        "prompt_tokens": 243,
-        "completion_tokens": 109,
-        "latency_ms": 13684,
-        "eval": {
-          "score": 1.0,
-          "passed": true,
-          "details": [
-            {
-              "criterion": "keyword:summary",
-              "score": 1.0,
-              "passed": true,
-              "message": "Found 'summary'"
-            },
-            {
-              "criterion": "keyword:data_extracted",
-              "score": 1.0,
-              "passed": true,
-              "message": "Found 'data_extracted'"
-            }
-          ]
-        },
-        "error": null
+        "success": false,
+        "response": "",
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "latency_ms": 0,
+        "eval": null,
+        "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
       }
     ]
   },
-  "total_duration_secs": 29.600470951
+  "total_duration_secs": 0.25926246
 }

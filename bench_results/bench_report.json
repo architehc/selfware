@@ -1,1111 +1,375 @@
 {
-  "timestamp": "2026-03-25T03:32:45.926464121+00:00",
+  "timestamp": "2026-03-27T22:26:32.866978357+00:00",
   "model": "qwen3.5-27b",
   "endpoint": "http://localhost:8000/v1",
   "max_concurrent": 32,
   "tasks_total": 32,
-  "tasks_passed": 5,
-  "tasks_failed": 27,
-  "total_prompt_tokens": 1228,
-  "total_completion_tokens": 16297,
-  "tokens_per_sec": 148.09185111268073,
-  "latency_p50_ms": 56102,
-  "latency_p95_ms": 97164,
-  "latency_p99_ms": 110043,
-  "latency_avg_ms": 62427.25,
-  "latency_min_ms": 27524,
-  "latency_max_ms": 110043,
-  "avg_score": 0.14583333333333331,
-  "total_duration_secs": 110.046568245,
-  "error_rate": 0.84375,
+  "tasks_passed": 0,
+  "tasks_failed": 32,
+  "total_prompt_tokens": 0,
+  "total_completion_tokens": 0,
+  "tokens_per_sec": 0.0,
+  "latency_p50_ms": 2,
+  "latency_p95_ms": 3,
+  "latency_p99_ms": 3,
+  "latency_avg_ms": 2.25,
+  "latency_min_ms": 1,
+  "latency_max_ms": 3,
+  "avg_score": 0.0,
+  "total_duration_secs": 0.004980371,
+  "error_rate": 1.0,
   "results": [
     {
       "task_id": "task-00",
       "stream_id": 0,
       "success": false,
       "response": "",
-      "prompt_tokens": 37,
-      "completion_tokens": 512,
-      "latency_ms": 27524,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:ownership",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'ownership'"
-          },
-          {
-            "criterion": "keyword:lifetime",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'lifetime'"
-          },
-          {
-            "criterion": "keyword:borrow",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'borrow'"
-          }
-        ]
-      },
-      "error": null
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 3,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
       "task_id": "task-01",
-      "stream_id": 8,
-      "success": false,
-      "response": "",
-      "prompt_tokens": 37,
-      "completion_tokens": 512,
-      "latency_ms": 78836,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:def",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'def'"
-          },
-          {
-            "criterion": "keyword:fibonacci",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'fibonacci'"
-          },
-          {
-            "criterion": "keyword:memo",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'memo'"
-          }
-        ]
-      },
-      "error": null
-    },
-    {
-      "task_id": "task-02",
-      "stream_id": 30,
-      "success": false,
-      "response": "",
-      "prompt_tokens": 40,
-      "completion_tokens": 512,
-      "latency_ms": 110042,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:single responsibility",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'single responsibility'"
-          },
-          {
-            "criterion": "keyword:open",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'open'"
-          },
-          {
-            "criterion": "keyword:liskov",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'liskov'"
-          }
-        ]
-      },
-      "error": null
-    },
-    {
-      "task_id": "task-03",
-      "stream_id": 1,
-      "success": false,
-      "response": "",
-      "prompt_tokens": 38,
-      "completion_tokens": 512,
-      "latency_ms": 27524,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:node",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'node'"
-          },
-          {
-            "criterion": "keyword:key",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'key'"
-          },
-          {
-            "criterion": "keyword:balanced",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'balanced'"
-          }
-        ]
-      },
-      "error": null
-    },
-    {
-      "task_id": "task-04",
-      "stream_id": 12,
-      "success": false,
-      "response": "",
-      "prompt_tokens": 38,
-      "completion_tokens": 512,
-      "latency_ms": 27568,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:fn",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'fn'"
-          },
-          {
-            "criterion": "keyword:binary",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'binary'"
-          },
-          {
-            "criterion": "keyword:search",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'search'"
-          }
-        ]
-      },
-      "error": null
-    },
-    {
-      "task_id": "task-05",
-      "stream_id": 2,
-      "success": false,
-      "response": "",
-      "prompt_tokens": 36,
-      "completion_tokens": 512,
-      "latency_ms": 27524,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:consistency",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'consistency'"
-          },
-          {
-            "criterion": "keyword:availability",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'availability'"
-          },
-          {
-            "criterion": "keyword:partition",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'partition'"
-          }
-        ]
-      },
-      "error": null
-    },
-    {
-      "task_id": "task-06",
-      "stream_id": 4,
-      "success": true,
-      "response": "\n\n## Key Differences\n\n| Aspect | Async/Await | Threads |\n|--------|-------------|---------|\n| **Execution Model** | Cooperative, event-driven | Preemptive, OS-scheduled |\n| **Parallelism** | Concurrent (single-threaded by default) | Parallel (multiple CPU cores) |\n| **Overhead** | Low (no context-switching cost) | Higher (OS thread management) |\n| **Blocking** | Non-blocking I/O | Can block the thread |\n| **Memory** | Minimal per task | Significant per thread (~1MB+) |\n\n## When to Use Each\n\n### **Use Async/Await When:**\n- **I/O-bound operations** (network requests, file/database access)\n- **High concurrency** (thousands of connections)\n- **Web servers, APIs, real-time apps**\n- Example: Fetching data from multiple APIs simultaneously\n\n```python\n# Async - efficient for I/O\nasync def fetch_all():\n    await asyncio.gather(fetch(url1), fetch(url2), fetch(url3))\n```\n\n### **Use Threads When:**\n- **CPU-bound operations** (heavy computation)\n- **True parallelism** needed across cores\n- **Blocking libraries** that don't support async\n- Example: Image processing, encryption, numerical calculations\n\n```python\n# Threads - parallel for CPU work\nfrom threading import Thread\nThread(target=heavy_computation).start()\n```\n\n## Rule of Thumb\n- **I/O-bound → Async/Await** (better scalability, lower overhead)\n- **CPU-bound → Threads/Processes** (utilize multiple cores)\n\n**Hybrid approach:** Use async for I/O and threads/processes for CPU-bound tasks within async applications.",
-      "prompt_tokens": 42,
-      "completion_tokens": 473,
-      "latency_ms": 65754,
-      "eval": {
-        "score": 1.0,
-        "passed": true,
-        "details": [
-          {
-            "criterion": "keyword:async",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'async'"
-          },
-          {
-            "criterion": "keyword:thread",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'thread'"
-          },
-          {
-            "criterion": "keyword:concur",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'concur'"
-          }
-        ]
-      },
-      "error": null
-    },
-    {
-      "task_id": "task-07",
-      "stream_id": 3,
-      "success": false,
-      "response": "",
-      "prompt_tokens": 39,
-      "completion_tokens": 512,
-      "latency_ms": 27524,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:garbage",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'garbage'"
-          },
-          {
-            "criterion": "keyword:reference",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'reference'"
-          },
-          {
-            "criterion": "keyword:memory",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'memory'"
-          }
-        ]
-      },
-      "error": null
-    },
-    {
-      "task_id": "task-08",
-      "stream_id": 14,
-      "success": true,
-      "response": "\n\nThe borrow checker enforces Rust's ownership model, ensuring each value has a single",
-      "prompt_tokens": 37,
-      "completion_tokens": 512,
-      "latency_ms": 36699,
-      "eval": {
-        "score": 0.6666666666666666,
-        "passed": true,
-        "details": [
-          {
-            "criterion": "keyword:ownership",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'ownership'"
-          },
-          {
-            "criterion": "keyword:lifetime",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'lifetime'"
-          },
-          {
-            "criterion": "keyword:borrow",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'borrow'"
-          }
-        ]
-      },
-      "error": null
-    },
-    {
-      "task_id": "task-09",
-      "stream_id": 5,
-      "success": false,
-      "response": "",
-      "prompt_tokens": 37,
-      "completion_tokens": 512,
-      "latency_ms": 91273,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:def",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'def'"
-          },
-          {
-            "criterion": "keyword:fibonacci",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'fibonacci'"
-          },
-          {
-            "criterion": "keyword:memo",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'memo'"
-          }
-        ]
-      },
-      "error": null
-    },
-    {
-      "task_id": "task-10",
       "stream_id": 31,
       "success": false,
       "response": "",
-      "prompt_tokens": 40,
-      "completion_tokens": 512,
-      "latency_ms": 110043,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:single responsibility",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'single responsibility'"
-          },
-          {
-            "criterion": "keyword:open",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'open'"
-          },
-          {
-            "criterion": "keyword:liskov",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'liskov'"
-          }
-        ]
-      },
-      "error": null
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 1,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
-      "task_id": "task-11",
-      "stream_id": 7,
+      "task_id": "task-02",
+      "stream_id": 1,
       "success": false,
       "response": "",
-      "prompt_tokens": 38,
-      "completion_tokens": 512,
-      "latency_ms": 56102,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:node",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'node'"
-          },
-          {
-            "criterion": "keyword:key",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'key'"
-          },
-          {
-            "criterion": "keyword:balanced",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'balanced'"
-          }
-        ]
-      },
-      "error": null
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 3,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
-      "task_id": "task-12",
-      "stream_id": 29,
-      "success": false,
-      "response": "",
-      "prompt_tokens": 38,
-      "completion_tokens": 512,
-      "latency_ms": 56101,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:fn",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'fn'"
-          },
-          {
-            "criterion": "keyword:binary",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'binary'"
-          },
-          {
-            "criterion": "keyword:search",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'search'"
-          }
-        ]
-      },
-      "error": null
-    },
-    {
-      "task_id": "task-13",
-      "stream_id": 6,
-      "success": false,
-      "response": "",
-      "prompt_tokens": 36,
-      "completion_tokens": 512,
-      "latency_ms": 27524,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:consistency",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'consistency'"
-          },
-          {
-            "criterion": "keyword:availability",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'availability'"
-          },
-          {
-            "criterion": "keyword:partition",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'partition'"
-          }
-        ]
-      },
-      "error": null
-    },
-    {
-      "task_id": "task-14",
-      "stream_id": 17,
-      "success": false,
-      "response": "",
-      "prompt_tokens": 42,
-      "completion_tokens": 512,
-      "latency_ms": 81014,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:async",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'async'"
-          },
-          {
-            "criterion": "keyword:thread",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'thread'"
-          },
-          {
-            "criterion": "keyword:concur",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'concur'"
-          }
-        ]
-      },
-      "error": null
-    },
-    {
-      "task_id": "task-15",
-      "stream_id": 9,
-      "success": false,
-      "response": "",
-      "prompt_tokens": 39,
-      "completion_tokens": 512,
-      "latency_ms": 42448,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:garbage",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'garbage'"
-          },
-          {
-            "criterion": "keyword:reference",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'reference'"
-          },
-          {
-            "criterion": "keyword:memory",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'memory'"
-          }
-        ]
-      },
-      "error": null
-    },
-    {
-      "task_id": "task-16",
-      "stream_id": 25,
-      "success": false,
-      "response": "",
-      "prompt_tokens": 37,
-      "completion_tokens": 512,
-      "latency_ms": 56101,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:ownership",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'ownership'"
-          },
-          {
-            "criterion": "keyword:lifetime",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'lifetime'"
-          },
-          {
-            "criterion": "keyword:borrow",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'borrow'"
-          }
-        ]
-      },
-      "error": null
-    },
-    {
-      "task_id": "task-17",
-      "stream_id": 10,
-      "success": false,
-      "response": "",
-      "prompt_tokens": 37,
-      "completion_tokens": 512,
-      "latency_ms": 91273,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:def",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'def'"
-          },
-          {
-            "criterion": "keyword:fibonacci",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'fibonacci'"
-          },
-          {
-            "criterion": "keyword:memo",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'memo'"
-          }
-        ]
-      },
-      "error": null
-    },
-    {
-      "task_id": "task-18",
-      "stream_id": 11,
-      "success": true,
-      "response": "\n\n1.  **Single Responsibility Principle (SRP):** A class should have only one reason to change.\n2.  **Open/Closed Principle (OCP):** Software entities should be open for extension but closed for modification.\n3.  **Liskov Substitution Principle (LSP):** Subtypes must be substitutable for their base types without altering correctness.\n4.  **Interface Segregation Principle (ISP):** Clients should not be forced to depend on interfaces they do not use.\n5.  **Dependency Inversion Principle (DIP):** Depend on abstractions, not concretions.",
-      "prompt_tokens": 40,
-      "completion_tokens": 488,
-      "latency_ms": 88490,
-      "eval": {
-        "score": 1.0,
-        "passed": true,
-        "details": [
-          {
-            "criterion": "keyword:single responsibility",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'single responsibility'"
-          },
-          {
-            "criterion": "keyword:open",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'open'"
-          },
-          {
-            "criterion": "keyword:liskov",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'liskov'"
-          }
-        ]
-      },
-      "error": null
-    },
-    {
-      "task_id": "task-19",
-      "stream_id": 13,
-      "success": false,
-      "response": "",
-      "prompt_tokens": 38,
-      "completion_tokens": 512,
-      "latency_ms": 56102,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:node",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'node'"
-          },
-          {
-            "criterion": "keyword:key",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'key'"
-          },
-          {
-            "criterion": "keyword:balanced",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'balanced'"
-          }
-        ]
-      },
-      "error": null
-    },
-    {
-      "task_id": "task-20",
-      "stream_id": 15,
-      "success": false,
-      "response": "",
-      "prompt_tokens": 38,
-      "completion_tokens": 512,
-      "latency_ms": 56156,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:fn",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'fn'"
-          },
-          {
-            "criterion": "keyword:binary",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'binary'"
-          },
-          {
-            "criterion": "keyword:search",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'search'"
-          }
-        ]
-      },
-      "error": null
-    },
-    {
-      "task_id": "task-21",
+      "task_id": "task-03",
       "stream_id": 16,
       "success": false,
       "response": "",
-      "prompt_tokens": 36,
-      "completion_tokens": 512,
-      "latency_ms": 42448,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:consistency",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'consistency'"
-          },
-          {
-            "criterion": "keyword:availability",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'availability'"
-          },
-          {
-            "criterion": "keyword:partition",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'partition'"
-          }
-        ]
-      },
-      "error": null
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 2,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
-      "task_id": "task-22",
-      "stream_id": 18,
+      "task_id": "task-04",
+      "stream_id": 2,
       "success": false,
       "response": "",
-      "prompt_tokens": 42,
-      "completion_tokens": 512,
-      "latency_ms": 81014,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:async",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'async'"
-          },
-          {
-            "criterion": "keyword:thread",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'thread'"
-          },
-          {
-            "criterion": "keyword:concur",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'concur'"
-          }
-        ]
-      },
-      "error": null
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 2,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
-      "task_id": "task-23",
-      "stream_id": 19,
+      "task_id": "task-05",
+      "stream_id": 15,
       "success": false,
       "response": "",
-      "prompt_tokens": 39,
-      "completion_tokens": 512,
-      "latency_ms": 89763,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:garbage",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'garbage'"
-          },
-          {
-            "criterion": "keyword:reference",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'reference'"
-          },
-          {
-            "criterion": "keyword:memory",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'memory'"
-          }
-        ]
-      },
-      "error": null
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 2,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
-      "task_id": "task-24",
-      "stream_id": 20,
+      "task_id": "task-06",
+      "stream_id": 3,
       "success": false,
       "response": "",
-      "prompt_tokens": 37,
-      "completion_tokens": 512,
-      "latency_ms": 81013,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:ownership",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'ownership'"
-          },
-          {
-            "criterion": "keyword:lifetime",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'lifetime'"
-          },
-          {
-            "criterion": "keyword:borrow",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'borrow'"
-          }
-        ]
-      },
-      "error": null
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 3,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
-      "task_id": "task-25",
+      "task_id": "task-07",
+      "stream_id": 25,
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 2,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
+    },
+    {
+      "task_id": "task-08",
+      "stream_id": 4,
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 3,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
+    },
+    {
+      "task_id": "task-09",
+      "stream_id": 30,
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 2,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
+    },
+    {
+      "task_id": "task-10",
+      "stream_id": 5,
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 3,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
+    },
+    {
+      "task_id": "task-11",
+      "stream_id": 12,
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 3,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
+    },
+    {
+      "task_id": "task-12",
+      "stream_id": 6,
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 2,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
+    },
+    {
+      "task_id": "task-13",
       "stream_id": 21,
       "success": false,
       "response": "",
-      "prompt_tokens": 37,
-      "completion_tokens": 512,
-      "latency_ms": 42448,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:def",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'def'"
-          },
-          {
-            "criterion": "keyword:fibonacci",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'fibonacci'"
-          },
-          {
-            "criterion": "keyword:memo",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'memo'"
-          }
-        ]
-      },
-      "error": null
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 1,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
+    },
+    {
+      "task_id": "task-14",
+      "stream_id": 7,
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 2,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
+    },
+    {
+      "task_id": "task-15",
+      "stream_id": 28,
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 2,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
+    },
+    {
+      "task_id": "task-16",
+      "stream_id": 8,
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 3,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
+    },
+    {
+      "task_id": "task-17",
+      "stream_id": 24,
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 2,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
+    },
+    {
+      "task_id": "task-18",
+      "stream_id": 9,
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 2,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
+    },
+    {
+      "task_id": "task-19",
+      "stream_id": 10,
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 3,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
+    },
+    {
+      "task_id": "task-20",
+      "stream_id": 11,
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 3,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
+    },
+    {
+      "task_id": "task-21",
+      "stream_id": 13,
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 3,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
+    },
+    {
+      "task_id": "task-22",
+      "stream_id": 14,
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 3,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
+    },
+    {
+      "task_id": "task-23",
+      "stream_id": 17,
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 2,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
+    },
+    {
+      "task_id": "task-24",
+      "stream_id": 18,
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 2,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
+    },
+    {
+      "task_id": "task-25",
+      "stream_id": 19,
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 2,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
       "task_id": "task-26",
-      "stream_id": 22,
-      "success": true,
-      "response": "\n\n1. **Single Responsibility Principle (SRP)**: A class should have only one reason to change.\n2. **Open/Closed Principle (OCP)**: Software entities should be open for extension but closed for modification.\n3. **Liskov Substitution Principle (LSP)**: Subtypes must be substitutable for their base types.\n4. **Interface Segregation Principle (ISP)**: Clients should not be forced to depend on interfaces they do not use.\n5. **Dependency Inversion Principle (DIP)**: Depend",
-      "prompt_tokens": 40,
-      "completion_tokens": 512,
-      "latency_ms": 91273,
-      "eval": {
-        "score": 1.0,
-        "passed": true,
-        "details": [
-          {
-            "criterion": "keyword:single responsibility",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'single responsibility'"
-          },
-          {
-            "criterion": "keyword:open",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'open'"
-          },
-          {
-            "criterion": "keyword:liskov",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'liskov'"
-          }
-        ]
-      },
-      "error": null
+      "stream_id": 20,
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 2,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
       "task_id": "task-27",
-      "stream_id": 23,
+      "stream_id": 22,
       "success": false,
       "response": "",
-      "prompt_tokens": 38,
-      "completion_tokens": 512,
-      "latency_ms": 42448,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:node",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'node'"
-          },
-          {
-            "criterion": "keyword:key",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'key'"
-          },
-          {
-            "criterion": "keyword:balanced",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'balanced'"
-          }
-        ]
-      },
-      "error": null
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 1,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
       "task_id": "task-28",
-      "stream_id": 24,
-      "success": true,
-      "response": "\n\n```rust\nfn binary_search<T: Ord>(slice: &[T], target: &T) -> Option<usize> {\n    let mut left = 0;\n    let mut right = slice.len();\n\n    while left < right {\n        let mid = left + (right - left) / 2;\n        match slice[mid].cmp(target) {\n            std::cmp::Ordering::Less => left = mid + 1,\n            std::cmp::Ordering::Greater => right = mid,\n            std::cmp::Ordering::Equal => return Some(mid),\n        }\n    }\n\n    None\n}\n```\n\n**Usage:**\n```rust\nlet arr = [1, 3, 5, 7, 9];\nassert_eq!(binary_search(&arr, &5), Some(2));\nassert_eq!(binary_search(&arr, &4), None);\n```\n\n**Note:** Rust's standard library provides `std::slice::binary_search` for the same functionality.",
-      "prompt_tokens": 38,
-      "completion_tokens": 488,
-      "latency_ms": 41106,
-      "eval": {
-        "score": 1.0,
-        "passed": true,
-        "details": [
-          {
-            "criterion": "keyword:fn",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'fn'"
-          },
-          {
-            "criterion": "keyword:binary",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'binary'"
-          },
-          {
-            "criterion": "keyword:search",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'search'"
-          }
-        ]
-      },
-      "error": null
+      "stream_id": 23,
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 2,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
       "task_id": "task-29",
       "stream_id": 26,
       "success": false,
       "response": "",
-      "prompt_tokens": 36,
-      "completion_tokens": 512,
-      "latency_ms": 56101,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:consistency",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'consistency'"
-          },
-          {
-            "criterion": "keyword:availability",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'availability'"
-          },
-          {
-            "criterion": "keyword:partition",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'partition'"
-          }
-        ]
-      },
-      "error": null
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 2,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
       "task_id": "task-30",
       "stream_id": 27,
       "success": false,
       "response": "",
-      "prompt_tokens": 42,
-      "completion_tokens": 512,
-      "latency_ms": 91272,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:async",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'async'"
-          },
-          {
-            "criterion": "keyword:thread",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'thread'"
-          },
-          {
-            "criterion": "keyword:concur",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'concur'"
-          }
-        ]
-      },
-      "error": null
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 2,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
       "task_id": "task-31",
-      "stream_id": 28,
+      "stream_id": 29,
       "success": false,
       "response": "",
-      "prompt_tokens": 39,
-      "completion_tokens": 512,
-      "latency_ms": 97164,
-      "eval": {
-        "score": 0.0,
-        "passed": false,
-        "details": [
-          {
-            "criterion": "keyword:garbage",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'garbage'"
-          },
-          {
-            "criterion": "keyword:reference",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'reference'"
-          },
-          {
-            "criterion": "keyword:memory",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'memory'"
-          }
-        ]
-      },
-      "error": null
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 2,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     }
   ]
 }

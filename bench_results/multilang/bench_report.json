@@ -1,437 +1,155 @@
 {
-  "timestamp": "2026-03-26T12:22:40.846439464+00:00",
+  "timestamp": "2026-03-27T22:26:34.712717342+00:00",
   "model": "qwen3.5-27b",
   "endpoint": "http://localhost:8000/v1",
   "max_concurrent": 12,
   "tasks_total": 12,
-  "tasks_passed": 12,
-  "tasks_failed": 0,
-  "total_prompt_tokens": 813,
-  "total_completion_tokens": 10068,
-  "tokens_per_sec": 140.67939001720987,
-  "latency_p50_ms": 34880,
-  "latency_p95_ms": 66756,
-  "latency_p99_ms": 71566,
-  "latency_avg_ms": 38978.166666666664,
-  "latency_min_ms": 22820,
-  "latency_max_ms": 71566,
-  "avg_score": 0.9722222222222223,
-  "total_duration_secs": 71.566986456,
-  "error_rate": 0.0,
+  "tasks_passed": 0,
+  "tasks_failed": 12,
+  "total_prompt_tokens": 0,
+  "total_completion_tokens": 0,
+  "tokens_per_sec": 0.0,
+  "latency_p50_ms": 1,
+  "latency_p95_ms": 1,
+  "latency_p99_ms": 1,
+  "latency_avg_ms": 1.0,
+  "latency_min_ms": 1,
+  "latency_max_ms": 1,
+  "avg_score": 0.0,
+  "total_duration_secs": 0.002112264,
+  "error_rate": 1.0,
   "results": [
     {
       "task_id": "go-concurrent-map",
-      "stream_id": 9,
-      "success": true,
-      "response": "```go\npackage safemap\n\nimport (\n\t\"sync\"\n\t\"testing\"\n)\n\ntype SafeMap[K comparable, V any] struct {\n\tmu sync.RWMutex\n\tm  map[K]V\n}\n\nfunc NewSafeMap[K comparable, V any]() *SafeMap[K, V] {\n\treturn &SafeMap[K, V]{\n\t\tm: make(map[K]V),\n\t}\n}\n\nfunc (s *SafeMap[K, V]) Get(key K) (V, bool) {\n\ts.mu.RLock()\n\tdefer s.mu.RUnlock()\n\tval, ok := s.m[key]\n\treturn val, ok\n}\n\nfunc (s *SafeMap[K, V]) Set(key K, value V) {\n\ts.mu.Lock()\n\tdefer s.mu.Unlock()\n\ts.m[key] = value\n}\n\nfunc (s *SafeMap[K, V]) Delete(key K) {\n\ts.mu.Lock()\n\tdefer s.mu.Unlock()\n\tdelete(s.m, key)\n}\n\nfunc (s *SafeMap[K, V]) Len() int {\n\ts.mu.RLock()\n\tdefer s.mu.RUnlock()\n\treturn len(s.m)\n}\n\n// Tests\nfunc TestSafeMap(t *testing.T) {\n\tt.Run(\"Basic Operations\", func(t *testing.T) {\n\t\tm := NewSafeMap[string, int]()\n\n\t\t// Set\n\t\tm.Set(\"a\", 1)\n\t\tm.Set(\"b\", 2)\n\n\t\t// Get\n\t\tval, ok := m.Get(\"a\")\n\t\tif !ok || val != 1 {\n\t\t\tt.Fatalf(\"Expected 1, got %d, ok=%v\", val, ok)\n\t\t}\n\n\t\tval, ok = m.Get(\"b\")\n\t\tif !ok || val != 2 {\n\t\t\tt.Fatalf(\"Expected 2, got %d, ok=%v\", val, ok)\n\t\t}\n\n\t\t// Get non-existent\n\t\t_, ok = m.Get(\"c\")\n\t\tif ok {\n\t\t\tt.Fatal(\"Expected false for non-existent key\")\n\t\t}\n\n\t\t// Delete\n\t\tm.Delete(\"a\")\n\t\t_, ok = m.Get(\"a\")\n\t\tif ok {\n\t\t\tt.Fatal(\"Expected false after delete\")\n\t\t}\n\n\t\t// Length\n\t\tif m.Len() != 1 {\n\t\t\tt.Fatalf(\"Expected length 1, got %d\", m.Len())\n\t\t}\n\t})\n\n\tt.Run(\"Concurrent Safety\", func(t *testing.T) {\n\t\tm := NewSafeMap[int, string]()\n\t\tdone := make(chan bool)\n\n\t\tgo func() {\n\t\t\tfor i := 0; i < 1000; i++ {\n\t\t\t\tm.Set(i, \"value\")\n\t\t\t}\n\t\t\tdone <- true\n\t\t}()\n\n\t\tgo func() {\n\t\t\tfor i := 0; i < 1000; i++ {\n\t\t\t\tm.Get(i)\n\t\t\t}\n\t\t\tdone <- true\n\t\t}()\n\n\t\tgo func() {\n\t\t\tfor i := 0; i < 1000; i++ {\n\t\t\t\tm.Delete(i)\n\t\t\t}\n\t\t\tdone <- true\n\t\t}()\n\n\t\t<-done\n\t\t<-done\n\t\t<-done\n\t})\n}\n```",
-      "prompt_tokens": 80,
-      "completion_tokens": 729,
-      "latency_ms": 34880,
-      "eval": {
-        "score": 1.0,
-        "passed": true,
-        "details": [
-          {
-            "criterion": "keyword:sync.RWMutex",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'sync.RWMutex'"
-          },
-          {
-            "criterion": "keyword:func",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'func'"
-          },
-          {
-            "criterion": "keyword:SafeMap",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'SafeMap'"
-          }
-        ]
-      },
-      "error": null
+      "stream_id": 10,
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 1,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
       "task_id": "go-http-middleware",
       "stream_id": 11,
-      "success": true,
-      "response": "package middleware\n\nimport (\n\t\"net/http\"\n\t\"testing\"\n)\n\n// Middleware is a function that wraps an http.Handler.\ntype Middleware func(http.Handler) http.Handler\n\n// Chain combines multiple middlewares into a single middleware.\nfunc Chain(middlewares ...Middleware) Middleware {\n\treturn func(next http.Handler) http.Handler {\n\t\tfor i := len(middlewares) - 1; i >= 0; i-- {\n\t\t\tnext = middlewares[i](next)\n\t\t}\n\t\treturn next\n\t}\n}\n\n// LoggingMiddleware logs the request method and path.\nfunc LoggingMiddleware(next http.Handler) http.Handler {\n\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\t// In a real app, you might use a logger library\n\t\t// log.Printf(\"%s %s\", r.Method, r.URL.Path)\n\t\tnext.ServeHTTP(w, r)\n\t})\n}\n\n// AuthMiddleware checks for a simple \"Authorization\" header.\nfunc AuthMiddleware(next http.Handler) http.Handler {\n\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\tif r.Header.Get(\"Authorization\") != \"Bearer secret-token\" {\n\t\t\thttp.Error(w, \"Unauthorized\", http.StatusUnauthorized)\n\t\t\treturn\n\t\t}\n\t\tnext.ServeHTTP(w, r)\n\t})\n}\n\n// --- Tests ---\n\nfunc TestChain(t *testing.T) {\n\tcalled := []string{}\n\n\tm1 := func(next http.Handler) http.Handler {\n\t\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\t\tcalled = append(called, \"m1-before\")\n\t\t\tnext.ServeHTTP(w, r)\n\t\t\tcalled = append(called, \"m1-after\")\n\t\t})\n\t}\n\n\tm2 := func(next http.Handler) http.Handler {\n\t\treturn http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\t\tcalled = append(called, \"m2-before\")\n\t\t\tnext.ServeHTTP(w, r)\n\t\t\tcalled = append(called, \"m2-after\")\n\t\t})\n\t}\n\n\thandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\tcalled = append(called, \"handler\")\n\t})\n\n\tchained := Chain(m1, m2)(handler)\n\n\treq := &http.Request{Method: \"GET\", URL: &http.URL{Path: \"/\"}}\n\tw := &testResponseWriter{}\n\n\tchained.ServeHTTP(w, req)\n\n\texpected := []string{\"m1-before\", \"m2-before\", \"handler\", \"m2-after\", \"m1-after\"}\n\tif len(called) != len(expected) {\n\t\tt.Fatalf(\"expected %d calls, got %d\", len(expected), len(called))\n\t}\n\tfor i, v := range expected {\n\t\tif called[i] != v {\n\t\t\tt.Errorf(\"at index %d: expected %s, got %s\", i, v, called[i])\n\t\t}\n\t}\n}\n\nfunc TestAuthMiddleware(t *testing.T) {\n\thandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\tw.WriteHeader(http.StatusOK)\n\t\tw.Write([]byte(\"Success\"))\n\t})\n\n\tmiddleware := AuthMiddleware(handler)\n\n\ttests := []struct {\n\t\tname           string\n\t\tauthHeader     string\n\t\texpectedStatus int\n\t}{\n\t\t{\"Valid Token\", \"Bearer secret-token\", http.StatusOK},\n\t\t{\"Invalid Token\", \"Bearer wrong-token\", http.StatusUnauthorized},\n\t\t{\"No Token\", \"\", http.StatusUnauthorized},\n\t}\n\n\tfor _, tt := range tests {\n\t\tt.Run(tt.name, func(t *testing.T) {\n\t\t\treq := &http.Request{\n\t\t\t\tMethod: \"GET\",\n\t\t\t\tHeader: make(http.Header),\n\t\t\t}\n\t\t\tif tt.authHeader != \"\" {\n\t\t\t\treq.Header.Set(\"Authorization\", tt.authHeader)\n\t\t\t}\n\n\t\t\tw := &testResponseWriter{}\n\t\t\tmiddleware.ServeHTTP(w, req)\n\n\t\t\tif w.status != tt.expectedStatus {\n\t\t\t\tt.Errorf(\"expected status %d, got %d\", tt.expectedStatus, w.status)\n\t\t\t}\n\t\t})\n\t}\n}\n\n// Helper for testing\ntype testResponseWriter struct {\n\tstatus int\n\tbody   []byte\n}\n\nfunc (t *testResponseWriter) Header() http.Header {\n\treturn make(http.Header)\n}\n\nfunc (t *testResponseWriter) Write(b []byte) (int, error) {\n\tt.body = b\n\treturn len(b), nil\n}\n\nfunc (t *testResponseWriter) WriteHeader(statusCode int) {\n\tt.status = statusCode\n}",
-      "prompt_tokens": 68,
-      "completion_tokens": 1016,
-      "latency_ms": 46440,
-      "eval": {
-        "score": 1.0,
-        "passed": true,
-        "details": [
-          {
-            "criterion": "keyword:Middleware",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'Middleware'"
-          },
-          {
-            "criterion": "keyword:http.Handler",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'http.Handler'"
-          },
-          {
-            "criterion": "keyword:func Chain",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'func Chain'"
-          }
-        ]
-      },
-      "error": null
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 1,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
       "task_id": "go-worker-pool",
-      "stream_id": 10,
-      "success": true,
-      "response": "```go\npackage pool\n\nimport (\n\t\"sync\"\n\t\"testing\"\n)\n\n// Pool represents a worker pool.\ntype Pool struct {\n\ttasks    chan func()\n\tworkers  int\n\twg       sync.WaitGroup\n\trunning  bool\n\tmu       sync.Mutex\n}\n\n// NewPool creates a new worker pool with the specified number of workers.\nfunc NewPool(workers int) *Pool {\n\tp := &Pool{\n\t\ttasks:   make(chan func()),\n\t\tworkers: workers,\n\t}\n\tp.start()\n\treturn p\n}\n\nfunc (p *Pool) start() {\n\tp.mu.Lock()\n\tdefer p.mu.Unlock()\n\tif p.running {\n\t\treturn\n\t}\n\tp.running = true\n\n\tfor i := 0; i < p.workers; i++ {\n\t\tp.wg.Add(1)\n\t\tgo func() {\n\t\t\tdefer p.wg.Done()\n\t\t\tfor task := range p.tasks {\n\t\t\t\ttask()\n\t\t\t}\n\t\t}()\n\t}\n}\n\n// Submit adds a task to the pool.\nfunc (p *Pool) Submit(task func()) {\n\tp.tasks <- task\n}\n\n// Wait blocks until all submitted tasks are completed.\nfunc (p *Pool) Wait() {\n\tclose(p.tasks)\n\tp.wg.Wait()\n}\n\n// --- Tests ---\n\nfunc TestPool(t *testing.T) {\n\tp := NewPool(4)\n\tvar wg sync.WaitGroup\n\tresults := make([]int, 10)\n\n\tfor i := 0; i < 10; i++ {\n\t\twg.Add(1)\n\t\tp.Submit(func(idx int) {\n\t\t\tdefer wg.Done()\n\t\t\tresults[idx] = idx * 2\n\t\t}(i))\n\t}\n\n\twg.Wait()\n\tp.Wait()\n\n\tfor i := 0; i < 10; i++ {\n\t\tif results[i] != i*2 {\n\t\t\tt.Errorf(\"Expected %d, got %d\", i*2, results[i])\n\t\t}\n\t}\n}\n\nfunc TestPoolZeroWorkers(t *testing.T) {\n\tp := NewPool(0)\n\tdone := make(chan bool)\n\t\n\tp.Submit(func() {\n\t\tdone <- true\n\t})\n\n\tselect {\n\tcase <-done:\n\t\tt.Error(\"Task should not have executed with 0 workers\")\n\tcase <-time.After(100 * time.Millisecond):\n\t\t// Expected behavior: task stuck\n\t}\n\t\n\t// Cleanup\n\tp.Wait()\n}\n\nfunc TestPoolConcurrentSubmission(t *testing.T) {\n\tp := NewPool(2)\n\tvar mu sync.Mutex\n\tcount := 0\n\n\tfor i := 0; i < 100; i++ {\n\t\tp.Submit(func() {\n\t\t\tmu.Lock()\n\t\t\tcount++\n\t\t\tmu.Unlock()\n\t\t})\n\t}\n\n\tp.Wait()\n\tif count != 100 {\n\t\tt.Errorf(\"Expected 100, got %d\", count)\n\t}\n}\n```",
-      "prompt_tokens": 75,
-      "completion_tokens": 668,
-      "latency_ms": 32336,
-      "eval": {
-        "score": 0.6666666666666666,
-        "passed": true,
-        "details": [
-          {
-            "criterion": "keyword:chan",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'chan'"
-          },
-          {
-            "criterion": "keyword:func NewPool",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'func NewPool'"
-          },
-          {
-            "criterion": "keyword:goroutine",
-            "score": 0.0,
-            "passed": false,
-            "message": "Missing 'goroutine'"
-          }
-        ]
-      },
-      "error": null
+      "stream_id": 9,
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 1,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
       "task_id": "js-debounce",
       "stream_id": 6,
-      "success": true,
-      "response": "```javascript\n// debounce.js\nfunction debounce(fn, delay) {\n  let timeoutId;\n\n  return function (...args) {\n    const context = this;\n\n    clearTimeout(timeoutId);\n\n    timeoutId = setTimeout(() => {\n      fn.apply(context, args);\n    }, delay);\n  };\n}\n\nmodule.exports = debounce;\n```\n\n```javascript\n// debounce.test.js\nconst debounce = require('./debounce');\n\njest.useFakeTimers();\n\ndescribe('debounce', () => {\n  beforeEach(() => {\n    jest.clearAllMocks();\n  });\n\n  test('should delay the execution of the function', () => {\n    const mockFn = jest.fn();\n    const debouncedFn = debounce(mockFn, 100);\n\n    debouncedFn();\n    expect(mockFn).not.toHaveBeenCalled();\n\n    jest.advanceTimersByTime(50);\n    expect(mockFn).not.toHaveBeenCalled();\n\n    jest.advanceTimersByTime(50);\n    expect(mockFn).toHaveBeenCalledTimes(1);\n  });\n\n  test('should cancel previous calls if called again before delay', () => {\n    const mockFn = jest.fn();\n    const debouncedFn = debounce(mockFn, 100);\n\n    debouncedFn();\n    jest.advanceTimersByTime(50);\n    debouncedFn();\n    jest.advanceTimersByTime(50);\n    debouncedFn();\n    jest.advanceTimersByTime(50);\n\n    expect(mockFn).not.toHaveBeenCalled();\n\n    jest.advanceTimersByTime(100);\n    expect(mockFn).toHaveBeenCalledTimes(1);\n  });\n\n  test('should pass arguments to the original function', () => {\n    const mockFn = jest.fn();\n    const debouncedFn = debounce(mockFn, 100);\n\n    debouncedFn('arg1', 'arg2');\n    jest.advanceTimersByTime(100);\n\n    expect(mockFn).toHaveBeenCalledWith('arg1', 'arg2');\n  });\n\n  test('should preserve the context (this) of the original function', () => {\n    const obj = {\n      value: 0,\n      increment: function () {\n        this.value++;\n      }\n    };\n\n    const debouncedFn = debounce(obj.increment, 100);\n    debouncedFn.call(obj);\n    jest.advanceTimersByTime(100);\n\n    expect(obj.value).toBe(1);\n  });\n});\n```",
-      "prompt_tokens": 54,
-      "completion_tokens": 552,
-      "latency_ms": 27412,
-      "eval": {
-        "score": 1.0,
-        "passed": true,
-        "details": [
-          {
-            "criterion": "keyword:function debounce",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'function debounce'"
-          },
-          {
-            "criterion": "keyword:setTimeout",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'setTimeout'"
-          },
-          {
-            "criterion": "keyword:test",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'test'"
-          }
-        ]
-      },
-      "error": null
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 1,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
       "task_id": "js-promise-pool",
       "stream_id": 7,
-      "success": true,
-      "response": "```javascript\nclass PromisePool {\n  constructor(concurrency) {\n    if (concurrency < 1) {\n      throw new Error('Concurrency must be at least 1');\n    }\n    this.concurrency = concurrency;\n    this.queue = [];\n    this.active = 0;\n    this.drainPromise = null;\n    this.drainResolve = null;\n  }\n\n  async add(promiseFn) {\n    return new Promise((resolve, reject) => {\n      const task = {\n        promiseFn,\n        resolve,\n        reject\n      };\n\n      this.queue.push(task);\n      this.processQueue();\n    });\n  }\n\n  processQueue() {\n    while (this.active < this.concurrency && this.queue.length > 0) {\n      const task = this.queue.shift();\n      this.active++;\n\n      Promise.resolve(task.promiseFn())\n        .then(result => {\n          task.resolve(result);\n        })\n        .catch(error => {\n          task.reject(error);\n        })\n        .finally(() => {\n          this.active--;\n          this.processQueue();\n        });\n    }\n  }\n\n  async drain() {\n    if (this.queue.length === 0 && this.active === 0) {\n      return;\n    }\n\n    if (!this.drainPromise) {\n      this.drainPromise = new Promise(resolve => {\n        this.drainResolve = resolve;\n      });\n    }\n\n    const checkDrain = () => {\n      if (this.queue.length === 0 && this.active === 0) {\n        if (this.drainResolve) {\n          this.drainResolve();\n          this.drainPromise = null;\n          this.drainResolve = null;\n        }\n      }\n    };\n\n    // We need to hook into the completion of tasks\n    // Since we can't easily hook into existing tasks, we'll use a polling approach \n    // or rely on the fact that processQueue is called on completion.\n    // A cleaner way for drain is to wait until the queue is empty and active is 0.\n    // We will attach a one-time check to the next completion or poll slightly.\n    \n    // Better approach: Wait for the current drainPromise if exists, \n    // otherwise create one and resolve it when conditions are met.\n    // We need to ensure the check runs after every task finishes.\n    \n    // Let's modify processQueue to check drain condition\n    // But to keep it simple and robust without refactoring processQueue logic heavily:\n    // We will just wait.\n    \n    return this.drainPromise;\n  }\n}\n\n// Patch processQueue to handle drain resolution\nPromisePool.prototype.processQueue = function() {\n  while (this.active < this.concurrency && this.queue.length > 0) {\n    const task = this.queue.shift();\n    this.active++;\n\n    Promise.resolve(task.promiseFn())\n      .then(result => {\n        task.resolve(result);\n      })\n      .catch(error => {\n        task.reject(error);\n      })\n      .finally(() => {\n        this.active--;\n        this.processQueue();\n        \n        // Check if we can resolve drain\n        if (this.drainResolve && this.queue.length === 0 && this.active === 0) {\n          this.drainResolve();\n          this.drainPromise = null;\n          this.drainResolve = null;\n        }\n      });\n  }\n  \n  // Check drain immediately if queue was empty to begin with\n  if (this.drainResolve && this.queue.length === 0 && this.active === 0) {\n    this.drainResolve();\n    this.drainPromise = null;\n    this.drainResolve = null;\n  }\n};\n\n// --- Tests ---\n\nasync function runTests() {\n  console.log('Running PromisePool Tests...\\n');\n\n  // Test 1: Basic Concurrency Limiting\n  try {\n    const pool1 = new PromisePool(2);\n    const results = [];\n    const logs = [];\n\n    const delay = (ms, id) => new Promise(resolve => {\n      setTimeout(() => {\n        logs.push(`start-${id}`);\n        resolve(id);\n      }, ms);\n    });\n\n    const tasks = [\n      pool1.add(() => delay(100, 1)),\n      pool1.add(() => delay(100, 2)),\n      pool1.add(() => delay(100, 3)),\n      pool1.add(() => delay(100, 4)),\n    ];\n\n    const start = Date.now();\n    const allResults = await Promise.all(tasks);\n    const duration = Date.now() - start;\n\n    // With concurrency 2 and 100ms tasks, 4 tasks should take ~200ms\n    if (duration < 190 || duration > 250) {\n      throw new Error(`Concurrency test failed: Expected ~200ms, got ${duration}ms`);\n    }\n    \n    if (allResults.length !== 4) {\n      throw new Error('Concurrency test failed: Incorrect result count');\n    }\n\n    console.log('✓ Test 1: Concurrency Limiting Passed');\n  } catch (e) {\n    console.error('✗ Test 1 Failed:', e.message);\n  }\n\n  // Test 2: Error Handling\n  try {\n    const pool2 = new PromisePool(1);\n    const errorTask = pool2.add(() => Promise.reject(new Error('Test Error')));\n    const successTask = pool2.add(() => Promise.resolve('Success'));\n\n    await errorTask.catch(err => {\n      if (err.message !== 'Test Error') throw err;\n    });\n    \n    const result = await successTask;\n    if (result !== 'Success') throw new Error('Success task failed');\n\n    console.log('✓ Test 2: Error Handling Passed');\n  } catch (e) {\n    console.error('✗ Test 2 Failed:', e.message);\n  }\n\n  // Test 3: Drain Functionality\n  try {\n    const pool3 = new PromisePool(1);\n    \n    // Start tasks\n    const t1 = pool3.add(() => new Promise(r => setTimeout(r, 50)));\n    const t2 = pool3.add(() => new Promise(r => setTimeout(r, 50)));\n    \n    // Wait for drain (should wait for t1 and t2 to finish)\n    const drainStart = Date.now();\n    await pool3.drain();\n    const drainDuration = Date.now() - drainStart;\n\n    // Drain should have waited for the tasks\n    if (drainDuration < 40) {\n      throw new Error('Drain test failed: Did not wait for tasks');\n    }\n\n    // Ensure tasks actually resolved\n    await t1;\n    await t2;\n\n    console.log('✓ Test 3: Drain Functionality Passed');\n  } catch (e) {\n    console.error('✗ Test 3 Failed:', e.message);\n  }\n\n  // Test 4: Invalid Concurrency\n  try {\n    new PromisePool(0);\n    throw new Error('Should have thrown for concurrency 0');\n  } catch (e) {\n    if (e.message.includes('Concurrency must be at least 1')) {\n      console.log('✓ Test 4: Invalid Concurrency Passed');\n    } else {\n      throw e;\n    }\n  }\n\n  console.log('\\nAll tests completed.');\n}\n\nrunTests();\n```",
-      "prompt_tokens": 65,
-      "completion_tokens": 1669,
-      "latency_ms": 71566,
-      "eval": {
-        "score": 1.0,
-        "passed": true,
-        "details": [
-          {
-            "criterion": "keyword:class PromisePool",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'class PromisePool'"
-          },
-          {
-            "criterion": "keyword:async",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'async'"
-          },
-          {
-            "criterion": "keyword:concurrency",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'concurrency'"
-          }
-        ]
-      },
-      "error": null
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 1,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
       "task_id": "python-async-queue",
       "stream_id": 5,
-      "success": true,
-      "response": "```python\nimport asyncio\nfrom collections import deque\nfrom typing import Any, Callable, Coroutine, Optional\n\nclass AsyncTaskQueue:\n    def __init__(self):\n        self._queue: deque[Coroutine[Any, Any, Any]] = deque()\n        self._results: list[Any] = []\n        self._finished = asyncio.Event()\n        self._lock = asyncio.Lock()\n\n    async def enqueue(self, task: Coroutine[Any, Any, Any]) -> None:\n        \"\"\"Add a coroutine to the queue.\"\"\"\n        async with self._lock:\n            self._queue.append(task)\n            # If the queue was empty, the processor might be waiting, \n            # but we don't need to signal here as process() handles the loop.\n\n    async def process(self) -> None:\n        \"\"\"Process all tasks in the queue sequentially.\"\"\"\n        while True:\n            task = None\n            async with self._lock:\n                if self._queue:\n                    task = self._queue.popleft()\n            \n            if task is None:\n                # No tasks currently, wait for new ones or completion\n                # We use a small sleep to prevent busy-waiting if no new tasks come\n                # In a real scenario, you might use a condition variable.\n                await asyncio.sleep(0.01)\n                continue\n            \n            try:\n                result = await task\n                async with self._lock:\n                    self._results.append(result)\n            except Exception as e:\n                async with self._lock:\n                    self._results.append(e)\n\n    async def wait_all(self) -> list[Any]:\n        \"\"\"Wait until the queue is empty and all tasks are processed.\"\"\"\n        while True:\n            async with self._lock:\n                if not self._queue:\n                    # We need to ensure the processor has finished the last item\n                    # Since process() runs in a loop, we rely on the fact that\n                    # if the queue is empty, the processor is sleeping.\n                    # To strictly wait for \"all\", we usually need a signal from process()\n                    # when it finishes a batch or when the queue is empty.\n                    # For this simple implementation, we assume the caller stops\n                    # the process task or we check if results match expected count.\n                    # However, to make wait_all() robust, we need to know when process() is done.\n                    # Let's assume the queue is \"done\" when it's empty and we break.\n                    # Note: This simple version assumes the caller manages the lifecycle of process().\n                    # A better approach for wait_all is to signal when the queue is empty.\n                    break\n            await asyncio.sleep(0.01)\n        \n        # Return a copy of results\n        async with self._lock:\n            return list(self._results)\n\n# Improved version with proper signaling for wait_all\nclass RobustAsyncTaskQueue:\n    def __init__(self):\n        self._queue: deque[Coroutine[Any, Any, Any]] = deque()\n        self._results: list[Any] = []\n        self._lock = asyncio.Lock()\n        self._queue_empty_event = asyncio.Event()\n        self._queue_empty_event.set()  # Initially empty\n\n    async def enqueue(self, task: Coroutine[Any, Any, Any]) -> None:\n        async with self._lock:\n            self._queue.append(task)\n            self._queue_empty_event.clear()\n\n    async def process(self) -> None:\n        while True:\n            task = None\n            async with self._lock:\n                if self._queue:\n                    task = self._queue.popleft()\n                else:\n                    self._queue_empty_event.set()\n            \n            if task is None:\n                # Wait until a new task is enqueued\n                await self._queue_empty_event.wait()\n                continue\n            \n            try:\n                result = await task\n                async with self._lock:\n                    self._results.append(result)\n            except Exception as e:\n                async with self._lock:\n                    self._results.append(e)\n\n    async def wait_all(self) -> list[Any]:\n        \"\"\"Wait until the queue is empty and all current tasks are processed.\"\"\"\n        # Wait for the queue to be empty\n        await self._queue_empty_event.wait()\n        \n        # Double check inside lock to ensure no race condition\n        async with self._lock:\n            if self._queue:\n                # If queue is not empty, wait again (though event should handle it)\n                await self._queue_empty_event.wait()\n            \n            return list(self._results)\n\n# --- Tests ---\n\nasync def dummy_task(value: int) -> int:\n    await asyncio.sleep(0.01)\n    return value * 2\n\nasync def failing_task() -> None:\n    await asyncio.sleep(0.01)\n    raise ValueError(\"Intentional error\")\n\nasync def test_basic_queue():\n    queue = RobustAsyncTaskQueue()\n    \n    # Start processing in background\n    process_task = asyncio.create_task(queue.process())\n    \n    try:\n        # Enqueue tasks\n        await queue.enqueue(dummy_task(1))\n        await queue.enqueue(dummy_task(2))\n        await queue.enqueue(dummy_task(3))\n        \n        # Wait for all to complete\n        results = await queue.wait_all()\n        \n        assert len(results) == 3\n        assert results == [2, 4, 6]\n        print(\"test_basic_queue: PASSED\")\n    finally:\n        process_task.cancel()\n        try:\n            await process_task\n        except asyncio.CancelledError:\n            pass\n\nasync def test_error_handling():\n    queue = RobustAsyncTaskQueue()\n    process_task = asyncio.create_task(queue.process())\n    \n    try:\n        await queue.enqueue(dummy_task(10))\n        await queue.enqueue(failing_task())\n        await queue.enqueue(dummy_task(20))\n        \n        results = await queue.wait_all()\n        \n        assert len(results) == 3\n        assert results[0] == 20\n        assert isinstance(results[1], ValueError)\n        assert results[1].args[0] == \"Intentional error\"\n        assert results[2] == 40\n        print(\"test_error_handling: PASSED\")\n    finally:\n        process_task.cancel()\n        try:\n            await process_task\n        except asyncio.CancelledError:\n            pass\n\nasync def test_empty_queue():\n    queue = RobustAsyncTaskQueue()\n    process_task = asyncio.create_task(queue.process())\n    \n    try:\n        # Wait immediately without adding tasks\n        results = await queue.wait_all()\n        assert results == []\n        print(\"test_empty_queue: PASSED\")\n    finally:\n        process_task.cancel()\n        try:\n            await process_task\n        except asyncio.CancelledError:\n            pass\n\nasync def main():\n    await test_basic_queue()\n    await test_error_handling()\n    await test_empty_queue()\n    print(\"All tests passed.\")\n\nif __name__ == \"__main__\":\n    asyncio.run(main())\n```",
-      "prompt_tokens": 64,
-      "completion_tokens": 1537,
-      "latency_ms": 66756,
-      "eval": {
-        "score": 1.0,
-        "passed": true,
-        "details": [
-          {
-            "criterion": "keyword:async def",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'async def'"
-          },
-          {
-            "criterion": "keyword:asyncio",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'asyncio'"
-          },
-          {
-            "criterion": "keyword:queue",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'queue'"
-          }
-        ]
-      },
-      "error": null
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 1,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
       "task_id": "python-decorator",
       "stream_id": 4,
-      "success": true,
-      "response": "```python\nimport time\nfrom functools import wraps\nfrom typing import Callable, Any, TypeVar, Optional\n\nT = TypeVar('T')\n\ndef retry(max_attempts: int = 3, delay: float = 1.0) -> Callable[[Callable[..., T]], Callable[..., T]]:\n    \"\"\"\n    Decorator to retry a function on exception.\n    \n    Args:\n        max_attempts: Maximum number of attempts to execute the function.\n        delay: Time in seconds to wait between retries.\n    \"\"\"\n    def decorator(func: Callable[..., T]) -> Callable[..., T]:\n        @wraps(func)\n        def wrapper(*args: Any, **kwargs: Any) -> T:\n            last_exception: Optional[Exception] = None\n            for attempt in range(max_attempts):\n                try:\n                    return func(*args, **kwargs)\n                except Exception as e:\n                    last_exception = e\n                    if attempt < max_attempts - 1:\n                        time.sleep(delay)\n                    else:\n                        raise last_exception\n        return wrapper\n    return decorator\n\n# --- Tests ---\n\ndef test_retry_success_on_first_attempt():\n    \"\"\"Test that function returns immediately if no exception occurs.\"\"\"\n    call_count = 0\n    \n    @retry(max_attempts=3, delay=0.1)\n    def success_func():\n        nonlocal call_count\n        call_count += 1\n        return \"Success\"\n    \n    result = success_func()\n    assert result == \"Success\"\n    assert call_count == 1\n\ndef test_retry_success_after_failure():\n    \"\"\"Test that function retries and succeeds after initial failures.\"\"\"\n    call_count = 0\n    \n    @retry(max_attempts=3, delay=0.1)\n    def flaky_func():\n        nonlocal call_count\n        call_count += 1\n        if call_count < 2:\n            raise ValueError(\"Temporary failure\")\n        return \"Recovered\"\n    \n    result = flaky_func()\n    assert result == \"Recovered\"\n    assert call_count == 2\n\ndef test_retry_max_attempts_exceeded():\n    \"\"\"Test that function raises exception after max attempts.\"\"\"\n    call_count = 0\n    \n    @retry(max_attempts=3, delay=0.1)\n    def always_fail():\n        nonlocal call_count\n        call_count += 1\n        raise RuntimeError(\"Always fails\")\n    \n    try:\n        always_fail()\n        assert False, \"Expected RuntimeError to be raised\"\n    except RuntimeError as e:\n        assert str(e) == \"Always fails\"\n        assert call_count == 3\n\ndef test_retry_delay_timing():\n    \"\"\"Test that delay is applied between retries.\"\"\"\n    import time\n    \n    call_count = 0\n    start_time = 0\n    \n    @retry(max_attempts=3, delay=0.5)\n    def slow_fail():\n        nonlocal call_count, start_time\n        call_count += 1\n        if call_count == 1:\n            start_time = time.time()\n            raise ValueError(\"Fail\")\n        elif call_count == 2:\n            elapsed = time.time() - start_time\n            assert elapsed >= 0.45, f\"Delay was not applied, elapsed: {elapsed}\"\n            raise ValueError(\"Fail again\")\n        return \"Success\"\n    \n    result = slow_fail()\n    assert result == \"Success\"\n    assert call_count == 3\n\nif __name__ == \"__main__\":\n    test_retry_success_on_first_attempt()\n    print(\"test_retry_success_on_first_attempt passed\")\n    \n    test_retry_success_after_failure()\n    print(\"test_retry_success_after_failure passed\")\n    \n    test_retry_max_attempts_exceeded()\n    print(\"test_retry_max_attempts_exceeded passed\")\n    \n    test_retry_delay_timing()\n    print(\"test_retry_delay_timing passed\")\n    \n    print(\"All tests passed.\")\n```",
-      "prompt_tokens": 58,
-      "completion_tokens": 837,
-      "latency_ms": 39380,
-      "eval": {
-        "score": 1.0,
-        "passed": true,
-        "details": [
-          {
-            "criterion": "keyword:def retry",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'def retry'"
-          },
-          {
-            "criterion": "keyword:max_attempts",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'max_attempts'"
-          },
-          {
-            "criterion": "keyword:def test",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'def test'"
-          }
-        ]
-      },
-      "error": null
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 1,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
       "task_id": "python-merge-sort",
       "stream_id": 3,
-      "success": true,
-      "response": "def merge_sort(arr: list) -> list:\n    if len(arr) <= 1:\n        return arr\n    \n    mid = len(arr) // 2\n    left_half = merge_sort(arr[:mid])\n    right_half = merge_sort(arr[mid:])\n    \n    return merge(left_half, right_half)\n\ndef merge(left: list, right: list) -> list:\n    sorted_list = []\n    i = j = 0\n    \n    while i < len(left) and j < len(right):\n        if left[i] <= right[j]:\n            sorted_list.append(left[i])\n            i += 1\n        else:\n            sorted_list.append(right[j])\n            j += 1\n            \n    sorted_list.extend(left[i:])\n    sorted_list.extend(right[j:])\n    \n    return sorted_list\n\n# pytest tests\ndef test_merge_sort_empty():\n    assert merge_sort([]) == []\n\ndef test_merge_sort_single_element():\n    assert merge_sort([5]) == [5]\n\ndef test_merge_sort_sorted():\n    assert merge_sort([1, 2, 3, 4, 5]) == [1, 2, 3, 4, 5]\n\ndef test_merge_sort_reverse_sorted():\n    assert merge_sort([5, 4, 3, 2, 1]) == [1, 2, 3, 4, 5]\n\ndef test_merge_sort_unsorted():\n    assert merge_sort([3, 1, 4, 1, 5, 9, 2, 6]) == [1, 1, 2, 3, 4, 5, 6, 9]\n\ndef test_merge_sort_with_duplicates():\n    assert merge_sort([2, 2, 2, 1, 1, 3]) == [1, 1, 2, 2, 2, 3]\n\ndef test_merge_sort_negative_numbers():\n    assert merge_sort([-3, -1, -2, 0, 1]) == [-3, -2, -1, 0, 1]\n\ndef test_merge_sort_mixed_numbers():\n    assert merge_sort([3, -1, 0, 2, -5]) == [-5, -1, 0, 2, 3]",
-      "prompt_tokens": 55,
-      "completion_tokens": 501,
-      "latency_ms": 25092,
-      "eval": {
-        "score": 1.0,
-        "passed": true,
-        "details": [
-          {
-            "criterion": "keyword:def merge_sort",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'def merge_sort'"
-          },
-          {
-            "criterion": "keyword:def test",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'def test'"
-          },
-          {
-            "criterion": "keyword:merge",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'merge'"
-          }
-        ]
-      },
-      "error": null
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 1,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
       "task_id": "rust-binary-search",
       "stream_id": 1,
-      "success": true,
-      "response": "```rust\nfn binary_search<T: Ord>(slice: &[T], target: &T) -> Option<usize> {\n    let mut left = 0;\n    let mut right = slice.len();\n\n    while left < right {\n        let mid = left + (right - left) / 2;\n        match slice[mid].cmp(target) {\n            std::cmp::Ordering::Less => left = mid + 1,\n            std::cmp::Ordering::Greater => right = mid,\n            std::cmp::Ordering::Equal => return Some(mid),\n        }\n    }\n    None\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn test_found_in_middle() {\n        let data = [1, 3, 5, 7, 9];\n        assert_eq!(binary_search(&data, &5), Some(2));\n    }\n\n    #[test]\n    fn test_found_at_start() {\n        let data = [1, 3, 5, 7, 9];\n        assert_eq!(binary_search(&data, &1), Some(0));\n    }\n\n    #[test]\n    fn test_found_at_end() {\n        let data = [1, 3, 5, 7, 9];\n        assert_eq!(binary_search(&data, &9), Some(4));\n    }\n\n    #[test]\n    fn test_not_found() {\n        let data = [1, 3, 5, 7, 9];\n        assert_eq!(binary_search(&data, &4), None);\n    }\n\n    #[test]\n    fn test_empty_slice() {\n        let data: [i32; 0] = [];\n        assert_eq!(binary_search(&data, &1), None);\n    }\n\n    #[test]\n    fn test_single_element_found() {\n        let data = [42];\n        assert_eq!(binary_search(&data, &42), Some(0));\n    }\n\n    #[test]\n    fn test_single_element_not_found() {\n        let data = [42];\n        assert_eq!(binary_search(&data, &10), None);\n    }\n\n    #[test]\n    fn test_string_slice() {\n        let data = [\"apple\", \"banana\", \"cherry\", \"date\"];\n        assert_eq!(binary_search(&data, &\"cherry\"), Some(2));\n        assert_eq!(binary_search(&data, &\"grape\"), None);\n    }\n}\n```",
-      "prompt_tokens": 70,
-      "completion_tokens": 571,
-      "latency_ms": 28192,
-      "eval": {
-        "score": 1.0,
-        "passed": true,
-        "details": [
-          {
-            "criterion": "keyword:fn binary_search",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'fn binary_search'"
-          },
-          {
-            "criterion": "keyword:Option<usize>",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'Option<usize>'"
-          },
-          {
-            "criterion": "keyword:Ord",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'Ord'"
-          }
-        ]
-      },
-      "error": null
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 1,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
       "task_id": "rust-fibonacci",
       "stream_id": 0,
-      "success": true,
-      "response": "```rust\nfn fibonacci(n: u64) -> u64 {\n    match n {\n        0 => 0,\n        1 => 1,\n        _ => {\n            let mut a = 0u64;\n            let mut b = 1u64;\n            for _ in 2..=n {\n                let next = a.wrapping_add(b);\n                a = b;\n                b = next;\n            }\n            b\n        }\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn test_fibonacci_base_cases() {\n        assert_eq!(fibonacci(0), 0);\n        assert_eq!(fibonacci(1), 1);\n        assert_eq!(fibonacci(2), 1);\n        assert_eq!(fibonacci(3), 2);\n        assert_eq!(fibonacci(4), 3);\n        assert_eq!(fibonacci(5), 5);\n    }\n\n    #[test]\n    fn test_fibonacci_larger_values() {\n        assert_eq!(fibonacci(10), 55);\n        assert_eq!(fibonacci(20), 6765);\n        assert_eq!(fibonacci(30), 832040);\n    }\n\n    #[test]\n    fn test_fibonacci_overflow_behavior() {\n        // u64 max is 18,446,744,073,709,551,615\n        // Fibonacci(93) is the largest that fits in u64\n        // Fibonacci(94) overflows. Using wrapping_add handles this gracefully.\n        let fib_93 = fibonacci(93);\n        let fib_94 = fibonacci(94);\n        // Verify that 94 is not equal to 93 (overflow occurred)\n        assert_ne!(fib_93, fib_94);\n    }\n}\n```",
-      "prompt_tokens": 60,
-      "completion_tokens": 451,
-      "latency_ms": 22820,
-      "eval": {
-        "score": 1.0,
-        "passed": true,
-        "details": [
-          {
-            "criterion": "keyword:fn fibonacci",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'fn fibonacci'"
-          },
-          {
-            "criterion": "keyword:u64",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'u64'"
-          },
-          {
-            "criterion": "keyword:test",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'test'"
-          }
-        ]
-      },
-      "error": null
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 1,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
       "task_id": "rust-lru-cache",
       "stream_id": 2,
-      "success": true,
-      "response": "use std::collections::HashMap;\nuse std::collections::VecDeque;\n\npub struct LRUCache {\n    capacity: usize,\n    cache: HashMap<String, String>,\n    order: VecDeque<String>,\n}\n\nimpl LRUCache {\n    pub fn new(capacity: usize) -> Self {\n        LRUCache {\n            capacity,\n            cache: HashMap::new(),\n            order: VecDeque::new(),\n        }\n    }\n\n    pub fn get(&mut self, key: &str) -> Option<&str> {\n        if let Some(value) = self.cache.get(key) {\n            // Move to front (most recently used)\n            self.order.remove(key);\n            self.order.push_front(key.to_string());\n            Some(value)\n        } else {\n            None\n        }\n    }\n\n    pub fn put(&mut self, key: String, value: String) {\n        if self.cache.contains_key(&key) {\n            // Update value and move to front\n            self.cache.insert(key.clone(), value);\n            self.order.remove(&key);\n            self.order.push_front(key);\n        } else {\n            // Insert new key-value pair\n            self.cache.insert(key.clone(), value);\n            self.order.push_front(key);\n\n            // Evict least recently used if capacity exceeded\n            if self.cache.len() > self.capacity {\n                if let Some(lru_key) = self.order.pop_back() {\n                    self.cache.remove(&lru_key);\n                }\n            }\n        }\n    }\n}\n\nimpl LRUCache {\n    fn remove(&mut self, key: &str) {\n        if let Some(pos) = self.order.iter().position(|k| k == key) {\n            self.order.remove(pos);\n        }\n    }\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn test_lru_cache_basic() {\n        let mut cache = LRUCache::new(2);\n        cache.put(\"a\".to_string(), \"1\".to_string());\n        cache.put(\"b\".to_string(), \"2\".to_string());\n        assert_eq!(cache.get(\"a\"), Some(\"1\"));\n        cache.put(\"c\".to_string(), \"3\".to_string()); // Evicts \"b\"\n        assert_eq!(cache.get(\"b\"), None);\n        assert_eq!(cache.get(\"c\"), Some(\"3\"));\n        cache.put(\"d\".to_string(), \"4\".to_string()); // Evicts \"a\"\n        assert_eq!(cache.get(\"a\"), None);\n        assert_eq!(cache.get(\"c\"), Some(\"3\"));\n        assert_eq!(cache.get(\"d\"), Some(\"4\"));\n    }\n\n    #[test]\n    fn test_lru_cache_update_existing() {\n        let mut cache = LRUCache::new(2);\n        cache.put(\"a\".to_string(), \"1\".to_string());\n        cache.put(\"b\".to_string(), \"2\".to_string());\n        cache.put(\"a\".to_string(), \"10\".to_string()); // Update \"a\"\n        assert_eq!(cache.get(\"a\"), Some(\"10\"));\n        cache.put(\"c\".to_string(), \"3\".to_string()); // Evicts \"b\"\n        assert_eq!(cache.get(\"b\"), None);\n        assert_eq!(cache.get(\"c\"), Some(\"3\"));\n    }\n\n    #[test]\n    fn test_lru_cache_zero_capacity() {\n        let mut cache = LRUCache::new(0);\n        cache.put(\"a\".to_string(), \"1\".to_string());\n        assert_eq!(cache.get(\"a\"), None);\n    }\n\n    #[test]\n    fn test_lru_cache_single_capacity() {\n        let mut cache = LRUCache::new(1);\n        cache.put(\"a\".to_string(), \"1\".to_string());\n        assert_eq!(cache.get(\"a\"), Some(\"1\"));\n        cache.put(\"b\".to_string(), \"2\".to_string());\n        assert_eq!(cache.get(\"a\"), None);\n        assert_eq!(cache.get(\"b\"), Some(\"2\"));\n    }\n}",
-      "prompt_tokens": 85,
-      "completion_tokens": 916,
-      "latency_ms": 42494,
-      "eval": {
-        "score": 1.0,
-        "passed": true,
-        "details": [
-          {
-            "criterion": "keyword:struct",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'struct'"
-          },
-          {
-            "criterion": "keyword:fn get",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'fn get'"
-          },
-          {
-            "criterion": "keyword:fn put",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'fn put'"
-          },
-          {
-            "criterion": "keyword:capacity",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'capacity'"
-          }
-        ]
-      },
-      "error": null
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 1,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     },
     {
       "task_id": "ts-type-safe-event",
       "stream_id": 8,
-      "success": true,
-      "response": "```typescript\ntype EventMap = {\n  [K: string]: (...args: any[]) => void;\n};\n\nclass TypedEmitter<Events extends EventMap> {\n  private listeners: { [K in keyof Events]?: Events[K][] } = {};\n\n  on<K extends keyof Events>(event: K, handler: Events[K]): void {\n    if (!this.listeners[event]) {\n      this.listeners[event] = [];\n    }\n    this.listeners[event].push(handler);\n  }\n\n  off<K extends keyof Events>(event: K, handler: Events[K]): void {\n    if (!this.listeners[event]) return;\n    this.listeners[event] = this.listeners[event].filter(h => h !== handler);\n  }\n\n  emit<K extends keyof Events>(event: K, ...args: Parameters<Events[K]>): void {\n    const handlers = this.listeners[event];\n    if (!handlers) return;\n    handlers.forEach(handler => handler(...args));\n  }\n}\n\n// --- Tests ---\n\ninterface MyEvents {\n  'user:login': (userId: string, timestamp: number) => void;\n  'data:changed': (key: string, value: boolean) => void;\n  'error': (message: string) => void;\n}\n\nconst emitter = new TypedEmitter<MyEvents>();\n\n// Test 1: Valid registration and emission\nlet loginCalled = false;\nlet loginUserId = '';\n\nemitter.on('user:login', (userId, timestamp) => {\n  loginCalled = true;\n  loginUserId = userId;\n});\n\nemitter.emit('user:login', 'user-123', Date.now());\n\nif (!loginCalled || loginUserId !== 'user-123') {\n  throw new Error('Test 1 Failed: Event not emitted correctly');\n}\n\n// Test 2: Type Safety Check (Compile-time)\n// Uncommenting the following lines should cause TypeScript compilation errors:\n// emitter.on('invalid:event', () => {}); \n// emitter.emit('user:login', 'wrong-args'); \n// emitter.emit('data:changed', 'key', 'not-a-boolean');\n\n// Test 3: Multiple listeners\nlet count = 0;\nemitter.on('data:changed', () => count++);\nemitter.on('data:changed', () => count++);\nemitter.emit('data:changed', 'active', true);\n\nif (count !== 2) {\n  throw new Error('Test 3 Failed: Multiple listeners not working');\n}\n\n// Test 4: Removing listeners\nemitter.off('data:changed', () => count++);\nemitter.emit('data:changed', 'active', true);\n\nif (count !== 3) {\n  throw new Error('Test 4 Failed: Listener removal not working');\n}\n\nconsole.log('All tests passed.');\n```",
-      "prompt_tokens": 79,
-      "completion_tokens": 621,
-      "latency_ms": 30370,
-      "eval": {
-        "score": 1.0,
-        "passed": true,
-        "details": [
-          {
-            "criterion": "keyword:class TypedEmitter",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'class TypedEmitter'"
-          },
-          {
-            "criterion": "keyword:keyof",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'keyof'"
-          },
-          {
-            "criterion": "keyword:extends",
-            "score": 1.0,
-            "passed": true,
-            "message": "Found 'extends'"
-          }
-        ]
-      },
-      "error": null
+      "success": false,
+      "response": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "latency_ms": 1,
+      "eval": null,
+      "error": "Request error: error sending request for url (http://localhost:8000/v1/chat/completions)"
     }
   ]
 }

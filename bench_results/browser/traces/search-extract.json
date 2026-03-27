@@ -1,11 +1,11 @@
 {
   "task_id": "search-extract",
   "task_name": "Search and Extract",
-  "started_at": "2026-03-25T11:49:43.326330562Z",
-  "ended_at": "2026-03-25T11:49:43.421434126Z",
+  "started_at": "2026-03-27T22:26:36.797231698Z",
+  "ended_at": "2026-03-27T22:26:36.885940515Z",
   "actions": [
     {
-      "timestamp": "2026-03-25T11:49:43.421027961Z",
+      "timestamp": "2026-03-27T22:26:36.885619319Z",
       "action": {
         "Navigate": {
           "url": "https://html.duckduckgo.com/html/"
@@ -18,10 +18,10 @@
       },
       "screenshot_before": null,
       "screenshot_after": null,
-      "duration_ms": 94
+      "duration_ms": 88
     },
     {
-      "timestamp": "2026-03-25T11:49:43.421032865Z",
+      "timestamp": "2026-03-27T22:26:36.885622606Z",
       "action": {
         "Fill": {
           "selector": "input[name='q']",
@@ -38,7 +38,7 @@
       "duration_ms": 0
     },
     {
-      "timestamp": "2026-03-25T11:49:43.421040811Z",
+      "timestamp": "2026-03-27T22:26:36.885627087Z",
       "action": {
         "Click": {
           "selector": "input[type='submit']"
@@ -54,7 +54,7 @@
       "duration_ms": 0
     },
     {
-      "timestamp": "2026-03-25T11:49:43.421126510Z",
+      "timestamp": "2026-03-27T22:26:36.885700382Z",
       "action": {
         "WaitFor": {
           "selector": ".result__title",
@@ -71,7 +71,7 @@
       "duration_ms": 0
     },
     {
-      "timestamp": "2026-03-25T11:49:43.421321085Z",
+      "timestamp": "2026-03-27T22:26:36.885823929Z",
       "action": {
         "Screenshot": {
           "label": "search_results"
@@ -87,7 +87,7 @@
       "duration_ms": 0
     },
     {
-      "timestamp": "2026-03-25T11:49:43.421406574Z",
+      "timestamp": "2026-03-27T22:26:36.885913913Z",
       "action": {
         "Extract": {
           "selector": ".result__title",
@@ -107,7 +107,7 @@
   "screenshots": [
     {
       "path": "bench_results/browser/screenshots/search-extract/search_results.html",
-      "timestamp": "2026-03-25T11:49:43.421318704Z",
+      "timestamp": "2026-03-27T22:26:36.885822108Z",
       "label": "search_results",
       "dimensions": [
         0,
@@ -122,5 +122,5 @@
       ]
     }
   },
-  "total_duration_ms": 95
+  "total_duration_ms": 88
 }

@@ -1,11 +1,11 @@
 {
   "task_id": "form-fill",
   "task_name": "Form Interaction",
-  "started_at": "2026-03-25T11:49:43.326401019Z",
-  "ended_at": "2026-03-25T11:49:43.537569608Z",
+  "started_at": "2026-03-27T22:26:36.797323526Z",
+  "ended_at": "2026-03-27T22:26:37.006856997Z",
   "actions": [
     {
-      "timestamp": "2026-03-25T11:49:43.537443165Z",
+      "timestamp": "2026-03-27T22:26:37.006482407Z",
       "action": {
         "Navigate": {
           "url": "https://httpbin.org/forms/post"
@@ -18,10 +18,10 @@
       },
       "screenshot_before": null,
       "screenshot_after": null,
-      "duration_ms": 211
+      "duration_ms": 209
     },
     {
-      "timestamp": "2026-03-25T11:49:43.537449303Z",
+      "timestamp": "2026-03-27T22:26:37.006493201Z",
       "action": {
         "WaitFor": {
           "selector": "form",
@@ -38,7 +38,7 @@
       "duration_ms": 0
     },
     {
-      "timestamp": "2026-03-25T11:49:43.537450593Z",
+      "timestamp": "2026-03-27T22:26:37.006495326Z",
       "action": {
         "Fill": {
           "selector": "input[name='custname']",
@@ -55,7 +55,7 @@
       "duration_ms": 0
     },
     {
-      "timestamp": "2026-03-25T11:49:43.537450979Z",
+      "timestamp": "2026-03-27T22:26:37.006496006Z",
       "action": {
         "Fill": {
           "selector": "input[name='custtel']",
@@ -72,7 +72,7 @@
       "duration_ms": 0
     },
     {
-      "timestamp": "2026-03-25T11:49:43.537451629Z",
+      "timestamp": "2026-03-27T22:26:37.006497001Z",
       "action": {
         "Fill": {
           "selector": "input[name='custemail']",
@@ -89,7 +89,7 @@
       "duration_ms": 0
     },
     {
-      "timestamp": "2026-03-25T11:49:43.537526196Z",
+      "timestamp": "2026-03-27T22:26:37.006719315Z",
       "action": {
         "Screenshot": {
           "label": "form_filled"
@@ -105,7 +105,7 @@
       "duration_ms": 0
     },
     {
-      "timestamp": "2026-03-25T11:49:43.537531685Z",
+      "timestamp": "2026-03-27T22:26:37.006724927Z",
       "action": {
         "Click": {
           "selector": "button[type='submit'], input[type='submit']"
@@ -121,7 +121,7 @@
       "duration_ms": 0
     },
     {
-      "timestamp": "2026-03-25T11:49:43.537532963Z",
+      "timestamp": "2026-03-27T22:26:37.006727670Z",
       "action": {
         "WaitFor": {
           "selector": "body",
@@ -138,7 +138,7 @@
       "duration_ms": 0
     },
     {
-      "timestamp": "2026-03-25T11:49:43.537554774Z",
+      "timestamp": "2026-03-27T22:26:37.006836037Z",
       "action": {
         "Screenshot": {
           "label": "form_submitted"
@@ -157,7 +157,7 @@
   "screenshots": [
     {
       "path": "bench_results/browser/screenshots/form-fill/form_filled.html",
-      "timestamp": "2026-03-25T11:49:43.537525193Z",
+      "timestamp": "2026-03-27T22:26:37.006717201Z",
       "label": "form_filled",
       "dimensions": [
         0,
@@ -166,7 +166,7 @@
     },
     {
       "path": "bench_results/browser/screenshots/form-fill/form_submitted.html",
-      "timestamp": "2026-03-25T11:49:43.537554531Z",
+      "timestamp": "2026-03-27T22:26:37.006834760Z",
       "label": "form_submitted",
       "dimensions": [
         0,
@@ -181,5 +181,5 @@
       ]
     }
   },
-  "total_duration_ms": 211
+  "total_duration_ms": 209
 }

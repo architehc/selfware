@@ -1,39 +1,39 @@
 # Benchmark Report — qwen3.5-27b
-**Date**: 2026-03-26T12:22:40.846439464+00:00 | **Endpoint**: http://localhost:8000/v1 | **Concurrency**: 12
+**Date**: 2026-03-27T22:26:34.712717342+00:00 | **Endpoint**: http://localhost:8000/v1 | **Concurrency**: 12
 
 ## Summary
 
 | Metric | Value |
 |--------|-------|
-| Tasks | 12/12 passed (0% error rate) |
-| Avg Score | 97.2% |
-| Throughput | 141 tok/s |
-| Tokens | 813 prompt + 10,068 completion |
-| Duration | 71.6s |
+| Tasks | 0/12 passed (100% error rate) |
+| Avg Score | 0.0% |
+| Throughput | 0 tok/s |
+| Tokens | 0 prompt + 0 completion |
+| Duration | 0.0s |
 
 ## Latency
 
 | Percentile | ms |
 |-----------|----|
-| p50 | 34880 |
-| p95 | 66756 |
-| p99 | 71566 |
-| avg | 38978 |
-| min/max | 22820/71566 |
+| p50 | 1 |
+| p95 | 1 |
+| p99 | 1 |
+| avg | 1 |
+| min/max | 1/1 |
 
 ## Per-Task Results
 
 | Task | Status | Score | Latency | Tokens |
 |------|--------|-------|---------|--------|
-| go-concurrent-map | PASS | 100% | 34880ms | 80+729 |
-| go-http-middleware | PASS | 100% | 46440ms | 68+1016 |
-| go-worker-pool | PASS | 67% | 32336ms | 75+668 |
-| js-debounce | PASS | 100% | 27412ms | 54+552 |
-| js-promise-pool | PASS | 100% | 71566ms | 65+1669 |
-| python-async-queue | PASS | 100% | 66756ms | 64+1537 |
-| python-decorator | PASS | 100% | 39380ms | 58+837 |
-| python-merge-sort | PASS | 100% | 25092ms | 55+501 |
-| rust-binary-search | PASS | 100% | 28192ms | 70+571 |
-| rust-fibonacci | PASS | 100% | 22820ms | 60+451 |
-| rust-lru-cache | PASS | 100% | 42494ms | 85+916 |
-| ts-type-safe-event | PASS | 100% | 30370ms | 79+621 |
+| go-concurrent-map | FAIL | N/A | 1ms | 0+0 |
+| go-http-middleware | FAIL | N/A | 1ms | 0+0 |
+| go-worker-pool | FAIL | N/A | 1ms | 0+0 |
+| js-debounce | FAIL | N/A | 1ms | 0+0 |
+| js-promise-pool | FAIL | N/A | 1ms | 0+0 |
+| python-async-queue | FAIL | N/A | 1ms | 0+0 |
+| python-decorator | FAIL | N/A | 1ms | 0+0 |
+| python-merge-sort | FAIL | N/A | 1ms | 0+0 |
+| rust-binary-search | FAIL | N/A | 1ms | 0+0 |
+| rust-fibonacci | FAIL | N/A | 1ms | 0+0 |
+| rust-lru-cache | FAIL | N/A | 1ms | 0+0 |
+| ts-type-safe-event | FAIL | N/A | 1ms | 0+0 |

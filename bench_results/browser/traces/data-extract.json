@@ -1,11 +1,11 @@
 {
   "task_id": "data-extract",
   "task_name": "Data Extraction",
-  "started_at": "2026-03-25T11:49:43.326447186Z",
-  "ended_at": "2026-03-25T11:49:43.800068843Z",
+  "started_at": "2026-03-27T22:26:36.797440764Z",
+  "ended_at": "2026-03-27T22:26:36.867343268Z",
   "actions": [
     {
-      "timestamp": "2026-03-25T11:49:43.799780712Z",
+      "timestamp": "2026-03-27T22:26:36.867142363Z",
       "action": {
         "Navigate": {
           "url": "https://httpbin.org/json"
@@ -18,10 +18,10 @@
       },
       "screenshot_before": null,
       "screenshot_after": null,
-      "duration_ms": 473
+      "duration_ms": 69
     },
     {
-      "timestamp": "2026-03-25T11:49:43.799798356Z",
+      "timestamp": "2026-03-27T22:26:36.867158109Z",
       "action": {
         "WaitFor": {
           "selector": "body",
@@ -38,7 +38,7 @@
       "duration_ms": 0
     },
     {
-      "timestamp": "2026-03-25T11:49:43.799801078Z",
+      "timestamp": "2026-03-27T22:26:36.867160528Z",
       "action": {
         "Extract": {
           "selector": "body",
@@ -55,7 +55,7 @@
       "duration_ms": 0
     },
     {
-      "timestamp": "2026-03-25T11:49:43.800064005Z",
+      "timestamp": "2026-03-27T22:26:36.867338871Z",
       "action": {
         "Screenshot": {
           "label": "json_data"
@@ -74,7 +74,7 @@
   "screenshots": [
     {
       "path": "bench_results/browser/screenshots/data-extract/json_data.html",
-      "timestamp": "2026-03-25T11:49:43.800060676Z",
+      "timestamp": "2026-03-27T22:26:36.867336557Z",
       "label": "json_data",
       "dimensions": [
         0,
@@ -83,5 +83,5 @@
     }
   ],
   "final_outcome": "Passed",
-  "total_duration_ms": 473
+  "total_duration_ms": 69
 }
