@@ -1,0 +1,5 @@
+if(EXISTS "/home/ivo/selfware/system_tests/projecte2e/templates/cpp_calculator/build/calculator_test[1]_tests.cmake")
+  include("/home/ivo/selfware/system_tests/projecte2e/templates/cpp_calculator/build/calculator_test[1]_tests.cmake")
+else()
+  add_test(calculator_test_NOT_BUILT calculator_test_NOT_BUILT)
+endif()

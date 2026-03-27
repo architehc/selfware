@@ -1,8 +1,21 @@
+use chrono::Utc;
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
 use super::*;
+use crate::checkpoint::VisualAssertion;
 use crate::cognitive::CyclePhase;
+
+/// Result of visual verification including whether it should hard-gate execution.
+#[allow(dead_code)]
+pub(super) struct VisualVerificationResult {
+    /// Message to append to the tool result (always present on non-pass).
+    pub message: String,
+    /// True when the verification failed with high confidence and should block.
+    pub hard_failure: bool,
+    /// The assertion record to log to the checkpoint.
+    pub assertion: Option<VisualAssertion>,
+}
 
 const EXPECTED_VISUAL_ARG: &str = "expected_visual";
 
@@ -381,7 +394,7 @@ impl Agent {
         &mut self,
         tool_name: &str,
         args: &Value,
-    ) -> Option<String> {
+    ) -> Option<VisualVerificationResult> {
         if !matches!(
             tool_name,
             "computer_mouse" | "computer_keyboard" | "computer_window"
@@ -416,12 +429,19 @@ impl Agent {
                     "Visual verification could not capture the screen after `{}`. Re-check the UI manually or retry with `computer_screen` before continuing.",
                     tool_name
                 ));
-                return Some(format!(
-                    "\n\n<visual_verification_unavailable>\n{}\n</visual_verification_unavailable>",
-                    msg
-                ));
+                return Some(VisualVerificationResult {
+                    message: format!(
+                        "\n\n<visual_verification_unavailable>\n{}\n</visual_verification_unavailable>",
+                        msg
+                    ),
+                    hard_failure: false,
+                    assertion: None,
+                });
             }
         };
+
+        let require_hard_gate = self.config.agent.require_visual_verification;
+        let current_step = self.loop_control.current_step();
 
         match verifier
             .verify_screenshot(&captured.base64_png, &expectation)
@@ -434,7 +454,33 @@ impl Agent {
                     tool_name,
                     report.confidence * 100.0
                 ));
-                None
+                let assertion = VisualAssertion {
+                    id: format!("va-{}-{}", current_step, uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("")),
+                    description: expectation.clone(),
+                    screenshot_path: None,
+                    verified: true,
+                    verification_result: Some(crate::session::checkpoint::VerificationResult {
+                        passed: true,
+                        confidence: report.confidence as f32,
+                        explanation: report.description.clone(),
+                        screenshot_hash: String::new(),
+                    }),
+                    created_at: Utc::now(),
+                    verified_at: Some(Utc::now()),
+                    step: Some(current_step),
+                    tool_name: Some(tool_name.to_string()),
+                    expected: Some(expectation.clone()),
+                    observed: Some(report.description.clone()),
+                    passed: Some(true),
+                    confidence: Some(report.confidence),
+                    screenshot_hash_legacy: None,
+                    timestamp: Some(Utc::now()),
+                };
+                Some(VisualVerificationResult {
+                    message: String::new(),
+                    hard_failure: false,
+                    assertion: Some(assertion),
+                })
             }
             Ok(report) => {
                 spinner.stop_error("Visual verification failed");
@@ -457,13 +503,51 @@ impl Agent {
                     truncate_visual_note(&report.description, 200),
                     truncate_visual_note(&issues, 200)
                 ));
-                Some(format!(
-                    "\n\n<visual_verification_failed>\nexpected: {}\nobserved: {}\nconfidence: {:.2}\nissues: {}\n</visual_verification_failed>",
-                    expectation,
-                    report.description,
-                    report.confidence,
-                    issues
-                ))
+                let hard_failure = require_hard_gate && report.confidence > 0.6;
+                let message = if hard_failure {
+                    format!(
+                        "\n\n<visual_verification_failed hard_gate=\"true\">\nVISUAL VERIFICATION HARD FAILURE — this action did NOT produce the expected result.\nexpected: {}\nobserved: {}\nconfidence: {:.2}\nissues: {}\nYou MUST retry this action or take a different approach before continuing.\n</visual_verification_failed>",
+                        expectation,
+                        report.description,
+                        report.confidence,
+                        issues
+                    )
+                } else {
+                    format!(
+                        "\n\n<visual_verification_failed>\nexpected: {}\nobserved: {}\nconfidence: {:.2}\nissues: {}\n</visual_verification_failed>",
+                        expectation,
+                        report.description,
+                        report.confidence,
+                        issues
+                    )
+                };
+                let assertion = VisualAssertion {
+                    id: format!("va-{}-{}", current_step, uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("")),
+                    description: expectation.clone(),
+                    screenshot_path: None,
+                    verified: true,
+                    verification_result: Some(crate::session::checkpoint::VerificationResult {
+                        passed: false,
+                        confidence: report.confidence as f32,
+                        explanation: report.description.clone(),
+                        screenshot_hash: String::new(),
+                    }),
+                    created_at: Utc::now(),
+                    verified_at: Some(Utc::now()),
+                    step: Some(current_step),
+                    tool_name: Some(tool_name.to_string()),
+                    expected: Some(expectation.clone()),
+                    observed: Some(report.description.clone()),
+                    passed: Some(false),
+                    confidence: Some(report.confidence),
+                    screenshot_hash_legacy: None,
+                    timestamp: Some(Utc::now()),
+                };
+                Some(VisualVerificationResult {
+                    message,
+                    hard_failure,
+                    assertion: Some(assertion),
+                })
             }
             Err(e) => {
                 spinner.stop_error("Visual verification unavailable");
@@ -478,10 +562,14 @@ impl Agent {
                     "Visual verification could not complete after `{}`. Verify the screen with `computer_screen` or troubleshoot the vision endpoint before continuing.",
                     tool_name
                 ));
-                Some(format!(
-                    "\n\n<visual_verification_unavailable>\n{}\n</visual_verification_unavailable>",
-                    msg
-                ))
+                Some(VisualVerificationResult {
+                    message: format!(
+                        "\n\n<visual_verification_unavailable>\n{}\n</visual_verification_unavailable>",
+                        msg
+                    ),
+                    hard_failure: false,
+                    assertion: None,
+                })
             }
         }
     }

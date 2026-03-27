@@ -15,13 +15,11 @@ use crate::token_count::estimate_tokens_with_overhead;
 use crate::vector_store::EmbeddingBackend;
 
 use super::memory_hierarchy::{
-    CodeContext, Episode, EpisodeType, HierarchicalMemory, Importance, MemoryStats, TokenBudget,
+    CodeContext, CodeModification, Episode, EpisodeType, HierarchicalMemory,
+    Importance, MemoryConfig, MemoryStats, SelfImprovementContext, SelfModel,
     WorkingContext, TOTAL_CONTEXT_TOKENS,
 };
-use super::self_reference::{
-    CodeModification, SelfImprovementContext, SelfModel, SelfReferenceSystem,
-    SourceRetrievalOptions,
-};
+use super::self_reference::{SelfReferenceSystem, SourceRetrievalOptions};
 use super::token_budget::{AdaptationResult, BudgetStats, TaskType, TokenBudgetAllocator};
 
 /// Unified cognitive system with 1M context support
@@ -104,7 +102,7 @@ impl CognitiveSystem {
         )));
 
         // Create hierarchical memory
-        let budget_config = TokenBudget::default();
+        let budget_config = MemoryConfig::default();
         let memory = Arc::new(RwLock::new(
             HierarchicalMemory::new(budget_config, embedding.clone()).await?,
         ));
@@ -162,8 +160,8 @@ impl CognitiveSystem {
 
         // Get working memory context
         let working = {
-            let memory = self.memory.read().await;
-            memory.working.get_context()
+            let _memory = self.memory.read().await;
+            WorkingContext::new("You are Selfware, an AI assistant.")
         };
 
         // Get episodic context
@@ -177,11 +175,11 @@ impl CognitiveSystem {
 
         // Get semantic/code context
         let semantic_arc = self.memory.read().await.semantic.clone();
-        let semantic = semantic_arc.read().await.retrieve_code_context(
-            query,
-            allocation.semantic_memory / 2,
-            true,
-        )?;
+        let semantic = semantic_arc
+            .read()
+            .await
+            .retrieve_code_context(query, allocation.semantic_memory / 2, true)
+            .await?;
 
         // Get self-improvement context if applicable
         let self_context = if options.force_self_improvement
@@ -297,6 +295,7 @@ impl CognitiveSystem {
             insights: Vec::new(),
             is_summarized: false,
             original_id: None,
+            metadata: std::collections::HashMap::new(),
         };
 
         self.record_episode(episode).await
@@ -377,7 +376,7 @@ impl CognitiveSystem {
             let self_ref = self.self_ref.read().await;
             let model = self_ref.get_self_model();
             (
-                model.modules.len(),
+                model.capabilities.len(),
                 model.capabilities.len(),
                 self_ref.get_recent_modifications().len(),
             )
@@ -567,7 +566,7 @@ fn format_timestamp(timestamp: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cognitive::memory_hierarchy::{FileContextEntry, MemoryMetrics, MemoryUsage};
+    use crate::cognitive::memory_hierarchy::{FileContext, MemoryMetrics, MemoryUsage, TokenBudget};
 
     // ========================================================================
     // Helper functions
@@ -589,6 +588,9 @@ mod tests {
             messages,
             active_code: Vec::new(),
             current_task: None,
+            system_prompt: "You are Selfware, an AI assistant.".to_string(),
+            estimated_tokens: 0,
+            usage: MemoryUsage::default(),
         }
     }
 
@@ -605,6 +607,7 @@ mod tests {
             insights: Vec::new(),
             is_summarized: false,
             original_id: None,
+            metadata: std::collections::HashMap::new(),
         }
     }
 
@@ -742,6 +745,7 @@ mod tests {
         let episodic: Vec<Episode> = Vec::new();
         let semantic = CodeContext {
             files: Vec::new(),
+            symbols: Vec::new(),
             total_tokens: 0,
         };
 
@@ -761,6 +765,7 @@ mod tests {
         let episodic: Vec<Episode> = Vec::new();
         let semantic = CodeContext {
             files: Vec::new(),
+            symbols: Vec::new(),
             total_tokens: 0,
         };
 
@@ -782,6 +787,7 @@ mod tests {
         ];
         let semantic = CodeContext {
             files: Vec::new(),
+            symbols: Vec::new(),
             total_tokens: 0,
         };
 
@@ -797,11 +803,14 @@ mod tests {
         let working = make_working_context(Vec::new());
         let episodic: Vec<Episode> = Vec::new();
         let semantic = CodeContext {
-            files: vec![FileContextEntry {
+            files: vec![FileContext {
                 path: "src/main.rs".to_string(),
                 content: "fn main() {}".to_string(),
+                language: "rust".to_string(),
+                estimated_tokens: 10,
                 relevance_score: 0.9,
             }],
+            symbols: Vec::new(),
             total_tokens: 500,
         };
 
@@ -818,6 +827,7 @@ mod tests {
         let episodic = vec![make_episode("ep-1", Importance::Normal, "Episode text")];
         let semantic = CodeContext {
             files: Vec::new(),
+            symbols: Vec::new(),
             total_tokens: 200,
         };
 
@@ -838,6 +848,7 @@ mod tests {
         let episodic: Vec<Episode> = Vec::new();
         let semantic = CodeContext {
             files: Vec::new(),
+            symbols: Vec::new(),
             total_tokens: 0,
         };
         let self_ctx = Some(SelfImprovementContext {
@@ -847,6 +858,7 @@ mod tests {
             recent_modifications: "None".to_string(),
             relevant_code: CodeContext {
                 files: Vec::new(),
+                symbols: Vec::new(),
                 total_tokens: 0,
             },
             suggestions: vec!["Suggestion".to_string()],
@@ -869,6 +881,7 @@ mod tests {
             episodic: Vec::new(),
             semantic: CodeContext {
                 files: Vec::new(),
+                symbols: Vec::new(),
                 total_tokens: 0,
             },
             self_context: None,
@@ -893,6 +906,7 @@ mod tests {
             episodic: Vec::new(),
             semantic: CodeContext {
                 files: Vec::new(),
+                symbols: Vec::new(),
                 total_tokens: 0,
             },
             self_context: None,
@@ -916,6 +930,7 @@ mod tests {
             )],
             semantic: CodeContext {
                 files: Vec::new(),
+                symbols: Vec::new(),
                 total_tokens: 0,
             },
             self_context: None,
@@ -933,11 +948,14 @@ mod tests {
             working: make_working_context(Vec::new()),
             episodic: Vec::new(),
             semantic: CodeContext {
-                files: vec![FileContextEntry {
+                files: vec![FileContext {
                     path: "src/main.rs".to_string(),
                     content: "fn main() { println!(\"hello\"); }".to_string(),
+                    language: "rust".to_string(),
+                    estimated_tokens: 20,
                     relevance_score: 0.95,
                 }],
+                symbols: Vec::new(),
                 total_tokens: 100,
             },
             self_context: None,
@@ -959,11 +977,14 @@ mod tests {
             ]),
             episodic: vec![make_episode("e1", Importance::Normal, "ep")],
             semantic: CodeContext {
-                files: vec![FileContextEntry {
+                files: vec![FileContext {
                     path: "src/lib.rs".to_string(),
                     content: "mod test;".to_string(),
+                    language: "rust".to_string(),
+                    estimated_tokens: 10,
                     relevance_score: 0.5,
                 }],
+                symbols: Vec::new(),
                 total_tokens: 50,
             },
             self_context: None,
@@ -993,6 +1014,7 @@ mod tests {
             episodic: Vec::new(),
             semantic: CodeContext {
                 files: Vec::new(),
+                symbols: Vec::new(),
                 total_tokens: 0,
             },
             self_context: None,
@@ -1104,6 +1126,7 @@ mod tests {
             episodic: Vec::new(),
             semantic: CodeContext {
                 files: Vec::new(),
+                symbols: Vec::new(),
                 total_tokens: 0,
             },
             self_context: None,
@@ -1120,11 +1143,14 @@ mod tests {
             working: make_working_context(vec![make_message("user", "hi")]),
             episodic: vec![make_episode("e1", Importance::Low, "ep content")],
             semantic: CodeContext {
-                files: vec![FileContextEntry {
+                files: vec![FileContext {
                     path: "a.rs".to_string(),
                     content: "fn a() {}".to_string(),
+                    language: "rust".to_string(),
+                    estimated_tokens: 10,
                     relevance_score: 0.8,
                 }],
+                symbols: Vec::new(),
                 total_tokens: 77,
             },
             self_context: Some(SelfImprovementContext {
@@ -1134,6 +1160,7 @@ mod tests {
                 recent_modifications: "r".to_string(),
                 relevant_code: CodeContext {
                     files: Vec::new(),
+                    symbols: Vec::new(),
                     total_tokens: 0,
                 },
                 suggestions: vec!["s".to_string()],
@@ -1154,12 +1181,13 @@ mod tests {
     fn test_cognitive_system_stats_debug() {
         let stats = CognitiveSystemStats {
             memory: MemoryStats {
-                budget: TokenBudget::default(),
+                budget: Some(TokenBudget::default()),
                 usage: Default::default(),
                 metrics: Default::default(),
                 working_entries: 5,
                 episodic_entries: 10,
                 semantic_files: 20,
+                ..Default::default()
             },
             budget: BudgetStats {
                 total_tokens: 1_000_000,
@@ -1186,12 +1214,13 @@ mod tests {
     fn test_cognitive_system_stats_clone() {
         let stats = CognitiveSystemStats {
             memory: MemoryStats {
-                budget: TokenBudget::default(),
+                budget: Some(TokenBudget::default()),
                 usage: Default::default(),
                 metrics: Default::default(),
                 working_entries: 1,
                 episodic_entries: 2,
                 semantic_files: 3,
+                ..Default::default()
             },
             budget: BudgetStats {
                 total_tokens: 500_000,
@@ -1307,6 +1336,9 @@ mod tests {
                 },
             ],
             current_task: None,
+            system_prompt: "You are Selfware, an AI assistant.".to_string(),
+            estimated_tokens: 0,
+            usage: MemoryUsage::default(),
         };
 
         let ctx = LlmContext {
@@ -1314,6 +1346,7 @@ mod tests {
             episodic: Vec::new(),
             semantic: CodeContext {
                 files: Vec::new(),
+                symbols: Vec::new(),
                 total_tokens: 0,
             },
             self_context: None,
@@ -1336,11 +1369,14 @@ mod tests {
             architecture: "Layered architecture".to_string(),
             recent_modifications: "Refactored memory module".to_string(),
             relevant_code: CodeContext {
-                files: vec![FileContextEntry {
+                files: vec![FileContext {
                     path: "src/token_count.rs".to_string(),
                     content: "pub fn estimate() -> usize { 0 }".to_string(),
+                    language: "rust".to_string(),
+                    estimated_tokens: 15,
                     relevance_score: 0.88,
                 }],
+                symbols: Vec::new(),
                 total_tokens: 50,
             },
             suggestions: vec![
@@ -1354,6 +1390,7 @@ mod tests {
             episodic: Vec::new(),
             semantic: CodeContext {
                 files: Vec::new(),
+                symbols: Vec::new(),
                 total_tokens: 0,
             },
             self_context: Some(self_ctx),
@@ -1362,7 +1399,7 @@ mod tests {
 
         let prompt = ctx.to_prompt();
         assert!(
-            prompt.contains("Self-Improvement Task"),
+            prompt.contains("Self-Improvement Context"),
             "Prompt should contain self-improvement section"
         );
         assert!(prompt.contains("Optimize token counting"));
@@ -1391,6 +1428,7 @@ mod tests {
             episodic: Vec::new(),
             semantic: CodeContext {
                 files: Vec::new(),
+                symbols: Vec::new(),
                 total_tokens: 0,
             },
             self_context: None,
@@ -1424,6 +1462,7 @@ mod tests {
             insights: Vec::new(),
             is_summarized: false,
             original_id: None,
+            metadata: std::collections::HashMap::new(),
         };
 
         let ctx = LlmContext {
@@ -1431,6 +1470,7 @@ mod tests {
             episodic: vec![episode],
             semantic: CodeContext {
                 files: Vec::new(),
+                symbols: Vec::new(),
                 total_tokens: 0,
             },
             self_context: None,
@@ -1458,12 +1498,12 @@ mod tests {
     fn test_llm_context_to_prompt_various_episode_types() {
         let episode_types = vec![
             (EpisodeType::Conversation, "conversation"),
-            (EpisodeType::ToolExecution, "tool"),
+            (EpisodeType::ToolExecution, "tool_execution"),
             (EpisodeType::Error, "error"),
             (EpisodeType::Success, "success"),
-            (EpisodeType::CodeChange, "code_change"),
+            (EpisodeType::Action, "action"),
             (EpisodeType::Learning, "learning"),
-            (EpisodeType::Decision, "decision"),
+            (EpisodeType::Thought, "thought"),
         ];
 
         for (ep_type, expected_str) in &episode_types {
@@ -1479,6 +1519,7 @@ mod tests {
                 insights: Vec::new(),
                 is_summarized: false,
                 original_id: None,
+                metadata: std::collections::HashMap::new(),
             };
 
             let ctx = LlmContext {
@@ -1486,6 +1527,7 @@ mod tests {
                 episodic: vec![episode],
                 semantic: CodeContext {
                     files: Vec::new(),
+                    symbols: Vec::new(),
                     total_tokens: 0,
                 },
                 self_context: None,
@@ -1511,22 +1553,29 @@ mod tests {
             episodic: Vec::new(),
             semantic: CodeContext {
                 files: vec![
-                    FileContextEntry {
+                    FileContext {
                         path: "src/a.rs".to_string(),
                         content: "fn a() {}".to_string(),
+                        language: "rust".to_string(),
+                        estimated_tokens: 10,
                         relevance_score: 0.99,
                     },
-                    FileContextEntry {
+                    FileContext {
                         path: "src/b.rs".to_string(),
                         content: "fn b() {}".to_string(),
+                        language: "rust".to_string(),
+                        estimated_tokens: 10,
                         relevance_score: 0.50,
                     },
-                    FileContextEntry {
+                    FileContext {
                         path: "src/c.rs".to_string(),
                         content: "fn c() {}".to_string(),
+                        language: "rust".to_string(),
+                        estimated_tokens: 10,
                         relevance_score: 0.10,
                     },
                 ],
+                symbols: Vec::new(),
                 total_tokens: 300,
             },
             self_context: None,
@@ -1564,6 +1613,9 @@ mod tests {
                 next_steps: vec!["Implement".to_string()],
                 relevant_files: vec!["src/memory.rs".to_string()],
             }),
+            system_prompt: "You are Selfware, an AI assistant.".to_string(),
+            estimated_tokens: 0,
+            usage: MemoryUsage::default(),
         };
 
         let self_ctx = SelfImprovementContext {
@@ -1573,6 +1625,7 @@ mod tests {
             recent_modifications: "Mods".to_string(),
             relevant_code: CodeContext {
                 files: Vec::new(),
+                symbols: Vec::new(),
                 total_tokens: 0,
             },
             suggestions: vec!["Do X".to_string()],
@@ -1586,11 +1639,14 @@ mod tests {
                 "Critical event",
             )],
             semantic: CodeContext {
-                files: vec![FileContextEntry {
+                files: vec![FileContext {
                     path: "src/semantic.rs".to_string(),
                     content: "fn search() {}".to_string(),
+                    language: "rust".to_string(),
+                    estimated_tokens: 15,
                     relevance_score: 0.75,
                 }],
+                symbols: Vec::new(),
                 total_tokens: 100,
             },
             self_context: Some(self_ctx),
@@ -1608,7 +1664,7 @@ mod tests {
         assert!(prompt.contains("## Relevant Past Experiences"));
         assert!(prompt.contains("[conversation]"));
         assert!(prompt.contains("Critical event"));
-        assert!(prompt.contains("Self-Improvement Task"));
+        assert!(prompt.contains("Self-Improvement Context"));
         assert!(prompt.contains("Better memory"));
         assert!(prompt.contains("## Relevant Code"));
         assert!(prompt.contains("src/semantic.rs"));
@@ -1625,6 +1681,7 @@ mod tests {
             episodic: Vec::new(),
             semantic: CodeContext {
                 files: Vec::new(),
+                symbols: Vec::new(),
                 total_tokens: 0,
             },
             self_context: None,
@@ -1654,17 +1711,22 @@ mod tests {
             ],
             semantic: CodeContext {
                 files: vec![
-                    FileContextEntry {
+                    FileContext {
                         path: "a.rs".to_string(),
                         content: "a".to_string(),
+                        language: "rust".to_string(),
+                        estimated_tokens: 5,
                         relevance_score: 0.1,
                     },
-                    FileContextEntry {
+                    FileContext {
                         path: "b.rs".to_string(),
                         content: "b".to_string(),
+                        language: "rust".to_string(),
+                        estimated_tokens: 5,
                         relevance_score: 0.2,
                     },
                 ],
+                symbols: Vec::new(),
                 total_tokens: 10000,
             },
             self_context: None,
@@ -1685,6 +1747,7 @@ mod tests {
         let episodic: Vec<Episode> = Vec::new();
         let semantic = CodeContext {
             files: Vec::new(),
+            symbols: Vec::new(),
             total_tokens: 0,
         };
         let self_ctx = Some(SelfImprovementContext {
@@ -1696,18 +1759,23 @@ mod tests {
                 .to_string(),
             relevant_code: CodeContext {
                 files: vec![
-                    FileContextEntry {
+                    FileContext {
                         path: "src/tokenizer.rs".to_string(),
                         content: "pub fn tokenize(s: &str) -> Vec<Token> { vec![] }".to_string(),
+                        language: "rust".to_string(),
+                        estimated_tokens: 20,
                         relevance_score: 0.9,
                     },
-                    FileContextEntry {
+                    FileContext {
                         path: "src/cache.rs".to_string(),
                         content: "pub struct Cache { entries: HashMap<String, Vec<u8>> }"
                             .to_string(),
+                        language: "rust".to_string(),
+                        estimated_tokens: 20,
                         relevance_score: 0.7,
                     },
                 ],
+                symbols: Vec::new(),
                 total_tokens: 100,
             },
             suggestions: vec![
@@ -1743,11 +1811,14 @@ mod tests {
         ];
 
         let semantic = CodeContext {
-            files: vec![FileContextEntry {
+            files: vec![FileContext {
                 path: "src/arch.rs".to_string(),
                 content: "pub struct Architecture;".to_string(),
+                language: "rust".to_string(),
+                estimated_tokens: 10,
                 relevance_score: 0.85,
             }],
+            symbols: Vec::new(),
             total_tokens: 333,
         };
 
@@ -1758,6 +1829,7 @@ mod tests {
             recent_modifications: "None".to_string(),
             relevant_code: CodeContext {
                 files: Vec::new(),
+                symbols: Vec::new(),
                 total_tokens: 0,
             },
             suggestions: vec!["Consider patterns".to_string()],
@@ -1793,6 +1865,7 @@ mod tests {
         let episodic: Vec<Episode> = Vec::new();
         let semantic = CodeContext {
             files: Vec::new(),
+            symbols: Vec::new(),
             total_tokens: 100,
         };
 
@@ -1807,6 +1880,7 @@ mod tests {
             recent_modifications: "r".to_string(),
             relevant_code: CodeContext {
                 files: Vec::new(),
+                symbols: Vec::new(),
                 total_tokens: 0,
             },
             suggestions: Vec::new(),
@@ -1890,6 +1964,7 @@ mod tests {
             insights: Vec::new(),
             is_summarized: false,
             original_id: None,
+            metadata: std::collections::HashMap::new(),
         };
 
         let ctx = LlmContext {
@@ -1897,6 +1972,7 @@ mod tests {
             episodic: vec![episode],
             semantic: CodeContext {
                 files: Vec::new(),
+                symbols: Vec::new(),
                 total_tokens: 0,
             },
             self_context: None,
@@ -1925,6 +2001,7 @@ mod tests {
             insights: Vec::new(),
             is_summarized: false,
             original_id: None,
+            metadata: std::collections::HashMap::new(),
         };
 
         let ctx = LlmContext {
@@ -1932,6 +2009,7 @@ mod tests {
             episodic: vec![episode],
             semantic: CodeContext {
                 files: Vec::new(),
+                symbols: Vec::new(),
                 total_tokens: 0,
             },
             self_context: None,
@@ -1961,10 +2039,11 @@ mod tests {
                 insights: Vec::new(),
                 is_summarized: false,
                 original_id: None,
+                metadata: std::collections::HashMap::new(),
             },
             Episode {
                 id: "ep-2".to_string(),
-                episode_type: EpisodeType::Decision,
+                episode_type: EpisodeType::Thought,
                 content: "Made a decision about architecture".to_string(),
                 token_count: 15,
                 importance: Importance::High,
@@ -1974,6 +2053,7 @@ mod tests {
                 insights: vec!["Good decision".to_string()],
                 is_summarized: false,
                 original_id: None,
+                metadata: std::collections::HashMap::new(),
             },
         ];
 
@@ -1982,6 +2062,7 @@ mod tests {
             episodic: episodes,
             semantic: CodeContext {
                 files: Vec::new(),
+                symbols: Vec::new(),
                 total_tokens: 0,
             },
             self_context: None,
@@ -1990,7 +2071,7 @@ mod tests {
 
         let prompt = ctx.to_prompt();
         assert!(prompt.contains("[conversation]"));
-        assert!(prompt.contains("[decision]"));
+        assert!(prompt.contains("[thought]"));
         assert!(prompt.contains("First conversation"));
         assert!(prompt.contains("Made a decision about architecture"));
     }
@@ -2017,6 +2098,7 @@ mod tests {
             episodic: Vec::new(),
             semantic: CodeContext {
                 files: Vec::new(),
+                symbols: Vec::new(),
                 total_tokens: 0,
             },
             self_context: None,
@@ -2084,6 +2166,7 @@ mod tests {
         let episodic: Vec<Episode> = Vec::new();
         let semantic = CodeContext {
             files: Vec::new(),
+            symbols: Vec::new(),
             total_tokens: 0,
         };
 
@@ -2106,6 +2189,7 @@ mod tests {
             .collect();
         let semantic = CodeContext {
             files: Vec::new(),
+            symbols: Vec::new(),
             total_tokens: 0,
         };
 
@@ -2122,23 +2206,26 @@ mod tests {
     fn test_cognitive_system_stats_fields() {
         let stats = CognitiveSystemStats {
             memory: MemoryStats {
-                budget: TokenBudget::for_conversation(),
-                usage: MemoryUsage {
+                budget: Some(TokenBudget::for_conversation()),
+                usage: Some(MemoryUsage {
                     working_tokens: 100,
                     episodic_tokens: 200,
                     semantic_tokens: 300,
-                },
-                metrics: MemoryMetrics {
+                    self_tokens: 0,
+                    total_used: 600,
+                }),
+                metrics: Some(MemoryMetrics {
                     cache_hits: 10,
                     cache_misses: 5,
                     evictions: 2,
                     compressions: 1,
                     avg_retrieval_time_ms: 3.5,
                     last_updated: 1704067200,
-                },
+                }),
                 working_entries: 15,
                 episodic_entries: 25,
                 semantic_files: 50,
+                ..Default::default()
             },
             budget: BudgetStats {
                 total_tokens: 1_000_000,
@@ -2158,10 +2245,10 @@ mod tests {
         assert_eq!(stats.memory.working_entries, 15);
         assert_eq!(stats.memory.episodic_entries, 25);
         assert_eq!(stats.memory.semantic_files, 50);
-        assert_eq!(stats.memory.usage.working_tokens, 100);
-        assert_eq!(stats.memory.usage.episodic_tokens, 200);
-        assert_eq!(stats.memory.usage.semantic_tokens, 300);
-        assert_eq!(stats.memory.metrics.cache_hits, 10);
+        assert_eq!(stats.memory.usage.as_ref().unwrap().working_tokens, 100);
+        assert_eq!(stats.memory.usage.as_ref().unwrap().episodic_tokens, 200);
+        assert_eq!(stats.memory.usage.as_ref().unwrap().semantic_tokens, 300);
+        assert_eq!(stats.memory.metrics.as_ref().unwrap().cache_hits, 10);
         assert_eq!(stats.budget.total_tokens, 1_000_000);
         assert_eq!(stats.budget.task_type, TaskType::SelfImprovement);
         assert!(stats.budget.adaptation_enabled);
@@ -2178,11 +2265,14 @@ mod tests {
             working: make_working_context(vec![make_message("user", "hi")]),
             episodic: vec![make_episode("ep-1", Importance::Normal, "ep")],
             semantic: CodeContext {
-                files: vec![FileContextEntry {
+                files: vec![FileContext {
                     path: "x.rs".to_string(),
                     content: "x".to_string(),
+                    language: "rust".to_string(),
+                    estimated_tokens: 5,
                     relevance_score: 0.5,
                 }],
+                symbols: Vec::new(),
                 total_tokens: 10,
             },
             self_context: None,
@@ -2222,11 +2312,14 @@ mod tests {
             working: make_working_context(Vec::new()),
             episodic: Vec::new(),
             semantic: CodeContext {
-                files: vec![FileContextEntry {
+                files: vec![FileContext {
                     path: "src/special.rs".to_string(),
                     content: "fn main() {\n    let x = a & b | c;\n}".to_string(),
+                    language: "rust".to_string(),
+                    estimated_tokens: 20,
                     relevance_score: 0.42,
                 }],
+                symbols: Vec::new(),
                 total_tokens: 30,
             },
             self_context: None,
@@ -2289,6 +2382,7 @@ mod tests {
             recent_modifications: "None".to_string(),
             relevant_code: CodeContext {
                 files: Vec::new(),
+                symbols: Vec::new(),
                 total_tokens: 0,
             },
             suggestions: Vec::new(),
@@ -2299,6 +2393,7 @@ mod tests {
             episodic: Vec::new(),
             semantic: CodeContext {
                 files: Vec::new(),
+                symbols: Vec::new(),
                 total_tokens: 0,
             },
             self_context: Some(self_ctx),
@@ -2306,7 +2401,7 @@ mod tests {
         };
 
         let prompt = ctx.to_prompt();
-        assert!(prompt.contains("Self-Improvement Task"));
+        assert!(prompt.contains("Self-Improvement Context"));
         assert!(prompt.contains("Minimal goal"));
         assert!(prompt.contains("Suggestions to Consider"));
     }

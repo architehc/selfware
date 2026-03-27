@@ -876,6 +876,488 @@ fn parse_layout_response(raw: &str) -> Result<LayoutAnalysis> {
 }
 
 // ---------------------------------------------------------------------------
+// Visual Stuck-Loop Detection
+// ---------------------------------------------------------------------------
+
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+use chrono::{DateTime, Utc};
+
+/// Tracks screenshot history to detect stuck loops
+#[derive(Debug, Clone)]
+pub struct VisualStateTracker {
+    /// Ring buffer of recent screenshot states
+    history: VecDeque<ScreenshotState>,
+    /// Maximum history size
+    max_history: usize,
+    /// Threshold for considering screenshots "similar" (0.0-1.0)
+    similarity_threshold: f32,
+    /// How many consecutive similar states before declaring "stuck"
+    stuck_threshold: usize,
+    /// Minimum hash similarity to consider screens "same" (0.0-1.0)
+    hash_similarity_threshold: f32,
+}
+
+/// A recorded screenshot state for loop detection
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScreenshotState {
+    /// Perceptual hash of the screenshot (for fast compare)
+    pub hash: String,
+    /// Semantic description of what's visible
+    pub semantic_description: String,
+    /// Timestamp when this state was recorded
+    pub timestamp: DateTime<Utc>,
+    /// Action that was taken from this state
+    pub action_taken: String,
+    /// Whether the action succeeded
+    pub action_succeeded: bool,
+    /// Optional screenshot path for debugging
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screenshot_path: Option<PathBuf>,
+}
+
+/// Result of stuck-loop detection
+#[derive(Debug, Clone)]
+pub enum LoopDetectionResult {
+    /// No loop detected, proceed normally
+    Proceed,
+    /// Possible loop forming - warn
+    Warning { similar_states: Vec<ScreenshotState> },
+    /// Stuck loop confirmed - need recovery
+    Stuck {
+        loop_pattern: Vec<ScreenshotState>,
+        suggested_recovery: RecoveryStrategy,
+    },
+}
+
+/// Recovery strategy when a stuck loop is detected
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RecoveryStrategy {
+    /// Try a different action on same screen
+    TryDifferentAction { alternatives: Vec<String> },
+    /// Reset to known good state
+    ResetToCheckpoint,
+    /// Escalate to user
+    EscalateToUser { reason: String },
+    /// Wait and retry (for transient states)
+    WaitAndRetry { delay_ms: u64 },
+    /// Take a screenshot to reassess the current state
+    ReassessWithScreenshot,
+    /// Change input method (e.g., keyboard instead of mouse)
+    ChangeInputMethod { suggestion: String },
+}
+
+impl std::fmt::Display for RecoveryStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RecoveryStrategy::TryDifferentAction { alternatives } => {
+                write!(f, "Try different action. Alternatives: {}", alternatives.join(", "))
+            }
+            RecoveryStrategy::ResetToCheckpoint => write!(f, "Reset to checkpoint"),
+            RecoveryStrategy::EscalateToUser { reason } => {
+                write!(f, "Escalate to user: {}", reason)
+            }
+            RecoveryStrategy::WaitAndRetry { delay_ms } => {
+                write!(f, "Wait {}ms and retry", delay_ms)
+            }
+            RecoveryStrategy::ReassessWithScreenshot => write!(f, "Reassess with fresh screenshot"),
+            RecoveryStrategy::ChangeInputMethod { suggestion } => {
+                write!(f, "Change input method: {}", suggestion)
+            }
+        }
+    }
+}
+
+impl VisualStateTracker {
+    /// Create a new visual state tracker with default settings
+    pub fn new(max_history: usize, stuck_threshold: usize) -> Self {
+        Self {
+            history: VecDeque::with_capacity(max_history),
+            max_history,
+            similarity_threshold: 0.85,
+            stuck_threshold,
+            hash_similarity_threshold: 0.90,
+        }
+    }
+
+    /// Create with custom similarity thresholds
+    pub fn with_thresholds(
+        max_history: usize,
+        stuck_threshold: usize,
+        similarity_threshold: f32,
+        hash_similarity_threshold: f32,
+    ) -> Self {
+        Self {
+            history: VecDeque::with_capacity(max_history),
+            max_history,
+            similarity_threshold,
+            stuck_threshold,
+            hash_similarity_threshold,
+        }
+    }
+
+    /// Create a default configuration (20 history, 2 repeats = stuck)
+    pub fn default_config() -> Self {
+        Self::new(20, 2)
+    }
+
+    /// Record a new state and check for loops
+    pub fn record_state(
+        &mut self,
+        screenshot_path: &Path,
+        semantic_description: String,
+        action_taken: String,
+        action_succeeded: bool,
+    ) -> Result<LoopDetectionResult> {
+        let hash = compute_perceptual_hash(screenshot_path)?;
+        let state = ScreenshotState {
+            hash,
+            semantic_description,
+            timestamp: Utc::now(),
+            action_taken: action_taken.clone(),
+            action_succeeded,
+            screenshot_path: Some(screenshot_path.to_path_buf()),
+        };
+
+        // Check for similar states in history
+        let similar: Vec<_> = self
+            .history
+            .iter()
+            .filter(|h| self.is_same_screen(&state, h))
+            .cloned()
+            .collect();
+
+        let result = if similar.len() >= self.stuck_threshold {
+            // We're stuck in a loop
+            let strategy = self.determine_recovery_strategy(&similar, action_succeeded);
+            LoopDetectionResult::Stuck {
+                loop_pattern: similar,
+                suggested_recovery: strategy,
+            }
+        } else if !similar.is_empty() {
+            // Possible loop forming
+            LoopDetectionResult::Warning {
+                similar_states: similar,
+            }
+        } else {
+            LoopDetectionResult::Proceed
+        };
+
+        // Add to history
+        if self.history.len() >= self.max_history {
+            self.history.pop_front();
+        }
+        self.history.push_back(state);
+
+        Ok(result)
+    }
+
+    /// Record state with pre-computed hash (for efficiency when hash is already known)
+    pub fn record_state_with_hash(
+        &mut self,
+        screenshot_hash: String,
+        semantic_description: String,
+        action_taken: String,
+        action_succeeded: bool,
+    ) -> LoopDetectionResult {
+        let state = ScreenshotState {
+            hash: screenshot_hash,
+            semantic_description,
+            timestamp: Utc::now(),
+            action_taken: action_taken.clone(),
+            action_succeeded,
+            screenshot_path: None,
+        };
+
+        // Check for similar states in history
+        let similar: Vec<_> = self
+            .history
+            .iter()
+            .filter(|h| self.is_same_screen(&state, h))
+            .cloned()
+            .collect();
+
+        let result = if similar.len() >= self.stuck_threshold {
+            let strategy = self.determine_recovery_strategy(&similar, action_succeeded);
+            LoopDetectionResult::Stuck {
+                loop_pattern: similar,
+                suggested_recovery: strategy,
+            }
+        } else if !similar.is_empty() {
+            LoopDetectionResult::Warning {
+                similar_states: similar,
+            }
+        } else {
+            LoopDetectionResult::Proceed
+        };
+
+        // Add to history
+        if self.history.len() >= self.max_history {
+            self.history.pop_front();
+        }
+        self.history.push_back(state);
+
+        result
+    }
+
+    /// Check if two screenshot states represent the same screen with same failed action
+    fn is_same_screen(&self, state1: &ScreenshotState, state2: &ScreenshotState) -> bool {
+        let hash_sim = compute_hash_similarity(&state1.hash, &state2.hash);
+        let action_same = state1.action_taken == state2.action_taken;
+        let both_failed = !state1.action_succeeded && !state2.action_succeeded;
+
+        // Same screen = high visual similarity + same action + both failed
+        hash_sim >= self.hash_similarity_threshold && action_same && both_failed
+    }
+
+    /// Determine the best recovery strategy based on the loop pattern
+    fn determine_recovery_strategy(
+        &self,
+        pattern: &[ScreenshotState],
+        _last_action_succeeded: bool,
+    ) -> RecoveryStrategy {
+        let action = pattern.last().map(|s| s.action_taken.clone()).unwrap_or_default();
+
+        // Analyze the pattern to suggest appropriate recovery
+        if pattern.len() >= 3 {
+            // Persistent loop - try fundamentally different approach
+            RecoveryStrategy::TryDifferentAction {
+                alternatives: vec![
+                    format!("Use keyboard shortcut instead of: {}", action),
+                    "Wait for animation to complete before next action".to_string(),
+                    "Refresh the page/application and retry".to_string(),
+                    "Try a different UI element or location".to_string(),
+                ],
+            }
+        } else if pattern.len() == 2 {
+            // Early loop detection - suggest alternatives
+            RecoveryStrategy::TryDifferentAction {
+                alternatives: vec![
+                    format!("Retry '{}' after brief pause", action),
+                    "Check if element is interactable".to_string(),
+                    "Try alternative selector or coordinates".to_string(),
+                ],
+            }
+        } else {
+            // Single repeat - wait and retry
+            RecoveryStrategy::WaitAndRetry { delay_ms: 1000 }
+        }
+    }
+
+    /// Get the current history size
+    pub fn history_size(&self) -> usize {
+        self.history.len()
+    }
+
+    /// Clear all history
+    pub fn clear_history(&mut self) {
+        self.history.clear();
+    }
+
+    /// Get a reference to the history
+    pub fn history(&self) -> &VecDeque<ScreenshotState> {
+        &self.history
+    }
+
+    /// Check if a similar state exists in recent history (for quick checks)
+    pub fn has_similar_state(&self, hash: &str, action: &str) -> bool {
+        self.history.iter().any(|h| {
+            let hash_sim = compute_hash_similarity(&h.hash, hash);
+            hash_sim >= self.hash_similarity_threshold && h.action_taken == action && !h.action_succeeded
+        })
+    }
+}
+
+/// Compute perceptual hash (dhash) for a screenshot
+/// 
+/// Uses difference hash algorithm:
+/// 1. Resize image to 9x8
+/// 2. Compute gradient between adjacent pixels
+/// 3. Return hex string of hash
+pub fn compute_perceptual_hash(screenshot_path: &Path) -> Result<String> {
+    use image::GenericImageView;
+
+    // Open and decode the image
+    let img = image::open(screenshot_path)
+        .with_context(|| format!("Failed to open screenshot: {}", screenshot_path.display()))?;
+
+    // Convert to grayscale and resize to 9x8 for dhash
+    let gray = img.to_luma8();
+    let resized = image::imageops::resize(
+        &gray,
+        9,
+        8,
+        image::imageops::FilterType::Lanczos3,
+    );
+
+    // Compute difference hash
+    let mut hash_bits = Vec::with_capacity(64);
+    for y in 0..8 {
+        for x in 0..8 {
+            let left = resized.get_pixel(x, y)[0];
+            let right = resized.get_pixel(x + 1, y)[0];
+            hash_bits.push(if right > left { 1 } else { 0 });
+        }
+    }
+
+    // Convert bits to hex string
+    let mut hex_string = String::with_capacity(16);
+    for chunk in hash_bits.chunks(4) {
+        let nibble = chunk.iter().fold(0u8, |acc, &bit| (acc << 1) | bit);
+        let hex_char = match nibble {
+            0..=9 => (b'0' + nibble) as char,
+            10..=15 => (b'a' + nibble - 10) as char,
+            _ => '0',
+        };
+        hex_string.push(hex_char);
+    }
+
+    Ok(hex_string)
+}
+
+/// Compute perceptual hash from image bytes (for in-memory images)
+pub fn compute_perceptual_hash_from_bytes(image_bytes: &[u8]) -> Result<String> {
+    use image::GenericImageView;
+
+    // Decode the image from bytes
+    let img = image::load_from_memory(image_bytes)
+        .with_context(|| "Failed to decode image from bytes")?;
+
+    // Convert to grayscale and resize to 9x8 for dhash
+    let gray = img.to_luma8();
+    let resized = image::imageops::resize(
+        &gray,
+        9,
+        8,
+        image::imageops::FilterType::Lanczos3,
+    );
+
+    // Compute difference hash
+    let mut hash_bits = Vec::with_capacity(64);
+    for y in 0..8 {
+        for x in 0..8 {
+            let left = resized.get_pixel(x, y)[0];
+            let right = resized.get_pixel(x + 1, y)[0];
+            hash_bits.push(if right > left { 1 } else { 0 });
+        }
+    }
+
+    // Convert bits to hex string
+    let mut hex_string = String::with_capacity(16);
+    for chunk in hash_bits.chunks(4) {
+        let nibble = chunk.iter().fold(0u8, |acc, &bit| (acc << 1) | bit);
+        let hex_char = match nibble {
+            0..=9 => (b'0' + nibble) as char,
+            10..=15 => (b'a' + nibble - 10) as char,
+            _ => '0',
+        };
+        hex_string.push(hex_char);
+    }
+
+    Ok(hex_string)
+}
+
+/// Compare two perceptual hashes using Hamming distance
+/// Returns similarity score 0.0-1.0 where 1.0 is identical
+pub fn compute_hash_similarity(hash1: &str, hash2: &str) -> f32 {
+    if hash1.len() != hash2.len() {
+        // Different lengths - compute similarity based on common prefix
+        let min_len = hash1.len().min(hash2.len());
+        let max_len = hash1.len().max(hash2.len());
+        let common = hash1.bytes().zip(hash2.bytes())
+            .take(min_len)
+            .filter(|(a, b)| a == b)
+            .count();
+        return common as f32 / max_len as f32;
+    }
+
+    let max_distance = hash1.len() * 4; // Each hex char = 4 bits
+    let distance = hamming_distance(hash1, hash2);
+    
+    // Convert to similarity: 1.0 - normalized distance
+    1.0 - (distance as f32 / max_distance as f32)
+}
+
+/// Compute Hamming distance between two hex strings
+fn hamming_distance(s1: &str, s2: &str) -> usize {
+    s1.bytes()
+        .zip(s2.bytes())
+        .map(|(b1, b2)| {
+            let n1 = hex_to_nibble(b1);
+            let n2 = hex_to_nibble(b2);
+            (n1 ^ n2).count_ones() as usize
+        })
+        .sum()
+}
+
+/// Convert hex character to nibble
+fn hex_to_nibble(c: u8) -> u8 {
+    match c {
+        b'0'..=b'9' => c - b'0',
+        b'a'..=b'f' => c - b'a' + 10,
+        b'A'..=b'F' => c - b'A' + 10,
+        _ => 0,
+    }
+}
+
+/// Configuration for visual stuck-loop detection
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VisualLoopConfig {
+    /// Maximum number of states to keep in history
+    pub max_history: usize,
+    /// Number of similar states required to trigger stuck detection
+    pub stuck_threshold: usize,
+    /// Hash similarity threshold (0.0-1.0)
+    pub hash_similarity_threshold: f32,
+    /// Semantic similarity threshold (0.0-1.0) - for future use with VLM
+    pub semantic_similarity_threshold: f32,
+    /// Enable automatic recovery when stuck
+    pub auto_recovery: bool,
+}
+
+impl Default for VisualLoopConfig {
+    fn default() -> Self {
+        Self {
+            max_history: 20,
+            stuck_threshold: 2,
+            hash_similarity_threshold: 0.90,
+            semantic_similarity_threshold: 0.85,
+            auto_recovery: true,
+        }
+    }
+}
+
+impl VisualLoopConfig {
+    /// Create a new tracker from this config
+    pub fn create_tracker(&self) -> VisualStateTracker {
+        VisualStateTracker::with_thresholds(
+            self.max_history,
+            self.stuck_threshold,
+            self.semantic_similarity_threshold,
+            self.hash_similarity_threshold,
+        )
+    }
+}
+
+/// Utility function to quickly check for stuck loops with minimal config
+/// 
+/// This is a convenience function for simple use cases. For more control,
+/// use `VisualStateTracker` directly.
+pub fn check_visual_loop(
+    tracker: &mut VisualStateTracker,
+    screenshot_path: &Path,
+    action: &str,
+    action_succeeded: bool,
+) -> Result<LoopDetectionResult> {
+    tracker.record_state(
+        screenshot_path,
+        String::new(), // No semantic description in simple mode
+        action.to_string(),
+        action_succeeded,
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1497,5 +1979,318 @@ mod tests {
     fn test_parse_layout_response_invalid() {
         let raw = "garbage";
         assert!(parse_layout_response(raw).is_err());
+    }
+
+    // ---- Visual verifier edge cases ----
+
+    #[test]
+    fn test_visual_verifier_handles_invalid_image() {
+        // Garbage base64 should still produce a valid request body without panicking.
+        // The actual VLM call would fail, but construction must be graceful.
+        let verifier = VisualVerifier::new("http://localhost:1234/v1", "test-model");
+        let garbage = "not-valid-base64-!@#$%^&*()";
+        let body = verifier.build_single_image_request("Check this", garbage);
+        // The body is constructed; the data URI contains the garbage verbatim
+        let url = body["messages"][0]["content"][1]["image_url"]["url"]
+            .as_str()
+            .unwrap();
+        assert!(url.starts_with("data:image/png;base64,"));
+        assert!(url.contains(garbage));
+
+        // Parsing a verification response that would come from invalid image
+        // input should also be handled — the VLM would return an error string,
+        // which fails JSON parsing gracefully.
+        let bad_response = "Error: invalid image data";
+        assert!(parse_verification_response(bad_response).is_err());
+    }
+
+    #[test]
+    fn test_visual_verifier_handles_empty_expectation() {
+        // An empty expected description should not panic during prompt construction.
+        let prompt = build_verify_prompt("");
+        assert!(prompt.contains("EXPECTED:"));
+        // The prompt still contains the structural JSON instructions
+        assert!(prompt.contains("passed"));
+        assert!(prompt.contains("confidence"));
+
+        // Parsing a response for an empty-expectation query should work normally
+        let raw = r#"{"passed": true, "confidence": 0.5, "description": "Blank screen", "issues": []}"#;
+        let result = parse_verification_response(raw).unwrap();
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn test_visual_verification_result_serde_roundtrip() {
+        let original = VisualVerificationResult {
+            passed: false,
+            confidence: 0.73,
+            description: "Dashboard with charts".to_string(),
+            issues: vec!["Missing legend".to_string(), "Colors too similar".to_string()],
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let roundtripped: VisualVerificationResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtripped.passed, original.passed);
+        assert!((roundtripped.confidence - original.confidence).abs() < f64::EPSILON);
+        assert_eq!(roundtripped.description, original.description);
+        assert_eq!(roundtripped.issues, original.issues);
+
+        // Also test via serde_json::Value to confirm field names
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(value.get("passed").is_some());
+        assert!(value.get("confidence").is_some());
+        assert!(value.get("description").is_some());
+        assert!(value.get("issues").is_some());
+    }
+
+    // ---- Visual Stuck-Loop Detection Tests ----
+
+    #[test]
+    fn test_visual_state_tracker_new() {
+        let tracker = VisualStateTracker::new(20, 2);
+        assert_eq!(tracker.history_size(), 0);
+    }
+
+    #[test]
+    fn test_visual_state_tracker_default_config() {
+        let tracker = VisualStateTracker::default_config();
+        assert_eq!(tracker.history_size(), 0);
+    }
+
+    #[test]
+    fn test_visual_state_tracker_record_state_proceed() {
+        let mut tracker = VisualStateTracker::new(10, 2);
+        
+        // First state - should proceed
+        let result = tracker.record_state_with_hash(
+            "abc123".to_string(),
+            "Login page".to_string(),
+            "click".to_string(),
+            false,
+        );
+        
+        match result {
+            LoopDetectionResult::Proceed => {}
+            _ => panic!("Expected Proceed for first state"),
+        }
+        assert_eq!(tracker.history_size(), 1);
+    }
+
+    #[test]
+    fn test_visual_state_tracker_detects_stuck_loop() {
+        let mut tracker = VisualStateTracker::new(10, 2);
+        
+        // Record same hash + action + failed three times
+        for _ in 0..2 {
+            tracker.record_state_with_hash(
+                "abc123".to_string(),
+                "Login page".to_string(),
+                "click".to_string(),
+                false,
+            );
+        }
+        
+        // Third time should trigger stuck detection
+        let result = tracker.record_state_with_hash(
+            "abc123".to_string(),
+            "Login page".to_string(),
+            "click".to_string(),
+            false,
+        );
+        
+        match result {
+            LoopDetectionResult::Stuck { loop_pattern, suggested_recovery } => {
+                assert_eq!(loop_pattern.len(), 2);
+                // Should suggest recovery strategy
+                match suggested_recovery {
+                    RecoveryStrategy::TryDifferentAction { alternatives } => {
+                        assert!(!alternatives.is_empty());
+                    }
+                    _ => {} // Other strategies are also valid
+                }
+            }
+            _ => panic!("Expected Stuck result, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_visual_state_tracker_different_hashes_proceed() {
+        let mut tracker = VisualStateTracker::new(10, 2);
+        
+        // Record clearly different hashes - should never get stuck
+        // Use hex strings that are very different from each other
+        let hashes = vec![
+            "0000000000000000",
+            "ffffffffffffffff", 
+            "aaaaaaaaaaaaaaaa",
+            "5555555555555555",
+            "123456789abcdef0",
+        ];
+        
+        for hash in hashes {
+            let result = tracker.record_state_with_hash(
+                hash.to_string(),
+                "Different page".to_string(),
+                "click".to_string(),
+                false,
+            );
+            
+            match result {
+                LoopDetectionResult::Proceed => {}
+                _ => panic!("Expected Proceed for different hashes, got {:?}", result),
+            }
+        }
+    }
+
+    #[test]
+    fn test_visual_state_tracker_success_does_not_stick() {
+        let mut tracker = VisualStateTracker::new(10, 2);
+        
+        // Same hash but action succeeded - should not count as stuck
+        for _ in 0..5 {
+            let result = tracker.record_state_with_hash(
+                "abc123".to_string(),
+                "Login page".to_string(),
+                "click".to_string(),
+                true, // succeeded
+            );
+            
+            match result {
+                LoopDetectionResult::Proceed => {}
+                _ => panic!("Successful actions should not trigger stuck detection"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_hash_similarity_identical() {
+        let hash1 = "abcdef123456";
+        let hash2 = "abcdef123456";
+        let sim = compute_hash_similarity(hash1, hash2);
+        assert!((sim - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_hash_similarity_completely_different() {
+        let hash1 = "00000000";
+        let hash2 = "ffffffff";
+        let sim = compute_hash_similarity(hash1, hash2);
+        assert!(sim < 0.5); // Should be low similarity
+    }
+
+    #[test]
+    fn test_hash_similarity_one_bit_different() {
+        // Two hashes that differ by one nibble
+        let hash1 = "00000000";
+        let hash2 = "10000000";
+        let sim = compute_hash_similarity(hash1, hash2);
+        assert!(sim > 0.9); // Should still be high similarity
+        assert!(sim < 1.0); // But not identical
+    }
+
+    #[test]
+    fn test_recovery_strategy_display() {
+        let strategy = RecoveryStrategy::WaitAndRetry { delay_ms: 1000 };
+        let display = format!("{}", strategy);
+        assert!(display.contains("Wait"));
+        assert!(display.contains("1000ms"));
+
+        let strategy = RecoveryStrategy::ResetToCheckpoint;
+        let display = format!("{}", strategy);
+        assert!(display.contains("Reset"));
+
+        let strategy = RecoveryStrategy::TryDifferentAction {
+            alternatives: vec!["alt1".to_string(), "alt2".to_string()],
+        };
+        let display = format!("{}", strategy);
+        assert!(display.contains("alt1"));
+        assert!(display.contains("alt2"));
+    }
+
+    #[test]
+    fn test_visual_loop_config_default() {
+        let config = VisualLoopConfig::default();
+        assert_eq!(config.max_history, 20);
+        assert_eq!(config.stuck_threshold, 2);
+        assert!(config.auto_recovery);
+    }
+
+    #[test]
+    fn test_visual_loop_config_create_tracker() {
+        let config = VisualLoopConfig::default();
+        let tracker = config.create_tracker();
+        assert_eq!(tracker.history_size(), 0);
+    }
+
+    #[test]
+    fn test_screenshot_state_serialization() {
+        use chrono::Utc;
+        let state = ScreenshotState {
+            hash: "abc123".to_string(),
+            semantic_description: "Login page".to_string(),
+            timestamp: Utc::now(),
+            action_taken: "click".to_string(),
+            action_succeeded: false,
+            screenshot_path: Some(std::path::PathBuf::from("/tmp/test.png")),
+        };
+        
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("abc123"));
+        assert!(json.contains("Login page"));
+        assert!(json.contains("click"));
+    }
+
+    #[test]
+    fn test_visual_state_tracker_clear_history() {
+        let mut tracker = VisualStateTracker::new(10, 2);
+        
+        tracker.record_state_with_hash(
+            "abc123".to_string(),
+            "Login page".to_string(),
+            "click".to_string(),
+            false,
+        );
+        
+        assert_eq!(tracker.history_size(), 1);
+        tracker.clear_history();
+        assert_eq!(tracker.history_size(), 0);
+    }
+
+    #[test]
+    fn test_visual_state_tracker_has_similar_state() {
+        let mut tracker = VisualStateTracker::new(10, 2);
+        
+        tracker.record_state_with_hash(
+            "abc123".to_string(),
+            "Login page".to_string(),
+            "click".to_string(),
+            false,
+        );
+        
+        // Should find similar state
+        assert!(tracker.has_similar_state("abc123", "click"));
+        
+        // Different hash - should not match
+        assert!(!tracker.has_similar_state("xyz789", "click"));
+        
+        // Different action - should not match
+        assert!(!tracker.has_similar_state("abc123", "type"));
+    }
+
+    #[test]
+    fn test_visual_state_tracker_history_limit() {
+        let mut tracker = VisualStateTracker::new(3, 2);
+        
+        // Record more states than max_history
+        for i in 0..5 {
+            tracker.record_state_with_hash(
+                format!("hash{}", i),
+                format!("Page {}", i),
+                "click".to_string(),
+                false,
+            );
+        }
+        
+        // History should be capped at max_history
+        assert_eq!(tracker.history_size(), 3);
     }
 }

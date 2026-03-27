@@ -89,6 +89,9 @@ fn build_custom_config() -> Config {
 
         // Resource limits
         resources: Default::default(),
+
+        // Use defaults for remaining fields
+        ..Default::default()
     }
 }
 

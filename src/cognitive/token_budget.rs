@@ -560,6 +560,8 @@ mod tests {
                 working_tokens: 10_000,   // Way under budget
                 episodic_tokens: 100_000, // Normal
                 semantic_tokens: 650_000, // Over budget
+                self_tokens: 0,
+                total_used: 760_000,
             });
         }
 
@@ -586,6 +588,8 @@ mod tests {
             working_tokens: 100,
             episodic_tokens: 200,
             semantic_tokens: 300,
+            self_tokens: 0,
+            total_used: 0,
         });
         assert_eq!(allocator.usage_history.len(), 1);
 
@@ -605,6 +609,8 @@ mod tests {
                 working_tokens: i,
                 episodic_tokens: 0,
                 semantic_tokens: 0,
+                self_tokens: 0,
+                total_used: 0,
             });
         }
         assert_eq!(allocator.usage_history.len(), 100);
@@ -627,6 +633,8 @@ mod tests {
                 working_tokens: 1,
                 episodic_tokens: 1,
                 semantic_tokens: 999_000,
+                self_tokens: 0,
+                total_used: 0,
             });
         }
 
@@ -644,6 +652,8 @@ mod tests {
                 working_tokens: 100,
                 episodic_tokens: 100,
                 semantic_tokens: 100,
+                self_tokens: 0,
+                total_used: 0,
             });
         }
 
@@ -662,6 +672,8 @@ mod tests {
                 working_tokens: 300_000,
                 episodic_tokens: 300_000,
                 semantic_tokens: 300_000,
+                self_tokens: 0,
+                total_used: 0,
             });
         }
 
@@ -680,6 +692,8 @@ mod tests {
                 working_tokens: 600_000,  // 200% of allocation -- way over
                 episodic_tokens: 300_000, // right at allocation
                 semantic_tokens: 50_000,  // ~17% of allocation -- way under
+                self_tokens: 0,
+                total_used: 950_000,
             });
         }
 
@@ -766,11 +780,15 @@ mod tests {
             working_tokens: 100,
             episodic_tokens: 200,
             semantic_tokens: 300,
+            self_tokens: 0,
+            total_used: 0,
         });
         allocator.record_usage(&MemoryUsage {
             working_tokens: 300,
             episodic_tokens: 400,
             semantic_tokens: 500,
+            self_tokens: 0,
+            total_used: 0,
         });
 
         let stats = allocator.get_stats();

@@ -706,10 +706,32 @@ impl Agent {
                     // Context overflow: the message history is too large.
                     // Hard-compress before retrying — adding more messages would
                     // only make things worse.
-                    if error.contains("CONTEXT OVERFLOW") {
+                    if error.contains("CONTEXT OVERFLOW") || error.contains("Context overflow") {
                         warn!("Context overflow detected — hard-compressing before retry");
                         self.messages = self.compressor.hard_compress(&self.messages);
                         self.trim_message_history();
+                    } else if error.contains("Visual assertion failed") {
+                        // Visual assertion failure: provide specific recovery guidance
+                        warn!("Visual assertion failure detected — entering visual recovery mode");
+                        
+                        // Clear the pending visual assertion since we're handling the recovery
+                        if let Some(ref mut checkpoint) = self.current_checkpoint {
+                            checkpoint.clear_pending_visual_assertion();
+                        }
+                        
+                        cli_println!("{}", "🖥️ Visual assertion failed — action did not produce expected UI state".bright_red());
+                        
+                        self.messages.push(Message::user(format!(
+                            "VISUAL ASSERTION FAILED: The previous action did not produce the expected visual result.\n\n\
+                            This is a HARD GATE — the UI state must be correct before continuing.\n\n\
+                            RECOVERY STRATEGY:\n\
+                            1. Use computer_screen to capture the current state\n\
+                            2. Analyze what actually happened vs what was expected\n\
+                            3. Try a different approach — the previous action did not work\n\
+                            4. Consider: was the element not clickable? Was the window not ready?\n\n\
+                            Error: {}\n\n{}",
+                            error, self.cognitive_state.summary()
+                        )));
                     } else {
                         let cognitive_summary = self.cognitive_state.summary();
                         self.messages.push(Message::user(format!(
