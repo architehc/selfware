@@ -753,7 +753,7 @@ impl Agent {
                         
                         // Clear the pending visual assertion since we're handling the recovery
                         if let Some(ref mut checkpoint) = self.current_checkpoint {
-                            checkpoint.clear_pending_visual_assertion();
+                            // Pending assertion preserved for retry — cleared only on successful re-verification
                         }
                         
                         cli_println!("{}", "🖥️ Visual assertion failed — action did not produce expected UI state".bright_red());

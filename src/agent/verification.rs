@@ -513,7 +513,7 @@ impl Agent {
                     id: format!("va-{}-{}", current_step, uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("")),
                     description: expectation.clone(),
                     screenshot_path,
-                    verified: true,
+                    verified: false,
                     verification_result: Some(crate::session::checkpoint::VerificationResult {
                         passed: true,
                         confidence: report.confidence as f32,
@@ -521,7 +521,7 @@ impl Agent {
                         screenshot_hash,
                     }),
                     created_at: Utc::now(),
-                    verified_at: Some(Utc::now()),
+                    verified_at: None,
                     step: Some(current_step),
                     tool_name: Some(tool_name.to_string()),
                     expected: Some(expectation.clone()),

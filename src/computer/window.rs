@@ -497,10 +497,18 @@ impl WindowManager {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         // Parse: WM_CLASS(STRING) = "instance", "class"
-        if let Some(start) = stdout.find("=\"") {
-            let rest = &stdout[start + 2..];
-            if let Some(end) = rest.find("\"") {
-                return Ok(rest[..end].to_string());
+        if let Some(eq_pos) = stdout.find(" = \"") {
+            // Parse WM_CLASS(STRING) = "instance", "class"
+            let rest = &stdout[eq_pos + 3..];
+            let quoted: Vec<&str> = rest.split('"')
+                .enumerate()
+                .filter(|(i, _)| i % 2 == 1)
+                .map(|(_, s)| s)
+                .collect();
+            if let Some(class) = quoted.get(1) {
+                return Ok(class.to_string());
+            } else if let Some(instance) = quoted.first() {
+                return Ok(instance.to_string());
             }
         }
 
