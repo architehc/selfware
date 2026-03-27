@@ -4,6 +4,7 @@ use tracing::{debug, info, warn};
 
 use super::*;
 use crate::api::types::Message;
+use crate::testing::visual_verification::{LoopDetectionResult, RecoveryStrategy, VisualStateTracker};
 
 /// Maximum consecutive no-action prompts before aborting.
 pub(super) const MAX_NO_ACTION_PROMPTS: usize = 6;
@@ -163,6 +164,87 @@ impl Agent {
         }
 
         stuck
+    }
+
+    /// Advanced visual stuck-loop detection using VisualStateTracker.
+    /// 
+    /// This provides more sophisticated detection with perceptual hashing,
+    /// semantic state tracking, and recovery strategy suggestions.
+    /// 
+    /// Returns true if a stuck loop is detected and recorded.
+    pub(super) fn detect_visual_stuck_loop_advanced(
+        &mut self,
+        screenshot_hash: &str,
+        action: &str,
+        action_succeeded: bool,
+    ) -> Option<RecoveryStrategy> {
+        let result = self
+            .visual_state_tracker
+            .record_state_with_hash(screenshot_hash.to_string(), String::new(), action.to_string(), action_succeeded);
+
+        match result {
+            LoopDetectionResult::Stuck { loop_pattern, suggested_recovery } => {
+                let count = loop_pattern.len();
+                warn!(
+                    "Advanced visual stuck loop detected: {} similar states for action '{}'",
+                    count, action
+                );
+                self.visual_stuck_loop_active = true;
+                self.cognitive_state.episodic_memory.what_failed(
+                    "visual_stuck_loop_advanced",
+                    &format!(
+                        "Visual stuck loop: same screen repeated {} times for action '{}'",
+                        count, action
+                    ),
+                );
+                Some(suggested_recovery)
+            }
+            LoopDetectionResult::Warning { similar_states } => {
+                debug!(
+                    "Visual loop warning: {} similar states detected",
+                    similar_states.len()
+                );
+                None
+            }
+            LoopDetectionResult::Proceed => None,
+        }
+    }
+
+    /// Handle visual stuck loop by building appropriate recovery hint
+    pub(super) fn handle_visual_stuck_loop(&self, recovery: &RecoveryStrategy) -> String {
+        let base_message = format!(
+            "VISUAL STUCK LOOP DETECTED: The screen has not changed after repeated attempts. Recovery Strategy: {}",
+            recovery
+        );
+
+        let specific_guidance = match recovery {
+            RecoveryStrategy::TryDifferentAction { alternatives } => {
+                format!(
+                    " Try one of these alternatives: {}",
+                    alternatives.join("; ")
+                )
+            }
+            RecoveryStrategy::WaitAndRetry { delay_ms } => {
+                format!(
+                    " Wait {}ms for any animations to complete before retrying.",
+                    delay_ms
+                )
+            }
+            RecoveryStrategy::ResetToCheckpoint => {
+                " Consider resetting to a known good state.".to_string()
+            }
+            RecoveryStrategy::ReassessWithScreenshot => {
+                " Take a fresh screenshot to reassess the current state.".to_string()
+            }
+            RecoveryStrategy::ChangeInputMethod { suggestion } => {
+                format!(" Try changing input method: {}", suggestion)
+            }
+            RecoveryStrategy::EscalateToUser { reason } => {
+                format!(" Escalation required: {}", reason)
+            }
+        };
+
+        format!("{}{}", base_message, specific_guidance)
     }
 
     fn no_action_failure_context(&self) -> Option<String> {

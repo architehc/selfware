@@ -71,6 +71,13 @@ pub enum AgentError {
 
     #[error("Visual verification error: {0}")]
     VisualVerificationError(String),
+
+    #[error("Visual stuck loop detected: same screen and failed action repeated {count} times. Recovery: {recovery_hint}")]
+    VisualStuckLoop {
+        count: usize,
+        recovery_hint: String,
+        last_screenshot: PathBuf,
+    },
 }
 
 #[derive(Error, Debug)]

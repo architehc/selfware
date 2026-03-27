@@ -112,6 +112,7 @@ xcap = "0.3"
 nvml-wrapper = "0.12.0"
 zstd = "0.13.3"
 openssl = { version = "0.10", features = ["vendored"], optional = true }  # For cross-compilation in release builds
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }  # For visual stuck-loop detection
 tokenizers = { version = "0.22.2", features = ["hf-hub", "http"] }
 tracing-appender = "0.2.4"
 opentelemetry = "0.21.0"
