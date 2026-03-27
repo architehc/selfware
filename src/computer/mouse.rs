@@ -1,9 +1,15 @@
 //! Mouse control for desktop automation.
 //!
 //! Provides programmatic mouse movement, clicking, scrolling, and dragging.
+//! On Linux, uses xdotool for actual input. On other platforms, stubs with logging.
 
 use anyhow::{bail, Result};
+#[cfg(target_os = "linux")]
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "macos")]
+use tracing::{debug, warn};
+#[cfg(not(target_os = "macos"))]
 use tracing::debug;
 
 use super::{ActionRateLimiter, MovementProfile};
@@ -15,6 +21,17 @@ pub enum MouseButton {
     Left,
     Right,
     Middle,
+}
+
+impl MouseButton {
+    /// Return the xdotool button number.
+    fn xdotool_button(&self) -> u8 {
+        match self {
+            MouseButton::Left => 1,
+            MouseButton::Right => 3,
+            MouseButton::Middle => 2,
+        }
+    }
 }
 
 /// A 2D coordinate on the screen.
@@ -34,6 +51,94 @@ impl Point {
 pub struct MouseController {
     rate_limiter: ActionRateLimiter,
     movement_profile: MovementProfile,
+}
+
+/// Build xdotool args for mouse move.
+fn build_mousemove_args(x: i32, y: i32) -> Vec<String> {
+    vec!["mousemove".to_string(), x.to_string(), y.to_string()]
+}
+
+/// Build xdotool args for a click.
+fn build_click_args(button: u8) -> Vec<String> {
+    vec!["click".to_string(), button.to_string()]
+}
+
+/// Build xdotool args for a double-click.
+fn build_double_click_args() -> Vec<String> {
+    vec![
+        "click".to_string(),
+        "--repeat".to_string(),
+        "2".to_string(),
+        "1".to_string(),
+    ]
+}
+
+/// Build xdotool args for a scroll action.
+/// button 4 = scroll up, button 5 = scroll down.
+/// Repeats `amount` times for the given direction.
+fn build_scroll_args(delta_x: i32, delta_y: i32) -> Vec<Vec<String>> {
+    let mut commands = Vec::new();
+
+    // Vertical scroll: negative delta_y = scroll up (button 4), positive = scroll down (button 5)
+    if delta_y != 0 {
+        let button = if delta_y < 0 { "4" } else { "5" };
+        let count = delta_y.unsigned_abs();
+        for _ in 0..count {
+            commands.push(vec!["click".to_string(), button.to_string()]);
+        }
+    }
+
+    // Horizontal scroll: positive delta_x = scroll right (button 7), negative = scroll left (button 6)
+    if delta_x != 0 {
+        let button = if delta_x < 0 { "6" } else { "7" };
+        let count = delta_x.unsigned_abs();
+        for _ in 0..count {
+            commands.push(vec!["click".to_string(), button.to_string()]);
+        }
+    }
+
+    commands
+}
+
+/// Build xdotool args for a drag operation.
+fn build_drag_args(from: Point, to: Point, button: u8) -> Vec<String> {
+    vec![
+        "mousemove".to_string(),
+        from.x.to_string(),
+        from.y.to_string(),
+        "mousedown".to_string(),
+        button.to_string(),
+        "mousemove".to_string(),
+        to.x.to_string(),
+        to.y.to_string(),
+        "mouseup".to_string(),
+        button.to_string(),
+    ]
+}
+
+/// Execute an xdotool command. Returns error if xdotool is not available.
+#[cfg(all(target_os = "linux", not(test)))]
+async fn run_xdotool(args: &[String]) -> Result<()> {
+    use tokio::process::Command;
+
+    let output = Command::new("xdotool")
+        .args(args)
+        .output()
+        .await
+        .context("Failed to execute xdotool. Is xdotool installed? (apt install xdotool)")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("xdotool failed (exit {}): {}", output.status, stderr.trim());
+    }
+
+    Ok(())
+}
+
+/// No-op xdotool stub for tests (avoids requiring xdotool in CI).
+#[cfg(all(target_os = "linux", test))]
+async fn run_xdotool(_args: &[String]) -> Result<()> {
+    Ok(())
 }
 
 impl MouseController {
@@ -58,18 +163,17 @@ impl MouseController {
 
         debug!("Mouse move to ({}, {})", x, y);
 
+        #[cfg(target_os = "linux")]
+        {
+            let args = build_mousemove_args(x, y);
+            run_xdotool(&args).await?;
+        }
+
         #[cfg(target_os = "macos")]
         {
-            use tokio::process::Command;
-            // Use osascript for macOS mouse control
-            let script = format!(
-                "tell application \"System Events\" to set position of mouse to {{{}, {}}}",
-                x, y
-            );
-            // Note: This is a placeholder. Real implementation would use
-            // CoreGraphics CGEventCreateMouseEvent for precise control.
-            info!(
-                "Mouse move to ({}, {}) — requires Accessibility permissions",
+            // Placeholder for macOS — would use CoreGraphics CGEventCreateMouseEvent
+            warn!(
+                "Mouse move to ({}, {}) — macOS not yet implemented, requires Accessibility permissions",
                 x, y
             );
         }
@@ -83,6 +187,13 @@ impl MouseController {
             bail!("Mouse action rate limit exceeded");
         }
         debug!("Mouse click: {:?}", button);
+
+        #[cfg(target_os = "linux")]
+        {
+            let args = build_click_args(button.xdotool_button());
+            run_xdotool(&args).await?;
+        }
+
         Ok(())
     }
 
@@ -92,6 +203,13 @@ impl MouseController {
             bail!("Mouse action rate limit exceeded");
         }
         debug!("Mouse double click");
+
+        #[cfg(target_os = "linux")]
+        {
+            let args = build_double_click_args();
+            run_xdotool(&args).await?;
+        }
+
         Ok(())
     }
 
@@ -107,11 +225,20 @@ impl MouseController {
             bail!("Mouse action rate limit exceeded");
         }
         debug!("Mouse scroll: dx={}, dy={}", delta_x, delta_y);
+
+        #[cfg(target_os = "linux")]
+        {
+            let commands = build_scroll_args(delta_x, delta_y);
+            for args in &commands {
+                run_xdotool(args).await?;
+            }
+        }
+
         Ok(())
     }
 
     /// Drag from one point to another.
-    pub async fn drag(&self, from: Point, to: Point, _button: MouseButton) -> Result<()> {
+    pub async fn drag(&self, from: Point, to: Point, button: MouseButton) -> Result<()> {
         if !self.rate_limiter.check() {
             bail!("Mouse action rate limit exceeded");
         }
@@ -121,6 +248,13 @@ impl MouseController {
             "Mouse drag from ({}, {}) to ({}, {})",
             from.x, from.y, to.x, to.y
         );
+
+        #[cfg(target_os = "linux")]
+        {
+            let args = build_drag_args(from, to, button.xdotool_button());
+            run_xdotool(&args).await?;
+        }
+
         Ok(())
     }
 
@@ -282,5 +416,110 @@ mod tests {
             let parsed: MouseButton = serde_json::from_str(&json).unwrap();
             let _ = format!("{:?}", parsed);
         }
+    }
+
+    // ---- Command construction tests ----
+
+    #[test]
+    fn test_mouse_button_xdotool_numbers() {
+        assert_eq!(MouseButton::Left.xdotool_button(), 1);
+        assert_eq!(MouseButton::Middle.xdotool_button(), 2);
+        assert_eq!(MouseButton::Right.xdotool_button(), 3);
+    }
+
+    #[test]
+    fn test_build_mousemove_args() {
+        let args = build_mousemove_args(100, 200);
+        assert_eq!(args, vec!["mousemove", "100", "200"]);
+    }
+
+    #[test]
+    fn test_build_mousemove_args_negative() {
+        let args = build_mousemove_args(-50, -100);
+        assert_eq!(args, vec!["mousemove", "-50", "-100"]);
+    }
+
+    #[test]
+    fn test_build_click_args() {
+        assert_eq!(build_click_args(1), vec!["click", "1"]);
+        assert_eq!(build_click_args(2), vec!["click", "2"]);
+        assert_eq!(build_click_args(3), vec!["click", "3"]);
+    }
+
+    #[test]
+    fn test_build_double_click_args() {
+        let args = build_double_click_args();
+        assert_eq!(args, vec!["click", "--repeat", "2", "1"]);
+    }
+
+    #[test]
+    fn test_build_scroll_args_down() {
+        let commands = build_scroll_args(0, 3);
+        assert_eq!(commands.len(), 3);
+        for cmd in &commands {
+            assert_eq!(cmd, &vec!["click".to_string(), "5".to_string()]);
+        }
+    }
+
+    #[test]
+    fn test_build_scroll_args_up() {
+        let commands = build_scroll_args(0, -2);
+        assert_eq!(commands.len(), 2);
+        for cmd in &commands {
+            assert_eq!(cmd, &vec!["click".to_string(), "4".to_string()]);
+        }
+    }
+
+    #[test]
+    fn test_build_scroll_args_horizontal() {
+        // Scroll right
+        let commands = build_scroll_args(2, 0);
+        assert_eq!(commands.len(), 2);
+        for cmd in &commands {
+            assert_eq!(cmd, &vec!["click".to_string(), "7".to_string()]);
+        }
+
+        // Scroll left
+        let commands = build_scroll_args(-1, 0);
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0], vec!["click".to_string(), "6".to_string()]);
+    }
+
+    #[test]
+    fn test_build_scroll_args_zero() {
+        let commands = build_scroll_args(0, 0);
+        assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn test_build_scroll_args_both_axes() {
+        let commands = build_scroll_args(1, -1);
+        // 1 vertical (up) + 1 horizontal (right)
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0], vec!["click".to_string(), "4".to_string()]); // up
+        assert_eq!(commands[1], vec!["click".to_string(), "7".to_string()]); // right
+    }
+
+    #[test]
+    fn test_build_drag_args() {
+        let from = Point::new(10, 20);
+        let to = Point::new(300, 400);
+        let args = build_drag_args(from, to, 1);
+        assert_eq!(
+            args,
+            vec![
+                "mousemove", "10", "20", "mousedown", "1", "mousemove", "300", "400", "mouseup",
+                "1"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_drag_args_right_button() {
+        let from = Point::new(0, 0);
+        let to = Point::new(100, 100);
+        let args = build_drag_args(from, to, 3);
+        assert_eq!(args[4], "3"); // mousedown button
+        assert_eq!(args[9], "3"); // mouseup button
     }
 }

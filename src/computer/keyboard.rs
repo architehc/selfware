@@ -1,8 +1,11 @@
 //! Keyboard control for desktop automation.
 //!
 //! Provides programmatic typing, key presses, and key combinations.
+//! On Linux, uses xdotool for actual input. On other platforms, stubs with logging.
 
 use anyhow::{bail, Result};
+#[cfg(target_os = "linux")]
+use anyhow::Context;
 use tracing::debug;
 
 use super::{is_blocked_combo, ActionRateLimiter, TypingProfile};
@@ -11,6 +14,104 @@ use super::{is_blocked_combo, ActionRateLimiter, TypingProfile};
 pub struct KeyboardController {
     rate_limiter: ActionRateLimiter,
     typing_profile: TypingProfile,
+}
+
+/// Map common key names to xdotool key names.
+fn map_key_name(key: &str) -> &str {
+    match key.to_lowercase().as_str() {
+        "enter" | "return" => "Return",
+        "tab" => "Tab",
+        "escape" | "esc" => "Escape",
+        "backspace" => "BackSpace",
+        "delete" | "del" => "Delete",
+        "space" => "space",
+        "up" => "Up",
+        "down" => "Down",
+        "left" => "Left",
+        "right" => "Right",
+        "home" => "Home",
+        "end" => "End",
+        "pageup" | "page_up" => "Prior",
+        "pagedown" | "page_down" => "Next",
+        "insert" => "Insert",
+        "f1" => "F1",
+        "f2" => "F2",
+        "f3" => "F3",
+        "f4" => "F4",
+        "f5" => "F5",
+        "f6" => "F6",
+        "f7" => "F7",
+        "f8" => "F8",
+        "f9" => "F9",
+        "f10" => "F10",
+        "f11" => "F11",
+        "f12" => "F12",
+        "shift" => "shift",
+        "ctrl" | "control" => "ctrl",
+        "alt" => "alt",
+        "super" | "meta" | "cmd" | "command" => "super",
+        _ => key,
+    }
+}
+
+/// Build the xdotool key string for a combo like "ctrl+shift+t".
+fn build_xdotool_combo(combo: &str) -> String {
+    combo
+        .split('+')
+        .map(|part| map_key_name(part.trim()))
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+/// Build the command args for an xdotool invocation.
+/// Returns (program, args) tuple for testability.
+fn build_xdotool_type_cmd(text: &str) -> (&'static str, Vec<String>) {
+    (
+        "xdotool",
+        vec![
+            "type".to_string(),
+            "--clearmodifiers".to_string(),
+            "--".to_string(),
+            text.to_string(),
+        ],
+    )
+}
+
+fn build_xdotool_key_cmd(key: &str) -> (&'static str, Vec<String>) {
+    ("xdotool", vec!["key".to_string(), key.to_string()])
+}
+
+fn build_xdotool_keydown_cmd(key: &str) -> (&'static str, Vec<String>) {
+    ("xdotool", vec!["keydown".to_string(), key.to_string()])
+}
+
+fn build_xdotool_keyup_cmd(key: &str) -> (&'static str, Vec<String>) {
+    ("xdotool", vec!["keyup".to_string(), key.to_string()])
+}
+
+/// Execute an xdotool command. Returns error if xdotool is not available.
+#[cfg(all(target_os = "linux", not(test)))]
+async fn run_xdotool(args: &[String]) -> Result<()> {
+    use tokio::process::Command;
+
+    let output = Command::new("xdotool")
+        .args(args)
+        .output()
+        .await
+        .context("Failed to execute xdotool. Is xdotool installed? (apt install xdotool)")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("xdotool failed (exit {}): {}", output.status, stderr.trim());
+    }
+
+    Ok(())
+}
+
+/// No-op xdotool stub for tests (avoids requiring xdotool in CI).
+#[cfg(all(target_os = "linux", test))]
+async fn run_xdotool(_args: &[String]) -> Result<()> {
+    Ok(())
 }
 
 impl KeyboardController {
@@ -42,17 +143,39 @@ impl KeyboardController {
 
         debug!("Keyboard type: {} chars", text.len());
 
-        if self.typing_profile.base_delay_ms > 0 {
-            // Human-like typing with delays
-            for ch in text.chars() {
-                // Each character gets a delay
-                let delay = self.typing_profile.base_delay_ms;
-                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-                debug!("Typed: '{}'", ch);
+        #[cfg(target_os = "linux")]
+        {
+            if text.is_empty() {
+                return Ok(());
             }
-        } else {
-            // Instant typing (paste-like)
-            debug!("Typed {} chars instantly", text.len());
+
+            if self.typing_profile.base_delay_ms > 0 {
+                // Human-like typing: type char by char with delays
+                for ch in text.chars() {
+                    let delay = self.typing_profile.base_delay_ms;
+                    let char_str = ch.to_string();
+                    let (_, args) = build_xdotool_type_cmd(&char_str);
+                    run_xdotool(&args).await?;
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                }
+            } else {
+                // Instant typing
+                let (_, args) = build_xdotool_type_cmd(text);
+                run_xdotool(&args).await?;
+            }
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            if self.typing_profile.base_delay_ms > 0 {
+                for ch in text.chars() {
+                    let delay = self.typing_profile.base_delay_ms;
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    debug!("Typed: '{}'", ch);
+                }
+            } else {
+                debug!("Typed {} chars instantly (stub — no xdotool on this platform)", text.len());
+            }
         }
 
         Ok(())
@@ -63,7 +186,16 @@ impl KeyboardController {
         if !self.rate_limiter.check() {
             bail!("Keyboard action rate limit exceeded");
         }
-        debug!("Key press: {}", key);
+
+        let mapped = map_key_name(key);
+        debug!("Key press: {} (mapped: {})", key, mapped);
+
+        #[cfg(target_os = "linux")]
+        {
+            let (_, args) = build_xdotool_key_cmd(mapped);
+            run_xdotool(&args).await?;
+        }
+
         Ok(())
     }
 
@@ -81,7 +213,15 @@ impl KeyboardController {
             );
         }
 
-        debug!("Key combo: {}", combo);
+        let xdotool_combo = build_xdotool_combo(combo);
+        debug!("Key combo: {} (xdotool: {})", combo, xdotool_combo);
+
+        #[cfg(target_os = "linux")]
+        {
+            let (_, args) = build_xdotool_key_cmd(&xdotool_combo);
+            run_xdotool(&args).await?;
+        }
+
         Ok(())
     }
 
@@ -90,7 +230,16 @@ impl KeyboardController {
         if !self.rate_limiter.check() {
             bail!("Keyboard action rate limit exceeded");
         }
-        debug!("Key down: {}", key);
+
+        let mapped = map_key_name(key);
+        debug!("Key down: {} (mapped: {})", key, mapped);
+
+        #[cfg(target_os = "linux")]
+        {
+            let (_, args) = build_xdotool_keydown_cmd(mapped);
+            run_xdotool(&args).await?;
+        }
+
         Ok(())
     }
 
@@ -99,7 +248,16 @@ impl KeyboardController {
         if !self.rate_limiter.check() {
             bail!("Keyboard action rate limit exceeded");
         }
-        debug!("Key up: {}", key);
+
+        let mapped = map_key_name(key);
+        debug!("Key up: {} (mapped: {})", key, mapped);
+
+        #[cfg(target_os = "linux")]
+        {
+            let (_, args) = build_xdotool_keyup_cmd(mapped);
+            run_xdotool(&args).await?;
+        }
+
         Ok(())
     }
 }
@@ -214,5 +372,109 @@ mod tests {
         };
         let kb = KeyboardController::new().with_typing_profile(profile);
         assert!(kb.type_text("hi").await.is_ok());
+    }
+
+    // ---- Command construction tests ----
+
+    #[test]
+    fn test_map_key_name_common() {
+        assert_eq!(map_key_name("Enter"), "Return");
+        assert_eq!(map_key_name("enter"), "Return");
+        assert_eq!(map_key_name("Return"), "Return");
+        assert_eq!(map_key_name("Tab"), "Tab");
+        assert_eq!(map_key_name("Escape"), "Escape");
+        assert_eq!(map_key_name("esc"), "Escape");
+        assert_eq!(map_key_name("Backspace"), "BackSpace");
+        assert_eq!(map_key_name("Delete"), "Delete");
+        assert_eq!(map_key_name("space"), "space");
+    }
+
+    #[test]
+    fn test_map_key_name_arrows() {
+        assert_eq!(map_key_name("up"), "Up");
+        assert_eq!(map_key_name("down"), "Down");
+        assert_eq!(map_key_name("left"), "Left");
+        assert_eq!(map_key_name("right"), "Right");
+    }
+
+    #[test]
+    fn test_map_key_name_modifiers() {
+        assert_eq!(map_key_name("ctrl"), "ctrl");
+        assert_eq!(map_key_name("control"), "ctrl");
+        assert_eq!(map_key_name("alt"), "alt");
+        assert_eq!(map_key_name("shift"), "shift");
+        assert_eq!(map_key_name("super"), "super");
+        assert_eq!(map_key_name("meta"), "super");
+        assert_eq!(map_key_name("cmd"), "super");
+    }
+
+    #[test]
+    fn test_map_key_name_function_keys() {
+        for i in 1..=12 {
+            let key = format!("f{}", i);
+            let expected = format!("F{}", i);
+            assert_eq!(map_key_name(&key), expected);
+        }
+    }
+
+    #[test]
+    fn test_map_key_name_unknown_passthrough() {
+        assert_eq!(map_key_name("a"), "a");
+        assert_eq!(map_key_name("z"), "z");
+        assert_eq!(map_key_name("SomeWeirdKey"), "SomeWeirdKey");
+    }
+
+    #[test]
+    fn test_build_xdotool_type_cmd() {
+        let (prog, args) = build_xdotool_type_cmd("hello world");
+        assert_eq!(prog, "xdotool");
+        assert_eq!(args, vec!["type", "--clearmodifiers", "--", "hello world"]);
+    }
+
+    #[test]
+    fn test_build_xdotool_type_cmd_special_chars() {
+        let (_, args) = build_xdotool_type_cmd("echo \"test\" && rm -rf /");
+        assert_eq!(args[3], "echo \"test\" && rm -rf /");
+    }
+
+    #[test]
+    fn test_build_xdotool_key_cmd() {
+        let (prog, args) = build_xdotool_key_cmd("Return");
+        assert_eq!(prog, "xdotool");
+        assert_eq!(args, vec!["key", "Return"]);
+    }
+
+    #[test]
+    fn test_build_xdotool_keydown_cmd() {
+        let (prog, args) = build_xdotool_keydown_cmd("shift");
+        assert_eq!(prog, "xdotool");
+        assert_eq!(args, vec!["keydown", "shift"]);
+    }
+
+    #[test]
+    fn test_build_xdotool_keyup_cmd() {
+        let (prog, args) = build_xdotool_keyup_cmd("shift");
+        assert_eq!(prog, "xdotool");
+        assert_eq!(args, vec!["keyup", "shift"]);
+    }
+
+    #[test]
+    fn test_build_xdotool_combo() {
+        assert_eq!(build_xdotool_combo("ctrl+c"), "ctrl+c");
+        assert_eq!(build_xdotool_combo("ctrl+shift+t"), "ctrl+shift+t");
+        assert_eq!(build_xdotool_combo("ctrl+v"), "ctrl+v");
+    }
+
+    #[test]
+    fn test_build_xdotool_combo_maps_keys() {
+        assert_eq!(build_xdotool_combo("ctrl+Enter"), "ctrl+Return");
+        assert_eq!(build_xdotool_combo("alt+Backspace"), "alt+BackSpace");
+        assert_eq!(build_xdotool_combo("cmd+shift+Escape"), "super+shift+Escape");
+    }
+
+    #[test]
+    fn test_build_xdotool_combo_with_spaces() {
+        assert_eq!(build_xdotool_combo("ctrl + c"), "ctrl+c");
+        assert_eq!(build_xdotool_combo("ctrl + shift + t"), "ctrl+shift+t");
     }
 }
