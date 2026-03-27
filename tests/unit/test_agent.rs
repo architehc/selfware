@@ -85,13 +85,13 @@ mod agent_loop_tests {
 
         assert_eq!(agent_loop.current_step(), 0);
 
-        agent_loop.increment_step();
+        let _ = agent_loop.increment_step();
         assert_eq!(agent_loop.current_step(), 1);
 
-        agent_loop.increment_step();
+        let _ = agent_loop.increment_step();
         assert_eq!(agent_loop.current_step(), 2);
 
-        agent_loop.increment_step();
+        let _ = agent_loop.increment_step();
         assert_eq!(agent_loop.current_step(), 3);
     }
 
@@ -100,7 +100,7 @@ mod agent_loop_tests {
         let mut agent_loop = AgentLoop::new(100);
 
         // Initially in Planning state
-        agent_loop.increment_step();
+        let _ = agent_loop.increment_step();
 
         // After increment, should be in Executing state
         let state = agent_loop.next_state();

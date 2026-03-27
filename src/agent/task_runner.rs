@@ -797,6 +797,10 @@ mod tests {
         Config {
             endpoint,
             model: "mock-model".to_string(),
+            // Set context_length high enough that max_context_tokens doesn't become 0
+            // after subtracting max_tokens and safety margin
+            context_length: 500_000,
+            max_tokens: 8192,
             agent: AgentConfig {
                 max_iterations: 8,
                 step_timeout_secs: 30,

@@ -250,6 +250,7 @@ impl EvolutionPlanner {
         Ok(files)
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn collect_source_files<'a>(
         &'a self,
         dir: &'a Path,

@@ -510,6 +510,7 @@ impl McpServer {
     }
 
     /// Build a simple directory tree string.
+    #[allow(clippy::only_used_in_recursion)]
     fn build_directory_tree(&self, path: &Path, depth: usize, max_depth: usize) -> String {
         if depth >= max_depth {
             return String::new();

@@ -85,6 +85,7 @@ fn build_custom_config() -> Config {
             context_compression_ratio: 0.15,
             context_thinking_ratio: 0.15,
             compression_detail: "signatures".to_string(),
+            require_visual_verification: false,
         },
 
         // Resource limits

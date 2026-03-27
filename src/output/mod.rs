@@ -81,6 +81,7 @@ pub(crate) fn get_total_tokens() -> (u64, u64) {
 }
 
 /// Reset token counters (for new sessions)
+#[allow(dead_code)]
 #[inline]
 pub(crate) fn reset_tokens() {
     TOTAL_PROMPT_TOKENS.store(0, Ordering::SeqCst);

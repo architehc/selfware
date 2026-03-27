@@ -106,8 +106,10 @@ impl Default for LocalCache<String> {
 #[derive(Debug, Clone)]
 pub struct CacheStats {
     pub entry_count: usize,
+    #[allow(dead_code)]
     pub max_entries: usize,
     pub total_size_bytes: usize,
+    #[allow(dead_code)]
     pub max_size_bytes: usize,
     pub hit_rate: f64,
 }

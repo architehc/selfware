@@ -10,6 +10,7 @@ use selfware::bench_harness::*;
 
 /// A SWE-bench task loaded from JSON.
 #[derive(Debug, Clone, serde::Deserialize)]
+#[allow(dead_code)]
 struct SWETask {
     repo: String,
     instance_id: String,
@@ -49,12 +50,12 @@ impl TaskEvaluator for PatchEvaluator {
         });
 
         // 2. Check if the right files are modified
-        let mut files_hit = 0;
+        let mut _files_hit = 0;
         for file in &self.gold_files {
-            let short = file.split('/').last().unwrap_or(file);
+            let short = file.split('/').next_back().unwrap_or(file);
             let found = response.contains(file.as_str()) || response.contains(short);
             if found {
-                files_hit += 1;
+                _files_hit += 1;
             }
             details.push(EvalDetail {
                 criterion: format!("file:{}", short),
@@ -78,7 +79,7 @@ impl TaskEvaluator for PatchEvaluator {
             .take(5) // Check up to 5 key added lines
             .collect();
 
-        let mut code_hits = 0;
+        let mut _code_hits = 0;
         for line in &gold_lines {
             // Check if the response contains something similar
             // (exact match or key identifiers from the line)
@@ -92,7 +93,7 @@ impl TaskEvaluator for PatchEvaluator {
                 >= key_tokens.len().max(1) / 2;
 
             if found {
-                code_hits += 1;
+                _code_hits += 1;
             }
             details.push(EvalDetail {
                 criterion: format!("code_pattern:{}", &line[..line.len().min(40)]),

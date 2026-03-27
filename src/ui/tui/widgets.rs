@@ -83,6 +83,7 @@ impl GrowthGauge {
     }
 
     /// Get the bar characters
+    #[allow(dead_code)]
     fn bar_chars(&self, width: usize) -> String {
         let filled = ((self.ratio * width as f64) as usize).min(width);
         let empty = width - filled;

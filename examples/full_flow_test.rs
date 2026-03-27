@@ -422,7 +422,7 @@ async fn test_error_resilience(endpoint: &str, model: &str, burst_size: usize) -
     eprintln!("  [3a] Testing invalid model name...");
     tests_run += 1;
     let resp = client
-        .post(&format!("{}/chat/completions", endpoint))
+        .post(format!("{}/chat/completions", endpoint))
         .json(&json!({
             "model": "nonexistent-model-12345",
             "messages": [{"role": "user", "content": "hi"}],
@@ -448,7 +448,7 @@ async fn test_error_resilience(endpoint: &str, model: &str, burst_size: usize) -
     eprintln!("  [3b] Testing empty messages...");
     tests_run += 1;
     let resp = client
-        .post(&format!("{}/chat/completions", endpoint))
+        .post(format!("{}/chat/completions", endpoint))
         .json(&json!({
             "model": model,
             "messages": [],
@@ -475,7 +475,7 @@ async fn test_error_resilience(endpoint: &str, model: &str, burst_size: usize) -
     eprintln!("  [3c] Testing max_tokens=1...");
     tests_run += 1;
     let resp = client
-        .post(&format!("{}/chat/completions", endpoint))
+        .post(format!("{}/chat/completions", endpoint))
         .json(&json!({
             "model": model,
             "messages": [{"role": "user", "content": "hi"}],
@@ -503,7 +503,7 @@ async fn test_error_resilience(endpoint: &str, model: &str, burst_size: usize) -
     tests_run += 1;
     let large_prompt = "Repeat this word: hello. ".repeat(10000); // ~50K tokens
     let resp = client
-        .post(&format!("{}/chat/completions", endpoint))
+        .post(format!("{}/chat/completions", endpoint))
         .json(&json!({
             "model": model,
             "messages": [{"role": "user", "content": large_prompt}],
@@ -601,7 +601,7 @@ async fn test_tool_calling(endpoint: &str, model: &str) -> FlowResult {
     // Test with tools + thinking disabled
     eprintln!("  [4a] Testing tool calling (thinking disabled)...");
     let resp = client
-        .post(&format!("{}/chat/completions", endpoint))
+        .post(format!("{}/chat/completions", endpoint))
         .json(&json!({
             "model": model,
             "messages": [{"role": "user", "content": "Read the file README.md"}],
@@ -664,7 +664,7 @@ async fn test_tool_calling(endpoint: &str, model: &str) -> FlowResult {
     // Test with tools + thinking enabled
     eprintln!("  [4b] Testing tool calling (thinking enabled)...");
     let resp = client
-        .post(&format!("{}/chat/completions", endpoint))
+        .post(format!("{}/chat/completions", endpoint))
         .json(&json!({
             "model": model,
             "messages": [{"role": "user", "content": "Read the file README.md"}],

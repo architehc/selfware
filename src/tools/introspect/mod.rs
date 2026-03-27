@@ -226,6 +226,7 @@ impl CodeIntrospect {
         Ok(files)
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn collect_files_recursive<'a>(
         &'a self,
         dir: &'a Path,
@@ -434,6 +435,7 @@ impl Tool for CodeQuery {
 
     async fn execute(&self, args: Value) -> Result<Value> {
         #[derive(Deserialize)]
+        #[allow(dead_code)]
         struct Args {
             query: String,
             #[serde(default)]
@@ -589,6 +591,7 @@ impl Tool for CodePlan {
         use planner::EvolutionPlanner;
 
         #[derive(Deserialize)]
+        #[allow(dead_code)]
         struct Args {
             goal: String,
             #[serde(default = "default_iterations")]
@@ -689,6 +692,7 @@ impl Tool for CodeDiffPlan {
         use planner::analyze_impact;
 
         #[derive(Deserialize)]
+        #[allow(dead_code)]
         struct Args {
             target_file: String,
             change_type: String,

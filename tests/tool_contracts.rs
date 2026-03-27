@@ -455,7 +455,7 @@ async fn all_core_tools_schema_has_required_subset_of_properties() {
         let props = schema
             .get("properties")
             .and_then(|v| v.as_object())
-            .expect(&format!("{}: missing properties", tool.name()));
+            .unwrap_or_else(|| panic!("{}: missing properties", tool.name()));
 
         if let Some(required) = schema.get("required").and_then(|v| v.as_array()) {
             for req in required {
