@@ -63,7 +63,7 @@ mod tool_dispatch;
 pub mod tui_events;
 mod verification;
 
-use crate::errors::{is_confirmation_error, is_no_action_error};
+use crate::errors::{is_confirmation_error, is_no_action_error, is_visual_assertion_error};
 use context::ContextCompressor;
 use loop_control::{AgentLoop, AgentState};
 use planning::Planner;
