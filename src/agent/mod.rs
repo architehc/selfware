@@ -343,12 +343,10 @@ pub struct Agent {
     /// Last tool output for progressive disclosure via `/last`.
     last_tool_output: Option<last_tool::LastToolOutput>,
     /// Recent screenshot hashes for visual stuck-loop detection.
-    #[allow(dead_code)]
     recent_screenshot_hashes: std::collections::VecDeque<u64>,
     /// Whether a visual stuck loop was detected on the most recent screenshot.
     visual_stuck_loop_active: bool,
     /// Advanced visual state tracker for stuck-loop detection with perceptual hashing
-    #[allow(dead_code)]
     visual_state_tracker: crate::testing::visual_verification::VisualStateTracker,
     /// Hierarchical context map for token-aware codebase ingestion.
     context_map: context_map::ContextMap,

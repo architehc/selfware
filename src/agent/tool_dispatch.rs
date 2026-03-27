@@ -1923,31 +1923,42 @@ impl Agent {
                 if let Some(ver_msg) = verification_result {
                     final_result.push_str(&ver_msg);
                 }
-                let mut needs_retry = false;
-                if let Some(vvr) = visual_verification_result {
+                // Track visual verification details for potential error reporting
+                let mut hard_failure_details: Option<(String, String, String)> = None;
+                if let Some(ref vvr) = visual_verification_result {
                     if !vvr.message.is_empty() {
                         final_result.push_str(&vvr.message);
                     }
-                    if let Some(assertion) = vvr.assertion {
+                    if let Some(ref assertion) = vvr.assertion {
                         if let Some(ref mut checkpoint) = self.current_checkpoint {
                             // On hard failure, set as pending assertion to gate progression
                             if vvr.hard_failure {
                                 checkpoint.set_pending_visual_assertion(assertion.clone());
                             } else {
-                                checkpoint.log_visual_assertion(assertion);
+                                checkpoint.log_visual_assertion(assertion.clone());
                             }
                         }
-                    }
-                    if vvr.hard_failure {
-                        needs_retry = true;
+                        // Capture details for error message if this is a hard failure
+                        if vvr.hard_failure {
+                            let exp = assertion.expected.clone().unwrap_or_else(|| "Expected UI state".to_string());
+                            let obs = assertion.observed.clone().unwrap_or_else(|| "Actual UI state did not match".to_string());
+                            // Extract issues from the message if present
+                            let iss = if vvr.message.contains("issues:") {
+                                vvr.message.split("issues:").nth(1).map(|s| s.trim().to_string())
+                                    .unwrap_or_else(|| "No specific issues listed".to_string())
+                            } else {
+                                "No specific issues listed".to_string()
+                            };
+                            hard_failure_details = Some((exp, obs, iss));
+                        }
                     }
                 }
-                if needs_retry {
-                    // Return an error to trigger error recovery flow
+                if let Some((expected, actual, issues)) = hard_failure_details {
+                    // Return an error to trigger error recovery flow with rich details
                     return Err(crate::errors::AgentError::VisualAssertionFailed {
-                        description: format!("Visual verification failed after {}", name),
-                        expected: "Expected UI state".to_string(),
-                        actual: "Actual UI state did not match".to_string(),
+                        description: format!("Visual verification failed after {}: {}", name, issues),
+                        expected,
+                        actual,
                         recovery_hint: format!(
                             "The {} action did not produce the expected visual result. \
                              Retry the action with different parameters or try a different approach.",

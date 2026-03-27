@@ -129,7 +129,6 @@ impl Agent {
     /// Maintains a sliding window of the last 10 screenshot hashes.
     /// Returns `true` if the same hash appears 3+ times in the last 5
     /// screenshots, meaning the screen has not changed despite actions.
-    #[allow(dead_code)]
     pub(super) fn detect_visual_stuck_loop(&mut self, screenshot_hash: u64) -> bool {
         const MAX_HASHES: usize = 10;
         const WINDOW: usize = 5;
@@ -173,7 +172,6 @@ impl Agent {
     /// semantic state tracking, and recovery strategy suggestions.
     /// 
     /// Returns true if a stuck loop is detected and recorded.
-    #[allow(dead_code)]
     pub(super) fn detect_visual_stuck_loop_advanced(
         &mut self,
         screenshot_hash: &str,
@@ -213,7 +211,6 @@ impl Agent {
     }
 
     /// Handle visual stuck loop by building appropriate recovery hint
-    #[allow(dead_code)]
     pub(super) fn handle_visual_stuck_loop(&self, recovery: &RecoveryStrategy) -> String {
         let base_message = format!(
             "VISUAL STUCK LOOP DETECTED: The screen has not changed after repeated attempts. Recovery Strategy: {}",
