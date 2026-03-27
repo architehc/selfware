@@ -204,7 +204,7 @@ impl StreamingResponse {
                 Err(e) => {
                     // Should not happen with a semaphore, but handle gracefully
                     let _ = tx
-                        .send(Err(anyhow::anyhow!("Stream semaphore error: {}", e)))
+                        .send(Err(ApiError::Network(format!("Stream semaphore error: {}", e)).into()))
                         .await;
                     return;
                 }
@@ -228,10 +228,7 @@ impl StreamingResponse {
                             }
                         }
                         if tx
-                            .send(Err(anyhow::anyhow!(
-                                "Stream timeout: no data for {} seconds",
-                                chunk_timeout.as_secs()
-                            )))
+                            .send(Err(ApiError::Timeout.into()))
                             .await
                             .is_err()
                         {
@@ -274,7 +271,7 @@ impl StreamingResponse {
                             }
                         }
                         if tx
-                            .send(Err(anyhow::anyhow!("Stream error: {}", e)))
+                            .send(Err(ApiError::Network(format!("Stream error: {}", e)).into()))
                             .await
                             .is_err()
                         {
@@ -309,7 +306,6 @@ impl StreamingResponse {
     }
 
     /// Collect all chunks into a complete response
-    #[allow(dead_code)] // Streaming API - collects stream into response
     pub async fn collect(self) -> Result<ChatResponse> {
         let mut rx = self.into_channel().await;
         let mut content = String::new();
@@ -633,7 +629,6 @@ impl ApiClient {
     }
 
     /// Create client with custom retry configuration
-    #[allow(dead_code)] // Builder method for API configuration
     pub fn with_retry_config(mut self, retry_config: RetryConfig) -> Self {
         self.retry_config = retry_config;
         self
@@ -651,7 +646,7 @@ impl ApiClient {
             .await
             .map_err(|e| match e {
                 CircuitBreakerError::CircuitOpen => {
-                    anyhow::anyhow!("Circuit breaker is open - API is unavailable")
+                    ApiError::Network("Circuit breaker is open - API is unavailable".to_string()).into()
                 }
                 CircuitBreakerError::OperationFailed(err) => err,
             })
@@ -725,12 +720,12 @@ impl ApiClient {
         let min_output = 512_usize;
         if input_tokens + min_output > hard_limit {
             let msg = format!(
-                "CONTEXT OVERFLOW: input_tokens ({}) + min_output ({}) > context_length ({}). \
+                "input_tokens ({}) + min_output ({}) > context_length ({}). \
                  Messages: {} tokens, Tools: {} tokens. Context trimming failed to stay within limits.",
                 input_tokens, min_output, hard_limit, message_tokens, tool_tokens
             );
-            tracing::error!("{}", msg);
-            return Err(anyhow::anyhow!("{}", msg));
+            tracing::error!("CONTEXT OVERFLOW: {}", msg);
+            return Err(ApiError::ContextOverflow(msg).into());
         }
 
         // Cap output tokens to what the model can actually produce
@@ -780,7 +775,7 @@ impl ApiClient {
             .await
             .map_err(|e| match e {
                 CircuitBreakerError::CircuitOpen => {
-                    anyhow::anyhow!("Circuit breaker is open - API is unavailable")
+                    ApiError::Network("Circuit breaker is open - API is unavailable".to_string()).into()
                 }
                 CircuitBreakerError::OperationFailed(err) => err,
             })
@@ -811,12 +806,12 @@ impl ApiClient {
         let min_output = 512_usize;
         if input_tokens + min_output > hard_limit {
             let msg = format!(
-                "CONTEXT OVERFLOW: input_tokens ({}) + min_output ({}) > context_length ({}). \
+                "input_tokens ({}) + min_output ({}) > context_length ({}). \
                  Messages: {} tokens, Tools: {} tokens. Context trimming failed to stay within limits.",
                 input_tokens, min_output, hard_limit, message_tokens, tool_tokens
             );
-            tracing::error!("{}", msg);
-            return Err(anyhow::anyhow!("{}", msg));
+            tracing::error!("CONTEXT OVERFLOW: {}", msg);
+            return Err(ApiError::ContextOverflow(msg).into());
         }
 
         // Cap output tokens to what the model can actually produce
@@ -893,7 +888,7 @@ impl ApiClient {
             .await
             .map_err(|e| match e {
                 CircuitBreakerError::CircuitOpen => {
-                    anyhow::anyhow!("Circuit breaker is open - API is unavailable")
+                    ApiError::Network("Circuit breaker is open - API is unavailable".to_string()).into()
                 }
                 CircuitBreakerError::OperationFailed(err) => err,
             })
@@ -1116,7 +1111,6 @@ pub enum ThinkingMode {
     /// Thinking disabled for faster responses
     Disabled,
     /// Thinking with a specific token budget
-    #[allow(dead_code)] // For models supporting thinking budget
     Budget(usize),
 }
 
@@ -1974,7 +1968,7 @@ mod tests {
         assert!(second
             .unwrap_err()
             .to_string()
-            .contains("Stream timeout: no data"));
+            .contains("API Request timed out"));
 
         let _ = server.await;
     }

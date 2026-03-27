@@ -94,6 +94,45 @@ pub struct FixSuggestion {
     pub notes: Option<String>,
 }
 
+/// Shared helper for unused/dead-code warning suggestions.
+fn unused_code_suggestion(message: &str) -> FixSuggestion {
+    if message.contains("dead_code") || message.contains("never used") {
+        FixSuggestion {
+            description: "Code is never used.".to_string(),
+            fix_code: Some("#[allow(dead_code)]".to_string()),
+            confidence: 0.8,
+            auto_fixable: true,
+            notes: Some(
+                "Remove the code, or add #[allow(dead_code)] if intentional.".to_string(),
+            ),
+        }
+    } else if message.contains("unused variable") {
+        FixSuggestion {
+            description: "Prefix with underscore: _variable".to_string(),
+            fix_code: None,
+            confidence: 0.9,
+            auto_fixable: true,
+            notes: None,
+        }
+    } else if message.contains("unused import") {
+        FixSuggestion {
+            description: "Remove the unused import".to_string(),
+            fix_code: None,
+            confidence: 0.9,
+            auto_fixable: true,
+            notes: None,
+        }
+    } else {
+        FixSuggestion {
+            description: "Remove or use the item".to_string(),
+            fix_code: None,
+            confidence: 0.9,
+            auto_fixable: true,
+            notes: None,
+        }
+    }
+}
+
 /// Error pattern matcher
 pub struct ErrorAnalyzer {
     /// Known error patterns and their fixes
@@ -402,45 +441,18 @@ impl ErrorAnalyzer {
                     })
                 },
             },
-            // Unused warnings
+            // Unused and dead code warnings
             ErrorPattern {
                 codes: vec![],
                 message_contains: Some("unused"),
                 category: ErrorCategory::UnusedWarning,
-                suggest_fix: |_code, message| {
-                    let suggestion = if message.contains("unused variable") {
-                        "Prefix with underscore: _variable"
-                    } else if message.contains("unused import") {
-                        "Remove the unused import"
-                    } else {
-                        "Remove or use the item"
-                    };
-                    Some(FixSuggestion {
-                        description: suggestion.to_string(),
-                        fix_code: None,
-                        confidence: 0.9,
-                        auto_fixable: true,
-                        notes: None,
-                    })
-                },
+                suggest_fix: |_code, message| Some(unused_code_suggestion(message)),
             },
-            // Dead code warning
             ErrorPattern {
                 codes: vec![],
                 message_contains: Some("dead_code"),
                 category: ErrorCategory::UnusedWarning,
-                suggest_fix: |_code, _message| {
-                    Some(FixSuggestion {
-                        description: "Code is never used.".to_string(),
-                        fix_code: Some("#[allow(dead_code)]".to_string()),
-                        confidence: 0.8,
-                        auto_fixable: true,
-                        notes: Some(
-                            "Remove the code, or add #[allow(dead_code)] if intentional."
-                                .to_string(),
-                        ),
-                    })
-                },
+                suggest_fix: |_code, message| Some(unused_code_suggestion(message)),
             },
         ]
     }

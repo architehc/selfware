@@ -84,6 +84,9 @@ pub enum ApiError {
 
     #[error("Model not found: {0}")]
     ModelNotFound(String),
+
+    #[error("Context overflow: {0}")]
+    ContextOverflow(String),
 }
 
 #[derive(Error, Debug)]

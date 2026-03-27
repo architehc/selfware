@@ -54,10 +54,10 @@ static MOD_REGEX: Lazy<Regex> = Lazy::new(|| {
         .unwrap_or_else(|e| panic!("Invalid regex pattern: {e}"))
 });
 
-// TODO: Consider migrating to tokio::sync::RwLock if ProjectIntelligence methods become async.
-// Currently all methods are synchronous, so std::sync::RwLock is correct and avoids
-// requiring .await at every lock acquisition. Migration would require making refresh(),
-// search(), index_files(), and all accessor call-sites async (~50+ changes).
+// std::sync::RwLock is intentional here. All ProjectIntelligence methods are synchronous,
+// so std::sync::RwLock avoids requiring .await at every lock acquisition. Migrating to
+// tokio::sync::RwLock would require making refresh(), search(), index_files(), and all
+// accessor call-sites async (~50+ changes) with no functional benefit.
 
 /// Main intelligence hub coordinating all analysis
 #[derive(Debug)]

@@ -706,7 +706,7 @@ impl Agent {
                     // Context overflow: the message history is too large.
                     // Hard-compress before retrying — adding more messages would
                     // only make things worse.
-                    if error.contains("CONTEXT OVERFLOW") {
+                    if error.contains("CONTEXT OVERFLOW") || error.contains("Context overflow") {
                         warn!("Context overflow detected — hard-compressing before retry");
                         self.messages = self.compressor.hard_compress(&self.messages);
                         self.trim_message_history();
