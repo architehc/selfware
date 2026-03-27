@@ -10,7 +10,7 @@ pub mod types;
 pub use long_term::{ArchiveMemory, LongTermMemory};
 pub use short_term::{ShortTermMemory, WorkingMemory};
 pub use types::{
-    ActiveCodeContext, ActiveCodeCollection, ChangeType, CodeContent, CodeContext, CodeEdit,
+    ActiveCodeCollection, ActiveCodeContext, ChangeType, CodeContent, CodeContext, CodeEdit,
     CodeModification, ConsolidationResult, Episode, EpisodeType, FileContext, FileContextEntry,
     Importance, MemoryConfig, MemoryEntry, MemoryIndex, MemoryMetrics, MemoryQuery, MemoryStats,
     MemoryTier, MemoryUsage, SelfImprovementContext, SelfModel, SymbolContext, TaskContext,
@@ -122,7 +122,10 @@ impl Clone for SemanticMemory {
 
 impl HierarchicalMemory {
     /// Create a new hierarchical memory system
-    pub async fn new(config: MemoryConfig, _embedding: Arc<crate::vector_store::EmbeddingBackend>) -> anyhow::Result<Self> {
+    pub async fn new(
+        config: MemoryConfig,
+        _embedding: Arc<crate::vector_store::EmbeddingBackend>,
+    ) -> anyhow::Result<Self> {
         let config = Arc::new(RwLock::new(config));
         let index = Arc::new(MemoryIndex::new());
         let stats = Arc::new(RwLock::new(MemoryStats::default()));
@@ -157,7 +160,11 @@ impl HierarchicalMemory {
     /// Create with default configuration
     pub async fn default() -> anyhow::Result<Self> {
         use crate::vector_store::{EmbeddingBackend, MockEmbeddingProvider};
-        Self::new(MemoryConfig::default(), Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default()))).await
+        Self::new(
+            MemoryConfig::default(),
+            Arc::new(EmbeddingBackend::Mock(MockEmbeddingProvider::default())),
+        )
+        .await
     }
 
     /// Add a message to working memory
@@ -185,11 +192,15 @@ impl HierarchicalMemory {
 
     /// Check if memory is within budget
     pub fn is_within_budget(&self) -> bool {
-        self.usage.total_used < self.budget.working_memory + self.budget.episodic_memory + self.budget.semantic_memory
+        self.usage.total_used
+            < self.budget.working_memory + self.budget.episodic_memory + self.budget.semantic_memory
     }
 
     /// Initialize selfware codebase index
-    pub async fn initialize_selfware_index(&mut self, _path: &std::path::Path) -> anyhow::Result<()> {
+    pub async fn initialize_selfware_index(
+        &mut self,
+        _path: &std::path::Path,
+    ) -> anyhow::Result<()> {
         let semantic = self.semantic.write().await;
         semantic.index_codebase(_path).await?;
         Ok(())
@@ -253,9 +264,11 @@ impl HierarchicalMemory {
                 MemoryTier::LongTerm => 2,
                 MemoryTier::Archive => 3,
             };
-            tier_order(a.tier)
-                .cmp(&tier_order(b.tier))
-                .then_with(|| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal))
+            tier_order(a.tier).cmp(&tier_order(b.tier)).then_with(|| {
+                b.importance
+                    .partial_cmp(&a.importance)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
         });
 
         if let Some(limit) = query.limit {
@@ -378,7 +391,5 @@ impl Clone for HierarchicalMemory {
 
 /// Re-export commonly used types
 pub mod prelude {
-    pub use super::{
-        HierarchicalMemory, MemoryConfig, MemoryEntry, MemoryQuery, MemoryTier,
-    };
+    pub use super::{HierarchicalMemory, MemoryConfig, MemoryEntry, MemoryQuery, MemoryTier};
 }

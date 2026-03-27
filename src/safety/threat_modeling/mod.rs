@@ -9,9 +9,11 @@ pub mod model;
 pub mod types;
 
 // Re-export main types
-pub use types::*;
-pub use analyzer::{AttackSurfaceMapper, EntryPointDetector, SecurityScanner, StrideAnalyzer, ThreatPattern};
+pub use analyzer::{
+    AttackSurfaceMapper, EntryPointDetector, SecurityScanner, StrideAnalyzer, ThreatPattern,
+};
 pub use model::ThreatModel;
+pub use types::*;
 
 #[cfg(test)]
 mod tests;

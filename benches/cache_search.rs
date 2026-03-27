@@ -8,9 +8,13 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // Simulate the old O(N) brute force search
-fn brute_force_search(embeddings: &[(String, Vec<f32>)], query: &[f32], threshold: f32) -> Option<String> {
+fn brute_force_search(
+    embeddings: &[(String, Vec<f32>)],
+    query: &[f32],
+    threshold: f32,
+) -> Option<String> {
     let mut best_match: Option<(String, f32)> = None;
-    
+
     for (id, entry_embedding) in embeddings.iter() {
         let similarity = cosine_similarity(query, entry_embedding);
         if similarity >= threshold {
@@ -19,7 +23,7 @@ fn brute_force_search(embeddings: &[(String, Vec<f32>)], query: &[f32], threshol
             }
         }
     }
-    
+
     best_match.map(|(id, _)| id)
 }
 
@@ -28,11 +32,11 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
-    
+
     let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
     let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    
+
     if norm_a > 0.0 && norm_b > 0.0 {
         dot_product / (norm_a * norm_b)
     } else {
@@ -61,46 +65,43 @@ fn random_embedding(dim: usize) -> Vec<f32> {
 
 fn benchmark_cache_search(c: &mut Criterion) {
     let mut group = c.benchmark_group("cache_search");
-    
+
     // Test with different cache sizes
     let cache_sizes = vec![100, 500, 1000, 5000];
     let dim = 384; // Common embedding dimension
     let threshold = 0.85;
-    
+
     for size in cache_sizes {
         // Generate test data
         let mut embeddings: Vec<(String, Vec<f32>)> = Vec::with_capacity(size);
         for i in 0..size {
             embeddings.push((format!("entry-{}", i), random_embedding(dim)));
         }
-        
+
         // Query vector (normalized)
         let mut query = random_embedding(dim);
         l2_normalize(&mut query);
-        
+
         // Benchmark brute force O(N) search
-        group.bench_with_input(
-            BenchmarkId::new("brute_force", size),
-            &size,
-            |b, _| {
-                b.iter(|| {
-                    brute_force_search(
-                        black_box(&embeddings),
-                        black_box(&query),
-                        black_box(threshold),
-                    )
-                });
-            },
-        );
-        
+        group.bench_with_input(BenchmarkId::new("brute_force", size), &size, |b, _| {
+            b.iter(|| {
+                brute_force_search(
+                    black_box(&embeddings),
+                    black_box(&query),
+                    black_box(threshold),
+                )
+            });
+        });
+
         // Benchmark HNSW O(log N) search
         // Note: We need to create the HNSW index outside the bench function
-        use hnsw_rs::hnsw::{Hnsw, Neighbour};
         use hnsw_rs::anndists::dist::distances::DistDot;
-        
+        use hnsw_rs::hnsw::{Hnsw, Neighbour};
+
         let mut hnsw = Hnsw::new(32, size.max(100), 16, 100, DistDot {});
-        let mut id_mapping: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
-        
+        let mut id_mapping: std::collections::HashMap<usize, String> =
+            std::collections::HashMap::new();
+
         // Insert all embeddings into HNSW
         for (i, (id, embedding)) in embeddings.iter().enumerate() {
             let mut normed = embedding.clone();
@@ -108,80 +109,66 @@ fn benchmark_cache_search(c: &mut Criterion) {
             hnsw.insert((&normed, i));
             id_mapping.insert(i, id.clone());
         }
-        
-        group.bench_with_input(
-            BenchmarkId::new("hnsw_index", size),
-            &size,
-            |b, _| {
-                b.iter(|| {
-                    let normed_query: Vec<f32> = query.clone();
-                    let neighbors: Vec<Neighbour> = hnsw.search(&normed_query, 1, 50);
-                    
-                    let mut best: Option<String> = None;
-                    for neighbour in neighbors {
-                        let similarity = 1.0 - neighbour.distance;
-                        if similarity >= threshold {
-                            if let Some(entry_id) = id_mapping.get(&neighbour.d_id) {
-                                best = Some(entry_id.clone());
-                                break;
-                            }
+
+        group.bench_with_input(BenchmarkId::new("hnsw_index", size), &size, |b, _| {
+            b.iter(|| {
+                let normed_query: Vec<f32> = query.clone();
+                let neighbors: Vec<Neighbour> = hnsw.search(&normed_query, 1, 50);
+
+                let mut best: Option<String> = None;
+                for neighbour in neighbors {
+                    let similarity = 1.0 - neighbour.distance;
+                    if similarity >= threshold {
+                        if let Some(entry_id) = id_mapping.get(&neighbour.d_id) {
+                            best = Some(entry_id.clone());
+                            break;
                         }
                     }
-                    best
-                });
-            },
-        );
+                }
+                best
+            });
+        });
     }
-    
+
     group.finish();
 }
 
 fn benchmark_insertion(c: &mut Criterion) {
     let mut group = c.benchmark_group("cache_insertion");
-    
+
     let dim = 384;
     let sizes = vec![100, 500, 1000];
-    
+
     for size in sizes {
         // Generate test embeddings
-        let embeddings: Vec<Vec<f32>> = (0..size)
-            .map(|_| random_embedding(dim))
-            .collect();
-        
+        let embeddings: Vec<Vec<f32>> = (0..size).map(|_| random_embedding(dim)).collect();
+
         // Benchmark HNSW insertion
-        use hnsw_rs::hnsw::Hnsw;
         use hnsw_rs::anndists::dist::distances::DistDot;
-        
-        group.bench_with_input(
-            BenchmarkId::new("hnsw_insert", size),
-            &size,
-            |b, _| {
-                b.iter(|| {
-                    let mut hnsw = Hnsw::new(32, size.max(100), 16, 100, DistDot {});
-                    for (i, mut emb) in embeddings.clone().into_iter().enumerate() {
-                        l2_normalize(&mut emb);
-                        hnsw.insert((&emb, i));
-                    }
-                });
-            },
-        );
-        
+        use hnsw_rs::hnsw::Hnsw;
+
+        group.bench_with_input(BenchmarkId::new("hnsw_insert", size), &size, |b, _| {
+            b.iter(|| {
+                let mut hnsw = Hnsw::new(32, size.max(100), 16, 100, DistDot {});
+                for (i, mut emb) in embeddings.clone().into_iter().enumerate() {
+                    l2_normalize(&mut emb);
+                    hnsw.insert((&emb, i));
+                }
+            });
+        });
+
         // Benchmark Vec insertion (baseline)
-        group.bench_with_input(
-            BenchmarkId::new("vec_insert", size),
-            &size,
-            |b, _| {
-                b.iter(|| {
-                    let mut vec: Vec<(String, Vec<f32>)> = Vec::with_capacity(size);
-                    for (i, emb) in embeddings.clone().into_iter().enumerate() {
-                        vec.push((format!("entry-{}", i), emb));
-                    }
-                    black_box(vec);
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("vec_insert", size), &size, |b, _| {
+            b.iter(|| {
+                let mut vec: Vec<(String, Vec<f32>)> = Vec::with_capacity(size);
+                for (i, emb) in embeddings.clone().into_iter().enumerate() {
+                    vec.push((format!("entry-{}", i), emb));
+                }
+                black_box(vec);
+            });
+        });
     }
-    
+
     group.finish();
 }
 

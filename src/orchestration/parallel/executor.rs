@@ -1,6 +1,8 @@
 //! Parallel Execution Engine
 
-use super::types::{DependencyGraph, ExecutionRecord, ExecutionStats, NodeStatus, ParallelConfig, ParallelResult};
+use super::types::{
+    DependencyGraph, ExecutionRecord, ExecutionStats, NodeStatus, ParallelConfig, ParallelResult,
+};
 use crate::tools::ToolRegistry;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -69,7 +71,10 @@ impl ParallelExecutor {
             };
             drop(config);
 
-            let mut queue = self.queue.write().map_err(|_| anyhow::anyhow!("Queue lock poisoned"))?;
+            let mut queue = self
+                .queue
+                .write()
+                .map_err(|_| anyhow::anyhow!("Queue lock poisoned"))?;
             queue.push_back(call);
             Ok(())
         }
@@ -90,7 +95,10 @@ impl ParallelExecutor {
             priority: 100,
         };
 
-        let mut queue = self.queue.write().map_err(|_| anyhow::anyhow!("Queue lock poisoned"))?;
+        let mut queue = self
+            .queue
+            .write()
+            .map_err(|_| anyhow::anyhow!("Queue lock poisoned"))?;
         queue.push_back(call);
         Ok(())
     }
@@ -212,7 +220,11 @@ impl ParallelExecutor {
             } else {
                 let calls: Vec<(String, String, serde_json::Value)> = level
                     .iter()
-                    .filter_map(|id| graph.get_node(id).map(|n| (id.clone(), n.tool_name.clone(), n.arguments.clone())))
+                    .filter_map(|id| {
+                        graph
+                            .get_node(id)
+                            .map(|n| (id.clone(), n.tool_name.clone(), n.arguments.clone()))
+                    })
                     .collect();
 
                 let semaphore = self.semaphore.clone();
@@ -258,10 +270,7 @@ impl ParallelExecutor {
     }
 
     pub async fn pending_count(&self) -> usize {
-        self.queue
-            .read()
-            .map(|q| q.len())
-            .unwrap_or(0)
+        self.queue.read().map(|q| q.len()).unwrap_or(0)
     }
 
     pub fn stats(&self) -> &ExecutionStats {

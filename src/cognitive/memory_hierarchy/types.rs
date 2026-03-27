@@ -79,7 +79,11 @@ pub struct Episode {
 }
 
 impl Episode {
-    pub fn new(id: impl Into<String>, episode_type: EpisodeType, content: impl Into<String>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        episode_type: EpisodeType,
+        content: impl Into<String>,
+    ) -> Self {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -128,7 +132,10 @@ pub struct CodeEdit {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CodeContent {
     Full(String),
-    Summary { overview: String, key_functions: Vec<String> },
+    Summary {
+        overview: String,
+        key_functions: Vec<String>,
+    },
 }
 
 /// Active code context entry (single file)
@@ -313,8 +320,16 @@ pub struct SelfImprovementContext {
 
 impl SelfImprovementContext {
     pub fn estimate_tokens(&self) -> usize {
-        let base = self.goal.len() + self.self_model.len() + self.architecture.len() + self.recent_modifications.len();
-        let code_tokens: usize = self.relevant_code.files.iter().map(|f| f.content.len()).sum();
+        let base = self.goal.len()
+            + self.self_model.len()
+            + self.architecture.len()
+            + self.recent_modifications.len();
+        let code_tokens: usize = self
+            .relevant_code
+            .files
+            .iter()
+            .map(|f| f.content.len())
+            .sum();
         let suggestions_tokens: usize = self.suggestions.iter().map(|s| s.len()).sum();
         (base + code_tokens + suggestions_tokens) / 4
     }
@@ -326,7 +341,10 @@ impl SelfImprovementContext {
         prompt.push_str(&format!("Self-Model: {}\n", self.self_model));
         prompt.push_str(&format!("Architecture: {}\n", self.architecture));
         if !self.recent_modifications.is_empty() {
-            prompt.push_str(&format!("Recent Modifications: {}\n", self.recent_modifications));
+            prompt.push_str(&format!(
+                "Recent Modifications: {}\n",
+                self.recent_modifications
+            ));
         }
         prompt.push_str("Suggestions to Consider:\n");
         if !self.suggestions.is_empty() {

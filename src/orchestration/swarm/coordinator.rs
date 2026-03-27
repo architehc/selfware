@@ -313,7 +313,8 @@ impl Swarm {
             let pressure = pressure_lock.read().unwrap_or_else(|e| e.into_inner());
             if matches!(
                 *pressure,
-                crate::resource::ResourcePressure::High | crate::resource::ResourcePressure::Critical
+                crate::resource::ResourcePressure::High
+                    | crate::resource::ResourcePressure::Critical
             ) {
                 return Err(anyhow!(
                     "Cannot queue task: resource pressure is {:?}",

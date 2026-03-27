@@ -178,14 +178,21 @@ impl Default for ConflictDetector {
 pub struct ConflictResolver;
 
 impl ConflictResolver {
-    pub fn resolve_by_ordering(conflicts: &[Conflict], calls: &mut [ToolCallRef]) -> anyhow::Result<()> {
+    pub fn resolve_by_ordering(
+        conflicts: &[Conflict],
+        calls: &mut [ToolCallRef],
+    ) -> anyhow::Result<()> {
         if conflicts.is_empty() {
             return Ok(());
         }
 
         for conflict in conflicts {
-            let idx_a = calls.iter().position(|c| c.id == Some(conflict.tool_call_id_a.clone()));
-            let idx_b = calls.iter().position(|c| c.id == Some(conflict.tool_call_id_b.clone()));
+            let idx_a = calls
+                .iter()
+                .position(|c| c.id == Some(conflict.tool_call_id_a.clone()));
+            let idx_b = calls
+                .iter()
+                .position(|c| c.id == Some(conflict.tool_call_id_b.clone()));
 
             if let (Some(a), Some(b)) = (idx_a, idx_b) {
                 match conflict.conflict_type {
@@ -209,7 +216,10 @@ impl ConflictResolver {
     pub fn group_by_resource(conflicts: &[Conflict]) -> HashMap<String, Vec<Conflict>> {
         let mut groups: HashMap<String, Vec<Conflict>> = HashMap::new();
         for conflict in conflicts {
-            groups.entry(conflict.resource.clone()).or_default().push(conflict.clone());
+            groups
+                .entry(conflict.resource.clone())
+                .or_default()
+                .push(conflict.clone());
         }
         groups
     }

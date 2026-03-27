@@ -3,7 +3,9 @@
 use super::*;
 use crate::api::types::{ToolCall, ToolFunction};
 use crate::config::SafetyConfig;
-use crate::safety::checker::validation::{is_private_or_internal, normalize_shell_command, split_shell_commands};
+use crate::safety::checker::validation::{
+    is_private_or_internal, normalize_shell_command, split_shell_commands,
+};
 
 fn create_test_call(name: &str, args: &str) -> ToolCall {
     ToolCall {

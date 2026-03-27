@@ -135,8 +135,7 @@ fn test_entry_point_creation() {
 
 #[test]
 fn test_threat_model_creation() {
-    let model =
-        ThreatModel::new("My Application").with_description("Web application threat model");
+    let model = ThreatModel::new("My Application").with_description("Web application threat model");
 
     assert_eq!(model.name, "My Application");
     assert!(!model.description.is_empty());

@@ -1,8 +1,11 @@
 //! Self-Introspection Capabilities
 
-use super::types::{IntrospectionResult, IntrospectionTarget, ReferenceConfig, ReferenceLevel, ReferenceState, SelfReference};
-use crate::cognitive::memory_hierarchy::HierarchicalMemory;
+use super::types::{
+    IntrospectionResult, IntrospectionTarget, ReferenceConfig, ReferenceLevel, ReferenceState,
+    SelfReference,
+};
 use crate::cognitive::memory_hierarchy::types::{MemoryQuery, MemoryTier};
+use crate::cognitive::memory_hierarchy::HierarchicalMemory;
 
 /// Introspection engine for self-examination
 pub struct IntrospectionEngine {
@@ -23,7 +26,10 @@ impl IntrospectionEngine {
     }
 
     /// Perform introspection on a target
-    pub async fn introspect(&self, target: IntrospectionTarget) -> anyhow::Result<IntrospectionResult> {
+    pub async fn introspect(
+        &self,
+        target: IntrospectionTarget,
+    ) -> anyhow::Result<IntrospectionResult> {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();
@@ -76,11 +82,19 @@ impl IntrospectionEngine {
     }
 
     /// Reflect on self at a given level
-    pub async fn reflect(&self, thought: &str, level: ReferenceLevel) -> anyhow::Result<Reflection> {
+    pub async fn reflect(
+        &self,
+        thought: &str,
+        level: ReferenceLevel,
+    ) -> anyhow::Result<Reflection> {
         let current = self.state.get_level().await;
 
         if level > current && !self.can_elevate(level).await {
-            return Err(anyhow::anyhow!("Cannot elevate to {:?} from {:?}", level, current));
+            return Err(anyhow::anyhow!(
+                "Cannot elevate to {:?} from {:?}",
+                level,
+                current
+            ));
         }
 
         let reflection = Reflection {
@@ -108,7 +122,11 @@ impl IntrospectionEngine {
     }
 
     /// Query memory for context
-    pub async fn query_memory(&self, memory: &HierarchicalMemory, query: &str) -> anyhow::Result<Vec<String>> {
+    pub async fn query_memory(
+        &self,
+        memory: &HierarchicalMemory,
+        query: &str,
+    ) -> anyhow::Result<Vec<String>> {
         let mem_query = MemoryQuery::new(query).with_tier(MemoryTier::Working);
         let results = memory.query(mem_query).await;
         Ok(results.into_iter().map(|r| r.content).collect())

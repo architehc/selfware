@@ -15,7 +15,9 @@ use crate::tool_parser::parse_tool_calls;
 use crate::tools::ToolRegistry;
 
 use super::config::{MultiAgentConfig, MultiAgentFailurePolicy};
-use super::types::{AgentInstance, AgentResult, AgentStatus, MultiAgentEvent, MAX_CONCURRENT_AGENTS};
+use super::types::{
+    AgentInstance, AgentResult, AgentStatus, MultiAgentEvent, MAX_CONCURRENT_AGENTS,
+};
 
 /// Multi-agent chat orchestrator
 ///

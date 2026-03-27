@@ -26,8 +26,10 @@ pub mod yolo;
 
 // Re-exports for convenience
 pub use autonomy::{AutonomyContext, AutonomyController, AutonomyLevel};
+pub use checker::validation::{
+    is_private_or_internal, normalize_shell_command, split_shell_commands, PinnedDnsResolver,
+};
 pub use checker::SafetyChecker;
-pub use checker::validation::{is_private_or_internal, PinnedDnsResolver, normalize_shell_command, split_shell_commands};
 pub use sandbox::{FilesystemPolicy, NetworkPolicy, ResourceLimits};
 pub use scanner::{
     SecretScanner, SecurityCategory, SecurityFinding, SecurityScanner, SecuritySeverity,

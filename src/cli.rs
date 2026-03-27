@@ -871,7 +871,13 @@ async fn handle_command(
 
             println!(
                 "{}",
-                render_graph_output(&graph.name, focus.as_deref(), &summary, output_format, &rendered)
+                render_graph_output(
+                    &graph.name,
+                    focus.as_deref(),
+                    &summary,
+                    output_format,
+                    &rendered
+                )
             );
         }
 

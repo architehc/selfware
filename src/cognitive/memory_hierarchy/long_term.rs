@@ -1,6 +1,8 @@
 //! Long-term memory management
 
-use super::types::{ConsolidationResult, MemoryConfig, MemoryEntry, MemoryIndex, MemoryQuery, MemoryTier};
+use super::types::{
+    ConsolidationResult, MemoryConfig, MemoryEntry, MemoryIndex, MemoryQuery, MemoryTier,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -133,7 +135,11 @@ impl LongTermMemory {
     }
 
     fn matches_query(&self, entry: &MemoryEntry, query: &MemoryQuery) -> bool {
-        if !entry.content.to_lowercase().contains(&query.pattern.to_lowercase()) {
+        if !entry
+            .content
+            .to_lowercase()
+            .contains(&query.pattern.to_lowercase())
+        {
             return false;
         }
 
@@ -164,7 +170,10 @@ impl LongTermMemory {
         true
     }
 
-    async fn archive_oldest(&self, entries: &mut tokio::sync::RwLockWriteGuard<'_, HashMap<u64, MemoryEntry>>) -> anyhow::Result<()> {
+    async fn archive_oldest(
+        &self,
+        entries: &mut tokio::sync::RwLockWriteGuard<'_, HashMap<u64, MemoryEntry>>,
+    ) -> anyhow::Result<()> {
         let oldest = entries
             .values()
             .filter(|e| e.importance < 0.5)

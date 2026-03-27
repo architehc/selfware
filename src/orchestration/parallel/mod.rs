@@ -38,7 +38,10 @@ impl ParallelManager {
         let cfg = Arc::new(RwLock::new(config.clone()));
         let executor = Arc::new(ParallelExecutor::new(config));
 
-        Self { executor, config: cfg }
+        Self {
+            executor,
+            config: cfg,
+        }
     }
 
     /// Get the underlying executor

@@ -1,6 +1,9 @@
 //! Self-Modification System
 
-use super::types::{ModificationType, ProposedModification, ReferenceConfig, ReferenceLevel, ReferenceState, RiskLevel, SelfReferenceRecord, ValidationResult, ReferenceOperation};
+use super::types::{
+    ModificationType, ProposedModification, ReferenceConfig, ReferenceLevel, ReferenceOperation,
+    ReferenceState, RiskLevel, SelfReferenceRecord, ValidationResult,
+};
 use std::collections::HashSet;
 
 /// Modification engine for self-modification
@@ -88,7 +91,10 @@ impl ModificationEngine {
     }
 
     /// Execute a validated modification
-    pub async fn execute(&self, proposal: &ProposedModification) -> anyhow::Result<ModificationResult> {
+    pub async fn execute(
+        &self,
+        proposal: &ProposedModification,
+    ) -> anyhow::Result<ModificationResult> {
         let validation = self.validate(proposal).await;
         if !validation.valid {
             return Err(anyhow::anyhow!(
@@ -98,7 +104,9 @@ impl ModificationEngine {
         }
 
         if self.config.auto_validate && proposal.risk_level >= RiskLevel::High {
-            return Err(anyhow::anyhow!("High risk modification requires manual approval"));
+            return Err(anyhow::anyhow!(
+                "High risk modification requires manual approval"
+            ));
         }
 
         let timestamp = std::time::SystemTime::now()
@@ -115,7 +123,9 @@ impl ModificationEngine {
         let record = SelfReferenceRecord {
             id: proposal.id,
             timestamp,
-            operation: ReferenceOperation::Propose { modification: proposal.clone() },
+            operation: ReferenceOperation::Propose {
+                modification: proposal.clone(),
+            },
             level: ReferenceLevel::Meta,
         };
         self.state.record(record).await;
@@ -208,10 +218,18 @@ impl ModificationBuilder {
     }
 
     pub fn build(self) -> anyhow::Result<(ModificationType, String, String, String, Vec<String>)> {
-        let t = self.modification_type.ok_or_else(|| anyhow::anyhow!("Missing modification_type"))?;
-        let target = self.target.ok_or_else(|| anyhow::anyhow!("Missing target"))?;
-        let desc = self.description.ok_or_else(|| anyhow::anyhow!("Missing description"))?;
-        let reasoning = self.reasoning.ok_or_else(|| anyhow::anyhow!("Missing reasoning"))?;
+        let t = self
+            .modification_type
+            .ok_or_else(|| anyhow::anyhow!("Missing modification_type"))?;
+        let target = self
+            .target
+            .ok_or_else(|| anyhow::anyhow!("Missing target"))?;
+        let desc = self
+            .description
+            .ok_or_else(|| anyhow::anyhow!("Missing description"))?;
+        let reasoning = self
+            .reasoning
+            .ok_or_else(|| anyhow::anyhow!("Missing reasoning"))?;
         Ok((t, target, desc, reasoning, self.capabilities))
     }
 }

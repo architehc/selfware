@@ -588,8 +588,8 @@ mod tests {
             working_tokens: 100,
             episodic_tokens: 200,
             semantic_tokens: 300,
-                self_tokens: 0,
-                total_used: 0,
+            self_tokens: 0,
+            total_used: 0,
         });
         assert_eq!(allocator.usage_history.len(), 1);
 
@@ -780,15 +780,15 @@ mod tests {
             working_tokens: 100,
             episodic_tokens: 200,
             semantic_tokens: 300,
-                self_tokens: 0,
-                total_used: 0,
+            self_tokens: 0,
+            total_used: 0,
         });
         allocator.record_usage(&MemoryUsage {
             working_tokens: 300,
             episodic_tokens: 400,
             semantic_tokens: 500,
-                self_tokens: 0,
-                total_used: 0,
+            self_tokens: 0,
+            total_used: 0,
         });
 
         let stats = allocator.get_stats();

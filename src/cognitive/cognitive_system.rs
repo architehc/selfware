@@ -175,11 +175,11 @@ impl CognitiveSystem {
 
         // Get semantic/code context
         let semantic_arc = self.memory.read().await.semantic.clone();
-        let semantic = semantic_arc.read().await.retrieve_code_context(
-            query,
-            allocation.semantic_memory / 2,
-            true,
-        ).await?;
+        let semantic = semantic_arc
+            .read()
+            .await
+            .retrieve_code_context(query, allocation.semantic_memory / 2, true)
+            .await?;
 
         // Get self-improvement context if applicable
         let self_context = if options.force_self_improvement

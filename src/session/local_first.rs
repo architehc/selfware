@@ -157,7 +157,7 @@ mod tests {
     fn test_cache_response() {
         let mut coord = LocalFirstCoordinator::new();
         coord.cache_response("key1", "value1".to_string(), 6);
-        
+
         let stats = coord.stats();
         assert_eq!(stats.cache_stats.entry_count, 1);
         assert_eq!(stats.bandwidth_saved_bytes, 6);
@@ -172,7 +172,7 @@ mod tests {
             size_bytes: 5,
         };
         cache.put(entry);
-        
+
         let stats = cache.stats();
         assert_eq!(stats.entry_count, 1);
         assert_eq!(stats.total_size_bytes, 5);

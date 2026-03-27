@@ -204,8 +204,12 @@ impl SafetyChecker {
             "computer_screen" | "computer_window" => {
                 // Screen capture returns base64 PNG in-memory
             }
-            "context_status" | "context_focus" | "context_evict"
-            | "context_recommend" | "context_load_skeleton" | "context_bulk_read"
+            "context_status"
+            | "context_focus"
+            | "context_evict"
+            | "context_recommend"
+            | "context_load_skeleton"
+            | "context_bulk_read"
             | "context_summary" => {
                 // Context tools interact with internal state only
             }
@@ -286,9 +290,7 @@ impl SafetyChecker {
         for part in split_shell_commands(&normalized) {
             let part_trimmed = part.trim();
             if DANGEROUS_ENV_VARS.is_match(part_trimmed) {
-                anyhow::bail!(
-                    "Dangerous command blocked: environment variable injection detected"
-                );
+                anyhow::bail!("Dangerous command blocked: environment variable injection detected");
             }
         }
 

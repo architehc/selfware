@@ -1,6 +1,8 @@
 //! Short-term memory management
 
-use super::types::{MemoryConfig, MemoryEntry, MemoryIndex, MemoryQuery, MemoryTier, TierTransition};
+use super::types::{
+    MemoryConfig, MemoryEntry, MemoryIndex, MemoryQuery, MemoryTier, TierTransition,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -81,7 +83,9 @@ impl ShortTermMemory {
     pub async fn check_promotion(&self, id: u64, config: &MemoryConfig) -> TierTransition {
         let entries = self.entries.read().await;
         if let Some(entry) = entries.get(&id) {
-            if entry.access_count >= config.promotion_threshold && entry.importance >= config.importance_threshold {
+            if entry.access_count >= config.promotion_threshold
+                && entry.importance >= config.importance_threshold
+            {
                 return TierTransition::Promote;
             }
             let now = std::time::SystemTime::now()
@@ -118,7 +122,11 @@ impl ShortTermMemory {
     }
 
     fn matches_query(&self, entry: &MemoryEntry, query: &MemoryQuery) -> bool {
-        if !entry.content.to_lowercase().contains(&query.pattern.to_lowercase()) {
+        if !entry
+            .content
+            .to_lowercase()
+            .contains(&query.pattern.to_lowercase())
+        {
             return false;
         }
 
@@ -149,11 +157,11 @@ impl ShortTermMemory {
         true
     }
 
-    async fn evict_oldest(&self, entries: &mut tokio::sync::RwLockWriteGuard<'_, HashMap<u64, MemoryEntry>>) -> anyhow::Result<()> {
-        let oldest = entries
-            .values()
-            .min_by_key(|e| e.accessed_at)
-            .map(|e| e.id);
+    async fn evict_oldest(
+        &self,
+        entries: &mut tokio::sync::RwLockWriteGuard<'_, HashMap<u64, MemoryEntry>>,
+    ) -> anyhow::Result<()> {
+        let oldest = entries.values().min_by_key(|e| e.accessed_at).map(|e| e.id);
 
         if let Some(id) = oldest {
             if let Some(entry) = entries.remove(&id) {

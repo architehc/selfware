@@ -19,7 +19,7 @@ pub use types::{
     RiskLevel, SelfReference, SelfReferenceRecord, ValidationResult,
 };
 
-use crate::cognitive::memory_hierarchy::{CodeContext, SemanticMemory, SelfModel};
+use crate::cognitive::memory_hierarchy::{CodeContext, SelfModel, SemanticMemory};
 
 /// Options for retrieving source code
 #[derive(Debug, Clone, Default)]
@@ -45,8 +45,15 @@ impl ModificationTracker {
         self.modifications.push(modification);
     }
 
-    pub fn get_recent(&self, limit: usize) -> Vec<&crate::cognitive::memory_hierarchy::CodeModification> {
-        self.modifications.iter().rev().take(limit).collect::<Vec<_>>()
+    pub fn get_recent(
+        &self,
+        limit: usize,
+    ) -> Vec<&crate::cognitive::memory_hierarchy::CodeModification> {
+        self.modifications
+            .iter()
+            .rev()
+            .take(limit)
+            .collect::<Vec<_>>()
     }
 }
 
@@ -139,28 +146,54 @@ impl SelfReferenceSystem {
     }
 
     /// Get improvement context for self-improvement
-    pub async fn get_improvement_context(&self, goal: &str, max_tokens: usize) -> anyhow::Result<crate::cognitive::memory_hierarchy::SelfImprovementContext> {
+    pub async fn get_improvement_context(
+        &self,
+        goal: &str,
+        max_tokens: usize,
+    ) -> anyhow::Result<crate::cognitive::memory_hierarchy::SelfImprovementContext> {
         let self_model = self.self_model.read().await;
-        let code_context = self.semantic.read().await.retrieve_code_context(goal, max_tokens, true).await?;
-        
+        let code_context = self
+            .semantic
+            .read()
+            .await
+            .retrieve_code_context(goal, max_tokens, true)
+            .await?;
+
         Ok(crate::cognitive::memory_hierarchy::SelfImprovementContext {
             goal: goal.to_string(),
-            self_model: format!("Version: {}, Capabilities: {:?}", self_model.version, self_model.capabilities),
+            self_model: format!(
+                "Version: {}, Capabilities: {:?}",
+                self_model.version, self_model.capabilities
+            ),
             architecture: "Hierarchical memory system with self-reference".to_string(),
-            recent_modifications: self.get_recent_modifications().iter().map(|m| format!("{:?}", m)).collect::<Vec<_>>().join(", "),
+            recent_modifications: self
+                .get_recent_modifications()
+                .iter()
+                .map(|m| format!("{:?}", m))
+                .collect::<Vec<_>>()
+                .join(", "),
             relevant_code: code_context,
             suggestions: Vec::new(),
         })
     }
 
     /// Read own source code
-    pub async fn read_own_code(&self, module_path: &str, _options: &SourceRetrievalOptions) -> anyhow::Result<String> {
+    pub async fn read_own_code(
+        &self,
+        module_path: &str,
+        _options: &SourceRetrievalOptions,
+    ) -> anyhow::Result<String> {
         let path = self.selfware_path.join("src").join(module_path);
-        tokio::fs::read_to_string(&path).await.map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))
+        tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", path.display(), e))
     }
 
     /// Track a code modification
-    pub fn track_modification(&mut self, modification: crate::cognitive::memory_hierarchy::CodeModification) {
+    pub fn track_modification(
+        &mut self,
+        modification: crate::cognitive::memory_hierarchy::CodeModification,
+    ) {
         self.modification_tracker.track(modification);
     }
 
@@ -178,14 +211,19 @@ impl SelfReferenceSystem {
     }
 
     /// Get recent modifications
-    pub fn get_recent_modifications(&self) -> Vec<&crate::cognitive::memory_hierarchy::CodeModification> {
+    pub fn get_recent_modifications(
+        &self,
+    ) -> Vec<&crate::cognitive::memory_hierarchy::CodeModification> {
         self.modification_tracker.get_recent(10)
     }
 }
 
 impl Default for SelfReferenceSystem {
     fn default() -> Self {
-        Self::new(Arc::new(RwLock::new(SemanticMemory::new())), std::env::current_dir().unwrap_or_default())
+        Self::new(
+            Arc::new(RwLock::new(SemanticMemory::new())),
+            std::env::current_dir().unwrap_or_default(),
+        )
     }
 }
 

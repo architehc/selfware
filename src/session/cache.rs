@@ -150,9 +150,10 @@ impl ToolCache {
 
     /// Get cache statistics
     pub fn stats(&self) -> CacheStats {
-        let entries = self.entries.read().unwrap_or_else(|poisoned| {
-            poisoned.into_inner()
-        });
+        let entries = self
+            .entries
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         CacheStats {
             entries: entries.len(),
             max_entries: self.max_entries,
@@ -387,15 +388,20 @@ impl LlmCache {
         items.sort_by(|a, b| a.1.cmp(&b.1));
 
         let to_remove = self.config.max_entries / 10;
-        let ids_to_remove: Vec<_> = items.iter().take(to_remove).map(|(k, _)| k.clone()).collect();
+        let ids_to_remove: Vec<_> = items
+            .iter()
+            .take(to_remove)
+            .map(|(k, _)| k.clone())
+            .collect();
 
         for id in &ids_to_remove {
             entries.remove(id);
         }
 
-        let mut embeddings = self.embeddings.write().unwrap_or_else(|poisoned| {
-            poisoned.into_inner()
-        });
+        let mut embeddings = self
+            .embeddings
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         for id in &ids_to_remove {
             embeddings.remove(id);
         }
@@ -404,9 +410,10 @@ impl LlmCache {
     /// Invalidate entries for a file path
     pub fn invalidate_path(&self, path: &str) {
         let ids_to_remove: Vec<_> = {
-            let entries = self.entries.read().unwrap_or_else(|poisoned| {
-                poisoned.into_inner()
-            });
+            let entries = self
+                .entries
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             entries
                 .iter()
                 .filter(|(_, entry)| entry.file_paths.iter().any(|p| p.contains(path)))
@@ -415,18 +422,20 @@ impl LlmCache {
         };
 
         {
-            let mut entries = self.entries.write().unwrap_or_else(|poisoned| {
-                poisoned.into_inner()
-            });
+            let mut entries = self
+                .entries
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             for id in &ids_to_remove {
                 entries.remove(id);
             }
         }
 
         {
-            let mut embeddings = self.embeddings.write().unwrap_or_else(|poisoned| {
-                poisoned.into_inner()
-            });
+            let mut embeddings = self
+                .embeddings
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             for id in &ids_to_remove {
                 embeddings.remove(id);
             }
@@ -491,11 +500,14 @@ mod tests {
     fn test_tool_cache_basic() {
         let cache = ToolCache::new();
         let args = serde_json::json!({"path": "test.txt"});
-        
+
         assert!(cache.get("file_read", &args).is_none());
-        
+
         cache.set("file_read", &args, serde_json::json!("content"));
-        assert_eq!(cache.get("file_read", &args), Some(serde_json::json!("content")));
+        assert_eq!(
+            cache.get("file_read", &args),
+            Some(serde_json::json!("content"))
+        );
     }
 
     #[test]
@@ -503,7 +515,7 @@ mod tests {
         let key1 = ToolCache::cache_key("file_read", &serde_json::json!({"path": "test.txt"}));
         let key2 = ToolCache::cache_key("file_read", &serde_json::json!({"path": "test.txt"}));
         let key3 = ToolCache::cache_key("file_read", &serde_json::json!({"path": "other.txt"}));
-        
+
         assert_eq!(key1, key2);
         assert_ne!(key1, key3);
     }
@@ -546,7 +558,7 @@ mod tests {
             context_hash: 0,
             file_paths: vec![],
         };
-        
+
         let config = LlmCacheConfig::default();
         let cost = entry.estimated_cost(&config);
         assert!(cost > 0.0);
@@ -555,11 +567,11 @@ mod tests {
     #[test]
     fn test_llm_cache_lookup_and_store() {
         let cache = LlmCache::default();
-        
+
         // Should return None for empty cache
         let result = cache.lookup("test", &[0.1, 0.2, 0.3], 0);
         assert!(result.is_none());
-        
+
         // Store an entry
         let entry = LlmCacheEntry {
             id: "test-id".into(),
@@ -575,7 +587,7 @@ mod tests {
             file_paths: vec![],
         };
         cache.store(entry);
-        
+
         // Should find with exact match
         let result = cache.lookup("test prompt", &[1.0, 0.0, 0.0], 0);
         assert!(result.is_some());

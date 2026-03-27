@@ -6,8 +6,8 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::orchestration::multiagent::{
-    AgentInstance, AgentResult, AgentStatus, MultiAgentChat, MultiAgentConfig,
-    MultiAgentEvent, MultiAgentFailurePolicy, MAX_CONCURRENT_AGENTS,
+    AgentInstance, AgentResult, AgentStatus, MultiAgentChat, MultiAgentConfig, MultiAgentEvent,
+    MultiAgentFailurePolicy, MAX_CONCURRENT_AGENTS,
 };
 use crate::swarm::AgentRole;
 
