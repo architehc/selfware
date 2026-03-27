@@ -108,7 +108,7 @@ impl CodeIntrospect {
 
         // Determine depth - auto-select if not specified
         let depth = if let Some(d) = args.depth {
-            Depth::from_str(&d)?
+            Depth::parse(&d)?
         } else {
             budget.suggest_depth(&[])
         };
@@ -166,7 +166,7 @@ impl CodeIntrospect {
                 if budget.allocate(symbol_tokens) > 0 {
                     files_included.push(FileInfo {
                         path: file_path.to_string_lossy().to_string(),
-                        depth: actual_depth.to_string(),
+                        depth: actual_depth.as_str().to_string(),
                         tokens: symbol_tokens,
                         symbols: symbols.iter().map(|s| s.name.clone()).collect(),
                     });
@@ -434,7 +434,6 @@ impl Tool for CodeQuery {
 
     async fn execute(&self, args: Value) -> Result<Value> {
         #[derive(Deserialize)]
-        #[allow(dead_code)]
         struct Args {
             query: String,
             #[serde(default)]
@@ -590,7 +589,6 @@ impl Tool for CodePlan {
         use planner::EvolutionPlanner;
 
         #[derive(Deserialize)]
-        #[allow(dead_code)]
         struct Args {
             goal: String,
             #[serde(default = "default_iterations")]
@@ -691,7 +689,6 @@ impl Tool for CodeDiffPlan {
         use planner::analyze_impact;
 
         #[derive(Deserialize)]
-        #[allow(dead_code)]
         struct Args {
             target_file: String,
             change_type: String,

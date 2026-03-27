@@ -144,7 +144,7 @@ impl HarnessReport {
         ));
 
         md.push_str("## Summary\n\n");
-        md.push_str(&format!("| Metric | Value |\n|--------|-------|\n"));
+        md.push_str("| Metric | Value |\n|--------|-------|\n");
         md.push_str(&format!(
             "| Tasks | {}/{} passed ({:.0}% error rate) |\n",
             self.tasks_passed,

@@ -7,7 +7,6 @@ use crate::checkpoint::VisualAssertion;
 use crate::cognitive::CyclePhase;
 
 /// Result of visual verification including whether it should hard-gate execution.
-#[allow(dead_code)]
 pub(super) struct VisualVerificationResult {
     /// Message to append to the tool result (always present on non-pass).
     pub message: String,
@@ -319,7 +318,7 @@ impl Agent {
 
         // Always reject test-only edits if task mentions fixing/implementing,
         // OR if there are edits but none to source files (likely a mistake)
-        if all_test_files && (needs_source_change || edited_files.len() >= 1) {
+        if all_test_files && (needs_source_change || !edited_files.is_empty()) {
             warn!(
                 "Workflow validator: only test files edited ({:?}), task requires source changes",
                 edited_files
@@ -403,9 +402,7 @@ impl Agent {
         }
 
         let expectation = visual_verification_expectation(tool_name, args)?;
-        let Some(verifier) = configured_visual_verifier(&self.config) else {
-            return None;
-        };
+        let verifier = configured_visual_verifier(&self.config)?;
 
         info!(
             "Running visual verification after {} with expectation: {}",

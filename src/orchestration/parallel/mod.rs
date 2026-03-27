@@ -81,5 +81,4 @@ impl Default for ParallelManager {
 }
 
 /// Re-export commonly used types
-#[allow(dead_code)]
 pub mod prelude {}

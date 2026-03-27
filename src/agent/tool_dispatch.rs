@@ -1642,10 +1642,7 @@ impl Agent {
             name.bright_cyan(),
             args_display.bright_white()
         );
-        print!(
-            "{}",
-            "\n\x1b[0m\x1b[1m\x1b[97mExecute? [y/N/s(bypass permissions)]: \x1b[0m"
-        );
+        print!("\n\x1b[0m\x1b[1m\x1b[97mExecute? [y/N/s(bypass permissions)]: \x1b[0m");
         let _ = tokio::io::stdout().flush().await;
 
         let response =

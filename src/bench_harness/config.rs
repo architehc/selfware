@@ -124,15 +124,19 @@ mod tests {
 
     #[test]
     fn test_validate_empty_endpoint() {
-        let mut cfg = HarnessConfig::default();
-        cfg.endpoint = String::new();
+        let cfg = HarnessConfig {
+            endpoint: String::new(),
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_validate_empty_model() {
-        let mut cfg = HarnessConfig::default();
-        cfg.model = String::new();
+        let cfg = HarnessConfig {
+            model: String::new(),
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 

@@ -2573,7 +2573,7 @@ mod tests {
         let cargo_toml_path = format!("{}/Cargo.toml", env!("CARGO_MANIFEST_DIR"));
         let server = MockLlmServer::builder()
             .with_response(
-                &format!(
+                format!(
                     "<tool>\n<name>file_read</name>\n<arguments>{{\"path\":\"{}\"}}</arguments>\n</tool>",
                     cargo_toml_path
                 ),

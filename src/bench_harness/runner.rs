@@ -273,8 +273,10 @@ mod tests {
 
     #[test]
     fn test_runner_invalid_config() {
-        let mut config = HarnessConfig::default();
-        config.endpoint = String::new();
+        let config = HarnessConfig {
+            endpoint: String::new(),
+            ..Default::default()
+        };
         assert!(HarnessRunner::new(config).is_err());
     }
 }

@@ -28,7 +28,7 @@ impl SelfwareCompleter {
     }
 
     /// Get command completions
-    #[allow(dead_code)] // Convenience wrapper
+    #[cfg(test)]
     fn complete_commands(&self, prefix: &str) -> Vec<Suggestion> {
         self.complete_commands_with_span(prefix, 0, prefix.len())
     }
@@ -67,7 +67,7 @@ impl SelfwareCompleter {
     }
 
     /// Get tool completions
-    #[allow(dead_code)] // Convenience wrapper
+    #[cfg(test)]
     fn complete_tools(&self, prefix: &str) -> Vec<Suggestion> {
         self.complete_tools_with_span(prefix, 0, prefix.len())
     }
@@ -106,7 +106,7 @@ impl SelfwareCompleter {
     }
 
     /// Get file path completions
-    #[allow(dead_code)] // Convenience wrapper
+    #[cfg(test)]
     fn complete_paths(&self, prefix: &str) -> Vec<Suggestion> {
         self.complete_paths_with_span(prefix, 0, prefix.len())
     }

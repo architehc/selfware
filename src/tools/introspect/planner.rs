@@ -7,7 +7,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::budget::PlanBudget;
 use super::query::{extract_keywords, find_related_symbols};
@@ -73,16 +73,16 @@ pub enum ActionType {
 }
 
 impl ActionType {
-    pub fn to_string(&self) -> String {
+    pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Introspect => "introspect".to_string(),
-            Self::Query => "query".to_string(),
-            Self::Read => "read".to_string(),
-            Self::ImpactAnalysis => "impact_analysis".to_string(),
-            Self::Modify => "modify".to_string(),
-            Self::Verify => "verify".to_string(),
-            Self::Test => "test".to_string(),
-            Self::Complete => "complete".to_string(),
+            Self::Introspect => "introspect",
+            Self::Query => "query",
+            Self::Read => "read",
+            Self::ImpactAnalysis => "impact_analysis",
+            Self::Modify => "modify",
+            Self::Verify => "verify",
+            Self::Test => "test",
+            Self::Complete => "complete",
         }
     }
 }
@@ -98,12 +98,12 @@ pub enum RiskLevel {
 }
 
 impl RiskLevel {
-    pub fn to_string(&self) -> String {
+    pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Low => "low".to_string(),
-            Self::Medium => "medium".to_string(),
-            Self::High => "high".to_string(),
-            Self::Critical => "critical".to_string(),
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Critical => "critical",
         }
     }
 }
@@ -188,9 +188,9 @@ impl EvolutionPlanner {
         } else if keywords
             .iter()
             .any(|k| ["add", "implement", "create"].contains(&k.as_str()))
+            || goal_lower.contains("understand")
+            || goal_lower.contains("explore")
         {
-            PlanningStrategy::TargetedChange
-        } else if goal_lower.contains("understand") || goal_lower.contains("explore") {
             PlanningStrategy::Exploratory
         } else {
             // Default strategy
@@ -252,7 +252,7 @@ impl EvolutionPlanner {
 
     fn collect_source_files<'a>(
         &'a self,
-        dir: &'a PathBuf,
+        dir: &'a Path,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<PathBuf>>> + Send + 'a>>
     {
         Box::pin(async move {
@@ -284,7 +284,7 @@ impl EvolutionPlanner {
         })
     }
 
-    fn is_source_file(path: &PathBuf) -> bool {
+    fn is_source_file(path: &Path) -> bool {
         let extensions = ["rs", "py", "js", "ts", "go", "java"];
         path.extension()
             .and_then(|e| e.to_str())

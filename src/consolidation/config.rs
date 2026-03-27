@@ -110,8 +110,10 @@ mod tests {
 
     #[test]
     fn test_validate_empty_endpoint() {
-        let mut cfg = ConsolidationConfig::default();
-        cfg.endpoint = String::new();
+        let cfg = ConsolidationConfig {
+            endpoint: String::new(),
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 

@@ -3,7 +3,7 @@
 //! Provides screenshot capture and vision-based analysis for website validation
 
 use anyhow::Result;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::info;
 
@@ -121,7 +121,7 @@ impl VisualValidator {
         let path = self.config.output_dir.join(&filename);
 
         // Try playwright first
-        if let Ok(_) = self.capture_with_playwright(device, &path).await {
+        if self.capture_with_playwright(device, &path).await.is_ok() {
             return ScreenshotResult {
                 device: device.name.clone(),
                 path,
@@ -140,7 +140,7 @@ impl VisualValidator {
     }
 
     /// Capture using playwright
-    async fn capture_with_playwright(&self, device: &Device, path: &PathBuf) -> Result<()> {
+    async fn capture_with_playwright(&self, device: &Device, path: &Path) -> Result<()> {
         let script = format!(
             r#"
 from playwright.sync_api import sync_playwright
@@ -176,7 +176,7 @@ with sync_playwright() as p:
     }
 
     /// Analyze screenshot with vision model
-    pub async fn analyze_screenshot(&self, path: &PathBuf) -> Result<AnalysisResult> {
+    pub async fn analyze_screenshot(&self, path: &Path) -> Result<AnalysisResult> {
         // This would integrate with the vision model
         // For now, return a placeholder
         info!("Analyzing screenshot: {}", path.display());

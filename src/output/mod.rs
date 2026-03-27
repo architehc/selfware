@@ -72,7 +72,6 @@ pub(crate) fn record_tokens(prompt: u64, completion: u64) {
 }
 
 /// Get total token usage
-#[allow(dead_code)]
 #[inline]
 pub(crate) fn get_total_tokens() -> (u64, u64) {
     (
@@ -82,7 +81,6 @@ pub(crate) fn get_total_tokens() -> (u64, u64) {
 }
 
 /// Reset token counters (for new sessions)
-#[allow(dead_code)]
 #[inline]
 pub(crate) fn reset_tokens() {
     TOTAL_PROMPT_TOKENS.store(0, Ordering::SeqCst);
@@ -795,11 +793,11 @@ pub(crate) fn display_file_diff(path: &str, old_content: &str, new_content: &str
                 && old_lines[i] == new_lines[j + lookahead]
             {
                 // Added lines
-                for add_j in j..j + lookahead {
+                for line in new_lines.iter().skip(j).take(lookahead) {
                     diff_lines.push(format!(
                         "  {} {}",
                         "+".bright_green(),
-                        new_lines[add_j].bright_green()
+                        line.bright_green()
                     ));
                 }
                 j += lookahead;
@@ -811,11 +809,11 @@ pub(crate) fn display_file_diff(path: &str, old_content: &str, new_content: &str
                 && old_lines[i + lookahead] == new_lines[j]
             {
                 // Deleted lines
-                for del_i in i..i + lookahead {
+                for line in old_lines.iter().skip(i).take(lookahead) {
                     diff_lines.push(format!(
                         "  {} {}",
                         "-".bright_red(),
-                        old_lines[del_i].bright_red()
+                        line.bright_red()
                     ));
                 }
                 i += lookahead;

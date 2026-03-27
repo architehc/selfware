@@ -499,6 +499,7 @@ impl SafetyChecker {
 
     /// Check if path is in allowed list (test helper)
     #[cfg(test)]
+    #[allow(dead_code)]
     fn is_path_in_allowed_list(&self, canonical_str: &str, _original_path: &str) -> Result<bool> {
         use crate::safety::path_validator::PathValidator;
         let validator = PathValidator::new(&self.config, self.working_dir.clone());

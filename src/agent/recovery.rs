@@ -4,7 +4,7 @@ use tracing::{debug, info, warn};
 
 use super::*;
 use crate::api::types::Message;
-use crate::testing::visual_verification::{LoopDetectionResult, RecoveryStrategy, VisualStateTracker};
+use crate::testing::visual_verification::{LoopDetectionResult, RecoveryStrategy};
 
 /// Maximum consecutive no-action prompts before aborting.
 pub(super) const MAX_NO_ACTION_PROMPTS: usize = 6;
@@ -129,6 +129,7 @@ impl Agent {
     /// Maintains a sliding window of the last 10 screenshot hashes.
     /// Returns `true` if the same hash appears 3+ times in the last 5
     /// screenshots, meaning the screen has not changed despite actions.
+    #[allow(dead_code)]
     pub(super) fn detect_visual_stuck_loop(&mut self, screenshot_hash: u64) -> bool {
         const MAX_HASHES: usize = 10;
         const WINDOW: usize = 5;
@@ -141,7 +142,7 @@ impl Agent {
 
         // Check the last WINDOW entries for repeated hashes
         let len = self.recent_screenshot_hashes.len();
-        let start = if len > WINDOW { len - WINDOW } else { 0 };
+        let start = len.saturating_sub(WINDOW);
         let window: Vec<u64> = self.recent_screenshot_hashes.iter().skip(start).copied().collect();
 
         let count = window.iter().filter(|&&h| h == screenshot_hash).count();
@@ -172,6 +173,7 @@ impl Agent {
     /// semantic state tracking, and recovery strategy suggestions.
     /// 
     /// Returns true if a stuck loop is detected and recorded.
+    #[allow(dead_code)]
     pub(super) fn detect_visual_stuck_loop_advanced(
         &mut self,
         screenshot_hash: &str,
@@ -211,6 +213,7 @@ impl Agent {
     }
 
     /// Handle visual stuck loop by building appropriate recovery hint
+    #[allow(dead_code)]
     pub(super) fn handle_visual_stuck_loop(&self, recovery: &RecoveryStrategy) -> String {
         let base_message = format!(
             "VISUAL STUCK LOOP DETECTED: The screen has not changed after repeated attempts. Recovery Strategy: {}",
@@ -333,12 +336,10 @@ impl Agent {
                 tool_name,
                 &error[..error.len().min(200)]
             );
-            return format!(
-                "ERROR RECOVERY: Rate limit or quota exceeded. \
+            return "ERROR RECOVERY: Rate limit or quota exceeded. \
                  Wait a moment, then continue with smaller requests. \
                  Reduce the scope of your next action — read smaller files, \
-                 make smaller edits, or use grep_search instead of reading entire files.",
-            );
+                 make smaller edits, or use grep_search instead of reading entire files.".to_string();
         }
 
         // Regression detection — tests that were passing now fail
@@ -347,15 +348,13 @@ impl Agent {
             && tool_name.contains("test")
         {
             warn!("Possible regression detected in test output");
-            return format!(
-                "ERROR RECOVERY: Tests are failing after your change. This may be a regression. \
+            return "ERROR RECOVERY: Tests are failing after your change. This may be a regression. \
                  Steps to fix:\
                  1. Read the test error output carefully\
                  2. Use git_diff to review your changes\
                  3. If your edit introduced the failure, use file_edit to fix it\
                  4. Run the tests again to verify\
-                 Do NOT add more tests — fix the source code that caused the regression.",
-            );
+                 Do NOT add more tests — fix the source code that caused the regression.".to_string();
         }
 
         // File not found errors - suggest alternatives
@@ -775,8 +774,7 @@ fn extract_mentioned_path(content: &str) -> Option<String> {
 }
 
 /// Extract a quoted string from content (single or double quotes, or backticks).
-#[allow(dead_code)]
-fn extract_quoted_string(content: &str) -> Option<String> {
+fn _extract_quoted_string(content: &str) -> Option<String> {
     for delim in ['"', '\'', '`'] {
         if let Some(start) = content.find(delim) {
             if let Some(end) = content[start + 1..].find(delim) {

@@ -149,10 +149,10 @@ impl LongTermMemory {
             }
         }
 
-        if !query.tags.is_empty() {
-            if !query.tags.iter().all(|t| entry.tags.contains(t)) {
-                return false;
-            }
+        if !query.tags.is_empty()
+            && !query.tags.iter().all(|t| entry.tags.contains(t))
+        {
+            return false;
         }
 
         if let Some(min_importance) = query.min_importance {

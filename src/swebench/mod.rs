@@ -596,7 +596,7 @@ mod tests {
         // All stub test functions return Ok(())
         assert!(report.all_passed);
         assert_eq!(report.results.len(), 6);
-        for (_, passed) in &report.results {
+        for passed in report.results.values() {
             assert!(passed);
         }
     }

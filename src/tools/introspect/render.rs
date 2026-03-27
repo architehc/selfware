@@ -21,7 +21,7 @@ pub enum OutputFormat {
 }
 
 impl OutputFormat {
-    pub fn from_str(s: &str) -> Result<Self> {
+    pub fn parse(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "tree" => Ok(Self::Tree),
             "flat" => Ok(Self::Flat),
@@ -39,7 +39,7 @@ pub struct OutputRenderer {
 impl OutputRenderer {
     /// Create a new renderer
     pub fn new(format: &str) -> Self {
-        let format = OutputFormat::from_str(format).unwrap_or(OutputFormat::Tree);
+        let format = OutputFormat::parse(format).unwrap_or(OutputFormat::Tree);
         Self { format }
     }
 

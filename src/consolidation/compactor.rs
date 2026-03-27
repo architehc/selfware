@@ -22,7 +22,6 @@ use super::temporal::{CompactedContent, ConsolidationReport, RecordImportance, T
 #[derive(Debug)]
 struct ItemGroup {
     items: Vec<CollectedItem>,
-    #[allow(dead_code)]
     primary_timestamp: chrono::DateTime<Utc>,
 }
 

@@ -63,7 +63,7 @@ mod tool_dispatch;
 pub mod tui_events;
 mod verification;
 
-use crate::errors::{is_confirmation_error, is_no_action_error, is_visual_assertion_error};
+use crate::errors::{is_confirmation_error, is_no_action_error};
 use context::ContextCompressor;
 use loop_control::{AgentLoop, AgentState};
 use planning::Planner;
@@ -289,7 +289,6 @@ pub struct Agent {
     /// Whether at least one checkpoint has been persisted in this session
     checkpoint_persisted_once: bool,
     /// Event emitter for real-time updates (TUI or other)
-    #[allow(dead_code)]
     events: Arc<dyn EventEmitter>,
     /// Edit history for undo support
     edit_history: EditHistory,
@@ -344,10 +343,12 @@ pub struct Agent {
     /// Last tool output for progressive disclosure via `/last`.
     last_tool_output: Option<last_tool::LastToolOutput>,
     /// Recent screenshot hashes for visual stuck-loop detection.
+    #[allow(dead_code)]
     recent_screenshot_hashes: std::collections::VecDeque<u64>,
     /// Whether a visual stuck loop was detected on the most recent screenshot.
     visual_stuck_loop_active: bool,
     /// Advanced visual state tracker for stuck-loop detection with perceptual hashing
+    #[allow(dead_code)]
     visual_state_tracker: crate::testing::visual_verification::VisualStateTracker,
     /// Hierarchical context map for token-aware codebase ingestion.
     context_map: context_map::ContextMap,
@@ -780,8 +781,7 @@ To call a tool, use this EXACT XML structure:
 
     /// Build LSP-enriched context for a file, helping smaller models understand code semantics.
     /// Returns a summary of symbols (functions, structs, etc.) with their signatures.
-    #[allow(dead_code)]
-    async fn build_lsp_context(&self, file_path: &str) -> Option<String> {
+    async fn _build_lsp_context(&self, file_path: &str) -> Option<String> {
         // Use the lsp_document_symbols tool to get file structure
         let args = serde_json::json!({
             "file": file_path

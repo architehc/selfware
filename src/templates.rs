@@ -47,8 +47,7 @@ const NODEJS_VITEST_CONFIG: &str = include_str!("../templates/nodejs/vitest.conf
 const WORKFLOW_RUST_QA: &str = include_str!("../templates/workflows/rust-qa.yml");
 const WORKFLOW_PYTHON_QA: &str = include_str!("../templates/workflows/python-qa.yml");
 const WORKFLOW_NODEJS_QA: &str = include_str!("../templates/workflows/nodejs-qa.yml");
-#[allow(dead_code)]
-const WORKFLOW_ORCHESTRATOR: &str =
+const _WORKFLOW_ORCHESTRATOR: &str =
     include_str!("../templates/workflows/selfware-qa-orchestrator.yml");
 
 const QA_SCHEMA_YAML: &str = include_str!("../selfware-qa-schema.yaml");

@@ -92,18 +92,13 @@ impl AgentLoop {
     }
 
     fn is_valid_transition(current: &AgentState, next: &AgentState) -> bool {
-        match (current, next) {
-            (AgentState::Planning, AgentState::Executing { .. })
+        matches!((current, next), (AgentState::Planning, AgentState::Executing { .. })
             | (AgentState::Planning, AgentState::ErrorRecovery { .. })
-            | (AgentState::Planning, AgentState::Failed { .. }) => true,
-            (AgentState::Executing { .. }, AgentState::Executing { .. })
+            | (AgentState::Planning, AgentState::Failed { .. }) | (AgentState::Executing { .. }, AgentState::Executing { .. })
             | (AgentState::Executing { .. }, AgentState::ErrorRecovery { .. })
             | (AgentState::Executing { .. }, AgentState::Completed)
-            | (AgentState::Executing { .. }, AgentState::Failed { .. }) => true,
-            (AgentState::ErrorRecovery { .. }, AgentState::Executing { .. })
-            | (AgentState::ErrorRecovery { .. }, AgentState::Failed { .. }) => true,
-            _ => false,
-        }
+            | (AgentState::Executing { .. }, AgentState::Failed { .. }) | (AgentState::ErrorRecovery { .. }, AgentState::Executing { .. })
+            | (AgentState::ErrorRecovery { .. }, AgentState::Failed { .. }))
     }
 
     pub fn transition_to(
