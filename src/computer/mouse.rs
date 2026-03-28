@@ -4,8 +4,9 @@
 //! On Linux, uses xdotool for actual input. On other platforms, stubs with logging.
 
 use anyhow::{bail, Result};
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(test)))]
 use anyhow::Context;
+#[cfg(target_os = "linux")]
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "macos")]
 use tracing::{debug, warn};

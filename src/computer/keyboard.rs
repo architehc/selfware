@@ -4,7 +4,8 @@
 //! On Linux, uses xdotool for actual input. On other platforms, stubs with logging.
 
 use anyhow::{bail, Result};
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(test)))]
+use anyhow::Context;
 
 use tracing::debug;
 

@@ -9,7 +9,7 @@
 #[cfg(feature = "integration")]
 mod visual_e2e {
     use selfware::computer::ScreenCapture;
-    use selfware::visual_verification::{VisualVerificationResult, VisualVerifier};
+    use selfware::visual_verification::VisualVerifier;
 
     /// PNG magic bytes: 0x89 P N G \r \n 0x1A \n
     const PNG_HEADER: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
