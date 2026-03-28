@@ -2340,12 +2340,12 @@ use std::time::Duration;
             "chat_template_kwargs".to_string(),
             serde_json::json!({ "enable_thinking": false }),
         );
-        extra.insert("backend_flag".to_string(), serde_json::json!(true));
+        extra.insert("top_p".to_string(), serde_json::json!(0.95));
 
         merge_extra_body(&mut body, Some(&extra), "default chat request").unwrap();
 
         assert_eq!(body["chat_template_kwargs"]["enable_thinking"], false);
-        assert_eq!(body["backend_flag"], true);
+        assert_eq!(body["top_p"], 0.95);
         assert_eq!(body["model"], "text-model");
     }
 
@@ -2400,6 +2400,46 @@ use std::time::Duration;
         assert!(err_text.contains("model profile chat request"));
         assert!(err_text.contains("thinking"));
         assert!(body.get("chat_template_kwargs").is_none());
+    }
+
+    #[test]
+    fn test_merge_extra_body_rejects_non_allowlisted_keys() {
+        let mut body = serde_json::json!({
+            "model": "test",
+            "messages": [],
+            "stream": false
+        });
+        let mut extra = serde_json::Map::new();
+        extra.insert("logprobs".to_string(), serde_json::json!(true));
+
+        let err = merge_extra_body(&mut body, Some(&extra), "test")
+            .expect_err("non-allowlisted keys must be rejected");
+        assert!(err.to_string().contains("disallowed key 'logprobs'"));
+    }
+
+    #[test]
+    fn test_merge_extra_body_rejects_logit_bias() {
+        let mut body = serde_json::json!({ "model": "test", "messages": [] });
+        let mut extra = serde_json::Map::new();
+        extra.insert(
+            "logit_bias".to_string(),
+            serde_json::json!({ "50256": -100 }),
+        );
+
+        let err = merge_extra_body(&mut body, Some(&extra), "test")
+            .expect_err("logit_bias must be rejected");
+        assert!(err.to_string().contains("disallowed key 'logit_bias'"));
+    }
+
+    #[test]
+    fn test_merge_extra_body_rejects_n_completions() {
+        let mut body = serde_json::json!({ "model": "test", "messages": [] });
+        let mut extra = serde_json::Map::new();
+        extra.insert("n".to_string(), serde_json::json!(5));
+
+        let err = merge_extra_body(&mut body, Some(&extra), "test")
+            .expect_err("n must be rejected");
+        assert!(err.to_string().contains("disallowed key 'n'"));
     }
 
     // ============================================

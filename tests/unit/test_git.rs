@@ -3,11 +3,21 @@
 //! Tests for GitStatus tool using temporary git repositories.
 //! Note: GitDiff and GitCommit use current directory and are tested in integration tests.
 
+use selfware::config::SafetyConfig;
 use selfware::tools::{git::GitStatus, Tool};
 use serde_json::json;
 use std::fs;
 use std::process::Command;
 use tempfile::TempDir;
+
+/// Create a safety config that allows temp directories for testing.
+fn permissive_safety_config() -> SafetyConfig {
+    SafetyConfig {
+        allowed_paths: vec!["**".to_string()],
+        denied_paths: vec![],
+        ..SafetyConfig::default()
+    }
+}
 
 /// Create a temporary git repository for testing
 fn create_test_repo() -> TempDir {
@@ -56,7 +66,7 @@ fn create_test_repo() -> TempDir {
 async fn test_git_status_clean_repo() {
     let dir = create_test_repo();
 
-    let tool = GitStatus;
+    let tool = GitStatus::with_safety_config(permissive_safety_config());
     let args = json!({
         "repo_path": dir.path().to_str().unwrap()
     });
@@ -80,7 +90,7 @@ async fn test_git_status_with_untracked() {
     // Verify file exists
     assert!(new_file.exists(), "New file should exist");
 
-    let tool = GitStatus;
+    let tool = GitStatus::with_safety_config(permissive_safety_config());
     let args = json!({
         "repo_path": dir.path().to_str().unwrap()
     });
@@ -107,7 +117,7 @@ async fn test_git_status_with_staged() {
         .output()
         .expect("Failed to stage file");
 
-    let tool = GitStatus;
+    let tool = GitStatus::with_safety_config(permissive_safety_config());
     let args = json!({
         "repo_path": dir.path().to_str().unwrap()
     });
@@ -123,7 +133,7 @@ async fn test_git_status_with_modified() {
     let dir = create_test_repo();
     fs::write(dir.path().join("README.md"), "# Modified").unwrap();
 
-    let tool = GitStatus;
+    let tool = GitStatus::with_safety_config(permissive_safety_config());
     let args = json!({
         "repo_path": dir.path().to_str().unwrap()
     });
@@ -138,7 +148,7 @@ async fn test_git_status_with_modified() {
 async fn test_git_status_shows_branch() {
     let dir = create_test_repo();
 
-    let tool = GitStatus;
+    let tool = GitStatus::with_safety_config(permissive_safety_config());
     let args = json!({
         "repo_path": dir.path().to_str().unwrap()
     });
@@ -158,7 +168,7 @@ async fn test_git_status_shows_branch() {
 async fn test_git_status_not_a_repo() {
     let dir = TempDir::new().unwrap(); // Not initialized as git repo
 
-    let tool = GitStatus;
+    let tool = GitStatus::with_safety_config(permissive_safety_config());
     let args = json!({
         "repo_path": dir.path().to_str().unwrap()
     });
@@ -171,7 +181,7 @@ async fn test_git_status_not_a_repo() {
 
 #[test]
 fn test_git_status_metadata() {
-    let tool = GitStatus;
+    let tool = GitStatus::with_safety_config(permissive_safety_config());
     assert_eq!(tool.name(), "git_status");
     assert!(!tool.description().is_empty());
     let schema = tool.schema();
@@ -195,7 +205,7 @@ async fn test_git_status_with_multiple_changes() {
     // Modify existing file
     fs::write(dir.path().join("README.md"), "modified").unwrap();
 
-    let tool = GitStatus;
+    let tool = GitStatus::with_safety_config(permissive_safety_config());
     let args = json!({
         "repo_path": dir.path().to_str().unwrap()
     });
@@ -217,7 +227,7 @@ async fn test_git_status_with_multiple_changes() {
 async fn test_git_status_default_path() {
     // Test with no repo_path (defaults to current directory)
     // This is the main project repo
-    let tool = GitStatus;
+    let tool = GitStatus::with_safety_config(permissive_safety_config());
     let args = json!({});
 
     let result = tool.execute(args).await.unwrap();
@@ -233,7 +243,7 @@ use selfware::tools::git::GitDiff;
 async fn test_git_diff_no_changes() {
     let dir = create_test_repo();
 
-    let tool = GitDiff;
+    let tool = GitDiff::with_safety_config(permissive_safety_config());
     let args = json!({
         "path": dir.path().to_str().unwrap()
     });
@@ -248,7 +258,7 @@ async fn test_git_diff_with_changes() {
     let dir = create_test_repo();
     fs::write(dir.path().join("README.md"), "# Changed content").unwrap();
 
-    let tool = GitDiff;
+    let tool = GitDiff::with_safety_config(permissive_safety_config());
     let args = json!({
         "path": dir.path().to_str().unwrap()
     });
@@ -270,7 +280,7 @@ async fn test_git_diff_staged() {
         .output()
         .expect("Failed to stage file");
 
-    let tool = GitDiff;
+    let tool = GitDiff::with_safety_config(permissive_safety_config());
     let args = json!({
         "path": dir.path().to_str().unwrap(),
         "staged": true
@@ -291,7 +301,7 @@ async fn test_git_diff_default_not_staged() {
         .output()
         .expect("Failed to stage file");
 
-    let tool = GitDiff;
+    let tool = GitDiff::with_safety_config(permissive_safety_config());
     // Without staged=true, should show working tree diff (empty since we staged)
     let args = json!({
         "path": dir.path().to_str().unwrap(),
@@ -342,7 +352,7 @@ use selfware::tools::git::GitCheckpoint;
 
 #[test]
 fn test_git_diff_metadata() {
-    let tool = GitDiff;
+    let tool = GitDiff::with_safety_config(permissive_safety_config());
     assert_eq!(tool.name(), "git_diff");
     assert!(tool.description().contains("diff"));
     let schema = tool.schema();
@@ -351,7 +361,7 @@ fn test_git_diff_metadata() {
 
 #[test]
 fn test_git_commit_metadata() {
-    let tool = GitCommit;
+    let tool = GitCommit::with_safety_config(permissive_safety_config());
     assert_eq!(tool.name(), "git_commit");
     assert!(tool.description().contains("commit"));
     let schema = tool.schema();
@@ -364,7 +374,7 @@ fn test_git_commit_metadata() {
 
 #[test]
 fn test_git_checkpoint_metadata() {
-    let tool = GitCheckpoint;
+    let tool = GitCheckpoint::with_safety_config(permissive_safety_config());
     assert_eq!(tool.name(), "git_checkpoint");
     assert!(tool.description().contains("checkpoint"));
     let schema = tool.schema();
@@ -381,7 +391,7 @@ async fn test_git_status_with_deleted_file() {
     // Delete the README.md file
     fs::remove_file(dir.path().join("README.md")).unwrap();
 
-    let tool = GitStatus;
+    let tool = GitStatus::with_safety_config(permissive_safety_config());
     let args = json!({
         "repo_path": dir.path().to_str().unwrap()
     });
@@ -407,7 +417,7 @@ async fn test_git_status_with_index_deleted() {
         .output()
         .expect("Failed to stage deletion");
 
-    let tool = GitStatus;
+    let tool = GitStatus::with_safety_config(permissive_safety_config());
     let args = json!({
         "repo_path": dir.path().to_str().unwrap()
     });
@@ -437,7 +447,7 @@ async fn test_git_status_staged_and_unstaged() {
     // Modify tracked file (unstaged)
     fs::write(dir.path().join("README.md"), "modified").unwrap();
 
-    let tool = GitStatus;
+    let tool = GitStatus::with_safety_config(permissive_safety_config());
     let args = json!({
         "repo_path": dir.path().to_str().unwrap()
     });
@@ -463,7 +473,7 @@ async fn test_git_status_staged_and_unstaged() {
 async fn test_git_diff_not_a_repo() {
     let dir = TempDir::new().unwrap(); // Not a git repo
 
-    let tool = GitDiff;
+    let tool = GitDiff::with_safety_config(permissive_safety_config());
     let args = json!({
         "path": dir.path().to_str().unwrap()
     });
@@ -500,7 +510,7 @@ async fn test_git_diff_multiple_files_changed() {
 
     fs::write(dir.path().join("file2.txt"), "modified file2").unwrap();
 
-    let tool = GitDiff;
+    let tool = GitDiff::with_safety_config(permissive_safety_config());
     let args = json!({
         "path": dir.path().to_str().unwrap(),
         "staged": false
@@ -527,7 +537,7 @@ async fn test_git_diff_staged_vs_unstaged() {
     // Create an unstaged change to a different file
     fs::write(dir.path().join("README.md"), "unstaged change").unwrap();
 
-    let tool = GitDiff;
+    let tool = GitDiff::with_safety_config(permissive_safety_config());
 
     // Check staged diff
     let staged_args = json!({
@@ -560,7 +570,7 @@ async fn test_git_commit_empty_files_array() {
     fs::write(dir.path().join("newfile.txt"), "content").unwrap();
 
     // Run commit tool with empty files (should stage all)
-    let tool = GitCommit;
+    let tool = GitCommit::with_safety_config(permissive_safety_config());
 
     // We can't actually test GitCommit easily because it operates on current dir
     // But we can test the schema
@@ -574,7 +584,7 @@ async fn test_git_commit_empty_files_array() {
 #[tokio::test]
 async fn test_git_checkpoint_creates_tagged_commit() {
     // Test the schema requirements
-    let tool = GitCheckpoint;
+    let tool = GitCheckpoint::with_safety_config(permissive_safety_config());
     let schema = tool.schema();
 
     let required = schema["required"].as_array().unwrap();
@@ -586,7 +596,7 @@ async fn test_git_checkpoint_creates_tagged_commit() {
 
 #[test]
 fn test_git_checkpoint_auto_branch_default() {
-    let tool = GitCheckpoint;
+    let tool = GitCheckpoint::with_safety_config(permissive_safety_config());
     let schema = tool.schema();
 
     let auto_branch = &schema["properties"]["auto_branch"];
@@ -598,10 +608,10 @@ fn test_git_checkpoint_auto_branch_default() {
 #[test]
 fn test_all_git_tools_have_object_schema() {
     let tools: Vec<Box<dyn Tool>> = vec![
-        Box::new(GitStatus),
-        Box::new(GitDiff),
-        Box::new(GitCommit),
-        Box::new(GitCheckpoint),
+        Box::new(GitStatus::with_safety_config(permissive_safety_config())),
+        Box::new(GitDiff::with_safety_config(permissive_safety_config())),
+        Box::new(GitCommit::with_safety_config(permissive_safety_config())),
+        Box::new(GitCheckpoint::with_safety_config(permissive_safety_config())),
     ];
 
     for tool in tools {
@@ -623,10 +633,10 @@ fn test_all_git_tools_have_object_schema() {
 #[test]
 fn test_git_tools_have_descriptions() {
     let tools: Vec<Box<dyn Tool>> = vec![
-        Box::new(GitStatus),
-        Box::new(GitDiff),
-        Box::new(GitCommit),
-        Box::new(GitCheckpoint),
+        Box::new(GitStatus::with_safety_config(permissive_safety_config())),
+        Box::new(GitDiff::with_safety_config(permissive_safety_config())),
+        Box::new(GitCommit::with_safety_config(permissive_safety_config())),
+        Box::new(GitCheckpoint::with_safety_config(permissive_safety_config())),
     ];
 
     for tool in tools {

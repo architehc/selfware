@@ -470,6 +470,9 @@ impl ApiClient {
     }
 
     /// Send a chat completion to an alternate model described by a `ModelProfile`.
+    ///
+    /// Applies the same message normalization and context budgeting as the main
+    /// `chat()` path so profile-based calls cannot silently diverge.
     pub async fn chat_with_profile(
         &self,
         messages: Vec<Message>,
@@ -477,23 +480,51 @@ impl ApiClient {
         thinking: ThinkingMode,
         profile: &crate::config::ModelProfile,
     ) -> Result<ChatResponse> {
-        let messages: Vec<Message> = if !profile.supports_vision() {
+        let mut messages: Vec<Message> = if !profile.supports_vision() {
             messages.iter().map(|m| m.strip_images()).collect()
         } else {
             messages
         };
 
+        // Apply the same message normalization as the main chat path.
+        maybe_prepend_disabled_thinking_instruction(&mut messages, &thinking);
+        canonicalize_message_order(&mut messages);
+
+        // Context budgeting: cap output tokens to what the profile can produce.
+        let message_tokens = estimate_messages_tokens(&messages);
+        let tool_tokens = tools
+            .as_ref()
+            .map(|t| estimate_tool_definitions_tokens(t))
+            .unwrap_or(0);
+        let input_tokens = message_tokens + tool_tokens;
+        let hard_limit = profile.context_length;
+        let min_output = 512_usize;
+
+        if input_tokens + min_output > hard_limit {
+            let msg = format!(
+                "input_tokens ({}) + min_output ({}) > context_length ({}) for profile '{}'. \
+                 Messages: {} tokens, Tools: {} tokens.",
+                input_tokens, min_output, hard_limit, profile.model,
+                message_tokens, tool_tokens
+            );
+            tracing::error!("CONTEXT OVERFLOW (profile): {}", msg);
+            return Err(ApiError::ContextOverflow(msg).into());
+        }
+
+        let available_for_output = hard_limit.saturating_sub(input_tokens);
+        let max_tokens = profile
+            .max_tokens
+            .min(available_for_output.max(min_output));
+
         let mut body = serde_json::json!({
             "model": profile.model,
             "messages": messages,
             "temperature": profile.temperature,
-            "max_tokens": profile.max_tokens,
+            "max_tokens": max_tokens,
             "stream": false,
         });
 
-        if let Some(ref tools) = tools {
-            body["tools"] = serde_json::json!(tools);
-        }
+        attach_tools_to_body(&mut body, &tools, false);
 
         if let ThinkingMode::Budget(tokens) = thinking {
             body["thinking"] = serde_json::json!({

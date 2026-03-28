@@ -180,24 +180,56 @@ pub struct ToolRegistry {
 
 impl ToolRegistry {
     /// Create a new registry pre-populated with all built-in tools.
+    /// Create a registry with default tools and no per-instance safety config.
+    ///
+    /// Tools created this way fall back to the process-global `SAFETY_CONFIG`
+    /// (set by `init_safety_config()` during agent startup). If the global has
+    /// not been initialized, they use `SafetyConfig::default()`.
+    ///
+    /// Prefer [`with_safety_config`] for production use so each tool carries
+    /// its own config and doesn't depend on ambient global state.
     pub fn new() -> Self {
+        Self::with_safety_config(None)
+    }
+
+    /// Create a registry with default tools using the given safety config.
+    ///
+    /// When `safety_config` is `Some`, all file/git tools are initialized with
+    /// per-instance configs instead of relying on the deprecated global fallback.
+    pub fn with_safety_config(safety_config: Option<&crate::config::SafetyConfig>) -> Self {
         let mut registry = Self {
             tools: HashMap::new(),
         };
 
         // File operations
-        registry.register(FileRead::new());
-        registry.register(FileWrite::new());
-        registry.register(FileEdit::new());
-        registry.register(FileDelete::new());
-        registry.register(DirectoryTree::new());
+        if let Some(cfg) = safety_config {
+            registry.register(FileRead::with_safety_config(cfg.clone()));
+            registry.register(FileWrite::with_safety_config(cfg.clone()));
+            registry.register(FileEdit::with_safety_config(cfg.clone()));
+            registry.register(FileDelete::with_safety_config(cfg.clone()));
+            registry.register(DirectoryTree::with_safety_config(cfg.clone()));
+        } else {
+            registry.register(FileRead::new());
+            registry.register(FileWrite::new());
+            registry.register(FileEdit::new());
+            registry.register(FileDelete::new());
+            registry.register(DirectoryTree::new());
+        }
 
         // Git operations
-        registry.register(GitStatus::new());
-        registry.register(GitDiff::new());
-        registry.register(GitCommit::new());
-        registry.register(GitPush::new());
-        registry.register(GitCheckpoint::new());
+        if let Some(cfg) = safety_config {
+            registry.register(GitStatus::with_safety_config(cfg.clone()));
+            registry.register(GitDiff::with_safety_config(cfg.clone()));
+            registry.register(GitCommit::with_safety_config(cfg.clone()));
+            registry.register(GitPush::with_safety_config(cfg.clone()));
+            registry.register(GitCheckpoint::with_safety_config(cfg.clone()));
+        } else {
+            registry.register(GitStatus::new());
+            registry.register(GitDiff::new());
+            registry.register(GitCommit::new());
+            registry.register(GitPush::new());
+            registry.register(GitCheckpoint::new());
+        }
 
         // Cargo/Build operations
         registry.register(CargoTest);

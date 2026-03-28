@@ -78,6 +78,7 @@ fn attach_tools_to_body(
     }
 }
 
+/// Keys that the request builder owns — extra_body must not override these.
 const RESERVED_EXTRA_BODY_KEYS: &[&str] = &[
     "model",
     "messages",
@@ -87,6 +88,36 @@ const RESERVED_EXTRA_BODY_KEYS: &[&str] = &[
     "max_tokens",
     "temperature",
     "thinking",
+];
+
+/// Allowlisted extra_body keys — safe sampling/backend parameters.
+///
+/// Any key not in this list AND not reserved is rejected. This prevents
+/// injection of fields like `logprobs`, `logit_bias`, `n`, `user`, or
+/// `response_format` that could leak data or alter behavior unexpectedly.
+const ALLOWED_EXTRA_BODY_KEYS: &[&str] = &[
+    // Sampling parameters
+    "top_p",
+    "top_k",
+    "min_p",
+    "repetition_penalty",
+    "frequency_penalty",
+    "presence_penalty",
+    "seed",
+    "stop",
+    // Backend-specific extensions (vLLM, SGLang)
+    "chat_template_kwargs",
+    "guided_json",
+    "guided_regex",
+    "guided_choice",
+    "skip_special_tokens",
+    "spaces_between_special_tokens",
+    "add_generation_prompt",
+    // Best-of / beam search (resource control, not data leakage)
+    "best_of",
+    "use_beam_search",
+    "length_penalty",
+    "early_stopping",
 ];
 
 fn merge_extra_body(
@@ -102,18 +133,24 @@ fn merge_extra_body(
         .as_object_mut()
         .context("request body must be a JSON object")?;
 
-    let reserved: Vec<&str> = extra_body
-        .keys()
-        .map(|key| key.as_str())
-        .filter(|key| RESERVED_EXTRA_BODY_KEYS.contains(key))
-        .collect();
-
-    if !reserved.is_empty() {
-        bail!(
-            "{} extra_body cannot override reserved top-level keys: {}",
-            context,
-            reserved.join(", ")
-        );
+    for key in extra_body.keys() {
+        let k = key.as_str();
+        if RESERVED_EXTRA_BODY_KEYS.contains(&k) {
+            bail!(
+                "{} extra_body cannot override reserved key: {}",
+                context, k
+            );
+        }
+        if !ALLOWED_EXTRA_BODY_KEYS.contains(&k) {
+            bail!(
+                "{} extra_body contains disallowed key '{}'. \
+                 Only sampling and backend-specific parameters are permitted. \
+                 Allowed keys: {}",
+                context,
+                k,
+                ALLOWED_EXTRA_BODY_KEYS.join(", ")
+            );
+        }
     }
 
     for (key, value) in extra_body {

@@ -137,11 +137,11 @@ pub use testing::visual_verification;
 // ============================================================================
 // New feature modules
 // ============================================================================
-pub mod batch;
+pub(crate) mod batch;
 pub mod browser;
 pub mod profiles;
 pub mod swebench;
-pub mod validation;
+pub(crate) mod validation;
 
 // ============================================================================
 // Utility modules

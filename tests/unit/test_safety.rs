@@ -69,12 +69,13 @@ mod basic_safety_tests {
     }
 
     #[test]
-    fn test_safety_allows_unknown_tool() {
+    fn test_safety_blocks_unknown_tool() {
         let config = SafetyConfig::default();
         let checker = SafetyChecker::new(&config);
 
+        // Unknown tools are blocked by default — must be registered in the checker dispatch
         let call = create_test_call("custom_tool", r#"{"any": "arg"}"#);
-        assert!(checker.check_tool_call(&call).is_ok());
+        assert!(checker.check_tool_call(&call).is_err());
     }
 }
 

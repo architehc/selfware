@@ -1,6 +1,8 @@
-//! Visual Validation Module
+//! Visual Validation Module (PLACEHOLDER — analysis returns fabricated scores)
 //!
 //! Provides screenshot capture and vision-based analysis for website validation
+
+#![allow(dead_code)]
 
 use anyhow::Result;
 use std::path::{Path, PathBuf};

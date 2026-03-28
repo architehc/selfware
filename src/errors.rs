@@ -120,6 +120,34 @@ pub enum ToolError {
 
     #[error("Tool execution timed out")]
     Timeout,
+
+    // File-specific errors
+    #[error("File not found: {path}")]
+    FileNotFound { path: String },
+
+    #[error("Path is a directory, not a file: {path}")]
+    PathIsDirectory { path: String },
+
+    #[error("File too large to read: {size} bytes (limit: {limit} bytes)")]
+    FileTooLarge { size: u64, limit: u64 },
+
+    #[error("Content too large to write: {size} bytes (limit: {limit} bytes)")]
+    WriteTooLarge { size: usize, limit: usize },
+
+    #[error("old_str not found in file")]
+    EditStringNotFound,
+
+    #[error("old_str matches {count} times, expected exactly 1")]
+    EditStringMultiple { count: usize },
+
+    #[error("old_str and new_str are identical — this is a no-op edit")]
+    EditNoOp,
+
+    #[error("Test mode only valid for test fixtures, got: {path}")]
+    TestModeInvalidPath { path: String },
+
+    #[error("Test fixture not found or not in allowed directory: {path}")]
+    TestFixtureNotFound { path: String },
 }
 
 #[derive(Error, Debug)]

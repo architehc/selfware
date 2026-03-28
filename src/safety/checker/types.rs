@@ -56,6 +56,11 @@ pub(crate) static DANGEROUS_COMMAND_PATTERNS: LazyLock<Vec<(Regex, &'static str)
                 Regex::new(r">\s*/dev/(sd|hd|nvme|vd|xvd)").expect("Invalid regex"),
                 "redirect to disk device",
             ),
+            // Redirect output to system directories (/etc, /usr, /boot, /sys, /var, /sbin)
+            (
+                Regex::new(r">\s*/(etc|usr|boot|sys|sbin|var)/").expect("Invalid regex"),
+                "redirect to system directory",
+            ),
             // chmod 777 on root
             (
                 Regex::new(r"chmod\s+(-[a-zA-Z]+\s+)*777\s+/+").expect("Invalid regex"),

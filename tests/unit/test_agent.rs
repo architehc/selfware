@@ -280,9 +280,8 @@ mod context_compressor_tests {
     fn test_should_compress_large_messages() {
         let compressor = ContextCompressor::new(1000);
         // Create messages that exceed threshold (85% of 1000 = 850 tokens)
-        // Each message gets ~50 base tokens + chars/4
-        // So 20 messages with 200 chars each = 20 * (50 + 50) = 2000 tokens
-        let messages = create_messages(20, 200);
+        // tiktoken is efficient for repetitive text, so use many long messages
+        let messages = create_messages(200, 2000);
         assert!(compressor.should_compress(&messages));
     }
 
@@ -346,12 +345,12 @@ mod context_compressor_tests {
         // Threshold is 85% of budget
         let compressor = ContextCompressor::new(10000);
 
-        // Create messages just under threshold
+        // Create messages just under threshold — few short messages
         let small = create_messages(5, 100);
         assert!(!compressor.should_compress(&small));
 
-        // Create messages over threshold
-        let large = create_messages(100, 500);
+        // Create messages well over threshold — many long messages
+        let large = create_messages(500, 2000);
         assert!(compressor.should_compress(&large));
     }
 }

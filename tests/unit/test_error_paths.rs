@@ -530,10 +530,8 @@ mod safety_checker_tests {
         let config = SafetyConfig::default();
         let checker = SafetyChecker::new(&config);
 
-        // Writing to /etc should be blocked
         let write_call = create_tool_call("shell_exec", r#"{"command": "echo 'x' > /etc/passwd"}"#);
-        let write_result = checker.check_tool_call(&write_call);
-        assert!(write_result.is_err());
+        assert!(checker.check_tool_call(&write_call).is_err());
     }
 
     #[test]
@@ -618,13 +616,14 @@ mod safety_checker_tests {
     }
 
     #[test]
-    fn test_safety_unknown_tool_allowed() {
+    fn test_safety_unknown_tool_blocked() {
         let config = SafetyConfig::default();
         let checker = SafetyChecker::new(&config);
 
+        // Unknown tools are blocked by default for safety
         let call = create_tool_call("unknown_tool", r#"{}"#);
         let result = checker.check_tool_call(&call);
-        assert!(result.is_ok());
+        assert!(result.is_err());
     }
 
     #[test]

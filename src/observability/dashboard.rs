@@ -1,4 +1,4 @@
-//! Observability Dashboard
+//! Observability Dashboard (EXPERIMENTAL — no call sites, candidate for removal)
 //!
 //! Analytics and telemetry:
 //! - Token usage tracking
@@ -8,6 +8,7 @@
 //! - CLI stats command
 
 #![allow(dead_code, unused_imports, unused_variables)]
+
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};

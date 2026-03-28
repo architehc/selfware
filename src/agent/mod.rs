@@ -356,13 +356,14 @@ impl Agent {
     pub async fn new(config: Config) -> Result<Self> {
         let cache_config = config.cache.clone();
         let client = ApiClient::new(&config)?;
-        let mut tools = ToolRegistry::new();
-        tools.register(crate::tools::fim::FileFimEdit::new(std::sync::Arc::new(
-            client.clone(),
-        )));
+        let mut tools = ToolRegistry::with_safety_config(Some(&config.safety));
+        tools.register(crate::tools::fim::FileFimEdit::with_safety_config(
+            std::sync::Arc::new(client.clone()),
+            config.safety.clone(),
+        ));
         let memory = AgentMemory::new(&config)?;
         let safety = SafetyChecker::new(&config.safety);
-        // Publish the user-loaded safety config so file tools honour allowed_paths etc.
+        // Keep global init as fallback for tools not yet migrated to per-instance config.
         init_safety_config(&config.safety);
         let loop_control = AgentLoop::new(config.agent.max_iterations);
         let compressor = ContextCompressor::with_content_ratio(

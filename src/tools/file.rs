@@ -1,5 +1,6 @@
 use super::Tool;
 use crate::config::SafetyConfig;
+use crate::errors::{ToolError, SelfwareError};
 use crate::safety::path_validator::PathValidator;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -195,11 +196,11 @@ impl Tool for FileRead {
         // Check file size before reading to prevent OOM on huge files
         if let Ok(metadata) = tokio::fs::metadata(&path).await {
             if metadata.len() > MAX_READ_SIZE {
-                anyhow::bail!(
-                    "File too large to read: {} bytes (limit: {} bytes)",
-                    metadata.len(),
-                    MAX_READ_SIZE
-                );
+                return Err(ToolError::FileTooLarge {
+                    size: metadata.len(),
+                    limit: MAX_READ_SIZE,
+                }
+                .into());
             }
         }
 
@@ -264,18 +265,18 @@ impl Tool for FileWrite {
 
         // Check write size limit to prevent accidentally writing huge files
         if args.content.len() > MAX_WRITE_SIZE {
-            anyhow::bail!(
-                "Content too large to write: {} bytes (limit: {} bytes)",
-                args.content.len(),
-                MAX_WRITE_SIZE
-            );
+            return Err(ToolError::WriteTooLarge {
+                size: args.content.len(),
+                limit: MAX_WRITE_SIZE,
+            }
+            .into());
         }
 
         // Detect no-op writes (content identical to existing file)
         if path.exists() {
             if let Ok(existing) = tokio::fs::read_to_string(&path).await {
                 if existing == args.content {
-                    anyhow::bail!("file_write is a no-op \u{2014} the file already has this exact content. You need to change the content to make an actual modification.");
+                    return Err(ToolError::EditNoOp.into());
                 }
             }
         }
@@ -334,13 +335,13 @@ impl Tool for FileEdit {
         // Check for exactly one match
         let matches = content.matches(&args.old_str).count();
         if matches == 0 {
-            anyhow::bail!("old_str not found in file");
+            return Err(ToolError::EditStringNotFound.into());
         }
         if matches > 1 {
-            anyhow::bail!("old_str matches {} times, expected exactly 1", matches);
+            return Err(ToolError::EditStringMultiple { count: matches }.into());
         }
         if args.old_str == args.new_str {
-            anyhow::bail!("old_str and new_str are identical \u{2014} this is a no-op edit. You must provide a different new_str to make an actual change.");
+            return Err(ToolError::EditNoOp.into());
         }
 
         let new_content = content.replace(&args.old_str, &args.new_str);
@@ -389,10 +390,10 @@ impl Tool for FileDelete {
         let path = PathBuf::from(&args.path);
 
         if !path.exists() {
-            anyhow::bail!("File not found: {}", args.path);
+            return Err(ToolError::FileNotFound { path: args.path.clone() }.into());
         }
         if path.is_dir() {
-            anyhow::bail!("Path is a directory, not a file: {}", args.path);
+            return Err(ToolError::PathIsDirectory { path: args.path.clone() }.into());
         }
 
         tokio::fs::remove_file(&path)

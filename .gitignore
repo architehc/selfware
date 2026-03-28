@@ -30,8 +30,37 @@ Thumbs.db
 /system_tests/projecte2e/work/
 /system_tests/projecte2e/reports/
 
+# Benchmark and test result directories
+/bench_results/
+/benchmark_results_*/
+/benchmark_suite_*/
+/parallel_results/
+/parallel_dev_tests/
+/gpu_max_test/
+/swebench_eval/
+/swebench_122b/
+/hybrid_demo_results_*/
+/new_template_results_*/
+/comparison_results/
+/vlm_results/
+/sab_results/
+/multilang_results/
+/test_results_*/
+/test_single_*/
+/27b_longcontext_results_*/
+/benchmark_final_report_*.md
+
+# Screenshots captured during testing
+/screenshots/
+
+# Evolution worktrees
+/.worktrees/
+
 # Claude Code worktrees
 .claude/worktrees/
+
+# Backup files
+*.bak
 
 # Local config overrides (keep examples)
 selfware-local.toml

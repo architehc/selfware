@@ -1,6 +1,8 @@
-//! Batch Mode - Execute multiple tasks in parallel
+//! Batch Mode - Execute multiple tasks in parallel (PLACEHOLDER — executor is stubbed)
 //!
 //! Provides true headless parallel execution for maximum throughput
+
+#![allow(dead_code)]
 
 use anyhow::Result;
 use std::path::PathBuf;

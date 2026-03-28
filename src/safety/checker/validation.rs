@@ -210,7 +210,8 @@ impl SafetyChecker {
             | "context_recommend"
             | "context_load_skeleton"
             | "context_bulk_read"
-            | "context_summary" => {
+            | "context_summary"
+            | "code_introspect" => {
                 // Context tools interact with internal state only
             }
             "computer_mouse" | "computer_keyboard" => {

@@ -1,4 +1,4 @@
-//! Code Review Assistant
+//! Code Review Assistant (EXPERIMENTAL — no call sites, candidate for removal)
 //!
 //! Comprehensive code review capabilities including:
 //! - PR/diff analysis
@@ -8,6 +8,7 @@
 //! - Suggestion generation
 
 #![allow(dead_code, unused_imports, unused_variables)]
+
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

@@ -395,7 +395,7 @@ async fn grep_search_invalid_args() {
 
 #[tokio::test]
 async fn git_status_schema_contract() {
-    let tool = GitStatus;
+    let tool = GitStatus::default();
     assert_metadata(&tool);
     assert_valid_schema(&tool.schema(), tool.name());
 }
@@ -403,7 +403,7 @@ async fn git_status_schema_contract() {
 #[tokio::test]
 async fn git_status_valid_execution() {
     // Run against the selfware repo itself
-    let tool = GitStatus;
+    let tool = GitStatus::default();
     let result = tool.execute(json!({"repo_path": "."})).await;
     assert!(
         result.is_ok(),
@@ -422,7 +422,7 @@ async fn git_status_valid_execution() {
 #[tokio::test]
 async fn git_status_invalid_repo() {
     let dir = TempDir::new().expect("create temp dir");
-    let tool = GitStatus;
+    let tool = GitStatus::default();
     let result = tool
         .execute(json!({"repo_path": dir.path().to_str().unwrap()}))
         .await;
@@ -447,7 +447,7 @@ async fn all_core_tools_schema_has_required_subset_of_properties() {
         Box::new(DirectoryTree::new()),
         Box::new(ShellExec),
         Box::new(GrepSearch),
-        Box::new(GitStatus),
+        Box::new(GitStatus::default()),
     ];
 
     for tool in &tools {

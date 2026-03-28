@@ -32,21 +32,29 @@ fn test_compression_threshold_large() {
 #[test]
 fn test_estimate_tokens_text() {
     let compressor = ContextCompressor::new(10000);
-    let messages = vec![Message::user("hello world")]; // 11 chars / 4 + 50 = 52 tokens
+    let messages = vec![Message::user("hello world")];
 
     let tokens = compressor.estimate_tokens(&messages);
-    assert!(tokens > 50 && tokens < 100);
+    // tiktoken: "hello world" ~ 2 tokens + MESSAGE_OVERHEAD_TOKENS (4)
+    assert!(
+        tokens > 0 && tokens < 50,
+        "Expected small token count for 'hello world', got {}",
+        tokens
+    );
 }
 
 #[test]
 fn test_estimate_tokens_code() {
     let compressor = ContextCompressor::new(10000);
-    // Code uses factor 3 (contains { or ;)
-    let messages = vec![Message::user("fn main() { println!(); }")]; // ~26 chars
+    let messages = vec![Message::user("fn main() { println!(); }")];
 
     let tokens = compressor.estimate_tokens(&messages);
-    // 26/3 + 50 = ~58 tokens
-    assert!(tokens > 55 && tokens < 70);
+    // tiktoken: ~10 tokens + MESSAGE_OVERHEAD_TOKENS (4)
+    assert!(
+        tokens > 0 && tokens < 50,
+        "Expected small token count for a short code snippet, got {}",
+        tokens
+    );
 }
 
 #[test]
