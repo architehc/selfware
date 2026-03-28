@@ -572,9 +572,10 @@ mod tests {
 
     #[test]
     fn test_parse_rust_function() {
+        // Sample Rust input for parser coverage — the body content is irrelevant.
         let code = r#"
 pub async fn process_data(input: String) -> Result<(), Error> {
-    todo!()
+    Ok(())
 }
 "#;
         let parsed = parse_rust(code);
