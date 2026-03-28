@@ -27,7 +27,7 @@ use crate::ui::components::{
 };
 use crate::ui::style::{Glyphs, SelfwareStyle};
 use crate::ui::theme::{self, ThemeId};
-use crate::workflows::{VarValue, WorkflowExecutor};
+use crate::workflows::{LlmCallOutput, LlmTokenUsage, VarValue, WorkflowExecutor};
 
 use args::*;
 
@@ -63,6 +63,150 @@ fn parse_workflow_inputs(values: &[String]) -> Result<std::collections::HashMap<
         }
     }
     Ok(inputs)
+}
+
+fn workflow_llm_output_from_response(response: crate::api::ChatResponse) -> Result<LlmCallOutput> {
+    let usage = LlmTokenUsage {
+        prompt_tokens: response.usage.prompt_tokens as u64,
+        completion_tokens: response.usage.completion_tokens as u64,
+        total_tokens: response.usage.total_tokens as u64,
+    };
+    let estimated_cost_usd = estimate_workflow_llm_cost_usd(
+        response.usage.prompt_tokens,
+        response.usage.completion_tokens,
+    );
+    let model = response.model.clone();
+
+    let choice = response
+        .choices
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("model returned no choices"))?;
+    let text = choice.message.content.text_all();
+    let content = if !text.trim().is_empty() {
+        text
+    } else if let Some(reasoning) = choice.reasoning_content.or(choice.message.reasoning_content) {
+        reasoning
+    } else {
+        anyhow::bail!("model returned empty content");
+    };
+
+    Ok(LlmCallOutput::text(content)
+        .with_model(model)
+        .with_usage(usage)
+        .with_estimated_cost(estimated_cost_usd))
+}
+
+fn print_workflow_telemetry(result: &crate::workflows::WorkflowResult) {
+    if result.telemetry.llm_calls == 0 {
+        return;
+    }
+
+    println!("\n   {} Telemetry:", Glyphs::journal());
+    println!(
+        "      LLM calls: {}",
+        result.telemetry.llm_calls.to_string().garden_healthy()
+    );
+    println!(
+        "      Tokens: {} in / {} out / {} total",
+        result.telemetry.prompt_tokens,
+        result.telemetry.completion_tokens,
+        result.telemetry.total_tokens
+    );
+    println!(
+        "      Estimated cost: ~${:.4}",
+        result.telemetry.estimated_cost_usd
+    );
+    println!(
+        "      LLM latency: {}ms",
+        result.telemetry.llm_latency_ms
+    );
+}
+
+fn estimate_workflow_llm_cost_usd(prompt_tokens: usize, completion_tokens: usize) -> f64 {
+    let prompt_cost_per_1m = 3.0;
+    let completion_cost_per_1m = 15.0;
+
+    (prompt_tokens as f64 / 1_000_000.0 * prompt_cost_per_1m)
+        + (completion_tokens as f64 / 1_000_000.0 * completion_cost_per_1m)
+}
+
+fn workflow_agent_label(prompt: &str) -> String {
+    prompt
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("SWL agent: "))
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .unwrap_or("workflow_llm")
+        .to_string()
+}
+
+fn build_workflow_llm_handler(
+    client: std::sync::Arc<crate::api::ApiClient>,
+    model_label: String,
+) -> crate::workflows::LlmHandler {
+    Box::new(move |prompt, ctx| {
+        let client = std::sync::Arc::clone(&client);
+        let model_label = model_label.clone();
+        let agent_label = workflow_agent_label(prompt);
+        let request = if ctx.is_empty() {
+            prompt.to_string()
+        } else {
+            format!("{prompt}\n\nContext:\n{}", ctx.join("\n"))
+        };
+
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move {
+                crate::observability::telemetry::increment_api_requests();
+
+                let started = std::time::Instant::now();
+                let response = client
+                    .chat(
+                        vec![crate::api::Message::user(request)],
+                        None,
+                        crate::api::ThinkingMode::Disabled,
+                    )
+                    .await;
+                let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+                match response {
+                    Ok(response) => {
+                        let prompt_tokens = response.usage.prompt_tokens as u64;
+                        let completion_tokens = response.usage.completion_tokens as u64;
+                        let total_tokens = response.usage.total_tokens as u64;
+                        let estimated_cost_usd = estimate_workflow_llm_cost_usd(
+                            response.usage.prompt_tokens,
+                            response.usage.completion_tokens,
+                        );
+
+                        tracing::info!(
+                            model = %model_label,
+                            agent = %agent_label,
+                            latency_ms,
+                            prompt_tokens,
+                            completion_tokens,
+                            total_tokens,
+                            estimated_cost_usd,
+                            "workflow llm request completed"
+                        );
+                        workflow_llm_output_from_response(response)
+                    }
+                    Err(err) => {
+                        crate::observability::telemetry::increment_api_errors();
+                        tracing::warn!(
+                            model = %model_label,
+                            agent = %agent_label,
+                            latency_ms,
+                            error = %err,
+                            "workflow llm request failed"
+                        );
+                        Err(err.into())
+                    }
+                }
+            })
+        })
+    })
 }
 
 /// Resolve the config file path relative to the original working directory.
@@ -1279,49 +1423,10 @@ async fn handle_command(
 
                                 let client =
                                     std::sync::Arc::new(crate::api::ApiClient::new(&config)?);
-                                executor =
-                                    executor.with_llm_handler(Box::new(move |prompt, ctx| {
-                                        let client = std::sync::Arc::clone(&client);
-                                        let request = if ctx.is_empty() {
-                                            prompt.to_string()
-                                        } else {
-                                            format!("{prompt}\n\nContext:\n{}", ctx.join("\n"))
-                                        };
-
-                                        tokio::task::block_in_place(|| {
-                                            tokio::runtime::Handle::current().block_on(async move {
-                                                let response = client
-                                                    .chat(
-                                                        vec![crate::api::Message::user(request)],
-                                                        None,
-                                                        crate::api::ThinkingMode::Disabled,
-                                                    )
-                                                    .await?;
-
-                                                let choice = response
-                                                    .choices
-                                                    .into_iter()
-                                                    .next()
-                                                    .ok_or_else(|| {
-                                                        anyhow::anyhow!("model returned no choices")
-                                                    })?;
-                                                let text = choice.message.content.text_all();
-
-                                                if !text.trim().is_empty() {
-                                                    Ok(text)
-                                                } else if let Some(reasoning) = choice
-                                                    .reasoning_content
-                                                    .or(choice.message.reasoning_content)
-                                                {
-                                                    Ok(reasoning)
-                                                } else {
-                                                    Err(anyhow::anyhow!(
-                                                        "model returned empty content"
-                                                    ))
-                                                }
-                                            })
-                                        })
-                                    }));
+                                executor = executor.with_llm_handler(build_workflow_llm_handler(
+                                    client,
+                                    config.model.clone(),
+                                ));
 
                                 println!(
                                     "   {} Executing workflow: {}\n",
@@ -1357,6 +1462,7 @@ async fn handle_command(
                                     }
                                 }
 
+                                print_workflow_telemetry(&result);
                                 if !result.outputs.is_empty() {
                                     println!("\n   {} Outputs:", Glyphs::journal());
                                     for (name, value) in &result.outputs {
@@ -1398,49 +1504,10 @@ async fn handle_command(
                             if !dry_run {
                                 let client =
                                     std::sync::Arc::new(crate::api::ApiClient::new(&config)?);
-                                executor =
-                                    executor.with_llm_handler(Box::new(move |prompt, ctx| {
-                                        let client = std::sync::Arc::clone(&client);
-                                        let request = if ctx.is_empty() {
-                                            prompt.to_string()
-                                        } else {
-                                            format!("{prompt}\n\nContext:\n{}", ctx.join("\n"))
-                                        };
-
-                                        tokio::task::block_in_place(|| {
-                                            tokio::runtime::Handle::current().block_on(async move {
-                                                let response = client
-                                                    .chat(
-                                                        vec![crate::api::Message::user(request)],
-                                                        None,
-                                                        crate::api::ThinkingMode::Disabled,
-                                                    )
-                                                    .await?;
-
-                                                let choice = response
-                                                    .choices
-                                                    .into_iter()
-                                                    .next()
-                                                    .ok_or_else(|| {
-                                                        anyhow::anyhow!("model returned no choices")
-                                                    })?;
-                                                let text = choice.message.content.text_all();
-
-                                                if !text.trim().is_empty() {
-                                                    Ok(text)
-                                                } else if let Some(reasoning) = choice
-                                                    .reasoning_content
-                                                    .or(choice.message.reasoning_content)
-                                                {
-                                                    Ok(reasoning)
-                                                } else {
-                                                    Err(anyhow::anyhow!(
-                                                        "model returned empty content"
-                                                    ))
-                                                }
-                                            })
-                                        })
-                                    }));
+                                executor = executor.with_llm_handler(build_workflow_llm_handler(
+                                    client,
+                                    config.model.clone(),
+                                ));
                             }
 
                             println!(
@@ -1487,6 +1554,7 @@ async fn handle_command(
                                 }
                             }
 
+                            print_workflow_telemetry(&result);
                             if !result.outputs.is_empty() {
                                 println!("\n   {} Outputs:", Glyphs::journal());
                                 for (name, value) in &result.outputs {

@@ -24,6 +24,9 @@
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use crate::observability::telemetry::{
+    add_tokens_processed, record_workflow_llm_call, record_workflow_run,
+};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -334,6 +337,75 @@ pub struct StepResult {
     pub retry_count: u32,
 }
 
+/// Token usage reported for a workflow LLM call.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LlmTokenUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+}
+
+/// Rich LLM step output used by the workflow executor.
+#[derive(Debug, Clone, Default)]
+pub struct LlmCallOutput {
+    pub content: String,
+    pub usage: Option<LlmTokenUsage>,
+    pub model: Option<String>,
+    pub estimated_cost_usd: Option<f64>,
+}
+
+impl LlmCallOutput {
+    pub fn text(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            usage: None,
+            model: None,
+            estimated_cost_usd: None,
+        }
+    }
+
+    pub fn with_usage(mut self, usage: LlmTokenUsage) -> Self {
+        self.usage = Some(usage);
+        self
+    }
+
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    pub fn with_estimated_cost(mut self, estimated_cost_usd: f64) -> Self {
+        self.estimated_cost_usd = Some(estimated_cost_usd);
+        self
+    }
+}
+
+impl From<String> for LlmCallOutput {
+    fn from(content: String) -> Self {
+        Self::text(content)
+    }
+}
+
+impl From<&str> for LlmCallOutput {
+    fn from(content: &str) -> Self {
+        Self::text(content)
+    }
+}
+
+/// Aggregated telemetry for a workflow execution.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct WorkflowTelemetry {
+    pub llm_calls: u64,
+    pub llm_latency_ms: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    pub estimated_cost_usd: f64,
+    pub completed_steps: u64,
+    pub failed_steps: u64,
+    pub skipped_steps: u64,
+}
+
 /// Maximum recursion depth for nested step execution
 const MAX_RECURSION_DEPTH: usize = 10;
 
@@ -343,6 +415,8 @@ const MAX_WORKFLOW_LOG_ENTRIES: usize = 1000;
 /// Workflow execution context
 #[derive(Debug, Clone)]
 pub struct WorkflowContext {
+    /// Workflow name for telemetry labeling
+    pub workflow_name: Option<String>,
     /// Variables
     pub variables: HashMap<String, VarValue>,
     /// Working directory
@@ -365,6 +439,8 @@ pub struct WorkflowContext {
     pub control_flow_managed_steps: std::collections::HashSet<String>,
     /// Workflow call stack for cycle detection in sub-workflows
     pub workflow_call_stack: Vec<String>,
+    /// Aggregated workflow telemetry
+    pub telemetry: WorkflowTelemetry,
 }
 
 /// Log entry
@@ -380,6 +456,7 @@ impl WorkflowContext {
     /// Create new context
     pub fn new(working_dir: impl Into<PathBuf>) -> Self {
         Self {
+            workflow_name: None,
             variables: HashMap::new(),
             working_dir: working_dir.into(),
             step_results: HashMap::new(),
@@ -391,6 +468,7 @@ impl WorkflowContext {
             executing_steps: Vec::new(),
             control_flow_managed_steps: std::collections::HashSet::new(),
             workflow_call_stack: Vec::new(),
+            telemetry: WorkflowTelemetry::default(),
         }
     }
 
@@ -644,13 +722,64 @@ impl WorkflowContext {
             .map(|s| s.elapsed().as_millis() as u64)
             .unwrap_or(0)
     }
+
+    fn record_llm_call(&mut self, output: &LlmCallOutput, latency_ms: u64) {
+        self.telemetry.llm_calls += 1;
+        self.telemetry.llm_latency_ms += latency_ms;
+
+        let usage = output.usage.unwrap_or_default();
+        self.telemetry.prompt_tokens += usage.prompt_tokens;
+        self.telemetry.completion_tokens += usage.completion_tokens;
+        self.telemetry.total_tokens += usage.total_tokens;
+        self.telemetry.estimated_cost_usd += output.estimated_cost_usd.unwrap_or_else(|| {
+            estimate_llm_cost_usd(usage.prompt_tokens, usage.completion_tokens)
+        });
+
+        if usage.total_tokens > 0 {
+            add_tokens_processed(usage.total_tokens);
+        }
+
+        record_workflow_llm_call(
+            self.workflow_name.as_deref().unwrap_or("unknown"),
+            output.model.as_deref().unwrap_or("unknown"),
+            latency_ms,
+            usage.prompt_tokens,
+            usage.completion_tokens,
+            usage.total_tokens,
+            output.estimated_cost_usd.unwrap_or_else(|| {
+                estimate_llm_cost_usd(usage.prompt_tokens, usage.completion_tokens)
+            }),
+        );
+    }
+
+    fn finalize_telemetry(&mut self) {
+        self.telemetry.completed_steps = self
+            .step_results
+            .values()
+            .filter(|result| result.status == StepStatus::Completed)
+            .count() as u64;
+        self.telemetry.failed_steps = self
+            .step_results
+            .values()
+            .filter(|result| result.status == StepStatus::Failed)
+            .count() as u64;
+        self.telemetry.skipped_steps = self
+            .step_results
+            .values()
+            .filter(|result| result.status == StepStatus::Skipped)
+            .count() as u64;
+    }
 }
 
 /// Type alias for tool handler function
 pub type ToolHandler = Box<dyn Fn(&str, &HashMap<String, String>) -> Result<String> + Send + Sync>;
 
 /// Type alias for LLM handler function
-pub type LlmHandler = Box<dyn Fn(&str, &[String]) -> Result<String> + Send + Sync>;
+pub type LlmHandler = Box<dyn Fn(&str, &[String]) -> Result<LlmCallOutput> + Send + Sync>;
+
+fn estimate_llm_cost_usd(prompt_tokens: u64, completion_tokens: u64) -> f64 {
+    (prompt_tokens as f64 * 3.0 / 1_000_000.0) + (completion_tokens as f64 * 15.0 / 1_000_000.0)
+}
 
 /// Workflow executor
 pub struct WorkflowExecutor {
@@ -719,8 +848,14 @@ impl WorkflowExecutor {
     }
 
     /// Set LLM handler for executing LLM steps
-    pub fn with_llm_handler(mut self, handler: LlmHandler) -> Self {
-        self.llm_handler = Some(handler);
+    pub fn with_llm_handler<F, R>(mut self, handler: F) -> Self
+    where
+        F: Fn(&str, &[String]) -> Result<R> + Send + Sync + 'static,
+        R: Into<LlmCallOutput>,
+    {
+        self.llm_handler = Some(Box::new(move |prompt, context| {
+            handler(prompt, context).map(Into::into)
+        }));
         self
     }
 
@@ -806,6 +941,7 @@ impl WorkflowExecutor {
             .clone();
 
         let mut context = WorkflowContext::new(working_dir.clone());
+        context.workflow_name = Some(workflow.name.clone());
         context.started_at = Some(Instant::now());
         context.status = WorkflowStatus::Running;
 
@@ -949,6 +1085,25 @@ impl WorkflowExecutor {
         }
 
         let duration_ms = context.elapsed_ms();
+        context.finalize_telemetry();
+        let telemetry = context.telemetry.clone();
+        record_workflow_run(
+            &workflow.name,
+            match context.status {
+                WorkflowStatus::Completed => "completed",
+                WorkflowStatus::Failed => "failed",
+                WorkflowStatus::Paused => "paused",
+                WorkflowStatus::Cancelled => "cancelled",
+                WorkflowStatus::Running => "running",
+                WorkflowStatus::Pending => "pending",
+            },
+            duration_ms,
+            telemetry.llm_calls,
+            telemetry.prompt_tokens,
+            telemetry.completion_tokens,
+            telemetry.total_tokens,
+            telemetry.estimated_cost_usd,
+        );
 
         Ok(WorkflowResult {
             workflow_name: workflow.name,
@@ -957,6 +1112,7 @@ impl WorkflowExecutor {
             step_results: context.step_results,
             logs: context.logs,
             duration_ms,
+            telemetry,
         })
     }
 
@@ -1408,8 +1564,10 @@ impl WorkflowExecutor {
                         format!("Prompting LLM: {}", resolved_prompt),
                         None,
                     );
+                    let llm_start = Instant::now();
                     let result = handler(&resolved_prompt, &resolved_context)?;
-                    Ok(VarValue::String(result))
+                    context.record_llm_call(&result, llm_start.elapsed().as_millis() as u64);
+                    Ok(VarValue::String(result.content))
                 } else {
                     Err(anyhow!(
                         "LLM step requires an llm_handler - use with_llm_handler() to configure"
@@ -1710,6 +1868,8 @@ pub struct WorkflowResult {
     pub logs: VecDeque<LogEntry>,
     /// Total duration in milliseconds
     pub duration_ms: u64,
+    /// Aggregated workflow telemetry
+    pub telemetry: WorkflowTelemetry,
 }
 
 impl WorkflowResult {

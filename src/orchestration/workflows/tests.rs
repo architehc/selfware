@@ -221,6 +221,7 @@ fn test_workflow_result_helpers() {
         step_results: HashMap::new(),
         logs: VecDeque::new(),
         duration_ms: 1000,
+        telemetry: WorkflowTelemetry::default(),
     };
 
     assert!(result.is_success());
@@ -636,6 +637,7 @@ fn test_workflow_result_is_success() {
         step_results: HashMap::new(),
         logs: VecDeque::new(),
         duration_ms: 1000,
+        telemetry: WorkflowTelemetry::default(),
     };
 
     assert!(result.is_success());
@@ -650,6 +652,7 @@ fn test_workflow_result_is_not_success() {
         step_results: HashMap::new(),
         logs: VecDeque::new(),
         duration_ms: 1000,
+        telemetry: WorkflowTelemetry::default(),
     };
 
     assert!(!result.is_success());
@@ -667,6 +670,7 @@ fn test_workflow_result_get_output() {
         step_results: HashMap::new(),
         logs: VecDeque::new(),
         duration_ms: 0,
+        telemetry: WorkflowTelemetry::default(),
     };
 
     assert!(result.get_output("key").is_some());
@@ -706,6 +710,7 @@ fn test_workflow_result_failed_steps() {
         step_results,
         logs: VecDeque::new(),
         duration_ms: 150,
+        telemetry: WorkflowTelemetry::default(),
     };
 
     let failed = result.failed_steps();
@@ -2524,9 +2529,9 @@ async fn test_llm_step_live_with_handler() {
     let mut ctx = WorkflowContext::new("/tmp");
     ctx.set_var("topic", "rust");
     let executor =
-        WorkflowExecutor::new().with_llm_handler(Box::new(|prompt: &str, context: &[String]| {
+        WorkflowExecutor::new().with_llm_handler(|prompt: &str, context: &[String]| {
             Ok(format!("LLM: {} ctx={:?}", prompt, context))
-        }));
+        });
     let step_type = StepType::Llm {
         prompt: "Explain ${topic}".into(),
         context: vec!["file.rs".into()],
@@ -3630,6 +3635,7 @@ fn test_workflow_result_multiple_failed_steps() {
         step_results,
         logs: VecDeque::new(),
         duration_ms: 60,
+        telemetry: WorkflowTelemetry::default(),
     };
     let failed = result.failed_steps();
     assert_eq!(failed.len(), 2);
@@ -3641,7 +3647,7 @@ fn test_workflow_result_multiple_failed_steps() {
 fn test_executor_builder_methods() {
     let executor = WorkflowExecutor::new()
         .with_tool_handler(Box::new(|_name, _args| Ok("ok".to_string())))
-        .with_llm_handler(Box::new(|_prompt, _ctx| Ok("ok".to_string())));
+        .with_llm_handler(|_prompt: &str, _ctx: &[String]| Ok("ok".to_string()));
     // Just verify it compiles and the handlers are set
     assert!(executor.tool_handler.is_some());
     assert!(executor.llm_handler.is_some());
@@ -4592,9 +4598,9 @@ steps:
       - "programming"
 "#;
     let mut executor =
-        WorkflowExecutor::new().with_llm_handler(Box::new(|prompt: &str, _ctx: &[String]| {
+        WorkflowExecutor::new().with_llm_handler(|prompt: &str, _ctx: &[String]| {
             Ok(format!("Answer to: {}", prompt))
-        }));
+        });
     executor.load_yaml(yaml).unwrap();
 
     let result = executor
@@ -4630,9 +4636,9 @@ steps:
 "#;
 
     let mut executor =
-        WorkflowExecutor::new().with_llm_handler(Box::new(|prompt: &str, _ctx: &[String]| {
+        WorkflowExecutor::new().with_llm_handler(|prompt: &str, _ctx: &[String]| {
             Ok(prompt.to_string())
-        }));
+        });
     executor.load_yaml(yaml).unwrap();
 
     let result = executor
@@ -4645,6 +4651,50 @@ steps:
         result.outputs.get("final_text").and_then(|v| v.as_string()),
         Some("refine draft brief".to_string())
     );
+}
+
+#[tokio::test]
+async fn test_workflow_telemetry_records_llm_usage() {
+    let yaml = r#"
+name: llm_telemetry
+description: Workflow telemetry should capture LLM usage
+steps:
+  - id: ask_llm
+    name: Ask LLM
+    type: llm
+    prompt: "status"
+"#;
+
+    let mut executor = WorkflowExecutor::new().with_llm_handler(
+        |_prompt: &str, _ctx: &[String]| {
+            Ok(
+                LlmCallOutput::text("ok")
+                    .with_model("test-model")
+                    .with_usage(LlmTokenUsage {
+                        prompt_tokens: 11,
+                        completion_tokens: 7,
+                        total_tokens: 18,
+                    })
+                    .with_estimated_cost(0.000138),
+            )
+        },
+    );
+    executor.load_yaml(yaml).unwrap();
+
+    let result = executor
+        .execute("llm_telemetry", HashMap::new(), PathBuf::from("/tmp"))
+        .await
+        .unwrap();
+
+    assert!(result.is_success());
+    assert_eq!(result.telemetry.llm_calls, 1);
+    assert_eq!(result.telemetry.prompt_tokens, 11);
+    assert_eq!(result.telemetry.completion_tokens, 7);
+    assert_eq!(result.telemetry.total_tokens, 18);
+    assert_eq!(result.telemetry.completed_steps, 1);
+    assert_eq!(result.telemetry.failed_steps, 0);
+    assert_eq!(result.telemetry.skipped_steps, 0);
+    assert!((result.telemetry.estimated_cost_usd - 0.000138).abs() < f64::EPSILON);
 }
 
 // --- Loop with dependency on step OUTSIDE loop ---
