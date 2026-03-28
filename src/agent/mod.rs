@@ -765,6 +765,18 @@ To call a tool, use this EXACT XML structure:
         self
     }
 
+    /// Attach an evolution event bus. All existing AgentEvents will be
+    /// automatically translated to EvolutionEvents via the bridge emitter.
+    /// The inner emitter (TUI or noop) is preserved — events flow to both.
+    pub fn with_evolution_bus(mut self, bus: evolution_events::EvolutionBus, agent_id: String) -> Self {
+        self.events = Arc::new(evolution_events::EvolutionBridgeEmitter::new(
+            bus,
+            agent_id,
+            Arc::clone(&self.events),
+        ));
+        self
+    }
+
     /// Emit an event to the TUI / event listener (no-op when no emitter is configured).
     fn emit_event(&self, event: AgentEvent) {
         self.events.emit(event);
