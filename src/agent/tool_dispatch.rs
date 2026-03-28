@@ -615,14 +615,27 @@ impl Agent {
         self.remember_failed_tool(name, &err);
         self.record_failed_tool_attempt(name, args_str, "task_state", &err);
 
-        // After 3+ suppressed rereads of the same file, force the model to
-        // produce a text response instead of continuing to emit tool calls.
+        // After 3+ suppressed rereads, strip tool XML from the system prompt
+        // so the model physically cannot emit tool calls on the next turn.
+        // This forces a text-only response from models (like Qwen3.5) that
+        // can't stop calling tools voluntarily.
         if read_count >= 3 {
-            self.messages.push(crate::api::types::Message::system(
-                "STOP calling tools. You already have the file content in your context. \
-                 Produce your answer as plain text NOW. Do not emit any more <tool> blocks."
-                    .to_string(),
-            ));
+            if let Some(sys_msg) = self.messages.first_mut() {
+                if sys_msg.role == "system" {
+                    let content = sys_msg.content.to_string();
+                    // Remove <tool>...</tool> blocks from system prompt
+                    if let Some(tools_start) = content.find("<tool name=") {
+                        if let Some(last_tool_end) = content.rfind("</tool>") {
+                            let stripped = format!(
+                                "{}\n\nYou have already gathered the data you need. Respond with your answer as plain text. Do not call any tools.\n{}",
+                                &content[..tools_start],
+                                &content[last_tool_end + 7..]
+                            );
+                            sys_msg.content = stripped.into();
+                        }
+                    }
+                }
+            }
         }
 
         true

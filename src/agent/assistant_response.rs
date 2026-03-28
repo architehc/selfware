@@ -168,12 +168,43 @@ impl Agent {
                 .await
             {
                 Ok((content, reasoning, stream_tool_calls)) => {
-                    if self.config.agent.native_function_calling && stream_tool_calls.is_some() {
-                        native_tool_calls = stream_tool_calls.clone();
-                        info!(
-                            "Received {} native tool calls from stream",
-                            native_tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
-                        );
+                    if self.config.agent.native_function_calling {
+                        let has_native = stream_tool_calls
+                            .as_ref()
+                            .map(|t| !t.is_empty())
+                            .unwrap_or(false);
+
+                        if has_native {
+                            native_tool_calls = stream_tool_calls.clone();
+                            info!(
+                                "Received {} native tool calls from stream",
+                                native_tool_calls.as_ref().map(|t| t.len()).unwrap_or(0)
+                            );
+                        } else if !content.is_empty() {
+                            // Fallback: sglang returns tool_calls:[] but puts
+                            // Qwen3-format calls in content. Parse those.
+                            let parsed = crate::tool_parser::parse_tool_calls(&content);
+                            if !parsed.tool_calls.is_empty() {
+                                info!(
+                                    "Native FC returned empty tool_calls; parsed {} from content (sglang fallback)",
+                                    parsed.tool_calls.len()
+                                );
+                                native_tool_calls = Some(
+                                    parsed
+                                        .tool_calls
+                                        .into_iter()
+                                        .map(|p| crate::api::types::ToolCall {
+                                            id: format!("parsed_{}", uuid::Uuid::new_v4()),
+                                            call_type: "function".to_string(),
+                                            function: crate::api::types::ToolFunction {
+                                                name: p.tool_name,
+                                                arguments: p.arguments.to_string(),
+                                            },
+                                        })
+                                        .collect(),
+                                );
+                            }
+                        }
                     }
                     (content, reasoning)
                 }
