@@ -335,9 +335,17 @@ impl Agent {
         // (unless the task is explicitly about writing tests)
         if all_test_files && !needs_source_change {
             // Check if task is explicitly about writing tests
-            let is_test_task = task_desc.contains("write test")
-                || task_desc.contains("add test")
-                || task_desc.contains("create test");
+            let task_lower = task_desc.to_lowercase();
+            let is_test_task = task_lower.contains("test")
+                && (task_lower.contains("write")
+                    || task_lower.contains("add")
+                    || task_lower.contains("create")
+                    || task_lower.contains("coverage")
+                    || task_lower.contains("regression")
+                    || task_lower.contains("reproducer")
+                    || task_lower.contains("fix test")
+                    || task_lower.contains("update test")
+                    || task_lower.contains("improve"));
             
             if !is_test_task {
                 warn!(

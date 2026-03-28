@@ -70,6 +70,8 @@ pub struct MockLlmServer {
     shutdown_tx: watch::Sender<bool>,
     /// Join handle for the background accept loop.
     handle: tokio::task::JoinHandle<()>,
+    /// Captured request bodies for assertion in tests.
+    captured_requests: Arc<Mutex<Vec<String>>>,
 }
 
 impl MockLlmServer {
@@ -92,19 +94,31 @@ impl MockLlmServer {
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let config = Arc::new(config);
+        let captured_requests = Arc::new(Mutex::new(Vec::new()));
 
-        let handle = tokio::spawn(accept_loop(listener, config, shutdown_rx));
+        let handle = tokio::spawn(accept_loop(
+            listener,
+            config,
+            shutdown_rx,
+            Arc::clone(&captured_requests),
+        ));
 
         Self {
             url,
             shutdown_tx,
             handle,
+            captured_requests,
         }
     }
 
     /// The base URL of this mock server (e.g. `"http://127.0.0.1:54321"`).
     pub fn url(&self) -> &str {
         &self.url
+    }
+
+    /// Return the JSON request bodies captured so far (in order received).
+    pub async fn captured_request_bodies(&self) -> Vec<String> {
+        self.captured_requests.lock().await.clone()
     }
 
     /// Signal the server to stop accepting new connections and wait for the
@@ -223,26 +237,25 @@ async fn accept_loop(
     listener: TcpListener,
     config: Arc<MockServerConfig>,
     mut shutdown_rx: watch::Receiver<bool>,
+    captured_requests: Arc<Mutex<Vec<String>>>,
 ) {
-    // Wrap the response index in a mutex so we can pop from the queue
     let response_idx = Arc::new(Mutex::new(0usize));
 
     loop {
         tokio::select! {
-            // Check shutdown signal
             _ = shutdown_rx.changed() => {
                 if *shutdown_rx.borrow() {
                     break;
                 }
             }
-            // Accept new connections
             accept_result = listener.accept() => {
                 match accept_result {
                     Ok((stream, _addr)) => {
                         let cfg = Arc::clone(&config);
                         let idx = Arc::clone(&response_idx);
+                        let cap = Arc::clone(&captured_requests);
                         tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, cfg, idx).await {
+                            if let Err(e) = handle_connection(stream, cfg, idx, cap).await {
                                 tracing::debug!("mock server connection error: {}", e);
                             }
                         });
@@ -262,15 +275,23 @@ async fn handle_connection(
     mut stream: tokio::net::TcpStream,
     config: Arc<MockServerConfig>,
     response_idx: Arc<Mutex<usize>>,
+    captured_requests: Arc<Mutex<Vec<String>>>,
 ) -> std::io::Result<()> {
-    // Read request into a buffer (we don't need to parse it fully)
-    let mut buf = vec![0u8; 8192];
+    let mut buf = vec![0u8; 65536];
     let n = stream.read(&mut buf).await?;
     if n == 0 {
         return Ok(());
     }
 
     let request = String::from_utf8_lossy(&buf[..n]);
+
+    // Capture the JSON body (everything after the blank line separator).
+    if let Some(body_start) = request.find("\r\n\r\n") {
+        let body = request[body_start + 4..].trim().to_string();
+        if !body.is_empty() {
+            captured_requests.lock().await.push(body);
+        }
+    }
 
     // Handle POST /v1/chat/completions and /v1/completions
     let is_post = request.starts_with("POST");

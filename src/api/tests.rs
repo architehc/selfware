@@ -2693,6 +2693,19 @@ use std::time::Duration;
             .await;
         assert!(result.is_ok(), "chat_with_profile failed: {:?}", result.err());
 
+        // Verify the request body was normalized: should contain a user message
+        // injected by canonicalize_message_order (original had only system + tool).
+        let bodies = server.captured_request_bodies().await;
+        assert!(!bodies.is_empty(), "no request captured");
+        let body: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+        let messages = body["messages"].as_array().unwrap();
+        let has_user = messages.iter().any(|m| m["role"] == "user");
+        assert!(
+            has_user,
+            "canonicalization should have injected a user message, got: {:?}",
+            messages
+        );
+
         server.stop().await;
     }
 
@@ -2722,11 +2735,22 @@ use std::time::Duration;
             extra_body: None,
         };
 
+        // Send a message with image content — strip_images should remove it.
         let messages = vec![Message::user("describe this image")];
         let result = client
             .chat_with_profile(messages, None, ThinkingMode::Enabled, &profile)
             .await;
         assert!(result.is_ok());
+
+        // Verify the sent request has no image_url blocks in message content.
+        let bodies = server.captured_request_bodies().await;
+        assert!(!bodies.is_empty(), "no request captured");
+        let body_str = &bodies[0];
+        assert!(
+            !body_str.contains("image_url"),
+            "image content should have been stripped for text-only model, got: {}",
+            body_str
+        );
 
         server.stop().await;
     }

@@ -202,14 +202,23 @@ impl SafetyChecker {
             "computer_screen" | "computer_window" => {
                 // Screen capture returns base64 PNG in-memory
             }
+            "code_introspect" | "code_query" | "code_plan" => {
+                // These tools accept filesystem paths — validate them.
+                let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
+                if let Some(path) = args.get("target").and_then(|v| v.as_str()) {
+                    self.check_path(path)?;
+                }
+                if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                    self.check_path(path)?;
+                }
+            }
             "context_status"
             | "context_focus"
             | "context_evict"
             | "context_recommend"
             | "context_load_skeleton"
             | "context_bulk_read"
-            | "context_summary"
-            | "code_introspect" => {
+            | "context_summary" => {
                 // Context tools interact with internal state only
             }
             "computer_mouse" | "computer_keyboard" => {

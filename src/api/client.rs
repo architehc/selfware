@@ -436,11 +436,10 @@ impl ApiClient {
                             .into(),
                         );
 
+                        // Honour Retry-After but never exceed the configured max_delay_ms.
                         if let Some(retry_secs) = retry_after_secs {
                             let retry_ms = retry_secs * 1000;
-                            if retry_ms > delay_ms {
-                                delay_ms = retry_ms;
-                            }
+                            delay_ms = delay_ms.max(retry_ms).min(self.retry_config.max_delay_ms);
                         }
                         continue;
                     }
