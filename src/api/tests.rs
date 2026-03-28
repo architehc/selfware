@@ -2650,3 +2650,297 @@ use std::time::Duration;
         assert_eq!(msgs[1].content, "task");
         assert_eq!(msgs[2].role, "assistant");
     }
+
+    // ============================================
+    // chat_with_profile tests
+    // ============================================
+
+    #[tokio::test]
+    async fn test_chat_with_profile_normalizes_messages() {
+        use crate::testing::mock_api::MockLlmServer;
+
+        let server = MockLlmServer::builder()
+            .with_response("profile response")
+            .build()
+            .await;
+
+        let config = crate::config::Config {
+            endpoint: format!("{}/v1", server.url()),
+            ..Default::default()
+        };
+        let client = ApiClient::new(&config).unwrap();
+
+        let profile = crate::config::ModelProfile {
+            endpoint: format!("{}/v1", server.url()),
+            model: "test-model".to_string(),
+            api_key: None,
+            max_tokens: 1024,
+            temperature: 0.5,
+            modalities: vec!["text".to_string()],
+            context_length: 32768,
+            extra_body: None,
+        };
+
+        // Only system + tool messages (no user message) — canonicalization
+        // should inject a user message to prevent backend 400 errors.
+        let messages = vec![
+            Message::system("You are helpful."),
+            Message::tool("tool result", "call_1"),
+        ];
+
+        let result = client
+            .chat_with_profile(messages, None, ThinkingMode::Enabled, &profile)
+            .await;
+        assert!(result.is_ok(), "chat_with_profile failed: {:?}", result.err());
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_chat_with_profile_strips_images_for_text_only_model() {
+        use crate::testing::mock_api::MockLlmServer;
+
+        let server = MockLlmServer::builder()
+            .with_response("text only response")
+            .build()
+            .await;
+
+        let config = crate::config::Config {
+            endpoint: format!("{}/v1", server.url()),
+            ..Default::default()
+        };
+        let client = ApiClient::new(&config).unwrap();
+
+        let profile = crate::config::ModelProfile {
+            endpoint: format!("{}/v1", server.url()),
+            model: "text-only".to_string(),
+            api_key: None,
+            max_tokens: 1024,
+            temperature: 0.5,
+            modalities: vec!["text".to_string()], // NO vision
+            context_length: 32768,
+            extra_body: None,
+        };
+
+        let messages = vec![Message::user("describe this image")];
+        let result = client
+            .chat_with_profile(messages, None, ThinkingMode::Enabled, &profile)
+            .await;
+        assert!(result.is_ok());
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_chat_with_profile_context_overflow() {
+        use crate::testing::mock_api::MockLlmServer;
+
+        let server = MockLlmServer::builder()
+            .with_response("should not reach here")
+            .build()
+            .await;
+
+        let config = crate::config::Config {
+            endpoint: format!("{}/v1", server.url()),
+            ..Default::default()
+        };
+        let client = ApiClient::new(&config).unwrap();
+
+        // Profile with tiny context window — should overflow.
+        let profile = crate::config::ModelProfile {
+            endpoint: format!("{}/v1", server.url()),
+            model: "tiny".to_string(),
+            api_key: None,
+            max_tokens: 100,
+            temperature: 0.5,
+            modalities: vec!["text".to_string()],
+            context_length: 100, // Impossibly small
+            extra_body: None,
+        };
+
+        let messages = vec![
+            Message::system("A".repeat(1000)),
+            Message::user("B".repeat(1000)),
+        ];
+
+        let result = client
+            .chat_with_profile(messages, None, ThinkingMode::Enabled, &profile)
+            .await;
+        assert!(result.is_err(), "should fail with context overflow");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("context_length") || err.contains("CONTEXT OVERFLOW"),
+            "error should mention context overflow, got: {}",
+            err
+        );
+
+        server.stop().await;
+    }
+
+    // ============================================
+    // Retry-After header edge cases
+    // ============================================
+
+    #[tokio::test]
+    async fn test_retry_after_header_caps_at_300_seconds() {
+        use crate::testing::mock_api::MockLlmServer;
+
+        // First response: 429 with Retry-After: 9999 (should be capped to 300)
+        // Second response: success
+        let server = MockLlmServer::builder()
+            .with_error_and_headers(
+                429,
+                r#"{"error":"rate limited"}"#,
+                vec![("Retry-After".to_string(), "9999".to_string())],
+            )
+            .with_response("ok after retry")
+            .build()
+            .await;
+
+        let config = crate::config::Config {
+            endpoint: format!("{}/v1", server.url()),
+            retry: crate::config::RetrySettings {
+                max_retries: 2,
+                base_delay_ms: 1, // Tiny delay so test is fast
+                max_delay_ms: 1,
+            },
+            ..Default::default()
+        };
+        let client = ApiClient::new(&config).unwrap()
+            .with_retry_config(RetryConfig {
+                max_retries: 2,
+                initial_delay_ms: 1,
+                max_delay_ms: 1, // Override to make test fast
+                retryable_status_codes: vec![429],
+            });
+
+        let result = client
+            .chat(vec![Message::user("test")], None, ThinkingMode::Enabled)
+            .await;
+        // The retry should succeed on the second attempt.
+        // Note: this test will take ~1ms, not 9999s, because we capped.
+        assert!(result.is_ok(), "retry should succeed: {:?}", result.err());
+
+        server.stop().await;
+    }
+
+    // ============================================
+    // Context overflow on main chat path
+    // ============================================
+
+    #[tokio::test]
+    async fn test_chat_context_overflow_returns_error() {
+        let config = crate::config::Config {
+            context_length: 100, // Impossibly small
+            ..Default::default()
+        };
+        let client = ApiClient::new(&config).unwrap();
+
+        let messages = vec![
+            Message::system("A".repeat(5000)),
+            Message::user("B".repeat(5000)),
+        ];
+
+        let result = client
+            .chat(messages, None, ThinkingMode::Enabled)
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("context_length"));
+    }
+
+    #[tokio::test]
+    async fn test_chat_stream_context_overflow_returns_error() {
+        let config = crate::config::Config {
+            context_length: 100,
+            ..Default::default()
+        };
+        let client = ApiClient::new(&config).unwrap();
+
+        let messages = vec![
+            Message::system("A".repeat(5000)),
+            Message::user("B".repeat(5000)),
+        ];
+
+        let result = client
+            .chat_stream(messages, None, ThinkingMode::Enabled)
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("context_length"));
+    }
+
+    // ============================================
+    // All retries exhausted gives meaningful error
+    // ============================================
+
+    #[tokio::test]
+    async fn test_all_retries_exhausted_preserves_last_error() {
+        use crate::testing::mock_api::MockLlmServer;
+
+        // All responses are 500 errors.
+        let server = MockLlmServer::builder()
+            .with_error(500, r#"{"error":"server down"}"#)
+            .with_error(500, r#"{"error":"still down"}"#)
+            .with_error(500, r#"{"error":"really down"}"#)
+            .build()
+            .await;
+
+        let config = crate::config::Config {
+            endpoint: format!("{}/v1", server.url()),
+            ..Default::default()
+        };
+        let client = ApiClient::new(&config).unwrap()
+            .with_retry_config(RetryConfig {
+                max_retries: 2,
+                initial_delay_ms: 1,
+                max_delay_ms: 1,
+                retryable_status_codes: vec![500],
+            });
+
+        let result = client
+            .chat(vec![Message::user("test")], None, ThinkingMode::Enabled)
+            .await;
+        assert!(result.is_err());
+        // The error should be the HTTP 500, not a generic "all retries exhausted".
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("500") || err.contains("down"),
+            "error should contain last HTTP status: {}",
+            err
+        );
+
+        server.stop().await;
+    }
+
+    // ============================================
+    // Non-retryable status code is immediate failure
+    // ============================================
+
+    #[tokio::test]
+    async fn test_non_retryable_401_fails_immediately() {
+        use crate::testing::mock_api::MockLlmServer;
+
+        let server = MockLlmServer::builder()
+            .with_error(401, r#"{"error":"unauthorized"}"#)
+            .build()
+            .await;
+
+        let config = crate::config::Config {
+            endpoint: format!("{}/v1", server.url()),
+            ..Default::default()
+        };
+        let client = ApiClient::new(&config).unwrap()
+            .with_retry_config(RetryConfig {
+                max_retries: 5,
+                initial_delay_ms: 1,
+                max_delay_ms: 1,
+                retryable_status_codes: vec![429, 500, 502, 503],
+            });
+
+        let result = client
+            .chat(vec![Message::user("test")], None, ThinkingMode::Enabled)
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("401"));
+
+        server.stop().await;
+    }

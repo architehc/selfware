@@ -53,6 +53,12 @@ pub enum MockResponse {
     ToolCalls(Vec<MockToolCall>),
     /// Return an HTTP error with the given status code and body.
     Error { status: u16, body: String },
+    /// Return an HTTP error with custom headers (e.g. Retry-After).
+    ErrorWithHeaders {
+        status: u16,
+        body: String,
+        headers: Vec<(String, String)>,
+    },
 }
 
 /// A lightweight mock HTTP server that speaks just enough of the
@@ -166,6 +172,23 @@ impl MockLlmServerBuilder {
         self
     }
 
+    /// Queue an error with custom headers (e.g. 429 with Retry-After).
+    pub fn with_error_and_headers(
+        mut self,
+        status: u16,
+        body: impl Into<String>,
+        headers: Vec<(String, String)>,
+    ) -> Self {
+        self.config
+            .responses
+            .push(MockResponse::ErrorWithHeaders {
+                status,
+                body: body.into(),
+                headers,
+            });
+        self
+    }
+
     /// Set the artificial latency (in milliseconds) applied before every
     /// response is sent.
     pub fn with_latency(mut self, ms: u64) -> Self {
@@ -249,11 +272,12 @@ async fn handle_connection(
 
     let request = String::from_utf8_lossy(&buf[..n]);
 
-    // Only handle POST /v1/chat/completions
-    let is_chat = request.starts_with("POST") && request.contains("/v1/chat/completions");
+    // Handle POST /v1/chat/completions and /v1/completions
+    let is_post = request.starts_with("POST");
+    let is_chat = is_post && request.contains("/v1/chat/completions");
+    let is_completion = is_post && request.contains("/v1/completions") && !is_chat;
 
-    if !is_chat {
-        // Return 404 for anything else
+    if !is_chat && !is_completion {
         let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
         stream.write_all(response.as_bytes()).await?;
         return Ok(());
@@ -279,15 +303,26 @@ async fn handle_connection(
     match mock_response {
         MockResponse::Text(text) => {
             let body = format_chat_response(&config.model, &text, None);
-            write_http_response(&mut stream, 200, &body).await?;
+            write_http_response(&mut stream, 200, &body, &[]).await?;
         }
         MockResponse::ToolCalls(calls) => {
             let tool_calls_json = format_tool_calls(&calls);
             let body = format_chat_response(&config.model, "", Some(&tool_calls_json));
-            write_http_response(&mut stream, 200, &body).await?;
+            write_http_response(&mut stream, 200, &body, &[]).await?;
         }
         MockResponse::Error { status, body } => {
-            write_http_response(&mut stream, status, &body).await?;
+            write_http_response(&mut stream, status, &body, &[]).await?;
+        }
+        MockResponse::ErrorWithHeaders {
+            status,
+            body,
+            headers,
+        } => {
+            let header_refs: Vec<(&str, &str)> = headers
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            write_http_response(&mut stream, status, &body, &header_refs).await?;
         }
     }
 
@@ -342,6 +377,7 @@ async fn write_http_response(
     stream: &mut tokio::net::TcpStream,
     status: u16,
     body: &str,
+    extra_headers: &[(&str, &str)],
 ) -> std::io::Result<()> {
     let status_text = match status {
         200 => "OK",
@@ -354,11 +390,17 @@ async fn write_http_response(
         _ => "Error",
     };
 
+    let mut extra = String::new();
+    for (key, value) in extra_headers {
+        extra.push_str(&format!("{}: {}\r\n", key, value));
+    }
+
     let response = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n{}",
         status,
         status_text,
         body.len(),
+        extra,
         body,
     );
 
