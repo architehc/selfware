@@ -29,9 +29,7 @@ pub enum EvolutionEvent {
     },
 
     /// Agent released focus (idle or moved to different file).
-    AgentDefocus {
-        agent_id: String,
-    },
+    AgentDefocus { agent_id: String },
 
     /// Agent produced streaming content.
     AgentStream {
@@ -348,8 +346,12 @@ impl super::tui_events::EventEmitter for EvolutionBridgeEmitter {
                 prompt_tokens,
                 completion_tokens,
             } => {
-                self.bus.throughput().record_tokens_out(prompt_tokens as usize);
-                self.bus.throughput().record_tokens_in(completion_tokens as usize);
+                self.bus
+                    .throughput()
+                    .record_tokens_out(prompt_tokens as usize);
+                self.bus
+                    .throughput()
+                    .record_tokens_in(completion_tokens as usize);
             }
             super::tui_events::AgentEvent::AssistantDelta { ref text } => {
                 self.bus.emit(EvolutionEvent::AgentStream {
@@ -443,7 +445,12 @@ mod tests {
 
         let event = rx.recv().await.unwrap();
         match event {
-            EvolutionEvent::AgentFocus { agent_id, file_path, tier, .. } => {
+            EvolutionEvent::AgentFocus {
+                agent_id,
+                file_path,
+                tier,
+                ..
+            } => {
                 assert_eq!(agent_id, "coder");
                 assert_eq!(file_path, "src/main.rs");
                 assert_eq!(tier, ContextTier::Edit);
@@ -534,11 +541,7 @@ mod tests {
         let bus = EvolutionBus::new(16);
         let _rx = bus.subscribe();
 
-        let bridge = EvolutionBridgeEmitter::new(
-            bus,
-            "test_agent".into(),
-            counter.clone(),
-        );
+        let bridge = EvolutionBridgeEmitter::new(bus, "test_agent".into(), counter.clone());
 
         // Emit a ToolStarted event through the bridge.
         bridge.emit(AgentEvent::ToolStarted {
@@ -587,7 +590,9 @@ mod tests {
                 file_path: "f.rs".into(),
                 tier: ContextTier::Edit,
             },
-            EvolutionEvent::AgentDefocus { agent_id: "a".into() },
+            EvolutionEvent::AgentDefocus {
+                agent_id: "a".into(),
+            },
             EvolutionEvent::AgentStream {
                 agent_id: "a".into(),
                 content_preview: "hello".into(),

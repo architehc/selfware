@@ -53,7 +53,9 @@ mod visual_e2e {
                 );
                 let err_msg = verify_result.unwrap_err().to_string();
                 assert!(
-                    err_msg.contains("connect") || err_msg.contains("Failed") || err_msg.contains("timed out"),
+                    err_msg.contains("connect")
+                        || err_msg.contains("Failed")
+                        || err_msg.contains("timed out"),
                     "Error should indicate a connection failure, got: {}",
                     err_msg
                 );
@@ -89,9 +91,7 @@ mod visual_e2e {
                 let verifier =
                     VisualVerifier::new("http://127.0.0.1:1/v1", "test-model").with_timeout(2);
                 let fake_png_b64 = base64_encode(&PNG_HEADER);
-                let result = verifier
-                    .verify_screenshot(&fake_png_b64, "Anything")
-                    .await;
+                let result = verifier.verify_screenshot(&fake_png_b64, "Anything").await;
                 assert!(
                     result.is_err(),
                     "Verification with unreachable VLM should fail gracefully"
@@ -105,8 +105,7 @@ mod visual_e2e {
         // Simulate the retry/recovery path: call verify_screenshot multiple
         // times against an unreachable endpoint and confirm each attempt fails
         // gracefully without panics or state corruption.
-        let verifier =
-            VisualVerifier::new("http://127.0.0.1:1/v1", "test-model").with_timeout(1);
+        let verifier = VisualVerifier::new("http://127.0.0.1:1/v1", "test-model").with_timeout(1);
         let fake_b64 = base64_encode(&PNG_HEADER);
 
         let mut errors = Vec::new();
@@ -133,19 +132,18 @@ mod visual_e2e {
     async fn test_visual_check_integration_graceful_failure() {
         // The visual_check method (used by VerificationGate) should return
         // Ok(CheckResult) even when the VLM is unreachable.
-        let verifier =
-            VisualVerifier::new("http://127.0.0.1:1/v1", "test-model").with_timeout(1);
+        let verifier = VisualVerifier::new("http://127.0.0.1:1/v1", "test-model").with_timeout(1);
         let fake_b64 = base64_encode(&PNG_HEADER);
 
         let check_result = verifier.visual_check(&fake_b64, "Some UI").await;
         // visual_check wraps errors into CheckResult, so it should return Ok
-        assert!(check_result.is_ok(), "visual_check should not propagate errors");
+        assert!(
+            check_result.is_ok(),
+            "visual_check should not propagate errors"
+        );
         let cr = check_result.unwrap();
         assert!(!cr.passed, "Check should not pass when VLM is unreachable");
-        assert!(
-            !cr.errors.is_empty(),
-            "Check should contain error details"
-        );
+        assert!(!cr.errors.is_empty(), "Check should contain error details");
     }
 
     fn base64_decode(input: &str) -> Vec<u8> {

@@ -1,0 +1,119 @@
+name: product_release
+description: Release preparation workflow with QA, docs, and launch notes.
+version: "1.0.0"
+author: "Selfware"
+category: "product"
+inputs:
+  - name: idea
+    description: Feature or product release
+    required: true
+  - name: discovery_brief
+    description: Discovery artifact
+    required: true
+  - name: architecture_plan
+    description: Architecture artifact
+    required: true
+  - name: implementation_sprint
+    description: Implementation artifact
+    required: true
+  - name: review_gate
+    description: Review packet
+    required: true
+  - name: smoke_test_command
+    description: Optional smoke test command
+    required: false
+    default: ""
+outputs:
+  - name: release_checklist
+    description: Final release readiness checklist
+    from: release_checklist
+  - name: docs_update_plan
+    description: Required docs updates before merge
+    from: docs_update_plan
+  - name: launch_note
+    description: Draft launch note for the shipped change
+    from: launch_note
+steps:
+  - id: release_checklist
+    name: Release Checklist
+    description: Turn prior artifacts into a release checklist
+    type: llm
+    prompt: |
+      Create a release checklist for:
+      ${idea}
+
+      Discovery brief:
+      ${discovery_brief}
+
+      Architecture:
+      ${architecture_plan}
+
+      Implementation:
+      ${implementation_sprint}
+
+      Review gate:
+      ${review_gate}
+
+      Include:
+      1. Pre-merge checks
+      2. Post-merge checks
+      3. Canary or smoke checks
+      4. Rollback signals
+      5. Ownership and comms
+    timeout_secs: 240
+  - id: maybe_smoke_test
+    name: Maybe Run Smoke Tests
+    description: Run smoke tests if configured
+    type: condition
+    if: "${smoke_test_command}"
+    then:
+      - smoke_tests
+  - id: smoke_tests
+    name: Smoke Tests
+    description: Execute configured smoke tests
+    type: shell
+    command: "${smoke_test_command}"
+    required: false
+    timeout_secs: 600
+  - id: docs_update_plan
+    name: Docs Update Plan
+    description: Identify documentation drift that must be closed
+    type: llm
+    depends_on:
+      - release_checklist
+    prompt: |
+      Based on this release checklist:
+
+      ${release_checklist}
+
+      Write a docs update plan with:
+      1. Files that likely drifted
+      2. What changed for users
+      3. What changed for operators
+      4. Release notes bullets
+      5. Any follow-up runbooks needed
+    timeout_secs: 180
+  - id: launch_note
+    name: Launch Note
+    description: Draft the outward-facing launch summary
+    type: llm
+    depends_on:
+      - docs_update_plan
+    prompt: |
+      Draft a launch note for this release.
+
+      Product:
+      ${idea}
+
+      Checklist:
+      ${release_checklist}
+
+      Docs plan:
+      ${docs_update_plan}
+
+      Keep it concise and include:
+      - what shipped
+      - who it helps
+      - known constraints
+      - how success will be measured
+    timeout_secs: 180

@@ -5,7 +5,6 @@
 //! to a vision-capable LLM for structured scoring, and repeats until quality
 //! meets the threshold — all without human intervention.
 
-
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 

@@ -262,4 +262,3 @@ allowed_paths = {}
 
     Ok(())
 }
-

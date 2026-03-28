@@ -43,11 +43,7 @@ impl Agent {
         // Collect per-message token counts once (O(N)) instead of recomputing
         // every iteration. Use estimate_message_tokens for per-message breakdown.
         use super::context::estimate_message_tokens;
-        let token_counts: Vec<usize> = self
-            .messages
-            .iter()
-            .map(estimate_message_tokens)
-            .collect();
+        let token_counts: Vec<usize> = self.messages.iter().map(estimate_message_tokens).collect();
         let pinned_critical: std::collections::HashSet<usize> = self
             .messages
             .iter()

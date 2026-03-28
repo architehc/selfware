@@ -346,7 +346,7 @@ impl Agent {
                     || task_lower.contains("fix test")
                     || task_lower.contains("update test")
                     || task_lower.contains("improve"));
-            
+
             if !is_test_task {
                 warn!(
                     "Workflow validator: only test files edited ({:?}), no source files modified",
@@ -500,19 +500,26 @@ impl Agent {
                     match std::fs::create_dir_all(&evidence_dir) {
                         Ok(()) => {
                             let timestamp = Utc::now().format("%Y%m%dT%H%M%S%.3fZ");
-                            let filename =
-                                format!("step_{}_{}.png", current_step, timestamp);
+                            let filename = format!("step_{}_{}.png", current_step, timestamp);
                             let filepath = evidence_dir.join(&filename);
                             match std::fs::write(&filepath, &png_bytes) {
                                 Ok(()) => Some((filepath, sha_hash)),
                                 Err(e) => {
-                                    warn!("Failed to write screenshot to {}: {}", filepath.display(), e);
+                                    warn!(
+                                        "Failed to write screenshot to {}: {}",
+                                        filepath.display(),
+                                        e
+                                    );
                                     None
                                 }
                             }
                         }
                         Err(e) => {
-                            warn!("Failed to create evidence dir {}: {}", evidence_dir.display(), e);
+                            warn!(
+                                "Failed to create evidence dir {}: {}",
+                                evidence_dir.display(),
+                                e
+                            );
                             None
                         }
                     }
@@ -539,7 +546,15 @@ impl Agent {
                     .map(|(p, h)| (Some(p.clone()), h.clone()))
                     .unwrap_or((None, String::new()));
                 let assertion = VisualAssertion {
-                    id: format!("va-{}-{}", current_step, uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("")),
+                    id: format!(
+                        "va-{}-{}",
+                        current_step,
+                        uuid::Uuid::new_v4()
+                            .to_string()
+                            .split('-')
+                            .next()
+                            .unwrap_or("")
+                    ),
                     description: expectation.clone(),
                     screenshot_path,
                     verified: false,
@@ -610,7 +625,15 @@ impl Agent {
                     .map(|(p, h)| (Some(p.clone()), h.clone()))
                     .unwrap_or((None, String::new()));
                 let assertion = VisualAssertion {
-                    id: format!("va-{}-{}", current_step, uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("")),
+                    id: format!(
+                        "va-{}-{}",
+                        current_step,
+                        uuid::Uuid::new_v4()
+                            .to_string()
+                            .split('-')
+                            .next()
+                            .unwrap_or("")
+                    ),
                     description: expectation.clone(),
                     screenshot_path,
                     verified: true,

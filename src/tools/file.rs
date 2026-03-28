@@ -390,10 +390,16 @@ impl Tool for FileDelete {
         let path = PathBuf::from(&args.path);
 
         if !path.exists() {
-            return Err(ToolError::FileNotFound { path: args.path.clone() }.into());
+            return Err(ToolError::FileNotFound {
+                path: args.path.clone(),
+            }
+            .into());
         }
         if path.is_dir() {
-            return Err(ToolError::PathIsDirectory { path: args.path.clone() }.into());
+            return Err(ToolError::PathIsDirectory {
+                path: args.path.clone(),
+            }
+            .into());
         }
 
         tokio::fs::remove_file(&path)
@@ -567,7 +573,9 @@ pub(super) fn validate_tool_path(path: &str, config: &SafetyConfig) -> Result<()
         }
     }
     let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
-    PathValidator::new(config, working_dir).validate(path).map_err(|e| anyhow::anyhow!(e))
+    PathValidator::new(config, working_dir)
+        .validate(path)
+        .map_err(|e| anyhow::anyhow!(e))
 }
 
 /// Write content to a file atomically using a temporary file and rename.

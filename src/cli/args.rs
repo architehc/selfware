@@ -401,15 +401,26 @@ pub(crate) enum Commands {
         target: f32,
     },
 
-    /// Execute a workflow from a YAML file
+    /// Workflow commands (SWL and YAML)
     #[command(alias = "w")]
     Workflow {
-        /// Path to workflow YAML file
-        file: String,
+        #[command(subcommand)]
+        command: WorkflowCommands,
+    },
+}
 
-        /// Workflow name to execute (if file contains multiple)
-        #[arg(short, long)]
-        name: Option<String>,
+#[derive(Subcommand, Clone, Debug)]
+pub(crate) enum WorkflowCommands {
+    /// Validate an SWL file
+    Validate {
+        /// Path to the SWL file
+        file: String,
+    },
+
+    /// Run an SWL workflow
+    Run {
+        /// Path to the SWL file
+        file: String,
 
         /// Input variables (KEY=VALUE format)
         #[arg(short, long)]
@@ -418,5 +429,16 @@ pub(crate) enum Commands {
         /// Dry-run mode (log but don't execute)
         #[arg(long)]
         dry_run: bool,
+    },
+
+    /// List available workflows in the current directory
+    List {
+        /// Directory to search for workflows (default: current directory)
+        #[arg(short, long, default_value = ".")]
+        dir: String,
+
+        /// Show all workflows including SWL and YAML formats
+        #[arg(long)]
+        all: bool,
     },
 }

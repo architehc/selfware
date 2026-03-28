@@ -16,10 +16,7 @@ use std::collections::{HashMap, HashSet};
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let focus_name = args.get(1).map(|s| s.as_str()).unwrap_or("agent");
-    let context_window: usize = args
-        .get(2)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(131_072);
+    let context_window: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(131_072);
 
     println!("Building workspace graph from src/...");
     let options = WorkspaceGraphOptions {
@@ -53,12 +50,8 @@ fn main() -> Result<()> {
         let mut path_to_id: HashMap<String, String> = HashMap::new();
         for node in &file_nodes {
             if let Some(ref path) = node.file_path {
-                let short_name = path
-                    .strip_prefix("src/")
-                    .unwrap_or(path)
-                    .to_string();
-                let new_node = GraphNode::new(&short_name, NodeType::File)
-                    .in_file(path);
+                let short_name = path.strip_prefix("src/").unwrap_or(path).to_string();
+                let new_node = GraphNode::new(&short_name, NodeType::File).in_file(path);
                 let id = file_graph.add_node(new_node);
                 path_to_id.insert(path.clone(), id);
             }
@@ -86,11 +79,11 @@ fn main() -> Result<()> {
                 if let (Some(sid), Some(tid)) = (src_id, tgt_id) {
                     let key = (sid.clone(), tid.clone());
                     if seen_edges.insert(key) {
-                        file_graph.add_edge(
-                            selfware::analysis::code_graph::GraphEdge::new(
-                                sid, tid, EdgeType::Imports,
-                            ),
-                        );
+                        file_graph.add_edge(selfware::analysis::code_graph::GraphEdge::new(
+                            sid,
+                            tid,
+                            EdgeType::Imports,
+                        ));
                     }
                 }
             }
@@ -147,10 +140,7 @@ fn main() -> Result<()> {
 
     // Run the allocator
     let config = TierAllocatorConfig::for_context_window(context_window);
-    println!(
-        "Context window: {} tokens",
-        config.context_window
-    );
+    println!("Context window: {} tokens", config.context_window);
     println!(
         "Content budget: {} tokens (system:{}, output:{})\n",
         config.content_budget(),

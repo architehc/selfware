@@ -136,10 +136,7 @@ fn merge_extra_body(
     for key in extra_body.keys() {
         let k = key.as_str();
         if RESERVED_EXTRA_BODY_KEYS.contains(&k) {
-            bail!(
-                "{} extra_body cannot override reserved key: {}",
-                context, k
-            );
+            bail!("{} extra_body cannot override reserved key: {}", context, k);
         }
         if !ALLOWED_EXTRA_BODY_KEYS.contains(&k) {
             bail!(

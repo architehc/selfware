@@ -795,11 +795,7 @@ pub(crate) fn display_file_diff(path: &str, old_content: &str, new_content: &str
             {
                 // Added lines
                 for line in new_lines.iter().skip(j).take(lookahead) {
-                    diff_lines.push(format!(
-                        "  {} {}",
-                        "+".bright_green(),
-                        line.bright_green()
-                    ));
+                    diff_lines.push(format!("  {} {}", "+".bright_green(), line.bright_green()));
                 }
                 j += lookahead;
                 found_sync = true;
@@ -811,11 +807,7 @@ pub(crate) fn display_file_diff(path: &str, old_content: &str, new_content: &str
             {
                 // Deleted lines
                 for line in old_lines.iter().skip(i).take(lookahead) {
-                    diff_lines.push(format!(
-                        "  {} {}",
-                        "-".bright_red(),
-                        line.bright_red()
-                    ));
+                    diff_lines.push(format!("  {} {}", "-".bright_red(), line.bright_red()));
                 }
                 i += lookahead;
                 found_sync = true;

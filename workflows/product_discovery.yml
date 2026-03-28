@@ -1,0 +1,81 @@
+name: product_discovery
+description: Product discovery workflow inspired by gstack office-hours and claude-skills product discovery.
+version: "1.0.0"
+author: "Selfware"
+category: "product"
+inputs:
+  - name: idea
+    description: Product idea or problem statement
+    required: true
+  - name: target_user
+    description: Primary user persona
+    required: false
+    default: "A technical team under delivery pressure"
+  - name: constraints
+    description: Delivery or platform constraints
+    required: false
+    default: "Use the current repository and existing stack"
+  - name: success_metric
+    description: Primary outcome metric
+    required: false
+    default: "Ship a narrow wedge users will actively use"
+outputs:
+  - name: discovery_brief
+    description: Product brief with wedge, assumptions, and decision
+    from: discovery_brief
+  - name: risk_register
+    description: Ranked assumptions and cheapest validation steps
+    from: risk_register
+steps:
+  - id: kickoff
+    name: Kickoff
+    description: Announce discovery scope
+    type: log
+    message: "Starting discovery for ${idea}"
+    level: info
+  - id: discovery_brief
+    name: Office Hours Brief
+    description: Reframe the idea around real user pain
+    type: llm
+    prompt: |
+      You are running a product-discovery pass that combines Garry Tan style office-hours with claude-skills product discovery.
+
+      Problem / idea:
+      ${idea}
+
+      Target user:
+      ${target_user}
+
+      Constraints:
+      ${constraints}
+
+      Success metric:
+      ${success_metric}
+
+      Produce a concise artifact with these sections:
+      1. Real user pain
+      2. Status quo and why it fails
+      3. Narrowest wedge to ship next
+      4. Key assumptions ranked by risk
+      5. Proceed / pivot / stop recommendation
+      6. Open questions
+    timeout_secs: 180
+  - id: risk_register
+    name: Assumption Risk Register
+    description: Convert discovery into testable assumptions
+    type: llm
+    depends_on:
+      - discovery_brief
+    prompt: |
+      Turn this discovery brief into a validation-ready risk register:
+
+      ${discovery_brief}
+
+      Output a table with:
+      - assumption
+      - certainty (1-5)
+      - impact (1-5)
+      - cheapest validation test
+      - owner
+      - proceed / watch / block
+    timeout_secs: 180

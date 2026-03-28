@@ -7,11 +7,9 @@
 //!
 //! Usage: cargo run --example evolution_bus_demo
 
-use selfware::agent::evolution_events::{
-    AgentActivityState, EvolutionBus, EvolutionEvent,
-};
-use selfware::agent::tui_events::{AgentEvent, EventEmitter, NoopEmitter};
 use selfware::agent::evolution_events::EvolutionBridgeEmitter;
+use selfware::agent::evolution_events::{AgentActivityState, EvolutionBus, EvolutionEvent};
+use selfware::agent::tui_events::{AgentEvent, EventEmitter, NoopEmitter};
 use std::sync::Arc;
 
 #[tokio::main]

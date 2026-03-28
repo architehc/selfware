@@ -1,0 +1,423 @@
+# Bug Investigation Workflow - Inspired by gstack's /investigate
+# Systematic debugging workflow with structured root cause analysis
+# For txn545/Qwen3.5-122B-A10B-NVFP4 with 262k context
+
+version: "1.0"
+name: bug_investigation
+description: |
+  Systematic bug investigation workflow based on gstack's /investigate skill.
+  Structured debugging: Reproduce → Isolate → Diagnose → Fix → Verify.
+
+metadata:
+  author: "Selfware Engineering Team"
+  tags: ["debugging", "investigation", "root-cause-analysis", "bug-fix"]
+
+agents:
+  # Incident Commander - Coordinates investigation
+  incident_commander:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.3
+      max_tokens: 8192
+    role: |
+      You are an incident commander managing bug investigation.
+      You coordinate resources, set priorities, and ensure systematic analysis.
+      You ask the right questions to focus the investigation.
+    instruction: |
+      Initiate structured bug investigation:
+      
+      1. Bug Intake Questions
+         - What was observed? (symptoms)
+         - When did it start? (timeline)
+         - Where does it happen? (environment, user segment)
+         - How often? (frequency, reproducibility)
+         - What's the impact? (severity, affected users)
+      
+      2. Initial Triage
+         - Severity assessment (P0/P1/P2/P3)
+         - Related services/components
+         - Recent changes that might have caused it
+         - Quick mitigation options
+      
+      3. Investigation Plan
+         - Assign specialists based on symptoms
+         - Define success criteria
+         - Set timeboxes for each phase
+      
+      Output: INCIDENT_REPORT.md with bug summary and investigation plan
+    tools:
+      - file_read
+      - file_write
+      - web_search
+    output_key: incident_report
+
+  # Reproduction Specialist - Makes bugs reproducible
+  reproduction_specialist:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.2
+      max_tokens: 8192
+    role: |
+      You specialize in reproducing bugs. You write minimal reproduction cases.
+      You turn "it sometimes fails" into "run this command to see the error".
+      "I SEE THE ISSUE" is your catchphrase when you find it.
+    instruction: |
+      Create minimal reproduction for the bug:
+      
+      1. Reproduction Steps
+         - Exact sequence of actions
+         - Required state/setup
+         - Environment details
+         - Test data needed
+      
+      2. Minimization
+         - Remove irrelevant steps
+         - Simplify test data
+         - Identify minimal code path
+         - Create automated reproduction script
+      
+      3. Variation Testing
+         - Does it happen on different environments?
+         - Does it happen with different data?
+         - Edge cases that trigger it
+         - Related but non-triggering cases
+      
+      4. Reproduction Script
+         - Shell script or test case
+         - Clear pass/fail criteria
+         - Include in test suite as regression test
+      
+      Output: REPRODUCTION_CASE.md with steps and reproduction script
+    tools:
+      - file_read
+      - file_write
+      - shell
+      - file_edit
+    output_key: reproduction_case
+
+  # Root Cause Analyzer - Finds the why
+  root_cause_analyzer:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.2
+      max_tokens: 8192
+    role: |
+      You are a root cause analysis expert. You don't just find where the bug is,
+      you understand WHY it happened. You use 5 Whys, fault trees, and code analysis.
+      You distinguish symptoms from causes.
+    instruction: |
+      Perform deep root cause analysis:
+      
+      1. Code Path Analysis
+         - Trace execution from entry to failure
+         - Identify state changes
+         - Map data transformations
+         - Find boundary crossings
+      
+      2. The 5 Whys
+         - Why did the error occur? (direct cause)
+         - Why did that happen? (contributing cause)
+         - Why wasn't it caught? (detection gap)
+         - Why was the code written this way? (design decision)
+         - Why did the design allow this? (systemic cause)
+      
+      3. Fault Tree Analysis
+         - Top event: The bug
+         - AND gates: Multiple conditions required
+         - OR gates: Any condition sufficient
+         - Basic events: Root causes
+      
+      4. Contributing Factors
+         - Code issues (logic, concurrency, etc.)
+         - Process issues (review gaps, missing tests)
+         - Environmental issues (config, dependencies)
+         - Human factors (misunderstanding, time pressure)
+      
+      5. Evidence Collection
+         - Log analysis
+         - Stack traces
+         - State dumps
+         - Code diffs
+      
+      Output: ROOT_CAUSE_ANALYSIS.md with findings and evidence
+    tools:
+      - file_read
+      - file_write
+      - shell
+      - grep
+      - git_log
+    output_key: root_cause_analysis
+
+  # Fix Developer - Implements the solution
+  fix_developer:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.2
+      max_tokens: 8192
+    role: |
+      You fix bugs with surgical precision. You address the root cause, not symptoms.
+      You write regression tests. You ensure fixes don't introduce new bugs.
+      Your fixes are minimal and focused.
+    instruction: |
+      Develop and implement the fix:
+      
+      1. Solution Design
+         - Address root cause (not symptom)
+         - Consider multiple approaches
+         - Evaluate trade-offs
+         - Choose minimal, safe fix
+      
+      2. Implementation
+         - Atomic commit with clear message
+         - Document why the fix works
+         - Add regression test
+         - Update relevant documentation
+      
+      3. Testing Strategy
+         - Unit test for the fix
+         - Integration test for the scenario
+         - Edge case coverage
+         - Regression test in CI
+      
+      4. Safety Checks
+         - Check for similar bugs elsewhere
+         - Verify no side effects
+         - Review dependent code
+         - Performance impact assessment
+      
+      Output: FIX.md with implementation details and test results
+    tools:
+      - file_read
+      - file_write
+      - file_edit
+      - shell
+      - git
+    output_key: fix_implementation
+
+  # Verification Engineer - Confirms the fix
+  verification_engineer:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.2
+      max_tokens: 8192
+    role: |
+      You verify that bugs are truly fixed. You test the fix thoroughly.
+      You ensure the fix works in production-like conditions.
+      You sign off only when confident.
+    instruction: |
+      Verify the bug fix:
+      
+      1. Fix Verification
+         - Run reproduction case → should pass now
+         - Run regression tests
+         - Check related functionality still works
+         - Verify in staging/production-like environment
+      
+      2. Verification Matrix
+         - Original failing case: PASS
+         - Edge cases: PASS
+         - Related scenarios: PASS
+         - Performance: No regression
+      
+      3. Sign-off Checklist
+         - [ ] Bug no longer reproduces
+         - [ ] Regression test passes
+         - [ ] No new warnings/errors
+         - [ ] Documentation updated
+         - [ ] Monitoring/alerting verified
+      
+      Output: VERIFICATION_REPORT.md with sign-off
+    tools:
+      - file_read
+      - file_write
+      - shell
+      - browser_navigate
+    output_key: verification_report
+
+workflows:
+  # Full investigation - systematic debugging
+  full_investigation:
+    type: sequential
+    description: "Complete bug investigation from report to verified fix"
+    steps:
+      # Phase 1: Triage and plan
+      - delegate: incident_commander
+        input:
+          bug_report: "{{bug_report}}"
+          output_file: "INCIDENT_REPORT.md"
+      
+      # Phase 2: Make it reproducible
+      - delegate: reproduction_specialist
+        input:
+          incident_report: "INCIDENT_REPORT.md"
+          output_file: "REPRODUCTION_CASE.md"
+      
+      # Phase 3: Find root cause
+      - delegate: root_cause_analyzer
+        input:
+          reproduction_case: "REPRODUCTION_CASE.md"
+          output_file: "ROOT_CAUSE_ANALYSIS.md"
+      
+      # Phase 4: Fix it
+      - delegate: fix_developer
+        input:
+          root_cause: "ROOT_CAUSE_ANALYSIS.md"
+          output_file: "FIX.md"
+      
+      # Phase 5: Verify
+      - delegate: verification_engineer
+        input:
+          fix_doc: "FIX.md"
+          output_file: "VERIFICATION_REPORT.md"
+
+  # Quick debug - fast path for simple bugs
+  quick_debug:
+    type: sequential
+    description: "Fast debugging for straightforward issues"
+    steps:
+      - delegate: reproduction_specialist
+        input:
+          mode: "quick"
+      - delegate: fix_developer
+        input:
+          mode: "quick"
+      - delegate: verification_engineer
+        input:
+          mode: "quick"
+
+  # Root cause only - analysis without fix
+  analyze_only:
+    type: sequential
+    description: "Root cause analysis for complex issues"
+    steps:
+      - delegate: incident_commander
+        input:
+          mode: "triage_only"
+      - delegate: reproduction_specialist
+        input:
+          mode: "minimal"
+      - delegate: root_cause_analyzer
+        input:
+          output_file: "ROOT_CAUSE_ANALYSIS.md"
+
+  # Regression hunter - find similar bugs
+  regression_hunt:
+    type: sequential
+    description: "Find similar bugs across codebase"
+    steps:
+      - delegate: root_cause_analyzer
+        input:
+          mode: "pattern_search"
+      - delegate: fix_developer
+        input:
+          mode: "batch_fix"
+      - delegate: verification_engineer
+        input:
+          mode: "batch_verify"
+
+  # War room - parallel investigation for P0s
+  war_room:
+    type: parallel
+    description: "All-hands parallel investigation for critical bugs"
+    steps:
+      - parallel:
+          branches:
+            - delegate: reproduction_specialist
+              input:
+                priority: "P0"
+            - delegate: root_cause_analyzer
+              input:
+                priority: "P0"
+            - delegate: fix_developer
+              input:
+                mode: "exploratory"
+      - delegate: incident_commander
+        input:
+          mode: "coordinate"
+
+state:
+  fields:
+    - name: incident_report
+      type: string
+      description: "Path to INCIDENT_REPORT.md"
+    
+    - name: reproduction_case
+      type: string
+      description: "Path to REPRODUCTION_CASE.md"
+    
+    - name: root_cause_analysis
+      type: string
+      description: "Path to ROOT_CAUSE_ANALYSIS.md"
+    
+    - name: fix_implementation
+      type: string
+      description: "Path to FIX.md"
+    
+    - name: verification_report
+      type: string
+      description: "Path to VERIFICATION_REPORT.md"
+    
+    - name: severity
+      type: string
+      description: "Bug severity (P0/P1/P2/P3)"
+      default: "P2"
+    
+    - name: fix_verified
+      type: boolean
+      description: "Whether fix has been verified"
+      default: false
+    
+    - name: regression_test_added
+      type: boolean
+      description: "Whether regression test was added"
+      default: false
+
+telemetry:
+  enabled: true
+  metrics:
+    - inference_latency
+    - token_usage
+    - investigation_time
+    - bug_severity_distribution
+  export:
+    type: file
+    path: "./logs/bug_investigation_telemetry.jsonl"
+
+guardrails:
+  - name: require_reproduction
+    type: pre_agent
+    condition:
+      language: rust
+      content: |
+        // Ensure we have reproduction before attempting fix
+        if args.agent_name == "fix_developer" {
+          args.state.reproduction_case.is_some()
+        } else {
+          true
+        }
+    on_violation: warn
+  
+  - name: verify_before_close
+    type: post_workflow
+    condition:
+      language: rust
+      content: |
+        // Require verification before considering done
+        args.state.fix_verified || args.workflow_name != "full_investigation"
+    on_violation: warn
+  
+  - name: require_regression_test
+    type: post_agent
+    condition:
+      language: rust
+      content: |
+        // Require regression test for P0/P1 bugs
+        let is_high_severity = args.state.severity == "P0" || args.state.severity == "P1";
+        let is_fixer = args.agent_name == "fix_developer";
+        !is_high_severity || !is_fixer || args.output.contains("regression test")
+    on_violation: warn

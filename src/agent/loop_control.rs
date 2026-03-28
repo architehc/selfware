@@ -92,13 +92,24 @@ impl AgentLoop {
     }
 
     fn is_valid_transition(current: &AgentState, next: &AgentState) -> bool {
-        matches!((current, next), (AgentState::Planning, AgentState::Executing { .. })
-            | (AgentState::Planning, AgentState::ErrorRecovery { .. })
-            | (AgentState::Planning, AgentState::Failed { .. }) | (AgentState::Executing { .. }, AgentState::Executing { .. })
-            | (AgentState::Executing { .. }, AgentState::ErrorRecovery { .. })
-            | (AgentState::Executing { .. }, AgentState::Completed)
-            | (AgentState::Executing { .. }, AgentState::Failed { .. }) | (AgentState::ErrorRecovery { .. }, AgentState::Executing { .. })
-            | (AgentState::ErrorRecovery { .. }, AgentState::Failed { .. }))
+        matches!(
+            (current, next),
+            (AgentState::Planning, AgentState::Executing { .. })
+                | (AgentState::Planning, AgentState::ErrorRecovery { .. })
+                | (AgentState::Planning, AgentState::Failed { .. })
+                | (AgentState::Executing { .. }, AgentState::Executing { .. })
+                | (
+                    AgentState::Executing { .. },
+                    AgentState::ErrorRecovery { .. }
+                )
+                | (AgentState::Executing { .. }, AgentState::Completed)
+                | (AgentState::Executing { .. }, AgentState::Failed { .. })
+                | (
+                    AgentState::ErrorRecovery { .. },
+                    AgentState::Executing { .. }
+                )
+                | (AgentState::ErrorRecovery { .. }, AgentState::Failed { .. })
+        )
     }
 
     pub fn transition_to(

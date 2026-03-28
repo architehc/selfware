@@ -15,9 +15,9 @@ use crate::token_count::estimate_tokens_with_overhead;
 use crate::vector_store::EmbeddingBackend;
 
 use super::memory_hierarchy::{
-    CodeContext, CodeModification, Episode, EpisodeType, HierarchicalMemory,
-    Importance, MemoryConfig, MemoryStats, SelfImprovementContext, SelfModel,
-    WorkingContext, TOTAL_CONTEXT_TOKENS,
+    CodeContext, CodeModification, Episode, EpisodeType, HierarchicalMemory, Importance,
+    MemoryConfig, MemoryStats, SelfImprovementContext, SelfModel, WorkingContext,
+    TOTAL_CONTEXT_TOKENS,
 };
 use super::self_reference::{SelfReferenceSystem, SourceRetrievalOptions};
 use super::token_budget::{AdaptationResult, BudgetStats, TaskType, TokenBudgetAllocator};
@@ -566,7 +566,9 @@ fn format_timestamp(timestamp: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cognitive::memory_hierarchy::{FileContext, MemoryMetrics, MemoryUsage, TokenBudget};
+    use crate::cognitive::memory_hierarchy::{
+        FileContext, MemoryMetrics, MemoryUsage, TokenBudget,
+    };
 
     // ========================================================================
     // Helper functions

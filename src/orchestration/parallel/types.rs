@@ -7,7 +7,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock as StdRwLock;
 
-
 /// Configuration for parallel execution
 #[derive(Debug, Clone)]
 pub struct ParallelConfig {

@@ -3,9 +3,9 @@
 //! Provides programmatic typing, key presses, and key combinations.
 //! On Linux, uses xdotool for actual input. On other platforms, stubs with logging.
 
-use anyhow::{bail, Result};
 #[cfg(all(target_os = "linux", not(test)))]
 use anyhow::Context;
+use anyhow::{bail, Result};
 
 use tracing::debug;
 
@@ -175,7 +175,10 @@ impl KeyboardController {
                     debug!("Typed: '{}'", ch);
                 }
             } else {
-                debug!("Typed {} chars instantly (stub — no xdotool on this platform)", text.len());
+                debug!(
+                    "Typed {} chars instantly (stub — no xdotool on this platform)",
+                    text.len()
+                );
             }
         }
 
@@ -470,7 +473,10 @@ mod tests {
     fn test_build_xdotool_combo_maps_keys() {
         assert_eq!(build_xdotool_combo("ctrl+Enter"), "ctrl+Return");
         assert_eq!(build_xdotool_combo("alt+Backspace"), "alt+BackSpace");
-        assert_eq!(build_xdotool_combo("cmd+shift+Escape"), "super+shift+Escape");
+        assert_eq!(
+            build_xdotool_combo("cmd+shift+Escape"),
+            "super+shift+Escape"
+        );
     }
 
     #[test]

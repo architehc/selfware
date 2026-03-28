@@ -879,9 +879,9 @@ fn parse_layout_response(raw: &str) -> Result<LayoutAnalysis> {
 // Visual Stuck-Loop Detection
 // ---------------------------------------------------------------------------
 
+use chrono::{DateTime, Utc};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use chrono::{DateTime, Utc};
 
 /// Tracks screenshot history to detect stuck loops
 #[derive(Debug, Clone)]
@@ -922,7 +922,9 @@ pub enum LoopDetectionResult {
     /// No loop detected, proceed normally
     Proceed,
     /// Possible loop forming - warn
-    Warning { similar_states: Vec<ScreenshotState> },
+    Warning {
+        similar_states: Vec<ScreenshotState>,
+    },
     /// Stuck loop confirmed - need recovery
     Stuck {
         loop_pattern: Vec<ScreenshotState>,
@@ -951,7 +953,11 @@ impl std::fmt::Display for RecoveryStrategy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RecoveryStrategy::TryDifferentAction { alternatives } => {
-                write!(f, "Try different action. Alternatives: {}", alternatives.join(", "))
+                write!(
+                    f,
+                    "Try different action. Alternatives: {}",
+                    alternatives.join(", ")
+                )
             }
             RecoveryStrategy::ResetToCheckpoint => write!(f, "Reset to checkpoint"),
             RecoveryStrategy::EscalateToUser { reason } => {
@@ -1116,7 +1122,10 @@ impl VisualStateTracker {
         pattern: &[ScreenshotState],
         _last_action_succeeded: bool,
     ) -> RecoveryStrategy {
-        let action = pattern.last().map(|s| s.action_taken.clone()).unwrap_or_default();
+        let action = pattern
+            .last()
+            .map(|s| s.action_taken.clone())
+            .unwrap_or_default();
 
         // Analyze the pattern to suggest appropriate recovery
         if pattern.len() >= 3 {
@@ -1163,13 +1172,15 @@ impl VisualStateTracker {
     pub fn has_similar_state(&self, hash: &str, action: &str) -> bool {
         self.history.iter().any(|h| {
             let hash_sim = compute_hash_similarity(&h.hash, hash);
-            hash_sim >= self.hash_similarity_threshold && h.action_taken == action && !h.action_succeeded
+            hash_sim >= self.hash_similarity_threshold
+                && h.action_taken == action
+                && !h.action_succeeded
         })
     }
 }
 
 /// Compute perceptual hash (dhash) for a screenshot
-/// 
+///
 /// Uses difference hash algorithm:
 /// 1. Resize image to 9x8
 /// 2. Compute gradient between adjacent pixels
@@ -1183,12 +1194,7 @@ pub fn compute_perceptual_hash(screenshot_path: &Path) -> Result<String> {
 
     // Convert to grayscale and resize to 9x8 for dhash
     let gray = img.to_luma8();
-    let resized = image::imageops::resize(
-        &gray,
-        9,
-        8,
-        image::imageops::FilterType::Lanczos3,
-    );
+    let resized = image::imageops::resize(&gray, 9, 8, image::imageops::FilterType::Lanczos3);
 
     // Compute difference hash
     let mut hash_bits = Vec::with_capacity(64);
@@ -1225,12 +1231,7 @@ pub fn compute_perceptual_hash_from_bytes(image_bytes: &[u8]) -> Result<String> 
 
     // Convert to grayscale and resize to 9x8 for dhash
     let gray = img.to_luma8();
-    let resized = image::imageops::resize(
-        &gray,
-        9,
-        8,
-        image::imageops::FilterType::Lanczos3,
-    );
+    let resized = image::imageops::resize(&gray, 9, 8, image::imageops::FilterType::Lanczos3);
 
     // Compute difference hash
     let mut hash_bits = Vec::with_capacity(64);
@@ -1264,7 +1265,9 @@ pub fn compute_hash_similarity(hash1: &str, hash2: &str) -> f32 {
         // Different lengths - compute similarity based on common prefix
         let min_len = hash1.len().min(hash2.len());
         let max_len = hash1.len().max(hash2.len());
-        let common = hash1.bytes().zip(hash2.bytes())
+        let common = hash1
+            .bytes()
+            .zip(hash2.bytes())
             .take(min_len)
             .filter(|(a, b)| a == b)
             .count();
@@ -1273,7 +1276,7 @@ pub fn compute_hash_similarity(hash1: &str, hash2: &str) -> f32 {
 
     let max_distance = hash1.len() * 4; // Each hex char = 4 bits
     let distance = hamming_distance(hash1, hash2);
-    
+
     // Convert to similarity: 1.0 - normalized distance
     1.0 - (distance as f32 / max_distance as f32)
 }
@@ -1340,7 +1343,7 @@ impl VisualLoopConfig {
 }
 
 /// Utility function to quickly check for stuck loops with minimal config
-/// 
+///
 /// This is a convenience function for simple use cases. For more control,
 /// use `VisualStateTracker` directly.
 pub fn check_visual_loop(
@@ -2016,7 +2019,8 @@ mod tests {
         assert!(prompt.contains("confidence"));
 
         // Parsing a response for an empty-expectation query should work normally
-        let raw = r#"{"passed": true, "confidence": 0.5, "description": "Blank screen", "issues": []}"#;
+        let raw =
+            r#"{"passed": true, "confidence": 0.5, "description": "Blank screen", "issues": []}"#;
         let result = parse_verification_response(raw).unwrap();
         assert!(result.passed);
     }
@@ -2027,7 +2031,10 @@ mod tests {
             passed: false,
             confidence: 0.73,
             description: "Dashboard with charts".to_string(),
-            issues: vec!["Missing legend".to_string(), "Colors too similar".to_string()],
+            issues: vec![
+                "Missing legend".to_string(),
+                "Colors too similar".to_string(),
+            ],
         };
         let json = serde_json::to_string(&original).unwrap();
         let roundtripped: VisualVerificationResult = serde_json::from_str(&json).unwrap();
@@ -2061,7 +2068,7 @@ mod tests {
     #[test]
     fn test_visual_state_tracker_record_state_proceed() {
         let mut tracker = VisualStateTracker::new(10, 2);
-        
+
         // First state - should proceed
         let result = tracker.record_state_with_hash(
             "abc123".to_string(),
@@ -2069,7 +2076,7 @@ mod tests {
             "click".to_string(),
             false,
         );
-        
+
         match result {
             LoopDetectionResult::Proceed => {}
             _ => panic!("Expected Proceed for first state"),
@@ -2080,7 +2087,7 @@ mod tests {
     #[test]
     fn test_visual_state_tracker_detects_stuck_loop() {
         let mut tracker = VisualStateTracker::new(10, 2);
-        
+
         // Record same hash + action + failed three times
         for _ in 0..2 {
             tracker.record_state_with_hash(
@@ -2090,7 +2097,7 @@ mod tests {
                 false,
             );
         }
-        
+
         // Third time should trigger stuck detection
         let result = tracker.record_state_with_hash(
             "abc123".to_string(),
@@ -2098,9 +2105,12 @@ mod tests {
             "click".to_string(),
             false,
         );
-        
+
         match result {
-            LoopDetectionResult::Stuck { loop_pattern, suggested_recovery } => {
+            LoopDetectionResult::Stuck {
+                loop_pattern,
+                suggested_recovery,
+            } => {
                 assert_eq!(loop_pattern.len(), 2);
                 // Should suggest recovery strategy
                 if let RecoveryStrategy::TryDifferentAction { alternatives } = suggested_recovery {
@@ -2114,17 +2124,17 @@ mod tests {
     #[test]
     fn test_visual_state_tracker_different_hashes_proceed() {
         let mut tracker = VisualStateTracker::new(10, 2);
-        
+
         // Record clearly different hashes - should never get stuck
         // Use hex strings that are very different from each other
         let hashes = vec![
             "0000000000000000",
-            "ffffffffffffffff", 
+            "ffffffffffffffff",
             "aaaaaaaaaaaaaaaa",
             "5555555555555555",
             "123456789abcdef0",
         ];
-        
+
         for hash in hashes {
             let result = tracker.record_state_with_hash(
                 hash.to_string(),
@@ -2132,7 +2142,7 @@ mod tests {
                 "click".to_string(),
                 false,
             );
-            
+
             match result {
                 LoopDetectionResult::Proceed => {}
                 _ => panic!("Expected Proceed for different hashes, got {:?}", result),
@@ -2143,7 +2153,7 @@ mod tests {
     #[test]
     fn test_visual_state_tracker_success_does_not_stick() {
         let mut tracker = VisualStateTracker::new(10, 2);
-        
+
         // Same hash but action succeeded - should not count as stuck
         for _ in 0..5 {
             let result = tracker.record_state_with_hash(
@@ -2152,7 +2162,7 @@ mod tests {
                 "click".to_string(),
                 true, // succeeded
             );
-            
+
             match result {
                 LoopDetectionResult::Proceed => {}
                 _ => panic!("Successful actions should not trigger stuck detection"),
@@ -2231,7 +2241,7 @@ mod tests {
             action_succeeded: false,
             screenshot_path: Some(std::path::PathBuf::from("/tmp/test.png")),
         };
-        
+
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains("abc123"));
         assert!(json.contains("Login page"));
@@ -2241,14 +2251,14 @@ mod tests {
     #[test]
     fn test_visual_state_tracker_clear_history() {
         let mut tracker = VisualStateTracker::new(10, 2);
-        
+
         tracker.record_state_with_hash(
             "abc123".to_string(),
             "Login page".to_string(),
             "click".to_string(),
             false,
         );
-        
+
         assert_eq!(tracker.history_size(), 1);
         tracker.clear_history();
         assert_eq!(tracker.history_size(), 0);
@@ -2257,20 +2267,20 @@ mod tests {
     #[test]
     fn test_visual_state_tracker_has_similar_state() {
         let mut tracker = VisualStateTracker::new(10, 2);
-        
+
         tracker.record_state_with_hash(
             "abc123".to_string(),
             "Login page".to_string(),
             "click".to_string(),
             false,
         );
-        
+
         // Should find similar state
         assert!(tracker.has_similar_state("abc123", "click"));
-        
+
         // Different hash - should not match
         assert!(!tracker.has_similar_state("xyz789", "click"));
-        
+
         // Different action - should not match
         assert!(!tracker.has_similar_state("abc123", "type"));
     }
@@ -2278,7 +2288,7 @@ mod tests {
     #[test]
     fn test_visual_state_tracker_history_limit() {
         let mut tracker = VisualStateTracker::new(3, 2);
-        
+
         // Record more states than max_history
         for i in 0..5 {
             tracker.record_state_with_hash(
@@ -2288,7 +2298,7 @@ mod tests {
                 false,
             );
         }
-        
+
         // History should be capped at max_history
         assert_eq!(tracker.history_size(), 3);
     }

@@ -1,0 +1,119 @@
+name: product_build
+description: End-to-end product build workflow inspired by gstack and claude-skills.
+version: "1.0.0"
+author: "Selfware"
+category: "product"
+inputs:
+  - name: idea
+    description: Product idea or feature to build
+    required: true
+  - name: target_user
+    description: Primary user persona
+    required: false
+    default: "A technical team under delivery pressure"
+  - name: constraints
+    description: Technical or time constraints
+    required: false
+    default: "Use the current repository and existing stack"
+  - name: success_metric
+    description: Primary success metric
+    required: false
+    default: "Ship a narrow wedge that solves the user pain"
+  - name: repo_context
+    description: Context about the current repository
+    required: false
+    default: "Existing repository"
+  - name: verification_command
+    description: Optional implementation verification command
+    required: false
+    default: ""
+  - name: smoke_test_command
+    description: Optional smoke test command
+    required: false
+    default: ""
+outputs:
+  - name: discovery_brief
+    description: Product discovery brief
+    from: discovery_brief
+  - name: architecture_plan
+    description: Engineering architecture plan
+    from: architecture_plan
+  - name: implementation_sprint
+    description: Delivery backlog and acceptance criteria
+    from: implementation_sprint
+  - name: release_checklist
+    description: Release readiness checklist
+    from: release_checklist
+  - name: final_summary
+    description: Final end-to-end summary
+    from: final_summary
+steps:
+  - id: kickoff
+    name: Kickoff
+    description: Announce full product build workflow
+    type: log
+    message: "Running end-to-end product build workflow for ${idea}"
+    level: info
+  - id: discovery
+    name: Discovery
+    description: Run product discovery
+    type: sub_workflow
+    workflow: product_discovery
+    inputs:
+      idea: "${idea}"
+      target_user: "${target_user}"
+      constraints: "${constraints}"
+      success_metric: "${success_metric}"
+  - id: delivery
+    name: Delivery
+    description: Build the engineering delivery plan
+    type: sub_workflow
+    workflow: product_delivery
+    depends_on:
+      - discovery
+    inputs:
+      idea: "${idea}"
+      discovery_brief: "${discovery_brief}"
+      repo_context: "${repo_context}"
+      verification_command: "${verification_command}"
+  - id: release
+    name: Release
+    description: Build the release and QA plan
+    type: sub_workflow
+    workflow: product_release
+    depends_on:
+      - delivery
+    inputs:
+      idea: "${idea}"
+      discovery_brief: "${discovery_brief}"
+      architecture_plan: "${architecture_plan}"
+      implementation_sprint: "${implementation_sprint}"
+      review_gate: "${review_gate}"
+      smoke_test_command: "${smoke_test_command}"
+  - id: final_summary
+    name: Final Summary
+    description: Consolidate all product-build artifacts
+    type: llm
+    depends_on:
+      - release
+    prompt: |
+      Summarize this product build workflow as a handoff packet.
+
+      Discovery brief:
+      ${discovery_brief}
+
+      Architecture plan:
+      ${architecture_plan}
+
+      Implementation sprint:
+      ${implementation_sprint}
+
+      Release checklist:
+      ${release_checklist}
+
+      Include:
+      1. Recommended next action
+      2. Top 3 risks
+      3. First thing to verify with a real user
+      4. What the team should do this week
+    timeout_secs: 240

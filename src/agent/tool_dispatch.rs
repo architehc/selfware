@@ -1940,11 +1940,20 @@ impl Agent {
                         }
                         // Capture details for error message if this is a hard failure
                         if vvr.hard_failure {
-                            let exp = assertion.expected.clone().unwrap_or_else(|| "Expected UI state".to_string());
-                            let obs = assertion.observed.clone().unwrap_or_else(|| "Actual UI state did not match".to_string());
+                            let exp = assertion
+                                .expected
+                                .clone()
+                                .unwrap_or_else(|| "Expected UI state".to_string());
+                            let obs = assertion
+                                .observed
+                                .clone()
+                                .unwrap_or_else(|| "Actual UI state did not match".to_string());
                             // Extract issues from the message if present
                             let iss = if vvr.message.contains("issues:") {
-                                vvr.message.split("issues:").nth(1).map(|s| s.trim().to_string())
+                                vvr.message
+                                    .split("issues:")
+                                    .nth(1)
+                                    .map(|s| s.trim().to_string())
                                     .unwrap_or_else(|| "No specific issues listed".to_string())
                             } else {
                                 "No specific issues listed".to_string()

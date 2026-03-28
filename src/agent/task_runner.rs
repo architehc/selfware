@@ -713,36 +713,43 @@ impl Agent {
                     } else if error.contains("Visual assertion failed") {
                         // Visual assertion failure: provide specific recovery guidance
                         warn!("Visual assertion failure detected — entering visual recovery mode");
-                        
+
                         // Use pending visual assertion for smarter recovery if available
                         // First, extract the data we need from the checkpoint
                         let assertion_data = self.current_checkpoint.as_ref().and_then(|cp| {
                             cp.pending_visual_assertion.as_ref().map(|a| {
-                                let hash = a.verification_result.as_ref()
+                                let hash = a
+                                    .verification_result
+                                    .as_ref()
                                     .map(|vr| vr.screenshot_hash.clone())
                                     .unwrap_or_default();
-                                let tool = a.tool_name.clone().unwrap_or_else(|| "unknown".to_string());
-                                let expected = a.expected.clone().unwrap_or_else(|| "unknown".to_string());
-                                let observed = a.observed.clone().unwrap_or_else(|| "unknown".to_string());
+                                let tool =
+                                    a.tool_name.clone().unwrap_or_else(|| "unknown".to_string());
+                                let expected =
+                                    a.expected.clone().unwrap_or_else(|| "unknown".to_string());
+                                let observed =
+                                    a.observed.clone().unwrap_or_else(|| "unknown".to_string());
                                 (hash, tool, expected, observed)
                             })
                         });
-                        
+
                         // Check for visual stuck loop if we have assertion data with a hash
-                        let stuck_recovery = if let Some((hash, tool, _, _)) = assertion_data.as_ref() {
-                            if !hash.is_empty() {
-                                self.detect_visual_stuck_loop_advanced(hash, tool, false)
+                        let stuck_recovery =
+                            if let Some((hash, tool, _, _)) = assertion_data.as_ref() {
+                                if !hash.is_empty() {
+                                    self.detect_visual_stuck_loop_advanced(hash, tool, false)
+                                } else {
+                                    None
+                                }
                             } else {
                                 None
-                            }
-                        } else {
-                            None
-                        };
-                        
+                            };
+
                         // Format stuck loop info using the dedicated handler
-                        let stuck_info = stuck_recovery.as_ref()
+                        let stuck_info = stuck_recovery
+                            .as_ref()
                             .map(|strategy| self.handle_visual_stuck_loop(strategy));
-                        
+
                         let pending_assertion_info = assertion_data.map(|(_, tool, expected, observed)| {
                             format!(
                                 "\nPending assertion details:\n- Tool: {}\n- Expected: {}\n- Observed: {}{}",
@@ -750,14 +757,18 @@ impl Agent {
                                 stuck_info.as_deref().map(|s| format!("\n{}", s)).unwrap_or_default()
                             )
                         });
-                        
+
                         // Clear the pending visual assertion since we're handling the recovery
                         if self.current_checkpoint.is_some() {
                             // Pending assertion preserved for retry — cleared only on successful re-verification
                         }
-                        
-                        cli_println!("{}", "🖥️ Visual assertion failed — action did not produce expected UI state".bright_red());
-                        
+
+                        cli_println!(
+                            "{}",
+                            "🖥️ Visual assertion failed — action did not produce expected UI state"
+                                .bright_red()
+                        );
+
                         let recovery_msg = format!(
                             "VISUAL ASSERTION FAILED: The previous action did not produce the expected visual result.\n\n\
                             This is a HARD GATE — the UI state must be correct before continuing.\n\n\

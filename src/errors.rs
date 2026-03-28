@@ -55,7 +55,10 @@ impl From<std::io::Error> for SelfwareError {
 
 impl From<glob::PatternError> for SelfwareError {
     fn from(e: glob::PatternError) -> Self {
-        SelfwareError::Safety(SafetyError::Internal(format!("Invalid glob pattern: {}", e)))
+        SelfwareError::Safety(SafetyError::Internal(format!(
+            "Invalid glob pattern: {}",
+            e
+        )))
     }
 }
 
@@ -189,7 +192,9 @@ pub enum SafetyError {
     #[error("Path contains suspicious Unicode character: {character} (U+{codepoint:04X}) - possible homoglyph bypass attempt")]
     PathSuspiciousUnicode { character: String, codepoint: u32 },
 
-    #[error("Path component '{component}' contains suspicious mix of ASCII and non-ASCII characters")]
+    #[error(
+        "Path component '{component}' contains suspicious mix of ASCII and non-ASCII characters"
+    )]
     PathSuspiciousMix { component: String },
 
     #[error("Path not in allowed list: {path}")]
@@ -249,7 +254,9 @@ pub enum SafetyError {
     #[error("Dangerous container volume mount blocked: {mount} (mounts sensitive SSH material)")]
     ContainerSshMount { mount: String },
 
-    #[error("Dangerous container volume mount blocked: {mount} (mounts system directory {directory})")]
+    #[error(
+        "Dangerous container volume mount blocked: {mount} (mounts system directory {directory})"
+    )]
     ContainerSystemMount { mount: String, directory: String },
 
     // Network policy errors

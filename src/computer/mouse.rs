@@ -3,15 +3,15 @@
 //! Provides programmatic mouse movement, clicking, scrolling, and dragging.
 //! On Linux, uses xdotool for actual input. On other platforms, stubs with logging.
 
-use anyhow::{bail, Result};
 #[cfg(all(target_os = "linux", not(test)))]
 use anyhow::Context;
+use anyhow::{bail, Result};
 #[cfg(target_os = "linux")]
 use serde::{Deserialize, Serialize};
-#[cfg(target_os = "macos")]
-use tracing::{debug, warn};
 #[cfg(not(target_os = "macos"))]
 use tracing::debug;
+#[cfg(target_os = "macos")]
+use tracing::{debug, warn};
 
 use super::{ActionRateLimiter, MovementProfile};
 
@@ -509,7 +509,15 @@ mod tests {
         assert_eq!(
             args,
             vec![
-                "mousemove", "10", "20", "mousedown", "1", "mousemove", "300", "400", "mouseup",
+                "mousemove",
+                "10",
+                "20",
+                "mousedown",
+                "1",
+                "mousemove",
+                "300",
+                "400",
+                "mouseup",
                 "1"
             ]
         );

@@ -193,13 +193,11 @@ impl MockLlmServerBuilder {
         body: impl Into<String>,
         headers: Vec<(String, String)>,
     ) -> Self {
-        self.config
-            .responses
-            .push(MockResponse::ErrorWithHeaders {
-                status,
-                body: body.into(),
-                headers,
-            });
+        self.config.responses.push(MockResponse::ErrorWithHeaders {
+            status,
+            body: body.into(),
+            headers,
+        });
         self
     }
 

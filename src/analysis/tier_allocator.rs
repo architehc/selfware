@@ -293,9 +293,7 @@ pub fn allocate_tiers(
     if total > budget {
         // Process from most distant to closest, never downgrade the focus node.
         let mut indices_by_distance: Vec<usize> = (0..assignments.len()).collect();
-        indices_by_distance.sort_by(|&a, &b| {
-            assignments[b].hops.cmp(&assignments[a].hops)
-        });
+        indices_by_distance.sort_by(|&a, &b| assignments[b].hops.cmp(&assignments[a].hops));
 
         for &idx in &indices_by_distance {
             if total <= budget {
@@ -329,9 +327,7 @@ pub fn allocate_tiers(
     if total > budget {
         // Sort by distance descending for exclusion.
         let mut indices_by_distance: Vec<usize> = (0..assignments.len()).collect();
-        indices_by_distance.sort_by(|&a, &b| {
-            assignments[b].hops.cmp(&assignments[a].hops)
-        });
+        indices_by_distance.sort_by(|&a, &b| assignments[b].hops.cmp(&assignments[a].hops));
 
         let mut to_exclude: HashSet<usize> = HashSet::new();
         for &idx in &indices_by_distance {
@@ -356,7 +352,10 @@ pub fn allocate_tiers(
 
     // Final sort: L4 first, then L3, L2, L1 (by tier descending, then by name).
     assignments.sort_by(|a, b| {
-        b.tier.cmp(&a.tier).then_with(|| a.hops.cmp(&b.hops)).then_with(|| a.name.cmp(&b.name))
+        b.tier
+            .cmp(&a.tier)
+            .then_with(|| a.hops.cmp(&b.hops))
+            .then_with(|| a.name.cmp(&b.name))
     });
 
     TierAllocation {
@@ -374,7 +373,7 @@ pub fn allocate_tiers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::code_graph::{CodeGraph, GraphNode, NodeType, EdgeType};
+    use crate::analysis::code_graph::{CodeGraph, EdgeType, GraphNode, NodeType};
 
     // ── Test Helpers ────────────────────────────────────────────────────────
 
@@ -497,7 +496,11 @@ mod tests {
         // Budget is 1000. Focus node alone is 800.
         // That leaves only 200 for 5 other nodes.
         // Should downgrade and/or exclude distant nodes.
-        assert!(alloc.total_tokens <= 1000, "total {} exceeds budget 1000", alloc.total_tokens);
+        assert!(
+            alloc.total_tokens <= 1000,
+            "total {} exceeds budget 1000",
+            alloc.total_tokens
+        );
 
         // Focus node must always be present at L4.
         let agent_assign = alloc.for_node(&agent_node.id).unwrap();
@@ -561,7 +564,11 @@ mod tests {
         let summary = alloc.summary();
         assert!(summary.contains("L4:1"), "expected 1 L4 node: {}", summary);
         assert!(summary.contains("L3:"), "expected L3 count: {}", summary);
-        assert!(summary.contains("tokens"), "expected token info: {}", summary);
+        assert!(
+            summary.contains("tokens"),
+            "expected token info: {}",
+            summary
+        );
     }
 
     #[test]
@@ -577,7 +584,8 @@ mod tests {
             assert!(
                 window[0] >= window[1],
                 "assignments not sorted by tier: {:?} before {:?}",
-                window[0], window[1]
+                window[0],
+                window[1]
             );
         }
     }
@@ -704,7 +712,11 @@ mod tests {
         let alloc = allocate_tiers(&graph, &agent_node.id, &config);
 
         let pct = alloc.utilization_pct();
-        assert!(pct >= 0.0 && pct <= 100.0, "utilization {} out of range", pct);
+        assert!(
+            pct >= 0.0 && pct <= 100.0,
+            "utilization {} out of range",
+            pct
+        );
     }
 
     #[test]
@@ -760,7 +772,10 @@ mod tests {
         let b_node = graph.get_node("b").unwrap();
         assert!(distances.contains_key(&b_node.id));
         let island_node = graph.get_node("island").unwrap();
-        assert!(!distances.contains_key(&island_node.id), "island should be unreachable");
+        assert!(
+            !distances.contains_key(&island_node.id),
+            "island should be unreachable"
+        );
     }
 
     // ── Deep DAG tests ──────────────────────────────────────────────────────
@@ -770,7 +785,9 @@ mod tests {
         // a -> b -> c -> d -> e (linear chain, 4 hops from a to e)
         let mut graph = CodeGraph::new("chain");
         for name in &["a", "b", "c", "d", "e"] {
-            graph.add_node(GraphNode::new(name, NodeType::File).in_file(&format!("src/{}.rs", name)));
+            graph.add_node(
+                GraphNode::new(name, NodeType::File).in_file(&format!("src/{}.rs", name)),
+            );
         }
         graph.connect("a", "b", EdgeType::Imports);
         graph.connect("b", "c", EdgeType::Imports);
@@ -788,10 +805,19 @@ mod tests {
         let e_node = graph.get_node("e").unwrap();
 
         assert_eq!(alloc.for_node(&a_node.id).unwrap().tier, ContextTier::Edit);
-        assert_eq!(alloc.for_node(&b_node.id).unwrap().tier, ContextTier::Integrate);
+        assert_eq!(
+            alloc.for_node(&b_node.id).unwrap().tier,
+            ContextTier::Integrate
+        );
         assert_eq!(alloc.for_node(&c_node.id).unwrap().tier, ContextTier::Work);
-        assert_eq!(alloc.for_node(&d_node.id).unwrap().tier, ContextTier::Describe);
-        assert_eq!(alloc.for_node(&e_node.id).unwrap().tier, ContextTier::Describe);
+        assert_eq!(
+            alloc.for_node(&d_node.id).unwrap().tier,
+            ContextTier::Describe
+        );
+        assert_eq!(
+            alloc.for_node(&e_node.id).unwrap().tier,
+            ContextTier::Describe
+        );
     }
 
     #[test]
@@ -800,7 +826,9 @@ mod tests {
         let mut graph = CodeGraph::new("star");
         graph.add_node(GraphNode::new("hub", NodeType::File).in_file("src/hub.rs"));
         for name in &["a", "b", "c", "d"] {
-            graph.add_node(GraphNode::new(name, NodeType::File).in_file(&format!("src/{}.rs", name)));
+            graph.add_node(
+                GraphNode::new(name, NodeType::File).in_file(&format!("src/{}.rs", name)),
+            );
             graph.connect("hub", name, EdgeType::Imports);
         }
 
@@ -809,10 +837,16 @@ mod tests {
         let alloc = allocate_tiers(&graph, &hub_node.id, &config);
 
         // hub=L4, all children=L3 (1 hop)
-        assert_eq!(alloc.for_node(&hub_node.id).unwrap().tier, ContextTier::Edit);
+        assert_eq!(
+            alloc.for_node(&hub_node.id).unwrap().tier,
+            ContextTier::Edit
+        );
         for name in &["a", "b", "c", "d"] {
             let node = graph.get_node(name).unwrap();
-            assert_eq!(alloc.for_node(&node.id).unwrap().tier, ContextTier::Integrate);
+            assert_eq!(
+                alloc.for_node(&node.id).unwrap().tier,
+                ContextTier::Integrate
+            );
         }
     }
 

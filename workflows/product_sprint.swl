@@ -1,0 +1,410 @@
+# Product Sprint Workflow - Inspired by gstack's /office-hours → /ship pipeline
+# For txn545/Qwen3.5-122B-A10B-NVFP4 with 262k context
+
+version: "1.0"
+name: product_sprint
+description: |
+  Complete product sprint from ideation to shipping.
+  Based on gstack's proven workflow: Think → Plan → Build → Review → Test → Ship
+
+metadata:
+  author: "Selfware Product Team"
+  tags: ["product", "sprint", "full-cycle"]
+
+agents:
+  # CEO/Product Thinker - reframes problems, challenges premises
+  product_strategist:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.7
+      max_tokens: 8192
+    role: |
+      You are a YC-level product strategist. Your job is to:
+      1. Push back on the user's framing - extract the real problem
+      2. Challenge 3-4 premises in their approach
+      3. Generate 3 implementation alternatives with effort estimates
+      4. Recommend the narrowest wedge to ship tomorrow
+      
+      Always ask: "What pain are you actually solving?" not "What feature are you building?"
+    instruction: |
+      Run /office-hours style discovery. Ask 6 forcing questions:
+      1. What specific examples of this pain have you experienced?
+      2. Who else has this problem? How do you know?
+      3. What have you already tried? Why didn't it work?
+      4. What's the narrowest version that would still be valuable?
+      5. What would make this a 10-star experience?
+      6. What happens if you don't build this?
+      
+      Write a DESIGN.md that feeds into downstream workflows.
+    tools:
+      - file_read
+      - file_write
+      - directory_list
+      - web_search
+    output_key: design_doc
+
+  # Engineering Manager - locks architecture, diagrams, tests
+  architect:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.3
+      max_tokens: 8192
+    role: |
+      You are a staff engineer who forces hidden assumptions into the open.
+      You create ASCII diagrams for data flow, state machines, and error paths.
+      You define test matrices and failure modes BEFORE code is written.
+    instruction: |
+      Read the DESIGN.md from product_strategist.
+      
+      Produce:
+      1. ARCHITECTURE.md with data flow diagrams
+      2. API contract definitions
+      3. State machine diagram (ASCII)
+      4. Error handling strategy
+      5. Test matrix: unit, integration, e2e requirements
+      6. Security concerns checklist
+      
+      Lock the architecture. No code until this is approved.
+    tools:
+      - file_read
+      - file_write
+      - directory_list
+    output_key: architecture_doc
+    sub_agents:
+      - security_auditor
+
+  # Senior Developer - implements with tests
+  implementer:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.2
+      max_tokens: 8192
+    role: |
+      You ship production code with tests. You follow the architecture exactly.
+      You write atomic commits. You never skip tests.
+      You use TDD: test first, then implementation.
+    instruction: |
+      Read ARCHITECTURE.md and DESIGN.md.
+      
+      Implementation rules:
+      1. Bootstrap test framework if missing (cargo test, pytest, vitest, etc.)
+      2. Write failing tests FIRST
+      3. Implement to make tests pass
+      4. Coverage goal: 80% minimum, 100% for critical paths
+      5. Atomic commits: one logical change per commit
+      6. Document public APIs with doc comments
+      
+      Stop and ask if architecture doesn't make sense.
+    tools:
+      - file_read
+      - file_write
+      - file_edit
+      - shell
+      - cargo
+      - npm
+    output_key: implementation_complete
+
+  # Staff Engineer - finds bugs that pass CI but blow up in prod
+  reviewer:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.1
+      max_tokens: 8192
+    role: |
+      You are a code reviewer who catches what others miss.
+      You look for: race conditions, error handling gaps, resource leaks,
+      security issues, performance problems, and completeness gaps.
+      Auto-fix the obvious. Flag the subtle.
+    instruction: |
+      Review the git diff from implementer.
+      
+      Review checklist:
+      1. [ ] Error paths handled (not just happy path)
+      2. [ ] Resource cleanup (files, connections, temp files)
+      3. [ ] Race conditions in concurrent code
+      4. [ ] Input validation at boundaries
+      5. [ ] Logging for debugging
+      6. [ ] Test coverage > 80%
+      7. [ ] No hardcoded secrets
+      8. [ ] No SQL injection / command injection risks
+      
+      Format findings as:
+      - [AUTO-FIXED] Description → Fixed automatically
+      - [ASK] Description → Needs human decision
+      - [INFO] Description → For awareness
+      
+      If 3+ [ASK] items, reject and request changes.
+    tools:
+      - file_read
+      - file_diff
+      - file_edit
+      - shell
+    output_key: review_complete
+
+  # QA Engineer - tests with real browser
+  qa_engineer:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.3
+      max_tokens: 8192
+    role: |
+      You test like a real user. You open browsers, click buttons, find bugs.
+      When you find a bug: reproduce, fix with atomic commit, add regression test,
+      re-verify the fix. "I SEE THE ISSUE" is your catchphrase.
+    instruction: |
+      Run QA on staging or local environment.
+      
+      QA process:
+      1. Read test plan from architect
+      2. Navigate through all user flows
+      3. Take screenshots at key points
+      4. Find bugs → fix with atomic commits
+      5. Generate regression tests for every fix
+      6. Re-verify after fixes
+      
+      Use browser tools to:
+      - Navigate and interact with pages
+      - Fill forms with test data
+      - Take screenshots for visual regression
+      - Check console for JS errors
+      - Verify responsive design
+    tools:
+      - browser_navigate
+      - browser_click
+      - browser_screenshot
+      - file_read
+      - file_write
+      - file_edit
+    output_key: qa_complete
+
+  # Security Auditor - OWASP + STRIDE
+  security_auditor:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.1
+      max_tokens: 8192
+    role: |
+      You are a CISO running OWASP Top 10 + STRIDE threat modeling.
+      You find concrete exploit scenarios, not vague warnings.
+      You filter false positives (8/10+ confidence only).
+    instruction: |
+      Run security audit on the implementation.
+      
+      Checklist:
+      OWASP Top 10:
+      1. Broken Access Control
+      2. Cryptographic Failures
+      3. Injection (SQL, Command, XSS)
+      4. Insecure Design
+      5. Security Misconfiguration
+      6. Vulnerable Components
+      7. Auth Failures
+      8. Data Integrity Failures
+      9. Logging Failures
+      10. SSRF
+      
+      STRIDE:
+      - Spoofing
+      - Tampering
+      - Repudiation
+      - Information Disclosure
+      - Denial of Service
+      - Elevation of Privilege
+      
+      Each finding must include:
+      - Concrete exploit scenario
+      - Severity (Critical/High/Medium/Low)
+      - Specific file/line reference
+      - Remediation code
+    tools:
+      - file_read
+      - file_write
+    output_key: security_audit_complete
+
+  # Release Engineer - ships the PR
+  release_engineer:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.2
+      max_tokens: 8192
+    role: |
+      You ship code. You sync main, run tests, audit coverage, push, open PR.
+      You never ship without tests. You document what shipped.
+    instruction: |
+      Run /ship workflow:
+      1. Sync with main: `git pull origin main`
+      2. Run full test suite
+      3. Coverage audit (goal: 80%+)
+      4. Push branch
+      5. Open PR with description
+      6. Update CHANGELOG.md
+      7. Update documentation
+      
+      PR description template:
+      - What changed
+      - Why it changed
+      - Test coverage %
+      - Screenshots (if UI)
+      - Breaking changes (if any)
+    tools:
+      - shell
+      - git
+      - file_read
+      - file_write
+    output_key: pr_opened
+
+workflows:
+  # Main sprint workflow - sequential pipeline
+  sprint:
+    type: sequential
+    description: "Complete product sprint from idea to shipped PR"
+    steps:
+      # Phase 1: Think - Product discovery
+      - delegate: product_strategist
+        input:
+          prompt: "{{user_prompt}}"
+          output_file: "DESIGN.md"
+      
+      # Phase 2: Plan - Architecture lock
+      - delegate: architect
+        input:
+          design_doc: "DESIGN.md"
+          output_file: "ARCHITECTURE.md"
+      
+      # Phase 3: Build - Implementation (with sub-flow for security)
+      - parallel:
+          branches:
+            - delegate: implementer
+              input:
+                architecture: "ARCHITECTURE.md"
+            - delegate: security_auditor
+              input:
+                architecture: "ARCHITECTURE.md"
+      
+      # Phase 4: Review - Code review
+      - delegate: reviewer
+        input:
+          scope: "full_diff"
+      
+      # Phase 5: Test - QA validation
+      - delegate: qa_engineer
+        input:
+          environment: "{{staging_url | default('local')}}"
+      
+      # Phase 6: Ship - Release
+      - delegate: release_engineer
+        input:
+          create_pr: true
+
+  # Fast track for hotfixes
+  hotfix:
+    type: sequential
+    description: "Emergency fix with reduced ceremony"
+    steps:
+      - delegate: implementer
+        input:
+          mode: "hotfix"
+          tests_required: true
+      - delegate: reviewer
+        input:
+          mode: "focused"
+          scope: "changed_files_only"
+      - delegate: release_engineer
+        input:
+          skip_qa: true
+          urgent: true
+
+  # Architecture review only
+  architecture_review:
+    type: sequential
+    description: "Review and lock architecture before building"
+    steps:
+      - delegate: product_strategist
+      - delegate: architect
+      - parallel:
+          branches:
+            - delegate: security_auditor
+            - delegate: reviewer
+              input:
+                mode: "architecture_only"
+
+state:
+  fields:
+    - name: design_doc
+      type: string
+      description: "Path to DESIGN.md"
+    
+    - name: architecture_doc
+      type: string
+      description: "Path to ARCHITECTURE.md"
+    
+    - name: test_coverage
+      type: float
+      description: "Test coverage percentage"
+      default: 0.0
+    
+    - name: bugs_found
+      type: integer
+      description: "Number of bugs found in QA"
+      default: 0
+    
+    - name: security_findings
+      type: array
+      element_type: object
+      description: "Security audit findings"
+      default: []
+    
+    - name: pr_url
+      type: string
+      description: "URL of opened PR"
+
+telemetry:
+  enabled: true
+  metrics:
+    - inference_latency
+    - token_usage
+    - step_completion_time
+    - agent_delegation_count
+  export:
+    type: file
+    path: "./logs/sprint_telemetry.jsonl"
+
+guardrails:
+  - name: no_main_branch_direct_edit
+    type: pre_tool
+    condition:
+      language: rust
+      content: |
+        // Block direct commits to main
+        !args.tool_name.contains("git_commit") || 
+        !args.args.message.contains("main")
+    on_violation: block
+  
+  - name: require_tests
+    type: post_agent
+    condition:
+      language: rust
+      content: |
+        // Ensure tests were added
+        args.agent_name == "implementer" &&
+        args.output.contains("test")
+    on_violation: warn
+  
+  - name: security_scan
+    type: pre_tool
+    condition:
+      language: rust
+      content: |
+        // Block dangerous shell commands
+        let cmd = args.args.command.to_lowercase();
+        !cmd.contains("rm -rf /") &&
+        !cmd.contains("drop table") &&
+        !cmd.contains("truncate")
+    on_violation: block

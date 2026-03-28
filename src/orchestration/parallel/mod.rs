@@ -13,14 +13,10 @@ pub mod types;
 pub use conflicts::{Conflict, ConflictDetector, ConflictResolver, ConflictType};
 pub use executor::ParallelExecutor;
 #[allow(unused_imports)]
-pub use types::{
-    DependencyGraph, NodeStatus, ParallelConfig, ParallelResult,
-};
+pub use types::{DependencyGraph, NodeStatus, ParallelConfig, ParallelResult};
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
-
-
 
 /// Manages parallel execution of tool calls
 pub struct ParallelManager {

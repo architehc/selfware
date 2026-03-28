@@ -1,0 +1,433 @@
+# Security Audit Workflow - Inspired by gstack's /cso (Chief Security Officer)
+# Comprehensive security review with OWASP Top 10 + STRIDE threat modeling
+# For txn545/Qwen3.5-122B-A10B-NVFP4 with 262k context
+
+version: "1.0"
+name: security_audit
+description: |
+  Comprehensive security audit workflow combining OWASP Top 10 and STRIDE threat modeling.
+  Based on gstack's /cso skill: systematic security analysis with concrete exploit scenarios.
+
+metadata:
+  author: "Selfware Security Team"
+  tags: ["security", "audit", "owasp", "stride", "threat-modeling"]
+
+agents:
+  # Chief Security Officer - Strategic security leadership
+  cso:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.2
+      max_tokens: 8192
+    role: |
+      You are a Chief Security Officer conducting strategic security assessment.
+      You set the security posture, prioritize risks, and align security with business goals.
+      You think like an attacker: "How would I break this?"
+    instruction: |
+      Run executive-level security assessment:
+      
+      1. Asset Inventory
+         - Identify all valuable assets (data, systems, credentials)
+         - Classify sensitivity levels (Public, Internal, Confidential, Secret)
+      
+      2. Threat Landscape
+         - Who would want to attack this? (threat actors)
+         - What's their motivation? (financial, espionage, disruption)
+         - What's their capability level?
+      
+      3. Risk Prioritization
+         - Likelihood × Impact matrix
+         - Top 5 risks that could kill the business
+      
+      4. Compliance Requirements
+         - GDPR, HIPAA, SOC2, PCI-DSS applicability
+         - Gap analysis against standards
+      
+      Output: SECURITY_STRATEGY.md with executive summary and risk register
+    tools:
+      - file_read
+      - file_write
+      - directory_list
+      - web_search
+    output_key: security_strategy
+
+  # Threat Modeler - STRIDE analysis expert
+  threat_modeler:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.2
+      max_tokens: 8192
+    role: |
+      You are a threat modeling specialist using STRIDE methodology.
+      You create data flow diagrams and identify threats systematically.
+      Every threat you find includes a concrete exploit scenario.
+    instruction: |
+      Perform STRIDE threat modeling on the system:
+      
+      1. Create Data Flow Diagrams (DFDs)
+         - Identify trust boundaries
+         - Map data flows between components
+         - Mark external entities and data stores
+      
+      2. STRIDE Analysis (per element):
+         - Spoofing: Can an attacker pretend to be someone else?
+         - Tampering: Can data be modified in transit or at rest?
+         - Repudiation: Can actions be denied without proof?
+         - Information Disclosure: Can unauthorized data be accessed?
+         - Denial of Service: Can the system be made unavailable?
+         - Elevation of Privilege: Can a user gain unauthorized access?
+      
+      3. Threat Ranking
+         - DREAD score (Damage, Reproducibility, Exploitability, Affected users, Discoverability)
+         - 0-10 scale for each dimension
+      
+      4. Mitigation Mapping
+         - Specific countermeasures for each high-risk threat
+         - Defense in depth strategy
+      
+      Output: THREAT_MODEL.md with DFDs and ranked threat list
+    tools:
+      - file_read
+      - file_write
+      - file_edit
+    output_key: threat_model
+
+  # OWASP Specialist - Application security expert
+  owasp_specialist:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.1
+      max_tokens: 8192
+    role: |
+      You are an OWASP Top 10 specialist. You find and validate security vulnerabilities.
+      You provide proof-of-concept exploits and specific remediation code.
+      Filter: Only report findings with 8/10+ confidence.
+    instruction: |
+      Conduct OWASP Top 10 audit on the codebase:
+      
+      OWASP 2021 Top 10 Checklist:
+      
+      1. Broken Access Control
+         - IDOR vulnerabilities (can user A access user B's data?)
+         - Missing authorization checks
+         - Directory traversal
+         - CORS misconfigurations
+      
+      2. Cryptographic Failures
+         - Weak algorithms (MD5, SHA1, DES)
+         - Hardcoded secrets
+         - Missing encryption at rest/transit
+         - Insecure randomness
+      
+      3. Injection
+         - SQL injection (including blind/time-based)
+         - Command injection
+         - LDAP injection
+         - NoSQL injection
+         - XSS (stored, reflected, DOM)
+      
+      4. Insecure Design
+         - Missing rate limiting
+         - Business logic flaws
+         - Race conditions
+      
+      5. Security Misconfiguration
+         - Default credentials
+         - Exposed admin panels
+         - Verbose error messages
+         - Missing security headers
+      
+      6. Vulnerable Components
+         - Outdated dependencies
+         - Known CVEs in libraries
+      
+      7. Authentication Failures
+         - Weak password policies
+         - Missing MFA
+         - Session fixation
+         - JWT vulnerabilities
+      
+      8. Software and Data Integrity Failures
+         - Insecure deserialization
+         - Missing signature verification
+      
+      9. Logging Failures
+         - Insufficient logging
+         - Sensitive data in logs
+         - No log integrity protection
+      
+      10. Server-Side Request Forgery (SSRF)
+          - Internal service access via URL parameters
+          - Metadata endpoint access
+      
+      Output Format per Finding:
+      ```
+      [SEVERITY] OWASP Category: Title
+      - File:Line reference
+      - Confidence: X/10
+      - Exploit Scenario: "An attacker could..."
+      - Proof of Concept: <code example>
+      - Remediation: <fixed code>
+      ```
+      
+      Output: OWASP_AUDIT.md with findings and remediation guide
+    tools:
+      - file_read
+      - file_write
+      - file_diff
+      - grep
+    output_key: owasp_findings
+
+  # Code Security Reviewer - Implementation-level analysis
+  code_security_reviewer:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.1
+      max_tokens: 8192
+    role: |
+      You review code for security anti-patterns. You find the bugs that 
+      security scanners miss. You focus on implementation-level security flaws.
+    instruction: |
+      Deep code review for security issues:
+      
+      Language-Specific Checks:
+      
+      For Rust:
+      - unsafe blocks usage
+      - unwrap/expect on user input
+      - Serialization/deserialization safety
+      - Tokio task cancellation issues
+      
+      For Python:
+      - eval/exec on untrusted input
+      - pickle usage on untrusted data
+      - String formatting with user input
+      - subprocess with shell=True
+      
+      For JavaScript/TypeScript:
+      - innerHTML with user content
+      - Prototype pollution
+      - eval() usage
+      - RegExp ReDoS
+      
+      For Go:
+      - Integer overflow
+      - Race conditions
+      - Unsafe package usage
+      - SQL concatenation
+      
+      General Checks:
+      - Input validation patterns
+      - Output encoding
+      - Authentication middleware
+      - Authorization checks
+      - Secret management
+      - Audit logging
+      
+      Output: CODE_SECURITY.md with line-by-line findings
+    tools:
+      - file_read
+      - file_write
+      - file_diff
+      - grep
+    output_key: code_security_review
+
+  # Security Validator - Verifies fixes and signs off
+  security_validator:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.1
+      max_tokens: 8192
+    role: |
+      You validate that security issues have been properly remediated.
+      You re-test vulnerabilities and verify mitigations work.
+      You provide final security sign-off.
+    instruction: |
+      Validate security remediation:
+      
+      1. Review all findings from previous agents
+      2. Verify fixes have been applied correctly
+      3. Check for regression risks
+      4. Validate defense in depth
+      
+      Sign-off Criteria:
+      - No [CRITICAL] findings remain
+      - All [HIGH] findings have mitigations
+      - Tests added for security fixes
+      - Documentation updated
+      
+      Output: SECURITY_SIGNOFF.md with final verdict
+    tools:
+      - file_read
+      - file_diff
+      - shell
+    output_key: security_signoff
+
+workflows:
+  # Full security audit - comprehensive assessment
+  full_audit:
+    type: sequential
+    description: "Complete security audit from strategy to validation"
+    steps:
+      # Phase 1: Strategic assessment
+      - delegate: cso
+        input:
+          scope: "{{scope | default('full_system')}}"
+          output_file: "SECURITY_STRATEGY.md"
+      
+      # Phase 2: Parallel deep analysis
+      - parallel:
+          branches:
+            - delegate: threat_modeler
+              input:
+                strategy_doc: "SECURITY_STRATEGY.md"
+            - delegate: owasp_specialist
+              input:
+                strategy_doc: "SECURITY_STRATEGY.md"
+            - delegate: code_security_reviewer
+              input:
+                strategy_doc: "SECURITY_STRATEGY.md"
+      
+      # Phase 3: Consolidate findings
+      - delegate: security_validator
+        input:
+          mode: "consolidate"
+          output_file: "SECURITY_AUDIT_REPORT.md"
+
+  # Quick security scan - fast assessment
+  quick_scan:
+    type: sequential
+    description: "Fast security scan for CI/CD pipeline"
+    steps:
+      - delegate: owasp_specialist
+        input:
+          depth: "quick"
+          focus: ["injection", "access_control", "secrets"]
+      - guard:
+          condition:
+            language: rust
+            content: |
+              // Block if critical vulnerabilities found
+              !args.owasp_findings.contains("[CRITICAL]")
+          on_violation: block
+
+  # Threat modeling only
+  threat_model_only:
+    type: sequential
+    description: "STRIDE threat modeling workshop"
+    steps:
+      - delegate: cso
+        input:
+          mode: "assets_only"
+      - delegate: threat_modeler
+        input:
+          output_file: "THREAT_MODEL.md"
+
+  # Pre-deployment security gate
+  deployment_gate:
+    type: sequential
+    description: "Security gate before production deployment"
+    steps:
+      - parallel:
+          branches:
+            - delegate: owasp_specialist
+              input:
+                mode: "deployment_check"
+            - delegate: code_security_reviewer
+              input:
+                mode: "deployment_check"
+      - delegate: security_validator
+        input:
+          mode: "deployment_signoff"
+      - guard:
+          condition:
+            language: rust
+            content: |
+              // Deployment blocked if critical or high issues found
+              let findings = args.owasp_findings.clone() + &args.code_security_review;
+              !findings.contains("[CRITICAL]") && !findings.contains("[HIGH]")
+          on_violation: block
+
+state:
+  fields:
+    - name: security_strategy
+      type: string
+      description: "Path to SECURITY_STRATEGY.md"
+    
+    - name: threat_model
+      type: string
+      description: "Path to THREAT_MODEL.md"
+    
+    - name: owasp_findings
+      type: string
+      description: "OWASP audit findings"
+      default: ""
+    
+    - name: code_security_review
+      type: string
+      description: "Code security review results"
+      default: ""
+    
+    - name: critical_count
+      type: integer
+      description: "Number of critical findings"
+      default: 0
+    
+    - name: high_count
+      type: integer
+      description: "Number of high findings"
+      default: 0
+    
+    - name: audit_passed
+      type: boolean
+      description: "Whether audit passed security gate"
+      default: false
+
+telemetry:
+  enabled: true
+  metrics:
+    - inference_latency
+    - token_usage
+    - vulnerability_count_by_severity
+    - audit_completion_time
+  export:
+    type: file
+    path: "./logs/security_audit_telemetry.jsonl"
+
+guardrails:
+  - name: block_critical_vulnerabilities
+    type: post_agent
+    condition:
+      language: rust
+      content: |
+        // Block workflow if critical vulnerabilities found
+        let findings = args.agent_outputs.owasp_findings.clone();
+        !findings.contains("[CRITICAL]")
+    on_violation: block
+  
+  - name: require_security_signoff
+    type: post_workflow
+    condition:
+      language: rust
+      content: |
+        // Require validator signoff for production
+        let signoff = args.state.security_signoff.clone();
+        signoff.contains("APPROVED") || !args.state.audit_passed
+    on_violation: block
+  
+  - name: no_secrets_in_output
+    type: post_agent
+    condition:
+      language: rust
+      content: |
+        // Prevent accidental secret exposure in outputs
+        let output = args.agent_output.to_lowercase();
+        !output.contains("password:") &&
+        !output.contains("api_key:") &&
+        !output.contains("secret:")
+    on_violation: warn

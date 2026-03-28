@@ -36,6 +36,34 @@ const COMMIT_HASH_PREFIX_CHARS: usize = 8;
 const MAX_JOURNAL_ERRORS_DISPLAY: usize = 3;
 const DEFAULT_WORKFLOW_NAME: &str = "default";
 
+/// Workflow file kind for determining how to handle workflow files
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkflowFileKind {
+    Swl,
+    Yaml,
+}
+
+/// Determine the workflow file kind from a path
+fn workflow_file_kind(path: &std::path::Path) -> Option<WorkflowFileKind> {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("swl") => Some(WorkflowFileKind::Swl),
+        Some("yaml") | Some("yml") => Some(WorkflowFileKind::Yaml),
+        _ => None,
+    }
+}
+
+/// Parse workflow input variables in KEY=VALUE format
+fn parse_workflow_inputs(values: &[String]) -> Result<std::collections::HashMap<String, VarValue>> {
+    let mut inputs = std::collections::HashMap::new();
+    for kv in values {
+        if let Some((k, v)) = kv.split_once('=') {
+            inputs.insert(k.to_string(), VarValue::String(v.to_string()));
+        } else {
+            anyhow::bail!("Invalid input format '{}', expected KEY=VALUE", kv);
+        }
+    }
+    Ok(inputs)
+}
 
 /// Resolve the config file path relative to the original working directory.
 ///
@@ -1035,106 +1063,387 @@ async fn handle_command(
             println!("   (Full execution requires Playwright installation)");
         }
 
-        Commands::Workflow {
-            file,
-            name,
-            input,
-            dry_run,
-        } => {
+        Commands::Workflow { command } => {
+            use crate::swl::{parse_document, validate_document};
+            use args::WorkflowCommands;
+
             if !quiet {
                 println!("{}", render_header(ctx));
             }
 
-            // Load workflow file
-            let path = std::path::Path::new(&file);
-            if !path.exists() {
-                anyhow::bail!("Workflow file not found: {}", file);
-            }
+            match command {
+                WorkflowCommands::Validate { file } => {
+                    let path = std::path::Path::new(&file);
+                    if !path.exists() {
+                        anyhow::bail!("Workflow file not found: {}", file);
+                    }
 
-            let mut executor = if dry_run {
-                println!(
-                    "\n{} {} (dry-run mode)\n",
-                    Glyphs::gear(),
-                    "Workflow Execution".workshop_title()
-                );
-                WorkflowExecutor::new_dry_run_with_config(&config.safety)
-            } else {
-                println!(
-                    "\n{} {}\n",
-                    Glyphs::gear(),
-                    "Workflow Execution".workshop_title()
-                );
-                WorkflowExecutor::new_with_config(&config.safety)
-            };
+                    match workflow_file_kind(path) {
+                        Some(WorkflowFileKind::Swl) => {
+                            println!(
+                                "\n{} {}\n",
+                                Glyphs::gear(),
+                                "SWL Validation".workshop_title()
+                            );
+                            println!(
+                                "   {} File: {}",
+                                Glyphs::journal(),
+                                file.as_str().path_local()
+                            );
 
-            executor.load_file(path)?;
+                            let source = std::fs::read_to_string(path)?;
+                            let doc = match parse_document(&source) {
+                                Ok(d) => d,
+                                Err(e) => {
+                                    println!("\n   {} Validation failed:\n", Glyphs::frost());
+                                    println!("   {}\n", e);
+                                    anyhow::bail!("SWL validation failed");
+                                }
+                            };
 
-            // Determine which workflow to run
-            let workflow_name = name.unwrap_or_else(|| default_workflow_name(path));
+                            let issues = validate_document(&doc);
+                            if issues.is_empty() {
+                                println!("\n   {} SWL file is valid!", Glyphs::bloom());
+                                println!("   Name: {}", doc.name.emphasis());
+                                println!("   Version: {}", doc.version);
+                                println!(
+                                    "   Agents: {}",
+                                    doc.agents.len().to_string().garden_healthy()
+                                );
+                                println!(
+                                    "   Workflows: {}",
+                                    doc.workflows.len().to_string().garden_healthy()
+                                );
+                                println!();
+                            } else {
+                                println!("\n   {} Validation issues found:\n", Glyphs::frost());
+                                for issue in &issues {
+                                    println!(
+                                        "   - {}: {}",
+                                        issue.path.clone().path_local(),
+                                        issue.message
+                                    );
+                                }
+                                println!();
+                                anyhow::bail!("SWL validation failed with {} issues", issues.len());
+                            }
+                        }
+                        Some(WorkflowFileKind::Yaml) => {
+                            println!(
+                                "\n{} {}\n",
+                                Glyphs::gear(),
+                                "YAML Workflow Validation".workshop_title()
+                            );
+                            println!(
+                                "   {} File: {}",
+                                Glyphs::journal(),
+                                file.as_str().path_local()
+                            );
 
-            // Parse input variables
-            let mut inputs = std::collections::HashMap::new();
-            for kv in input {
-                if let Some((k, v)) = kv.split_once('=') {
-                    inputs.insert(k.to_string(), VarValue::String(v.to_string()));
-                } else {
-                    anyhow::bail!("Invalid input format '{}', expected KEY=VALUE", kv);
+                            let source = std::fs::read_to_string(path)?;
+                            let workflow: crate::workflows::Workflow =
+                                serde_yaml::from_str(&source).map_err(|e| {
+                                    anyhow::anyhow!("Failed to parse workflow YAML: {}", e)
+                                })?;
+
+                            let mut executor = WorkflowExecutor::new_with_config(&config.safety);
+                            executor.load_file(path)?;
+
+                            println!("\n   {} YAML workflow is valid!", Glyphs::bloom());
+                            println!("   Name: {}", workflow.name.emphasis());
+                            println!("   Version: {}", workflow.version);
+                            println!(
+                                "   Steps: {}",
+                                workflow.steps.len().to_string().garden_healthy()
+                            );
+                            println!(
+                                "   Inputs: {}",
+                                workflow.inputs.len().to_string().garden_healthy()
+                            );
+                            println!();
+                        }
+                        None => anyhow::bail!(
+                            "Unsupported workflow file '{}'. Use .swl, .yaml, or .yml",
+                            file
+                        ),
+                    }
                 }
-            }
 
-            println!(
-                "   {} Running workflow: {}",
-                Glyphs::compass(),
-                workflow_name.clone().emphasis()
-            );
-            if !inputs.is_empty() {
-                println!("   {} Inputs: {:?}", Glyphs::journal(), inputs);
-            }
-            println!();
+                WorkflowCommands::Run {
+                    file,
+                    input,
+                    dry_run,
+                } => {
+                    let path = std::path::Path::new(&file);
+                    if !path.exists() {
+                        anyhow::bail!("Workflow file not found: {}", file);
+                    }
 
-            // Execute workflow
-            let working_dir = std::env::current_dir()?;
-            let result = executor
-                .execute(&workflow_name, inputs, working_dir)
-                .await?;
+                    let inputs = parse_workflow_inputs(&input)?;
 
-            // Report result
-            match result.status {
-                crate::workflows::WorkflowStatus::Completed => {
+                    match workflow_file_kind(path) {
+                        Some(WorkflowFileKind::Swl) => {
+                            let source = std::fs::read_to_string(path)?;
+                            let _doc = match parse_document(&source) {
+                                Ok(d) => d,
+                                Err(e) => {
+                                    anyhow::bail!("Failed to parse SWL file: {}", e);
+                                }
+                            };
+
+                            if dry_run {
+                                println!(
+                                    "\n{} {} (dry-run mode)\n",
+                                    Glyphs::gear(),
+                                    "SWL Workflow".workshop_title()
+                                );
+                            } else {
+                                println!(
+                                    "\n{} {}\n",
+                                    Glyphs::gear(),
+                                    "SWL Workflow".workshop_title()
+                                );
+                            }
+                            println!(
+                                "   {} File: {}",
+                                Glyphs::journal(),
+                                file.as_str().path_local()
+                            );
+
+                            if !inputs.is_empty() {
+                                println!("   {} Inputs: {:?}", Glyphs::journal(), inputs);
+                            }
+
+                            println!();
+                            println!("   {} SWL file parsed successfully.", Glyphs::bloom());
+                            println!(
+                                "   (Full SWL execution not yet implemented - use YAML workflows for live execution)"
+                            );
+                            println!();
+                        }
+                        Some(WorkflowFileKind::Yaml) => {
+                            let source = std::fs::read_to_string(path)?;
+                            let workflow_name =
+                                serde_yaml::from_str::<crate::workflows::Workflow>(&source)
+                                    .map(|workflow| workflow.name)
+                                    .unwrap_or_else(|_| default_workflow_name(path));
+
+                            let mut executor = if dry_run {
+                                println!(
+                                    "\n{} {} (dry-run mode)\n",
+                                    Glyphs::gear(),
+                                    "YAML Workflow".workshop_title()
+                                );
+                                WorkflowExecutor::new_dry_run_with_config(&config.safety)
+                            } else {
+                                println!(
+                                    "\n{} {}\n",
+                                    Glyphs::gear(),
+                                    "YAML Workflow".workshop_title()
+                                );
+                                WorkflowExecutor::new_with_config(&config.safety)
+                            };
+
+                            load_related_yaml_workflows(&mut executor, path)?;
+
+                            if !dry_run {
+                                let client =
+                                    std::sync::Arc::new(crate::api::ApiClient::new(&config)?);
+                                executor =
+                                    executor.with_llm_handler(Box::new(move |prompt, ctx| {
+                                        let client = std::sync::Arc::clone(&client);
+                                        let request = if ctx.is_empty() {
+                                            prompt.to_string()
+                                        } else {
+                                            format!("{prompt}\n\nContext:\n{}", ctx.join("\n"))
+                                        };
+
+                                        tokio::task::block_in_place(|| {
+                                            tokio::runtime::Handle::current().block_on(async move {
+                                                let response = client
+                                                    .chat(
+                                                        vec![crate::api::Message::user(request)],
+                                                        None,
+                                                        crate::api::ThinkingMode::Disabled,
+                                                    )
+                                                    .await?;
+
+                                                let choice = response
+                                                    .choices
+                                                    .into_iter()
+                                                    .next()
+                                                    .ok_or_else(|| {
+                                                        anyhow::anyhow!("model returned no choices")
+                                                    })?;
+                                                let text = choice.message.content.text_all();
+
+                                                if !text.trim().is_empty() {
+                                                    Ok(text)
+                                                } else if let Some(reasoning) = choice
+                                                    .reasoning_content
+                                                    .or(choice.message.reasoning_content)
+                                                {
+                                                    Ok(reasoning)
+                                                } else {
+                                                    Err(anyhow::anyhow!(
+                                                        "model returned empty content"
+                                                    ))
+                                                }
+                                            })
+                                        })
+                                    }));
+                            }
+
+                            println!(
+                                "   {} File: {}",
+                                Glyphs::journal(),
+                                file.as_str().path_local()
+                            );
+                            println!(
+                                "   {} Running workflow: {}",
+                                Glyphs::compass(),
+                                workflow_name.clone().emphasis()
+                            );
+                            if !inputs.is_empty() {
+                                println!("   {} Inputs: {:?}", Glyphs::journal(), inputs);
+                            }
+                            println!();
+
+                            let working_dir = std::env::current_dir()?;
+                            let result = executor
+                                .execute(&workflow_name, inputs, working_dir)
+                                .await?;
+
+                            match result.status {
+                                crate::workflows::WorkflowStatus::Completed => {
+                                    println!(
+                                        "\n   {} Workflow completed successfully in {}ms",
+                                        Glyphs::flower(),
+                                        result.duration_ms
+                                    );
+                                }
+                                crate::workflows::WorkflowStatus::Failed => {
+                                    println!(
+                                        "\n   {} Workflow failed after {}ms",
+                                        Glyphs::fallen_leaf(),
+                                        result.duration_ms
+                                    );
+                                }
+                                other => {
+                                    println!(
+                                        "\n   {} Workflow ended with status: {:?}",
+                                        Glyphs::leaf(),
+                                        other
+                                    );
+                                }
+                            }
+
+                            if !result.outputs.is_empty() {
+                                println!("\n   {} Outputs:", Glyphs::journal());
+                                for (name, value) in &result.outputs {
+                                    println!("      {} = {:?}", name.as_str().emphasis(), value);
+                                }
+                            }
+                            println!();
+                        }
+                        None => anyhow::bail!(
+                            "Unsupported workflow file '{}'. Use .swl, .yaml, or .yml",
+                            file
+                        ),
+                    }
+                }
+
+                WorkflowCommands::List { dir, all } => {
                     println!(
-                        "\n   {} Workflow completed successfully in {}ms",
-                        Glyphs::flower(),
-                        result.duration_ms
+                        "\n{} {}\n",
+                        Glyphs::gear(),
+                        "Available Workflows".workshop_title()
                     );
-                }
-                crate::workflows::WorkflowStatus::Failed => {
-                    println!(
-                        "\n   {} Workflow failed after {}ms",
-                        Glyphs::fallen_leaf(),
-                        result.duration_ms
-                    );
-                }
-                _ => {
-                    println!(
-                        "\n   {} Workflow ended with status: {:?}",
-                        Glyphs::leaf(),
-                        result.status
-                    );
-                }
-            }
 
-            // Show step results
-            println!("\n   {} Steps executed:", Glyphs::journal());
-            for (id, step_result) in &result.step_results {
-                let status_icon = match step_result.status {
-                    crate::workflows::StepStatus::Completed => Glyphs::flower(),
-                    crate::workflows::StepStatus::Failed => Glyphs::fallen_leaf(),
-                    crate::workflows::StepStatus::Skipped => Glyphs::leaf(),
-                    _ => Glyphs::gear(),
-                };
-                println!("      {} {} ({:?})", status_icon, id, step_result.status);
+                    let dir_path = std::path::Path::new(&dir);
+                    if !dir_path.exists() {
+                        anyhow::bail!("Directory not found: {}", dir);
+                    }
+
+                    // Find SWL files
+                    let mut swl_files = Vec::new();
+                    let mut yaml_files = Vec::new();
+
+                    for entry in walkdir::WalkDir::new(dir_path).max_depth(2) {
+                        let entry = entry?;
+                        if entry.file_type().is_file() {
+                            let path = entry.path();
+                            if let Some(ext) = path.extension() {
+                                if ext == "swl" {
+                                    swl_files.push(path.to_path_buf());
+                                } else if all && (ext == "yaml" || ext == "yml") {
+                                    // Try to parse as workflow file
+                                    if let Ok(content) = std::fs::read_to_string(path) {
+                                        if content.contains("workflows:")
+                                            || content.contains("steps:")
+                                        {
+                                            yaml_files.push(path.to_path_buf());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if swl_files.is_empty() && yaml_files.is_empty() {
+                        println!("   No workflow files found.\n");
+                        println!(
+                            "   {} Tip: Create .swl files to define workflows\n",
+                            Glyphs::sprout()
+                        );
+                    } else {
+                        if !swl_files.is_empty() {
+                            println!("   {} SWL Workflows:", Glyphs::journal());
+                            for file in &swl_files {
+                                let name = file
+                                    .file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("unknown");
+                                let rel_path =
+                                    file.strip_prefix(dir_path).unwrap_or(file.as_path());
+                                println!(
+                                    "      {} {} ({})",
+                                    Glyphs::flower(),
+                                    name.emphasis(),
+                                    rel_path.display()
+                                );
+                            }
+                            println!();
+                        }
+
+                        if all && !yaml_files.is_empty() {
+                            println!("   {} YAML Workflows:", Glyphs::journal());
+                            for file in &yaml_files {
+                                let name = file
+                                    .file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("unknown");
+                                let rel_path =
+                                    file.strip_prefix(dir_path).unwrap_or(file.as_path());
+                                println!(
+                                    "      {} {} ({})",
+                                    Glyphs::leaf(),
+                                    name,
+                                    rel_path.display()
+                                );
+                            }
+                            println!();
+                        }
+
+                        println!(
+                            "   Found {} workflow file(s)\n",
+                            (swl_files.len() + yaml_files.len())
+                                .to_string()
+                                .garden_healthy()
+                        );
+                    }
+                }
             }
-            println!();
         }
 
         Commands::McpServer => {
@@ -1688,7 +1997,6 @@ fn run_demo_scenario(scenario: DemoScenarioKind, fast: bool, quiet: bool) -> Res
     Ok(())
 }
 
-
 fn truncate_with_ellipsis(input: &str, max_chars: usize) -> String {
     if input.chars().count() <= max_chars {
         return input.to_string();
@@ -1716,6 +2024,27 @@ fn default_workflow_name(path: &std::path::Path) -> String {
             DEFAULT_WORKFLOW_NAME.to_string()
         }
     }
+}
+
+fn load_related_yaml_workflows(
+    executor: &mut WorkflowExecutor,
+    path: &std::path::Path,
+) -> Result<()> {
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+
+    for entry in walkdir::WalkDir::new(dir).max_depth(1) {
+        let entry = entry?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let workflow_path = entry.path();
+        if workflow_file_kind(workflow_path) == Some(WorkflowFileKind::Yaml) {
+            executor.load_file(workflow_path)?;
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,0 +1,264 @@
+# Code Review Workflow - Multi-Agent Review Pipeline
+# Inspired by gstack's /review and claude-skills' PR review expert
+
+version: "1.0"
+name: comprehensive_code_review
+description: |
+  Multi-layer code review: Staff Engineer + Security + Performance.
+  Inspired by gstack's review skill and claude-skills' engineering POWER tier.
+
+agents:
+  # Staff Engineer - Deep code analysis
+  staff_engineer:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.1
+      max_tokens: 8192
+    role: |
+      You are a staff engineer doing code review. You catch bugs that pass CI.
+      You look for: logic errors, edge cases, error handling, resource management,
+      concurrency issues, API design, and test quality.
+    instruction: |
+      Review the code diff thoroughly.
+      
+      Review dimensions (rate 1-10):
+      1. Correctness - Does it work? Are edge cases handled?
+      2. Performance - Any N+1 queries? Unnecessary allocations?
+      3. Readability - Can a junior understand this?
+      4. Test coverage - Are critical paths tested?
+      5. Error handling - Are all error paths covered?
+      6. Security - Any injection risks? Auth issues?
+      7. Maintainability - Will this be hard to change?
+      
+      Format:
+      ```
+      ## Summary
+      Overall assessment
+      
+      ## Detailed Findings
+      ### [SEVERITY] File:Line - Issue
+      Description
+      Suggested fix:
+      ```code
+      // Fixed code
+      ```
+      
+      ## Scores
+      | Dimension | Score | Notes |
+      
+      ## Action Required
+      - [ ] Fix [CRITICAL] issues
+      - [ ] Address [HIGH] issues
+      - [ ] Consider [MEDIUM/LOW] suggestions
+      ```
+    tools:
+      - file_read
+      - file_diff
+      - git_log
+    output_key: staff_review
+
+  # Security Auditor - Security-focused review
+  security_reviewer:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.1
+      max_tokens: 8192
+    role: |
+      You are a security engineer doing focused security review.
+      You find OWASP Top 10 issues and STRIDE threats.
+      You provide concrete exploit scenarios.
+    instruction: |
+      Focus ONLY on security. Ignore style, performance (unless it's DoS), etc.
+      
+      Check for:
+      1. Injection (SQL, NoSQL, Command, XSS)
+      2. Broken Authentication
+      3. Sensitive Data Exposure
+      4. XML External Entities (XXE)
+      5. Broken Access Control
+      6. Security Misconfiguration
+      7. XSS
+      8. Insecure Deserialization
+      9. Using Components with Known Vulnerabilities
+      10. Insufficient Logging
+      
+      For each finding:
+      - Severity: Critical / High / Medium / Low
+      - OWASP category
+      - Concrete exploit scenario
+      - Exact file and line
+      - Remediation code
+      
+      If no issues found: "✅ No security issues identified"
+    tools:
+      - file_read
+      - file_diff
+    output_key: security_review
+
+  # Performance Engineer - Performance analysis
+  performance_reviewer:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.1
+      max_tokens: 8192
+    role: |
+      You are a performance engineer. You find bottlenecks and optimization opportunities.
+      You care about: time complexity, space complexity, database queries,
+      memory allocations, and async efficiency.
+    instruction: |
+      Analyze code for performance issues.
+      
+      Check for:
+      1. Algorithmic complexity (O(n²) when O(n) possible)
+      2. N+1 database queries
+      3. Unnecessary memory allocations
+      4. Blocking operations in async code
+      5. Missing caching opportunities
+      6. Large data structures without pagination
+      7. Synchronous I/O in hot paths
+      
+      For each issue:
+      - Impact: High / Medium / Low
+      - Current complexity / time
+      - Suggested optimization
+      - Expected improvement
+      
+      Use Big-O notation for complexity analysis.
+    tools:
+      - file_read
+      - file_diff
+    output_key: performance_review
+
+  # Test Reviewer - Test quality analysis
+  test_reviewer:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.1
+      max_tokens: 8192
+    role: |
+      You review test quality. You ensure tests are comprehensive,
+      reliable, and maintainable. You check coverage and edge cases.
+    instruction: |
+      Review the test changes.
+      
+      Check for:
+      1. Test coverage of new code (>80% target)
+      2. Edge case coverage
+      3. Error path testing
+      4. Test readability and maintainability
+      5. Mock usage (are we mocking the right things?)
+      6. Test data quality
+      7. Flaky test risks
+      8. Test naming conventions
+      
+      Report:
+      - Coverage % (estimate if not measured)
+      - Missing test scenarios
+      - Tests that should be added
+      - Tests that are too brittle
+    tools:
+      - file_read
+      - file_diff
+      - shell  # For running coverage
+    output_key: test_review
+
+workflows:
+  # Full review pipeline - all reviewers in parallel
+  full_review:
+    type: parallel
+    description: "Comprehensive multi-agent code review"
+    steps:
+      - delegate: staff_engineer
+        input:
+          scope: "full"
+      - delegate: security_reviewer
+        input:
+          scope: "security_only"
+      - delegate: performance_reviewer
+        input:
+          scope: "performance_only"
+      - delegate: test_reviewer
+        input:
+          scope: "tests_only"
+    
+    # Merge phase - consolidate all reviews
+    merge:
+      agent: staff_engineer
+      instruction: |
+        Consolidate all review findings into a single report.
+        Prioritize: Critical > High > Medium > Low
+        Group by file for easier addressing.
+
+  # Quick review - staff engineer only
+  quick_review:
+    type: sequential
+    description: "Fast review for small changes"
+    steps:
+      - delegate: staff_engineer
+        input:
+          scope: "focused"
+          depth: "medium"
+
+  # Security-only review
+  security_review_only:
+    type: sequential
+    description: "Security-focused review"
+    steps:
+      - delegate: security_reviewer
+        input:
+          depth: "comprehensive"
+      - guard:
+          condition:
+            language: rust
+            content: |
+              // Block if critical security issues found
+              !args.security_review.contains("[CRITICAL]")
+          on_violation: block
+
+state:
+  fields:
+    - name: pr_branch
+      type: string
+      description: "Branch being reviewed"
+    
+    - name: review_scores
+      type: object
+      description: "Scores by dimension"
+      default: {}
+    
+    - name: critical_issues
+      type: integer
+      description: "Number of critical issues"
+      default: 0
+    
+    - name: approved
+      type: boolean
+      description: "Review approval status"
+      default: false
+
+guardrails:
+  - name: block_if_critical_security
+    type: post_agent
+    condition:
+      language: rust
+      content: |
+        // Block merge if critical security issues
+        let has_critical = args.agent_outputs.security_review
+          .map_or(false, |r| r.contains("[CRITICAL]"));
+        !has_critical
+    on_violation: block
+  
+  - name: require_tests_for_new_code
+    type: post_agent
+    condition:
+      language: rust
+      content: |
+        // Require tests if code was added
+        let has_new_code = args.diff_stats.lines_added > 50;
+        let has_test_review = args.agent_outputs.contains_key("test_review");
+        !has_new_code || has_test_review
+    on_violation: warn

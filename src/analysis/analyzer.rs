@@ -102,9 +102,7 @@ fn unused_code_suggestion(message: &str) -> FixSuggestion {
             fix_code: Some("#[allow(dead_code)]".to_string()),
             confidence: 0.8,
             auto_fixable: true,
-            notes: Some(
-                "Remove the code, or add #[allow(dead_code)] if intentional.".to_string(),
-            ),
+            notes: Some("Remove the code, or add #[allow(dead_code)] if intentional.".to_string()),
         }
     } else if message.contains("unused variable") {
         FixSuggestion {

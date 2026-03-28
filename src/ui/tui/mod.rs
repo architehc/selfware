@@ -531,7 +531,9 @@ pub fn run_tui(model: &str) -> Result<Vec<String>> {
                     }
                     KeyCode::Left => {
                         // Collapse if expanded
-                        if let Some(GardenItem::Bed { expanded: true, .. }) = app.garden_view.selected_item() {
+                        if let Some(GardenItem::Bed { expanded: true, .. }) =
+                            app.garden_view.selected_item()
+                        {
                             app.garden_view.toggle_expand();
                         }
                     }

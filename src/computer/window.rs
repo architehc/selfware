@@ -20,6 +20,13 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use tracing::{debug, info, warn};
 
+#[cfg(target_os = "macos")]
+use anyhow::Context;
+#[cfg(target_os = "macos")]
+use std::collections::HashMap;
+#[cfg(target_os = "macos")]
+use std::sync::{Arc, Mutex};
+
 /// Unique window identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WindowId(pub u64);
@@ -109,6 +116,9 @@ pub struct WindowManager {
     /// Detected display server (Linux only)
     #[cfg(target_os = "linux")]
     display_server: DisplayServer,
+    /// Mapping from WindowId to app name for macOS focus operations
+    #[cfg(target_os = "macos")]
+    window_id_to_app: Arc<Mutex<HashMap<WindowId, String>>>,
 }
 
 impl WindowManager {
@@ -120,7 +130,14 @@ impl WindowManager {
             Self { display_server }
         }
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            Self {
+                window_id_to_app: Arc::new(Mutex::new(HashMap::new())),
+            }
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             Self {}
         }
@@ -140,8 +157,7 @@ impl WindowManager {
                 return false;
             }
             // Check if required tools are available
-            self.check_tool_available("wmctrl").await
-                || self.check_tool_available("xdotool").await
+            self.check_tool_available("wmctrl").await || self.check_tool_available("xdotool").await
         }
 
         #[cfg(target_os = "macos")]
@@ -371,7 +387,9 @@ impl WindowManager {
                 anyhow::bail!("wmctrl failed with status {}", output_no_geom.status);
             }
 
-            return self.parse_wmctrl_output_no_geom(&output_no_geom.stdout).await;
+            return self
+                .parse_wmctrl_output_no_geom(&output_no_geom.stdout)
+                .await;
         }
 
         self.parse_wmctrl_output_with_geom(&output.stdout).await
@@ -460,12 +478,16 @@ impl WindowManager {
             let is_focused = active_id.as_ref() == Some(&wid);
 
             // Try to get geometry from xdotool
-            let (x, y, width, height) = self.get_window_geometry_xdotool(wid).await.unwrap_or((0, 0, 0, 0));
+            let (x, y, width, height) = self
+                .get_window_geometry_xdotool(wid)
+                .await
+                .unwrap_or((0, 0, 0, 0));
 
             // Try to get better app name using xprop
-            let app_name = self.get_window_class_xprop(wid).await.unwrap_or_else(|_| {
-                hostname.to_string()
-            });
+            let app_name = self
+                .get_window_class_xprop(wid)
+                .await
+                .unwrap_or_else(|_| hostname.to_string());
 
             windows.push(WindowInfo {
                 id: WindowId(wid),
@@ -500,7 +522,8 @@ impl WindowManager {
         if let Some(eq_pos) = stdout.find(" = \"") {
             // Parse WM_CLASS(STRING) = "instance", "class"
             let rest = &stdout[eq_pos + 3..];
-            let quoted: Vec<&str> = rest.split('"')
+            let quoted: Vec<&str> = rest
+                .split('"')
                 .enumerate()
                 .filter(|(i, _)| i % 2 == 1)
                 .map(|(_, s)| s)
@@ -541,7 +564,10 @@ impl WindowManager {
                     if let Some(comma_pos) = pos_str.find(',') {
                         if let Some(paren_pos) = pos_str.find('(') {
                             x = pos_str[..comma_pos].trim().parse().unwrap_or(0);
-                            y = pos_str[comma_pos + 1..paren_pos].trim().parse().unwrap_or(0);
+                            y = pos_str[comma_pos + 1..paren_pos]
+                                .trim()
+                                .parse()
+                                .unwrap_or(0);
                         }
                     }
                 }
@@ -602,12 +628,16 @@ impl WindowManager {
             let is_focused = active_id.as_ref() == Some(&wid);
 
             // Get geometry
-            let (x, y, width, height) = self.get_window_geometry_xdotool(wid).await.unwrap_or((0, 0, 0, 0));
+            let (x, y, width, height) = self
+                .get_window_geometry_xdotool(wid)
+                .await
+                .unwrap_or((0, 0, 0, 0));
 
             // Get app name
-            let app_name = self.get_window_class_xprop(wid).await.unwrap_or_else(|_| {
-                title.clone()
-            });
+            let app_name = self
+                .get_window_class_xprop(wid)
+                .await
+                .unwrap_or_else(|_| title.clone());
 
             windows.push(WindowInfo {
                 id: WindowId(wid),
@@ -654,16 +684,22 @@ impl WindowManager {
             .await?;
 
         let title = if name_output.status.success() {
-            String::from_utf8_lossy(&name_output.stdout).trim().to_string()
+            String::from_utf8_lossy(&name_output.stdout)
+                .trim()
+                .to_string()
         } else {
             String::new()
         };
 
-        let app_name = self.get_window_class_xprop(wid).await.unwrap_or_else(|_| {
-            title.clone()
-        });
+        let app_name = self
+            .get_window_class_xprop(wid)
+            .await
+            .unwrap_or_else(|_| title.clone());
 
-        let (x, y, width, height) = self.get_window_geometry_xdotool(wid).await.unwrap_or((0, 0, 0, 0));
+        let (x, y, width, height) = self
+            .get_window_geometry_xdotool(wid)
+            .await
+            .unwrap_or((0, 0, 0, 0));
 
         Ok(WindowInfo {
             id: WindowId(wid),
@@ -754,7 +790,10 @@ impl WindowManager {
             .map_err(|e| anyhow::anyhow!("xdotool not available: {}", e))?;
 
         if result.status.success() {
-            debug!("Resized window {} to {}x{} via xdotool", id.0, width, height);
+            debug!(
+                "Resized window {} to {}x{} via xdotool",
+                id.0, width, height
+            );
             Ok(())
         } else {
             let stderr = String::from_utf8_lossy(&result.stderr);
@@ -829,7 +868,10 @@ impl WindowManager {
                     Ok(())
                 }
                 _ => {
-                    let stderr = result.as_ref().map(|o| String::from_utf8_lossy(&o.stderr).to_string()).unwrap_or_default();
+                    let stderr = result
+                        .as_ref()
+                        .map(|o| String::from_utf8_lossy(&o.stderr).to_string())
+                        .unwrap_or_default();
                     anyhow::bail!("Failed to minimize window: {}", stderr)
                 }
             }
@@ -880,11 +922,23 @@ impl WindowManager {
             .await?;
 
         if !output.status.success() {
-            anyhow::bail!("osascript failed: {}", String::from_utf8_lossy(&output.stderr));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // Check for accessibility permissions error
+            if stderr.contains("not allowed") || stderr.contains("assistive") {
+                anyhow::bail!(
+                    "Accessibility permissions required. \
+                     Please enable System Settings > Privacy & Security > Accessibility for this application."
+                );
+            }
+            anyhow::bail!("osascript failed: {}", stderr);
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let app_names: Vec<&str> = stdout.split(", ").map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        let app_names: Vec<&str> = stdout
+            .split(", ")
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
 
         // Get the frontmost process
         let frontmost_output = tokio::process::Command::new("osascript")
@@ -893,13 +947,20 @@ impl WindowManager {
             .await;
 
         let frontmost_app = match frontmost_output {
-            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+            Ok(out) if out.status.success() => {
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            }
             _ => String::new(),
         };
 
         let mut windows = Vec::new();
+        let mut id_to_app = self.window_id_to_app.lock().unwrap();
+        id_to_app.clear();
 
         for (i, app_name) in app_names.iter().enumerate() {
+            let window_id = WindowId(i as u64);
+            id_to_app.insert(window_id.clone(), app_name.to_string());
+
             // Get window info for each app
             let window_output = tokio::process::Command::new("osascript")
                 .args([
@@ -935,7 +996,7 @@ impl WindowManager {
             let is_focused = *app_name == frontmost_app;
 
             windows.push(WindowInfo {
-                id: WindowId(i as u64),
+                id: window_id,
                 title: app_name.to_string(),
                 app_name: app_name.to_string(),
                 x,
@@ -951,12 +1012,71 @@ impl WindowManager {
     }
 
     #[cfg(target_os = "macos")]
-    async fn focus_window_macos(&self, _id: &WindowId) -> Result<()> {
-        // TODO: Implement proper macOS window focus using the window ID
-        // For now, we would need to track the app name alongside the ID
-        warn!("Window focus by ID not yet implemented for macOS");
+    async fn focus_window_macos(&self, id: &WindowId) -> Result<()> {
+        let app_name = self.resolve_macos_app_name(id).await?;
+        let escaped_app_name = escape_applescript_string(&app_name);
+
+        debug!("Focusing macOS window for app: {}", app_name);
+
+        // First bring the owning app to the foreground, then raise its front window.
+        let focus_script = format!(
+            r#"tell application "{app}" to activate
+tell application "System Events"
+    tell process "{app}"
+        set frontmost to true
+        try
+            perform action "AXRaise" of window 1
+        end try
+    end tell
+end tell"#,
+            app = escaped_app_name
+        );
+
+        let output = tokio::process::Command::new("osascript")
+            .args(["-e", &focus_script])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("not allowed") || stderr.contains("assistive") {
+                anyhow::bail!(
+                    "Accessibility permissions required. \
+                     Please enable System Settings > Privacy & Security > Accessibility for this application."
+                );
+            }
+            anyhow::bail!("Failed to focus window: {}", stderr);
+        }
+
+        info!("Focused macOS window for app: {}", app_name);
         Ok(())
     }
+
+    #[cfg(target_os = "macos")]
+    async fn resolve_macos_app_name(&self, id: &WindowId) -> Result<String> {
+        if let Some(app_name) = self.lookup_macos_app_name(id)? {
+            return Ok(app_name);
+        }
+
+        // Refresh the cache once in case the caller is using a stale/new manager instance.
+        self.list_windows_macos().await?;
+        self.lookup_macos_app_name(id)?
+            .context("Unknown window ID. Call list_windows() first to refresh the window list.")
+    }
+
+    #[cfg(target_os = "macos")]
+    fn lookup_macos_app_name(&self, id: &WindowId) -> Result<Option<String>> {
+        let id_to_app = self
+            .window_id_to_app
+            .lock()
+            .map_err(|e| anyhow::anyhow!("macOS window cache poisoned: {}", e))?;
+        Ok(id_to_app.get(id).cloned())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn escape_applescript_string(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 impl Default for WindowManager {
@@ -1037,6 +1157,15 @@ mod tests {
     fn test_window_manager_default() {
         let _wm = WindowManager::default();
         let _ = format!("{:?}", "WindowManager created");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_escape_applescript_string() {
+        assert_eq!(
+            escape_applescript_string(r#"App "Name"\Test"#),
+            r#"App \"Name\"\\Test"#
+        );
     }
 
     #[test]
@@ -1139,5 +1268,69 @@ mod tests {
         let _ = wm.move_window(&WindowId(999999), 100, 100).await;
         let _ = wm.minimize_window(&WindowId(999999)).await;
         let _ = wm.close_window(&WindowId(999999)).await;
+    }
+
+    // macOS-specific tests for window ID mapping and script generation
+    #[cfg(target_os = "macos")]
+    mod macos {
+        use super::*;
+
+        #[test]
+        fn test_window_id_to_app_mapping() {
+            let wm = WindowManager::new();
+
+            // Initially empty
+            {
+                let map = wm.window_id_to_app.lock().unwrap();
+                assert!(map.is_empty());
+            }
+
+            // Insert some mappings
+            {
+                let mut map = wm.window_id_to_app.lock().unwrap();
+                map.insert(WindowId(0), "Safari".to_string());
+                map.insert(WindowId(1), "Terminal".to_string());
+                map.insert(WindowId(2), "Code".to_string());
+            }
+
+            // Verify mappings
+            {
+                let map = wm.window_id_to_app.lock().unwrap();
+                assert_eq!(map.get(&WindowId(0)), Some(&"Safari".to_string()));
+                assert_eq!(map.get(&WindowId(1)), Some(&"Terminal".to_string()));
+                assert_eq!(map.get(&WindowId(2)), Some(&"Code".to_string()));
+                assert_eq!(map.get(&WindowId(999)), None);
+            }
+        }
+
+        #[test]
+        fn test_app_name_quoting_in_scripts() {
+            // Test that app names with quotes are properly escaped
+            let app_name = r#"My "App" Name"#;
+            let expected = r#"My \"App\" Name"#;
+            assert_eq!(app_name.replace('"', "\\\""), expected);
+
+            // Test normal app name (no change)
+            let app_name = "Safari";
+            assert_eq!(app_name.replace('"', "\\\""), "Safari");
+        }
+
+        #[tokio::test]
+        async fn test_focus_unknown_window_id_errors() {
+            let wm = WindowManager::new();
+            // Window ID not in map should return error
+            let result = wm.focus_window(&WindowId(999)).await;
+            assert!(result.is_err());
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("Unknown window ID"));
+        }
+
+        #[test]
+        fn test_window_manager_creation_macos() {
+            let wm = WindowManager::new();
+            // Should create with empty mapping
+            let map = wm.window_id_to_app.lock().unwrap();
+            assert!(map.is_empty());
+        }
     }
 }

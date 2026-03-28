@@ -154,19 +154,19 @@ pub struct ToolCallLog {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VerificationResult {
     pub passed: bool,
-    pub confidence: f32,              // VLM confidence score
-    pub explanation: String,          // Why it passed/failed
-    pub screenshot_hash: String,      // For detecting stale screens
+    pub confidence: f32,         // VLM confidence score
+    pub explanation: String,     // Why it passed/failed
+    pub screenshot_hash: String, // For detecting stale screens
 }
 
 /// A persistent visual assertion that gates task progression.
 /// Can be used both for pending assertions (to verify) and completed assertions (in history).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct VisualAssertion {
-    pub id: String,                   // Unique identifier for this assertion
-    pub description: String,          // What to look for
+    pub id: String,                       // Unique identifier for this assertion
+    pub description: String,              // What to look for
     pub screenshot_path: Option<PathBuf>, // Path to reference screenshot
-    pub verified: bool,               // Whether this assertion has been verified
+    pub verified: bool,                   // Whether this assertion has been verified
     pub verification_result: Option<VerificationResult>,
     pub created_at: DateTime<Utc>,
     pub verified_at: Option<DateTime<Utc>>,
@@ -308,16 +308,17 @@ impl TaskCheckpoint {
         } else {
             return None;
         };
-        let new_visual_assertions =
-            if self.visual_assertions.len() >= base.visual_assertions.len() {
-                self.visual_assertions[base.visual_assertions.len()..].to_vec()
-            } else {
-                return None;
-            };
+        let new_visual_assertions = if self.visual_assertions.len() >= base.visual_assertions.len()
+        {
+            self.visual_assertions[base.visual_assertions.len()..].to_vec()
+        } else {
+            return None;
+        };
 
         // Check if pending visual assertion changed
         let pending_changed = self.pending_visual_assertion != base.pending_visual_assertion;
-        let pending_visual_assertion = pending_changed.then_some(self.pending_visual_assertion.clone());
+        let pending_visual_assertion =
+            pending_changed.then_some(self.pending_visual_assertion.clone());
 
         let has_changes = status.is_some()
             || current_step.is_some()

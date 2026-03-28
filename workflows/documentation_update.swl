@@ -1,0 +1,460 @@
+# Documentation Update Workflow - Inspired by gstack's /document-release
+# Auto-update docs workflow for releases and feature documentation
+# For txn545/Qwen3.5-122B-A10B-NVFP4 with 262k context
+
+version: "1.0"
+name: documentation_update
+description: |
+  Automated documentation update workflow based on gstack's /document-release skill.
+  Syncs docs with code changes: API docs, guides, changelogs, and release notes.
+
+metadata:
+  author: "Selfware Documentation Team"
+  tags: ["documentation", "release", "changelog", "api-docs", "guides"]
+
+agents:
+  # Technical Writer - Documentation specialist
+  technical_writer:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.3
+      max_tokens: 8192
+    role: |
+      You are a technical writer who creates clear, accurate documentation.
+      You explain complex concepts simply. You structure information for discoverability.
+      You write for the user, not for yourself.
+    instruction: |
+      Create and update documentation:
+      
+      1. Documentation Audit
+         - Identify what docs exist
+         - Check for outdated content
+         - Find gaps between code and docs
+         - Review doc structure/navigation
+      
+      2. Content Creation
+         - Write clear explanations
+         - Include code examples
+         - Add diagrams where helpful
+         - Follow style guide consistently
+      
+      3. Structure & Organization
+         - Logical information hierarchy
+         - Clear headings and sections
+         - Cross-references and links
+         - Search-friendly content
+      
+      4. Review & Polish
+         - Grammar and spelling
+         - Technical accuracy
+         - Consistent terminology
+         - Working code examples
+      
+      Output: Updated documentation files
+    tools:
+      - file_read
+      - file_write
+      - file_edit
+      - directory_list
+      - web_search
+    output_key: documentation_content
+
+  # API Documenter - API reference specialist
+  api_documenter:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.2
+      max_tokens: 8192
+    role: |
+      You specialize in API documentation. You extract API specs from code.
+      You create OpenAPI specs, doc comments, and usage examples.
+      You ensure API contracts are clearly documented.
+    instruction: |
+      Generate and update API documentation:
+      
+      1. API Discovery
+         - Scan codebase for endpoints/functions
+         - Extract parameters and return types
+         - Identify authentication requirements
+         - Map error responses
+      
+      2. Reference Documentation
+         - Endpoint/method documentation
+         - Request/response schemas
+         - Authentication details
+         - Error code reference
+      
+      3. Code Documentation
+         - Doc comments for public APIs
+         - Type annotations
+         - Usage examples in code
+         - Deprecation notices
+      
+      4. OpenAPI/Swagger
+         - Generate/update OpenAPI spec
+         - Tag endpoints by category
+         - Include example requests/responses
+         - Document security schemes
+      
+      Output: API documentation and OpenAPI spec
+    tools:
+      - file_read
+      - file_write
+      - file_edit
+      - grep
+    output_key: api_documentation
+
+  # Changelog Curator - Release notes expert
+  changelog_curator:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.3
+      max_tokens: 8192
+    role: |
+      You curate changelogs and release notes. You organize changes by impact.
+      You write for different audiences: users, developers, operators.
+      You highlight breaking changes and migration paths.
+    instruction: |
+      Generate changelogs and release notes:
+      
+      1. Change Analysis
+         - Parse git commits since last release
+         - Categorize changes (feat/fix/docs/refactor)
+         - Identify breaking changes
+         - Assess impact on users
+      
+      2. Changelog Generation
+         - Follow Keep a Changelog format
+         - Group by category (Added/Changed/Fixed/Removed)
+         - Write clear, user-focused descriptions
+         - Link to issues/PRs
+      
+      3. Release Notes
+         - Highlights for this release
+         - New features with examples
+         - Breaking changes with migration guide
+         - Deprecation notices
+         - Contributors acknowledgment
+      
+      4. Version Bump
+         - Determine semver change (major/minor/patch)
+         - Update version in relevant files
+         - Tagging recommendations
+      
+      Output: CHANGELOG.md and RELEASE_NOTES.md
+    tools:
+      - file_read
+      - file_write
+      - shell
+      - git_log
+      - git
+    output_key: changelog
+
+  # Guide Writer - Tutorial and guide specialist
+  guide_writer:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.3
+      max_tokens: 8192
+    role: |
+      You write tutorials, guides, and how-to documents.
+      You think from the user's perspective: what do they need to know?
+      You provide step-by-step instructions with working examples.
+    instruction: |
+      Create user guides and tutorials:
+      
+      1. User Journey Mapping
+         - Identify user personas
+         - Map tasks and goals
+         - Find friction points
+         - Document common workflows
+      
+      2. Tutorial Creation
+         - Step-by-step instructions
+         - Working code examples
+         - Expected output at each step
+         - Troubleshooting tips
+      
+      3. Guide Writing
+         - Quick start guides
+         - Feature deep-dives
+         - Best practices
+         - Migration guides
+      
+      4. FAQ and Troubleshooting
+         - Common questions
+         - Known issues and workarounds
+         - Error message explanations
+         - Support resources
+      
+      Output: User guides and tutorials
+    tools:
+      - file_read
+      - file_write
+      - directory_list
+    output_key: guides
+
+  # Doc Reviewer - Documentation QA
+  doc_reviewer:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.2
+      max_tokens: 8192
+    role: |
+      You review documentation for accuracy and completeness.
+      You catch outdated information and broken links.
+      You ensure docs match the actual code behavior.
+    instruction: |
+      Review and validate documentation:
+      
+      1. Accuracy Check
+         - Code examples run correctly
+         - API signatures match implementation
+         - File paths are correct
+         - Links work
+      
+      2. Completeness Check
+         - All features documented
+         - All parameters explained
+         - All error cases covered
+         - Getting started exists
+      
+      3. Consistency Check
+         - Terminology is consistent
+         - Formatting follows style guide
+         - Tone is appropriate
+         - Cross-references work
+      
+      4. Usability Check
+         - Clear to target audience
+         - Properly organized
+         - Searchable content
+         - Accessible formatting
+      
+      Review Checklist:
+      - [ ] All code examples tested
+      - [ ] All links verified
+      - [ ] Screenshots up to date (if UI)
+      - [ ] No placeholder content
+      - [ ] Breaking changes documented
+      
+      Output: DOC_REVIEW.md with findings and fixes
+    tools:
+      - file_read
+      - file_write
+      - shell
+      - browser_navigate
+    output_key: doc_review
+
+workflows:
+  # Full documentation update - comprehensive refresh
+  full_update:
+    type: sequential
+    description: "Complete documentation update for a release"
+    steps:
+      # Phase 1: Analyze changes
+      - delegate: changelog_curator
+        input:
+          since_tag: "{{since_tag | default('last_release')}}"
+          output_file: "CHANGELOG.md"
+      
+      # Phase 2: Update API docs in parallel
+      - parallel:
+          branches:
+            - delegate: api_documenter
+              input:
+                update_openapi: true
+            - delegate: technical_writer
+              input:
+                focus: "reference"
+      
+      # Phase 3: Update guides
+      - delegate: guide_writer
+        input:
+          new_features: "{{changelog_curator.output.new_features}}"
+          output_dir: "docs/guides"
+      
+      # Phase 4: Review everything
+      - delegate: doc_reviewer
+        input:
+          scope: "full"
+          output_file: "DOC_REVIEW.md"
+
+  # Release documentation - focused on release notes
+  release_docs:
+    type: sequential
+    description: "Generate release documentation"
+    steps:
+      - delegate: changelog_curator
+        input:
+          generate_release_notes: true
+          output_file: "RELEASE_NOTES.md"
+      - delegate: technical_writer
+        input:
+          task: "update_version_references"
+      - delegate: doc_reviewer
+        input:
+          scope: "release_only"
+
+  # API docs only - update API reference
+  api_docs_only:
+    type: sequential
+    description: "Update API documentation only"
+    steps:
+      - delegate: api_documenter
+        input:
+          scan_codebase: true
+          generate_openapi: true
+          output_spec: "openapi.yaml"
+      - delegate: doc_reviewer
+        input:
+          scope: "api_only"
+
+  # Guide refresh - update tutorials and guides
+  guide_refresh:
+    type: sequential
+    description: "Refresh user guides and tutorials"
+    steps:
+      - delegate: guide_writer
+        input:
+          audit_existing: true
+          update_outdated: true
+      - delegate: technical_writer
+        input:
+          task: "polish_guides"
+      - delegate: doc_reviewer
+        input:
+          scope: "guides_only"
+
+  # Quick fix - fix specific documentation issues
+  quick_fix:
+    type: sequential
+    description: "Quick documentation fixes"
+    steps:
+      - delegate: technical_writer
+        input:
+          mode: "quick_fix"
+          issues: "{{issues}}"
+      - delegate: doc_reviewer
+        input:
+          mode: "quick_check"
+
+  # Documentation sprint - parallel creation
+  doc_sprint:
+    type: parallel
+    description: "Parallel documentation creation for new feature"
+    steps:
+      - parallel:
+          branches:
+            - delegate: api_documenter
+              input:
+                feature: "{{feature_name}}"
+            - delegate: guide_writer
+              input:
+                feature: "{{feature_name}}"
+            - delegate: technical_writer
+              input:
+                task: "feature_overview"
+                feature: "{{feature_name}}"
+      - delegate: doc_reviewer
+        input:
+          scope: "feature_only"
+          feature: "{{feature_name}}"
+
+state:
+  fields:
+    - name: changelog
+      type: string
+      description: "Path to CHANGELOG.md"
+    
+    - name: release_notes
+      type: string
+      description: "Path to RELEASE_NOTES.md"
+    
+    - name: api_documentation
+      type: string
+      description: "Path to API docs"
+    
+    - name: guides
+      type: string
+      description: "Path to guides directory"
+    
+    - name: doc_review
+      type: string
+      description: "Path to DOC_REVIEW.md"
+    
+    - name: version
+      type: string
+      description: "Version being documented"
+    
+    - name: breaking_changes
+      type: array
+      element_type: string
+      description: "List of breaking changes"
+      default: []
+    
+    - name: new_features
+      type: array
+      element_type: string
+      description: "List of new features"
+      default: []
+    
+    - name: docs_complete
+      type: boolean
+      description: "Whether documentation is complete"
+      default: false
+
+telemetry:
+  enabled: true
+  metrics:
+    - inference_latency
+    - token_usage
+    - docs_updated_count
+    - review_findings_count
+  export:
+    type: file
+    path: "./logs/documentation_telemetry.jsonl"
+
+guardrails:
+  - name: check_code_examples
+    type: post_agent
+    condition:
+      language: rust
+      content: |
+        // Ensure code examples are marked as tested
+        if args.agent_name == "technical_writer" || args.agent_name == "guide_writer" {
+          args.output.contains("```") == args.output.contains("tested")
+        } else {
+          true
+        }
+    on_violation: warn
+  
+  - name: require_changelog_for_release
+    type: pre_agent
+    condition:
+      language: rust
+      content: |
+        // Require changelog update for version bump
+        if args.workflow_name == "release_docs" {
+          args.state.changelog.is_some()
+        } else {
+          true
+        }
+    on_violation: warn
+  
+  - name: no_placeholder_content
+    type: post_agent
+    condition:
+      language: rust
+      content: |
+        // Block placeholder content like "TODO" or "FIXME" in docs
+        let output_lower = args.output.to_lowercase();
+        !output_lower.contains("todo:") &&
+        !output_lower.contains("fixme:") &&
+        !output_lower.contains("coming soon")
+    on_violation: warn

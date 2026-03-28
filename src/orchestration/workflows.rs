@@ -917,6 +917,12 @@ impl WorkflowExecutor {
 
             context.step_results.insert(step.id.clone(), result.clone());
 
+            if result.status == StepStatus::Completed {
+                if let Some(output) = result.output.clone() {
+                    context.set_var(&step.id, output);
+                }
+            }
+
             // Check if we should abort
             if result.status == StepStatus::Failed && step.required {
                 context.status = WorkflowStatus::Failed;

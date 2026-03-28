@@ -29,6 +29,7 @@ pub mod screen_capture;
 pub mod search;
 pub mod shell;
 pub mod swarm_tool;
+pub mod task_focus;
 pub mod vision;
 
 use browser::{BrowserEval, BrowserFetch, BrowserLinks, BrowserPdf, BrowserScreenshot};

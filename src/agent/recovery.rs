@@ -142,7 +142,12 @@ impl Agent {
         // Check the last WINDOW entries for repeated hashes
         let len = self.recent_screenshot_hashes.len();
         let start = len.saturating_sub(WINDOW);
-        let window: Vec<u64> = self.recent_screenshot_hashes.iter().skip(start).copied().collect();
+        let window: Vec<u64> = self
+            .recent_screenshot_hashes
+            .iter()
+            .skip(start)
+            .copied()
+            .collect();
 
         let count = window.iter().filter(|&&h| h == screenshot_hash).count();
         let stuck = count >= THRESHOLD;
@@ -167,10 +172,10 @@ impl Agent {
     }
 
     /// Advanced visual stuck-loop detection using VisualStateTracker.
-    /// 
+    ///
     /// This provides more sophisticated detection with perceptual hashing,
     /// semantic state tracking, and recovery strategy suggestions.
-    /// 
+    ///
     /// Returns true if a stuck loop is detected and recorded.
     pub(super) fn detect_visual_stuck_loop_advanced(
         &mut self,
@@ -178,12 +183,18 @@ impl Agent {
         action: &str,
         action_succeeded: bool,
     ) -> Option<RecoveryStrategy> {
-        let result = self
-            .visual_state_tracker
-            .record_state_with_hash(screenshot_hash.to_string(), String::new(), action.to_string(), action_succeeded);
+        let result = self.visual_state_tracker.record_state_with_hash(
+            screenshot_hash.to_string(),
+            String::new(),
+            action.to_string(),
+            action_succeeded,
+        );
 
         match result {
-            LoopDetectionResult::Stuck { loop_pattern, suggested_recovery } => {
+            LoopDetectionResult::Stuck {
+                loop_pattern,
+                suggested_recovery,
+            } => {
                 let count = loop_pattern.len();
                 warn!(
                     "Advanced visual stuck loop detected: {} similar states for action '{}'",
@@ -336,7 +347,8 @@ impl Agent {
             return "ERROR RECOVERY: Rate limit or quota exceeded. \
                  Wait a moment, then continue with smaller requests. \
                  Reduce the scope of your next action — read smaller files, \
-                 make smaller edits, or use grep_search instead of reading entire files.".to_string();
+                 make smaller edits, or use grep_search instead of reading entire files."
+                .to_string();
         }
 
         // Regression detection — tests that were passing now fail

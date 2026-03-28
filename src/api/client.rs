@@ -14,11 +14,11 @@ use crate::supervision::circuit_breaker::{
 use crate::tokens::{estimate_messages_tokens, estimate_tool_definitions_tokens};
 
 use super::streaming::StreamingResponse;
+use super::types::*;
 use super::{
     attach_tools_to_body, canonicalize_message_order, maybe_prepend_disabled_thinking_instruction,
     merge_extra_body, LlmClient, ThinkingMode,
 };
-use super::types::*;
 
 /// Retry configuration for API calls
 #[derive(Clone, Debug)]
@@ -403,10 +403,7 @@ impl ApiClient {
                         if std::env::var("SELFWARE_DEBUG").is_ok()
                             && std::env::var("SELFWARE_DEBUG_RAW").is_ok()
                         {
-                            eprintln!(
-                                "=== RAW API RESPONSE ===\n{}\n=== END RAW ===",
-                                body_text
-                            );
+                            eprintln!("=== RAW API RESPONSE ===\n{}\n=== END RAW ===", body_text);
                         }
 
                         let chat_response: ChatResponse = serde_json::from_str(&body_text)
@@ -503,17 +500,14 @@ impl ApiClient {
             let msg = format!(
                 "input_tokens ({}) + min_output ({}) > context_length ({}) for profile '{}'. \
                  Messages: {} tokens, Tools: {} tokens.",
-                input_tokens, min_output, hard_limit, profile.model,
-                message_tokens, tool_tokens
+                input_tokens, min_output, hard_limit, profile.model, message_tokens, tool_tokens
             );
             tracing::error!("CONTEXT OVERFLOW (profile): {}", msg);
             return Err(ApiError::ContextOverflow(msg).into());
         }
 
         let available_for_output = hard_limit.saturating_sub(input_tokens);
-        let max_tokens = profile
-            .max_tokens
-            .min(available_for_output.max(min_output));
+        let max_tokens = profile.max_tokens.min(available_for_output.max(min_output));
 
         let mut body = serde_json::json!({
             "model": profile.model,

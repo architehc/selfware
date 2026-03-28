@@ -44,8 +44,7 @@ impl CompactedContent {
 }
 
 /// Importance level for temporal records.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 pub enum RecordImportance {
     Low = 1,
     #[default]

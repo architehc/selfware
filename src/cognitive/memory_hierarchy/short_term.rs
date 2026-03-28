@@ -136,9 +136,7 @@ impl ShortTermMemory {
             }
         }
 
-        if !query.tags.is_empty()
-            && !query.tags.iter().all(|t| entry.tags.contains(t))
-        {
+        if !query.tags.is_empty() && !query.tags.iter().all(|t| entry.tags.contains(t)) {
             return false;
         }
 

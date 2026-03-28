@@ -192,7 +192,9 @@ impl PathValidator {
         if !self.config.allowed_paths.is_empty() {
             // allowed_paths is configured: path must be in the allowed list
             if !is_explicitly_allowed {
-                return Err(SelfwareError::Safety(SafetyError::PathNotAllowed { path: canonical_str.to_string() }));
+                return Err(SelfwareError::Safety(SafetyError::PathNotAllowed {
+                    path: canonical_str.to_string(),
+                }));
             }
             // Even if in allowed list, still check denied patterns below
         } else {
@@ -225,10 +227,14 @@ impl PathValidator {
             let glob_pattern = glob::Pattern::new(pattern)?;
 
             if glob_pattern.matches(&canonical_str) {
-                return Err(SelfwareError::Safety(SafetyError::PathDeniedPattern { pattern: pattern.clone() }));
+                return Err(SelfwareError::Safety(SafetyError::PathDeniedPattern {
+                    pattern: pattern.clone(),
+                }));
             }
             if glob_pattern.matches(path) {
-                return Err(SelfwareError::Safety(SafetyError::PathDeniedPattern { pattern: pattern.clone() }));
+                return Err(SelfwareError::Safety(SafetyError::PathDeniedPattern {
+                    pattern: pattern.clone(),
+                }));
             }
 
             // Also check components for filename-only patterns like ".env".
@@ -239,7 +245,9 @@ impl PathValidator {
                         && !pattern.contains('\\')
                         && glob_pattern.matches(&name_str)
                     {
-                        return Err(SelfwareError::Safety(SafetyError::PathDeniedPattern { pattern: pattern.clone() }));
+                        return Err(SelfwareError::Safety(SafetyError::PathDeniedPattern {
+                            pattern: pattern.clone(),
+                        }));
                     }
                 }
             }

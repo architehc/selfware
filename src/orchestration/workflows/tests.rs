@@ -4608,6 +4608,45 @@ steps:
     }
 }
 
+#[tokio::test]
+async fn test_step_output_is_available_to_later_steps() {
+    let yaml = r#"
+name: chained_llm
+description: Later LLM steps can reference earlier outputs
+outputs:
+  - name: final_text
+    from: refine
+steps:
+  - id: draft
+    name: Draft
+    type: llm
+    prompt: "draft brief"
+  - id: refine
+    name: Refine
+    type: llm
+    prompt: "refine ${draft}"
+    depends_on:
+      - draft
+"#;
+
+    let mut executor =
+        WorkflowExecutor::new().with_llm_handler(Box::new(|prompt: &str, _ctx: &[String]| {
+            Ok(prompt.to_string())
+        }));
+    executor.load_yaml(yaml).unwrap();
+
+    let result = executor
+        .execute("chained_llm", HashMap::new(), PathBuf::from("/tmp"))
+        .await
+        .unwrap();
+
+    assert!(result.is_success());
+    assert_eq!(
+        result.outputs.get("final_text").and_then(|v| v.as_string()),
+        Some("refine draft brief".to_string())
+    );
+}
+
 // --- Loop with dependency on step OUTSIDE loop ---
 
 #[tokio::test]

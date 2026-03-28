@@ -1,0 +1,111 @@
+name: product_delivery
+description: Product delivery workflow with architecture, backlog, and review gates.
+version: "1.0.0"
+author: "Selfware"
+category: "product"
+inputs:
+  - name: idea
+    description: Product idea or feature being delivered
+    required: true
+  - name: discovery_brief
+    description: Upstream discovery artifact
+    required: true
+  - name: repo_context
+    description: Repository or platform context
+    required: false
+    default: "Existing repository"
+  - name: verification_command
+    description: Optional verification command to run
+    required: false
+    default: ""
+outputs:
+  - name: architecture_plan
+    description: Execution architecture with interfaces and failure modes
+    from: architecture_plan
+  - name: implementation_sprint
+    description: Ordered backlog for implementation
+    from: implementation_sprint
+  - name: review_gate
+    description: Review and QA checklist before shipping
+    from: review_gate
+steps:
+  - id: architecture_plan
+    name: Architecture Plan
+    description: Lock data flow, interfaces, and failure modes
+    type: llm
+    prompt: |
+      You are preparing an engineering delivery plan.
+
+      Product idea:
+      ${idea}
+
+      Discovery brief:
+      ${discovery_brief}
+
+      Repository context:
+      ${repo_context}
+
+      Produce an artifact with:
+      1. Proposed architecture
+      2. Interfaces and contracts
+      3. Data flow
+      4. Failure modes and recovery
+      5. Test matrix
+      6. Security and observability notes
+    timeout_secs: 240
+  - id: implementation_sprint
+    name: Implementation Sprint Plan
+    description: Turn architecture into ordered execution slices
+    type: llm
+    depends_on:
+      - architecture_plan
+    prompt: |
+      Build an implementation plan from this architecture:
+
+      ${architecture_plan}
+
+      Output:
+      1. Committed scope
+      2. Stretch scope
+      3. Ordered stories
+      4. Acceptance criteria per story
+      5. Risks, dependencies, and rollback points
+      6. Capacity note with explicit slack
+    timeout_secs: 240
+  - id: maybe_verify
+    name: Maybe Verify
+    description: Run repository verification if a command is provided
+    type: condition
+    if: "${verification_command}"
+    then:
+      - verify_repo
+  - id: verify_repo
+    name: Repository Verification
+    description: Run the configured verification command
+    type: shell
+    command: "${verification_command}"
+    required: false
+    timeout_secs: 600
+  - id: review_gate
+    name: Review Gate
+    description: Define the single hard gate before shipping
+    type: llm
+    depends_on:
+      - implementation_sprint
+    prompt: |
+      Build a release-readiness review packet using:
+
+      Architecture plan:
+      ${architecture_plan}
+
+      Implementation sprint:
+      ${implementation_sprint}
+
+      Output:
+      1. One hard ship gate
+      2. Review checklist
+      3. QA flows to exercise first
+      4. Regression test expectations
+      5. Docs that must be updated
+      6. Metrics to watch after release
+    timeout_secs: 240

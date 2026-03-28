@@ -3,12 +3,12 @@
 use anyhow::Result;
 use futures::StreamExt;
 use once_cell::sync::Lazy;
+use std::time::Duration;
 use tokio::sync::{mpsc, Semaphore};
 use tracing::warn;
-use std::time::Duration;
 
-use crate::errors::ApiError;
 use super::types::{self, ChatResponse, Choice, Message, ToolCall, Usage};
+use crate::errors::ApiError;
 
 /// Semaphore to limit concurrent streaming API tasks to prevent resource exhaustion.
 static STREAM_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(100));
@@ -49,7 +49,11 @@ impl StreamingResponse {
                 Ok(p) => Some(p),
                 Err(e) => {
                     let _ = tx
-                        .send(Err(ApiError::Network(format!("Stream semaphore error: {}", e)).into()))
+                        .send(Err(ApiError::Network(format!(
+                            "Stream semaphore error: {}",
+                            e
+                        ))
+                        .into()))
                         .await;
                     return;
                 }
@@ -72,11 +76,7 @@ impl StreamingResponse {
                                 return;
                             }
                         }
-                        if tx
-                            .send(Err(ApiError::Timeout.into()))
-                            .await
-                            .is_err()
-                        {
+                        if tx.send(Err(ApiError::Timeout.into())).await.is_err() {
                             warn!("Streaming receiver dropped while sending timeout error");
                         }
                         return;
@@ -293,7 +293,10 @@ impl ToolCallAccumulator {
 }
 
 /// Parse a Server-Sent Events (SSE) event, returning zero or more StreamChunks.
-pub(crate) fn parse_sse_event(event: &str, accumulator: &mut ToolCallAccumulator) -> Vec<StreamChunk> {
+pub(crate) fn parse_sse_event(
+    event: &str,
+    accumulator: &mut ToolCallAccumulator,
+) -> Vec<StreamChunk> {
     let mut chunks = Vec::new();
 
     for line in event.lines() {

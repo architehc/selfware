@@ -65,6 +65,7 @@ pub mod input;
 pub mod lsp;
 pub mod mcp;
 pub mod safety;
+pub mod swl;
 pub mod tools;
 pub mod ui;
 

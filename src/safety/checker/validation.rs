@@ -258,9 +258,11 @@ impl SafetyChecker {
         // Check for dangerous patterns
         for (pattern, description) in DANGEROUS_COMMAND_PATTERNS.iter() {
             if pattern.is_match(&normalized) || pattern.is_match(&dequoted) {
-                return Err(SelfwareError::Safety(SafetyError::DangerousCommandPattern {
-                    description: (*description).to_string(),
-                }));
+                return Err(SelfwareError::Safety(
+                    SafetyError::DangerousCommandPattern {
+                        description: (*description).to_string(),
+                    },
+                ));
             }
         }
 
@@ -284,9 +286,11 @@ impl SafetyChecker {
             let part_trimmed = part.trim();
             for (pattern, description) in DANGEROUS_COMMAND_PATTERNS.iter() {
                 if pattern.is_match(part_trimmed) {
-                    return Err(SelfwareError::Safety(SafetyError::DangerousCommandPattern {
-                        description: format!("{} (in chain)", *description),
-                    }));
+                    return Err(SelfwareError::Safety(
+                        SafetyError::DangerousCommandPattern {
+                            description: format!("{} (in chain)", *description),
+                        },
+                    ));
                 }
             }
         }
@@ -503,7 +507,9 @@ impl SafetyChecker {
         use crate::safety::path_validator::PathValidator;
         let validator = PathValidator::new(&self.config, self.working_dir.clone());
         validator.validate(path).map_err(|e| match e {
-            crate::errors::SelfwareError::Safety(safety_err) => crate::errors::SelfwareError::Safety(safety_err),
+            crate::errors::SelfwareError::Safety(safety_err) => {
+                crate::errors::SelfwareError::Safety(safety_err)
+            }
             other => other,
         })
     }
@@ -514,10 +520,14 @@ impl SafetyChecker {
     fn is_path_in_allowed_list(&self, canonical_str: &str, _original_path: &str) -> Result<bool> {
         use crate::safety::path_validator::PathValidator;
         let validator = PathValidator::new(&self.config, self.working_dir.clone());
-        validator.is_path_in_allowed_list(canonical_str, _original_path).map_err(|e| match e {
-            crate::errors::SelfwareError::Safety(safety_err) => crate::errors::SelfwareError::Safety(safety_err),
-            other => other,
-        })
+        validator
+            .is_path_in_allowed_list(canonical_str, _original_path)
+            .map_err(|e| match e {
+                crate::errors::SelfwareError::Safety(safety_err) => {
+                    crate::errors::SelfwareError::Safety(safety_err)
+                }
+                other => other,
+            })
     }
 }
 

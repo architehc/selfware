@@ -1,0 +1,244 @@
+# Multi-Agent Swarm Workflow
+# Parallel agent execution with consensus voting
+# Optimized for 122B model with 262k context window
+
+version: "1.0"
+name: multi_agent_swarm
+description: |
+  Execute multiple agents in parallel with consensus-based aggregation.
+  Leverages the 122B model's large context window for complex reasoning.
+
+agents:
+  # Specialized agents for different aspects
+  backend_specialist:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.3
+      max_tokens: 8192
+    role: |
+      Backend architecture specialist. Focus on:
+      - Database design and queries
+      - API design and contracts
+      - Business logic implementation
+      - Performance optimization
+      - Error handling and resilience
+    instruction: |
+      Analyze the task from a backend perspective.
+      Provide specific, actionable recommendations.
+      Include code examples where relevant.
+    tools:
+      - file_read
+      - file_write
+    output_key: backend_analysis
+
+  frontend_specialist:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.3
+      max_tokens: 8192
+    role: |
+      Frontend architecture specialist. Focus on:
+      - Component design
+      - State management
+      - Accessibility (a11y)
+      - Responsive design
+      - Performance (bundle size, rendering)
+    instruction: |
+      Analyze the task from a frontend perspective.
+      Provide component structure and data flow recommendations.
+      Include code examples with modern frameworks.
+    tools:
+      - file_read
+      - file_write
+    output_key: frontend_analysis
+
+  devops_specialist:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.3
+      max_tokens: 8192
+    role: |
+      DevOps and infrastructure specialist. Focus on:
+      - Deployment strategy
+      - CI/CD pipelines
+      - Infrastructure as Code
+      - Monitoring and observability
+      - Security hardening
+    instruction: |
+      Analyze the task from an infrastructure perspective.
+      Provide deployment and operations recommendations.
+      Include configuration examples (Docker, K8s, Terraform).
+    tools:
+      - file_read
+      - file_write
+    output_key: devops_analysis
+
+  qa_specialist:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.3
+      max_tokens: 8192
+    role: |
+      QA and testing specialist. Focus on:
+      - Test strategy
+      - Test coverage
+      - Edge cases
+      - E2E scenarios
+      - Test automation
+    instruction: |
+      Analyze the task from a testing perspective.
+      Provide comprehensive test plan.
+      Identify edge cases and failure modes.
+    tools:
+      - file_read
+      - file_write
+    output_key: qa_analysis
+
+  # Consensus aggregator - synthesizes all perspectives
+  consensus_aggregator:
+    model:
+      provider: openai
+      name: txn545/Qwen3.5-122B-A10B-NVFP4
+      temperature: 0.2
+      max_tokens: 12288  # Use larger context for synthesis
+    role: |
+      You synthesize multiple expert opinions into coherent recommendations.
+      You identify conflicts between specialists and propose resolutions.
+      You create an integrated implementation plan.
+    instruction: |
+      Read all specialist analyses and synthesize:
+      
+      1. Summary of each specialist's key points
+      2. Areas of agreement (consensus)
+      3. Areas of conflict (with resolution recommendation)
+      4. Integrated implementation plan
+      5. Priority ordering of tasks
+      6. Risk assessment and mitigation
+      
+      Format as a comprehensive technical specification.
+    tools:
+      - file_read
+      - file_write
+    output_key: consensus_spec
+
+workflows:
+  # Parallel swarm with consensus
+  swarm_with_consensus:
+    type: map_reduce
+    description: "Execute specialists in parallel, aggregate with consensus"
+    
+    # Map phase: Run all specialists in parallel
+    map:
+      parallel:
+        branches:
+          - delegate: backend_specialist
+          - delegate: frontend_specialist
+          - delegate: devops_specialist
+          - delegate: qa_specialist
+    
+    # Reduce phase: Aggregate with consensus agent
+    reduce:
+      agent: consensus_aggregator
+      inputs:
+        - backend_analysis
+        - frontend_analysis
+        - devops_analysis
+        - qa_analysis
+
+  # Sequential deep-dive (for complex tasks)
+  sequential_deep_dive:
+    type: sequential
+    description: "Deep analysis with sequential expert consultation"
+    steps:
+      - delegate: backend_specialist
+      - delegate: frontend_specialist
+        input:
+          consider_backend: "{{backend_analysis}}"
+      - delegate: devops_specialist
+        input:
+          consider_backend: "{{backend_analysis}}"
+          consider_frontend: "{{frontend_analysis}}"
+      - delegate: qa_specialist
+        input:
+          consider_all: "{{all_previous}}"
+
+  # Quick consensus (for urgent decisions)
+  quick_consensus:
+    type: parallel
+    description: "Fast parallel consultation for urgent decisions"
+    steps:
+      - parallel:
+          branches:
+            - delegate: backend_specialist
+              input:
+                brief: true
+            - delegate: frontend_specialist
+              input:
+                brief: true
+            - delegate: qa_specialist
+              input:
+                brief: true
+      - delegate: consensus_aggregator
+        input:
+          mode: "brief"
+
+state:
+  fields:
+    - name: task_description
+      type: string
+      description: "The task being analyzed"
+    
+    - name: specialist_count
+      type: integer
+      description: "Number of specialists to run"
+      default: 4
+    
+    - name: consensus_reached
+      type: boolean
+      description: "Whether consensus was achieved"
+      default: false
+    
+    - name: conflict_areas
+      type: array
+      element_type: string
+      description: "Areas where specialists disagreed"
+      default: []
+    
+    - name: final_spec
+      type: string
+      description: "Path to consensus specification"
+
+telemetry:
+  enabled: true
+  metrics:
+    - parallel_agent_count
+    - consensus_time_ms
+    - agreement_percentage
+  export:
+    type: file
+    path: "./logs/swarm_telemetry.jsonl"
+
+guardrails:
+  - name: max_parallel_agents
+    type: pre_agent
+    condition:
+      language: rust
+      content: |
+        // Limit parallel agents to prevent resource exhaustion
+        args.parallel_count <= 16
+    on_violation: block
+  
+  - name: require_consensus_for_critical
+    type: post_workflow
+    condition:
+      language: rust
+      content: |
+        // For critical tasks, require consensus
+        let is_critical = args.task_priority == "critical";
+        let has_consensus = args.state.consensus_reached;
+        !is_critical || has_consensus
+    on_violation: warn

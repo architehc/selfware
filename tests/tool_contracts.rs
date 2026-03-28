@@ -89,7 +89,11 @@ async fn file_read_valid_execution() {
 
     let tool = FileRead::with_safety_config(permissive_safety(&parent));
     let result = tool.execute(json!({"path": path})).await;
-    assert!(result.is_ok(), "file_read with valid path should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "file_read with valid path should succeed: {:?}",
+        result.err()
+    );
 
     let val = result.unwrap();
     let content = val.get("content").and_then(|v| v.as_str()).unwrap_or("");
@@ -113,9 +117,7 @@ async fn file_read_nonexistent_file() {
     let parent = dir.path().to_str().unwrap().to_string();
     let tool = FileRead::with_safety_config(permissive_safety(&parent));
     let path = dir.path().join("no_such_file.txt");
-    let result = tool
-        .execute(json!({"path": path.to_str().unwrap()}))
-        .await;
+    let result = tool.execute(json!({"path": path.to_str().unwrap()})).await;
     assert!(
         result.is_err(),
         "file_read on nonexistent file should error"
@@ -153,7 +155,11 @@ async fn file_write_valid_execution() {
             "content": "written by test"
         }))
         .await;
-    assert!(result.is_ok(), "file_write should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "file_write should succeed: {:?}",
+        result.err()
+    );
 
     let on_disk = std::fs::read_to_string(&file_path).expect("read back");
     assert_eq!(on_disk, "written by test");
@@ -198,7 +204,11 @@ async fn file_edit_valid_execution() {
             "new_str": "BETA"
         }))
         .await;
-    assert!(result.is_ok(), "file_edit should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "file_edit should succeed: {:?}",
+        result.err()
+    );
 
     let on_disk = std::fs::read_to_string(&file_path).expect("read back");
     assert!(
@@ -263,14 +273,15 @@ async fn shell_exec_valid_execution() {
     let result = tool
         .execute(json!({"command": "echo hello", "timeout_secs": 5}))
         .await;
-    assert!(result.is_ok(), "shell_exec 'echo hello' should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "shell_exec 'echo hello' should succeed: {:?}",
+        result.err()
+    );
 
     let val = result.unwrap();
     let stdout = val.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
-    assert!(
-        stdout.contains("hello"),
-        "shell_exec should capture stdout"
-    );
+    assert!(stdout.contains("hello"), "shell_exec should capture stdout");
 }
 
 #[tokio::test]
@@ -308,9 +319,7 @@ async fn directory_tree_valid_execution() {
     let parent = dir.path().to_str().unwrap().to_string();
 
     let tool = DirectoryTree::with_safety_config(permissive_safety(&parent));
-    let result = tool
-        .execute(json!({"path": parent, "max_depth": 2}))
-        .await;
+    let result = tool.execute(json!({"path": parent, "max_depth": 2})).await;
     assert!(
         result.is_ok(),
         "directory_tree should succeed: {:?}",
@@ -351,11 +360,8 @@ async fn grep_search_schema_contract() {
 async fn grep_search_valid_execution() {
     let dir = TempDir::new().expect("create temp dir");
     let file_path = dir.path().join("searchable.txt");
-    std::fs::write(
-        &file_path,
-        "line one\nfind_this_needle\nline three\n",
-    )
-    .expect("create searchable file");
+    std::fs::write(&file_path, "line one\nfind_this_needle\nline three\n")
+        .expect("create searchable file");
 
     let tool = GrepSearch;
     let result = tool

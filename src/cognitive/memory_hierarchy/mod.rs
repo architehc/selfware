@@ -292,8 +292,10 @@ impl HierarchicalMemory {
                     .then_with(|| a.accessed_at.cmp(&b.accessed_at))
             });
 
-            let mut tokens_to_free =
-                self.usage.working_tokens.saturating_sub(self.budget.working_memory);
+            let mut tokens_to_free = self
+                .usage
+                .working_tokens
+                .saturating_sub(self.budget.working_memory);
             for entry in &entries {
                 if tokens_to_free == 0 {
                     break;
