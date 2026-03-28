@@ -317,9 +317,8 @@ impl Agent {
             || task_desc.contains("patch")
             || task_desc.contains("source code");
 
-        // Always reject test-only edits if task mentions fixing/implementing,
-        // OR if there are edits but none to source files (likely a mistake)
-        if all_test_files && (needs_source_change || !edited_files.is_empty()) {
+        // Reject test-only edits when task requires source changes
+        if all_test_files && needs_source_change {
             warn!(
                 "Workflow validator: only test files edited ({:?}), task requires source changes",
                 edited_files
@@ -330,6 +329,28 @@ impl Agent {
                  Do NOT only write tests. You MUST edit the actual source file(s) that contain the bug. \
                  Read the relevant source file, find the bug, and use file_edit to fix it."
             ));
+        }
+
+        // Also reject test-only edits if no source files were edited at all
+        // (unless the task is explicitly about writing tests)
+        if all_test_files && !needs_source_change {
+            // Check if task is explicitly about writing tests
+            let is_test_task = task_desc.contains("write test")
+                || task_desc.contains("add test")
+                || task_desc.contains("create test");
+            
+            if !is_test_task {
+                warn!(
+                    "Workflow validator: only test files edited ({:?}), no source files modified",
+                    edited_files
+                );
+                let files_str = edited_files.join(", ");
+                return Some(format!(
+                    "You only modified test files ({files_str}) but did not edit any source files. \
+                     If this task requires code changes, you MUST edit the actual source file(s). \
+                     If this is a test-writing task, ensure you're also updating source code if needed."
+                ));
+            }
         }
 
         if !all_test_files {
