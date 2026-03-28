@@ -3,6 +3,31 @@
 use anyhow::{bail, Context, Result};
 use tracing::warn;
 
+/// Known top-level TOML keys that map to Config fields.
+/// Any key not in this list triggers a warning during config load.
+const KNOWN_CONFIG_KEYS: &[&str] = &[
+    "endpoint",
+    "model",
+    "max_tokens",
+    "context_length",
+    "temperature",
+    "api_key",
+    "safety",
+    "agent",
+    "yolo",
+    "ui",
+    "continuous_work",
+    "retry",
+    "resources",
+    "evolution",
+    "cache",
+    "models",
+    "extra_body",
+    "qa",
+    "mcp",
+    "hooks",
+];
+
 use super::api_key::{load_api_key_from_keyring, ApiKeySource};
 use super::model::{default_modalities, ModelProfile, RedactedString};
 use super::types::ExecutionMode;
@@ -16,6 +41,22 @@ impl Config {
             .and_then(|agent| agent.as_table().cloned())
             .map(|agent| agent.contains_key("token_budget"))
             .unwrap_or(false)
+    }
+
+    /// Warn about unknown top-level TOML keys that would be silently ignored.
+    fn warn_unknown_keys(content: &str) {
+        if let Ok(toml::Value::Table(table)) = toml::from_str::<toml::Value>(content) {
+            for key in table.keys() {
+                if !KNOWN_CONFIG_KEYS.contains(&key.as_str()) {
+                    warn!(
+                        key = %key,
+                        "Unknown config key [{}] — this section is ignored. \
+                         Check for typos or remove it.",
+                        key
+                    );
+                }
+            }
+        }
     }
 
     /// On Unix, check whether a config file has overly permissive permissions
@@ -69,6 +110,7 @@ impl Config {
                     .with_context(|| format!("Failed to read config from {}", p))?;
                 loaded_from_path = Some(p.to_string());
                 token_budget_was_explicit = Self::content_sets_agent_token_budget(&content);
+                Self::warn_unknown_keys(&content);
                 toml::from_str(&content).context("Failed to parse config")?
             }
             None => {
@@ -89,6 +131,7 @@ impl Config {
                     if let Ok(content) = std::fs::read_to_string(p) {
                         loaded_from_path = Some(p.to_string());
                         token_budget_was_explicit = Self::content_sets_agent_token_budget(&content);
+                        Self::warn_unknown_keys(&content);
                         loaded = Some(toml::from_str(&content).context("Failed to parse config")?);
                         break;
                     }
