@@ -680,8 +680,8 @@ pub async fn run() -> Result<()> {
             // owns the terminal and renders from events only.
             crate::output::set_tui_active(true);
 
-            // Run TUI in a separate thread
-            let tui_handle = std::thread::spawn(move || {
+            // Run TUI using spawn_blocking to properly integrate with tokio runtime
+            let tui_handle = tokio::task::spawn_blocking(move || {
                 crate::ui::tui::run_tui_dashboard_with_events(
                     &model,
                     shared_state,
@@ -709,10 +709,8 @@ pub async fn run() -> Result<()> {
 
             crate::output::set_tui_active(false);
 
-            // Cleanup: join the TUI thread without blocking the async runtime
-            tokio::task::block_in_place(|| {
-                let _ = tui_handle.join();
-            });
+            // Cleanup: await the TUI task without blocking the async runtime
+            let _ = tui_handle.await;
             return Ok(());
         }
     }

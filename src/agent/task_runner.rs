@@ -752,7 +752,7 @@ impl Agent {
                         });
                         
                         // Clear the pending visual assertion since we're handling the recovery
-                        if let Some(ref mut checkpoint) = self.current_checkpoint {
+                        if self.current_checkpoint.is_some() {
                             // Pending assertion preserved for retry — cleared only on successful re-verification
                         }
                         
