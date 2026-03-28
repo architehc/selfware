@@ -1,0 +1,63 @@
+# Test workflow for end-to-end execution testing
+# Tests validation, dry-run, and live execution
+
+version: "1.0"
+name: test_execution
+
+description: |
+  A simple test workflow to validate SWL execution pipeline.
+  This workflow performs basic echo operations to verify functionality.
+
+agents:
+  test_runner:
+    model: claude-sonnet-4
+    role: tester
+    instruction: Execute test commands and verify outputs
+    
+  validator:
+    model: claude-sonnet-4
+    role: validator
+    instruction: Validate test results
+
+workflows:
+  main_flow:
+    type: sequential
+    steps:
+      - name: setup
+        agent: test_runner
+        action: echo
+        input: "Setting up test environment"
+        
+      - name: execute_test
+        agent: test_runner
+        action: echo
+        input: "Running test execution"
+        
+      - name: validate_results
+        agent: validator
+        action: echo
+        input: "Validating test results"
+        
+      - name: cleanup
+        agent: test_runner
+        action: echo
+        input: "Cleaning up test environment"
+
+guardrails:
+  - name: execution_timeout
+    type: timeout
+    condition: "step.duration > 300"
+    on_violation: fail
+    
+  - name: safe_execution
+    type: block
+    condition: "env.SAFE_MODE == 'true'"
+    on_violation: warn
+
+telemetry:
+  traces:
+    - inference
+    - execution
+  metrics:
+    - step_duration
+    - workflow_duration

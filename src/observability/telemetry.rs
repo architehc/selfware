@@ -287,6 +287,40 @@ pub fn get_metrics() -> &'static Metrics {
     &METRICS
 }
 
+// Guardrail telemetry functions
+
+/// Increment the total number of guardrail checks performed
+pub fn increment_guardrail_checks(count: u64) {
+    metrics::counter!("swl_guardrail_checks_total", count);
+}
+
+/// Increment the number of guardrail violations detected
+pub fn increment_guardrail_violations(count: u64) {
+    metrics::counter!("swl_guardrail_violations_total", count);
+}
+
+/// Record guardrail check with guardrail type label
+pub fn record_guardrail_check(guardrail_type: &str, passed: bool) {
+    let result = if passed { "pass" } else { "fail" };
+    metrics::counter!(
+        "swl_guardrail_check_total",
+        1,
+        "type" => guardrail_type.to_string(),
+        "result" => result.to_string()
+    );
+}
+
+/// Record a guardrail violation with action taken
+pub fn record_guardrail_violation(guardrail_name: &str, action: &str, severity: &str) {
+    metrics::counter!(
+        "swl_guardrail_violation_total",
+        1,
+        "guardrail" => guardrail_name.to_string(),
+        "action" => action.to_string(),
+        "severity" => severity.to_string()
+    );
+}
+
 /// Start Prometheus Metrics Exporter (if in daemon mode).
 ///
 /// Installs the `metrics-exporter-prometheus` global recorder and binds an
@@ -319,6 +353,24 @@ pub fn start_prometheus_exporter(bind_addr: std::net::SocketAddr) -> anyhow::Res
     metrics::describe_counter!(
         "selfware_tokens_processed_total",
         "Total number of tokens processed"
+    );
+    
+    // Guardrail metrics
+    metrics::describe_counter!(
+        "swl_guardrail_checks_total",
+        "Total number of guardrail checks performed"
+    );
+    metrics::describe_counter!(
+        "swl_guardrail_violations_total",
+        "Total number of guardrail violations detected"
+    );
+    metrics::describe_counter!(
+        "swl_guardrail_check_total",
+        "Guardrail checks by type and result"
+    );
+    metrics::describe_counter!(
+        "swl_guardrail_violation_total",
+        "Guardrail violations by guardrail name, action, and severity"
     );
 
     Ok(())

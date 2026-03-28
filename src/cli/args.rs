@@ -407,6 +407,13 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: WorkflowCommands,
     },
+
+    /// Inspect workflow state
+    #[command(alias = "st")]
+    State {
+        #[command(subcommand)]
+        command: StateCommands,
+    },
 }
 
 #[derive(Subcommand, Clone, Debug)]
@@ -441,4 +448,85 @@ pub(crate) enum WorkflowCommands {
         #[arg(long)]
         all: bool,
     },
+}
+
+#[derive(Subcommand, Clone, Debug)]
+pub(crate) enum StateCommands {
+    /// Show state for a workflow
+    Show {
+        /// Workflow name
+        workflow: String,
+
+        /// Output format
+        #[arg(short, long, value_enum, default_value = "text")]
+        format: StateOutputFormat,
+
+        /// State backend directory (default: ~/.selfware/state)
+        #[arg(short, long)]
+        dir: Option<String>,
+    },
+
+    /// List all saved workflow states
+    List {
+        /// State backend directory (default: ~/.selfware/state)
+        #[arg(short, long)]
+        dir: Option<String>,
+    },
+
+    /// Delete state for a workflow
+    Delete {
+        /// Workflow name
+        workflow: String,
+
+        /// State backend directory (default: ~/.selfware/state)
+        #[arg(short, long)]
+        dir: Option<String>,
+
+        /// Skip confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Export state to JSON file
+    Export {
+        /// Workflow name
+        workflow: String,
+
+        /// Output file path
+        #[arg(short, long)]
+        output: String,
+
+        /// State backend directory (default: ~/.selfware/state)
+        #[arg(short, long)]
+        dir: Option<String>,
+    },
+
+    /// Import state from JSON file
+    Import {
+        /// Workflow name
+        workflow: String,
+
+        /// Input file path
+        #[arg(short, long)]
+        input: String,
+
+        /// State backend directory (default: ~/.selfware/state)
+        #[arg(short, long)]
+        dir: Option<String>,
+
+        /// Skip confirmation if state exists
+        #[arg(short, long)]
+        force: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
+pub(crate) enum StateOutputFormat {
+    /// Human-readable text (default)
+    #[default]
+    Text,
+    /// JSON output
+    Json,
+    /// Table format
+    Table,
 }

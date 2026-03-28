@@ -1,8 +1,8 @@
-# Auto-configured by selfware auto-config
-endpoint = "http://localhost:8000/v1"
-model = "qwen3.5-27b"
+# Auto-configured for txn545/Qwen3.5-122B-A10B-NVFP4 (sglang) on https://crazyshit.ngrok.io/v1
+endpoint = "https://crazyshit.ngrok.io/v1"
+model = "txn545/Qwen3.5-122B-A10B-NVFP4"
 max_tokens = 16384
-context_length = 1010000
+context_length = 262144
 temperature = 0.6
 
 [safety]
@@ -11,10 +11,10 @@ denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**"]
 protected_branches = ["main"]
 
 [agent]
-native_function_calling = true
-streaming = true
-token_budget = 943616
+max_iterations = 50
 step_timeout_secs = 300
+native_function_calling = false
+streaming = true
 
 [continuous_work]
 enabled = true
@@ -23,6 +23,8 @@ checkpoint_interval_secs = 300
 auto_recovery = true
 max_recovery_attempts = 3
 
+# Thinking mode disabled — model consumes all tokens on reasoning
+# with small max_tokens, leaving content empty.
 [extra_body]
 chat_template_kwargs = { enable_thinking = false }
 

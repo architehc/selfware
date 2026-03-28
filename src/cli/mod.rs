@@ -1064,8 +1064,8 @@ async fn handle_command(
         }
 
         Commands::Workflow { command } => {
-            use crate::swl::{parse_document, validate_document};
             use args::WorkflowCommands;
+            use crate::swl::{parse_document, validate_document};
 
             if !quiet {
                 println!("{}", render_header(ctx));
@@ -1183,13 +1183,23 @@ async fn handle_command(
 
                     match workflow_file_kind(path) {
                         Some(WorkflowFileKind::Swl) => {
+                            use crate::swl::{lower_document, parse_document};
+
                             let source = std::fs::read_to_string(path)?;
-                            let _doc = match parse_document(&source) {
+                            let doc = match parse_document(&source) {
                                 Ok(d) => d,
                                 Err(e) => {
                                     anyhow::bail!("Failed to parse SWL file: {}", e);
                                 }
                             };
+
+                            let lowered = lower_document(&doc)?;
+                            let workflow_name = lowered
+                                .workflows
+                                .first()
+                                .map(|workflow| workflow.name.clone())
+                                .or_else(|| doc.workflows.keys().next().cloned())
+                                .unwrap_or_else(|| "main".to_string());
 
                             if dry_run {
                                 println!(
@@ -1197,29 +1207,168 @@ async fn handle_command(
                                     Glyphs::gear(),
                                     "SWL Workflow".workshop_title()
                                 );
+                                println!(
+                                    "   {} File: {}",
+                                    Glyphs::journal(),
+                                    file.as_str().path_local()
+                                );
+                                if !inputs.is_empty() {
+                                    println!("   {} Inputs: {:?}", Glyphs::journal(), inputs);
+                                }
+                                if !lowered.warnings.is_empty() {
+                                    println!("   {} Lowering warnings:", Glyphs::fallen_leaf());
+                                    for warning in &lowered.warnings {
+                                        println!("      - {}", warning);
+                                    }
+                                }
+                                println!();
+
+                                let mut executor =
+                                    WorkflowExecutor::new_dry_run_with_config(&config.safety);
+                                for workflow in lowered.workflows {
+                                    executor.register(workflow);
+                                }
+
+                                let working_dir = std::env::current_dir()?;
+                                let result = executor
+                                    .execute(&workflow_name, inputs, working_dir)
+                                    .await?;
+                                println!(
+                                    "   {} Workflow completed (dry-run) in {}ms",
+                                    Glyphs::bloom(),
+                                    result.duration_ms
+                                );
+                                if !result.outputs.is_empty() {
+                                    println!("   {} Outputs:", Glyphs::journal());
+                                    for (name, value) in &result.outputs {
+                                        println!(
+                                            "      {} = {:?}",
+                                            name.as_str().emphasis(),
+                                            value
+                                        );
+                                    }
+                                }
+                                println!();
                             } else {
                                 println!(
                                     "\n{} {}\n",
                                     Glyphs::gear(),
                                     "SWL Workflow".workshop_title()
                                 );
-                            }
-                            println!(
-                                "   {} File: {}",
-                                Glyphs::journal(),
-                                file.as_str().path_local()
-                            );
+                                println!(
+                                    "   {} File: {}",
+                                    Glyphs::journal(),
+                                    file.as_str().path_local()
+                                );
+                                if !inputs.is_empty() {
+                                    println!("   {} Inputs: {:?}", Glyphs::journal(), inputs);
+                                }
+                                if !lowered.warnings.is_empty() {
+                                    println!("   {} Lowering warnings:", Glyphs::fallen_leaf());
+                                    for warning in &lowered.warnings {
+                                        println!("      - {}", warning);
+                                    }
+                                }
+                                println!();
 
-                            if !inputs.is_empty() {
-                                println!("   {} Inputs: {:?}", Glyphs::journal(), inputs);
-                            }
+                                let mut executor =
+                                    WorkflowExecutor::new_with_config(&config.safety);
+                                for workflow in lowered.workflows {
+                                    executor.register(workflow);
+                                }
 
-                            println!();
-                            println!("   {} SWL file parsed successfully.", Glyphs::bloom());
-                            println!(
-                                "   (Full SWL execution not yet implemented - use YAML workflows for live execution)"
-                            );
-                            println!();
+                                let client =
+                                    std::sync::Arc::new(crate::api::ApiClient::new(&config)?);
+                                executor =
+                                    executor.with_llm_handler(Box::new(move |prompt, ctx| {
+                                        let client = std::sync::Arc::clone(&client);
+                                        let request = if ctx.is_empty() {
+                                            prompt.to_string()
+                                        } else {
+                                            format!("{prompt}\n\nContext:\n{}", ctx.join("\n"))
+                                        };
+
+                                        tokio::task::block_in_place(|| {
+                                            tokio::runtime::Handle::current().block_on(async move {
+                                                let response = client
+                                                    .chat(
+                                                        vec![crate::api::Message::user(request)],
+                                                        None,
+                                                        crate::api::ThinkingMode::Disabled,
+                                                    )
+                                                    .await?;
+
+                                                let choice = response
+                                                    .choices
+                                                    .into_iter()
+                                                    .next()
+                                                    .ok_or_else(|| {
+                                                        anyhow::anyhow!("model returned no choices")
+                                                    })?;
+                                                let text = choice.message.content.text_all();
+
+                                                if !text.trim().is_empty() {
+                                                    Ok(text)
+                                                } else if let Some(reasoning) = choice
+                                                    .reasoning_content
+                                                    .or(choice.message.reasoning_content)
+                                                {
+                                                    Ok(reasoning)
+                                                } else {
+                                                    Err(anyhow::anyhow!(
+                                                        "model returned empty content"
+                                                    ))
+                                                }
+                                            })
+                                        })
+                                    }));
+
+                                println!(
+                                    "   {} Executing workflow: {}\n",
+                                    Glyphs::compass(),
+                                    workflow_name.as_str().emphasis()
+                                );
+
+                                let working_dir = std::env::current_dir()?;
+                                let result =
+                                    executor.execute(&workflow_name, inputs, working_dir).await?;
+
+                                match result.status {
+                                    crate::workflows::WorkflowStatus::Completed => {
+                                        println!(
+                                            "\n   {} Workflow completed successfully in {}ms",
+                                            Glyphs::flower(),
+                                            result.duration_ms
+                                        );
+                                    }
+                                    crate::workflows::WorkflowStatus::Failed => {
+                                        println!(
+                                            "\n   {} Workflow failed after {}ms",
+                                            Glyphs::fallen_leaf(),
+                                            result.duration_ms
+                                        );
+                                    }
+                                    other => {
+                                        println!(
+                                            "\n   {} Workflow ended with status: {:?}",
+                                            Glyphs::leaf(),
+                                            other
+                                        );
+                                    }
+                                }
+
+                                if !result.outputs.is_empty() {
+                                    println!("\n   {} Outputs:", Glyphs::journal());
+                                    for (name, value) in &result.outputs {
+                                        println!(
+                                            "      {} = {:?}",
+                                            name.as_str().emphasis(),
+                                            value
+                                        );
+                                    }
+                                }
+                                println!();
+                            }
                         }
                         Some(WorkflowFileKind::Yaml) => {
                             let source = std::fs::read_to_string(path)?;
@@ -1409,7 +1558,7 @@ async fn handle_command(
                                 println!(
                                     "      {} {} ({})",
                                     Glyphs::flower(),
-                                    name.emphasis(),
+                                    name.to_string().emphasis(),
                                     rel_path.display()
                                 );
                             }
@@ -1444,6 +1593,13 @@ async fn handle_command(
                     }
                 }
             }
+        }
+
+        Commands::State { command } => {
+            anyhow::bail!(
+                "State commands are not wired into the current CLI yet: {:?}",
+                command
+            );
         }
 
         Commands::McpServer => {

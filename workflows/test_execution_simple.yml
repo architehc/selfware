@@ -1,0 +1,42 @@
+name: test_execution_simple
+description: Simple test workflow for end-to-end execution testing without LLM calls
+version: "1.0.0"
+author: "Test"
+category: "test"
+inputs:
+  - name: message
+    description: Test message to echo
+    required: false
+    default: "Hello from test workflow"
+outputs:
+  - name: result
+    description: Test result
+    from: final_step
+steps:
+  - id: step1
+    name: Step 1 - Setup
+    description: Initialize test
+    type: log
+    message: "Starting test workflow with message: ${message}"
+    level: info
+    
+  - id: step2
+    name: Step 2 - Process
+    description: Process test data
+    type: log
+    message: "Processing..."
+    level: debug
+    
+  - id: step3
+    name: Step 3 - Complete
+    description: Complete test
+    type: log
+    message: "Test workflow completed successfully!"
+    level: info
+    
+  - id: final_step
+    name: Final Step
+    description: Return result
+    type: log
+    message: "Result: SUCCESS"
+    level: info
