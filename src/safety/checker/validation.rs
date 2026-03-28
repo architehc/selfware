@@ -2,7 +2,7 @@
 //!
 //! Core validation functions for checking tool calls, shell commands, and paths.
 
-use anyhow::Result;
+use crate::errors::{Result, SafetyError, SelfwareError};
 use regex::Regex;
 use std::path::PathBuf;
 use std::sync::LazyLock;
@@ -79,9 +79,7 @@ impl SafetyChecker {
                 let args: serde_json::Value = serde_json::from_str(&call.function.arguments)?;
                 let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
                 if force {
-                    anyhow::bail!(
-                        "Force push is blocked for safety. Use --no-force or confirm manually."
-                    );
+                    return Err(SelfwareError::Safety(SafetyError::BlockedForcePush));
                 }
             }
             "container_exec" => {
@@ -234,11 +232,9 @@ impl SafetyChecker {
                     "Safety checker: unregistered tool '{}' blocked — add to checker.rs dispatch if legitimate.",
                     unknown
                 );
-                anyhow::bail!(
-                    "Unregistered tool '{}' blocked by safety checker. \
-                     Register it in checker.rs to allow execution.",
-                    unknown
-                );
+                return Err(SelfwareError::Safety(SafetyError::UnregisteredTool {
+                    tool: unknown.to_string(),
+                }));
             }
         }
 
@@ -253,23 +249,25 @@ impl SafetyChecker {
         // Check for dangerous patterns
         for (pattern, description) in DANGEROUS_COMMAND_PATTERNS.iter() {
             if pattern.is_match(&normalized) || pattern.is_match(&dequoted) {
-                anyhow::bail!("Dangerous command blocked: {}", description);
+                return Err(SelfwareError::Safety(SafetyError::DangerousCommandPattern {
+                    description: (*description).to_string(),
+                }));
             }
         }
 
         // Check for base64-encoded command execution
         if BASE64_EXEC_PATTERN.is_match(&normalized) || BASE64_EXEC_PATTERN.is_match(&dequoted) {
-            anyhow::bail!("Dangerous command blocked: base64-encoded command execution");
+            return Err(SelfwareError::Safety(SafetyError::BlockedBase64Command));
         }
 
         // Check for hex-encoded command execution
         if HEX_EXEC_PATTERN.is_match(&normalized) || HEX_EXEC_PATTERN.is_match(&dequoted) {
-            anyhow::bail!("Dangerous command blocked: hex-encoded command execution");
+            return Err(SelfwareError::Safety(SafetyError::BlockedHexCommand));
         }
 
         // Check for other encoding/obfuscation
         if ENCODED_EXEC_PATTERN.is_match(&normalized) || ENCODED_EXEC_PATTERN.is_match(&dequoted) {
-            anyhow::bail!("Dangerous command blocked: encoded command execution");
+            return Err(SelfwareError::Safety(SafetyError::BlockedEncodedCommand));
         }
 
         // Check command chaining
@@ -277,7 +275,9 @@ impl SafetyChecker {
             let part_trimmed = part.trim();
             for (pattern, description) in DANGEROUS_COMMAND_PATTERNS.iter() {
                 if pattern.is_match(part_trimmed) {
-                    anyhow::bail!("Dangerous command blocked (in chain): {}", description);
+                    return Err(SelfwareError::Safety(SafetyError::DangerousCommandPattern {
+                        description: format!("{} (in chain)", *description),
+                    }));
                 }
             }
         }
@@ -291,7 +291,7 @@ impl SafetyChecker {
         for part in split_shell_commands(&normalized) {
             let part_trimmed = part.trim();
             if DANGEROUS_ENV_VARS.is_match(part_trimmed) {
-                anyhow::bail!("Dangerous command blocked: environment variable injection detected");
+                return Err(SelfwareError::Safety(SafetyError::BlockedEnvInjection));
             }
         }
 
@@ -308,10 +308,9 @@ impl SafetyChecker {
             .collect();
         if !blocked.is_empty() {
             let titles: Vec<_> = blocked.iter().map(|f| f.title.as_str()).collect();
-            anyhow::bail!(
-                "Content blocked: potential secrets detected ({}). Use environment variables or a secrets manager instead.",
-                titles.join(", ")
-            );
+            return Err(SelfwareError::Safety(SafetyError::SecretDetected {
+                finding: titles.join(", "),
+            }));
         }
         Ok(())
     }
@@ -328,20 +327,18 @@ impl SafetyChecker {
             || host_path == "~/.ssh"
             || host_path.starts_with("~/.ssh/")
         {
-            anyhow::bail!(
-                "Dangerous container volume mount blocked: {} (mounts sensitive SSH material)",
-                mount
-            );
+            return Err(SelfwareError::Safety(SafetyError::ContainerSshMount {
+                mount: mount.to_string(),
+            }));
         }
         for dm in &dangerous_mounts {
             if host_path == *dm
                 || (host_path.starts_with(dm) && host_path.as_bytes().get(dm.len()) == Some(&b'/'))
             {
-                anyhow::bail!(
-                    "Dangerous container volume mount blocked: {} (mounts system directory {})",
-                    mount,
-                    dm
-                );
+                return Err(SelfwareError::Safety(SafetyError::ContainerSystemMount {
+                    mount: mount.to_string(),
+                    directory: (*dm).to_string(),
+                }));
             }
         }
         Ok(())
@@ -419,10 +416,9 @@ impl SafetyChecker {
                 return Ok(());
             }
             if lower.starts_with(scheme) {
-                anyhow::bail!(
-                    "Blocked request: only http/https schemes are allowed (got {})",
-                    scheme
-                );
+                return Err(SelfwareError::Safety(SafetyError::BlockedUrlScheme {
+                    scheme: (*scheme).trim_end_matches(':').to_string(),
+                }));
             }
         }
 
@@ -435,7 +431,9 @@ impl SafetyChecker {
         ];
         for host in &blocked_hosts {
             if lower.contains(host) {
-                anyhow::bail!("Blocked request to cloud metadata endpoint: {}", host);
+                return Err(SelfwareError::Safety(SafetyError::BlockedCloudMetadata {
+                    host: (*host).to_string(),
+                }));
             }
         }
 
@@ -452,15 +450,13 @@ impl SafetyChecker {
         ];
         for encoded in &encoded_bypasses {
             if lower.contains(encoded) {
-                anyhow::bail!(
-                    "Blocked request to encoded cloud metadata endpoint (bypass attempt)"
-                );
+                return Err(SelfwareError::Safety(SafetyError::BlockedEncodedMetadata));
             }
         }
 
         // Block link-local range
         if lower.contains("169.254.") {
-            anyhow::bail!("Blocked request to link-local address range (169.254.x.x)");
+            return Err(SelfwareError::Safety(SafetyError::BlockedLinkLocal));
         }
 
         // Check IP literals
@@ -471,7 +467,9 @@ impl SafetyChecker {
             if let Some(host) = parsed.host_str() {
                 if let Ok(ip) = host.parse::<std::net::IpAddr>() {
                     if is_private_or_internal(ip) && !allow_private {
-                        anyhow::bail!("Blocked request to private network address: {}", ip);
+                        return Err(SelfwareError::Safety(SafetyError::BlockedPrivateNetwork {
+                            ip: ip.to_string(),
+                        }));
                     }
                 }
             }
@@ -486,7 +484,7 @@ impl SafetyChecker {
         if (lower.contains("fetch(") || lower.contains("xmlhttprequest"))
             && (lower.contains("document.cookie") || lower.contains("localstorage"))
         {
-            anyhow::bail!("Suspicious browser eval blocked: potential data exfiltration");
+            return Err(SelfwareError::Safety(SafetyError::BlockedBrowserEval));
         }
         Ok(())
     }
@@ -495,7 +493,10 @@ impl SafetyChecker {
     fn check_path(&self, path: &str) -> Result<()> {
         use crate::safety::path_validator::PathValidator;
         let validator = PathValidator::new(&self.config, self.working_dir.clone());
-        validator.validate(path)
+        validator.validate(path).map_err(|e| match e {
+            crate::errors::SelfwareError::Safety(safety_err) => crate::errors::SelfwareError::Safety(safety_err),
+            other => other,
+        })
     }
 
     /// Check if path is in allowed list (test helper)
@@ -504,7 +505,10 @@ impl SafetyChecker {
     fn is_path_in_allowed_list(&self, canonical_str: &str, _original_path: &str) -> Result<bool> {
         use crate::safety::path_validator::PathValidator;
         let validator = PathValidator::new(&self.config, self.working_dir.clone());
-        validator.is_path_in_allowed_list(canonical_str, _original_path)
+        validator.is_path_in_allowed_list(canonical_str, _original_path).map_err(|e| match e {
+            crate::errors::SelfwareError::Safety(safety_err) => crate::errors::SelfwareError::Safety(safety_err),
+            other => other,
+        })
     }
 }
 

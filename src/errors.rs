@@ -35,6 +35,30 @@ pub enum SelfwareError {
     Other(#[from] anyhow::Error),
 }
 
+impl From<serde_json::Error> for SelfwareError {
+    fn from(e: serde_json::Error) -> Self {
+        SelfwareError::Internal(format!("JSON error: {}", e))
+    }
+}
+
+impl From<url::ParseError> for SelfwareError {
+    fn from(e: url::ParseError) -> Self {
+        SelfwareError::Internal(format!("URL parse error: {}", e))
+    }
+}
+
+impl From<std::io::Error> for SelfwareError {
+    fn from(e: std::io::Error) -> Self {
+        SelfwareError::Internal(format!("IO error: {}", e))
+    }
+}
+
+impl From<glob::PatternError> for SelfwareError {
+    fn from(e: glob::PatternError) -> Self {
+        SelfwareError::Safety(SafetyError::Internal(format!("Invalid glob pattern: {}", e)))
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum AgentError {
     #[error("Tool '{tool_name}' requires confirmation but running in non-interactive mode. Use --yolo to auto-approve tools, or run interactively.")]
@@ -152,20 +176,111 @@ pub enum ToolError {
 
 #[derive(Error, Debug)]
 pub enum SafetyError {
+    // Path validation errors
     #[error("Path blocked by safety policy: {path}")]
     BlockedPath { path: String },
 
-    #[error("Dangerous command blocked: {command} ({reason})")]
+    #[error("Path traversal attempt detected: {path}")]
+    PathTraversal { path: String },
+
+    #[error("Path contains null bytes")]
+    PathNullBytes,
+
+    #[error("Path contains suspicious Unicode character: {character} (U+{codepoint:04X}) - possible homoglyph bypass attempt")]
+    PathSuspiciousUnicode { character: String, codepoint: u32 },
+
+    #[error("Path component '{component}' contains suspicious mix of ASCII and non-ASCII characters")]
+    PathSuspiciousMix { component: String },
+
+    #[error("Path not in allowed list: {path}")]
+    PathNotAllowed { path: String },
+
+    #[error("Path '{path}' is outside working directory and no allowed_paths configured")]
+    PathOutsideWorkspace { path: String },
+
+    #[error("Path matches denied pattern: {pattern}")]
+    PathDeniedPattern { pattern: String },
+
+    #[error("Access to protected system path is not allowed: {path}")]
+    PathProtectedSystem { path: String },
+
+    // Symlink validation errors
+    #[error("Symlink loop detected: {path}")]
+    SymlinkLoop { path: String },
+
+    #[error("Symlink points to protected system path: {symlink} -> {target}")]
+    SymlinkProtectedTarget { symlink: String, target: String },
+
+    #[error("Symlink chain too deep (possible attack): {path}")]
+    SymlinkChainTooDeep { path: String },
+
+    // Command validation errors
+    #[error("Dangerous command blocked: {command}")]
     BlockedCommand { command: String, reason: String },
 
+    #[error("Dangerous command blocked: {description}")]
+    DangerousCommandPattern { description: String },
+
+    #[error("Dangerous command blocked: base64-encoded command execution")]
+    BlockedBase64Command,
+
+    #[error("Dangerous command blocked: hex-encoded command execution")]
+    BlockedHexCommand,
+
+    #[error("Dangerous command blocked: encoded command execution")]
+    BlockedEncodedCommand,
+
+    #[error("Dangerous command blocked: environment variable injection detected")]
+    BlockedEnvInjection,
+
+    // Git safety errors
+    #[error("Force push is blocked for safety. Use --no-force or confirm manually")]
+    BlockedForcePush,
+
+    // Tool registration errors
+    #[error("Unregistered tool '{tool}' blocked by safety checker. Register it in checker.rs to allow execution")]
+    UnregisteredTool { tool: String },
+
+    // Secret detection errors
     #[error("Potential secret detected in content: {finding}")]
     SecretDetected { finding: String },
 
+    // Container security errors
+    #[error("Dangerous container volume mount blocked: {mount} (mounts sensitive SSH material)")]
+    ContainerSshMount { mount: String },
+
+    #[error("Dangerous container volume mount blocked: {mount} (mounts system directory {directory})")]
+    ContainerSystemMount { mount: String, directory: String },
+
+    // Network policy errors
+    #[error("Blocked request: only http/https schemes are allowed (got {scheme})")]
+    BlockedUrlScheme { scheme: String },
+
+    #[error("Blocked request to cloud metadata endpoint: {host}")]
+    BlockedCloudMetadata { host: String },
+
+    #[error("Blocked request to encoded cloud metadata endpoint (bypass attempt)")]
+    BlockedEncodedMetadata,
+
+    #[error("Blocked request to link-local address range (169.254.x.x)")]
+    BlockedLinkLocal,
+
+    #[error("Blocked request to private network address: {ip}")]
+    BlockedPrivateNetwork { ip: String },
+
+    #[error("Suspicious browser eval blocked: potential data exfiltration")]
+    BlockedBrowserEval,
+
+    #[error("Network policy violation: {reason}")]
+    NetworkPolicyViolation { reason: String },
+
+    // General confirmation
     #[error("Action requires manual confirmation: {action}")]
     ConfirmationRequired { action: String },
 
-    #[error("Path traversal attempt detected: {path}")]
-    PathTraversal { path: String },
+    // Internal errors (for wrapping lower-level errors)
+    #[error("Internal safety error: {0}")]
+    Internal(String),
 }
 
 #[derive(Error, Debug)]

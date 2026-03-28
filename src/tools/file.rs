@@ -1,6 +1,6 @@
 use super::Tool;
 use crate::config::SafetyConfig;
-use crate::errors::{ToolError, SelfwareError};
+use crate::errors::ToolError;
 use crate::safety::path_validator::PathValidator;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -567,7 +567,7 @@ pub(super) fn validate_tool_path(path: &str, config: &SafetyConfig) -> Result<()
         }
     }
     let working_dir = std::env::current_dir().unwrap_or_else(|_| ".".into());
-    PathValidator::new(config, working_dir).validate(path)
+    PathValidator::new(config, working_dir).validate(path).map_err(|e| anyhow::anyhow!(e))
 }
 
 /// Write content to a file atomically using a temporary file and rename.

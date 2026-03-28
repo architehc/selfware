@@ -5,7 +5,7 @@
 
 use anyhow::{bail, Result};
 #[cfg(target_os = "linux")]
-use anyhow::Context;
+
 use tracing::debug;
 
 use super::{is_blocked_combo, ActionRateLimiter, TypingProfile};

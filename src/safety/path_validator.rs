@@ -1,7 +1,7 @@
 //! Shared path validation logic for safety checks.
 
 use crate::config::SafetyConfig;
-use anyhow::Result;
+use crate::errors::{Result, SafetyError, SelfwareError};
 use std::path::{Path, PathBuf};
 
 /// ELOOP errno value (symlink encountered with O_NOFOLLOW).
@@ -90,7 +90,7 @@ impl PathValidator {
         // Reject null bytes early — they can truncate paths at the OS/C-library
         // boundary, allowing an attacker to bypass later validation checks.
         if path.contains('\0') {
-            anyhow::bail!("Path contains null bytes");
+            return Err(SelfwareError::Safety(SafetyError::PathNullBytes));
         }
 
         // Unicode normalization bypass prevention.
@@ -110,11 +110,10 @@ impl PathValidator {
         ];
         for (ch, description) in suspicious_unicode {
             if path.contains(*ch) {
-                anyhow::bail!(
-                    "Path contains suspicious Unicode character: {} (U+{:04X}) - possible homoglyph bypass attempt",
-                    description,
-                    *ch as u32
-                );
+                return Err(SelfwareError::Safety(SafetyError::PathSuspiciousUnicode {
+                    character: (*description).to_string(),
+                    codepoint: *ch as u32,
+                }));
             }
         }
 
@@ -127,10 +126,9 @@ impl PathValidator {
             let has_non_ascii = !component.is_ascii();
             let has_dots = component.contains('.');
             if has_non_ascii && has_dots && component.len() <= 10 {
-                anyhow::bail!(
-                    "Path component '{}' contains suspicious mix of ASCII and non-ASCII characters",
-                    component
-                );
+                return Err(SelfwareError::Safety(SafetyError::PathSuspiciousMix {
+                    component: component.to_string(),
+                }));
             }
         }
         let path_buf = Path::new(path);
@@ -194,7 +192,7 @@ impl PathValidator {
         if !self.config.allowed_paths.is_empty() {
             // allowed_paths is configured: path must be in the allowed list
             if !is_explicitly_allowed {
-                anyhow::bail!("Path not in allowed list: {}", canonical_str);
+                return Err(SelfwareError::Safety(SafetyError::PathNotAllowed { path: canonical_str.to_string() }));
             }
             // Even if in allowed list, still check denied patterns below
         } else {
@@ -209,16 +207,13 @@ impl PathValidator {
                 );
                 // Distinguish between traversal attack vs absolute path access
                 if path.contains("..") {
-                    anyhow::bail!(
-                        "Path traversal detected: {} resolves to {}",
-                        path,
-                        canonical_str
-                    );
+                    return Err(SelfwareError::Safety(SafetyError::PathTraversal {
+                        path: format!("{} resolves to {}", path, canonical_str),
+                    }));
                 } else {
-                    anyhow::bail!(
-                        "Path '{}' is outside working directory and no allowed_paths configured",
-                        canonical_str
-                    );
+                    return Err(SelfwareError::Safety(SafetyError::PathOutsideWorkspace {
+                        path: canonical_str.to_string(),
+                    }));
                 }
             }
         }
@@ -230,10 +225,10 @@ impl PathValidator {
             let glob_pattern = glob::Pattern::new(pattern)?;
 
             if glob_pattern.matches(&canonical_str) {
-                anyhow::bail!("Path matches denied pattern: {}", pattern);
+                return Err(SelfwareError::Safety(SafetyError::PathDeniedPattern { pattern: pattern.clone() }));
             }
             if glob_pattern.matches(path) {
-                anyhow::bail!("Path matches denied pattern: {}", pattern);
+                return Err(SelfwareError::Safety(SafetyError::PathDeniedPattern { pattern: pattern.clone() }));
             }
 
             // Also check components for filename-only patterns like ".env".
@@ -244,7 +239,7 @@ impl PathValidator {
                         && !pattern.contains('\\')
                         && glob_pattern.matches(&name_str)
                     {
-                        anyhow::bail!("Path component matches denied pattern: {}", pattern);
+                        return Err(SelfwareError::Safety(SafetyError::PathDeniedPattern { pattern: pattern.clone() }));
                     }
                 }
             }
@@ -265,10 +260,9 @@ impl PathValidator {
         ];
         for dangerous in &dangerous_system_paths {
             if canonical_str.starts_with(dangerous) {
-                anyhow::bail!(
-                    "Access to protected system path is not allowed: {}",
-                    canonical_str
-                );
+                return Err(SelfwareError::Safety(SafetyError::PathProtectedSystem {
+                    path: canonical_str.to_string(),
+                }));
             }
         }
 
@@ -348,7 +342,9 @@ impl PathValidator {
 
             let current_str = current.to_string_lossy().to_string();
             if visited.contains(&current_str) {
-                anyhow::bail!("Symlink loop detected: {}", path.display());
+                return Err(SelfwareError::Safety(SafetyError::SymlinkLoop {
+                    path: path.display().to_string(),
+                }));
             }
             visited.insert(current_str);
 
@@ -371,11 +367,10 @@ impl PathValidator {
 
             for dangerous in &dangerous_targets {
                 if target_str.starts_with(dangerous) {
-                    anyhow::bail!(
-                        "Symlink points to protected system path: {} -> {}",
-                        path.display(),
-                        target_str
-                    );
+                    return Err(SelfwareError::Safety(SafetyError::SymlinkProtectedTarget {
+                        symlink: path.display().to_string(),
+                        target: target_str.to_string(),
+                    }));
                 }
             }
 
@@ -383,10 +378,9 @@ impl PathValidator {
         }
 
         if visited.len() >= max_depth {
-            anyhow::bail!(
-                "Symlink chain too deep (possible attack): {}",
-                path.display()
-            );
+            return Err(SelfwareError::Safety(SafetyError::SymlinkChainTooDeep {
+                path: path.display().to_string(),
+            }));
         }
 
         Ok(current)
