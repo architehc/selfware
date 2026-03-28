@@ -232,7 +232,7 @@ pub fn classify_task(task: &str) -> TaskType {
         || t.contains("split")
         || t.contains("extract")
         || t.contains("rename")
-        || t.contains("move")
+        || (t.contains("move") && !t.contains("remove"))
         || t.contains("consolidate")
     {
         return TaskType::Refactor;
