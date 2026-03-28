@@ -134,6 +134,35 @@ impl Agent {
             self.auto_load_skeletons_for_review();
         }
 
+        // Inject task-focused preamble into the system prompt itself
+        // so the model sees it BEFORE the tool list, not after.
+        let task_type = crate::tools::task_focus::classify_task(&task_description);
+        let preamble = task_type.preamble();
+        if !preamble.is_empty() && !self.messages.is_empty() && self.messages[0].role == "system" {
+            // Extract file paths mentioned in the task for explicit targeting.
+            let mentioned_files: Vec<&str> = task_description
+                .split_whitespace()
+                .filter(|w| w.contains('/') && (w.contains('.') || w.ends_with('/')))
+                .collect();
+            let file_hint = if !mentioned_files.is_empty() {
+                format!(
+                    "\nThe user mentioned these files: {}. Start with those.",
+                    mentioned_files.join(", ")
+                )
+            } else {
+                String::new()
+            };
+
+            let focus_block = format!(
+                "\n\n## TASK FOCUS (READ THIS FIRST)\n{}{}\n\nPrimary tools for this task: {}\nUse these tools FIRST. Do NOT start with git_status, context_status, or process_list.\n",
+                preamble,
+                file_hint,
+                task_type.primary_tools().join(", ")
+            );
+            let current = self.messages[0].content.to_string();
+            self.messages[0] = Message::system(format!("{}{}", focus_block, current));
+        }
+
         let msg = Message::user(task);
         self.memory.add_message(&msg);
         self.messages.push(msg);
