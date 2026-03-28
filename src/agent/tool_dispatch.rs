@@ -595,21 +595,36 @@ impl Agent {
             return false;
         }
 
+        let read_count = state.unchanged_read_count + 1;
+        // Increment the counter so repeated suppressions eventually trigger
+        // the forced text response (at count >= 3).
+        if let Some(state_mut) = self.file_tracker.read_state.get_mut(path) {
+            state_mut.unchanged_read_count = read_count;
+        }
         let err = format!(
             "Repeated unchanged reread blocked: `{}` has already been read unchanged {} times in this task. Use the content already in context or make the edit now instead of reading it again.",
-            path,
-            state.unchanged_read_count + 1
+            path, read_count
         );
         self.push_task_state_note(format!(
             "Blocked redundant reread of `{}` after {} unchanged reads",
-            path,
-            state.unchanged_read_count + 1
+            path, read_count
         ));
         self.pending_failure_hint = Some(err.clone());
         self.push_tool_result_message(use_native_fc, call_id, name, false, &err);
         self.log_tool_call(name, args_str, &err, false, start_time, false);
         self.remember_failed_tool(name, &err);
         self.record_failed_tool_attempt(name, args_str, "task_state", &err);
+
+        // After 3+ suppressed rereads of the same file, force the model to
+        // produce a text response instead of continuing to emit tool calls.
+        if read_count >= 3 {
+            self.messages.push(crate::api::types::Message::system(
+                "STOP calling tools. You already have the file content in your context. \
+                 Produce your answer as plain text NOW. Do not emit any more <tool> blocks."
+                    .to_string(),
+            ));
+        }
+
         true
     }
 

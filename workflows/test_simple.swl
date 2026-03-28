@@ -1,0 +1,24 @@
+# Simple test workflow for SWL validation
+
+version: "1.0"
+name: test_workflow
+
+agents:
+  test_agent:
+    model: claude-sonnet-4
+    role: tester
+    instruction: Run tests
+
+workflows:
+  test_flow:
+    type: sequential
+
+guardrails:
+  - name: test_guard
+    type: block
+    condition: "true"
+    on_violation: warn
+
+telemetry:
+  traces:
+    - inference
