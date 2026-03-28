@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::default_true;
+use super::types::default_true;
 
 /// Agent behavior settings: iteration limits, timeouts, token budgets, and calling mode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +38,11 @@ pub struct AgentConfig {
     /// computer control, web fetch, etc.) were used during the task.
     #[serde(default = "default_true")]
     pub require_verification_before_completion: bool,
+    /// When true, visual verification failures with confidence > 0.6 act as hard
+    /// gates — the tool result is marked as needing retry and the assertion is
+    /// logged to the checkpoint.  When false (default), failures are advisory only.
+    #[serde(default)]
+    pub require_visual_verification: bool,
     /// Fraction of token_budget reserved for content (files, conversation, tool results).
     /// Compression triggers when content exceeds this fraction.
     #[serde(default = "default_context_content_ratio")]
@@ -69,6 +74,7 @@ impl Default for AgentConfig {
             streaming: true,
             min_completion_steps: default_min_completion_steps(),
             require_verification_before_completion: true,
+            require_visual_verification: false,
             context_content_ratio: default_context_content_ratio(),
             context_compression_ratio: default_context_compression_ratio(),
             context_thinking_ratio: default_context_thinking_ratio(),
