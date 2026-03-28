@@ -60,6 +60,7 @@ mod session_log;
 mod streaming;
 mod task_runner;
 mod tool_dispatch;
+pub mod evolution_events;
 pub mod tui_events;
 mod verification;
 
