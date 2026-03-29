@@ -442,6 +442,10 @@ pub(crate) enum WorkflowCommands {
         /// Path to the SWL file
         file: String,
 
+        /// Workflow name to run (defaults to first workflow in file)
+        #[arg(short, long)]
+        workflow: Option<String>,
+
         /// Input variables (KEY=VALUE format)
         #[arg(short, long)]
         input: Vec<String>,

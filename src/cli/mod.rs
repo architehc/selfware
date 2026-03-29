@@ -1334,6 +1334,7 @@ async fn handle_command(
 
                 WorkflowCommands::Run {
                     file,
+                    workflow,
                     input,
                     dry_run,
                 } => {
@@ -1357,10 +1358,9 @@ async fn handle_command(
                             };
 
                             let lowered = lower_document(&doc)?;
-                            let workflow_name = lowered
-                                .workflows
-                                .first()
-                                .map(|workflow| workflow.name.clone())
+                            let workflow_name = workflow
+                                .clone()
+                                .or_else(|| lowered.workflows.first().map(|w| w.name.clone()))
                                 .or_else(|| doc.workflows.keys().next().cloned())
                                 .unwrap_or_else(|| "main".to_string());
 

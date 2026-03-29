@@ -228,7 +228,10 @@ impl GuardrailEnforcer {
         match condition {
             GuardCondition::Inline(expr) => Condition::Inline(expr.clone()),
             GuardCondition::Code(block) => Condition::Code {
-                language: block.language.to_string().to_lowercase(),
+                language: match block.language {
+                    crate::swl::parser::ast::CodeLanguage::Rust => "rust".to_string(),
+                    crate::swl::parser::ast::CodeLanguage::Python => "python".to_string(),
+                },
                 content: block.code.clone(),
             },
         }
@@ -428,7 +431,8 @@ mod tests {
         enforcer.register_guardrail(GuardrailDef {
             name: "block_on_critical".to_string(),
             guardrail_type: GuardrailType::PostAgent,
-            condition: Condition::Inline("agent_output.contains('[CRITICAL]')".to_string()),
+            // Condition: output should NOT contain CRITICAL. When it does, check fails → block.
+            condition: Condition::Inline("!agent_output.contains('[CRITICAL]')".to_string()),
             on_violation: ViolationAction::Block,
             description: None,
             severity: None,
