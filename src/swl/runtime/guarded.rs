@@ -62,7 +62,7 @@ impl GuardedSwlRuntime {
     }
 
     /// Set the maximum number of tool iterations
-    pub fn with_max_tool_iterations(mut self, max: usize) -> Self {
+    pub fn with_max_tool_iterations(self, _max: usize) -> Self {
         // This would need to be implemented on the base runtime
         self
     }

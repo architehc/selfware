@@ -64,17 +64,17 @@ impl GuardrailEnforcer {
                     tags: Vec::new(),
                 };
 
-                self.guardrails
-                    .entry(guardrail_type)
-                    .or_default()
-                    .push(def);
-
                 if self.verbose {
                     info!(
                         "Registered guardrail: {} ({})",
                         def.name, def.guardrail_type
                     );
                 }
+
+                self.guardrails
+                    .entry(guardrail_type)
+                    .or_default()
+                    .push(def);
             }
         }
     }
@@ -275,9 +275,8 @@ impl GuardrailEnforcer {
             .collect();
 
         // Store events
-        if let Ok(mut stored) = self.telemetry_events.lock().await {
-            stored.extend(events.clone());
-        }
+        let mut stored = self.telemetry_events.lock().await;
+        stored.extend(events.clone());
 
     }
 

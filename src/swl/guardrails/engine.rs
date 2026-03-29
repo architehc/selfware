@@ -78,26 +78,26 @@ impl GuardrailEngine {
             }
         }
         // Handle contains check: "output.contains('pattern')"
-        else if let Some(caps) = CONTAINS_PATTERN.captures(expr) {
+        else if let Some(caps) = get_contains_pattern().captures(expr) {
             let source = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             let pattern = caps.get(2).map(|m| m.as_str()).unwrap_or("");
             self.evaluate_contains(source, pattern, context)
         }
         // Handle regex match: "output.matches('regex')"
-        else if let Some(caps) = MATCHES_PATTERN.captures(expr) {
+        else if let Some(caps) = get_matches_pattern().captures(expr) {
             let source = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             let pattern = caps.get(2).map(|m| m.as_str()).unwrap_or("");
             self.evaluate_matches(source, pattern, context)
         }
         // Handle comparison: "value > 10"
-        else if let Some(caps) = COMPARISON_PATTERN.captures(expr) {
+        else if let Some(caps) = get_comparison_pattern().captures(expr) {
             let left = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             let op = caps.get(2).map(|m| m.as_str()).unwrap_or("");
             let right = caps.get(3).map(|m| m.as_str()).unwrap_or("");
             self.evaluate_comparison(left, op, right, context)
         }
         // Handle equality check
-        else if let Some(caps) = EQUALITY_PATTERN.captures(expr) {
+        else if let Some(caps) = get_equality_pattern().captures(expr) {
             let left = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             let op = caps.get(2).map(|m| m.as_str()).unwrap_or("");
             let right = caps.get(3).map(|m| m.as_str()).unwrap_or("");
@@ -212,7 +212,8 @@ impl GuardrailEngine {
             }
         };
 
-        let source_str = source_value.as_str().unwrap_or(&source_value.to_string());
+        let source_string = source_value.to_string();
+        let source_str = source_value.as_str().unwrap_or(&source_string);
         let pattern = pattern.trim_matches('\'').trim_matches('"');
 
         if source_str.contains(pattern) {
@@ -240,7 +241,8 @@ impl GuardrailEngine {
             }
         };
 
-        let source_str = source_value.as_str().unwrap_or(&source_value.to_string());
+        let source_string = source_value.to_string();
+        let source_str = source_value.as_str().unwrap_or(&source_string);
         let pattern = pattern.trim_matches('\'').trim_matches('"');
 
         match Regex::new(pattern) {
@@ -536,13 +538,13 @@ static EQUALITY_PATTERN: OnceLock<Regex> = OnceLock::new();
 
 fn get_contains_pattern() -> &'static Regex {
     CONTAINS_PATTERN.get_or_init(|| {
-        Regex::new(r#"(\w+(?:\.\w+)*)\.contains\(['"](.+?)['"]\)"#).expect("Invalid regex")
+        Regex::new(r#"(\w+(?:\.\w+)*)\.contains\(['"](.+?)['"])"#).expect("Invalid regex")
     })
 }
 
 fn get_matches_pattern() -> &'static Regex {
     MATCHES_PATTERN.get_or_init(|| {
-        Regex::new(r#"(\w+(?:\.\w+)*)\.matches\(['"](.+?)['"]\)"#).expect("Invalid regex")
+        Regex::new(r#"(\w+(?:\.\w+)*)\.matches\(['"](.+?)['"])"#).expect("Invalid regex")
     })
 }
 
@@ -556,224 +558,6 @@ fn get_equality_pattern() -> &'static Regex {
     EQUALITY_PATTERN.get_or_init(|| {
         Regex::new(r"(\w+(?:\.\w+)*)\s*([!=]=)\s*(.+?)").expect("Invalid regex")
     })
-}
-
-impl GuardrailEngine {
-    fn evaluate_contains(
-        &self,
-        source: &str,
-        pattern: &str,
-        context: &GuardrailContext,
-    ) -> EvaluationResult {
-        // Use the static pattern
-        let _ = get_contains_pattern();
-        self.evaluate_contains_internal(source, pattern, context)
-    }
-
-    fn evaluate_contains_internal(
-        &self,
-        source: &str,
-        pattern: &str,
-        context: &GuardrailContext,
-    ) -> EvaluationResult {
-        let source_value = match self.resolve_value(source, context) {
-            Some(v) => v,
-            None => {
-                return EvaluationResult::Error {
-                    message: format!("Could not resolve source: '{source}'"),
-                }
-            }
-        };
-
-        let source_str = source_value.as_str().unwrap_or(&source_value.to_string());
-        let pattern = pattern.trim_matches('\'').trim_matches('"');
-
-        if source_str.contains(pattern) {
-            EvaluationResult::Pass
-        } else {
-            EvaluationResult::Fail {
-                reason: format!("'{source}' does not contain '{pattern}'"),
-            }
-        }
-    }
-
-    fn evaluate_matches(
-        &self,
-        source: &str,
-        pattern: &str,
-        context: &GuardrailContext,
-    ) -> EvaluationResult {
-        let _ = get_matches_pattern();
-        self.evaluate_matches_internal(source, pattern, context)
-    }
-
-    fn evaluate_matches_internal(
-        &self,
-        source: &str,
-        pattern: &str,
-        context: &GuardrailContext,
-    ) -> EvaluationResult {
-        let source_value = match self.resolve_value(source, context) {
-            Some(v) => v,
-            None => {
-                return EvaluationResult::Error {
-                    message: format!("Could not resolve source: '{source}'"),
-                }
-            }
-        };
-
-        let source_str = source_value.as_str().unwrap_or(&source_value.to_string());
-        let pattern = pattern.trim_matches('\'').trim_matches('"');
-
-        match Regex::new(pattern) {
-            Ok(regex) => {
-                if regex.is_match(source_str) {
-                    EvaluationResult::Pass
-                } else {
-                    EvaluationResult::Fail {
-                        reason: format!("'{source}' does not match pattern '{pattern}'"),
-                    }
-                }
-            }
-            Err(e) => EvaluationResult::Error {
-                message: format!("Invalid regex pattern '{pattern}': {e}"),
-            },
-        }
-    }
-
-    fn evaluate_comparison(
-        &self,
-        left: &str,
-        op: &str,
-        right: &str,
-        context: &GuardrailContext,
-    ) -> EvaluationResult {
-        let _ = get_comparison_pattern();
-        self.evaluate_comparison_internal(left, op, right, context)
-    }
-
-    fn evaluate_comparison_internal(
-        &self,
-        left: &str,
-        op: &str,
-        right: &str,
-        context: &GuardrailContext,
-    ) -> EvaluationResult {
-        let left_val = match self.resolve_value(left, context) {
-            Some(v) => v,
-            None => {
-                return EvaluationResult::Error {
-                    message: format!("Could not resolve left operand: '{left}'"),
-                }
-            }
-        };
-
-        let left_num = match left_val.as_f64() {
-            Some(n) => n,
-            None => {
-                return EvaluationResult::Error {
-                    message: format!("Left operand '{left}' is not a number"),
-                }
-            }
-        };
-
-        let right_num: f64 = match right.trim().parse() {
-            Ok(n) => n,
-            Err(_) => {
-                match self.resolve_value(right, context) {
-                    Some(v) => match v.as_f64() {
-                        Some(n) => n,
-                        None => {
-                            return EvaluationResult::Error {
-                                message: format!("Right operand '{right}' is not a number"),
-                            }
-                        }
-                    },
-                    None => {
-                        return EvaluationResult::Error {
-                            message: format!("Could not resolve right operand: '{right}'"),
-                        }
-                    }
-                }
-            }
-        };
-
-        let result = match op {
-            ">" => left_num > right_num,
-            ">=" => left_num >= right_num,
-            "<" => left_num < right_num,
-            "<=" => left_num <= right_num,
-            _ => {
-                return EvaluationResult::Error {
-                    message: format!("Unknown comparison operator: '{op}'"),
-                }
-            }
-        };
-
-        if result {
-            EvaluationResult::Pass
-        } else {
-            EvaluationResult::Fail {
-                reason: format!("{left_num} {op} {right_num} is false"),
-            }
-        }
-    }
-
-    fn evaluate_equality(
-        &self,
-        left: &str,
-        op: &str,
-        right: &str,
-        context: &GuardrailContext,
-    ) -> EvaluationResult {
-        let _ = get_equality_pattern();
-        self.evaluate_equality_internal(left, op, right, context)
-    }
-
-    fn evaluate_equality_internal(
-        &self,
-        left: &str,
-        op: &str,
-        right: &str,
-        context: &GuardrailContext,
-    ) -> EvaluationResult {
-        let left_val = match self.resolve_value(left, context) {
-            Some(v) => v,
-            None => {
-                return EvaluationResult::Error {
-                    message: format!("Could not resolve left operand: '{left}'"),
-                }
-            }
-        };
-
-        let right_val = if right.starts_with('\'') || right.starts_with('"') {
-            serde_json::Value::String(right.trim_matches('\'').trim_matches('"').to_string())
-        } else {
-            match self.resolve_value(right, context) {
-                Some(v) => v,
-                None => serde_json::Value::String(right.to_string()),
-            }
-        };
-
-        let equal = left_val == right_val;
-        let result = match op {
-            "==" => equal,
-            "!=" => !equal,
-            _ => {
-                return EvaluationResult::Error {
-                    message: format!("Unknown equality operator: '{op}'"),
-                }
-            }
-        };
-
-        if result {
-            EvaluationResult::Pass
-        } else {
-            EvaluationResult::Fail {
-                reason: format!("'{left}' ({left_val}) {op} '{right}' ({right_val}) is false"),
-            }
-        }
-    }
 }
 
 #[cfg(test)]
