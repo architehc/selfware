@@ -1449,3 +1449,10 @@ mod tests {
         assert!(render.contains("Tokens"));
     }
 }
+
+// Command Center submodule for SWL workflow monitoring
+// #[cfg(feature = "tui")]
+// pub mod command_center;
+
+#[cfg(feature = "tui")]
+pub mod command_center;

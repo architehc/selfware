@@ -293,6 +293,19 @@ pub(crate) enum Commands {
         swarm_mode: bool,
     },
 
+    /// Launch Command Center for SWL workflow monitoring
+    #[cfg(feature = "tui")]
+    #[command(alias = "cc")]
+    CommandCenter {
+        /// Update mode: poll or stream
+        #[arg(short, long, default_value = "poll")]
+        mode: String,
+        
+        /// Auto-refresh interval in milliseconds
+        #[arg(short, long, default_value = "100")]
+        refresh: u64,
+    },
+
     /// Resume tending from a journal entry
     Resume {
         /// Journal entry ID

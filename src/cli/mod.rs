@@ -663,6 +663,25 @@ async fn handle_command(
             let _user_inputs = crate::ui::tui::run_tui_dashboard(&config.model)?;
         }
 
+        #[cfg(feature = "tui")]
+        Commands::CommandCenter { mode, refresh: _ } => {
+            if !quiet {
+                println!("{}", render_header(ctx));
+                println!(
+                    "\n{} {}\n",
+                    Glyphs::gear(),
+                    "Command Center - SWL Workflow Monitoring".workshop_title()
+                );
+            }
+            
+            let _update_mode = match mode.as_str() {
+                "stream" => crate::observability::dashboard::command_center::UpdateMode::Streaming,
+                _ => crate::observability::dashboard::command_center::UpdateMode::Polling,
+            };
+            
+            crate::observability::dashboard::command_center::run_command_center().await?;
+        }
+
         Commands::Resume { task_id } => {
             if !quiet {
                 println!("{}", render_header(ctx));
