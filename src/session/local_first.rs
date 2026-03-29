@@ -51,7 +51,6 @@ impl Default for LocalFirstCoordinator {
 pub struct LocalCache<T> {
     entries: HashMap<String, LocalCacheEntry<T>>,
     max_entries: usize,
-    max_size_bytes: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -68,7 +67,6 @@ impl LocalCache<String> {
         Self {
             entries: HashMap::new(),
             max_entries: 1000,
-            max_size_bytes: 10 * 1024 * 1024, // 10MB
         }
     }
 
@@ -88,9 +86,7 @@ impl LocalCache<String> {
         let total_size_bytes: usize = self.entries.values().map(|e| e.size_bytes).sum();
         CacheStats {
             entry_count: self.entries.len(),
-            max_entries: self.max_entries,
             total_size_bytes,
-            max_size_bytes: self.max_size_bytes,
             hit_rate: 0.0, // Simplified - no tracking in minimal version
         }
     }
@@ -106,11 +102,7 @@ impl Default for LocalCache<String> {
 #[derive(Debug, Clone)]
 pub struct CacheStats {
     pub entry_count: usize,
-    #[allow(dead_code)]
-    pub max_entries: usize,
     pub total_size_bytes: usize,
-    #[allow(dead_code)]
-    pub max_size_bytes: usize,
     pub hit_rate: f64,
 }
 

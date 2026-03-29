@@ -22,8 +22,7 @@
 #![allow(dead_code, unused_imports, unused_variables)]
 
 pub mod codegen;
-// Note: guardrails module has compilation issues, temporarily disabled
-// pub mod guardrails;
+pub mod guardrails;
 pub mod lowering;
 pub mod parser;
 pub mod runtime;

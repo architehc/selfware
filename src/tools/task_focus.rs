@@ -206,6 +206,17 @@ pub fn classify_task(task: &str) -> TaskType {
         if t.contains("fix") || t.contains("repair") || t.contains("broken") {
             return TaskType::Edit;
         }
+        // If diagnostic words appear but primary intent is test-writing, keep Test.
+        // Only redirect to Read when the prompt is purely investigative.
+        if t.contains("diagnose") || t.contains("debug") || t.contains("why") {
+            let has_test_writing_intent = t.contains("write")
+                || t.contains("add")
+                || t.contains("create")
+                || t.contains("implement");
+            if !has_test_writing_intent {
+                return TaskType::Read;
+            }
+        }
         return TaskType::Test;
     }
 
@@ -392,6 +403,23 @@ mod tests {
         );
         assert_eq!(
             classify_task("Create regression tests for the config loader"),
+            TaskType::Test
+        );
+    }
+
+    #[test]
+    fn test_classify_test_with_diagnostic_words() {
+        // Mixed-intent: test-writing with diagnostic context should stay Test
+        assert_eq!(
+            classify_task("write regression tests showing why the parser fails"),
+            TaskType::Test
+        );
+        assert_eq!(
+            classify_task("add tests to debug the allocation logic"),
+            TaskType::Test
+        );
+        assert_eq!(
+            classify_task("create a test that shows why X crashes"),
             TaskType::Test
         );
     }

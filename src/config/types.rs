@@ -162,6 +162,57 @@ impl Default for YoloFileConfig {
     }
 }
 
+/// Concurrency governor configuration (loaded from `[concurrency]` in selfware.toml)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConcurrencyConfig {
+    /// Maximum concurrent LLM streaming responses.
+    #[serde(default = "default_max_streams")]
+    pub max_streams: usize,
+    /// Maximum concurrent tool executions per agent.
+    #[serde(default = "default_max_tools")]
+    pub max_tools: usize,
+    /// Global limit on total inflight operations.
+    #[serde(default = "default_max_global")]
+    pub max_global: usize,
+}
+
+impl ConcurrencyConfig {
+    /// Validate concurrency limits: each must be >= 1 and <= 256.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for (name, value) in [
+            ("max_streams", self.max_streams),
+            ("max_tools", self.max_tools),
+            ("max_global", self.max_global),
+        ] {
+            if value < 1 {
+                anyhow::bail!(
+                    "Config error: concurrency.{} must be >= 1, got {}",
+                    name,
+                    value
+                );
+            }
+            if value > 256 {
+                anyhow::bail!(
+                    "Config error: concurrency.{} must be <= 256, got {}",
+                    name,
+                    value
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for ConcurrencyConfig {
+    fn default() -> Self {
+        Self {
+            max_streams: default_max_streams(),
+            max_tools: default_max_tools(),
+            max_global: default_max_global(),
+        }
+    }
+}
+
 /// Evolution daemon configuration (loaded from `[evolution]` in selfware.toml)
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EvolutionTomlConfig {
@@ -214,4 +265,13 @@ pub(crate) fn default_retry_base_delay_ms() -> u64 {
 }
 pub(crate) fn default_retry_max_delay_ms() -> u64 {
     60000
+}
+pub(crate) fn default_max_streams() -> usize {
+    4
+}
+pub(crate) fn default_max_tools() -> usize {
+    8
+}
+pub(crate) fn default_max_global() -> usize {
+    12
 }

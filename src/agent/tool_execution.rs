@@ -197,7 +197,7 @@ impl Agent {
         }
 
         // Check for tool result cache hit
-        let cached_result = self.tool_cache.get(name, &args);
+        let cached_result = self.cache_manager.tool_cache.get(name, &args);
         let result = if let Some(cached) = cached_result {
             debug!("Tool result cache hit for {}", name);
             cached
@@ -207,7 +207,7 @@ impl Agent {
 
             // Cache read-only tool results
             if tool.is_readonly() {
-                self.tool_cache.insert(name, &args, &result);
+                self.cache_manager.tool_cache.insert(name, &args, &result);
             }
 
             result

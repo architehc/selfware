@@ -20,6 +20,7 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
     "continuous_work",
     "retry",
     "resources",
+    "concurrency",
     "evolution",
     "cache",
     "models",
@@ -53,6 +54,10 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
     "checkpoint_interval_secs",
     "auto_recovery",
     "max_recovery_attempts",
+    // concurrency sub-keys
+    "max_streams",
+    "max_tools",
+    "max_global",
     // resources sub-keys
     "gpu",
     "memory",

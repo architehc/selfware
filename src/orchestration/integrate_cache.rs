@@ -32,7 +32,7 @@
 
 /// Step 3: Wire up cache invalidation hooks
 /// In execution.rs after tool calls, the invalidation is already done. Ensure all 
-/// mutating operations call cache_manager.invalidate_path() or cache_manager.clear_all()
+/// mutating operations call cache_manager.invalidate_path()
 
 /// Step 4: Enable semantic matching for LLM responses
 /// In streaming.rs:

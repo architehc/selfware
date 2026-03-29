@@ -695,6 +695,7 @@ To call a tool, use this EXACT XML structure:
             config.agent.context_compression_ratio,
             config.agent.context_thinking_ratio,
         );
+        let governor = ConcurrencyGovernor::from_config(&config.concurrency);
 
         let agent = Self {
             client,
@@ -742,7 +743,7 @@ To call a tool, use this EXACT XML structure:
             last_no_action_prompt_hash: None,
             permission_store,
             cache_manager: crate::session::cache::CacheManager::new(cache_config),
-            governor: ConcurrencyGovernor::with_defaults(),
+            governor,
             esc_paused: Arc::new(AtomicBool::new(false)),
             esc_pause_ack: Arc::new(AtomicBool::new(false)),
             last_tool_output: None,

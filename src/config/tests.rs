@@ -2,7 +2,7 @@ use super::api_key::{is_local_endpoint, ApiKeySource, KEYRING_SERVICE};
 use super::types::{
     default_animation_speed, default_checkpoint_interval_secs, default_checkpoint_interval_tools,
     default_max_recovery_attempts, default_retry_base_delay_ms, default_retry_max_delay_ms,
-    default_retry_max_retries, default_status_interval, default_theme,
+    default_retry_max_retries, default_status_interval, default_theme, ConcurrencyConfig,
 };
 use super::*;
 use std::path::PathBuf;
@@ -403,6 +403,7 @@ fn test_config_full_roundtrip() {
         mcp: crate::mcp::McpConfig::default(),
         hooks: Vec::new(),
         plan_mode: false,
+        concurrency: crate::config::ConcurrencyConfig::default(),
     };
 
     let toml_str = toml::to_string(&config).unwrap();
@@ -2937,4 +2938,83 @@ strict_permissions = false
 
     let result = Config::load(Some(config_path.to_str().unwrap()));
     assert!(result.is_ok());
+}
+
+#[test]
+fn test_concurrency_config_default_validates() {
+    let cfg = ConcurrencyConfig::default();
+    assert!(cfg.validate().is_ok());
+}
+
+#[test]
+fn test_concurrency_config_zero_max_streams_rejected() {
+    let cfg = ConcurrencyConfig {
+        max_streams: 0,
+        ..Default::default()
+    };
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.to_string().contains("max_streams"),
+        "expected max_streams error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_concurrency_config_zero_max_tools_rejected() {
+    let cfg = ConcurrencyConfig {
+        max_tools: 0,
+        ..Default::default()
+    };
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.to_string().contains("max_tools"),
+        "expected max_tools error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_concurrency_config_zero_max_global_rejected() {
+    let cfg = ConcurrencyConfig {
+        max_global: 0,
+        ..Default::default()
+    };
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.to_string().contains("max_global"),
+        "expected max_global error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_concurrency_config_exceeds_max_rejected() {
+    let cfg = ConcurrencyConfig {
+        max_streams: 257,
+        ..Default::default()
+    };
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.to_string().contains("256"),
+        "expected max 256 error, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_concurrency_config_boundary_values_accepted() {
+    let cfg = ConcurrencyConfig {
+        max_streams: 1,
+        max_tools: 1,
+        max_global: 1,
+    };
+    assert!(cfg.validate().is_ok());
+
+    let cfg = ConcurrencyConfig {
+        max_streams: 256,
+        max_tools: 256,
+        max_global: 256,
+    };
+    assert!(cfg.validate().is_ok());
 }

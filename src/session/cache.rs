@@ -253,7 +253,7 @@ pub struct LlmCacheEntry {
 
 impl LlmCacheEntry {
     /// Calculate the estimated cost of this entry
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used in tests; useful API for cost tracking
     pub fn estimated_cost(&self, config: &LlmCacheConfig) -> f64 {
         let input_cost = (self.input_tokens as f64 / 1000.0) * config.cost_per_1k_input;
         let output_cost = (self.output_tokens as f64 / 1000.0) * config.cost_per_1k_output;
@@ -473,12 +473,6 @@ impl CacheManager {
             local_first: crate::session::local_first::LocalFirstCoordinator::new(),
             llm_embedding: crate::analysis::vector_store::TfIdfEmbeddingProvider::default(),
         }
-    }
-
-    /// Clear all caches
-    #[allow(dead_code)]
-    pub fn clear_all(&self) {
-        self.tool_cache.clear();
     }
 
     /// Invalidate caches for a file path

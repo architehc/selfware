@@ -149,6 +149,9 @@ impl Config {
             );
         }
 
+        // --- Concurrency limits ---
+        self.concurrency.validate()?;
+
         // --- Glob pattern validation ---
         // Fail fast on invalid patterns instead of deferring to runtime.
         for (label, patterns) in [

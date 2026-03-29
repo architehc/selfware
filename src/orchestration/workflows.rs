@@ -34,7 +34,13 @@ use std::time::{Duration, Instant};
 use tokio::process::Command;
 mod templates;
 #[cfg(test)]
-mod tests;
+mod test_models;
+#[cfg(test)]
+mod test_context;
+#[cfg(test)]
+mod test_templates;
+#[cfg(test)]
+mod test_execution;
 
 /// Workflow execution status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

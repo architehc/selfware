@@ -43,6 +43,18 @@ impl ConcurrencyGovernor {
         }
     }
 
+    /// Create a governor from a [`ConcurrencyConfig`](crate::config::ConcurrencyConfig).
+    ///
+    /// As a safety net, all values are clamped to a minimum of 1 to prevent
+    /// semaphore deadlocks even if validation was bypassed.
+    pub fn from_config(cfg: &crate::config::ConcurrencyConfig) -> Self {
+        Self::new(
+            cfg.max_streams.max(1),
+            cfg.max_tools.max(1),
+            cfg.max_global.max(1),
+        )
+    }
+
     /// Create a governor with sensible defaults:
     /// - 4 concurrent streams (LLM API calls)
     /// - 8 concurrent tool executions (file I/O, shell, etc.)

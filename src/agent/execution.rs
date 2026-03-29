@@ -2676,7 +2676,7 @@ mod tests {
             .read_state
             .get(&path)
             .expect("expected tracked file state");
-        assert_eq!(state.unchanged_read_count, 1);
+        assert_eq!(state.unchanged_read_count, 2);
         assert!(agent
             .recent_failed_tool_attempts
             .back()

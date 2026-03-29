@@ -214,6 +214,36 @@ path = "examples/multi_agent.rs"
 name = "custom_config"
 path = "examples/custom_config.rs"
 
+[[example]]
+name = "bench_32_streams"
+path = "examples/bench_32_streams.rs"
+required-features = ["bench-harness"]
+
+[[example]]
+name = "browser_bench"
+path = "examples/browser_bench.rs"
+required-features = ["bench-harness"]
+
+[[example]]
+name = "full_flow_test"
+path = "examples/full_flow_test.rs"
+required-features = ["bench-harness", "resilience"]
+
+[[example]]
+name = "multilang_bench"
+path = "examples/multilang_bench.rs"
+required-features = ["bench-harness"]
+
+[[example]]
+name = "swebench_eval"
+path = "examples/swebench_eval.rs"
+required-features = ["bench-harness"]
+
+[[example]]
+name = "swebench_two_phase"
+path = "examples/swebench_two_phase.rs"
+required-features = ["bench-harness"]
+
 # VLM Benchmark binaries
 [[bin]]
 name = "vlm_gen_fixtures"

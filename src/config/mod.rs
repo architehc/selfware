@@ -95,6 +95,9 @@ pub struct Config {
     pub resources: ResourcesConfig,
 
     #[serde(default)]
+    pub concurrency: ConcurrencyConfig,
+
+    #[serde(default)]
     pub evolution: EvolutionTomlConfig,
 
     /// LLM response caching configuration
@@ -185,6 +188,7 @@ impl std::fmt::Debug for Config {
             .field("continuous_work", &self.continuous_work)
             .field("retry", &self.retry)
             .field("resources", &self.resources)
+            .field("concurrency", &self.concurrency)
             .field("evolution", &self.evolution)
             .field("cache", &self.cache)
             .field("models", &self.models)
@@ -217,6 +221,7 @@ impl Default for Config {
             continuous_work: ContinuousWorkConfig::default(),
             retry: RetrySettings::default(),
             resources: ResourcesConfig::default(),
+            concurrency: ConcurrencyConfig::default(),
             evolution: EvolutionTomlConfig::default(),
             cache: crate::session::cache::LlmCacheConfig::default(),
             models: HashMap::new(),
