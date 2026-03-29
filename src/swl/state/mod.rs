@@ -30,6 +30,19 @@ pub struct StateManager {
     dirty: bool,
 }
 
+impl std::fmt::Debug for StateManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StateManager")
+            .field("workflow_name", &self.workflow_name)
+            .field("schema", &self.schema)
+            .field("auto_save", &self.auto_save)
+            .field("cache", &self.cache)
+            .field("dirty", &self.dirty)
+            .field("backend", &"<dyn StateBackend>")
+            .finish()
+    }
+}
+
 impl StateManager {
     /// Create a new state manager with file backend (default)
     pub fn new_file_based(workflow_name: &str, base_dir: PathBuf) -> Result<Self> {

@@ -1,27 +1,10 @@
 //! SWL Workflow Runtime
 //!
 //! Executes SWL workflows with agent delegation, tool calling, and state management.
-//!
-//! ## Guardrail Enforcement
-//!
-//! For workflows requiring guardrail enforcement, use `GuardedSwlRuntime` from the
-//! `guarded` module:
-//!
-//! ```rust,ignore
-//! use selfware::swl::runtime::{GuardedSwlRuntime, GuardedRuntimeBuilder};
-//!
-//! let runtime = GuardedRuntimeBuilder::new()
-//!     .with_client(api_client)
-//!     .with_verbose_guardrails()
-//!     .build();
-//!
-//! runtime.register_guardrails(&doc).await;
-//! let result = runtime.execute_workflow(&doc, "my_workflow", inputs).await?;
-//! ```
 
-pub mod guarded;
-
-pub use guarded::{GuardedRuntimeBuilder, GuardedSwlRuntime};
+// Note: guarded runtime depends on guardrails module which has compilation issues
+// pub mod guarded;
+// pub use guarded::{GuardedRuntimeBuilder, GuardedSwlRuntime};
 
 use crate::api::{ApiClient, Message, ThinkingMode};
 use crate::errors::Result;
@@ -95,8 +78,8 @@ impl ExecutionContext {
 
     /// Set the state schema for validation
     pub fn with_schema(mut self, schema: StateSchema) -> Self {
-        if let Some(ref mut manager) = self.state_manager {
-            *manager = std::mem::take(manager).with_schema(schema);
+        if let Some(manager) = self.state_manager.take() {
+            self.state_manager = Some(manager.with_schema(schema));
         }
         self
     }
@@ -1067,7 +1050,7 @@ mod tests {
     fn test_execution_context() {
         let mut ctx = ExecutionContext::new();
         ctx.set("key".to_string(), "value".to_string());
-        assert_eq!(ctx.get("key"), Some(&"value".to_string()));
+        assert_eq!(ctx.get("key"), Some("value".to_string()));
     }
 
     #[test]

@@ -138,6 +138,10 @@ impl GuardrailEnforcer {
 
         // Emit telemetry
         self.emit_telemetry(&summary, guardrail_type, context).await;
+        
+        // Record metrics
+        increment_guardrail_checks(summary.total_checked as u64);
+        increment_guardrail_violations(summary.failed as u64);
 
         Ok(summary)
     }
@@ -275,9 +279,6 @@ impl GuardrailEnforcer {
             stored.extend(events.clone());
         }
 
-        // Log summary metric
-        telemetry::increment_guardrail_checks(summary.total_checked as u64);
-        telemetry::increment_guardrail_violations(summary.failed as u64);
     }
 
     /// Get all telemetry events
@@ -328,23 +329,13 @@ pub struct GuardrailStats {
     pub by_type: HashMap<String, usize>,
 }
 
-/// Extension trait for telemetry
-pub trait GuardrailTelemetry {
-    /// Increment guardrail check counter
-    fn increment_guardrail_checks(count: u64);
-    /// Increment guardrail violation counter
-    fn increment_guardrail_violations(count: u64);
+/// Helper functions for guardrail telemetry
+fn increment_guardrail_checks(count: u64) {
+    metrics::counter!("swl_guardrail_checks_total", count);
 }
 
-// Implement telemetry extension
-impl GuardrailTelemetry for telemetry {
-    fn increment_guardrail_checks(count: u64) {
-        metrics::counter!("swl_guardrail_checks_total", count);
-    }
-
-    fn increment_guardrail_violations(count: u64) {
-        metrics::counter!("swl_guardrail_violations_total", count);
-    }
+fn increment_guardrail_violations(count: u64) {
+    metrics::counter!("swl_guardrail_violations_total", count);
 }
 
 #[cfg(test)]

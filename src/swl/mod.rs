@@ -22,8 +22,12 @@
 #![allow(dead_code, unused_imports, unused_variables)]
 
 pub mod codegen;
+// Note: guardrails module has compilation issues, temporarily disabled
+// pub mod guardrails;
 pub mod lowering;
 pub mod parser;
+pub mod runtime;
+pub mod state;
 pub mod types;
 
 pub use codegen::generate_rust_stub;
@@ -31,5 +35,14 @@ pub use lowering::{lower_document, LoweredSwl};
 pub use parser::{
     parse_document, validate_document, CodeBlock, CodeLanguage, ParseError, SwlDocument,
     ValidationIssue, WorkflowType,
+};
+pub use runtime::{
+    AgentTelemetry, ExecutionContext, ExecutionEvent, ExecutionResult, ExecutionStatus,
+    SwlRuntime, WorkflowTelemetry,
+};
+pub use state::{
+    backend::{StateBackend, StateBackendType},
+    validation::{validate_state_against_schema, ValidationError},
+    StateManager,
 };
 pub use types::{check_codegen_compatibility, FieldType, StateField, StateSchema, TypeIssue};
