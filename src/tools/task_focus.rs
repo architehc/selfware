@@ -209,7 +209,7 @@ pub fn classify_task(task: &str) -> TaskType {
         return TaskType::Test;
     }
 
-    // Read/analyze/explain — no mutation implied
+    // Read/analyze/explain/diagnose — no mutation implied
     if t.contains("read")
         || t.contains("explain")
         || t.contains("describe")
@@ -222,6 +222,10 @@ pub fn classify_task(task: &str) -> TaskType {
         || t.contains("list")
         || t.contains("count")
         || t.contains("summarize")
+        || t.contains("why")
+        || t.contains("crash")
+        || t.contains("diagnose")
+        || t.contains("debug")
     {
         return TaskType::Read;
     }
@@ -343,6 +347,13 @@ mod tests {
             classify_task("List all public functions in api/client.rs"),
             TaskType::Read
         );
+        // Diagnostic/troubleshooting queries
+        assert_eq!(
+            classify_task("Why does this crash when I call allocate_tiers?"),
+            TaskType::Read
+        );
+        assert_eq!(classify_task("Debug the config loading issue"), TaskType::Read);
+        assert_eq!(classify_task("Diagnose the test failure"), TaskType::Read);
     }
 
     #[test]

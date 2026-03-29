@@ -197,7 +197,7 @@ impl ThroughputTracker {
         let current_out = self.tokens_out.load(Ordering::Relaxed);
 
         let (elapsed_secs, prev_in, prev_out) = {
-            let mut last = self.last_snapshot.lock().unwrap();
+            let mut last = self.last_snapshot.lock().unwrap_or_else(|e| e.into_inner());
             let elapsed = now.duration_since(*last).as_secs_f64().max(0.001);
             let prev_in = self.last_in.swap(current_in, Ordering::Relaxed);
             let prev_out = self.last_out.swap(current_out, Ordering::Relaxed);

@@ -799,11 +799,12 @@ To call a tool, use this EXACT XML structure:
     /// Builds a minimal prompt with just the task + gathered data, no tool
     /// definitions, no XML. Forces the model to produce text.
     pub(super) async fn synthesize_answer(&mut self, task: &str) -> Result<Option<String>> {
-        // Collect file contents from context map (the data gathered in phase 1)
+        // Collect file contents from context map (the data gathered in phase 1).
+        // Try Full level first, then fall back to Skeleton (signatures).
         let mut context_data = String::new();
         for path in self
             .context_map
-            .files_at_level(self::context_map::ContextLevel::Full)
+            .files_at_level(context_map::ContextLevel::Full)
         {
             if let Some(content) = self.context_map.full_content(path) {
                 context_data.push_str(&format!(
@@ -811,6 +812,34 @@ To call a tool, use this EXACT XML structure:
                     path.display(),
                     content
                 ));
+            }
+        }
+
+        // Fall back to Skeleton level if no Full content available.
+        if context_data.is_empty() {
+            for path in self
+                .context_map
+                .files_at_level(context_map::ContextLevel::Skeleton)
+            {
+                if let Some(skeleton) = self.context_map.skeleton(path) {
+                    context_data.push_str(&format!(
+                        "\n--- {} (signatures) ---\n{}\n",
+                        path.display(),
+                        skeleton.render()
+                    ));
+                }
+            }
+        }
+
+        // Also check message history for tool results containing file contents.
+        if context_data.is_empty() {
+            for msg in &self.messages {
+                if msg.role == "tool" && msg.content.len() > 100 {
+                    context_data.push_str(&format!(
+                        "\n--- tool result ---\n{}\n",
+                        msg.content.text()
+                    ));
+                }
             }
         }
 
