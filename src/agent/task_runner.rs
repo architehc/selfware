@@ -621,6 +621,34 @@ impl Agent {
                         let step_progress = ((step + 1) as f64 * 0.1).min(0.9);
                         progress.update_progress(step_progress);
                     }
+                    // Phase-2 synthesis: if the model gathered data but can't
+                    // produce a text answer, make a tool-free API call.
+                    if let Some(ref synthesis_task) = self.pending_synthesis.take() {
+                        info!("Running phase-2 synthesis for stuck model");
+                        match self.synthesize_answer(synthesis_task).await {
+                            Ok(Some(answer)) => {
+                                output::final_answer(&answer);
+                                self.last_assistant_response = answer;
+                                record_state_transition("Executing", "Completed");
+                                if mode == LoopMode::NewTask {
+                                    progress.complete_phase();
+                                }
+                                output::task_completed();
+                                self.record_task_outcome(task_description, Outcome::Success, None);
+                                if let Err(e) = self.complete_checkpoint() {
+                                    warn!("Failed to save completed checkpoint: {}", e);
+                                }
+                                return Ok(());
+                            }
+                            Ok(None) => {
+                                info!("Synthesis returned empty — continuing normal loop");
+                            }
+                            Err(e) => {
+                                warn!("Synthesis failed: {} — continuing normal loop", e);
+                            }
+                        }
+                    }
+
                     match self.execute_step_with_logging(task_description).await {
                         Ok(completed) => {
                             if self.is_cancelled() {

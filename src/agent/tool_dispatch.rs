@@ -615,27 +615,19 @@ impl Agent {
         self.remember_failed_tool(name, &err);
         self.record_failed_tool_attempt(name, args_str, "task_state", &err);
 
-        // After 3+ suppressed rereads, strip tool XML from the system prompt
-        // so the model physically cannot emit tool calls on the next turn.
-        // This forces a text-only response from models (like Qwen3.5) that
-        // can't stop calling tools voluntarily.
-        if read_count >= 3 {
-            if let Some(sys_msg) = self.messages.first_mut() {
-                if sys_msg.role == "system" {
-                    let content = sys_msg.content.to_string();
-                    // Remove <tool>...</tool> blocks from system prompt
-                    if let Some(tools_start) = content.find("<tool name=") {
-                        if let Some(last_tool_end) = content.rfind("</tool>") {
-                            let stripped = format!(
-                                "{}\n\nYou have already gathered the data you need. Respond with your answer as plain text. Do not call any tools.\n{}",
-                                &content[..tools_start],
-                                &content[last_tool_end + 7..]
-                            );
-                            sys_msg.content = stripped.into();
-                        }
-                    }
-                }
-            }
+        // After 3+ suppressed rereads, trigger phase-2 synthesis.
+        // The model has the data in context but can't produce a text answer.
+        // A separate tool-free API call will synthesize the response.
+        if read_count >= 3 && self.pending_synthesis.is_none() {
+            info!("Triggering phase-2 synthesis after {} suppressed rereads", read_count);
+            // Extract the task description from the first user message
+            let task = self
+                .messages
+                .iter()
+                .find(|m| m.role == "user")
+                .map(|m| m.content.to_string())
+                .unwrap_or_default();
+            self.pending_synthesis = Some(task);
         }
 
         true

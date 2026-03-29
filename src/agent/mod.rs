@@ -323,6 +323,10 @@ pub struct Agent {
     session_logger: Option<session_log::SessionLogger>,
     /// One-shot reminder injected after a failed tool call.
     pending_failure_hint: Option<String>,
+    /// When set, contains the task description for a phase-2 synthesis call.
+    /// The next execution step will make a tool-free API call to produce a
+    /// text answer from data already in context.
+    pending_synthesis: Option<String>,
     /// Consecutive turns where the model described intent but emitted no tool call.
     consecutive_no_action_prompts: usize,
     /// Lifetime total of no-action prompts across the entire task.
@@ -732,6 +736,7 @@ To call a tool, use this EXACT XML structure:
             audit_logger,
             session_logger,
             pending_failure_hint: None,
+            pending_synthesis: None,
             consecutive_no_action_prompts: 0,
             total_no_action_prompts: 0,
             last_no_action_prompt_hash: None,
@@ -785,6 +790,64 @@ To call a tool, use this EXACT XML structure:
     /// Emit an event to the TUI / event listener (no-op when no emitter is configured).
     fn emit_event(&self, event: AgentEvent) {
         self.events.emit(event);
+    }
+
+    /// Phase-2 synthesis: make a single tool-free API call to produce a text
+    /// answer from data already in context. Used when the model gathered data
+    /// via tools but can't transition to a text response (Qwen3.5 limitation).
+    ///
+    /// Builds a minimal prompt with just the task + gathered data, no tool
+    /// definitions, no XML. Forces the model to produce text.
+    pub(super) async fn synthesize_answer(&mut self, task: &str) -> Result<Option<String>> {
+        // Collect file contents from context map (the data gathered in phase 1)
+        let mut context_data = String::new();
+        for path in self
+            .context_map
+            .files_at_level(self::context_map::ContextLevel::Full)
+        {
+            if let Some(content) = self.context_map.full_content(path) {
+                context_data.push_str(&format!(
+                    "\n--- {} ---\n{}\n",
+                    path.display(),
+                    content
+                ));
+            }
+        }
+
+        if context_data.is_empty() {
+            return Ok(None);
+        }
+
+        let synthesis_prompt = format!(
+            "You are a helpful assistant. Answer the following task based ONLY on the provided file contents.\n\n\
+             TASK: {}\n\n\
+             FILE CONTENTS:\n{}\n\n\
+             Provide your answer now. Be concise and direct.",
+            task, context_data
+        );
+
+        let messages = vec![
+            crate::api::types::Message::system(synthesis_prompt),
+            crate::api::types::Message::user(task.to_string()),
+        ];
+
+        // No tools, no streaming — just a direct completion
+        let response = self
+            .client
+            .chat(messages, None, crate::api::ThinkingMode::Disabled)
+            .await?;
+
+        let answer = response
+            .choices
+            .first()
+            .map(|c| c.message.content.text().to_string())
+            .unwrap_or_default();
+
+        if answer.trim().is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(answer))
+        }
     }
 
     /// Get tools for API calls - returns Some(tools) if native function calling is enabled
