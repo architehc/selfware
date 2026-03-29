@@ -336,6 +336,13 @@ impl<'a> LoweringContext<'a> {
         steps.push(llm_step);
 
         let mut exits = vec![step_id.clone()];
+        
+        // Always make the step_id available as an output so parallel workflows can capture results
+        if !available.contains(&step_id) {
+            available.push(step_id.clone());
+        }
+        self.outputs.insert(step_id.clone());
+        
         if let Some(output_key) = agent.output_key.as_deref() {
             exits = self.capture_output(output_key, &step_id, steps);
             if !available.contains(&output_key.to_string()) {

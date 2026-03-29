@@ -8,9 +8,10 @@ use async_trait::async_trait;
 use regex::Regex;
 use serde_json::{json, Value};
 use std::net::{IpAddr, ToSocketAddrs};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::LazyLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 
 use super::Tool;
@@ -156,6 +157,96 @@ const browser = await pw.chromium.launch(launchOptions);
 "#,
         extra_args
     )
+}
+
+fn should_stage_chrome_output_for_home(output_path: &Path, home_dir: Option<&Path>) -> bool {
+    output_path.is_absolute() && home_dir.is_some_and(|home| !output_path.starts_with(home))
+}
+
+fn should_stage_chrome_output(output_path: &Path) -> bool {
+    let home_dir = std::env::var_os("HOME").map(PathBuf::from);
+    should_stage_chrome_output_for_home(output_path, home_dir.as_deref())
+}
+
+fn chrome_staging_output_path(requested_output: &Path) -> Result<PathBuf> {
+    let base_dir = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .ok_or_else(|| anyhow::anyhow!("Failed to determine a staging directory for Chrome output"))?;
+
+    let file_name = requested_output
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("browser-output"));
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+
+    Ok(base_dir
+        .join(".selfware")
+        .join("browser-output")
+        .join(format!("{}-{}", std::process::id(), unique))
+        .join(file_name))
+}
+
+async fn prepare_chrome_output_path(output_path: &str) -> Result<(PathBuf, Option<PathBuf>)> {
+    let requested_output = PathBuf::from(output_path);
+    if !should_stage_chrome_output(&requested_output) {
+        return Ok((requested_output, None));
+    }
+
+    let staged_output = chrome_staging_output_path(&requested_output)?;
+    if let Some(parent) = staged_output.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("Failed to create Chrome staging dir {}", parent.display()))?;
+    }
+
+    Ok((staged_output.clone(), Some(staged_output)))
+}
+
+async fn finalize_chrome_output_path(
+    requested_output: &str,
+    staged_output: Option<&Path>,
+) -> Result<(bool, Option<u64>)> {
+    let requested_output = PathBuf::from(requested_output);
+
+    if let Some(staged_output) = staged_output {
+        if tokio::fs::metadata(staged_output).await.is_ok() {
+            if let Some(parent) = requested_output.parent().filter(|p| !p.as_os_str().is_empty()) {
+                tokio::fs::create_dir_all(parent).await.with_context(|| {
+                    format!("Failed to create browser output dir {}", parent.display())
+                })?;
+            }
+
+            tokio::fs::copy(staged_output, &requested_output)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to copy staged browser output from {} to {}",
+                        staged_output.display(),
+                        requested_output.display()
+                    )
+                })?;
+
+            let _ = tokio::fs::remove_file(staged_output).await;
+        }
+    }
+
+    let file_exists = tokio::fs::metadata(&requested_output).await.is_ok();
+    let file_size = if file_exists {
+        tokio::fs::metadata(&requested_output)
+            .await
+            .ok()
+            .map(|m| m.len())
+    } else {
+        None
+    };
+
+    Ok((file_exists, file_size))
 }
 
 // ============================================================================
@@ -513,6 +604,7 @@ impl Tool for BrowserScreenshot {
             .get("output_path")
             .and_then(|v| v.as_str())
             .unwrap_or("/tmp/screenshot.png");
+        let (chrome_output_path, staged_output_path) = prepare_chrome_output_path(output_path).await?;
 
         let width = args.get("width").and_then(|v| v.as_u64()).unwrap_or(1920);
         let height = args.get("height").and_then(|v| v.as_u64()).unwrap_or(1080);
@@ -533,7 +625,7 @@ impl Tool for BrowserScreenshot {
                     "--disable-gpu",
                     "--disable-dev-shm-usage",
                     &format!("--window-size={},{}", width, height),
-                    &format!("--screenshot={}", output_path),
+                    &format!("--screenshot={}", chrome_output_path.display()),
                     &format!("--timeout={}", timeout_secs * 1000),
                 ]);
                 if no_sandbox {
@@ -560,13 +652,8 @@ impl Tool for BrowserScreenshot {
 
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
-                // Check if file was created
-                let file_exists = tokio::fs::metadata(output_path).await.is_ok();
-                let file_size = if file_exists {
-                    tokio::fs::metadata(output_path).await.ok().map(|m| m.len())
-                } else {
-                    None
-                };
+                let (file_exists, file_size) =
+                    finalize_chrome_output_path(output_path, staged_output_path.as_deref()).await?;
 
                 Ok(json!({
                     "success": output.status.success() && file_exists,
@@ -705,6 +792,7 @@ impl Tool for BrowserPdf {
             .get("output_path")
             .and_then(|v| v.as_str())
             .unwrap_or("/tmp/page.pdf");
+        let (chrome_output_path, staged_output_path) = prepare_chrome_output_path(output_path).await?;
 
         let timeout_secs = args
             .get("timeout_secs")
@@ -722,7 +810,7 @@ impl Tool for BrowserPdf {
                     "--headless",
                     "--disable-gpu",
                     "--disable-dev-shm-usage",
-                    &format!("--print-to-pdf={}", output_path),
+                    &format!("--print-to-pdf={}", chrome_output_path.display()),
                     &format!("--timeout={}", timeout_secs * 1000),
                 ]);
                 if no_sandbox {
@@ -748,12 +836,8 @@ impl Tool for BrowserPdf {
                 .context("Failed to generate PDF")?;
 
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                let file_exists = tokio::fs::metadata(output_path).await.is_ok();
-                let file_size = if file_exists {
-                    tokio::fs::metadata(output_path).await.ok().map(|m| m.len())
-                } else {
-                    None
-                };
+                let (file_exists, file_size) =
+                    finalize_chrome_output_path(output_path, staged_output_path.as_deref()).await?;
 
                 Ok(json!({
                     "success": output.status.success() && file_exists,
@@ -1449,6 +1533,33 @@ mod tests {
         assert!(schema["properties"].get("timeout_secs").is_some());
         assert!(schema["properties"].get("javascript").is_some());
         assert!(schema["properties"].get("user_agent").is_some());
+    }
+
+    #[test]
+    fn test_should_stage_chrome_output_for_non_home_absolute_paths() {
+        let home_dir = Path::new("/home/tester");
+        assert!(should_stage_chrome_output_for_home(
+            Path::new("/tmp/output.png"),
+            Some(home_dir)
+        ));
+        assert!(!should_stage_chrome_output_for_home(
+            Path::new("/home/tester/output.png"),
+            Some(home_dir)
+        ));
+        assert!(!should_stage_chrome_output_for_home(
+            Path::new("relative/output.png"),
+            Some(home_dir)
+        ));
+    }
+
+    #[test]
+    fn test_chrome_staging_output_preserves_filename() {
+        let staged = chrome_staging_output_path(Path::new("/tmp/chart-shot.png")).unwrap();
+        assert_eq!(
+            staged.file_name().and_then(|name| name.to_str()),
+            Some("chart-shot.png")
+        );
+        assert!(staged.to_string_lossy().contains(".selfware/browser-output"));
     }
 
     #[test]

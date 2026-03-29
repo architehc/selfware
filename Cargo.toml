@@ -163,6 +163,9 @@ consolidation = []
 # System-level E2E tests (require live LLM endpoint, run manually)
 system-tests = []
 
+# Redis backend for workflow state (optional, requires redis server)
+redis = []
+
 # Convenience feature that enables all optional modules
 extras = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-analysis", "tokens", "self-improvement", "hot-reload", "vlm-bench", "bench-harness", "consolidation"]
 
