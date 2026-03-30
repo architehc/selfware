@@ -269,7 +269,11 @@ impl Config {
             }
         }
         if !token_budget_was_explicit {
-            config.agent.token_budget = config.max_tokens;
+            // Default token_budget to 60% of context_length — this is the usable
+            // conversation budget for the ContextMap L1/L2/L3 file tracking.
+            // The old default (max_tokens = output budget, often 16K) was far too
+            // small and caused aggressive context eviction.
+            config.agent.token_budget = config.context_length * 3 / 5;
         }
         if let Ok(temp) = std::env::var("SELFWARE_TEMPERATURE") {
             if let Ok(t) = temp.parse::<f32>() {

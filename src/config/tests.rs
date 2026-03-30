@@ -1644,8 +1644,10 @@ temperature = 0.3
     assert_eq!(config.endpoint, "http://localhost:9999/v1");
     assert_eq!(config.model, "loaded-model");
     assert_eq!(config.max_tokens, 2048);
-    assert_eq!(config.agent.token_budget, 2048);
-    assert_eq!(config.agent.token_safety_margin, 2047);
+    // token_budget defaults to context_length * 3 / 5 = 131072 * 3 / 5 = 78643
+    assert_eq!(config.agent.token_budget, 131072 * 3 / 5);
+    // default safety_margin (8192) < token_budget, so no clamping
+    assert_eq!(config.agent.token_safety_margin, 8192);
     assert!((config.temperature - 0.3).abs() < f32::EPSILON);
     assert!(config.models.contains_key("default"));
     let default_prof = &config.models["default"];
@@ -1701,8 +1703,10 @@ max_tokens = 4096
     std::env::remove_var("SELFWARE_MAX_TOKENS");
 
     assert_eq!(config.max_tokens, 8192);
-    assert_eq!(config.agent.token_budget, 8192);
-    assert_eq!(config.agent.token_safety_margin, 8191);
+    // token_budget defaults to context_length * 3 / 5 = 131072 * 3 / 5 = 78643
+    assert_eq!(config.agent.token_budget, 131072 * 3 / 5);
+    // default safety_margin (8192) < token_budget, so no clamping
+    assert_eq!(config.agent.token_safety_margin, 8192);
 }
 
 #[test]

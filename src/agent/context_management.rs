@@ -2018,19 +2018,18 @@ mod tests {
         let server = MockLlmServer::builder().with_response("ok").build().await;
         let agent = make_test_agent(&server).await;
 
-        // Formula: context_length - max_tokens - 200_000
-        // Default: 131072 - 65536 - 200000 = 0 (saturating_sub)
-        // On small default configs, max_context_tokens saturates to 0.
-        // Real configs (e.g. context_length=1010000) get meaningful budgets.
-        // default context_length (131072) - default max_tokens (65536) - 200K = 0 (saturated)
+        // Formula: context_length - max_tokens - (context_length / 5)
+        // Default: 131072 - 65536 - 26214 = 39322
+        // The 20% dynamic overhead scales with context_length instead of
+        // the old fixed 200K overhead that saturated small configs to 0.
         let default_config = crate::config::Config::default();
         let expected = default_config
             .context_length
             .saturating_sub(default_config.max_tokens)
-            .saturating_sub(200_000);
+            .saturating_sub(default_config.context_length / 5);
         assert_eq!(
             agent.max_context_tokens, expected,
-            "max_context_tokens = context_length - max_tokens - 200K overhead"
+            "max_context_tokens = context_length - max_tokens - 20% overhead"
         );
 
         server.stop().await;

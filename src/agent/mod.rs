@@ -371,10 +371,9 @@ impl Agent {
         // Keep global init as fallback for tools not yet migrated to per-instance config.
         init_safety_config(&config.safety);
         let loop_control = AgentLoop::new(config.agent.max_iterations);
-        let compressor = ContextCompressor::with_content_ratio(
-            config.max_tokens,
-            config.agent.context_content_ratio,
-        );
+        // Compressor is created later, after max_context_tokens is calculated.
+        // See the block near "Calculate max_context_tokens" below.
+        let compressor_content_ratio = config.agent.context_content_ratio;
 
         // Initialize cognitive state and load global episodic memory if available
         let mut cognitive_state = CognitiveState::new();
@@ -667,33 +666,46 @@ To call a tool, use this EXACT XML structure:
 
         // Calculate max_context_tokens before moving config.
         // context_length MUST match vLLM --max-model-len exactly.
-        // Reserve space for: output tokens (max_tokens), tool definitions (~100-200K),
-        // chat template formatting, and estimation variance (~10-20%).
+        // Reserve: output tokens (max_tokens) + 20% safety margin for tool
+        // definitions, chat template formatting, and token estimation variance.
+        // The old fixed 200K reserve was far too aggressive — it left only 46K
+        // usable tokens on a 262K context model, causing premature eviction of
+        // file content and tool-call retry loops.
         let model_context_limit = config.context_length;
+        let safety_margin = model_context_limit / 5; // 20% of context window
         let max_context_tokens = model_context_limit
             .saturating_sub(config.max_tokens) // reserve for output tokens
-            .saturating_sub(200_000); // tools + template + estimation safety
+            .saturating_sub(safety_margin);     // tools + template + estimation safety
 
         if max_context_tokens == 0 {
             tracing::error!(
-                "max_context_tokens is 0! context_length ({}) is too small for max_tokens ({}) + 200K overhead. \
+                "max_context_tokens is 0! context_length ({}) is too small for max_tokens ({}) + {}% overhead. \
                  Check that selfware.toml context_length matches your vLLM --max-model-len.",
-                model_context_limit, config.max_tokens
+                model_context_limit, config.max_tokens, 20
             );
         }
         tracing::info!(
-            "Context limits: model={}, max_context_tokens={}, token_budget={}",
+            "Context limits: model={}, max_context_tokens={} (safety_margin={}), token_budget={}",
             model_context_limit,
             max_context_tokens,
+            safety_margin,
             config.agent.token_budget
         );
 
-        // Extract context map config before moving `config` into the struct.
+        // Use max_context_tokens (the actual usable conversation budget) rather
+        // than token_budget (which defaults to max_tokens = output budget).
         let ctx_map = context_map::ContextMap::new(
-            config.agent.token_budget,
+            max_context_tokens,
             config.agent.context_content_ratio,
             config.agent.context_compression_ratio,
             config.agent.context_thinking_ratio,
+        );
+        // Create compressor with the full conversation budget, not output budget.
+        // The old value (max_tokens=16384) triggered compression at ~12K tokens,
+        // evicting file content after just a few tool calls.
+        let compressor = ContextCompressor::with_content_ratio(
+            max_context_tokens,
+            compressor_content_ratio,
         );
         let governor = ConcurrencyGovernor::from_config(&config.concurrency);
 
