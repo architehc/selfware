@@ -251,6 +251,16 @@ name = "codegraph"
 path = "src/bin/codegraph.rs"
 
 [[bin]]
+name = "visual_polish_test"
+path = "system_tests/visual_polish_loop.rs"
+required-features = ["system-tests"]
+
+[[bin]]
+name = "frame_analyzer"
+path = "system_tests/frame_analyzer.rs"
+required-features = ["system-tests"]
+
+[[bin]]
 name = "vlm_gen_fixtures"
 path = "src/bin/vlm_gen_fixtures.rs"
 required-features = ["vlm-bench"]
@@ -259,6 +269,11 @@ required-features = ["vlm-bench"]
 name = "vlm_bench_run"
 path = "src/bin/vlm_bench_run.rs"
 required-features = ["vlm-bench"]
+
+[[bin]]
+name = "computer_control_test"
+path = "system_tests/computer_control_test.rs"
+required-features = ["system-tests"]
 
 # Benchmarks
 [[bench]]
