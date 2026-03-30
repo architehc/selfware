@@ -100,6 +100,7 @@ async fn main() -> Result<()> {
         // API retry settings
         retry: Default::default(),
 
+        concurrency: Default::default(),
         evolution: Default::default(),
         models: Default::default(),
 

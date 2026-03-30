@@ -1,0 +1,11 @@
+# Clippy lint configuration for selfware
+# https://doc.rust-lang.org/clippy/lint_configuration.html
+
+# selfware has complex constructors with many parameters
+too-many-arguments-threshold = 10
+
+# Allow moderately complex types (e.g., nested generics in agent/evolution code)
+type-complexity-threshold = 350
+
+# Allow higher cognitive complexity for orchestration functions
+cognitive-complexity-threshold = 30

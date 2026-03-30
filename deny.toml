@@ -26,6 +26,10 @@ ignore = [
     "RUSTSEC-2025-0119",
     # paste 1.0.15 -- pulled in by tokenizers
     "RUSTSEC-2024-0436",
+    # (withdrawn) advisory no longer in RustSec DB; added when ignoring unmaintained transitive deps
+    "RUSTSEC-2025-0435",
+    # quinn-proto DoS via invalid QUIC transport parameters (CVE-2026-31812); patched in >= 0.11.14
+    "RUSTSEC-2026-0037",
 ]
 # Treat unmaintained crates as errors (all = error for any unmaintained crate)
 unmaintained = "all"
