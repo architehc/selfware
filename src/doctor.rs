@@ -253,27 +253,22 @@ async fn check_accessibility() -> DoctorCheck {
 // ---------------------------------------------------------------------------
 
 async fn check_xcap() -> DoctorCheck {
-    // We check by attempting a quick screen-capture via the xcap crate.
-    // If the crate is compiled in (it always is — it's a hard dep), this
-    // really checks whether the underlying platform libs work.
-    let ok = tokio::task::spawn_blocking(|| {
-        use xcap::Monitor;
-        Monitor::all().map(|m| !m.is_empty()).unwrap_or(false)
-    })
-    .await
-    .unwrap_or(false);
+    let backend = tokio::task::spawn_blocking(crate::computer::ScreenCapture::available_backend)
+        .await
+        .ok()
+        .flatten();
 
-    if ok {
+    if let Some(backend) = backend {
         DoctorCheck {
-            name: "xcap (screen capture)".to_string(),
+            name: format!("screen capture ({})", backend.doctor_name()),
             category: Category::ComputerControl,
             status: CheckStatus::Ok,
             version: None,
-            message: "Screen capture available".to_string(),
+            message: backend.doctor_message().to_string(),
         }
     } else {
         DoctorCheck {
-            name: "xcap (screen capture)".to_string(),
+            name: "screen capture".to_string(),
             category: Category::ComputerControl,
             status: CheckStatus::Warning,
             version: None,
