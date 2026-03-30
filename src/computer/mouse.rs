@@ -1,19 +1,89 @@
 //! Mouse control for desktop automation.
 //!
 //! Provides programmatic mouse movement, clicking, scrolling, and dragging.
-//! On Linux, uses xdotool for actual input. On other platforms, stubs with logging.
+//! On Linux, uses xdotool for actual input. When running under WSL2 without
+//! xdotool, falls back to PowerShell with Win32 `mouse_event` and
+//! `System.Windows.Forms.Cursor` via `powershell.exe`.
+//! On other platforms, stubs with logging.
 
 #[cfg(all(target_os = "linux", not(test)))]
 use anyhow::Context;
 use anyhow::{bail, Result};
-#[cfg(target_os = "linux")]
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 #[cfg(not(target_os = "macos"))]
 use tracing::debug;
 #[cfg(target_os = "macos")]
 use tracing::{debug, warn};
 
 use super::{ActionRateLimiter, MovementProfile};
+
+/// Backend used for mouse control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MouseBackend {
+    Xdotool,
+    WindowsWsl,
+}
+
+impl MouseBackend {
+    pub(crate) fn doctor_name(self) -> &'static str {
+        match self {
+            Self::Xdotool => "xdotool",
+            Self::WindowsWsl => "windows_wsl",
+        }
+    }
+
+    pub(crate) fn doctor_message(self) -> &'static str {
+        match self {
+            Self::Xdotool => "Mouse control available via xdotool",
+            Self::WindowsWsl => "Mouse control available via Windows fallback (WSL)",
+        }
+    }
+}
+
+/// Detect the mouse backend once and cache it.
+fn detect_backend() -> Option<MouseBackend> {
+    static BACKEND: OnceLock<Option<MouseBackend>> = OnceLock::new();
+    *BACKEND.get_or_init(|| {
+        if xdotool_available() {
+            Some(MouseBackend::Xdotool)
+        } else if can_use_wsl_powershell() {
+            Some(MouseBackend::WindowsWsl)
+        } else {
+            None
+        }
+    })
+}
+
+fn xdotool_available() -> bool {
+    std::process::Command::new("which")
+        .arg("xdotool")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn can_use_wsl_powershell() -> bool {
+    is_wsl_environment()
+        && std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", "Write-Output ok"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+}
+
+fn is_wsl_environment() -> bool {
+    std::env::var_os("WSL_INTEROP").is_some()
+        || std::env::var_os("WSL_DISTRO_NAME").is_some()
+        || std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .map(|r| r.to_ascii_lowercase().contains("microsoft"))
+            .unwrap_or(false)
+}
+
+/// Return the available mouse backend (public for doctor checks).
+pub(crate) fn available_backend() -> Option<MouseBackend> {
+    detect_backend()
+}
 
 /// Mouse button types.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -117,6 +187,160 @@ fn build_drag_args(from: Point, to: Point, button: u8) -> Vec<String> {
     ]
 }
 
+// ---------------------------------------------------------------------------
+// PowerShell mouse helpers (WSL fallback)
+// ---------------------------------------------------------------------------
+
+/// PowerShell script for mouse_event via Win32 P/Invoke.
+/// We `Add-Type` once with the necessary signatures.
+const POWERSHELL_MOUSE_PREAMBLE: &str = r#"
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class WinMouse {
+    [DllImport("user32.dll")]
+    public static extern void mouse_event(uint dwFlags, int dx, int dy, int dwData, IntPtr dwExtraInfo);
+    public const uint MOUSEEVENTF_LEFTDOWN   = 0x0002;
+    public const uint MOUSEEVENTF_LEFTUP     = 0x0004;
+    public const uint MOUSEEVENTF_RIGHTDOWN  = 0x0008;
+    public const uint MOUSEEVENTF_RIGHTUP    = 0x0010;
+    public const uint MOUSEEVENTF_MIDDLEDOWN = 0x0020;
+    public const uint MOUSEEVENTF_MIDDLEUP   = 0x0040;
+    public const uint MOUSEEVENTF_WHEEL      = 0x0800;
+}
+"@
+"#;
+
+/// Build a PowerShell script that moves the cursor to (x, y).
+fn ps_move_to(x: i32, y: i32) -> String {
+    format!(
+        "{}\n[System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point({}, {})",
+        POWERSHELL_MOUSE_PREAMBLE, x, y
+    )
+}
+
+/// Build a PowerShell script for a mouse button click at the current position.
+fn ps_click(button: &MouseButton) -> String {
+    let (down, up) = match button {
+        MouseButton::Left => (
+            "WinMouse::MOUSEEVENTF_LEFTDOWN",
+            "WinMouse::MOUSEEVENTF_LEFTUP",
+        ),
+        MouseButton::Right => (
+            "WinMouse::MOUSEEVENTF_RIGHTDOWN",
+            "WinMouse::MOUSEEVENTF_RIGHTUP",
+        ),
+        MouseButton::Middle => (
+            "WinMouse::MOUSEEVENTF_MIDDLEDOWN",
+            "WinMouse::MOUSEEVENTF_MIDDLEUP",
+        ),
+    };
+    format!(
+        "{preamble}\n\
+         [WinMouse]::mouse_event([WinMouse]::{down}, 0, 0, 0, [IntPtr]::Zero)\n\
+         [WinMouse]::mouse_event([WinMouse]::{up}, 0, 0, 0, [IntPtr]::Zero)",
+        preamble = POWERSHELL_MOUSE_PREAMBLE,
+        down = down.strip_prefix("WinMouse::").unwrap_or(down),
+        up = up.strip_prefix("WinMouse::").unwrap_or(up),
+    )
+}
+
+/// Build a PowerShell script for a double-click (left button).
+fn ps_double_click() -> String {
+    format!(
+        "{}\n\
+         [WinMouse]::mouse_event([WinMouse]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [IntPtr]::Zero)\n\
+         [WinMouse]::mouse_event([WinMouse]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [IntPtr]::Zero)\n\
+         Start-Sleep -Milliseconds 50\n\
+         [WinMouse]::mouse_event([WinMouse]::MOUSEEVENTF_LEFTDOWN, 0, 0, 0, [IntPtr]::Zero)\n\
+         [WinMouse]::mouse_event([WinMouse]::MOUSEEVENTF_LEFTUP, 0, 0, 0, [IntPtr]::Zero)",
+        POWERSHELL_MOUSE_PREAMBLE
+    )
+}
+
+/// Build a PowerShell script for mouse wheel scrolling.
+/// Each WHEEL_DELTA unit is 120.  Positive = scroll up, negative = scroll down.
+fn ps_scroll(delta_x: i32, delta_y: i32) -> String {
+    let mut lines = vec![POWERSHELL_MOUSE_PREAMBLE.to_string()];
+
+    // Vertical scroll: positive delta_y = scroll down in our API, but Windows
+    // WHEEL uses positive = up, so we negate.
+    if delta_y != 0 {
+        let wheel_amount = -delta_y * 120;
+        lines.push(format!(
+            "[WinMouse]::mouse_event([WinMouse]::MOUSEEVENTF_WHEEL, 0, 0, {}, [IntPtr]::Zero)",
+            wheel_amount
+        ));
+    }
+
+    // Horizontal scroll (MOUSEEVENTF_HWHEEL = 0x01000) is available but not
+    // commonly supported; skip for now and log a debug note.
+    if delta_x != 0 {
+        lines.push(format!(
+            "# horizontal scroll delta_x={} not supported via mouse_event WHEEL",
+            delta_x
+        ));
+    }
+
+    lines.join("\n")
+}
+
+/// Build a PowerShell script for a drag operation.
+fn ps_drag(from: Point, to: Point, button: &MouseButton) -> String {
+    let (down, up) = match button {
+        MouseButton::Left => ("MOUSEEVENTF_LEFTDOWN", "MOUSEEVENTF_LEFTUP"),
+        MouseButton::Right => ("MOUSEEVENTF_RIGHTDOWN", "MOUSEEVENTF_RIGHTUP"),
+        MouseButton::Middle => ("MOUSEEVENTF_MIDDLEDOWN", "MOUSEEVENTF_MIDDLEUP"),
+    };
+    format!(
+        "{preamble}\n\
+         [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point({fx}, {fy})\n\
+         Start-Sleep -Milliseconds 50\n\
+         [WinMouse]::mouse_event([WinMouse]::{down}, 0, 0, 0, [IntPtr]::Zero)\n\
+         Start-Sleep -Milliseconds 50\n\
+         [System.Windows.Forms.Cursor]::Position = New-Object System.Drawing.Point({tx}, {ty})\n\
+         Start-Sleep -Milliseconds 50\n\
+         [WinMouse]::mouse_event([WinMouse]::{up}, 0, 0, 0, [IntPtr]::Zero)",
+        preamble = POWERSHELL_MOUSE_PREAMBLE,
+        fx = from.x,
+        fy = from.y,
+        tx = to.x,
+        ty = to.y,
+        down = down,
+        up = up,
+    )
+}
+
+/// Run a PowerShell script via powershell.exe.
+#[cfg(all(target_os = "linux", not(test)))]
+async fn run_powershell_script(script: &str) -> Result<()> {
+    use tokio::process::Command;
+
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-Command", script])
+        .output()
+        .await
+        .context("Failed to execute powershell.exe for mouse control")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "PowerShell mouse command failed (exit {}): {}",
+            output.status,
+            stderr.trim()
+        );
+    }
+
+    Ok(())
+}
+
+/// No-op PowerShell stub for tests.
+#[cfg(all(target_os = "linux", test))]
+async fn run_powershell_script(_script: &str) -> Result<()> {
+    Ok(())
+}
+
 /// Execute an xdotool command. Returns error if xdotool is not available.
 #[cfg(all(target_os = "linux", not(test)))]
 async fn run_xdotool(args: &[String]) -> Result<()> {
@@ -166,8 +390,16 @@ impl MouseController {
 
         #[cfg(target_os = "linux")]
         {
-            let args = build_mousemove_args(x, y);
-            run_xdotool(&args).await?;
+            match detect_backend() {
+                Some(MouseBackend::Xdotool) | None => {
+                    let args = build_mousemove_args(x, y);
+                    run_xdotool(&args).await?;
+                }
+                Some(MouseBackend::WindowsWsl) => {
+                    let script = ps_move_to(x, y);
+                    run_powershell_script(&script).await?;
+                }
+            }
         }
 
         #[cfg(target_os = "macos")]
@@ -191,8 +423,16 @@ impl MouseController {
 
         #[cfg(target_os = "linux")]
         {
-            let args = build_click_args(button.xdotool_button());
-            run_xdotool(&args).await?;
+            match detect_backend() {
+                Some(MouseBackend::Xdotool) | None => {
+                    let args = build_click_args(button.xdotool_button());
+                    run_xdotool(&args).await?;
+                }
+                Some(MouseBackend::WindowsWsl) => {
+                    let script = ps_click(&button);
+                    run_powershell_script(&script).await?;
+                }
+            }
         }
 
         Ok(())
@@ -207,8 +447,16 @@ impl MouseController {
 
         #[cfg(target_os = "linux")]
         {
-            let args = build_double_click_args();
-            run_xdotool(&args).await?;
+            match detect_backend() {
+                Some(MouseBackend::Xdotool) | None => {
+                    let args = build_double_click_args();
+                    run_xdotool(&args).await?;
+                }
+                Some(MouseBackend::WindowsWsl) => {
+                    let script = ps_double_click();
+                    run_powershell_script(&script).await?;
+                }
+            }
         }
 
         Ok(())
@@ -229,9 +477,17 @@ impl MouseController {
 
         #[cfg(target_os = "linux")]
         {
-            let commands = build_scroll_args(delta_x, delta_y);
-            for args in &commands {
-                run_xdotool(args).await?;
+            match detect_backend() {
+                Some(MouseBackend::Xdotool) | None => {
+                    let commands = build_scroll_args(delta_x, delta_y);
+                    for args in &commands {
+                        run_xdotool(args).await?;
+                    }
+                }
+                Some(MouseBackend::WindowsWsl) => {
+                    let script = ps_scroll(delta_x, delta_y);
+                    run_powershell_script(&script).await?;
+                }
             }
         }
 
@@ -252,8 +508,16 @@ impl MouseController {
 
         #[cfg(target_os = "linux")]
         {
-            let args = build_drag_args(from, to, button.xdotool_button());
-            run_xdotool(&args).await?;
+            match detect_backend() {
+                Some(MouseBackend::Xdotool) | None => {
+                    let args = build_drag_args(from, to, button.xdotool_button());
+                    run_xdotool(&args).await?;
+                }
+                Some(MouseBackend::WindowsWsl) => {
+                    let script = ps_drag(from, to, &button);
+                    run_powershell_script(&script).await?;
+                }
+            }
         }
 
         Ok(())
@@ -530,5 +794,82 @@ mod tests {
         let args = build_drag_args(from, to, 3);
         assert_eq!(args[4], "3"); // mousedown button
         assert_eq!(args[9], "3"); // mouseup button
+    }
+
+    // ---- PowerShell script construction tests ----
+
+    #[test]
+    fn test_ps_move_to_contains_coordinates() {
+        let script = ps_move_to(100, 200);
+        assert!(script.contains("Point(100, 200)"));
+        assert!(script.contains("Cursor"));
+    }
+
+    #[test]
+    fn test_ps_click_left() {
+        let script = ps_click(&MouseButton::Left);
+        assert!(script.contains("MOUSEEVENTF_LEFTDOWN"));
+        assert!(script.contains("MOUSEEVENTF_LEFTUP"));
+    }
+
+    #[test]
+    fn test_ps_click_right() {
+        let script = ps_click(&MouseButton::Right);
+        assert!(script.contains("MOUSEEVENTF_RIGHTDOWN"));
+        assert!(script.contains("MOUSEEVENTF_RIGHTUP"));
+    }
+
+    #[test]
+    fn test_ps_click_middle() {
+        let script = ps_click(&MouseButton::Middle);
+        assert!(script.contains("MOUSEEVENTF_MIDDLEDOWN"));
+        assert!(script.contains("MOUSEEVENTF_MIDDLEUP"));
+    }
+
+    #[test]
+    fn test_ps_double_click_has_two_pairs() {
+        let script = ps_double_click();
+        // The preamble defines the constants (1 occurrence each), plus 2 calls each
+        assert_eq!(script.matches("MOUSEEVENTF_LEFTDOWN").count(), 3);
+        assert_eq!(script.matches("MOUSEEVENTF_LEFTUP").count(), 3);
+    }
+
+    #[test]
+    fn test_ps_scroll_down() {
+        let script = ps_scroll(0, 3);
+        // delta_y=3 (scroll down) -> wheel_amount = -3*120 = -360
+        assert!(script.contains("-360"));
+        assert!(script.contains("MOUSEEVENTF_WHEEL"));
+    }
+
+    #[test]
+    fn test_ps_scroll_up() {
+        let script = ps_scroll(0, -2);
+        // delta_y=-2 (scroll up) -> wheel_amount = 2*120 = 240
+        assert!(script.contains("240"));
+    }
+
+    #[test]
+    fn test_ps_scroll_zero() {
+        let script = ps_scroll(0, 0);
+        // The preamble defines MOUSEEVENTF_WHEEL as a constant, but there
+        // should be no *call* to mouse_event with WHEEL when both deltas are 0.
+        // Count: preamble has 1 occurrence in the const definition, no extra calls.
+        assert_eq!(
+            script.matches("MOUSEEVENTF_WHEEL").count(),
+            1,
+            "Only the preamble constant definition should mention WHEEL"
+        );
+    }
+
+    #[test]
+    fn test_ps_drag_contains_coordinates() {
+        let from = Point::new(10, 20);
+        let to = Point::new(300, 400);
+        let script = ps_drag(from, to, &MouseButton::Left);
+        assert!(script.contains("Point(10, 20)"));
+        assert!(script.contains("Point(300, 400)"));
+        assert!(script.contains("MOUSEEVENTF_LEFTDOWN"));
+        assert!(script.contains("MOUSEEVENTF_LEFTUP"));
     }
 }

@@ -1,15 +1,85 @@
 //! Keyboard control for desktop automation.
 //!
 //! Provides programmatic typing, key presses, and key combinations.
-//! On Linux, uses xdotool for actual input. On other platforms, stubs with logging.
+//! On Linux, uses xdotool for actual input. When running under WSL2 without
+//! xdotool, falls back to PowerShell `SendKeys` via `powershell.exe`.
+//! On other platforms, stubs with logging.
 
 #[cfg(all(target_os = "linux", not(test)))]
 use anyhow::Context;
 use anyhow::{bail, Result};
 
-use tracing::debug;
+use std::sync::OnceLock;
+use tracing::{debug, warn};
 
 use super::{is_blocked_combo, ActionRateLimiter, TypingProfile};
+
+/// Backend used for keyboard input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyboardBackend {
+    Xdotool,
+    WindowsWsl,
+}
+
+impl KeyboardBackend {
+    pub(crate) fn doctor_name(self) -> &'static str {
+        match self {
+            Self::Xdotool => "xdotool",
+            Self::WindowsWsl => "windows_wsl",
+        }
+    }
+
+    pub(crate) fn doctor_message(self) -> &'static str {
+        match self {
+            Self::Xdotool => "Keyboard control available via xdotool",
+            Self::WindowsWsl => "Keyboard control available via Windows fallback (WSL)",
+        }
+    }
+}
+
+/// Detect the keyboard backend once and cache it.
+fn detect_backend() -> Option<KeyboardBackend> {
+    static BACKEND: OnceLock<Option<KeyboardBackend>> = OnceLock::new();
+    *BACKEND.get_or_init(|| {
+        if xdotool_available() {
+            Some(KeyboardBackend::Xdotool)
+        } else if can_use_wsl_powershell() {
+            Some(KeyboardBackend::WindowsWsl)
+        } else {
+            None
+        }
+    })
+}
+
+fn xdotool_available() -> bool {
+    std::process::Command::new("which")
+        .arg("xdotool")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn can_use_wsl_powershell() -> bool {
+    is_wsl_environment()
+        && std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", "Write-Output ok"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+}
+
+fn is_wsl_environment() -> bool {
+    std::env::var_os("WSL_INTEROP").is_some()
+        || std::env::var_os("WSL_DISTRO_NAME").is_some()
+        || std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .map(|r| r.to_ascii_lowercase().contains("microsoft"))
+            .unwrap_or(false)
+}
+
+/// Return the available keyboard backend (public for doctor checks).
+pub(crate) fn available_backend() -> Option<KeyboardBackend> {
+    detect_backend()
+}
 
 /// Keyboard controller with rate limiting and typing profiles.
 pub struct KeyboardController {
@@ -90,6 +160,130 @@ fn build_xdotool_keyup_cmd(key: &str) -> (&'static str, Vec<String>) {
     ("xdotool", vec!["keyup".to_string(), key.to_string()])
 }
 
+/// Map a key name to the PowerShell `SendKeys` notation.
+fn map_key_to_sendkeys(key: &str) -> String {
+    match key.to_lowercase().as_str() {
+        "enter" | "return" => "{ENTER}".to_string(),
+        "tab" => "{TAB}".to_string(),
+        "escape" | "esc" => "{ESC}".to_string(),
+        "backspace" => "{BACKSPACE}".to_string(),
+        "delete" | "del" => "{DELETE}".to_string(),
+        "space" => " ".to_string(),
+        "up" => "{UP}".to_string(),
+        "down" => "{DOWN}".to_string(),
+        "left" => "{LEFT}".to_string(),
+        "right" => "{RIGHT}".to_string(),
+        "home" => "{HOME}".to_string(),
+        "end" => "{END}".to_string(),
+        "pageup" | "page_up" | "prior" => "{PGUP}".to_string(),
+        "pagedown" | "page_down" | "next" => "{PGDN}".to_string(),
+        "insert" => "{INSERT}".to_string(),
+        "f1" => "{F1}".to_string(),
+        "f2" => "{F2}".to_string(),
+        "f3" => "{F3}".to_string(),
+        "f4" => "{F4}".to_string(),
+        "f5" => "{F5}".to_string(),
+        "f6" => "{F6}".to_string(),
+        "f7" => "{F7}".to_string(),
+        "f8" => "{F8}".to_string(),
+        "f9" => "{F9}".to_string(),
+        "f10" => "{F10}".to_string(),
+        "f11" => "{F11}".to_string(),
+        "f12" => "{F12}".to_string(),
+        // Single printable characters go through as-is but must be escaped
+        // if they are special SendKeys characters.
+        other => escape_sendkeys_char(other),
+    }
+}
+
+/// Escape characters that have special meaning in SendKeys.
+fn escape_sendkeys_char(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for ch in s.chars() {
+        match ch {
+            '+' | '^' | '%' | '~' | '(' | ')' | '{' | '}' | '[' | ']' => {
+                out.push('{');
+                out.push(ch);
+                out.push('}');
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Escape text for SendKeys (batch of printable characters).
+fn escape_sendkeys_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 16);
+    for ch in text.chars() {
+        match ch {
+            '+' | '^' | '%' | '~' | '(' | ')' | '{' | '}' | '[' | ']' => {
+                out.push('{');
+                out.push(ch);
+                out.push('}');
+            }
+            '\n' => out.push_str("{ENTER}"),
+            '\t' => out.push_str("{TAB}"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Build a PowerShell SendKeys combo string from "ctrl+shift+t" style input.
+/// SendKeys modifiers: ^ = Ctrl, % = Alt, + = Shift.
+fn build_sendkeys_combo(combo: &str) -> String {
+    let mut prefix = String::new();
+    let mut key_part = String::new();
+
+    for part in combo.split('+') {
+        let trimmed = part.trim();
+        match trimmed.to_lowercase().as_str() {
+            "ctrl" | "control" => prefix.push('^'),
+            "alt" => prefix.push('%'),
+            "shift" => prefix.push('+'),
+            "super" | "meta" | "cmd" | "command" => prefix.push('^'), // best-effort: map super to ctrl on Windows
+            _ => key_part = map_key_to_sendkeys(trimmed),
+        }
+    }
+
+    format!("{}{}", prefix, key_part)
+}
+
+/// Run a PowerShell SendKeys command via powershell.exe.
+#[cfg(all(target_os = "linux", not(test)))]
+async fn run_powershell_sendkeys(sendkeys_sequence: &str) -> Result<()> {
+    use tokio::process::Command;
+
+    let script = format!(
+        "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('{}')",
+        sendkeys_sequence.replace('\'', "''")
+    );
+
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-Command", &script])
+        .output()
+        .await
+        .context("Failed to execute powershell.exe for keyboard input")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "PowerShell SendKeys failed (exit {}): {}",
+            output.status,
+            stderr.trim()
+        );
+    }
+
+    Ok(())
+}
+
+/// No-op PowerShell stub for tests.
+#[cfg(all(target_os = "linux", test))]
+async fn run_powershell_sendkeys(_sendkeys_sequence: &str) -> Result<()> {
+    Ok(())
+}
+
 /// Execute an xdotool command. Returns error if xdotool is not available.
 #[cfg(all(target_os = "linux", not(test)))]
 async fn run_xdotool(args: &[String]) -> Result<()> {
@@ -150,19 +344,37 @@ impl KeyboardController {
                 return Ok(());
             }
 
+            let backend = detect_backend();
+
             if self.typing_profile.base_delay_ms > 0 {
                 // Human-like typing: type char by char with delays
                 for ch in text.chars() {
                     let delay = self.typing_profile.base_delay_ms;
                     let char_str = ch.to_string();
-                    let (_, args) = build_xdotool_type_cmd(&char_str);
-                    run_xdotool(&args).await?;
+                    match backend {
+                        Some(KeyboardBackend::Xdotool) | None => {
+                            let (_, args) = build_xdotool_type_cmd(&char_str);
+                            run_xdotool(&args).await?;
+                        }
+                        Some(KeyboardBackend::WindowsWsl) => {
+                            let escaped = escape_sendkeys_text(&char_str);
+                            run_powershell_sendkeys(&escaped).await?;
+                        }
+                    }
                     tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                 }
             } else {
                 // Instant typing
-                let (_, args) = build_xdotool_type_cmd(text);
-                run_xdotool(&args).await?;
+                match backend {
+                    Some(KeyboardBackend::Xdotool) | None => {
+                        let (_, args) = build_xdotool_type_cmd(text);
+                        run_xdotool(&args).await?;
+                    }
+                    Some(KeyboardBackend::WindowsWsl) => {
+                        let escaped = escape_sendkeys_text(text);
+                        run_powershell_sendkeys(&escaped).await?;
+                    }
+                }
             }
         }
 
@@ -196,8 +408,16 @@ impl KeyboardController {
 
         #[cfg(target_os = "linux")]
         {
-            let (_, args) = build_xdotool_key_cmd(mapped);
-            run_xdotool(&args).await?;
+            match detect_backend() {
+                Some(KeyboardBackend::Xdotool) | None => {
+                    let (_, args) = build_xdotool_key_cmd(mapped);
+                    run_xdotool(&args).await?;
+                }
+                Some(KeyboardBackend::WindowsWsl) => {
+                    let sendkeys = map_key_to_sendkeys(key);
+                    run_powershell_sendkeys(&sendkeys).await?;
+                }
+            }
         }
 
         Ok(())
@@ -222,8 +442,17 @@ impl KeyboardController {
 
         #[cfg(target_os = "linux")]
         {
-            let (_, args) = build_xdotool_key_cmd(&xdotool_combo);
-            run_xdotool(&args).await?;
+            match detect_backend() {
+                Some(KeyboardBackend::Xdotool) | None => {
+                    let (_, args) = build_xdotool_key_cmd(&xdotool_combo);
+                    run_xdotool(&args).await?;
+                }
+                Some(KeyboardBackend::WindowsWsl) => {
+                    let sendkeys = build_sendkeys_combo(combo);
+                    debug!("Key combo via SendKeys: {}", sendkeys);
+                    run_powershell_sendkeys(&sendkeys).await?;
+                }
+            }
         }
 
         Ok(())
@@ -240,8 +469,23 @@ impl KeyboardController {
 
         #[cfg(target_os = "linux")]
         {
-            let (_, args) = build_xdotool_keydown_cmd(mapped);
-            run_xdotool(&args).await?;
+            match detect_backend() {
+                Some(KeyboardBackend::Xdotool) | None => {
+                    let (_, args) = build_xdotool_keydown_cmd(mapped);
+                    run_xdotool(&args).await?;
+                }
+                Some(KeyboardBackend::WindowsWsl) => {
+                    // SendKeys does not support hold-down semantics; log a warning
+                    // and send a single key press as best-effort.
+                    warn!(
+                        "key_down('{}') via WSL PowerShell has no hold semantics; \
+                         sending a single key press instead",
+                        key
+                    );
+                    let sendkeys = map_key_to_sendkeys(key);
+                    run_powershell_sendkeys(&sendkeys).await?;
+                }
+            }
         }
 
         Ok(())
@@ -258,8 +502,19 @@ impl KeyboardController {
 
         #[cfg(target_os = "linux")]
         {
-            let (_, args) = build_xdotool_keyup_cmd(mapped);
-            run_xdotool(&args).await?;
+            match detect_backend() {
+                Some(KeyboardBackend::Xdotool) | None => {
+                    let (_, args) = build_xdotool_keyup_cmd(mapped);
+                    run_xdotool(&args).await?;
+                }
+                Some(KeyboardBackend::WindowsWsl) => {
+                    // SendKeys does not support key-up; this is a no-op on WSL.
+                    warn!(
+                        "key_up('{}') via WSL PowerShell is a no-op (SendKeys has no hold semantics)",
+                        key
+                    );
+                }
+            }
         }
 
         Ok(())
@@ -483,5 +738,84 @@ mod tests {
     fn test_build_xdotool_combo_with_spaces() {
         assert_eq!(build_xdotool_combo("ctrl + c"), "ctrl+c");
         assert_eq!(build_xdotool_combo("ctrl + shift + t"), "ctrl+shift+t");
+    }
+
+    // ---- SendKeys / PowerShell fallback tests ----
+
+    #[test]
+    fn test_map_key_to_sendkeys_common() {
+        assert_eq!(map_key_to_sendkeys("Enter"), "{ENTER}");
+        assert_eq!(map_key_to_sendkeys("return"), "{ENTER}");
+        assert_eq!(map_key_to_sendkeys("Tab"), "{TAB}");
+        assert_eq!(map_key_to_sendkeys("Escape"), "{ESC}");
+        assert_eq!(map_key_to_sendkeys("Backspace"), "{BACKSPACE}");
+        assert_eq!(map_key_to_sendkeys("Delete"), "{DELETE}");
+        assert_eq!(map_key_to_sendkeys("space"), " ");
+    }
+
+    #[test]
+    fn test_map_key_to_sendkeys_arrows() {
+        assert_eq!(map_key_to_sendkeys("up"), "{UP}");
+        assert_eq!(map_key_to_sendkeys("down"), "{DOWN}");
+        assert_eq!(map_key_to_sendkeys("left"), "{LEFT}");
+        assert_eq!(map_key_to_sendkeys("right"), "{RIGHT}");
+    }
+
+    #[test]
+    fn test_map_key_to_sendkeys_navigation() {
+        assert_eq!(map_key_to_sendkeys("home"), "{HOME}");
+        assert_eq!(map_key_to_sendkeys("end"), "{END}");
+        assert_eq!(map_key_to_sendkeys("pageup"), "{PGUP}");
+        assert_eq!(map_key_to_sendkeys("pagedown"), "{PGDN}");
+        assert_eq!(map_key_to_sendkeys("insert"), "{INSERT}");
+    }
+
+    #[test]
+    fn test_map_key_to_sendkeys_function_keys() {
+        for i in 1..=12 {
+            let key = format!("f{}", i);
+            let expected = format!("{{F{}}}", i);
+            assert_eq!(map_key_to_sendkeys(&key), expected);
+        }
+    }
+
+    #[test]
+    fn test_map_key_to_sendkeys_passthrough() {
+        assert_eq!(map_key_to_sendkeys("a"), "a");
+        assert_eq!(map_key_to_sendkeys("z"), "z");
+    }
+
+    #[test]
+    fn test_escape_sendkeys_char_special() {
+        assert_eq!(escape_sendkeys_char("+"), "{+}");
+        assert_eq!(escape_sendkeys_char("^"), "{^}");
+        assert_eq!(escape_sendkeys_char("%"), "{%}");
+        assert_eq!(escape_sendkeys_char("~"), "{~}");
+        assert_eq!(escape_sendkeys_char("("), "{(}");
+        assert_eq!(escape_sendkeys_char(")"), "{)}");
+    }
+
+    #[test]
+    fn test_escape_sendkeys_text() {
+        assert_eq!(escape_sendkeys_text("hello"), "hello");
+        assert_eq!(escape_sendkeys_text("a+b"), "a{+}b");
+        assert_eq!(escape_sendkeys_text("100%"), "100{%}");
+        assert_eq!(escape_sendkeys_text("line1\nline2"), "line1{ENTER}line2");
+        assert_eq!(escape_sendkeys_text("col1\tcol2"), "col1{TAB}col2");
+    }
+
+    #[test]
+    fn test_build_sendkeys_combo() {
+        assert_eq!(build_sendkeys_combo("ctrl+c"), "^c");
+        assert_eq!(build_sendkeys_combo("ctrl+v"), "^v");
+        assert_eq!(build_sendkeys_combo("alt+tab"), "%{TAB}");
+        assert_eq!(build_sendkeys_combo("ctrl+shift+t"), "^+t");
+        assert_eq!(build_sendkeys_combo("shift+Enter"), "+{ENTER}");
+    }
+
+    #[test]
+    fn test_build_sendkeys_combo_with_spaces() {
+        assert_eq!(build_sendkeys_combo("ctrl + c"), "^c");
+        assert_eq!(build_sendkeys_combo("ctrl + shift + t"), "^+t");
     }
 }
