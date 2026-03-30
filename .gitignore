@@ -72,3 +72,8 @@ selfware-local.toml
 
 # Coverage XML
 cobertura.xml
+codegraph.json
+
+vscode-selfware/node_modules/
+vscode-selfware/out/
+vscode-selfware/package-lock.json

@@ -1,0 +1,15 @@
+<idea-plugin>
+  <id>com.selfware.codemap</id>
+  <name>Selfware Code Map</name>
+  <version>0.1.0</version>
+  <vendor>selfware</vendor>
+  <description>Interactive code graph visualization</description>
+  <depends>com.intellij.modules.platform</depends>
+  <extensions defaultExtensionNs="com.intellij">
+    <toolWindow id="Selfware" factoryClass="com.selfware.CodeMapToolWindowFactory"/>
+  </extensions>
+  <actions>
+    <action id="selfware.openCodeMap" class="com.selfware.OpenCodeMapAction" text="Open Code Map"/>
+    <action id="selfware.contextAdd" class="com.selfware.ContextAddAction" text="Add to Context"/>
+  </actions>
+</idea-plugin>

@@ -247,6 +247,10 @@ required-features = ["bench-harness"]
 
 # VLM Benchmark binaries
 [[bin]]
+name = "codegraph"
+path = "src/bin/codegraph.rs"
+
+[[bin]]
 name = "vlm_gen_fixtures"
 path = "src/bin/vlm_gen_fixtures.rs"
 required-features = ["vlm-bench"]

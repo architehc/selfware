@@ -1,0 +1,41 @@
+{
+  "name": "selfware-codemap",
+  "displayName": "Selfware Code Map",
+  "description": "Interactive code graph visualization for selfware",
+  "version": "0.1.0",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Visualization"],
+  "activationEvents": ["onCommand:selfware.openCodeMap"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "selfware.openCodeMap", "title": "Selfware: Open Code Map" },
+      { "command": "selfware.contextAdd", "title": "Selfware: Add to Context" },
+      { "command": "selfware.contextRemove", "title": "Selfware: Remove from Context" },
+      { "command": "selfware.contextClear", "title": "Selfware: Clear Context" },
+      { "command": "selfware.inspect", "title": "Selfware: Inspect Component" },
+      { "command": "selfware.buildNew", "title": "Selfware: Build New Component" }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "selfware", "title": "Selfware", "icon": "media/icon.svg" }
+      ]
+    },
+    "views": {
+      "selfware": [
+        { "type": "webview", "id": "selfware.codeMap", "name": "Code Map" },
+        { "id": "selfware.context", "name": "Context Window" },
+        { "id": "selfware.actions", "name": "Actions" }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  }
+}

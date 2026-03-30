@@ -8,6 +8,7 @@ pub mod analyzer;
 pub mod browser;
 pub mod cargo;
 pub mod code_metrics;
+pub mod codemap;
 pub mod computer;
 pub mod container;
 pub mod context;
@@ -337,6 +338,11 @@ impl ToolRegistry {
 
         // Code metrics tool
         registry.register(code_metrics::CodeMetricsTool::new());
+
+        // Code map / context budget tools
+        registry.register(codemap::CodeMapTool);
+        registry.register(codemap::ContextBudgetTool);
+        registry.register(codemap::ContextActionTool);
 
         registry
     }
