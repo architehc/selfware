@@ -466,7 +466,10 @@ mod tests {
             ViolationAction::parse_str("warn"),
             Some(ViolationAction::Warn)
         );
-        assert_eq!(ViolationAction::parse_str("log"), Some(ViolationAction::Log));
+        assert_eq!(
+            ViolationAction::parse_str("log"),
+            Some(ViolationAction::Log)
+        );
         assert_eq!(
             ViolationAction::parse_str("alert"),
             Some(ViolationAction::Alert)
@@ -505,7 +508,10 @@ mod tests {
 
     #[test]
     fn test_guardrail_summary() {
-        let mut summary = GuardrailSummary { blocked: 1, ..Default::default() };
+        let mut summary = GuardrailSummary {
+            blocked: 1,
+            ..Default::default()
+        };
         summary.outcomes.push(GuardrailOutcome {
             guardrail_name: "test".to_string(),
             guardrail_type: GuardrailType::PreAgent,

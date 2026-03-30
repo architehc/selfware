@@ -34,8 +34,7 @@ fn endpoint() -> String {
 }
 
 fn model() -> String {
-    std::env::var("SELFWARE_MODEL")
-        .unwrap_or_else(|_| "txn545/Qwen3.5-122B-A10B-NVFP4".to_string())
+    std::env::var("SELFWARE_MODEL").unwrap_or_else(|_| "txn545/Qwen3.5-122B-A10B-NVFP4".to_string())
 }
 
 const MAX_ITERATIONS: usize = 5;
@@ -173,10 +172,7 @@ Return ONLY valid JSON (no markdown fences, no commentary) with this schema:
 // Local HTTP server (serves a single HTML file)
 // ---------------------------------------------------------------------------
 
-fn start_server(
-    html_path: PathBuf,
-    shutdown: Arc<AtomicBool>,
-) -> thread::JoinHandle<()> {
+fn start_server(html_path: PathBuf, shutdown: Arc<AtomicBool>) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let listener = TcpListener::bind(format!("127.0.0.1:{}", SERVER_PORT))
             .expect("Failed to bind server port");
@@ -283,7 +279,11 @@ fn parse_vlm_response(raw: &str) -> Result<Value, Box<dyn std::error::Error>> {
             let v: Value = serde_json::from_str(candidate)?;
             Ok(v)
         }
-        _ => Err(format!("No JSON object found in VLM response: {}", &raw[..raw.len().min(200)]).into()),
+        _ => Err(format!(
+            "No JSON object found in VLM response: {}",
+            &raw[..raw.len().min(200)]
+        )
+        .into()),
     }
 }
 
@@ -435,7 +435,8 @@ fn main() {
         let mut img_bytes = Vec::new();
         {
             let mut f = fs::File::open(&screenshot_path()).expect("Cannot open screenshot");
-            f.read_to_end(&mut img_bytes).expect("Cannot read screenshot");
+            f.read_to_end(&mut img_bytes)
+                .expect("Cannot read screenshot");
         }
         let img_b64 = base64::engine::general_purpose::STANDARD.encode(&img_bytes);
         println!(
@@ -472,10 +473,7 @@ fn main() {
         let mut scores: HashMap<String, u64> = HashMap::new();
         if let Some(s) = vlm_json.get("scores").and_then(|v| v.as_object()) {
             for dim in DIMENSIONS {
-                let val = s
-                    .get(*dim)
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
+                let val = s.get(*dim).and_then(|v| v.as_u64()).unwrap_or(0);
                 scores.insert(dim.to_string(), val);
             }
         }
@@ -499,7 +497,10 @@ fn main() {
             })
             .unwrap_or_default();
 
-        println!("[iter {}] Overall: {}/10, done: {}", iteration, overall, done);
+        println!(
+            "[iter {}] Overall: {}/10, done: {}",
+            iteration, overall, done
+        );
         for dim in DIMENSIONS {
             let s = scores.get(*dim).copied().unwrap_or(0);
             println!("  {:30} {}/10", dim, s);
@@ -550,7 +551,10 @@ fn main() {
                 thread::sleep(Duration::from_millis(300));
             }
             Err(e) => {
-                eprintln!("[iter {}] Failed to get corrections from LLM: {}", iteration, e);
+                eprintln!(
+                    "[iter {}] Failed to get corrections from LLM: {}",
+                    iteration, e
+                );
                 break;
             }
         }

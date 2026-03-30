@@ -24,10 +24,7 @@ fn main() {
 
     // Collect all .rs files
     let mut files: Vec<PathBuf> = Vec::new();
-    for entry in WalkDir::new(&src_dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(&src_dir).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path().to_path_buf();
         if path.extension().is_some_and(|ext| ext == "rs") {
             files.push(path);
@@ -388,13 +385,9 @@ fn main() {
 fn path_to_module_id(path: &Path) -> String {
     let path_str = path.to_string_lossy().replace('\\', "/");
     // Strip leading "src/"
-    let stripped = path_str
-        .strip_prefix("src/")
-        .unwrap_or(&path_str);
+    let stripped = path_str.strip_prefix("src/").unwrap_or(&path_str);
     // Strip trailing ".rs"
-    let stripped = stripped
-        .strip_suffix(".rs")
-        .unwrap_or(stripped);
+    let stripped = stripped.strip_suffix(".rs").unwrap_or(stripped);
     // Replace "/" with "::"
     stripped.replace('/', "::")
 }
@@ -502,9 +495,7 @@ fn detect_fusions(edges: &[Value]) -> Vec<Value> {
                 for j in (i + 1)..a_list.len() {
                     let b = a_list[i];
                     let c = a_list[j];
-                    if let (Some(b_targets), Some(c_targets)) =
-                        (mod_adj.get(b), mod_adj.get(c))
-                    {
+                    if let (Some(b_targets), Some(c_targets)) = (mod_adj.get(b), mod_adj.get(c)) {
                         let shared: Vec<&String> = b_targets
                             .intersection(c_targets)
                             .filter(|d| *d != a && *d != b && *d != c)

@@ -133,6 +133,44 @@ impl Agent {
             system_hints.push(self.context_map.render_tree());
         }
 
+        // RAG: inject relevant code chunks from scanned index
+        if let Some(ref rag_engine) = self.rag_engine {
+            // Extract query from the last user message
+            let query = self
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == "user")
+                .map(|m| m.content.text().to_string())
+                .unwrap_or_default();
+
+            if !query.is_empty() {
+                let engine = rag_engine.read().await;
+                match engine.retrieve(&query).await {
+                    Ok(ctx) if !ctx.context.is_empty() && ctx.token_count > 0 => {
+                        let rag_hint = format!(
+                            "## Relevant Code Context (RAG)\n\
+                             The following code chunks were retrieved from the indexed codebase \
+                             based on semantic similarity to the current query. Use them as \
+                             reference when answering.\n\n{}",
+                            ctx.context
+                        );
+                        debug!(
+                            "RAG injected {} tokens from {} sources ({}ms)",
+                            ctx.token_count,
+                            ctx.sources.len(),
+                            ctx.retrieval_time_ms
+                        );
+                        system_hints.push(rag_hint);
+                    }
+                    Ok(_) => {} // No relevant results
+                    Err(e) => {
+                        debug!("RAG retrieval error (non-fatal): {}", e);
+                    }
+                }
+            }
+        }
+
         if !system_hints.is_empty() {
             let merged_hints = system_hints.join("\n\n");
             // Merge into existing system message to maintain OpenAI message ordering

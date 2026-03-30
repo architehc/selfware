@@ -174,7 +174,6 @@ impl<'de> Deserialize<'de> for FieldType {
     }
 }
 
-
 impl FieldType {
     /// Get the type name as a string
     pub fn type_name(&self) -> &'static str {

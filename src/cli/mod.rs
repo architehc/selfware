@@ -1041,110 +1041,147 @@ async fn handle_command(
             population,
             parallel,
             dry_run,
+            workflow,
         } => {
-            use crate::evolution::daemon;
-            use crate::evolution::{
-                EvolutionConfig, FitnessWeights, LlmConfig, MutationTargets, SafetyConfig,
-            };
-
             if !quiet {
                 println!("{}", render_header(ctx));
-                println!(
-                    "\n{} {}\n",
-                    Glyphs::gear(),
-                    "Evolution Daemon".workshop_title()
-                );
             }
 
             let repo_root = std::env::current_dir()?;
-            let evo_config = EvolutionConfig {
-                generations,
-                population_size: population,
-                parallel_eval: parallel,
-                checkpoint_interval: 5,
-                fitness_weights: FitnessWeights::default(),
-                mutation_targets: MutationTargets {
-                    config_keys: config.evolution.config_keys.clone(),
-                    prompt_logic: config
-                        .evolution
-                        .prompt_logic
-                        .iter()
-                        .map(std::path::PathBuf::from)
-                        .collect(),
-                    tool_code: config
-                        .evolution
-                        .tool_code
-                        .iter()
-                        .map(std::path::PathBuf::from)
-                        .collect(),
-                    cognitive: config
-                        .evolution
-                        .cognitive
-                        .iter()
-                        .map(std::path::PathBuf::from)
-                        .collect(),
-                },
-                safety: SafetyConfig::default(),
-                llm: {
-                    // Use the hypothesis_model profile if configured, else fall back to default
-                    let hypothesis_profile = config
-                        .evolution
-                        .hypothesis_model
-                        .as_deref()
-                        .and_then(|name| config.resolve_model(Some(name)));
-                    if let Some(profile) = hypothesis_profile {
-                        tracing::info!(
-                            "Evolution using '{}' model profile for hypothesis generation: {}",
-                            config
-                                .evolution
-                                .hypothesis_model
-                                .as_deref()
-                                .unwrap_or("default"),
-                            profile.model
-                        );
-                        LlmConfig {
-                            endpoint: profile.endpoint.clone(),
-                            model: profile.model.clone(),
-                            api_key: profile.api_key.as_ref().map(|k| k.expose().to_string()),
-                            max_tokens: profile.max_tokens,
-                            temperature: profile.temperature,
-                        }
-                    } else {
-                        LlmConfig {
-                            endpoint: config.endpoint.clone(),
-                            model: config.model.clone(),
-                            api_key: config.api_key.as_ref().map(|k| k.expose().to_string()),
-                            max_tokens: config.max_tokens,
-                            temperature: config.temperature,
-                        }
+
+            if workflow == "rsi" {
+                // RSI Orchestrator workflow: recursive self-improvement with
+                // circuit breaker, fitness measurement, meta-learning, and
+                // state persistence across restarts.
+                use crate::cognitive::rsi_orchestrator::RSIOrchestrator;
+
+                if !quiet {
+                    println!(
+                        "\n{} {}\n",
+                        Glyphs::gear(),
+                        "RSI Orchestrator".workshop_title()
+                    );
+                }
+
+                if dry_run {
+                    println!("   RSI project root: {}", repo_root.display());
+                    println!("\n   {} Dry-run mode: no RSI loop started.", Glyphs::leaf());
+                    return Ok(());
+                }
+
+                let mut orchestrator = RSIOrchestrator::new(repo_root);
+                match orchestrator.run_loop().await {
+                    Ok(()) => {
+                        println!("\n   {} RSI loop completed successfully.", Glyphs::bloom());
                     }
-                },
-            };
+                    Err(e) => {
+                        println!("\n   {} RSI loop stopped: {}", Glyphs::frost(), e);
+                    }
+                }
+            } else {
+                // Default evolution daemon workflow
+                use crate::evolution::daemon;
+                use crate::evolution::{
+                    EvolutionConfig, FitnessWeights, LlmConfig, MutationTargets, SafetyConfig,
+                };
 
-            if dry_run {
-                println!("   Evolution config: {:?}", evo_config);
+                if !quiet {
+                    println!(
+                        "\n{} {}\n",
+                        Glyphs::gear(),
+                        "Evolution Daemon".workshop_title()
+                    );
+                }
+
+                let evo_config = EvolutionConfig {
+                    generations,
+                    population_size: population,
+                    parallel_eval: parallel,
+                    checkpoint_interval: 5,
+                    fitness_weights: FitnessWeights::default(),
+                    mutation_targets: MutationTargets {
+                        config_keys: config.evolution.config_keys.clone(),
+                        prompt_logic: config
+                            .evolution
+                            .prompt_logic
+                            .iter()
+                            .map(std::path::PathBuf::from)
+                            .collect(),
+                        tool_code: config
+                            .evolution
+                            .tool_code
+                            .iter()
+                            .map(std::path::PathBuf::from)
+                            .collect(),
+                        cognitive: config
+                            .evolution
+                            .cognitive
+                            .iter()
+                            .map(std::path::PathBuf::from)
+                            .collect(),
+                    },
+                    safety: SafetyConfig::default(),
+                    llm: {
+                        // Use the hypothesis_model profile if configured, else fall back to default
+                        let hypothesis_profile = config
+                            .evolution
+                            .hypothesis_model
+                            .as_deref()
+                            .and_then(|name| config.resolve_model(Some(name)));
+                        if let Some(profile) = hypothesis_profile {
+                            tracing::info!(
+                                "Evolution using '{}' model profile for hypothesis generation: {}",
+                                config
+                                    .evolution
+                                    .hypothesis_model
+                                    .as_deref()
+                                    .unwrap_or("default"),
+                                profile.model
+                            );
+                            LlmConfig {
+                                endpoint: profile.endpoint.clone(),
+                                model: profile.model.clone(),
+                                api_key: profile.api_key.as_ref().map(|k| k.expose().to_string()),
+                                max_tokens: profile.max_tokens,
+                                temperature: profile.temperature,
+                            }
+                        } else {
+                            LlmConfig {
+                                endpoint: config.endpoint.clone(),
+                                model: config.model.clone(),
+                                api_key: config.api_key.as_ref().map(|k| k.expose().to_string()),
+                                max_tokens: config.max_tokens,
+                                temperature: config.temperature,
+                            }
+                        }
+                    },
+                };
+
+                if dry_run {
+                    println!("   Evolution config: {:?}", evo_config);
+                    println!(
+                        "\n   {} Dry-run mode: no evolution started.",
+                        Glyphs::leaf()
+                    );
+                    return Ok(());
+                }
+
+                let result = daemon::evolve(evo_config, &repo_root);
+
                 println!(
-                    "\n   {} Dry-run mode: no evolution started.",
-                    Glyphs::leaf()
+                    "\n   {} Evolution complete: {} generations, {} improvements",
+                    Glyphs::bloom(),
+                    result.generations_run,
+                    result.improvements.len()
                 );
-                return Ok(());
+                println!(
+                    "   SAB: {:.0} → {:.0} ({:+.1})",
+                    result.initial_sab_score,
+                    result.final_sab_score,
+                    result.final_sab_score - result.initial_sab_score
+                );
+                println!("   Duration: {:.0}s", result.total_duration.as_secs_f64());
             }
-
-            let result = daemon::evolve(evo_config, &repo_root);
-
-            println!(
-                "\n   {} Evolution complete: {} generations, {} improvements",
-                Glyphs::bloom(),
-                result.generations_run,
-                result.improvements.len()
-            );
-            println!(
-                "   SAB: {:.0} → {:.0} ({:+.1})",
-                result.initial_sab_score,
-                result.final_sab_score,
-                result.final_sab_score - result.initial_sab_score
-            );
-            println!("   Duration: {:.0}s", result.total_duration.as_secs_f64());
         }
 
         Commands::Batch {

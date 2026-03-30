@@ -784,10 +784,10 @@ impl VectorIndex {
         if is_finite {
             let hnsw = self.hnsw.get_or_insert_with(|| {
                 hnsw_rs::hnsw::Hnsw::new(
-                    16,   // max_nb_connection
-                    256,  // max_elements hint (will grow automatically)
-                    16,   // max_layer
-                    200,  // ef_construction
+                    16,  // max_nb_connection
+                    256, // max_elements hint (will grow automatically)
+                    16,  // max_layer
+                    200, // ef_construction
                     hnsw_rs::anndists::dist::DistCosine,
                 )
             });
@@ -805,7 +805,10 @@ impl VectorIndex {
     /// When the fraction of deleted entries exceeds 30 %, the HNSW
     /// graph is compacted automatically on the next `search()`.
     pub fn remove(&mut self, chunk_id: &str) {
-        if let Some(pos) = self.chunk_ids.iter().enumerate()
+        if let Some(pos) = self
+            .chunk_ids
+            .iter()
+            .enumerate()
             .filter(|(i, _)| !self.deleted.contains(i))
             .find(|(_, id)| id.as_str() == chunk_id)
             .map(|(i, _)| i)
@@ -920,7 +923,12 @@ impl VectorIndex {
         }
         let mut embs = Vec::with_capacity(self.len());
         let mut ids = Vec::with_capacity(self.len());
-        for (i, (e, c)) in self.embeddings.iter().zip(self.chunk_ids.iter()).enumerate() {
+        for (i, (e, c)) in self
+            .embeddings
+            .iter()
+            .zip(self.chunk_ids.iter())
+            .enumerate()
+        {
             if !self.deleted.contains(&i) {
                 embs.push(e.clone());
                 ids.push(c.clone());
@@ -1666,10 +1674,8 @@ impl VectorStore {
             if let Some(index) = self.indices.get(name) {
                 let index_path = storage_path.join(format!("{}.idx", name));
                 let (embs, cids) = index.live_data_owned();
-                let data = bincode::serde::encode_to_vec(
-                    (&embs, &cids),
-                    bincode::config::standard(),
-                )?;
+                let data =
+                    bincode::serde::encode_to_vec((&embs, &cids), bincode::config::standard())?;
 
                 let tmp_idx = index_path.with_extension(format!("idx.tmp.{}", pid));
                 std::fs::write(&tmp_idx, &data)?;

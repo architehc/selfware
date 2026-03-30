@@ -369,6 +369,10 @@ pub(crate) enum Commands {
         /// Dry run: show config and exit
         #[arg(long)]
         dry_run: bool,
+
+        /// Workflow to use: "default" for evolution daemon, "rsi" for RSI orchestrator
+        #[arg(long, default_value = "default")]
+        workflow: String,
     },
 
     /// Run as MCP server (stdio transport) so other AI tools can use Selfware's capabilities

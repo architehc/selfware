@@ -28,7 +28,10 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 #[derive(Parser, Debug)]
-#[command(name = "computer_control_test", about = "Desktop control + VLM verification")]
+#[command(
+    name = "computer_control_test",
+    about = "Desktop control + VLM verification"
+)]
 struct Args {
     /// Which scenario to run: browser, editor, window, all
     #[arg(long, default_value = "all")]
@@ -279,17 +282,51 @@ fn vlm_verify(
 
 fn scenario_browser() -> Vec<ControlStep> {
     let steps = vec![
-        ("Launch Chromium to about:blank", Action::Launch {
-            cmd: "chromium".into(),
-            args: vec!["--no-first-run".into(), "--no-default-browser-check".into(), "about:blank".into()],
-        }, ""),
+        (
+            "Launch Chromium to about:blank",
+            Action::Launch {
+                cmd: "chromium".into(),
+                args: vec![
+                    "--no-first-run".into(),
+                    "--no-default-browser-check".into(),
+                    "about:blank".into(),
+                ],
+            },
+            "",
+        ),
         ("Wait for browser to open", Action::Wait { ms: 2000 }, ""),
-        ("Verify empty browser page", Action::Screenshot, "An empty browser window is visible showing about:blank or a blank page"),
-        ("Focus address bar", Action::KeyCombo { keys: "ctrl+l".into() }, ""),
-        ("Type URL", Action::Type { text: "https://example.com".into() }, ""),
-        ("Press Enter to navigate", Action::KeyCombo { keys: "Return".into() }, ""),
+        (
+            "Verify empty browser page",
+            Action::Screenshot,
+            "An empty browser window is visible showing about:blank or a blank page",
+        ),
+        (
+            "Focus address bar",
+            Action::KeyCombo {
+                keys: "ctrl+l".into(),
+            },
+            "",
+        ),
+        (
+            "Type URL",
+            Action::Type {
+                text: "https://example.com".into(),
+            },
+            "",
+        ),
+        (
+            "Press Enter to navigate",
+            Action::KeyCombo {
+                keys: "Return".into(),
+            },
+            "",
+        ),
         ("Wait for page load", Action::Wait { ms: 3000 }, ""),
-        ("Verify example.com loaded", Action::Screenshot, "The browser shows example.com with the heading 'Example Domain'"),
+        (
+            "Verify example.com loaded",
+            Action::Screenshot,
+            "The browser shows example.com with the heading 'Example Domain'",
+        ),
     ];
 
     steps
@@ -309,18 +346,54 @@ fn scenario_browser() -> Vec<ControlStep> {
 
 fn scenario_editor() -> Vec<ControlStep> {
     let steps = vec![
-        ("Launch terminal with nano", Action::Launch {
-            cmd: "xterm".into(),
-            args: vec!["-e".into(), "nano".into(), "/tmp/cc_test_note.txt".into()],
-        }, ""),
+        (
+            "Launch terminal with nano",
+            Action::Launch {
+                cmd: "xterm".into(),
+                args: vec!["-e".into(), "nano".into(), "/tmp/cc_test_note.txt".into()],
+            },
+            "",
+        ),
         ("Wait for editor to open", Action::Wait { ms: 2000 }, ""),
-        ("Verify editor is open", Action::Screenshot, "A terminal window is visible with the nano text editor open"),
-        ("Type test text", Action::Type { text: "Hello from selfware computer control test".into() }, ""),
+        (
+            "Verify editor is open",
+            Action::Screenshot,
+            "A terminal window is visible with the nano text editor open",
+        ),
+        (
+            "Type test text",
+            Action::Type {
+                text: "Hello from selfware computer control test".into(),
+            },
+            "",
+        ),
         ("Wait for text entry", Action::Wait { ms: 500 }, ""),
-        ("Verify text was entered", Action::Screenshot, "The nano editor shows the text 'Hello from selfware computer control test'"),
-        ("Save file with Ctrl+O", Action::KeyCombo { keys: "ctrl+o".into() }, ""),
-        ("Confirm filename with Enter", Action::KeyCombo { keys: "Return".into() }, ""),
-        ("Exit nano with Ctrl+X", Action::KeyCombo { keys: "ctrl+x".into() }, ""),
+        (
+            "Verify text was entered",
+            Action::Screenshot,
+            "The nano editor shows the text 'Hello from selfware computer control test'",
+        ),
+        (
+            "Save file with Ctrl+O",
+            Action::KeyCombo {
+                keys: "ctrl+o".into(),
+            },
+            "",
+        ),
+        (
+            "Confirm filename with Enter",
+            Action::KeyCombo {
+                keys: "Return".into(),
+            },
+            "",
+        ),
+        (
+            "Exit nano with Ctrl+X",
+            Action::KeyCombo {
+                keys: "ctrl+x".into(),
+            },
+            "",
+        ),
     ];
 
     steps
@@ -340,18 +413,39 @@ fn scenario_editor() -> Vec<ControlStep> {
 
 fn scenario_window() -> Vec<ControlStep> {
     let steps = vec![
-        ("Launch xterm window", Action::Launch {
-            cmd: "xterm".into(),
-            args: vec!["-title".into(), "CC_Test_Window".into()],
-        }, ""),
+        (
+            "Launch xterm window",
+            Action::Launch {
+                cmd: "xterm".into(),
+                args: vec!["-title".into(), "CC_Test_Window".into()],
+            },
+            "",
+        ),
         ("Wait for window", Action::Wait { ms: 1500 }, ""),
-        ("Verify window is open", Action::Screenshot, "A terminal window titled CC_Test_Window or an xterm window is visible"),
-        ("Move window with wmctrl", Action::Launch {
-            cmd: "wmctrl".into(),
-            args: vec!["-r".into(), "CC_Test_Window".into(), "-e".into(), "0,100,100,800,600".into()],
-        }, ""),
+        (
+            "Verify window is open",
+            Action::Screenshot,
+            "A terminal window titled CC_Test_Window or an xterm window is visible",
+        ),
+        (
+            "Move window with wmctrl",
+            Action::Launch {
+                cmd: "wmctrl".into(),
+                args: vec![
+                    "-r".into(),
+                    "CC_Test_Window".into(),
+                    "-e".into(),
+                    "0,100,100,800,600".into(),
+                ],
+            },
+            "",
+        ),
         ("Wait for move", Action::Wait { ms: 500 }, ""),
-        ("Verify window repositioned", Action::Screenshot, "The terminal window has been moved/resized and is visible at a different position"),
+        (
+            "Verify window repositioned",
+            Action::Screenshot,
+            "The terminal window has been moved/resized and is visible at a different position",
+        ),
     ];
 
     steps
@@ -433,11 +527,18 @@ fn run_scenario(
 
             match load_screenshot_base64(&screenshot_file) {
                 Ok(b64) => {
-                    match vlm_verify(client, endpoint, model, &b64, &step.description, &step.expected)
-                    {
+                    match vlm_verify(
+                        client,
+                        endpoint,
+                        model,
+                        &b64,
+                        &step.description,
+                        &step.expected,
+                    ) {
                         Ok(verdict) => {
                             step.passed = verdict.passed;
-                            step.vlm_response = Some(serde_json::to_string(&verdict).unwrap_or_default());
+                            step.vlm_response =
+                                Some(serde_json::to_string(&verdict).unwrap_or_default());
                             println!(
                                 "      VLM: {} — {}",
                                 if verdict.passed { "PASS" } else { "FAIL" },
@@ -507,7 +608,13 @@ fn generate_report(scenarios: &[(&str, &[ControlStep])], output_dir: &Path) -> R
                 .as_deref()
                 .and_then(|r| serde_json::from_str::<VlmVerdict>(r).ok())
                 .map(|v| v.actual)
-                .unwrap_or_else(|| if is_verified { "—".into() } else { "(no verification)".into() });
+                .unwrap_or_else(|| {
+                    if is_verified {
+                        "—".into()
+                    } else {
+                        "(no verification)".into()
+                    }
+                });
 
             let pass_str = if !is_verified {
                 "n/a".to_string()
@@ -520,7 +627,11 @@ fn generate_report(scenarios: &[(&str, &[ControlStep])], output_dir: &Path) -> R
             md.push_str(&format!(
                 "| {i} | {} | {} | {} | {pass_str} | {}ms |\n",
                 step.description,
-                if step.expected.is_empty() { "—" } else { &step.expected },
+                if step.expected.is_empty() {
+                    "—"
+                } else {
+                    &step.expected
+                },
                 actual,
                 step.duration_ms
             ));
@@ -587,9 +698,21 @@ fn main() -> Result<()> {
     let run_editor = args.scenario == "all" || args.scenario == "editor";
     let run_window = args.scenario == "all" || args.scenario == "window";
 
-    let mut browser_steps = if run_browser { scenario_browser() } else { vec![] };
-    let mut editor_steps = if run_editor { scenario_editor() } else { vec![] };
-    let mut window_steps = if run_window { scenario_window() } else { vec![] };
+    let mut browser_steps = if run_browser {
+        scenario_browser()
+    } else {
+        vec![]
+    };
+    let mut editor_steps = if run_editor {
+        scenario_editor()
+    } else {
+        vec![]
+    };
+    let mut window_steps = if run_window {
+        scenario_window()
+    } else {
+        vec![]
+    };
 
     if run_browser {
         run_scenario(
@@ -638,11 +761,9 @@ fn main() -> Result<()> {
     println!("\nReport written to: {}", report_path.display());
 
     // Exit with non-zero if any verified step failed.
-    let any_failure = scenario_refs.iter().any(|(_, steps)| {
-        steps
-            .iter()
-            .any(|s| !s.expected.is_empty() && !s.passed)
-    });
+    let any_failure = scenario_refs
+        .iter()
+        .any(|(_, steps)| steps.iter().any(|s| !s.expected.is_empty() && !s.passed));
 
     if any_failure {
         std::process::exit(1);

@@ -1,4 +1,5 @@
 use crate::cognitive::compilation_manager::CompilationSandbox;
+use crate::cognitive::meta_learning::MetaLearner;
 use crate::cognitive::metrics::MetricsStore;
 use crate::cognitive::self_edit::{
     AppliedMutation, ImprovementRecord, ImprovementTarget, SelfEditOrchestrator,
@@ -26,6 +27,7 @@ pub struct RSIState {
 /// The outer loop for Recursive Self-Improvement
 pub struct RSIOrchestrator {
     edit_orchestrator: SelfEditOrchestrator,
+    meta_learner: MetaLearner,
     _metrics: MetricsStore,
     project_root: PathBuf,
     is_running: bool,
@@ -46,6 +48,7 @@ impl RSIOrchestrator {
         let state_path = Self::default_state_path(&project_root);
         let mut orch = Self {
             edit_orchestrator: SelfEditOrchestrator::new(project_root.clone()),
+            meta_learner: MetaLearner::new(),
             _metrics: MetricsStore::new(),
             project_root,
             is_running: false,
@@ -218,14 +221,34 @@ impl RSIOrchestrator {
         let baseline_score = self.measure_fitness().await?;
         debug!("Baseline fitness score: {}", baseline_score);
 
-        // 2. Identify Target (Introspect)
-        // In a full implementation, this would use LLM introspection to find weaknesses.
-        // For now, we rely on the existing analyze_self logic.
-        let targets = self.edit_orchestrator.analyze_self();
+        // 2. Consult meta-learner for strategy priorities
+        let strategy_rankings = self.meta_learner.analyze_strategies();
+        if !strategy_rankings.is_empty() {
+            info!(
+                "Meta-learner strategy rankings (top 3): {:?}",
+                strategy_rankings.iter().take(3).collect::<Vec<_>>()
+            );
+        }
+
+        // 3. Identify Target (Introspect)
+        let mut targets = self.edit_orchestrator.analyze_self();
         if targets.is_empty() {
             info!("No improvement targets found in this cycle.");
             return Ok(false);
         }
+
+        // Re-weight target priorities using meta-learned category weights
+        for target in &mut targets {
+            target.priority = self
+                .meta_learner
+                .weight_priority(&target.category, target.priority);
+        }
+        // Re-sort by weighted priority (highest first)
+        targets.sort_by(|a, b| {
+            b.priority
+                .partial_cmp(&a.priority)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Pick highest priority target that has a concrete mutation strategy.
         let Some(target) = self.edit_orchestrator.select_target(&targets).cloned() else {
@@ -401,6 +424,10 @@ impl RSIOrchestrator {
                 .unwrap_or_default()
                 .as_secs(),
         };
+        // Update meta-learner weights based on the outcome so future cycles
+        // can prioritise categories that historically succeed.
+        self.meta_learner.update_weights(&record);
+
         self.edit_orchestrator.record_result(record)?;
         Ok(())
     }
@@ -412,6 +439,7 @@ impl RSIOrchestrator {
                 project_root.clone(),
                 history_path,
             ),
+            meta_learner: MetaLearner::new(),
             _metrics: MetricsStore::with_path(project_root.join(".selfware/test-metrics.jsonl")),
             project_root,
             is_running: false,

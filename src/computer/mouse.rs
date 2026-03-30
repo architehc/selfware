@@ -26,6 +26,7 @@ pub(crate) enum MouseBackend {
 }
 
 impl MouseBackend {
+    #[allow(dead_code)]
     pub(crate) fn doctor_name(self) -> &'static str {
         match self {
             Self::Xdotool => "xdotool",
@@ -33,6 +34,7 @@ impl MouseBackend {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn doctor_message(self) -> &'static str {
         match self {
             Self::Xdotool => "Mouse control available via xdotool",
@@ -81,6 +83,7 @@ fn is_wsl_environment() -> bool {
 }
 
 /// Return the available mouse backend (public for doctor checks).
+#[allow(dead_code)]
 pub(crate) fn available_backend() -> Option<MouseBackend> {
     detect_backend()
 }

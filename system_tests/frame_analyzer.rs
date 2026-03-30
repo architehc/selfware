@@ -269,7 +269,9 @@ fn call_vlm(
         .map_err(|e| format!("VLM request failed: {e}"))?;
 
     let status = resp.status();
-    let text = resp.text().map_err(|e| format!("Read response body failed: {e}"))?;
+    let text = resp
+        .text()
+        .map_err(|e| format!("Read response body failed: {e}"))?;
 
     if !status.is_success() {
         return Err(format!("VLM returned {status}: {text}"));
@@ -324,9 +326,8 @@ fn parse_analysis_json(raw: &str) -> Result<Value, String> {
         raw.trim()
     };
 
-    serde_json::from_str::<Value>(json_str).map_err(|e| {
-        format!("Could not parse analysis JSON: {e}\nRaw: {raw}")
-    })
+    serde_json::from_str::<Value>(json_str)
+        .map_err(|e| format!("Could not parse analysis JSON: {e}\nRaw: {raw}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -382,10 +383,9 @@ impl RunStats {
         // Quality trend: compare first half vs second half
         let trend = if self.quality_scores.len() >= 4 {
             let mid = self.quality_scores.len() / 2;
-            let first_avg: f64 =
-                self.quality_scores[..mid].iter().sum::<f64>() / mid as f64;
-            let second_avg: f64 =
-                self.quality_scores[mid..].iter().sum::<f64>() / (self.quality_scores.len() - mid) as f64;
+            let first_avg: f64 = self.quality_scores[..mid].iter().sum::<f64>() / mid as f64;
+            let second_avg: f64 = self.quality_scores[mid..].iter().sum::<f64>()
+                / (self.quality_scores.len() - mid) as f64;
             if second_avg > first_avg + 0.5 {
                 "improving"
             } else if second_avg < first_avg - 0.5 {
@@ -424,7 +424,10 @@ fn main() {
 
     eprintln!("[frame_analyzer] endpoint={}", cfg.endpoint);
     eprintln!("[frame_analyzer] model={}", cfg.model);
-    eprintln!("[frame_analyzer] fps={}, duration={}s", cfg.fps, cfg.duration);
+    eprintln!(
+        "[frame_analyzer] fps={}, duration={}s",
+        cfg.fps, cfg.duration
+    );
     eprintln!("[frame_analyzer] mode={:?}", cfg.mode);
     eprintln!("[frame_analyzer] output={}", cfg.output.display());
     if cfg.record {
@@ -586,10 +589,16 @@ fn main() {
             "mode": format!("{:?}", cfg.mode),
         }
     });
-    if let Err(e) = fs::write(&summary_path, serde_json::to_string_pretty(&summary).unwrap()) {
+    if let Err(e) = fs::write(
+        &summary_path,
+        serde_json::to_string_pretty(&summary).unwrap(),
+    ) {
         eprintln!("Failed to write summary: {e}");
     } else {
-        eprintln!("[frame_analyzer] Summary written to {}", summary_path.display());
+        eprintln!(
+            "[frame_analyzer] Summary written to {}",
+            summary_path.display()
+        );
     }
 
     eprintln!("[frame_analyzer] JSONL log at {}", jsonl_path.display());

@@ -115,6 +115,11 @@ pub static COMMANDS: &[CommandEntry] = &[
         category: CommandCategory::Context,
     },
     CommandEntry {
+        name: "/scan",
+        description: "Index a folder/file for RAG semantic search",
+        category: CommandCategory::Context,
+    },
+    CommandEntry {
         name: "/memory",
         description: "Show memory hierarchy status",
         category: CommandCategory::Context,
@@ -278,6 +283,12 @@ pub static COMMANDS: &[CommandEntry] = &[
         description: "Switch to vim input mode",
         category: CommandCategory::General,
     },
+    // Learning / Code Education
+    CommandEntry {
+        name: "/explain",
+        description: "Explain code in a file or set explanation level",
+        category: CommandCategory::Tools,
+    },
 ];
 
 /// Exit commands (not slash commands but valid input to exit)
@@ -374,6 +385,7 @@ mod tests {
             "/ctx copy",
             "/context",
             "/compress",
+            "/scan",
             "/memory",
             "/compact",
             "/verbose",
@@ -402,6 +414,7 @@ mod tests {
             "/chat list",
             "/chat delete",
             "/vim",
+            "/explain",
         ];
         let registry: HashSet<&str> = COMMANDS.iter().map(|c| c.name).collect();
         for name in &expected {

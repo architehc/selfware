@@ -11,6 +11,8 @@ use crate::analyzer::ErrorAnalyzer;
 use crate::api::types::{Message, ToolCall};
 use crate::api::{ApiClient, StreamChunk, ThinkingMode};
 use crate::checkpoint::{CheckpointManager, TaskCheckpoint};
+use crate::cognitive::learning::ExplanationLevel;
+use crate::cognitive::rag::RagEngine;
 use crate::cognitive::self_improvement::{Outcome, SelfImprovementEngine};
 use crate::cognitive::{CognitiveState, CyclePhase};
 use crate::concurrency::ConcurrencyGovernor;
@@ -27,6 +29,7 @@ use crate::telemetry::{enter_agent_step, record_state_transition};
 use crate::tools::file::init_safety_config;
 use crate::tools::ToolRegistry;
 use crate::verification::{VerificationConfig, VerificationGate};
+use tokio::sync::RwLock;
 
 /// Print only when TUI is NOT active (avoids writing to stdout while
 /// ratatui owns the alternate screen).
@@ -355,6 +358,10 @@ pub struct Agent {
     visual_state_tracker: crate::testing::visual_verification::VisualStateTracker,
     /// Hierarchical context map for token-aware codebase ingestion.
     context_map: context_map::ContextMap,
+    /// RAG engine for semantic code search via `/scan`
+    rag_engine: Option<Arc<RwLock<RagEngine>>>,
+    /// Detail level for `/explain` code education output.
+    explanation_level: ExplanationLevel,
 }
 
 impl Agent {
@@ -675,7 +682,7 @@ To call a tool, use this EXACT XML structure:
         let safety_margin = model_context_limit / 5; // 20% of context window
         let max_context_tokens = model_context_limit
             .saturating_sub(config.max_tokens) // reserve for output tokens
-            .saturating_sub(safety_margin);     // tools + template + estimation safety
+            .saturating_sub(safety_margin); // tools + template + estimation safety
 
         if max_context_tokens == 0 {
             tracing::error!(
@@ -703,10 +710,8 @@ To call a tool, use this EXACT XML structure:
         // Create compressor with the full conversation budget, not output budget.
         // The old value (max_tokens=16384) triggered compression at ~12K tokens,
         // evicting file content after just a few tool calls.
-        let compressor = ContextCompressor::with_content_ratio(
-            max_context_tokens,
-            compressor_content_ratio,
-        );
+        let compressor =
+            ContextCompressor::with_content_ratio(max_context_tokens, compressor_content_ratio);
         let governor = ConcurrencyGovernor::from_config(&config.concurrency);
 
         let agent = Self {
@@ -764,6 +769,8 @@ To call a tool, use this EXACT XML structure:
             visual_state_tracker:
                 crate::testing::visual_verification::VisualStateTracker::default_config(),
             context_map: ctx_map,
+            rag_engine: None,
+            explanation_level: ExplanationLevel::Intermediate,
         };
 
         let reconcile_report = crate::tools::process::reconcile_managed_processes(true).await;

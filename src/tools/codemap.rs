@@ -222,11 +222,7 @@ pub struct CodeMapNode {
 }
 
 /// Build a lightweight code map for a directory, optionally focused on a module path.
-fn build_code_map(
-    root: &Path,
-    focus: Option<&str>,
-    depth: u8,
-) -> HashMap<String, CodeMapNode> {
+fn build_code_map(root: &Path, focus: Option<&str>, depth: u8) -> HashMap<String, CodeMapNode> {
     let mut nodes: HashMap<String, CodeMapNode> = HashMap::new();
 
     let scan_dir = if let Some(focus_path) = focus {
@@ -353,9 +349,7 @@ fn extract_use_deps(path: &Path) -> Vec<String> {
         .filter_map(|line| {
             let trimmed = line.trim();
             if let Some(rest) = trimmed.strip_prefix("use crate::") {
-                let end = rest
-                    .find([';', '{', ' '])
-                    .unwrap_or(rest.len());
+                let end = rest.find([';', '{', ' ']).unwrap_or(rest.len());
                 Some(rest[..end].to_string())
             } else {
                 None

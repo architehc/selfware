@@ -22,6 +22,7 @@ pub(crate) enum KeyboardBackend {
 }
 
 impl KeyboardBackend {
+    #[allow(dead_code)]
     pub(crate) fn doctor_name(self) -> &'static str {
         match self {
             Self::Xdotool => "xdotool",
@@ -29,6 +30,7 @@ impl KeyboardBackend {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn doctor_message(self) -> &'static str {
         match self {
             Self::Xdotool => "Keyboard control available via xdotool",
@@ -77,6 +79,7 @@ fn is_wsl_environment() -> bool {
 }
 
 /// Return the available keyboard backend (public for doctor checks).
+#[allow(dead_code)]
 pub(crate) fn available_backend() -> Option<KeyboardBackend> {
     detect_backend()
 }

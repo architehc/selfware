@@ -646,6 +646,10 @@ impl Agent {
                     "🗜️ ".bright_white()
                 );
                 println!(
+                    "│  {} /scan <path>       Index folder for RAG search  │",
+                    "🔍".bright_white()
+                );
+                println!(
                     "{}",
                     "├─────────────────────────────────────────────────┤".bright_cyan()
                 );
@@ -838,6 +842,18 @@ impl Agent {
                     }
                     Err(e) => println!("{} Compression error: {}", "❌".bright_red(), e),
                 }
+                continue;
+            }
+
+            if input.starts_with("/scan") {
+                let path_arg = input.strip_prefix("/scan").map(str::trim).unwrap_or(".");
+                if path_arg.is_empty() || path_arg == "help" {
+                    println!("{} Usage: /scan <path>", "i".bright_yellow());
+                    println!("  Index a folder or file for RAG semantic search.");
+                    println!("  Example: /scan ./src");
+                    continue;
+                }
+                self.handle_scan_command(path_arg).await;
                 continue;
             }
 
@@ -1249,6 +1265,21 @@ impl Agent {
                     Ok(_) => self.after_task_run().await,
                     Err(e) => println!("{} Error analyzing: {}", "❌".bright_red(), e),
                 }
+                continue;
+            }
+
+            // ── /explain command ────────────────────────────────────
+            if input == "/explain" {
+                println!("{} Usage:", "ℹ".bright_yellow());
+                println!("  /explain <path>                  Explain code in a file");
+                println!("  /explain --level <level>         Set detail level (beginner|intermediate|advanced|expert)");
+                println!("  /explain --curriculum <dir>      Generate a learning curriculum from a directory");
+                continue;
+            }
+
+            if input.starts_with("/explain ") {
+                let args = input.strip_prefix("/explain ").unwrap().trim();
+                self.handle_explain_command(args);
                 continue;
             }
 
@@ -1915,6 +1946,226 @@ impl Agent {
         ));
     }
 
+    // ── /explain implementation ──────────────────────────────────────
+    fn handle_explain_command(&mut self, args: &str) {
+        use crate::cognitive::learning::{CodeExplainer, ConceptExtractor, ExplainModeConfig};
+
+        // /explain --level <level>
+        if let Some(level_str) = args
+            .strip_prefix("--level ")
+            .or_else(|| args.strip_prefix("--level="))
+        {
+            let level_str = level_str.trim();
+            match level_str.to_lowercase().as_str() {
+                "beginner" => {
+                    self.explanation_level = ExplanationLevel::Beginner;
+                    println!(
+                        "{} Explanation level set to {} ({})",
+                        ">>".bright_cyan(),
+                        "Beginner".bright_green(),
+                        ExplanationLevel::Beginner.description()
+                    );
+                }
+                "intermediate" => {
+                    self.explanation_level = ExplanationLevel::Intermediate;
+                    println!(
+                        "{} Explanation level set to {} ({})",
+                        ">>".bright_cyan(),
+                        "Intermediate".bright_green(),
+                        ExplanationLevel::Intermediate.description()
+                    );
+                }
+                "advanced" => {
+                    self.explanation_level = ExplanationLevel::Advanced;
+                    println!(
+                        "{} Explanation level set to {} ({})",
+                        ">>".bright_cyan(),
+                        "Advanced".bright_green(),
+                        ExplanationLevel::Advanced.description()
+                    );
+                }
+                "expert" => {
+                    self.explanation_level = ExplanationLevel::Expert;
+                    println!(
+                        "{} Explanation level set to {} ({})",
+                        ">>".bright_cyan(),
+                        "Expert".bright_green(),
+                        ExplanationLevel::Expert.description()
+                    );
+                }
+                _ => {
+                    println!(
+                        "{} Unknown level '{}'. Use: beginner, intermediate, advanced, expert",
+                        "!!".bright_red(),
+                        level_str
+                    );
+                }
+            }
+            return;
+        }
+
+        // /explain --curriculum <dir>
+        if let Some(dir_str) = args
+            .strip_prefix("--curriculum ")
+            .or_else(|| args.strip_prefix("--curriculum="))
+        {
+            let dir_path = std::path::Path::new(dir_str.trim());
+            if !dir_path.exists() {
+                println!(
+                    "{} Directory not found: {}",
+                    "!!".bright_red(),
+                    dir_str.trim()
+                );
+                return;
+            }
+            if !dir_path.is_dir() {
+                println!("{} Not a directory: {}", "!!".bright_red(), dir_str.trim());
+                return;
+            }
+
+            let extractor = ConceptExtractor::new();
+            let mut all_concepts = Vec::new();
+
+            if let Ok(entries) = std::fs::read_dir(dir_path) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                        if let Ok(content) = std::fs::read_to_string(&path) {
+                            let concepts = extractor.extract_from_code(&content, &path);
+                            all_concepts.extend(concepts);
+                        }
+                    }
+                }
+            }
+
+            if all_concepts.is_empty() {
+                println!(
+                    "{} No concepts found in {}",
+                    "ℹ".bright_yellow(),
+                    dir_str.trim()
+                );
+                return;
+            }
+
+            let curriculum = extractor
+                .generate_curriculum(&all_concepts, &format!("Curriculum: {}", dir_str.trim()));
+
+            println!();
+            println!(
+                "  {} {}",
+                ">>".bright_cyan(),
+                curriculum.title.bright_white().bold()
+            );
+            println!(
+                "  {} Total estimated time: {} minutes",
+                ">>".bright_cyan(),
+                curriculum.total_minutes
+            );
+            println!(
+                "  {} Concepts found: {}",
+                ">>".bright_cyan(),
+                curriculum.concepts.len()
+            );
+            println!();
+
+            for lesson in curriculum.suggested_order() {
+                println!(
+                    "  {} Lesson {}: {}",
+                    ">>".bright_cyan(),
+                    lesson.order,
+                    lesson.title.bright_green()
+                );
+                println!(
+                    "     {} (~{} min)",
+                    lesson.description.dimmed(),
+                    lesson.estimated_minutes
+                );
+                for cid in &lesson.concepts {
+                    if let Some(concept) = curriculum.get_concept(cid) {
+                        println!(
+                            "     - {} [{}]",
+                            concept.name.bright_yellow(),
+                            format!("{:?}", concept.difficulty).dimmed()
+                        );
+                    }
+                }
+                println!();
+            }
+            return;
+        }
+
+        // /explain <path> — explain a file
+        let file_path = std::path::Path::new(args);
+        if !file_path.exists() {
+            println!("{} File not found: {}", "!!".bright_red(), args);
+            return;
+        }
+
+        let content = match std::fs::read_to_string(file_path) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("{} Cannot read file: {}", "!!".bright_red(), e);
+                return;
+            }
+        };
+
+        let config = ExplainModeConfig {
+            level: self.explanation_level,
+            ..ExplainModeConfig::default()
+        };
+        let mut explainer = CodeExplainer::new().with_config(config);
+        let explanation = explainer.explain(&content);
+
+        println!();
+        println!(
+            "  {} Explaining: {}",
+            ">>".bright_cyan(),
+            args.bright_white().bold()
+        );
+        println!("  {} Level: {:?}", ">>".bright_cyan(), explanation.level);
+        println!();
+
+        if !explanation.concepts.is_empty() {
+            println!("  {} Concepts:", ">>".bright_cyan());
+            for concept in &explanation.concepts {
+                println!("     - {}", concept.bright_yellow());
+            }
+            println!();
+        }
+
+        if !explanation.explanation.is_empty() {
+            println!("  {} Overview:", ">>".bright_cyan());
+            for line in explanation.explanation.lines() {
+                println!("     {}", line);
+            }
+            println!();
+        }
+
+        if !explanation.line_explanations.is_empty() {
+            println!("  {} Line-by-line:", ">>".bright_cyan());
+            for le in &explanation.line_explanations {
+                println!(
+                    "     {:>4} | {}",
+                    le.line_number.to_string().dimmed(),
+                    le.code.trim()
+                );
+                println!("          {}", le.explanation.bright_green());
+                if !le.concepts.is_empty() {
+                    println!("          concepts: {}", le.concepts.join(", ").dimmed());
+                }
+            }
+            println!();
+        }
+
+        if !explanation.related_topics.is_empty() {
+            println!("  {} Related topics:", ">>".bright_cyan());
+            for topic in &explanation.related_topics {
+                println!("     - {}", topic.bright_blue());
+            }
+            println!();
+        }
+    }
+
     fn print_execution_debug(&self) {
         self.print_execution_debug_with_options(false);
     }
@@ -2212,8 +2463,10 @@ impl Agent {
                 println!("  /debug state    - Show task-state memory");
                 println!("  /debug-log      - Show the persistent session log");
                 println!("  /debug-log full - Show full recent session log entries");
+                println!("  /scan <path>    - Index folder for RAG search");
                 println!("  /analyze <path> - Analyze codebase at path");
                 println!("  /review <file>  - Review code in file");
+                println!("  /explain <path> - Explain code in a file");
                 println!("  /plan <task>    - Create a plan for a task");
                 println!("  /swarm <task>   - Run task with dev swarm");
                 println!("  /queue <msg>    - Queue a message");
@@ -2244,6 +2497,17 @@ impl Agent {
                 for tool in self.tools.list() {
                     println!("  - {}: {}", tool.name(), tool.description());
                 }
+                continue;
+            }
+
+            if input.starts_with("/scan") {
+                let path_arg = input.strip_prefix("/scan").map(str::trim).unwrap_or(".");
+                if path_arg.is_empty() || path_arg == "help" {
+                    println!("Usage: /scan <path>");
+                    println!("  Index a folder or file for RAG semantic search.");
+                    continue;
+                }
+                self.handle_scan_command(path_arg).await;
                 continue;
             }
 
@@ -2314,6 +2578,21 @@ impl Agent {
                     Ok(_) => self.after_task_run().await,
                     Err(e) => println!("{} Error analyzing: {}", "❌".bright_red(), e),
                 }
+                continue;
+            }
+
+            // ── /explain command (headless) ─────────────────────────
+            if input == "/explain" {
+                println!("{} Usage:", "ℹ".bright_yellow());
+                println!("  /explain <path>                  Explain code in a file");
+                println!("  /explain --level <level>         Set detail level (beginner|intermediate|advanced|expert)");
+                println!("  /explain --curriculum <dir>      Generate a learning curriculum from a directory");
+                continue;
+            }
+
+            if input.starts_with("/explain ") {
+                let args = input.strip_prefix("/explain ").unwrap().trim();
+                self.handle_explain_command(args);
                 continue;
             }
 
@@ -2496,6 +2775,111 @@ impl Agent {
         crate::tools::process::cleanup_all_processes().await;
 
         Ok(())
+    }
+
+    /// Handle the `/scan <path>` command: build a RAG index for the given path.
+    async fn handle_scan_command(&mut self, path_arg: &str) {
+        use crate::cognitive::rag::{RagConfig, RagEngine};
+        use crate::vector_store::{EmbeddingBackend, TfIdfEmbeddingProvider};
+
+        let scan_path = std::path::Path::new(path_arg);
+        let scan_path = if scan_path.is_relative() {
+            std::env::current_dir().unwrap_or_default().join(scan_path)
+        } else {
+            scan_path.to_path_buf()
+        };
+
+        if !scan_path.exists() {
+            println!(
+                "{} Path not found: {}",
+                "x".bright_red(),
+                scan_path.display()
+            );
+            return;
+        }
+
+        println!("{} Scanning {}...", ">>".bright_cyan(), scan_path.display());
+
+        // Build config with priority-aware extensions
+        let config = RagConfig {
+            include_extensions: vec![
+                // High priority (source code)
+                "rs".into(),
+                "toml".into(),
+                "go".into(),
+                "py".into(),
+                "ts".into(),
+                "js".into(),
+                "java".into(),
+                "c".into(),
+                "cpp".into(),
+                "h".into(),
+                // Medium priority
+                "json".into(),
+                "yaml".into(),
+                "yml".into(),
+                "sql".into(),
+                "sh".into(),
+                // Low priority
+                "md".into(),
+                "txt".into(),
+                "rst".into(),
+                "html".into(),
+                "css".into(),
+            ],
+            exclude_patterns: vec![
+                "target/".into(),
+                "node_modules/".into(),
+                ".git/".into(),
+                "__pycache__/".into(),
+                "*.min.js".into(),
+                "*.min.css".into(),
+                "vendor/".into(),
+                "dist/".into(),
+                "build/".into(),
+                "*.lock".into(),
+            ],
+            ..Default::default()
+        };
+
+        let provider = Arc::new(EmbeddingBackend::TfIdf(TfIdfEmbeddingProvider::default()));
+        let mut engine = RagEngine::new(&scan_path, provider, config);
+
+        match engine.build_index().await {
+            Ok(stats) => {
+                // Compute source vs docs split
+                let source_exts: std::collections::HashSet<&str> = [
+                    "rs", "toml", "go", "py", "ts", "js", "java", "c", "cpp", "h",
+                ]
+                .iter()
+                .copied()
+                .collect();
+                let source_files: usize = stats
+                    .files_by_language
+                    .iter()
+                    .filter(|(k, _)| source_exts.contains(k.as_str()))
+                    .map(|(_, v)| v)
+                    .sum();
+                let doc_files = stats.total_files.saturating_sub(source_files);
+
+                println!(
+                    "{} Indexed {} files ({} source, {} docs), {} chunks, ~{}K tokens in {}ms",
+                    "ok".bright_green(),
+                    stats.total_files,
+                    source_files,
+                    doc_files,
+                    stats.total_chunks,
+                    stats.total_tokens / 1000,
+                    stats.build_time_ms,
+                );
+
+                // Store engine on agent for retrieval
+                self.rag_engine = Some(Arc::new(tokio::sync::RwLock::new(engine)));
+            }
+            Err(e) => {
+                println!("{} Scan failed: {}", "x".bright_red(), e);
+            }
+        }
     }
 }
 
