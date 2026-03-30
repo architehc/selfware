@@ -459,12 +459,16 @@ mod tests {
     #[test]
     fn test_folder_scanner() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let scanner = FolderScanner::new(temp_dir.path(), 3);
+        // tempdir creates dirs starting with '.', which scan() skips as hidden.
+        // Use a non-hidden subdirectory as the scan root.
+        let project_dir = temp_dir.path().join("project");
+        fs::create_dir(&project_dir).unwrap();
+        let scanner = FolderScanner::new(&project_dir, 3);
 
         // Create some test structure
-        fs::create_dir(temp_dir.path().join("src")).unwrap();
-        fs::write(temp_dir.path().join("README.md"), "# Test Project").unwrap();
-        fs::write(temp_dir.path().join("src").join("main.rs"), "fn main() {}").unwrap();
+        fs::create_dir(project_dir.join("src")).unwrap();
+        fs::write(project_dir.join("README.md"), "# Test Project").unwrap();
+        fs::write(project_dir.join("src").join("main.rs"), "fn main() {}").unwrap();
 
         let folders = scanner.scan().unwrap();
         assert!(!folders.is_empty());
@@ -497,18 +501,22 @@ mod tests {
     #[test]
     fn test_folder_analyzer() {
         let temp_dir = tempfile::tempdir().unwrap();
+        // tempdir creates dirs starting with '.', which scan() skips as hidden.
+        // Use a non-hidden subdirectory as the scan root.
+        let project_dir = temp_dir.path().join("project");
+        fs::create_dir(&project_dir).unwrap();
 
         // Create test structure
-        fs::create_dir(temp_dir.path().join("src")).unwrap();
-        fs::write(temp_dir.path().join("README.md"), "# Test").unwrap();
-        fs::write(temp_dir.path().join("src").join("main.rs"), "fn main() {}").unwrap();
+        fs::create_dir(project_dir.join("src")).unwrap();
+        fs::write(project_dir.join("README.md"), "# Test").unwrap();
+        fs::write(project_dir.join("src").join("main.rs"), "fn main() {}").unwrap();
         fs::write(
-            temp_dir.path().join("src").join("lib.rs"),
+            project_dir.join("src").join("lib.rs"),
             "pub fn test() {}",
         )
         .unwrap();
 
-        let analyzer = FolderAnalyzer::new(temp_dir.path(), 3);
+        let analyzer = FolderAnalyzer::new(&project_dir, 3);
         let folders = analyzer.analyze().unwrap();
 
         assert!(!folders.is_empty());

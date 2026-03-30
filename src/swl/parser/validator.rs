@@ -120,7 +120,11 @@ pub fn validate_document(doc: &SwlDocument) -> Vec<ValidationIssue> {
                 ));
             }
 
-            if export.path.as_deref().is_some_and(|path| path.trim().is_empty()) {
+            if export
+                .path
+                .as_deref()
+                .is_some_and(|path| path.trim().is_empty())
+            {
                 issues.push(ValidationIssue::new(
                     "telemetry.export.path",
                     "telemetry export path must not be empty",
@@ -288,7 +292,12 @@ fn validate_step(
         }
 
         for (idx, branch) in parallel.branches.iter().enumerate() {
-            validate_step(doc, branch, &format!("{path}.parallel.branches.{idx}"), issues);
+            validate_step(
+                doc,
+                branch,
+                &format!("{path}.parallel.branches.{idx}"),
+                issues,
+            );
         }
     }
 

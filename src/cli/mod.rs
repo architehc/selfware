@@ -85,7 +85,10 @@ fn workflow_llm_output_from_response(response: crate::api::ChatResponse) -> Resu
     let text = choice.message.content.text_all();
     let content = if !text.trim().is_empty() {
         text
-    } else if let Some(reasoning) = choice.reasoning_content.or(choice.message.reasoning_content) {
+    } else if let Some(reasoning) = choice
+        .reasoning_content
+        .or(choice.message.reasoning_content)
+    {
         reasoning
     } else {
         anyhow::bail!("model returned empty content");
@@ -117,10 +120,7 @@ fn print_workflow_telemetry(result: &crate::workflows::WorkflowResult) {
         "      Estimated cost: ~${:.4}",
         result.telemetry.estimated_cost_usd
     );
-    println!(
-        "      LLM latency: {}ms",
-        result.telemetry.llm_latency_ms
-    );
+    println!("      LLM latency: {}ms", result.telemetry.llm_latency_ms);
 }
 
 fn estimate_workflow_llm_cost_usd(prompt_tokens: usize, completion_tokens: usize) -> f64 {
@@ -201,7 +201,7 @@ fn build_workflow_llm_handler(
                             error = %err,
                             "workflow llm request failed"
                         );
-                        Err(err.into())
+                        Err(err)
                     }
                 }
             })
@@ -673,12 +673,12 @@ async fn handle_command(
                     "Command Center - SWL Workflow Monitoring".workshop_title()
                 );
             }
-            
+
             let _update_mode = match mode.as_str() {
                 "stream" => crate::observability::dashboard::command_center::UpdateMode::Streaming,
                 _ => crate::observability::dashboard::command_center::UpdateMode::Polling,
             };
-            
+
             crate::observability::dashboard::command_center::run_command_center().await?;
         }
 
@@ -1227,8 +1227,8 @@ async fn handle_command(
         }
 
         Commands::Workflow { command } => {
-            use args::WorkflowCommands;
             use crate::swl::{parse_document, validate_document};
+            use args::WorkflowCommands;
 
             if !quiet {
                 println!("{}", render_header(ctx));
@@ -1454,8 +1454,9 @@ async fn handle_command(
                                 );
 
                                 let working_dir = std::env::current_dir()?;
-                                let result =
-                                    executor.execute(&workflow_name, inputs, working_dir).await?;
+                                let result = executor
+                                    .execute(&workflow_name, inputs, working_dir)
+                                    .await?;
 
                                 match result.status {
                                     crate::workflows::WorkflowStatus::Completed => {

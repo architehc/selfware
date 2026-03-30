@@ -726,10 +726,9 @@ async fn test_llm_step_live_no_handler() {
 async fn test_llm_step_live_with_handler() {
     let mut ctx = WorkflowContext::new("/tmp");
     ctx.set_var("topic", "rust");
-    let executor =
-        WorkflowExecutor::new().with_llm_handler(|prompt: &str, context: &[String]| {
-            Ok(format!("LLM: {} ctx={:?}", prompt, context))
-        });
+    let executor = WorkflowExecutor::new().with_llm_handler(|prompt: &str, context: &[String]| {
+        Ok(format!("LLM: {} ctx={:?}", prompt, context))
+    });
     let step_type = StepType::Llm {
         prompt: "Explain ${topic}".into(),
         context: vec!["file.rs".into()],
@@ -1623,10 +1622,8 @@ steps:
     context:
       - "programming"
 "#;
-    let mut executor =
-        WorkflowExecutor::new().with_llm_handler(|prompt: &str, _ctx: &[String]| {
-            Ok(format!("Answer to: {}", prompt))
-        });
+    let mut executor = WorkflowExecutor::new()
+        .with_llm_handler(|prompt: &str, _ctx: &[String]| Ok(format!("Answer to: {}", prompt)));
     executor.load_yaml(yaml).unwrap();
 
     let result = executor
@@ -1661,10 +1658,8 @@ steps:
       - draft
 "#;
 
-    let mut executor =
-        WorkflowExecutor::new().with_llm_handler(|prompt: &str, _ctx: &[String]| {
-            Ok(prompt.to_string())
-        });
+    let mut executor = WorkflowExecutor::new()
+        .with_llm_handler(|prompt: &str, _ctx: &[String]| Ok(prompt.to_string()));
     executor.load_yaml(yaml).unwrap();
 
     let result = executor
@@ -1691,20 +1686,17 @@ steps:
     prompt: "status"
 "#;
 
-    let mut executor = WorkflowExecutor::new().with_llm_handler(
-        |_prompt: &str, _ctx: &[String]| {
-            Ok(
-                LlmCallOutput::text("ok")
-                    .with_model("test-model")
-                    .with_usage(LlmTokenUsage {
-                        prompt_tokens: 11,
-                        completion_tokens: 7,
-                        total_tokens: 18,
-                    })
-                    .with_estimated_cost(0.000138),
-            )
-        },
-    );
+    let mut executor =
+        WorkflowExecutor::new().with_llm_handler(|_prompt: &str, _ctx: &[String]| {
+            Ok(LlmCallOutput::text("ok")
+                .with_model("test-model")
+                .with_usage(LlmTokenUsage {
+                    prompt_tokens: 11,
+                    completion_tokens: 7,
+                    total_tokens: 18,
+                })
+                .with_estimated_cost(0.000138))
+        });
     executor.load_yaml(yaml).unwrap();
 
     let result = executor

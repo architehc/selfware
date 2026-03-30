@@ -4,10 +4,10 @@
 //! Ensures type safety and required field constraints.
 
 use crate::errors::SelfwareError;
-use std::result::Result as StdResult;
 use crate::swl::types::schema::{FieldType, StateField, StateSchema};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::result::Result as StdResult;
 
 /// Validation error for state values
 #[derive(Debug, Clone)]
@@ -167,13 +167,11 @@ pub fn validate_field(
     field: &StateField,
 ) -> std::result::Result<(), ValidationError> {
     // Check if required field is present
-    if field.default.is_none() {
-        if !state.contains_key(&field.name) {
-            return Err(ValidationError {
-                field: field.name.clone(),
-                message: "Required field is missing".to_string(),
-            });
-        }
+    if field.default.is_none() && !state.contains_key(&field.name) {
+        return Err(ValidationError {
+            field: field.name.clone(),
+            message: "Required field is missing".to_string(),
+        });
     }
 
     // Validate type if present
@@ -190,10 +188,7 @@ pub fn validate_field(
 }
 
 /// Apply schema defaults to a state value (mutable)
-pub fn apply_defaults(
-    state: &mut HashMap<String, Value>,
-    schema: &StateSchema,
-) {
+pub fn apply_defaults(state: &mut HashMap<String, Value>, schema: &StateSchema) {
     for field in &schema.fields {
         if !state.contains_key(&field.name) {
             if let Some(ref default) = field.default {
@@ -206,17 +201,12 @@ pub fn apply_defaults(
 }
 
 /// Convert YAML value to JSON value
-fn yaml_to_json(
-    value: &serde_yaml::Value,
-) -> std::result::Result<Value, serde_json::Error> {
+fn yaml_to_json(value: &serde_yaml::Value) -> std::result::Result<Value, serde_json::Error> {
     serde_json::to_value(value)
 }
 
 /// Check if a value satisfies a field's constraints
-pub fn satisfies_constraints(
-    value: &Value,
-    field: &StateField,
-) -> std::result::Result<(), String> {
+pub fn satisfies_constraints(value: &Value, field: &StateField) -> std::result::Result<(), String> {
     // Type check
     validate_value_type(value, &field.field_type)?;
 
@@ -261,7 +251,7 @@ pub fn get_validation_issues(
 }
 
 /// Validate state transitions
-/// 
+///
 /// Checks that a state transition is valid (e.g., required fields aren't removed)
 pub fn validate_state_transition(
     old_state: &HashMap<String, Value>,
@@ -270,13 +260,14 @@ pub fn validate_state_transition(
 ) -> StdResult<(), SelfwareError> {
     // Check that required fields weren't removed
     for field in &schema.fields {
-        if field.default.is_none() {
-            if old_state.contains_key(&field.name) && !new_state.contains_key(&field.name) {
-                return Err(SelfwareError::Internal(format!(
-                    "State transition invalid: required field '{}' was removed",
-                    field.name
-                )));
-            }
+        if field.default.is_none()
+            && old_state.contains_key(&field.name)
+            && !new_state.contains_key(&field.name)
+        {
+            return Err(SelfwareError::Internal(format!(
+                "State transition invalid: required field '{}' was removed",
+                field.name
+            )));
         }
     }
 
@@ -309,13 +300,13 @@ mod tests {
     fn test_validate_integer() {
         assert!(validate_value_type(&serde_json::json!(42), &FieldType::Integer).is_ok());
         assert!(validate_value_type(&serde_json::json!(-10), &FieldType::Integer).is_ok());
-        assert!(validate_value_type(&serde_json::json!(3.14), &FieldType::Integer).is_err());
+        assert!(validate_value_type(&serde_json::json!(3.15), &FieldType::Integer).is_err());
         assert!(validate_value_type(&serde_json::json!("42"), &FieldType::Integer).is_err());
     }
 
     #[test]
     fn test_validate_float() {
-        assert!(validate_value_type(&serde_json::json!(3.14), &FieldType::Float).is_ok());
+        assert!(validate_value_type(&serde_json::json!(3.15), &FieldType::Float).is_ok());
         assert!(validate_value_type(&serde_json::json!(42), &FieldType::Float).is_ok()); // Integers are valid floats
         assert!(validate_value_type(&serde_json::json!("3.14"), &FieldType::Float).is_err());
     }
@@ -330,33 +321,31 @@ mod tests {
     #[test]
     fn test_validate_array() {
         let string_array = FieldType::Array(Box::new(FieldType::String));
-        assert!(
-            validate_value_type(&serde_json::json!(["a", "b", "c"]), &string_array).is_ok()
-        );
-        assert!(
-            validate_value_type(&serde_json::json!([]), &string_array).is_ok()
-        );
-        assert!(
-            validate_value_type(&serde_json::json!(["a", 1, "c"]), &string_array).is_err()
-        );
+        assert!(validate_value_type(&serde_json::json!(["a", "b", "c"]), &string_array).is_ok());
+        assert!(validate_value_type(&serde_json::json!([]), &string_array).is_ok());
+        assert!(validate_value_type(&serde_json::json!(["a", 1, "c"]), &string_array).is_err());
 
         let int_array = FieldType::Array(Box::new(FieldType::Integer));
-        assert!(
-            validate_value_type(&serde_json::json!([1, 2, 3]), &int_array).is_ok()
-        );
+        assert!(validate_value_type(&serde_json::json!([1, 2, 3]), &int_array).is_ok());
     }
 
     #[test]
     fn test_validate_object() {
-        assert!(
-            validate_value_type(&serde_json::json!({"key": "value"}), &FieldType::Object(std::collections::HashMap::new())).is_ok()
-        );
-        assert!(
-            validate_value_type(&serde_json::json!({}), &FieldType::Object(std::collections::HashMap::new())).is_ok()
-        );
-        assert!(
-            validate_value_type(&serde_json::json!("not an object"), &FieldType::Object(std::collections::HashMap::new())).is_err()
-        );
+        assert!(validate_value_type(
+            &serde_json::json!({"key": "value"}),
+            &FieldType::Object(std::collections::HashMap::new())
+        )
+        .is_ok());
+        assert!(validate_value_type(
+            &serde_json::json!({}),
+            &FieldType::Object(std::collections::HashMap::new())
+        )
+        .is_ok());
+        assert!(validate_value_type(
+            &serde_json::json!("not an object"),
+            &FieldType::Object(std::collections::HashMap::new())
+        )
+        .is_err());
     }
 
     #[test]

@@ -187,7 +187,7 @@ impl ToolRegistry {
     /// (set by `init_safety_config()` during agent startup). If the global has
     /// not been initialized, they use `SafetyConfig::default()`.
     ///
-    /// Prefer [`with_safety_config`] for production use so each tool carries
+    /// Prefer [`Self::with_safety_config`] for production use so each tool carries
     /// its own config and doesn't depend on ambient global state.
     pub fn new() -> Self {
         Self::with_safety_config(None)

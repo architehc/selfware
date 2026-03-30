@@ -6,16 +6,10 @@ use serde::{de::Error as DeError, Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 
 /// State schema definition
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct StateSchema {
     #[serde(default)]
     pub fields: Vec<StateField>,
-}
-
-impl Default for StateSchema {
-    fn default() -> Self {
-        Self { fields: vec![] }
-    }
 }
 
 impl StateSchema {
@@ -125,10 +119,11 @@ impl<'de> Deserialize<'de> for StateField {
 }
 
 /// Field type enumeration
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FieldType {
     /// String value
+    #[default]
     String,
     /// Integer value
     Integer,
@@ -179,11 +174,6 @@ impl<'de> Deserialize<'de> for FieldType {
     }
 }
 
-impl Default for FieldType {
-    fn default() -> Self {
-        Self::String
-    }
-}
 
 impl FieldType {
     /// Get the type name as a string

@@ -43,7 +43,7 @@ impl std::fmt::Display for GuardrailType {
 
 impl GuardrailType {
     /// Parse from string representation
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s {
             "pre_agent" => Some(GuardrailType::PreAgent),
             "post_agent" => Some(GuardrailType::PostAgent),
@@ -98,7 +98,7 @@ impl std::fmt::Display for ViolationAction {
 
 impl ViolationAction {
     /// Parse from string representation
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s {
             "block" => Some(ViolationAction::Block),
             "warn" => Some(ViolationAction::Warn),
@@ -110,20 +110,15 @@ impl ViolationAction {
 }
 
 /// Logical operator for combining conditions
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum LogicalOperator {
     /// All conditions must be true
     #[serde(rename = "and")]
+    #[default]
     And,
     /// At least one condition must be true
     #[serde(rename = "or")]
     Or,
-}
-
-impl Default for LogicalOperator {
-    fn default() -> Self {
-        LogicalOperator::And
-    }
 }
 
 /// A condition that can be evaluated
@@ -133,10 +128,7 @@ pub enum Condition {
     /// Simple inline expression
     Inline(String),
     /// Code block in a specific language
-    Code {
-        language: String,
-        content: String,
-    },
+    Code { language: String, content: String },
     /// Composite condition with logical operator
     Composite {
         operator: LogicalOperator,
@@ -168,24 +160,19 @@ pub struct GuardrailDef {
 }
 
 /// Severity level for guardrail violations
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub enum GuardrailSeverity {
     #[serde(rename = "info")]
     Info,
     #[serde(rename = "low")]
     Low,
     #[serde(rename = "medium")]
+    #[default]
     Medium,
     #[serde(rename = "high")]
     High,
     #[serde(rename = "critical")]
     Critical,
-}
-
-impl Default for GuardrailSeverity {
-    fn default() -> Self {
-        GuardrailSeverity::Medium
-    }
 }
 
 impl std::fmt::Display for GuardrailSeverity {
@@ -228,16 +215,25 @@ impl GuardrailContext {
     }
 
     /// Add state value
-    pub fn with_state(mut self, key: impl Into<String>, value: impl Into<serde_json::Value>) -> Self {
+    pub fn with_state(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<serde_json::Value>,
+    ) -> Self {
         self.state.insert(key.into(), value.into());
         self
     }
 
     /// Add agent output
-    pub fn with_agent_output(mut self, agent: impl Into<String>, output: impl Into<String>) -> Self {
+    pub fn with_agent_output(
+        mut self,
+        agent: impl Into<String>,
+        output: impl Into<String>,
+    ) -> Self {
         let agent_name = agent.into();
         let output_str = output.into();
-        self.agent_outputs.insert(agent_name.clone(), output_str.clone());
+        self.agent_outputs
+            .insert(agent_name.clone(), output_str.clone());
         self.current_agent = Some(agent_name);
         self.agent_output = Some(output_str);
         self
@@ -268,7 +264,11 @@ impl GuardrailContext {
     }
 
     /// Add workflow input
-    pub fn with_workflow_input(mut self, key: impl Into<String>, value: impl Into<serde_json::Value>) -> Self {
+    pub fn with_workflow_input(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<serde_json::Value>,
+    ) -> Self {
         self.workflow_inputs.insert(key.into(), value.into());
         self
     }
@@ -276,11 +276,20 @@ impl GuardrailContext {
     /// Convert to JSON for condition evaluation
     pub fn to_json(&self) -> serde_json::Value {
         let mut map = serde_json::Map::new();
-        
-        map.insert("state".to_string(), serde_json::to_value(&self.state).unwrap_or_default());
-        map.insert("agent_outputs".to_string(), serde_json::to_value(&self.agent_outputs).unwrap_or_default());
-        map.insert("workflow_inputs".to_string(), serde_json::to_value(&self.workflow_inputs).unwrap_or_default());
-        
+
+        map.insert(
+            "state".to_string(),
+            serde_json::to_value(&self.state).unwrap_or_default(),
+        );
+        map.insert(
+            "agent_outputs".to_string(),
+            serde_json::to_value(&self.agent_outputs).unwrap_or_default(),
+        );
+        map.insert(
+            "workflow_inputs".to_string(),
+            serde_json::to_value(&self.workflow_inputs).unwrap_or_default(),
+        );
+
         if let Some(agent) = &self.current_agent {
             map.insert("current_agent".to_string(), agent.clone().into());
         }
@@ -296,7 +305,7 @@ impl GuardrailContext {
         if let Some(output) = &self.agent_output {
             map.insert("agent_output".to_string(), output.clone().into());
         }
-        
+
         serde_json::Value::Object(map)
     }
 }
@@ -368,9 +377,9 @@ pub struct GuardrailSummary {
 impl GuardrailSummary {
     /// Check if any violations should block execution
     pub fn should_block(&self) -> bool {
-        self.outcomes.iter().any(|o| {
-            matches!(o.action, ViolationAction::Block) && o.result.is_fail()
-        })
+        self.outcomes
+            .iter()
+            .any(|o| matches!(o.action, ViolationAction::Block) && o.result.is_fail())
     }
 
     /// Get all blocking violations
@@ -428,20 +437,41 @@ mod tests {
 
     #[test]
     fn test_guardrail_type_from_str() {
-        assert_eq!(GuardrailType::from_str("pre_agent"), Some(GuardrailType::PreAgent));
-        assert_eq!(GuardrailType::from_str("post_agent"), Some(GuardrailType::PostAgent));
-        assert_eq!(GuardrailType::from_str("pre_tool"), Some(GuardrailType::PreTool));
-        assert_eq!(GuardrailType::from_str("post_tool"), Some(GuardrailType::PostTool));
-        assert_eq!(GuardrailType::from_str("unknown"), None);
+        assert_eq!(
+            GuardrailType::parse_str("pre_agent"),
+            Some(GuardrailType::PreAgent)
+        );
+        assert_eq!(
+            GuardrailType::parse_str("post_agent"),
+            Some(GuardrailType::PostAgent)
+        );
+        assert_eq!(
+            GuardrailType::parse_str("pre_tool"),
+            Some(GuardrailType::PreTool)
+        );
+        assert_eq!(
+            GuardrailType::parse_str("post_tool"),
+            Some(GuardrailType::PostTool)
+        );
+        assert_eq!(GuardrailType::parse_str("unknown"), None);
     }
 
     #[test]
     fn test_violation_action_from_str() {
-        assert_eq!(ViolationAction::from_str("block"), Some(ViolationAction::Block));
-        assert_eq!(ViolationAction::from_str("warn"), Some(ViolationAction::Warn));
-        assert_eq!(ViolationAction::from_str("log"), Some(ViolationAction::Log));
-        assert_eq!(ViolationAction::from_str("alert"), Some(ViolationAction::Alert));
-        assert_eq!(ViolationAction::from_str("unknown"), None);
+        assert_eq!(
+            ViolationAction::parse_str("block"),
+            Some(ViolationAction::Block)
+        );
+        assert_eq!(
+            ViolationAction::parse_str("warn"),
+            Some(ViolationAction::Warn)
+        );
+        assert_eq!(ViolationAction::parse_str("log"), Some(ViolationAction::Log));
+        assert_eq!(
+            ViolationAction::parse_str("alert"),
+            Some(ViolationAction::Alert)
+        );
+        assert_eq!(ViolationAction::parse_str("unknown"), None);
     }
 
     #[test]
@@ -460,23 +490,28 @@ mod tests {
     fn test_evaluation_result() {
         assert!(EvaluationResult::Pass.is_pass());
         assert!(!EvaluationResult::Pass.is_fail());
-        
-        let fail = EvaluationResult::Fail { reason: "test".to_string() };
+
+        let fail = EvaluationResult::Fail {
+            reason: "test".to_string(),
+        };
         assert!(fail.is_fail());
         assert!(!fail.is_pass());
-        
-        let error = EvaluationResult::Error { message: "error".to_string() };
+
+        let error = EvaluationResult::Error {
+            message: "error".to_string(),
+        };
         assert!(error.is_error());
     }
 
     #[test]
     fn test_guardrail_summary() {
-        let mut summary = GuardrailSummary::default();
-        summary.blocked = 1;
+        let mut summary = GuardrailSummary { blocked: 1, ..Default::default() };
         summary.outcomes.push(GuardrailOutcome {
             guardrail_name: "test".to_string(),
             guardrail_type: GuardrailType::PreAgent,
-            result: EvaluationResult::Fail { reason: "test".to_string() },
+            result: EvaluationResult::Fail {
+                reason: "test".to_string(),
+            },
             action: ViolationAction::Block,
             timestamp: std::time::Instant::now(),
             evaluation_duration_ms: 10,

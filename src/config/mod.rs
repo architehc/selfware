@@ -4,15 +4,15 @@
 //!
 //! Submodules:
 //! - [`model`]: RedactedString, ModelProfile
-//! - [`agent`]: AgentConfig (iteration limits, token budgets, etc.)
-//! - [`safety`]: SafetyConfig (allowed/denied paths, protected branches)
+//! - [`agent`][]: AgentConfig (iteration limits, token budgets, etc.)
+//! - [`safety`][]: SafetyConfig (allowed/denied paths, protected branches)
 //! - [`types`]: ExecutionMode, UiConfig, ContinuousWorkConfig, RetrySettings,
 //!   YoloFileConfig, EvolutionTomlConfig
 //! - [`api_key`]: Keyring integration, endpoint validation
-//! - [`loader`]: Config::load() and normalization
-//! - [`validation`]: Config::validate()
+//! - `loader`: Config::load() and normalization
+//! - `validation`: Config::validate()
 //! - [`auto_config`]: Automatic configuration generation
-//! - [`resources`]: ResourcesConfig
+//! - [`resources`][]: ResourcesConfig
 
 pub mod agent;
 pub mod api_key;

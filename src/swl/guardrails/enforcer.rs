@@ -51,13 +51,16 @@ impl GuardrailEnforcer {
             if let Some(guardrail_type) = guardrail
                 .guardrail_type
                 .as_ref()
-                .and_then(|t| GuardrailType::from_str(t))
+                .and_then(|t| GuardrailType::parse_str(t))
             {
                 let def = GuardrailDef {
-                    name: guardrail.name.clone().unwrap_or_else(|| "unnamed".to_string()),
+                    name: guardrail
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| "unnamed".to_string()),
                     guardrail_type,
                     condition: self.convert_condition(&guardrail.condition),
-                    on_violation: ViolationAction::from_str(&guardrail.on_violation)
+                    on_violation: ViolationAction::parse_str(&guardrail.on_violation)
                         .unwrap_or(ViolationAction::Log),
                     description: None,
                     severity: None,
@@ -71,10 +74,7 @@ impl GuardrailEnforcer {
                     );
                 }
 
-                self.guardrails
-                    .entry(guardrail_type)
-                    .or_default()
-                    .push(def);
+                self.guardrails.entry(guardrail_type).or_default().push(def);
             }
         }
     }
@@ -97,8 +97,12 @@ impl GuardrailEnforcer {
         let start = std::time::Instant::now();
         let mut summary = GuardrailSummary::default();
 
-        let guardrails = self.guardrails.get(&guardrail_type).cloned().unwrap_or_default();
-        
+        let guardrails = self
+            .guardrails
+            .get(&guardrail_type)
+            .cloned()
+            .unwrap_or_default();
+
         if guardrails.is_empty() {
             return Ok(summary);
         }
@@ -111,7 +115,7 @@ impl GuardrailEnforcer {
 
         for guardrail in &guardrails {
             let outcome = self.evaluate_guardrail(guardrail, context).await;
-            
+
             // Update summary
             summary.total_checked += 1;
             match &outcome.result {
@@ -126,7 +130,7 @@ impl GuardrailEnforcer {
                 }
                 EvaluationResult::Error { .. } => summary.errors += 1,
             }
-            
+
             summary.outcomes.push(outcome);
         }
 
@@ -138,7 +142,7 @@ impl GuardrailEnforcer {
 
         // Emit telemetry
         self.emit_telemetry(&summary, guardrail_type, context).await;
-        
+
         // Record metrics
         increment_guardrail_checks(summary.total_checked as u64);
         increment_guardrail_violations(summary.failed as u64);
@@ -153,7 +157,7 @@ impl GuardrailEnforcer {
         context: &GuardrailContext,
     ) -> Result<Option<Vec<GuardrailOutcome>>, SelfwareError> {
         let summary = self.check(guardrail_type, context).await?;
-        
+
         if summary.should_block() {
             Ok(Some(summary.outcomes))
         } else {
@@ -168,9 +172,11 @@ impl GuardrailEnforcer {
         context: &GuardrailContext,
     ) -> GuardrailOutcome {
         let start = std::time::Instant::now();
-        
-        let result = self.engine.evaluate_condition(&guardrail.condition, context);
-        
+
+        let result = self
+            .engine
+            .evaluate_condition(&guardrail.condition, context);
+
         let duration_ms = start.elapsed().as_millis() as u64;
 
         // Handle the action based on result
@@ -245,7 +251,9 @@ impl GuardrailEnforcer {
         context: &GuardrailContext,
     ) {
         let timestamp = chrono::Utc::now().to_rfc3339();
-        let workflow_name = context.state.get("workflow_name")
+        let workflow_name = context
+            .state
+            .get("workflow_name")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
@@ -280,7 +288,6 @@ impl GuardrailEnforcer {
         // Store events
         let mut stored = self.telemetry_events.lock().await;
         stored.extend(events.clone());
-
     }
 
     /// Get all telemetry events
@@ -344,7 +351,11 @@ fn increment_guardrail_violations(count: u64) {
 mod tests {
     use super::*;
 
-    fn create_test_guardrail(name: &str, guardrail_type: GuardrailType, condition: &str) -> GuardrailDef {
+    fn create_test_guardrail(
+        name: &str,
+        guardrail_type: GuardrailType,
+        condition: &str,
+    ) -> GuardrailDef {
         GuardrailDef {
             name: name.to_string(),
             guardrail_type,
@@ -403,21 +414,13 @@ mod tests {
     #[tokio::test]
     async fn test_enforcer_stats() {
         let mut enforcer = GuardrailEnforcer::new();
-        enforcer.register_guardrail(create_test_guardrail(
-            "g1",
-            GuardrailType::PreAgent,
-            "true",
-        ));
+        enforcer.register_guardrail(create_test_guardrail("g1", GuardrailType::PreAgent, "true"));
         enforcer.register_guardrail(create_test_guardrail(
             "g2",
             GuardrailType::PostAgent,
             "true",
         ));
-        enforcer.register_guardrail(create_test_guardrail(
-            "g3",
-            GuardrailType::PreAgent,
-            "true",
-        ));
+        enforcer.register_guardrail(create_test_guardrail("g3", GuardrailType::PreAgent, "true"));
 
         let stats = enforcer.get_stats();
         assert_eq!(stats.total_guardrails, 3);
@@ -440,17 +443,22 @@ mod tests {
         });
 
         // Test with critical output - should block
-        let ctx = GuardrailContext::new()
-            .with_agent_output("agent1", "Found [CRITICAL] security issue");
-        
-        let blocking = enforcer.should_block(GuardrailType::PostAgent, &ctx).await.unwrap();
+        let ctx =
+            GuardrailContext::new().with_agent_output("agent1", "Found [CRITICAL] security issue");
+
+        let blocking = enforcer
+            .should_block(GuardrailType::PostAgent, &ctx)
+            .await
+            .unwrap();
         assert!(blocking.is_some());
 
         // Test with safe output - should not block
-        let ctx = GuardrailContext::new()
-            .with_agent_output("agent1", "All checks passed");
-        
-        let blocking = enforcer.should_block(GuardrailType::PostAgent, &ctx).await.unwrap();
+        let ctx = GuardrailContext::new().with_agent_output("agent1", "All checks passed");
+
+        let blocking = enforcer
+            .should_block(GuardrailType::PostAgent, &ctx)
+            .await
+            .unwrap();
         assert!(blocking.is_none());
     }
 }

@@ -3,16 +3,11 @@
 //! Real-time monitoring dashboard for SWL workflows
 
 /// Dashboard update mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UpdateMode {
+    #[default]
     Polling,
     Streaming,
-}
-
-impl Default for UpdateMode {
-    fn default() -> Self {
-        UpdateMode::Polling
-    }
 }
 
 /// Run the command center dashboard

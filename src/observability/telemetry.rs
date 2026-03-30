@@ -490,7 +490,7 @@ pub fn start_prometheus_exporter(bind_addr: std::net::SocketAddr) -> anyhow::Res
         "selfware_workflow_llm_estimated_cost_usd",
         "Estimated workflow LLM request cost in USD"
     );
-    
+
     // Guardrail metrics
     metrics::describe_counter!(
         "swl_guardrail_checks_total",

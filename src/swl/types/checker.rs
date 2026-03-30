@@ -19,14 +19,12 @@ pub fn check_codegen_compatibility(doc: &SwlDocument) -> Vec<TypeIssue> {
     let mut issues = Vec::new();
 
     for (workflow_name, workflow) in &doc.workflows {
-        if let Some(reduce) = &workflow.reduce {
-            if let ReduceStage::Code(code) = reduce {
-                if code.language != CodeLanguage::Rust {
-                    issues.push(TypeIssue::new(
-                        format!("workflows.{workflow_name}.reduce.language"),
-                        "current Rust codegen only supports rust reduce blocks",
-                    ));
-                }
+        if let Some(ReduceStage::Code(code)) = &workflow.reduce {
+            if code.language != CodeLanguage::Rust {
+                issues.push(TypeIssue::new(
+                    format!("workflows.{workflow_name}.reduce.language"),
+                    "current Rust codegen only supports rust reduce blocks",
+                ));
             }
         }
     }

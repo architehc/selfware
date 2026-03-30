@@ -41,7 +41,7 @@ impl StateBackendType {
     }
 
     /// From string identifier
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "memory" => Some(StateBackendType::Memory),
             "file" => Some(StateBackendType::File {
@@ -138,7 +138,11 @@ impl StateBackend for FileBackend {
             ))
         })?;
 
-        debug!("Loaded state for '{}' from {}", workflow_name, path.display());
+        debug!(
+            "Loaded state for '{}' from {}",
+            workflow_name,
+            path.display()
+        );
         Ok(state)
     }
 
@@ -147,9 +151,8 @@ impl StateBackend for FileBackend {
         let temp_path = path.with_extension("tmp");
 
         // Write to temp file first for atomicity
-        let content = serde_json::to_string_pretty(state).map_err(|e| {
-            SelfwareError::Internal(format!("Failed to serialize state: {}", e))
-        })?;
+        let content = serde_json::to_string_pretty(state)
+            .map_err(|e| SelfwareError::Internal(format!("Failed to serialize state: {}", e)))?;
 
         tokio::fs::write(&temp_path, content).await.map_err(|e| {
             SelfwareError::Internal(format!(
@@ -183,7 +186,11 @@ impl StateBackend for FileBackend {
                     e
                 ))
             })?;
-            debug!("Deleted state for '{}' from {}", workflow_name, path.display());
+            debug!(
+                "Deleted state for '{}' from {}",
+                workflow_name,
+                path.display()
+            );
         }
 
         Ok(())
@@ -243,17 +250,19 @@ impl Default for MemoryBackend {
 #[async_trait]
 impl StateBackend for MemoryBackend {
     async fn load(&self, workflow_name: &str) -> Result<HashMap<String, Value>> {
-        let storage = self.storage.lock().map_err(|_| {
-            SelfwareError::Internal("Memory backend lock poisoned".to_string())
-        })?;
+        let storage = self
+            .storage
+            .lock()
+            .map_err(|_| SelfwareError::Internal("Memory backend lock poisoned".to_string()))?;
 
         Ok(storage.get(workflow_name).cloned().unwrap_or_default())
     }
 
     async fn save(&self, workflow_name: &str, state: &HashMap<String, Value>) -> Result<()> {
-        let mut storage = self.storage.lock().map_err(|_| {
-            SelfwareError::Internal("Memory backend lock poisoned".to_string())
-        })?;
+        let mut storage = self
+            .storage
+            .lock()
+            .map_err(|_| SelfwareError::Internal("Memory backend lock poisoned".to_string()))?;
 
         storage.insert(workflow_name.to_string(), state.clone());
         debug!("Saved state for '{}' to memory", workflow_name);
@@ -261,9 +270,10 @@ impl StateBackend for MemoryBackend {
     }
 
     async fn delete(&self, workflow_name: &str) -> Result<()> {
-        let mut storage = self.storage.lock().map_err(|_| {
-            SelfwareError::Internal("Memory backend lock poisoned".to_string())
-        })?;
+        let mut storage = self
+            .storage
+            .lock()
+            .map_err(|_| SelfwareError::Internal("Memory backend lock poisoned".to_string()))?;
 
         storage.remove(workflow_name);
         debug!("Deleted state for '{}' from memory", workflow_name);
@@ -280,9 +290,10 @@ impl StateBackend for MemoryBackend {
     }
 
     async fn list(&self) -> Result<Vec<String>> {
-        let storage = self.storage.lock().map_err(|_| {
-            SelfwareError::Internal("Memory backend lock poisoned".to_string())
-        })?;
+        let storage = self
+            .storage
+            .lock()
+            .map_err(|_| SelfwareError::Internal("Memory backend lock poisoned".to_string()))?;
 
         Ok(storage.keys().cloned().collect())
     }
@@ -301,13 +312,15 @@ pub struct RedisBackend {
 impl RedisBackend {
     /// Create a new Redis backend
     pub async fn new(url: &str, key_prefix: &str) -> Result<Self> {
-        let client = redis::Client::open(url).map_err(|e| {
-            SelfwareError::Internal(format!("Failed to connect to Redis: {}", e))
-        })?;
+        let client = redis::Client::open(url)
+            .map_err(|e| SelfwareError::Internal(format!("Failed to connect to Redis: {}", e)))?;
 
-        let conn = client.get_multiplexed_tokio_connection().await.map_err(|e| {
-            SelfwareError::Internal(format!("Failed to get Redis connection: {}", e))
-        })?;
+        let conn = client
+            .get_multiplexed_tokio_connection()
+            .await
+            .map_err(|e| {
+                SelfwareError::Internal(format!("Failed to get Redis connection: {}", e))
+            })?;
 
         Ok(Self {
             client: conn,
@@ -332,9 +345,7 @@ impl StateBackend for RedisBackend {
             .arg(&key)
             .query_async(&mut conn)
             .await
-            .map_err(|e| {
-                SelfwareError::Internal(format!("Redis GET failed: {}", e))
-            })?;
+            .map_err(|e| SelfwareError::Internal(format!("Redis GET failed: {}", e)))?;
 
         match data {
             Some(json) => {
@@ -351,18 +362,15 @@ impl StateBackend for RedisBackend {
         let key = self.full_key(workflow_name);
         let mut conn = self.client.clone();
 
-        let json = serde_json::to_string(state).map_err(|e| {
-            SelfwareError::Internal(format!("Failed to serialize state: {}", e))
-        })?;
+        let json = serde_json::to_string(state)
+            .map_err(|e| SelfwareError::Internal(format!("Failed to serialize state: {}", e)))?;
 
         redis::cmd("SET")
             .arg(&key)
             .arg(&json)
             .query_async(&mut conn)
             .await
-            .map_err(|e| {
-                SelfwareError::Internal(format!("Redis SET failed: {}", e))
-            })?;
+            .map_err(|e| SelfwareError::Internal(format!("Redis SET failed: {}", e)))?;
 
         debug!("Saved state for '{}' to Redis", workflow_name);
         Ok(())
@@ -376,9 +384,7 @@ impl StateBackend for RedisBackend {
             .arg(&key)
             .query_async(&mut conn)
             .await
-            .map_err(|e| {
-                SelfwareError::Internal(format!("Redis DEL failed: {}", e))
-            })?;
+            .map_err(|e| SelfwareError::Internal(format!("Redis DEL failed: {}", e)))?;
 
         debug!("Deleted state for '{}' from Redis", workflow_name);
         Ok(())
@@ -406,9 +412,7 @@ impl StateBackend for RedisBackend {
             .arg(&pattern)
             .query_async(&mut conn)
             .await
-            .map_err(|e| {
-                SelfwareError::Internal(format!("Redis KEYS failed: {}", e))
-            })?;
+            .map_err(|e| SelfwareError::Internal(format!("Redis KEYS failed: {}", e)))?;
 
         let prefix_len = self.key_prefix.len() + 1; // +1 for the colon
         let workflows: Vec<String> = keys
@@ -448,15 +452,15 @@ mod tests {
     #[test]
     fn test_backend_type_from_str() {
         assert!(matches!(
-            StateBackendType::from_str("memory"),
+            StateBackendType::parse_str("memory"),
             Some(StateBackendType::Memory)
         ));
         assert!(matches!(
-            StateBackendType::from_str("Memory"),
+            StateBackendType::parse_str("Memory"),
             Some(StateBackendType::Memory)
         ));
         assert!(matches!(
-            StateBackendType::from_str("file"),
+            StateBackendType::parse_str("file"),
             Some(StateBackendType::File { .. })
         ));
     }

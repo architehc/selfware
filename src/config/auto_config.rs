@@ -3,8 +3,8 @@
 //!
 //! Usage via CLI:
 //!   selfware auto-config --endpoint http://localhost:8000/v1 --toml
-//!   selfware auto-config --endpoint https://example.com/v1 --save
-//!   selfware auto-config --endpoint <url> --api-key <key> --save
+//!   selfware auto-config --endpoint <https://example.com/v1> --save
+//!   selfware auto-config --endpoint \<url\> --api-key \<key\> --save
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};

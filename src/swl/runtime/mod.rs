@@ -9,15 +9,15 @@
 use crate::api::{ApiClient, Message, ThinkingMode};
 use crate::errors::Result;
 use crate::observability::telemetry::{
-    add_tokens_processed, increment_api_requests, record_state_transition, record_success,
-    record_failure,
+    add_tokens_processed, increment_api_requests, record_failure, record_state_transition,
+    record_success,
 };
+use crate::orchestration::workflows::VarValue;
 use crate::swl::parser::ast::{AgentDefinition, SwlDocument, WorkflowDefinition, WorkflowType};
 use crate::swl::state::{StateBackendType, StateManager};
 use crate::swl::types::schema::StateSchema;
-use crate::orchestration::workflows::VarValue;
-use crate::tools::ToolRegistry;
 use crate::tool_parser::{parse_tool_calls, ParsedToolCall};
+use crate::tools::ToolRegistry;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -53,8 +53,9 @@ impl ExecutionContext {
         workflow_name: &str,
         backend_type: StateBackendType,
     ) -> Result<Self> {
-        let mut state_manager = StateManager::from_backend_type(backend_type, workflow_name).await?;
-        
+        let mut state_manager =
+            StateManager::from_backend_type(backend_type, workflow_name).await?;
+
         // Load existing state if available
         if let Err(e) = state_manager.load().await {
             warn!("Failed to load state for '{}': {}", workflow_name, e);
@@ -86,12 +87,12 @@ impl ExecutionContext {
 
     /// Get a state value as string (backward compatible)
     pub fn get(&self, key: &str) -> Option<String> {
-        self.state.get(key).and_then(|v| {
+        self.state.get(key).map(|v| {
             if let Some(s) = v.as_str() {
-                Some(s.to_string())
+                s.to_string()
             } else {
                 // Convert other types to string representation
-                Some(v.to_string())
+                v.to_string()
             }
         })
     }
@@ -165,10 +166,9 @@ impl ExecutionContext {
 
     /// Export state as JSON string
     pub fn export_json(&self) -> Result<String> {
-        serde_json::to_string_pretty(&self.state)
-            .map_err(|e| crate::errors::SelfwareError::Internal(
-                format!("Failed to serialize state: {}", e)
-            ))
+        serde_json::to_string_pretty(&self.state).map_err(|e| {
+            crate::errors::SelfwareError::Internal(format!("Failed to serialize state: {}", e))
+        })
     }
 }
 
@@ -298,7 +298,7 @@ impl SwlRuntime {
     ) -> Result<Self> {
         let tool_registry = Arc::new(ToolRegistry::new());
         let context = ExecutionContext::with_file_persistence(workflow_name).await?;
-        
+
         Ok(Self {
             client,
             tool_registry,
@@ -353,28 +353,19 @@ impl SwlRuntime {
         }
 
         // Find the workflow
-        let workflow = doc
-            .workflows
-            .get(workflow_name)
-            .ok_or_else(|| crate::errors::SelfwareError::Internal(format!(
+        let workflow = doc.workflows.get(workflow_name).ok_or_else(|| {
+            crate::errors::SelfwareError::Internal(format!(
                 "Workflow '{}' not found in document",
                 workflow_name
-            )))?;
+            ))
+        })?;
 
         // Execute based on workflow type
         let result = match workflow.workflow_type {
-            WorkflowType::Sequential => {
-                self.execute_sequential(doc, workflow).await
-            }
-            WorkflowType::Parallel => {
-                self.execute_parallel(doc, workflow).await
-            }
-            WorkflowType::MapReduce => {
-                self.execute_map_reduce(doc, workflow).await
-            }
-            WorkflowType::Conditional => {
-                self.execute_conditional(doc, workflow).await
-            }
+            WorkflowType::Sequential => self.execute_sequential(doc, workflow).await,
+            WorkflowType::Parallel => self.execute_parallel(doc, workflow).await,
+            WorkflowType::MapReduce => self.execute_map_reduce(doc, workflow).await,
+            WorkflowType::Conditional => self.execute_conditional(doc, workflow).await,
         };
 
         // Persist state after workflow execution
@@ -384,8 +375,9 @@ impl SwlRuntime {
 
         // Record workflow completion telemetry
         let duration_ms = workflow_start.elapsed().as_millis() as u64;
-        self.last_workflow_duration_ms.store(duration_ms, Ordering::Relaxed);
-        
+        self.last_workflow_duration_ms
+            .store(duration_ms, Ordering::Relaxed);
+
         match &result {
             Ok(_) => {
                 record_state_transition("executing_workflow", "completed");
@@ -457,8 +449,11 @@ impl SwlRuntime {
         let workflow_start = std::time::Instant::now();
 
         if self.dry_run {
-            for (agent_name, _) in &doc.agents {
-                println!("   [DRY-RUN] Would execute agent (parallel): {}", agent_name);
+            for agent_name in doc.agents.keys() {
+                println!(
+                    "   [DRY-RUN] Would execute agent (parallel): {}",
+                    agent_name
+                );
             }
             return Ok(ExecutionResult {
                 status: ExecutionStatus::Completed,
@@ -540,7 +535,10 @@ impl SwlRuntime {
                 if !self.dry_run {
                     let _reduce_output = self.execute_agent(&reduce_agent_name, agent).await?;
                 } else {
-                    println!("   [DRY-RUN] Would execute reduce agent: {}", reduce_agent_name);
+                    println!(
+                        "   [DRY-RUN] Would execute reduce agent: {}",
+                        reduce_agent_name
+                    );
                 }
             }
         }
@@ -567,7 +565,10 @@ impl SwlRuntime {
         // Then execute appropriate branch
         if let Some((first_agent_name, first_agent)) = doc.agents.iter().next() {
             let condition_result = if self.dry_run {
-                println!("   [DRY-RUN] Would check condition with agent: {}", first_agent_name);
+                println!(
+                    "   [DRY-RUN] Would check condition with agent: {}",
+                    first_agent_name
+                );
                 "true".to_string()
             } else {
                 self.execute_agent(first_agent_name, first_agent).await?
@@ -604,11 +605,7 @@ impl SwlRuntime {
     }
 
     /// Execute a single agent with tool support
-    async fn execute_agent(
-        &self,
-        name: &str,
-        agent: &AgentDefinition,
-    ) -> Result<String> {
+    async fn execute_agent(&self, name: &str, agent: &AgentDefinition) -> Result<String> {
         info!("Executing agent: {}", name);
 
         if self.dry_run {
@@ -617,23 +614,18 @@ impl SwlRuntime {
 
         // Get available tools for this agent
         let available_tools = self.get_agent_tools(agent);
-        
+
         // Build system prompt with tool definitions
         let system_prompt = self.build_system_prompt(agent, &available_tools);
-        
+
         // Build the initial user message from instruction
         let instruction = agent
             .instruction
             .clone()
             .unwrap_or_else(|| "Complete the task.".to_string());
 
-        let task_prompt = format!("{}", instruction);
-
         // Initialize conversation
-        let mut messages = vec![
-            Message::system(system_prompt),
-            Message::user(task_prompt),
-        ];
+        let mut messages = vec![Message::system(system_prompt), Message::user(instruction)];
 
         // Tool execution loop
         let mut final_response = String::new();
@@ -642,14 +634,17 @@ impl SwlRuntime {
         loop {
             iteration += 1;
             if iteration > self.max_tool_iterations {
-                warn!("Agent {} reached maximum tool iterations ({})", name, self.max_tool_iterations);
+                warn!(
+                    "Agent {} reached maximum tool iterations ({})",
+                    name, self.max_tool_iterations
+                );
                 final_response.push_str("\n[Note: Reached maximum tool iterations]");
                 break;
             }
 
             // Track inference latency
             let inference_start = std::time::Instant::now();
-            
+
             // Record API request telemetry
             increment_api_requests();
             let span = tracing::info_span!(
@@ -672,20 +667,12 @@ impl SwlRuntime {
             // Call LLM
             let response = self
                 .client
-                .chat(
-                    messages.clone(),
-                    tool_definitions,
-                    ThinkingMode::Disabled,
-                )
+                .chat(messages.clone(), tool_definitions, ThinkingMode::Disabled)
                 .await?;
 
-            let choice = response
-                .choices
-                .into_iter()
-                .next()
-                .ok_or_else(|| crate::errors::SelfwareError::Internal(
-                    "Model returned no choices".to_string()
-                ))?;
+            let choice = response.choices.into_iter().next().ok_or_else(|| {
+                crate::errors::SelfwareError::Internal("Model returned no choices".to_string())
+            })?;
 
             // Calculate inference latency
             let duration_ms = inference_start.elapsed().as_millis() as u64;
@@ -694,7 +681,7 @@ impl SwlRuntime {
             let tokens_in = response.usage.prompt_tokens as u32;
             let tokens_out = response.usage.completion_tokens as u32;
             let total_tokens = (tokens_in + tokens_out) as u64;
-            
+
             // Update span with telemetry data
             Span::current().record("duration_ms", duration_ms);
             Span::current().record("tokens_in", tokens_in);
@@ -725,7 +712,7 @@ impl SwlRuntime {
                     messages.push(Message {
                         role: "assistant".to_string(),
                         content: crate::api::types::MessageContent::Text(
-                            choice.message.content.text_all()
+                            choice.message.content.text_all(),
                         ),
                         reasoning_content: choice.message.reasoning_content.clone(),
                         tool_calls: Some(tool_calls.clone()),
@@ -736,7 +723,7 @@ impl SwlRuntime {
                     // Execute each tool call
                     for tool_call in &tool_calls {
                         let tool_result = self.execute_tool_call(tool_call, &available_tools).await;
-                        
+
                         let result_content = match tool_result {
                             Ok(result) => result.to_string(),
                             Err(e) => format!("Error: {}", e),
@@ -761,8 +748,10 @@ impl SwlRuntime {
 
                 // Execute each parsed tool call
                 for parsed_call in &parse_result.tool_calls {
-                    let tool_result = self.execute_parsed_tool_call(parsed_call, &available_tools).await;
-                    
+                    let tool_result = self
+                        .execute_parsed_tool_call(parsed_call, &available_tools)
+                        .await;
+
                     let result_content = match tool_result {
                         Ok(result) => result.to_string(),
                         Err(e) => format!("Error: {}", e),
@@ -771,8 +760,7 @@ impl SwlRuntime {
                     // Add tool response as a user message (since we don't have tool_call_id for parsed calls)
                     let tool_response = format!(
                         "Tool '{}' result:\n{}",
-                        parsed_call.tool_name,
-                        result_content
+                        parsed_call.tool_name, result_content
                     );
                     messages.push(Message::user(tool_response));
                 }
@@ -859,20 +847,23 @@ Wait for tool results before proceeding. When done, respond with plain text only
     }
 
     /// Build API-compatible tool definitions
-    fn build_tool_definitions(&self, tool_names: &[String]) -> Vec<crate::api::types::ToolDefinition> {
+    fn build_tool_definitions(
+        &self,
+        tool_names: &[String],
+    ) -> Vec<crate::api::types::ToolDefinition> {
         tool_names
             .iter()
             .filter_map(|name| {
-                self.tool_registry.get(name).map(|tool| {
-                    crate::api::types::ToolDefinition {
+                self.tool_registry
+                    .get(name)
+                    .map(|tool| crate::api::types::ToolDefinition {
                         def_type: "function".to_string(),
                         function: crate::api::types::FunctionDefinition {
                             name: tool.name().to_string(),
                             description: tool.description().to_string(),
                             parameters: tool.schema(),
                         },
-                    }
-                })
+                    })
             })
             .collect()
     }
@@ -894,9 +885,11 @@ Wait for tool results before proceeding. When done, respond with plain text only
 
         // Parse arguments
         let args: serde_json::Value = serde_json::from_str(&tool_call.function.arguments)?;
-        
+
         // Execute the tool
-        self.tool_registry.execute(&tool_call.function.name, args).await
+        self.tool_registry
+            .execute(&tool_call.function.name, args)
+            .await
     }
 
     /// Execute a parsed tool call from XML
@@ -915,7 +908,9 @@ Wait for tool results before proceeding. When done, respond with plain text only
         }
 
         // Execute the tool
-        self.tool_registry.execute(&parsed_call.tool_name, parsed_call.arguments.clone()).await
+        self.tool_registry
+            .execute(&parsed_call.tool_name, parsed_call.arguments.clone())
+            .await
     }
 
     /// Get execution context
@@ -931,45 +926,50 @@ Wait for tool results before proceeding. When done, respond with plain text only
     /// Get aggregated telemetry summary
     pub async fn get_telemetry_summary(&self) -> WorkflowTelemetry {
         let ctx = self.context.lock().await;
-        let mut summary = WorkflowTelemetry::default();
-        
-        summary.workflow_duration_ms = self.last_workflow_duration_ms.load(Ordering::Relaxed);
-        
+        let mut summary = WorkflowTelemetry {
+            workflow_duration_ms: self.last_workflow_duration_ms.load(Ordering::Relaxed),
+            ..Default::default()
+        };
+
         // Aggregate per-agent metrics
         for event in &ctx.trace {
-            let agent_metrics = summary.agent_metrics
+            let agent_metrics = summary
+                .agent_metrics
                 .entry(event.agent.clone())
                 .or_default();
-            
+
             agent_metrics.total_calls += 1;
             agent_metrics.total_tokens_in += event.tokens_in as u64;
             agent_metrics.total_tokens_out += event.tokens_out as u64;
             agent_metrics.total_latency_ms += event.duration_ms;
-            
+
             summary.total_tokens += (event.tokens_in + event.tokens_out) as u64;
             summary.total_api_calls += 1;
         }
-        
+
         // Calculate averages
-        for (_, metrics) in &mut summary.agent_metrics {
+        for metrics in summary.agent_metrics.values_mut() {
             if metrics.total_calls > 0 {
-                metrics.avg_latency_ms = metrics.total_latency_ms as f64 / metrics.total_calls as f64;
+                metrics.avg_latency_ms =
+                    metrics.total_latency_ms as f64 / metrics.total_calls as f64;
             }
         }
-        
+
         summary
     }
 
     /// Export telemetry data as JSON string
     pub async fn export_telemetry_json(&self) -> Result<String> {
         let summary = self.get_telemetry_summary().await;
-        
+
         // Build a serializable representation
         let export = TelemetryExport {
             workflow_duration_ms: summary.workflow_duration_ms,
             total_tokens: summary.total_tokens,
             total_api_calls: summary.total_api_calls,
-            agents: summary.agent_metrics.into_iter()
+            agents: summary
+                .agent_metrics
+                .into_iter()
                 .map(|(name, metrics)| AgentTelemetryExport {
                     name,
                     total_calls: metrics.total_calls,
@@ -980,11 +980,10 @@ Wait for tool results before proceeding. When done, respond with plain text only
                 })
                 .collect(),
         };
-        
-        serde_json::to_string_pretty(&export)
-            .map_err(|e| crate::errors::SelfwareError::Internal(format!(
-                "Failed to serialize telemetry: {}", e
-            )))
+
+        serde_json::to_string_pretty(&export).map_err(|e| {
+            crate::errors::SelfwareError::Internal(format!("Failed to serialize telemetry: {}", e))
+        })
     }
 
     /// Clear all telemetry data
@@ -1081,16 +1080,16 @@ mod tests {
     #[tokio::test]
     async fn test_telemetry_methods_with_dry_run() {
         let runtime = SwlRuntime::new_dry_run();
-        
+
         // Test get_execution_trace returns empty initially
         let trace = runtime.get_execution_trace().await;
         assert!(trace.is_empty());
-        
+
         // Test get_telemetry_summary returns default
         let summary = runtime.get_telemetry_summary().await;
         assert_eq!(summary.total_api_calls, 0);
         assert!(summary.agent_metrics.is_empty());
-        
+
         // Test get_agent_trace returns empty for non-existent agent
         let agent_trace = runtime.get_agent_trace("test_agent").await;
         assert!(agent_trace.is_empty());
@@ -1099,7 +1098,7 @@ mod tests {
     #[tokio::test]
     async fn test_clear_telemetry() {
         let runtime = SwlRuntime::new_dry_run();
-        
+
         // Add a synthetic event to the trace
         {
             let mut ctx = runtime.context.lock().await;
@@ -1112,14 +1111,14 @@ mod tests {
                 tokens_out: 20,
             });
         }
-        
+
         // Verify trace is not empty
         let trace = runtime.get_execution_trace().await;
         assert_eq!(trace.len(), 1);
-        
+
         // Clear telemetry
         runtime.clear_telemetry().await;
-        
+
         // Verify trace is empty
         let trace = runtime.get_execution_trace().await;
         assert!(trace.is_empty());
@@ -1128,7 +1127,7 @@ mod tests {
     #[tokio::test]
     async fn test_telemetry_summary_aggregation() {
         let runtime = SwlRuntime::new_dry_run();
-        
+
         // Add synthetic events to the trace
         {
             let mut ctx = runtime.context.lock().await;
@@ -1157,24 +1156,30 @@ mod tests {
                 tokens_out: 25,
             });
         }
-        
+
         // Get summary
         let summary = runtime.get_telemetry_summary().await;
-        
+
         // Verify totals
         assert_eq!(summary.total_api_calls, 3);
         assert_eq!(summary.total_tokens, 120); // (10+20) + (20+30) + (15+25)
-        
+
         // Verify agent1 metrics
-        let agent1 = summary.agent_metrics.get("agent1").expect("agent1 should exist");
+        let agent1 = summary
+            .agent_metrics
+            .get("agent1")
+            .expect("agent1 should exist");
         assert_eq!(agent1.total_calls, 2);
         assert_eq!(agent1.total_tokens_in, 30);
         assert_eq!(agent1.total_tokens_out, 50);
         assert_eq!(agent1.total_latency_ms, 300);
         assert_eq!(agent1.avg_latency_ms, 150.0);
-        
+
         // Verify agent2 metrics
-        let agent2 = summary.agent_metrics.get("agent2").expect("agent2 should exist");
+        let agent2 = summary
+            .agent_metrics
+            .get("agent2")
+            .expect("agent2 should exist");
         assert_eq!(agent2.total_calls, 1);
         assert_eq!(agent2.total_tokens_in, 15);
         assert_eq!(agent2.total_tokens_out, 25);
@@ -1185,7 +1190,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_agent_trace() {
         let runtime = SwlRuntime::new_dry_run();
-        
+
         // Add synthetic events
         {
             let mut ctx = runtime.context.lock().await;
@@ -1214,13 +1219,13 @@ mod tests {
                 tokens_out: 25,
             });
         }
-        
+
         // Get agent1 trace
         let agent1_trace = runtime.get_agent_trace("agent1").await;
         assert_eq!(agent1_trace.len(), 2);
         assert_eq!(agent1_trace[0].duration_ms, 100);
         assert_eq!(agent1_trace[1].duration_ms, 150);
-        
+
         // Get agent2 trace
         let agent2_trace = runtime.get_agent_trace("agent2").await;
         assert_eq!(agent2_trace.len(), 1);
@@ -1230,7 +1235,7 @@ mod tests {
     #[tokio::test]
     async fn test_export_telemetry_json() {
         let runtime = SwlRuntime::new_dry_run();
-        
+
         // Add a synthetic event
         {
             let mut ctx = runtime.context.lock().await;
@@ -1243,11 +1248,11 @@ mod tests {
                 tokens_out: 20,
             });
         }
-        
+
         // Export to JSON
         let json = runtime.export_telemetry_json().await;
         assert!(json.is_ok());
-        
+
         let json_str = json.unwrap();
         assert!(json_str.contains("test_agent"));
         assert!(json_str.contains("total_tokens"));
@@ -1264,7 +1269,7 @@ mod tests {
             tokens_in: 50,
             tokens_out: 100,
         };
-        
+
         assert_eq!(event.agent, "test_agent");
         assert_eq!(event.action, "llm_call");
         assert_eq!(event.duration_ms, 150);
@@ -1275,7 +1280,7 @@ mod tests {
     #[test]
     fn test_get_agent_tools() {
         let runtime = SwlRuntime::new_dry_run();
-        
+
         // Agent with specific tools
         let agent = AgentDefinition {
             model: crate::swl::parser::ast::ModelSpec::Simple("test-model".to_string()),
@@ -1285,7 +1290,7 @@ mod tests {
             output_key: None,
             sub_agents: vec![],
         };
-        
+
         let tools = runtime.get_agent_tools(&agent);
         assert_eq!(tools.len(), 2);
         assert!(tools.contains(&"file_read".to_string()));
@@ -1295,7 +1300,7 @@ mod tests {
     #[test]
     fn test_get_agent_tools_empty() {
         let runtime = SwlRuntime::new_dry_run();
-        
+
         // Agent with no tools
         let agent = AgentDefinition {
             model: crate::swl::parser::ast::ModelSpec::Simple("test-model".to_string()),
@@ -1305,7 +1310,7 @@ mod tests {
             output_key: None,
             sub_agents: vec![],
         };
-        
+
         let tools = runtime.get_agent_tools(&agent);
         assert!(tools.is_empty());
     }
@@ -1313,7 +1318,7 @@ mod tests {
     #[test]
     fn test_build_system_prompt_with_tools() {
         let runtime = SwlRuntime::new_dry_run();
-        
+
         let agent = AgentDefinition {
             model: crate::swl::parser::ast::ModelSpec::Simple("test-model".to_string()),
             role: Some("You are a coding assistant.".to_string()),
@@ -1322,10 +1327,10 @@ mod tests {
             output_key: None,
             sub_agents: vec![],
         };
-        
+
         let tools = vec!["file_read".to_string()];
         let prompt = runtime.build_system_prompt(&agent, &tools);
-        
+
         assert!(prompt.contains("You are a coding assistant."));
         assert!(prompt.contains("file_read"));
         assert!(prompt.contains("<tool>"));
@@ -1335,7 +1340,7 @@ mod tests {
     #[test]
     fn test_build_system_prompt_no_tools() {
         let runtime = SwlRuntime::new_dry_run();
-        
+
         let agent = AgentDefinition {
             model: crate::swl::parser::ast::ModelSpec::Simple("test-model".to_string()),
             role: Some("You are a helpful assistant.".to_string()),
@@ -1344,23 +1349,24 @@ mod tests {
             output_key: None,
             sub_agents: vec![],
         };
-        
+
         let tools: Vec<String> = vec![];
         let prompt = runtime.build_system_prompt(&agent, &tools);
-        
+
         assert_eq!(prompt, "You are a helpful assistant.");
     }
 
     #[test]
     fn test_build_tool_definitions() {
         let runtime = SwlRuntime::new_dry_run();
-        
+
         let tool_names = vec!["file_read".to_string(), "shell_exec".to_string()];
         let definitions = runtime.build_tool_definitions(&tool_names);
-        
+
         assert_eq!(definitions.len(), 2);
-        
-        let names: Vec<&str> = definitions.iter()
+
+        let names: Vec<&str> = definitions
+            .iter()
             .map(|d| d.function.name.as_str())
             .collect();
         assert!(names.contains(&"file_read"));
@@ -1370,18 +1376,17 @@ mod tests {
     #[test]
     fn test_build_tool_definitions_empty() {
         let runtime = SwlRuntime::new_dry_run();
-        
+
         let tool_names: Vec<String> = vec![];
         let definitions = runtime.build_tool_definitions(&tool_names);
-        
+
         assert!(definitions.is_empty());
     }
 
     #[test]
     fn test_max_tool_iterations_config() {
-        let runtime = SwlRuntime::new_dry_run()
-            .with_max_tool_iterations(100);
-        
+        let runtime = SwlRuntime::new_dry_run().with_max_tool_iterations(100);
+
         assert_eq!(runtime.max_tool_iterations, 100);
     }
 }

@@ -363,7 +363,10 @@ mod tests {
             classify_task("Why does this crash when I call allocate_tiers?"),
             TaskType::Read
         );
-        assert_eq!(classify_task("Debug the config loading issue"), TaskType::Read);
+        assert_eq!(
+            classify_task("Debug the config loading issue"),
+            TaskType::Read
+        );
         assert_eq!(classify_task("Diagnose the test failure"), TaskType::Read);
     }
 

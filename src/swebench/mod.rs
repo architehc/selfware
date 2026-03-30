@@ -1,7 +1,7 @@
 //! SWE-bench Pro Integration
 //!
 //! Testing framework for evaluating selfware on challenging software engineering tasks
-//! Reference: https://scaleapi.github.io/SWE-bench_Pro-os/
+//! Reference: <https://scaleapi.github.io/SWE-bench_Pro-os/>
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

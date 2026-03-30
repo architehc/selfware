@@ -300,7 +300,7 @@ pub(crate) enum Commands {
         /// Update mode: poll or stream
         #[arg(short, long, default_value = "poll")]
         mode: String,
-        
+
         /// Auto-refresh interval in milliseconds
         #[arg(short, long, default_value = "100")]
         refresh: u64,

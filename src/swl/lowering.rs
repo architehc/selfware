@@ -44,11 +44,7 @@ struct LoweringContext<'a> {
 }
 
 impl<'a> LoweringContext<'a> {
-    fn new(
-        doc: &'a SwlDocument,
-        workflow_name: &'a str,
-        workflow: &'a WorkflowDefinition,
-    ) -> Self {
+    fn new(doc: &'a SwlDocument, workflow_name: &'a str, workflow: &'a WorkflowDefinition) -> Self {
         let mut inputs = BTreeMap::new();
 
         if let Some(state) = &doc.state {
@@ -95,38 +91,26 @@ impl<'a> LoweringContext<'a> {
         let mut available = initial_available_vars(self.doc);
 
         let exit_ids = match self.workflow.workflow_type {
-            WorkflowType::Sequential => self.lower_sequential_steps(
-                &self.workflow.steps,
-                &[],
-                &mut available,
-                &mut steps,
-            )?,
-            WorkflowType::Parallel => self.lower_parallel_steps(
-                &self.workflow.steps,
-                &[],
-                &mut available,
-                &mut steps,
-            )?,
+            WorkflowType::Sequential => {
+                self.lower_sequential_steps(&self.workflow.steps, &[], &mut available, &mut steps)?
+            }
+            WorkflowType::Parallel => {
+                self.lower_parallel_steps(&self.workflow.steps, &[], &mut available, &mut steps)?
+            }
             WorkflowType::MapReduce => self.lower_map_reduce(&mut available, &mut steps)?,
             WorkflowType::Conditional => {
                 return Err(SelfwareError::Internal(format!(
                     "SWL workflow '{}' uses conditional type, which is not lowered yet",
                     self.workflow_name
-                ))
-                .into())
+                )))
             }
         };
 
         let mut current_exits = exit_ids;
 
         if let Some(merge) = &self.workflow.merge {
-            current_exits = self.lower_aggregate_stage(
-                merge,
-                current_exits,
-                &available,
-                &mut steps,
-                "merge",
-            )?;
+            current_exits =
+                self.lower_aggregate_stage(merge, current_exits, &available, &mut steps, "merge")?;
             self.record_agent_output(&merge.agent, &mut available);
         }
 
@@ -281,7 +265,10 @@ impl<'a> LoweringContext<'a> {
 
         if let Some(guard) = &step.guard {
             return Ok(self.lower_guard_warning(
-                &format!("step guard ({})", step.name.clone().unwrap_or_else(|| "unnamed".to_string())),
+                &format!(
+                    "step guard ({})",
+                    step.name.clone().unwrap_or_else(|| "unnamed".to_string())
+                ),
                 &guard.condition,
                 &guard.on_violation,
                 incoming.to_vec(),
@@ -292,8 +279,7 @@ impl<'a> LoweringContext<'a> {
         Err(SelfwareError::Internal(format!(
             "SWL step in workflow '{}' had no supported lowering shape",
             self.workflow_name
-        ))
-        .into())
+        )))
     }
 
     fn lower_delegate_step(
@@ -336,13 +322,13 @@ impl<'a> LoweringContext<'a> {
         steps.push(llm_step);
 
         let mut exits = vec![step_id.clone()];
-        
+
         // Always make the step_id available as an output so parallel workflows can capture results
         if !available.contains(&step_id) {
             available.push(step_id.clone());
         }
         self.outputs.insert(step_id.clone());
-        
+
         if let Some(output_key) = agent.output_key.as_deref() {
             exits = self.capture_output(output_key, &step_id, steps);
             if !available.contains(&output_key.to_string()) {
@@ -512,7 +498,13 @@ impl<'a> LoweringContext<'a> {
                 .name
                 .clone()
                 .unwrap_or_else(|| "unnamed_guardrail".to_string());
-            current = self.lower_guard_warning(&name, &guardrail.condition, &guardrail.on_violation, current, steps);
+            current = self.lower_guard_warning(
+                &name,
+                &guardrail.condition,
+                &guardrail.on_violation,
+                current,
+                steps,
+            );
         }
         current
     }
@@ -643,14 +635,21 @@ fn normalize_value(
             let mut rendered = Vec::new();
             for (key, value) in map {
                 let key = yaml_scalar_to_key(key).unwrap_or_else(|| "item".to_string());
-                rendered.push(format!("{}: {}", key, normalize_value(value, available, ctx)?));
+                rendered.push(format!(
+                    "{}: {}",
+                    key,
+                    normalize_value(value, available, ctx)?
+                ));
             }
             Ok(rendered.join("\n"))
         }
         serde_yaml::Value::Bool(b) => Ok(b.to_string()),
         serde_yaml::Value::Number(n) => Ok(n.to_string()),
         serde_yaml::Value::Null => Ok(String::new()),
-        _ => Ok(serde_yaml::to_string(value).unwrap_or_default().trim().to_string()),
+        _ => Ok(serde_yaml::to_string(value)
+            .unwrap_or_default()
+            .trim()
+            .to_string()),
     }
 }
 
@@ -849,8 +848,7 @@ fn jinja_regex() -> &'static Regex {
 fn default_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
     REGEX.get_or_init(|| {
-        Regex::new(r"^([A-Za-z0-9_]+)\s*\|\s*default\('([^']*)'\)$")
-            .expect("valid default regex")
+        Regex::new(r"^([A-Za-z0-9_]+)\s*\|\s*default\('([^']*)'\)$").expect("valid default regex")
     })
 }
 
@@ -925,6 +923,9 @@ mod tests {
             .iter()
             .find(|wf| wf.name == "main_flow")
             .unwrap();
-        assert!(workflow.steps.iter().any(|step| matches!(step.step_type, StepType::Log { .. })));
+        assert!(workflow
+            .steps
+            .iter()
+            .any(|step| matches!(step.step_type, StepType::Log { .. })));
     }
 }

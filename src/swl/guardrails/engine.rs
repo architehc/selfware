@@ -52,9 +52,10 @@ impl GuardrailEngine {
             Condition::Code { language, content } => {
                 self.evaluate_code_condition(language, content, context)
             }
-            Condition::Composite { operator, conditions } => {
-                self.evaluate_composite_condition(*operator, conditions, context)
-            }
+            Condition::Composite {
+                operator,
+                conditions,
+            } => self.evaluate_composite_condition(*operator, conditions, context),
         }
     }
 
@@ -67,8 +68,8 @@ impl GuardrailEngine {
         let expr = expr.trim();
 
         // Handle negation
-        if expr.starts_with('!') {
-            let inner = &expr[1..].trim();
+        if let Some(stripped) = expr.strip_prefix('!') {
+            let inner = &stripped.trim();
             match self.evaluate_inline_expression(inner, context) {
                 EvaluationResult::Pass => EvaluationResult::Fail {
                     reason: format!("Negated condition '{inner}' was true"),
@@ -187,10 +188,7 @@ impl GuardrailEngine {
                     }
                 }
                 EvaluationResult::Fail {
-                    reason: format!(
-                        "All OR conditions failed: {}",
-                        fail_reasons.join("; ")
-                    ),
+                    reason: format!("All OR conditions failed: {}", fail_reasons.join("; ")),
                 }
             }
         }
@@ -387,11 +385,7 @@ impl GuardrailEngine {
     }
 
     /// Evaluate Rust-like pseudocode
-    fn evaluate_rust_code(
-        &self,
-        code: &str,
-        context: &GuardrailContext,
-    ) -> EvaluationResult {
+    fn evaluate_rust_code(&self, code: &str, context: &GuardrailContext) -> EvaluationResult {
         // Convert Rust-like code to inline expressions
         // This is a simplified evaluator for common patterns
         let code = code.trim();
@@ -423,11 +417,7 @@ impl GuardrailEngine {
     }
 
     /// Evaluate JSON logic
-    fn evaluate_json_logic(
-        &self,
-        _logic: &str,
-        _context: &GuardrailContext,
-    ) -> EvaluationResult {
+    fn evaluate_json_logic(&self, _logic: &str, _context: &GuardrailContext) -> EvaluationResult {
         // TODO: Implement JSON Logic evaluation
         // For now, return error to indicate not implemented
         EvaluationResult::Error {
@@ -478,7 +468,10 @@ impl GuardrailEngine {
                 .get(1)
                 .and_then(|k| context.agent_outputs.get(*k))
                 .map(|s| serde_json::Value::String(s.clone())),
-            "workflow_inputs" => parts.get(1).and_then(|k| context.workflow_inputs.get(*k)).cloned(),
+            "workflow_inputs" => parts
+                .get(1)
+                .and_then(|k| context.workflow_inputs.get(*k))
+                .cloned(),
             "args" => {
                 // Special 'args' accessor for common patterns
                 if parts.len() >= 2 {
@@ -549,15 +542,13 @@ fn get_matches_pattern() -> &'static Regex {
 }
 
 fn get_comparison_pattern() -> &'static Regex {
-    COMPARISON_PATTERN.get_or_init(|| {
-        Regex::new(r"(\w+(?:\.\w+)*)\s*([><]=?)\s*(.+?)").expect("Invalid regex")
-    })
+    COMPARISON_PATTERN
+        .get_or_init(|| Regex::new(r"(\w+(?:\.\w+)*)\s*([><]=?)\s*(.+?)").expect("Invalid regex"))
 }
 
 fn get_equality_pattern() -> &'static Regex {
-    EQUALITY_PATTERN.get_or_init(|| {
-        Regex::new(r"(\w+(?:\.\w+)*)\s*([!=]=)\s*(.+?)").expect("Invalid regex")
-    })
+    EQUALITY_PATTERN
+        .get_or_init(|| Regex::new(r"(\w+(?:\.\w+)*)\s*([!=]=)\s*(.+?)").expect("Invalid regex"))
 }
 
 #[cfg(test)]
@@ -579,37 +570,26 @@ mod tests {
         let ctx = GuardrailContext::new()
             .with_agent_output("agent1", "This is a test output with [CRITICAL] issue");
 
-        let result = engine.evaluate_inline_expression(
-            "agent_output.contains('[CRITICAL]')",
-            &ctx,
-        );
+        let result = engine.evaluate_inline_expression("agent_output.contains('[CRITICAL]')", &ctx);
         assert!(result.is_pass(), "Should detect CRITICAL in output");
 
-        let result = engine.evaluate_inline_expression(
-            "agent_output.contains('[LOW]')",
-            &ctx,
-        );
+        let result = engine.evaluate_inline_expression("agent_output.contains('[LOW]')", &ctx);
         assert!(result.is_fail(), "Should not detect LOW in output");
     }
 
     #[test]
     fn test_evaluate_negation() {
         let engine = GuardrailEngine::new();
-        let ctx = GuardrailContext::new()
-            .with_agent_output("agent1", "safe output");
+        let ctx = GuardrailContext::new().with_agent_output("agent1", "safe output");
 
-        let result = engine.evaluate_inline_expression(
-            "!agent_output.contains('dangerous')",
-            &ctx,
-        );
+        let result = engine.evaluate_inline_expression("!agent_output.contains('dangerous')", &ctx);
         assert!(result.is_pass(), "Negation should work");
     }
 
     #[test]
     fn test_evaluate_comparison() {
         let engine = GuardrailEngine::new();
-        let ctx = GuardrailContext::new()
-            .with_state("count", 10);
+        let ctx = GuardrailContext::new().with_state("count", 10);
 
         let result = engine.evaluate_inline_expression("state.count > 5", &ctx);
         assert!(result.is_pass(), "10 > 5 should pass");
@@ -630,38 +610,29 @@ mod tests {
             Condition::Inline("state.count > 3".to_string()),
         ];
 
-        let result = engine.evaluate_composite_condition(
-            LogicalOperator::And,
-            &conditions,
-            &ctx,
-        );
+        let result = engine.evaluate_composite_condition(LogicalOperator::And, &conditions, &ctx);
         assert!(result.is_pass());
     }
 
     #[test]
     fn test_composite_or() {
         let engine = GuardrailEngine::new();
-        let ctx = GuardrailContext::new()
-            .with_agent_output("agent1", "test output");
+        let ctx = GuardrailContext::new().with_agent_output("agent1", "test output");
 
         let conditions = vec![
             Condition::Inline("agent_output.contains('missing')".to_string()),
             Condition::Inline("agent_output.contains('test')".to_string()),
         ];
 
-        let result = engine.evaluate_composite_condition(
-            LogicalOperator::Or,
-            &conditions,
-            &ctx,
-        );
+        let result = engine.evaluate_composite_condition(LogicalOperator::Or, &conditions, &ctx);
         assert!(result.is_pass());
     }
 
     #[test]
     fn test_evaluate_rust_code() {
         let engine = GuardrailEngine::new();
-        let ctx = GuardrailContext::new()
-            .with_agent_output("agent1", "[CRITICAL] Security issue found");
+        let ctx =
+            GuardrailContext::new().with_agent_output("agent1", "[CRITICAL] Security issue found");
 
         // Use a direct inline expression that the simplified evaluator can handle.
         // The evaluator resolves agent_output from context and checks .contains().
@@ -671,6 +642,9 @@ mod tests {
         "#;
 
         let result = engine.evaluate_rust_code(code, &ctx);
-        assert!(result.is_fail(), "Should detect CRITICAL in code evaluation");
+        assert!(
+            result.is_fail(),
+            "Should detect CRITICAL in code evaluation"
+        );
     }
 }

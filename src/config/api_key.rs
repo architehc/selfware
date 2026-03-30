@@ -48,7 +48,7 @@ pub fn save_api_key_to_keyring(api_key: &str) -> Result<()> {
 }
 
 /// Check whether an endpoint URL points to a local address.
-/// Local addresses include localhost, 127.0.0.1, [::1], and 0.0.0.0.
+/// Local addresses include localhost, 127.0.0.1, `[::1]`, and 0.0.0.0.
 /// These are safe to use over plain HTTP since traffic stays on the machine.
 pub fn is_local_endpoint(endpoint: &str) -> bool {
     // Extract host portion from the URL (after scheme, before port/path)

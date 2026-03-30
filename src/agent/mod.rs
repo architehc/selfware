@@ -808,11 +808,7 @@ To call a tool, use this EXACT XML structure:
             .files_at_level(context_map::ContextLevel::Full)
         {
             if let Some(content) = self.context_map.full_content(path) {
-                context_data.push_str(&format!(
-                    "\n--- {} ---\n{}\n",
-                    path.display(),
-                    content
-                ));
+                context_data.push_str(&format!("\n--- {} ---\n{}\n", path.display(), content));
             }
         }
 
@@ -836,10 +832,8 @@ To call a tool, use this EXACT XML structure:
         if context_data.is_empty() {
             for msg in &self.messages {
                 if msg.role == "tool" && msg.content.len() > 100 {
-                    context_data.push_str(&format!(
-                        "\n--- tool result ---\n{}\n",
-                        msg.content.text()
-                    ));
+                    context_data
+                        .push_str(&format!("\n--- tool result ---\n{}\n", msg.content.text()));
                 }
             }
         }

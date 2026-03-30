@@ -22,11 +22,11 @@
 //! - Tool integration (via handler injection)
 //! - Progress tracking
 
-use anyhow::{anyhow, Result};
-use serde::{Deserialize, Serialize};
 use crate::observability::telemetry::{
     add_tokens_processed, record_workflow_llm_call, record_workflow_run,
 };
+use anyhow::{anyhow, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -34,13 +34,13 @@ use std::time::{Duration, Instant};
 use tokio::process::Command;
 mod templates;
 #[cfg(test)]
-mod test_models;
-#[cfg(test)]
 mod test_context;
 #[cfg(test)]
-mod test_templates;
-#[cfg(test)]
 mod test_execution;
+#[cfg(test)]
+mod test_models;
+#[cfg(test)]
+mod test_templates;
 
 /// Workflow execution status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -737,9 +737,9 @@ impl WorkflowContext {
         self.telemetry.prompt_tokens += usage.prompt_tokens;
         self.telemetry.completion_tokens += usage.completion_tokens;
         self.telemetry.total_tokens += usage.total_tokens;
-        self.telemetry.estimated_cost_usd += output.estimated_cost_usd.unwrap_or_else(|| {
-            estimate_llm_cost_usd(usage.prompt_tokens, usage.completion_tokens)
-        });
+        self.telemetry.estimated_cost_usd += output
+            .estimated_cost_usd
+            .unwrap_or_else(|| estimate_llm_cost_usd(usage.prompt_tokens, usage.completion_tokens));
 
         if usage.total_tokens > 0 {
             add_tokens_processed(usage.total_tokens);

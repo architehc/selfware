@@ -4,17 +4,17 @@
 //! concurrency safety, and performance of the SWL runtime.
 
 use selfware::swl::{
-    parse_document, ExecutionContext, ExecutionStatus, StateBackendType, StateManager,
-    SwlDocument, SwlRuntime, WorkflowTelemetry,
+    parse_document, ExecutionContext, ExecutionStatus, StateBackendType, StateManager, SwlDocument,
+    SwlRuntime, WorkflowTelemetry,
 };
 use selfware::workflows::VarValue;
 use std::collections::HashMap;
 
-
 // Helper to create a simple test document
 fn create_test_document(workflow_type: &str) -> SwlDocument {
     let source = match workflow_type {
-        "sequential" => r#"
+        "sequential" => {
+            r#"
 version: "1.0"
 name: sequential_test
 agents:
@@ -29,8 +29,10 @@ agents:
 workflows:
   test_flow:
     type: sequential
-"#,
-        "parallel" => r#"
+"#
+        }
+        "parallel" => {
+            r#"
 version: "1.0"
 name: parallel_test
 agents:
@@ -45,8 +47,10 @@ agents:
 workflows:
   test_flow:
     type: parallel
-"#,
-        "conditional" => r#"
+"#
+        }
+        "conditional" => {
+            r#"
 version: "1.0"
 name: conditional_test
 agents:
@@ -61,8 +65,10 @@ agents:
 workflows:
   test_flow:
     type: conditional
-"#,
-        "map_reduce" => r#"
+"#
+        }
+        "map_reduce" => {
+            r#"
 version: "1.0"
 name: map_reduce_test
 agents:
@@ -82,7 +88,8 @@ workflows:
     reduce:
       language: rust
       code: "fn reduce() {}"
-"#,
+"#
+        }
         _ => panic!("Unknown workflow type"),
     };
 
@@ -111,7 +118,7 @@ fn test_execution_context_basic_operations() {
     // Test keys
     ctx.set("a".to_string(), "1".to_string());
     ctx.set("b".to_string(), "2".to_string());
-    let keys: Vec<_> = ctx.keys().into_iter().map(|s| s.clone()).collect();
+    let keys: Vec<_> = ctx.keys().into_iter().cloned().collect();
     assert!(keys.contains(&"a".to_string()));
     assert!(keys.contains(&"b".to_string()));
 }
@@ -224,7 +231,7 @@ async fn test_swl_runtime_telemetry_aggregation() {
 
     // Create a synthetic execution trace by directly accessing context
     {
-        let ctx = runtime.get_context().await;
+        let _ctx = runtime.get_context().await;
         // Add events manually through the runtime's internal trace
     }
 
@@ -291,7 +298,9 @@ async fn test_workflow_not_found() {
     let doc = create_test_document("sequential");
 
     let inputs: HashMap<String, VarValue> = HashMap::new();
-    let result = runtime.execute_workflow(&doc, "nonexistent_flow", inputs).await;
+    let result = runtime
+        .execute_workflow(&doc, "nonexistent_flow", inputs)
+        .await;
 
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
@@ -313,7 +322,10 @@ async fn test_state_persistence_integration() {
 
     // Set values
     manager
-        .set("persistent_key".to_string(), serde_json::json!("persistent_value"))
+        .set(
+            "persistent_key".to_string(),
+            serde_json::json!("persistent_value"),
+        )
         .expect("Set failed");
 
     // Save
@@ -343,7 +355,10 @@ async fn test_telemetry_clear_and_export() {
     let trace = runtime.get_execution_trace().await;
     assert!(trace.is_empty());
 
-    let json = runtime.export_telemetry_json().await.expect("Export failed");
+    let json = runtime
+        .export_telemetry_json()
+        .await
+        .expect("Export failed");
     assert!(json.contains("total_tokens"));
     assert!(json.contains("total_api_calls"));
 
@@ -390,7 +405,7 @@ workflows:
 
     let start = std::time::Instant::now();
     let result = runtime.execute_workflow(&doc, "test_flow", inputs).await;
-    let duration = start.elapsed();
+    let _duration = start.elapsed();
 
     assert!(result.is_ok());
     // In dry-run mode, should complete quickly regardless of agent count
@@ -476,7 +491,10 @@ workflows:
     let runtime = SwlRuntime::new_dry_run();
 
     let mut inputs: HashMap<String, VarValue> = HashMap::new();
-    inputs.insert("custom_input".to_string(), VarValue::String("custom_value".to_string()));
+    inputs.insert(
+        "custom_input".to_string(),
+        VarValue::String("custom_value".to_string()),
+    );
 
     let result = runtime.execute_workflow(&doc, "test_flow", inputs).await;
     assert!(result.is_ok());

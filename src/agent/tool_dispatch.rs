@@ -619,7 +619,10 @@ impl Agent {
         // The model has the data in context but can't produce a text answer.
         // A separate tool-free API call will synthesize the response.
         if read_count >= 3 && self.pending_synthesis.is_none() {
-            info!("Triggering phase-2 synthesis after {} suppressed rereads", read_count);
+            info!(
+                "Triggering phase-2 synthesis after {} suppressed rereads",
+                read_count
+            );
             // Extract the task description from the first user message
             let task = self
                 .messages

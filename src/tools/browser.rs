@@ -172,7 +172,9 @@ fn chrome_staging_output_path(requested_output: &Path) -> Result<PathBuf> {
     let base_dir = std::env::var_os("HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
-        .ok_or_else(|| anyhow::anyhow!("Failed to determine a staging directory for Chrome output"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("Failed to determine a staging directory for Chrome output")
+        })?;
 
     let file_name = requested_output
         .file_name()
@@ -216,7 +218,10 @@ async fn finalize_chrome_output_path(
 
     if let Some(staged_output) = staged_output {
         if tokio::fs::metadata(staged_output).await.is_ok() {
-            if let Some(parent) = requested_output.parent().filter(|p| !p.as_os_str().is_empty()) {
+            if let Some(parent) = requested_output
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+            {
                 tokio::fs::create_dir_all(parent).await.with_context(|| {
                     format!("Failed to create browser output dir {}", parent.display())
                 })?;
@@ -604,7 +609,8 @@ impl Tool for BrowserScreenshot {
             .get("output_path")
             .and_then(|v| v.as_str())
             .unwrap_or("/tmp/screenshot.png");
-        let (chrome_output_path, staged_output_path) = prepare_chrome_output_path(output_path).await?;
+        let (chrome_output_path, staged_output_path) =
+            prepare_chrome_output_path(output_path).await?;
 
         let width = args.get("width").and_then(|v| v.as_u64()).unwrap_or(1920);
         let height = args.get("height").and_then(|v| v.as_u64()).unwrap_or(1080);
@@ -792,7 +798,8 @@ impl Tool for BrowserPdf {
             .get("output_path")
             .and_then(|v| v.as_str())
             .unwrap_or("/tmp/page.pdf");
-        let (chrome_output_path, staged_output_path) = prepare_chrome_output_path(output_path).await?;
+        let (chrome_output_path, staged_output_path) =
+            prepare_chrome_output_path(output_path).await?;
 
         let timeout_secs = args
             .get("timeout_secs")
@@ -1559,7 +1566,9 @@ mod tests {
             staged.file_name().and_then(|name| name.to_str()),
             Some("chart-shot.png")
         );
-        assert!(staged.to_string_lossy().contains(".selfware/browser-output"));
+        assert!(staged
+            .to_string_lossy()
+            .contains(".selfware/browser-output"));
     }
 
     #[test]

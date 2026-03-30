@@ -2,11 +2,7 @@
 //!
 //! Integration tests for the guardrail enforcement system.
 
-use super::{
-    engine::GuardrailEngine,
-    enforcer::GuardrailEnforcer,
-    types::*,
-};
+use super::{enforcer::GuardrailEnforcer, engine::GuardrailEngine, types::*};
 use crate::swl::parser::ast::{CodeBlock, CodeLanguage, GuardCondition, Guardrail};
 
 /// Test helper to create a simple inline guardrail
@@ -51,7 +47,7 @@ fn create_code_guardrail(
 #[tokio::test]
 async fn test_pre_agent_guardrail_blocks_execution() {
     let mut enforcer = GuardrailEnforcer::new();
-    
+
     // Register a guardrail that always blocks
     enforcer.register_guardrail(create_inline_guardrail(
         "always_block",
@@ -60,8 +56,7 @@ async fn test_pre_agent_guardrail_blocks_execution() {
         ViolationAction::Block,
     ));
 
-    let ctx = GuardrailContext::new()
-        .with_current_agent("test_agent");
+    let ctx = GuardrailContext::new().with_current_agent("test_agent");
 
     let summary = enforcer.check(GuardrailType::PreAgent, &ctx).await.unwrap();
 
@@ -73,7 +68,7 @@ async fn test_pre_agent_guardrail_blocks_execution() {
 #[tokio::test]
 async fn test_post_agent_guardrail_detects_critical_issues() {
     let mut enforcer = GuardrailEnforcer::new();
-    
+
     // Register a guardrail that blocks on critical issues
     enforcer.register_guardrail(create_inline_guardrail(
         "block_critical",
@@ -86,16 +81,21 @@ async fn test_post_agent_guardrail_detects_critical_issues() {
     let ctx = GuardrailContext::new()
         .with_agent_output("agent1", "Found [CRITICAL] security vulnerability");
 
-    let summary = enforcer.check(GuardrailType::PostAgent, &ctx).await.unwrap();
+    let summary = enforcer
+        .check(GuardrailType::PostAgent, &ctx)
+        .await
+        .unwrap();
 
     assert!(summary.should_block());
     assert_eq!(summary.blocked, 1);
 
     // Test with safe output - should pass
-    let ctx = GuardrailContext::new()
-        .with_agent_output("agent1", "All checks passed successfully");
+    let ctx = GuardrailContext::new().with_agent_output("agent1", "All checks passed successfully");
 
-    let summary = enforcer.check(GuardrailType::PostAgent, &ctx).await.unwrap();
+    let summary = enforcer
+        .check(GuardrailType::PostAgent, &ctx)
+        .await
+        .unwrap();
 
     assert!(!summary.should_block());
     assert_eq!(summary.passed, 1);
@@ -104,7 +104,7 @@ async fn test_post_agent_guardrail_detects_critical_issues() {
 #[tokio::test]
 async fn test_pre_tool_guardrail_blocks_dangerous_commands() {
     let mut enforcer = GuardrailEnforcer::new();
-    
+
     // Register a guardrail that blocks rm -rf
     enforcer.register_guardrail(create_inline_guardrail(
         "no_rm_rf",
@@ -135,7 +135,7 @@ async fn test_pre_tool_guardrail_blocks_dangerous_commands() {
 #[tokio::test]
 async fn test_warn_action_does_not_block() {
     let mut enforcer = GuardrailEnforcer::new();
-    
+
     // Register a guardrail with warn action
     enforcer.register_guardrail(create_inline_guardrail(
         "warn_only",
@@ -144,10 +144,12 @@ async fn test_warn_action_does_not_block() {
         ViolationAction::Warn,
     ));
 
-    let ctx = GuardrailContext::new()
-        .with_agent_output("agent1", "some output");
+    let ctx = GuardrailContext::new().with_agent_output("agent1", "some output");
 
-    let summary = enforcer.check(GuardrailType::PostAgent, &ctx).await.unwrap();
+    let summary = enforcer
+        .check(GuardrailType::PostAgent, &ctx)
+        .await
+        .unwrap();
 
     // Should fail but not block
     assert!(!summary.should_block());
@@ -236,14 +238,12 @@ async fn test_state_based_conditions() {
 
     let condition = Condition::Inline("state.count > 5".to_string());
 
-    let ctx = GuardrailContext::new()
-        .with_state("count", 10);
+    let ctx = GuardrailContext::new().with_state("count", 10);
 
     let result = engine.evaluate_condition(&condition, &ctx);
     assert!(result.is_pass());
 
-    let ctx = GuardrailContext::new()
-        .with_state("count", 3);
+    let ctx = GuardrailContext::new().with_state("count", 3);
 
     let result = engine.evaluate_condition(&condition, &ctx);
     assert!(result.is_fail());
@@ -263,8 +263,7 @@ async fn test_no_secrets_in_output_guardrail() {
     };
 
     // Test with safe output — no secrets present, all checks pass
-    let ctx = GuardrailContext::new()
-        .with_agent_output("agent1", "The configuration is valid.");
+    let ctx = GuardrailContext::new().with_agent_output("agent1", "The configuration is valid.");
 
     let result = engine.evaluate_condition(&condition, &ctx);
     assert!(result.is_pass());
@@ -287,14 +286,12 @@ async fn test_regex_pattern_matching() {
         content: r"\[CRITICAL\]|\[HIGH\]".to_string(),
     };
 
-    let ctx = GuardrailContext::new()
-        .with_agent_output("agent1", "Found [HIGH] priority issue");
+    let ctx = GuardrailContext::new().with_agent_output("agent1", "Found [HIGH] priority issue");
 
     let result = engine.evaluate_condition(&condition, &ctx);
     assert!(result.is_pass()); // Regex matches, so condition passes
 
-    let ctx = GuardrailContext::new()
-        .with_agent_output("agent1", "All checks passed");
+    let ctx = GuardrailContext::new().with_agent_output("agent1", "All checks passed");
 
     let result = engine.evaluate_condition(&condition, &ctx);
     assert!(result.is_fail()); // Regex doesn't match, so condition fails
@@ -304,21 +301,21 @@ async fn test_regex_pattern_matching() {
 async fn test_enforcer_from_ast_guardrails() {
     let mut enforcer = GuardrailEnforcer::new();
 
-    let ast_guardrails = vec![
-        Guardrail {
-            name: Some("test_guardrail".to_string()),
-            guardrail_type: Some("post_agent".to_string()),
-            condition: GuardCondition::Inline("!agent_output.contains('ERROR')".to_string()),
-            on_violation: "block".to_string(),
-        },
-    ];
+    let ast_guardrails = vec![Guardrail {
+        name: Some("test_guardrail".to_string()),
+        guardrail_type: Some("post_agent".to_string()),
+        condition: GuardCondition::Inline("!agent_output.contains('ERROR')".to_string()),
+        on_violation: "block".to_string(),
+    }];
 
     enforcer.register_guardrails(&ast_guardrails);
 
-    let ctx = GuardrailContext::new()
-        .with_agent_output("agent1", "Something ERROR happened");
+    let ctx = GuardrailContext::new().with_agent_output("agent1", "Something ERROR happened");
 
-    let summary = enforcer.check(GuardrailType::PostAgent, &ctx).await.unwrap();
+    let summary = enforcer
+        .check(GuardrailType::PostAgent, &ctx)
+        .await
+        .unwrap();
 
     assert!(summary.should_block());
 }
@@ -326,7 +323,7 @@ async fn test_enforcer_from_ast_guardrails() {
 #[tokio::test]
 async fn test_guardrail_telemetry_collection() {
     let mut enforcer = GuardrailEnforcer::new();
-    
+
     enforcer.register_guardrail(create_inline_guardrail(
         "telemetry_test",
         GuardrailType::PreAgent,
@@ -334,8 +331,7 @@ async fn test_guardrail_telemetry_collection() {
         ViolationAction::Log,
     ));
 
-    let ctx = GuardrailContext::new()
-        .with_current_agent("test_agent");
+    let ctx = GuardrailContext::new().with_current_agent("test_agent");
 
     enforcer.check(GuardrailType::PreAgent, &ctx).await.unwrap();
 
@@ -373,13 +369,19 @@ async fn test_multiple_guardrail_types() {
 
     let ctx = GuardrailContext::new();
 
-    let pre_workflow_summary = enforcer.check(GuardrailType::PreWorkflow, &ctx).await.unwrap();
+    let pre_workflow_summary = enforcer
+        .check(GuardrailType::PreWorkflow, &ctx)
+        .await
+        .unwrap();
     assert_eq!(pre_workflow_summary.total_checked, 1);
 
     let pre_agent_summary = enforcer.check(GuardrailType::PreAgent, &ctx).await.unwrap();
     assert_eq!(pre_agent_summary.total_checked, 1);
 
-    let post_agent_summary = enforcer.check(GuardrailType::PostAgent, &ctx).await.unwrap();
+    let post_agent_summary = enforcer
+        .check(GuardrailType::PostAgent, &ctx)
+        .await
+        .unwrap();
     assert_eq!(post_agent_summary.total_checked, 1);
 }
 

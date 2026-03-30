@@ -713,7 +713,7 @@ mod tests {
 
         let pct = alloc.utilization_pct();
         assert!(
-            pct >= 0.0 && pct <= 100.0,
+            (0.0..=100.0).contains(&pct),
             "utilization {} out of range",
             pct
         );

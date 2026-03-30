@@ -90,18 +90,14 @@ impl StateManager {
     ) -> Result<Self> {
         #[cfg(feature = "redis")]
         match backend_type {
-            StateBackendType::File { base_dir } => {
-                Self::new_file_based(workflow_name, base_dir)
-            }
+            StateBackendType::File { base_dir } => Self::new_file_based(workflow_name, base_dir),
             StateBackendType::Memory => Ok(Self::new_memory(workflow_name)),
             StateBackendType::Redis { url } => Self::new_redis(workflow_name, &url).await,
         }
 
         #[cfg(not(feature = "redis"))]
         match backend_type {
-            StateBackendType::File { base_dir } => {
-                Self::new_file_based(workflow_name, base_dir)
-            }
+            StateBackendType::File { base_dir } => Self::new_file_based(workflow_name, base_dir),
             StateBackendType::Memory => Ok(Self::new_memory(workflow_name)),
         }
     }
@@ -121,9 +117,9 @@ impl StateManager {
     /// Load state from the backend
     pub async fn load(&mut self) -> Result<()> {
         debug!("Loading state for workflow: {}", self.workflow_name);
-        
+
         let state = self.backend.load(&self.workflow_name).await?;
-        
+
         // Validate against schema if present
         if let Some(ref schema) = self.schema {
             if let Err(e) = validation::validate_state_against_schema(&state, schema) {
@@ -131,11 +127,15 @@ impl StateManager {
                 // Continue with defaults applied
             }
         }
-        
+
         self.cache = state;
         self.dirty = false;
-        
-        info!("Loaded state for '{}' with {} fields", self.workflow_name, self.cache.len());
+
+        info!(
+            "Loaded state for '{}' with {} fields",
+            self.workflow_name,
+            self.cache.len()
+        );
         Ok(())
     }
 
@@ -147,16 +147,20 @@ impl StateManager {
         }
 
         debug!("Saving state for workflow: {}", self.workflow_name);
-        
+
         // Validate before saving if schema is present
         if let Some(ref schema) = self.schema {
             validation::validate_state_against_schema(&self.cache, schema)?;
         }
-        
+
         self.backend.save(&self.workflow_name, &self.cache).await?;
         self.dirty = false;
-        
-        info!("Saved state for '{}' with {} fields", self.workflow_name, self.cache.len());
+
+        info!(
+            "Saved state for '{}' with {} fields",
+            self.workflow_name,
+            self.cache.len()
+        );
         Ok(())
     }
 
@@ -170,10 +174,12 @@ impl StateManager {
         // Validate the value if schema is present
         if let Some(ref schema) = self.schema {
             if let Some(field) = schema.get_field(&key) {
-                validation::validate_value_type(&value, &field.field_type)
-                    .map_err(|e| crate::errors::SelfwareError::Internal(
-                        format!("Validation failed for field '{}': {}", key, e)
-                    ))?;
+                validation::validate_value_type(&value, &field.field_type).map_err(|e| {
+                    crate::errors::SelfwareError::Internal(format!(
+                        "Validation failed for field '{}': {}",
+                        key, e
+                    ))
+                })?;
             }
         }
 
@@ -264,27 +270,26 @@ impl StateManager {
 
     /// Export state as JSON string
     pub fn export_json(&self) -> Result<String> {
-        serde_json::to_string_pretty(&self.cache)
-            .map_err(|e| crate::errors::SelfwareError::Internal(
-                format!("Failed to serialize state: {}", e)
-            ))
+        serde_json::to_string_pretty(&self.cache).map_err(|e| {
+            crate::errors::SelfwareError::Internal(format!("Failed to serialize state: {}", e))
+        })
     }
 
     /// Import state from JSON string
     pub fn import_json(&mut self, json: &str) -> Result<()> {
-        let state: HashMap<String, serde_json::Value> = serde_json::from_str(json)
-            .map_err(|e| crate::errors::SelfwareError::Internal(
-                format!("Failed to parse state JSON: {}", e)
-            ))?;
-        
+        let state: HashMap<String, serde_json::Value> =
+            serde_json::from_str(json).map_err(|e| {
+                crate::errors::SelfwareError::Internal(format!("Failed to parse state JSON: {}", e))
+            })?;
+
         // Validate against schema if present
         if let Some(ref schema) = self.schema {
             validation::validate_state_against_schema(&state, schema)?;
         }
-        
+
         self.cache = state;
         self.dirty = true;
-        
+
         Ok(())
     }
 }
@@ -316,23 +321,27 @@ mod tests {
     #[test]
     fn test_state_manager_memory() {
         let mut manager = StateManager::new_memory("test_workflow");
-        
+
         // Set values
-        manager.set("key1".to_string(), serde_json::json!("value1")).unwrap();
-        manager.set("key2".to_string(), serde_json::json!(42)).unwrap();
-        
+        manager
+            .set("key1".to_string(), serde_json::json!("value1"))
+            .unwrap();
+        manager
+            .set("key2".to_string(), serde_json::json!(42))
+            .unwrap();
+
         // Check values
         assert_eq!(manager.get("key1"), Some(&serde_json::json!("value1")));
         assert_eq!(manager.get("key2"), Some(&serde_json::json!(42)));
         assert!(manager.get("missing").is_none());
-        
+
         // Check dirty flag
         assert!(manager.is_dirty());
-        
+
         // Delete value
         assert!(manager.delete("key1"));
         assert!(!manager.delete("missing"));
-        
+
         // Clear
         manager.clear();
         assert!(manager.get_all().is_empty());
@@ -341,33 +350,39 @@ mod tests {
     #[test]
     fn test_state_manager_with_schema() {
         let schema = create_test_schema();
-        let mut manager = StateManager::new_memory("test_workflow")
-            .with_schema(schema);
-        
+        let mut manager = StateManager::new_memory("test_workflow").with_schema(schema);
+
         // Apply defaults
         manager.apply_defaults();
-        
+
         // Check defaults were applied
-        assert_eq!(manager.get("name"), Some(&serde_json::json!("default_name")));
+        assert_eq!(
+            manager.get("name"),
+            Some(&serde_json::json!("default_name"))
+        );
         assert_eq!(manager.get("count"), Some(&serde_json::json!(0)));
     }
 
     #[test]
     fn test_state_manager_export_import() {
         let mut manager = StateManager::new_memory("test_workflow");
-        
-        manager.set("key1".to_string(), serde_json::json!("value1")).unwrap();
-        manager.set("key2".to_string(), serde_json::json!(42)).unwrap();
-        
+
+        manager
+            .set("key1".to_string(), serde_json::json!("value1"))
+            .unwrap();
+        manager
+            .set("key2".to_string(), serde_json::json!(42))
+            .unwrap();
+
         // Export
         let json = manager.export_json().unwrap();
         assert!(json.contains("key1"));
         assert!(json.contains("value1"));
-        
+
         // Clear and import
         manager.clear();
         manager.import_json(&json).unwrap();
-        
+
         assert_eq!(manager.get("key1"), Some(&serde_json::json!("value1")));
         assert_eq!(manager.get("key2"), Some(&serde_json::json!(42)));
     }
@@ -375,15 +390,19 @@ mod tests {
     #[tokio::test]
     async fn test_state_manager_file_backend() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let mut manager = StateManager::new_file_based("test_workflow", temp_dir.path().to_path_buf()).unwrap();
-        
-        manager.set("key1".to_string(), serde_json::json!("value1")).unwrap();
+        let mut manager =
+            StateManager::new_file_based("test_workflow", temp_dir.path().to_path_buf()).unwrap();
+
+        manager
+            .set("key1".to_string(), serde_json::json!("value1"))
+            .unwrap();
         manager.save().await.unwrap();
-        
+
         // Create new manager and load
-        let mut manager2 = StateManager::new_file_based("test_workflow", temp_dir.path().to_path_buf()).unwrap();
+        let mut manager2 =
+            StateManager::new_file_based("test_workflow", temp_dir.path().to_path_buf()).unwrap();
         manager2.load().await.unwrap();
-        
+
         assert_eq!(manager2.get("key1"), Some(&serde_json::json!("value1")));
     }
 }
