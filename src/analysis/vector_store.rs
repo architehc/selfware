@@ -3,9 +3,8 @@
 //! Semantic vector storage for code search and memory.
 //! Local-first design - no external server required.
 //!
-//! Uses brute-force cosine similarity search, which is efficient for
-//! collections up to ~100k vectors. For larger collections, consider
-//! integrating an HNSW library like `hnsw_rs` or `instant-distance`.
+//! Uses HNSW (Hierarchical Navigable Small World) graphs via `hnsw_rs`
+//! for O(log N) approximate nearest-neighbour search.
 //!
 //! Features:
 //! - Code chunking strategies (functions, structs, modules)
@@ -17,7 +16,7 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
-use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -61,25 +60,6 @@ pub const MAX_CHUNKS: usize = 100_000;
 
 /// Maximum vocabulary size for TF-IDF provider before eviction occurs
 pub const MAX_VOCABULARY_SIZE: usize = 50_000;
-
-/// Wrapper around `f32` that implements `Ord` via `total_cmp` for use in
-/// `BinaryHeap`. This avoids pulling in an external crate like `ordered-float`.
-#[derive(Clone, Copy, PartialEq)]
-struct OrdF32(f32);
-
-impl Eq for OrdF32 {}
-
-impl PartialOrd for OrdF32 {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for OrdF32 {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.total_cmp(&other.0)
-    }
-}
 
 /// Chunk types for code organization
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -738,33 +718,55 @@ impl EmbeddingProvider for TfIdfEmbeddingProvider {
     }
 }
 
-/// Vector index using simple brute-force search
+/// Default ef_search value for HNSW queries (width of the lowest-level search).
+const HNSW_EF_SEARCH: usize = 50;
+
+/// Vector index backed by HNSW (Hierarchical Navigable Small World) graphs.
 ///
-/// This implementation uses linear scan which is efficient for small collections
-/// (< 10,000 vectors). For larger collections, consider HNSW or IVF indexing.
+/// Uses `hnsw_rs` for O(log N) approximate nearest-neighbour search.
+/// Deletions are handled via a soft-delete set that filters results;
+/// the index is compacted (rebuilt) when the deletion ratio exceeds 30%.
 pub struct VectorIndex {
-    /// Embeddings matrix (row-major)
+    /// Embeddings (row-major, L2-normalized at insert time).
+    /// Kept for serialization and integrity checks.
     embeddings: Vec<Vec<f32>>,
-    /// Chunk IDs corresponding to embeddings
+    /// Chunk IDs corresponding to each embedding slot.
     chunk_ids: Vec<String>,
-    /// Dimension
+    /// Expected embedding dimension.
     dimension: usize,
+    /// HNSW graph.  `None` until the first valid vector is inserted.
+    hnsw: Option<hnsw_rs::hnsw::Hnsw<'static, f32, hnsw_rs::anndists::dist::DistCosine>>,
+    /// Indices that have been logically deleted but still live in the HNSW
+    /// graph.  Filtered out at query time and compacted periodically.
+    deleted: HashSet<usize>,
 }
 
 impl VectorIndex {
-    /// Create new index
+    /// Create a new, empty index for vectors of the given `dimension`.
     pub fn new(dimension: usize) -> Self {
         Self {
             embeddings: Vec::new(),
             chunk_ids: Vec::new(),
             dimension,
+            hnsw: None,
+            deleted: HashSet::new(),
         }
     }
 
-    /// Add embedding to index.
+    /// Number of live (non-deleted) entries.
+    pub fn len(&self) -> usize {
+        self.embeddings.len() - self.deleted.len()
+    }
+
+    /// Whether the index contains zero live entries.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Add an embedding to the index.
     ///
-    /// The embedding is L2-normalized at insert time so that cosine similarity
-    /// reduces to a simple dot product during search.
+    /// The embedding is L2-normalized at insert time so that the HNSW
+    /// dot-product distance equals cosine distance.
     pub fn add(&mut self, chunk_id: String, mut embedding: Vec<f32>) -> Result<()> {
         if embedding.len() != self.dimension {
             return Err(anyhow!(
@@ -775,81 +777,161 @@ impl VectorIndex {
         }
 
         Self::l2_normalize(&mut embedding);
+
+        let idx = self.embeddings.len();
+        // Only insert into HNSW if the vector is finite (no NaN/Inf).
+        let is_finite = embedding.iter().all(|v| v.is_finite());
+        if is_finite {
+            let hnsw = self.hnsw.get_or_insert_with(|| {
+                hnsw_rs::hnsw::Hnsw::new(
+                    16,   // max_nb_connection
+                    256,  // max_elements hint (will grow automatically)
+                    16,   // max_layer
+                    200,  // ef_construction
+                    hnsw_rs::anndists::dist::DistCosine,
+                )
+            });
+            hnsw.insert((&embedding, idx));
+        }
+
         self.embeddings.push(embedding);
         self.chunk_ids.push(chunk_id);
         Ok(())
     }
 
-    /// Remove embedding by chunk ID
+    /// Remove an embedding by chunk ID.
+    ///
+    /// The entry is soft-deleted (filtered from search results).
+    /// When the fraction of deleted entries exceeds 30 %, the HNSW
+    /// graph is compacted automatically on the next `search()`.
     pub fn remove(&mut self, chunk_id: &str) {
-        if let Some(pos) = self.chunk_ids.iter().position(|id| id == chunk_id) {
-            // Use swap_remove for O(1) removal instead of O(N) shift
-            self.embeddings.swap_remove(pos);
-            self.chunk_ids.swap_remove(pos);
+        if let Some(pos) = self.chunk_ids.iter().enumerate()
+            .filter(|(i, _)| !self.deleted.contains(i))
+            .find(|(_, id)| id.as_str() == chunk_id)
+            .map(|(i, _)| i)
+        {
+            self.deleted.insert(pos);
         }
     }
 
-    /// Search for similar embeddings
+    /// Search for the `k` most similar embeddings to `query`.
     ///
-    /// Uses a min-heap to efficiently track the top-k results without
-    /// sorting the entire result set. Also applies early termination
-    /// when all top-k results have similarity > 0.95.
-    ///
-    /// Because all stored embeddings are L2-normalized at insert time,
-    /// cosine similarity is just the dot product (no per-query sqrt needed).
+    /// Returns `(chunk_id, cosine_similarity)` pairs sorted by
+    /// descending similarity.
     pub fn search(&self, query: &[f32], k: usize) -> Vec<(String, f32)> {
         if query.len() != self.dimension || k == 0 {
             return Vec::new();
         }
 
-        // Normalize the query vector so dot product == cosine similarity.
-        let mut normed_query = query.to_vec();
-        Self::l2_normalize(&mut normed_query);
+        let hnsw = match self.hnsw.as_ref() {
+            Some(h) => h,
+            None => return Vec::new(),
+        };
 
-        // Min-heap: stores (OrderedFloat(score), index) so the smallest
-        // score is at the top, letting us efficiently evict the worst
-        // candidate when a better one is found.
-        // We use a wrapper to get Ord on f32 via total_cmp.
-        let mut heap: BinaryHeap<std::cmp::Reverse<(OrdF32, usize)>> =
-            BinaryHeap::with_capacity(k + 1);
-        /// Threshold for early termination: if we have k results all above
-        /// this similarity, further searching is unlikely to improve results.
-        const EARLY_TERM_THRESHOLD: f32 = 0.95;
+        // Normalize the query so dot-product == cosine similarity.
+        let mut normed = query.to_vec();
+        Self::l2_normalize(&mut normed);
 
-        for (i, emb) in self.embeddings.iter().enumerate() {
-            // Both vectors are unit-length, so dot product == cosine similarity.
-            let score = Self::dot_product(&normed_query, emb);
+        // Ask HNSW for extra candidates to compensate for deleted entries.
+        let extra = self.deleted.len().min(k * 2);
+        let ef = HNSW_EF_SEARCH.max(k + extra);
+        let neighbours = hnsw.search(&normed, k + extra, ef);
 
-            if heap.len() < k {
-                heap.push(std::cmp::Reverse((OrdF32(score), i)));
-            } else if let Some(&std::cmp::Reverse((OrdF32(min_score), _))) = heap.peek() {
-                // Only consider this vector if it beats the current k-th best
-                if score > min_score {
-                    heap.pop();
-                    heap.push(std::cmp::Reverse((OrdF32(score), i)));
-                }
-            }
-
-            // Early termination: if we have k results and the worst is
-            // already above the threshold, further search is unlikely
-            // to meaningfully improve results.
-            if heap.len() == k {
-                if let Some(&std::cmp::Reverse((OrdF32(min_score), _))) = heap.peek() {
-                    if min_score > EARLY_TERM_THRESHOLD {
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Extract results sorted by score descending
-        let mut results: Vec<(String, f32)> = heap
+        let mut results: Vec<(String, f32)> = neighbours
             .into_iter()
-            .map(|std::cmp::Reverse((OrdF32(score), i))| (self.chunk_ids[i].clone(), score))
+            .filter(|n| !self.deleted.contains(&n.d_id))
+            .map(|n| {
+                let similarity = 1.0 - n.distance; // DistCosine returns 1-cosine_similarity
+                (self.chunk_ids[n.d_id].clone(), similarity)
+            })
+            .take(k)
             .collect();
+
+        // HNSW already returns neighbours sorted by distance (ascending),
+        // which maps to similarity descending, but let us be explicit.
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         results
     }
+
+    /// Clear the entire index.
+    pub fn clear(&mut self) {
+        self.embeddings.clear();
+        self.chunk_ids.clear();
+        self.deleted.clear();
+        self.hnsw = None;
+    }
+
+    /// Compact the index: rebuild the HNSW graph, dropping deleted entries.
+    ///
+    /// Called automatically when the deletion ratio exceeds the threshold,
+    /// but can also be invoked manually.
+    #[allow(dead_code)]
+    pub fn compact(&mut self) {
+        if self.deleted.is_empty() {
+            return;
+        }
+        let mut new_embeddings = Vec::with_capacity(self.len());
+        let mut new_chunk_ids = Vec::with_capacity(self.len());
+
+        for (i, (emb, cid)) in self
+            .embeddings
+            .iter()
+            .zip(self.chunk_ids.iter())
+            .enumerate()
+        {
+            if !self.deleted.contains(&i) {
+                new_embeddings.push(emb.clone());
+                new_chunk_ids.push(cid.clone());
+            }
+        }
+
+        self.embeddings = new_embeddings;
+        self.chunk_ids = new_chunk_ids;
+        self.deleted.clear();
+
+        // Rebuild the HNSW from scratch.
+        self.hnsw = None;
+        if !self.embeddings.is_empty() {
+            let hnsw = hnsw_rs::hnsw::Hnsw::new(
+                16,
+                self.embeddings.len().max(256),
+                16,
+                200,
+                hnsw_rs::anndists::dist::DistCosine,
+            );
+            for (i, emb) in self.embeddings.iter().enumerate() {
+                if emb.iter().all(|v| v.is_finite()) {
+                    hnsw.insert((emb, i));
+                }
+            }
+            self.hnsw = Some(hnsw);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Serialization helpers
+    // ------------------------------------------------------------------
+
+    /// Return the live (non-deleted) embeddings and chunk IDs for
+    /// serialization.  Filters out soft-deleted entries.
+    pub(crate) fn live_data_owned(&self) -> (Vec<Vec<f32>>, Vec<String>) {
+        if self.deleted.is_empty() {
+            return (self.embeddings.clone(), self.chunk_ids.clone());
+        }
+        let mut embs = Vec::with_capacity(self.len());
+        let mut ids = Vec::with_capacity(self.len());
+        for (i, (e, c)) in self.embeddings.iter().zip(self.chunk_ids.iter()).enumerate() {
+            if !self.deleted.contains(&i) {
+                embs.push(e.clone());
+                ids.push(c.clone());
+            }
+        }
+        (embs, ids)
+    }
+
+    // ------------------------------------------------------------------
+    // Static helpers
+    // ------------------------------------------------------------------
 
     /// Dot product between two vectors.
     #[inline]
@@ -870,8 +952,6 @@ impl VectorIndex {
     /// Cosine similarity between two arbitrary vectors.
     ///
     /// Normalizes both inputs before computing the dot product.
-    /// Kept for external callers and tests; the hot search path uses
-    /// `dot_product` on pre-normalized vectors instead.
     pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         let mut na = a.to_vec();
         let mut nb = b.to_vec();
@@ -880,21 +960,9 @@ impl VectorIndex {
         Self::dot_product(&na, &nb)
     }
 
-    /// Get index size
-    pub fn len(&self) -> usize {
-        self.embeddings.len()
-    }
-
-    /// Check if empty
-    pub fn is_empty(&self) -> bool {
-        self.embeddings.is_empty()
-    }
-
-    /// Clear index
-    pub fn clear(&mut self) {
-        self.embeddings.clear();
-        self.chunk_ids.clear();
-    }
+    // ------------------------------------------------------------------
+    // Integrity / health
+    // ------------------------------------------------------------------
 
     /// Verify index integrity, returning a list of issues found.
     ///
@@ -906,16 +974,22 @@ impl VectorIndex {
     pub fn verify_index_integrity(&self) -> Vec<String> {
         let mut issues = Vec::new();
 
-        // Check for duplicate IDs
+        // Check for duplicate IDs (among live entries only)
         let mut seen_ids = HashSet::new();
-        for id in &self.chunk_ids {
+        for (i, id) in self.chunk_ids.iter().enumerate() {
+            if self.deleted.contains(&i) {
+                continue;
+            }
             if !seen_ids.insert(id.as_str()) {
                 issues.push(format!("Duplicate chunk ID: {}", id));
             }
         }
 
-        // Check each embedding
+        // Check each live embedding
         for (i, embedding) in self.embeddings.iter().enumerate() {
+            if self.deleted.contains(&i) {
+                continue;
+            }
             let id = self
                 .chunk_ids
                 .get(i)
@@ -949,7 +1023,7 @@ impl VectorIndex {
             }
         }
 
-        // Parallel array length mismatch
+        // Parallel array length mismatch (raw arrays, ignoring deletions)
         if self.embeddings.len() != self.chunk_ids.len() {
             issues.push(format!(
                 "Array length mismatch: {} embeddings vs {} chunk_ids",
@@ -1591,8 +1665,9 @@ impl VectorStore {
             // Atomic write for embeddings index
             if let Some(index) = self.indices.get(name) {
                 let index_path = storage_path.join(format!("{}.idx", name));
+                let (embs, cids) = index.live_data_owned();
                 let data = bincode::serde::encode_to_vec(
-                    (&index.embeddings, &index.chunk_ids),
+                    (&embs, &cids),
                     bincode::config::standard(),
                 )?;
 

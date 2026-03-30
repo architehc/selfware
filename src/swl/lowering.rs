@@ -99,10 +99,10 @@ impl<'a> LoweringContext<'a> {
             }
             WorkflowType::MapReduce => self.lower_map_reduce(&mut available, &mut steps)?,
             WorkflowType::Conditional => {
-                return Err(SelfwareError::Internal(format!(
-                    "SWL workflow '{}' uses conditional type, which is not lowered yet",
-                    self.workflow_name
-                )))
+                // Conditional workflows are sequential with guard steps that can
+                // block downstream execution.  We reuse lower_sequential_steps
+                // which already handles per-step guards via lower_step / lower_guard_warning.
+                self.lower_sequential_steps(&self.workflow.steps, &[], &mut available, &mut steps)?
             }
         };
 

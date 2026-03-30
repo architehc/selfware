@@ -1752,10 +1752,20 @@ mod tests {
         let after_api = METRICS.api_requests.load(Ordering::Relaxed);
         let after_tool = METRICS.tool_executions.load(Ordering::Relaxed);
 
-        // 5 threads doing api_requests * 100 each = 500
-        assert_eq!(after_api - before_api, 500);
+        // 5 threads doing api_requests * 100 each = 500.
+        // Other parallel tests may also increment these counters, so the delta
+        // can be >= 500 but never less (atomics guarantee no lost updates).
+        assert!(
+            after_api - before_api >= 500,
+            "Expected at least 500 api_request increments, got {}",
+            after_api - before_api
+        );
         // 5 threads doing tool_executions * 100 each = 500
-        assert_eq!(after_tool - before_tool, 500);
+        assert!(
+            after_tool - before_tool >= 500,
+            "Expected at least 500 tool_execution increments, got {}",
+            after_tool - before_tool
+        );
     }
 
     // --- sanitize_for_log: injection prevention ---

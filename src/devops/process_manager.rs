@@ -1630,17 +1630,35 @@ mod tests {
 
     #[tokio::test]
     async fn test_acquire_startup_port_listener_auto_reserves_unreserved_port() {
-        let manager = ProcessManager::new();
-        let (probe_listener, port) = bind_available_port().await.unwrap();
-        drop(probe_listener);
+        // Retry with fresh ports to avoid TOCTOU races: between dropping the
+        // probe listener and calling acquire_startup_port_listener, another
+        // process (or parallel test) may grab the port.
+        let mut last_err = None;
+        for _ in 0..5 {
+            let manager = ProcessManager::new();
+            let (probe_listener, port) = bind_available_port().await.unwrap();
+            drop(probe_listener);
 
-        let startup_listener = manager.acquire_startup_port_listener(port).await.unwrap();
-        assert!(!manager.has_reserved_port(port).await);
-        assert!(!is_port_available(port).await);
+            match manager.acquire_startup_port_listener(port).await {
+                Ok(startup_listener) => {
+                    assert!(!manager.has_reserved_port(port).await);
+                    assert!(!is_port_available(port).await);
 
-        drop(startup_listener);
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-        assert!(is_port_available(port).await);
+                    drop(startup_listener);
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                    assert!(is_port_available(port).await);
+                    return; // success
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    continue;
+                }
+            }
+        }
+        panic!(
+            "Failed after 5 attempts to acquire an unreserved port: {}",
+            last_err.unwrap()
+        );
     }
 
     #[tokio::test]

@@ -6,6 +6,18 @@ use super::types::{
 };
 use super::*;
 use std::path::PathBuf;
+use std::sync::Mutex;
+
+/// Mutex to serialize tests that mutate SELFWARE_* environment variables.
+/// `env::set_var` / `env::remove_var` are process-global, so parallel tests
+/// that rely on specific env values will race without serialization.
+/// All tests that call `clear_selfware_env_vars()` or `set_var(SELFWARE_*)`
+/// should acquire this lock first via `lock_env()`.
+static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+    ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 #[test]
 fn test_config_default() {
@@ -1164,9 +1176,12 @@ fn test_keyring_service_constant() {
     assert_eq!(KEYRING_SERVICE, "selfware-api-key");
 }
 
-/// Helper to clear all SELFWARE_* env vars that Config::load reads.
-/// This prevents env var leakage between parallel tests.
-fn clear_selfware_env_vars() {
+/// Helper to clear all SELFWARE_* env vars that Config::load reads,
+/// while holding the ENV_MUTEX to prevent parallel tests from racing
+/// on environment variable mutations. Returns the guard so the lock
+/// is held for the duration of the calling test.
+fn clear_selfware_env_vars() -> std::sync::MutexGuard<'static, ()> {
+    let guard = lock_env();
     for var in &[
         "SELFWARE_CONFIG",
         "SELFWARE_ENDPOINT",
@@ -1182,6 +1197,7 @@ fn clear_selfware_env_vars() {
     ] {
         std::env::remove_var(var);
     }
+    guard
 }
 
 // ---- RedactedString comprehensive tests ----
@@ -1608,7 +1624,7 @@ fn test_config_with_default_model_profile_toml() {
 
 #[test]
 fn test_config_load_from_file() {
-    clear_selfware_env_vars();
+    let _env_guard = clear_selfware_env_vars();
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("test_config.toml");
@@ -1639,7 +1655,7 @@ temperature = 0.3
 
 #[test]
 fn test_config_load_preserves_valid_token_limits() {
-    clear_selfware_env_vars();
+    let _env_guard = clear_selfware_env_vars();
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("valid_limits.toml");
@@ -1665,7 +1681,7 @@ token_safety_margin = 8192
 
 #[test]
 fn test_config_load_implicit_token_budget_tracks_env_max_tokens() {
-    clear_selfware_env_vars();
+    let _env_guard = clear_selfware_env_vars();
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("implicit_budget.toml");
@@ -1691,7 +1707,7 @@ max_tokens = 4096
 
 #[test]
 fn test_config_load_with_all_sections() {
-    clear_selfware_env_vars();
+    let _env_guard = clear_selfware_env_vars();
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("full_config.toml");
@@ -1769,7 +1785,7 @@ model = "coder-v1"
 
 #[test]
 fn test_config_load_empty_file() {
-    clear_selfware_env_vars();
+    let _env_guard = clear_selfware_env_vars();
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("empty_config.toml");
@@ -1785,7 +1801,7 @@ fn test_config_load_empty_file() {
 
 #[test]
 fn test_config_load_invalid_toml_file() {
-    clear_selfware_env_vars();
+    let _env_guard = clear_selfware_env_vars();
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("bad_config.toml");
@@ -1802,7 +1818,7 @@ fn test_config_load_invalid_toml_file() {
 
 #[test]
 fn test_config_load_validates() {
-    clear_selfware_env_vars();
+    let _env_guard = clear_selfware_env_vars();
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("invalid_config.toml");
@@ -1826,7 +1842,7 @@ model = "test"
 
 #[test]
 fn test_config_load_synthesizes_default_model_profile() {
-    clear_selfware_env_vars();
+    let _env_guard = clear_selfware_env_vars();
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("synth_config.toml");
@@ -1856,7 +1872,7 @@ api_key = "sk-synth-key"
 
 #[test]
 fn test_config_load_does_not_overwrite_explicit_default_profile() {
-    clear_selfware_env_vars();
+    let _env_guard = clear_selfware_env_vars();
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("explicit_default.toml");
@@ -2661,7 +2677,7 @@ fn test_model_profile_multiple_modalities() {
 
 #[test]
 fn test_config_load_fails_on_zero_max_tokens() {
-    clear_selfware_env_vars();
+    let _env_guard = clear_selfware_env_vars();
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("zero_tokens.toml");
@@ -2685,7 +2701,7 @@ max_tokens = 0
 
 #[test]
 fn test_config_load_fails_on_empty_model() {
-    clear_selfware_env_vars();
+    let _env_guard = clear_selfware_env_vars();
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("empty_model.toml");
@@ -2709,7 +2725,7 @@ model = "   "
 
 #[test]
 fn test_config_load_fails_on_empty_endpoint() {
-    clear_selfware_env_vars();
+    let _env_guard = clear_selfware_env_vars();
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("empty_ep.toml");
@@ -2734,7 +2750,7 @@ endpoint = ""
 
 #[test]
 fn test_config_load_applies_ui_to_top_level() {
-    clear_selfware_env_vars();
+    let _env_guard = clear_selfware_env_vars();
     use std::io::Write;
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("ui_apply.toml");
@@ -2777,7 +2793,7 @@ fn test_config_load_nonexistent_path_error_message() {
 #[cfg(unix)]
 #[test]
 fn test_config_load_strict_permissions_error() {
-    clear_selfware_env_vars();
+    let _env_guard = clear_selfware_env_vars();
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 
@@ -2810,7 +2826,7 @@ strict_permissions = true
 #[cfg(unix)]
 #[test]
 fn test_config_load_strict_permissions_ok_when_600() {
-    clear_selfware_env_vars();
+    let _env_guard = clear_selfware_env_vars();
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 
@@ -2837,7 +2853,7 @@ strict_permissions = true
 #[cfg(unix)]
 #[test]
 fn test_config_load_strict_permissions_rejects_plaintext_api_key() {
-    clear_selfware_env_vars();
+    let _env_guard = clear_selfware_env_vars();
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 
@@ -2916,7 +2932,7 @@ fn test_config_validate_accepts_valid_glob_patterns() {
 #[cfg(unix)]
 #[test]
 fn test_config_load_permissive_without_strict_is_ok() {
-    clear_selfware_env_vars();
+    let _env_guard = clear_selfware_env_vars();
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 

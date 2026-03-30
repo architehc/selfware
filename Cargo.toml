@@ -112,6 +112,7 @@ xcap = "0.3"
 nvml-wrapper = "0.12.0"
 zstd = "0.13.3"
 openssl = { version = "0.10", features = ["vendored"], optional = true }  # For cross-compilation in release builds
+redis = { version = "0.27", optional = true, features = ["aio", "tokio-comp"] }  # Redis backend for workflow state
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }  # For visual stuck-loop detection
 tokenizers = { version = "0.22.2", features = ["hf-hub", "http"] }
 tracing-appender = "0.2.4"
@@ -164,7 +165,7 @@ consolidation = []
 system-tests = []
 
 # Redis backend for workflow state (optional, requires redis server)
-redis = []
+redis = ["dep:redis"]
 
 # Convenience feature that enables all optional modules
 extras = ["tui", "workflows", "resilience", "execution-modes", "cache", "log-analysis", "tokens", "self-improvement", "hot-reload", "vlm-bench", "bench-harness", "consolidation"]

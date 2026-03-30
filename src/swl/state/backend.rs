@@ -368,7 +368,7 @@ impl StateBackend for RedisBackend {
         redis::cmd("SET")
             .arg(&key)
             .arg(&json)
-            .query_async(&mut conn)
+            .query_async::<()>(&mut conn)
             .await
             .map_err(|e| SelfwareError::Internal(format!("Redis SET failed: {}", e)))?;
 
@@ -382,7 +382,7 @@ impl StateBackend for RedisBackend {
 
         redis::cmd("DEL")
             .arg(&key)
-            .query_async(&mut conn)
+            .query_async::<()>(&mut conn)
             .await
             .map_err(|e| SelfwareError::Internal(format!("Redis DEL failed: {}", e)))?;
 
