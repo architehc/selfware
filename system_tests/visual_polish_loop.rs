@@ -40,7 +40,11 @@ fn model() -> String {
 
 const MAX_ITERATIONS: usize = 5;
 const SERVER_PORT: u16 = 8899;
-const SCREENSHOT_PATH: &str = "/tmp/selfware_visual_test.png";
+/// Screenshot path — must be in $HOME for snap chromium sandboxing.
+fn screenshot_path() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    format!("{}/selfware_visual_test.png", home)
+}
 const SCORE_THRESHOLD: u64 = 8;
 
 // ---------------------------------------------------------------------------
@@ -229,7 +233,7 @@ fn take_screenshot() -> Result<(), Box<dyn std::error::Error>> {
             "--headless",
             "--disable-gpu",
             "--no-sandbox",
-            &format!("--screenshot={}", SCREENSHOT_PATH),
+            &format!("--screenshot={}", &screenshot_path()),
             "--window-size=1920,1080",
             &format!("http://127.0.0.1:{}", SERVER_PORT),
         ])
@@ -243,7 +247,7 @@ fn take_screenshot() -> Result<(), Box<dyn std::error::Error>> {
     // Give the file a moment to flush
     thread::sleep(Duration::from_millis(500));
 
-    if !Path::new(SCREENSHOT_PATH).exists() {
+    if !Path::new(&screenshot_path()).exists() {
         return Err("Screenshot file was not created".into());
     }
 
@@ -430,7 +434,7 @@ fn main() {
         // Read screenshot as base64
         let mut img_bytes = Vec::new();
         {
-            let mut f = fs::File::open(SCREENSHOT_PATH).expect("Cannot open screenshot");
+            let mut f = fs::File::open(&screenshot_path()).expect("Cannot open screenshot");
             f.read_to_end(&mut img_bytes).expect("Cannot read screenshot");
         }
         let img_b64 = base64::engine::general_purpose::STANDARD.encode(&img_bytes);
@@ -510,7 +514,7 @@ fn main() {
         report.score_history.push(scores);
         report.iterations = iteration;
         report.final_overall = overall;
-        report.final_screenshot = SCREENSHOT_PATH.to_string();
+        report.final_screenshot = screenshot_path();
 
         // Check if we're done
         if done || overall >= SCORE_THRESHOLD {
@@ -561,8 +565,8 @@ fn main() {
         "/tmp/selfware_visual_test_final_{}.png",
         chrono::Utc::now().format("%Y%m%d_%H%M%S")
     );
-    if Path::new(SCREENSHOT_PATH).exists() {
-        let _ = fs::copy(SCREENSHOT_PATH, &final_path);
+    if Path::new(&screenshot_path()).exists() {
+        let _ = fs::copy(&screenshot_path(), &final_path);
         report.final_screenshot = final_path;
     }
 
