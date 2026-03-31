@@ -25,6 +25,8 @@ pub mod state;
 // New modules for 1M context support
 pub mod cognitive_system;
 pub mod compilation_manager;
+pub mod dream;
+pub mod dream_subprocess;
 pub mod memory_hierarchy;
 pub mod memory_system;
 #[cfg(feature = "self-improvement")]
@@ -40,6 +42,14 @@ pub use state::{
 
 // Re-export key types for new memory architecture
 pub use cognitive_system::CognitiveSystem;
+pub use dream::{
+    DreamConfig, DreamPhase, DreamResult, DreamState, DreamStatus, DreamTrigger,
+    MemoryEntry, MemorySection, MemoryStats, MemoryStore, should_run_dream,
+};
+pub use dream_subprocess::{
+    AutoDreamConfig, AutoDreamHandle, check_and_spawn_autodream, get_dream_status,
+    run_dream_consolidation, spawn_autodream,
+};
 pub use memory_hierarchy::HierarchicalMemory;
 pub use self_reference::SelfReferenceSystem;
 pub use token_budget::TokenBudgetAllocator;

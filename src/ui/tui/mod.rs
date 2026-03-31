@@ -1334,6 +1334,14 @@ pub fn run_tui_dashboard_with_events(
                                                /cost           -- Show token cost estimate\n  \
                                                /ctx            -- Show context usage\n\
                                              \n\
+                                             Plan Mode:\n  \
+                                               /plan           -- Enter plan mode (read-only tools only)\n  \
+                                               /execute        -- Approve plan and start execution\n  \
+                                               /modify         -- Exit plan mode without executing\n\
+                                             \n\
+                                             Coordinator Mode:\n  \
+                                               /workers        -- List active workers\n\
+                                             \n\
                                              Display:\n  \
                                                /mode [mode]    -- Show or set mode (normal|yolo|auto-edit|daemon)\n  \
                                                /compact        -- Switch to compact output\n  \
@@ -1590,6 +1598,77 @@ pub fn run_tui_dashboard_with_events(
                                         app.add_system_message(&msg);
                                         with_dashboard_state(&shared_state, |state| {
                                             state.log(LogLevel::Info, "Listed available skills");
+                                        });
+                                    }
+                                    "/plan" => {
+                                        // Send command to agent to enter plan mode
+                                        let _ = user_input_tx.send("/plan".to_string());
+                                        app.add_system_message(
+                                            "🔍 Entering plan mode. The agent will analyze the codebase using only read-only tools.\n\
+                                             \n\
+                                             Available tools in plan mode:\n  \
+                                               • file_read - Read file contents\n  \
+                                               • grep_search - Search for patterns\n  \
+                                               • glob_find - Find files by pattern\n  \
+                                               • directory_tree - Explore directory structure\n  \
+                                               • symbol_search - Search for code symbols\n\
+                                             \n\
+                                             Type your request to generate a plan.\n\
+                                             Use /execute to approve the plan, or /modify to cancel."
+                                        );
+                                        with_dashboard_state(&shared_state, |state| {
+                                            state.log(LogLevel::Info, "Entered plan mode");
+                                        });
+                                    }
+                                    "/workers" => {
+                                        // Show coordinator worker status
+                                        let workers_msg = with_dashboard_state(&shared_state, |state| {
+                                            if state.coordinator_status.is_active {
+                                                let phase = &state.coordinator_status.current_phase;
+                                                let active = state.coordinator_status.active_workers;
+                                                let total = state.coordinator_status.total_workers;
+                                                if let Some(ref task_id) = state.coordinator_status.task_id {
+                                                    format!(
+                                                        "👑 Coordinator Mode Active\n\
+                                                         Task ID: {}\n\
+                                                         Phase: {}\n\
+                                                         Workers: {}/{} active",
+                                                        task_id, phase, active, total
+                                                    )
+                                                } else {
+                                                    format!(
+                                                        "👑 Coordinator Mode Active\n\
+                                                         Phase: {}\n\
+                                                         Workers: {}/{} active",
+                                                        phase, active, total
+                                                    )
+                                                }
+                                            } else {
+                                                "Coordinator mode is not active.\n\
+                                                 Use --coordinator flag to enable.".to_string()
+                                            }
+                                        });
+                                        app.add_system_message(&workers_msg);
+                                        with_dashboard_state(&shared_state, |state| {
+                                            state.log(LogLevel::Info, "Displayed worker status");
+                                        });
+                                    }
+                                    "/execute" => {
+                                        let _ = user_input_tx.send("/execute".to_string());
+                                        app.add_system_message(
+                                            "✅ Plan approved. Executing modifications..."
+                                        );
+                                        with_dashboard_state(&shared_state, |state| {
+                                            state.log(LogLevel::Info, "Plan approved for execution");
+                                        });
+                                    }
+                                    "/modify" => {
+                                        let _ = user_input_tx.send("/modify".to_string());
+                                        app.add_system_message(
+                                            "📝 Plan mode cancelled. You can now request changes or enter /plan again."
+                                        );
+                                        with_dashboard_state(&shared_state, |state| {
+                                            state.log(LogLevel::Info, "Plan mode cancelled");
                                         });
                                     }
                                     // CLI-only commands that don't apply in TUI

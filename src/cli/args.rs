@@ -82,6 +82,12 @@ pub(crate) struct Cli {
     /// Resume a named chat session (alias for `selfware chat --resume <name>`)
     #[arg(long, value_name = "NAME")]
     pub(crate) resume_session: Option<String>,
+
+    /// Run in coordinator mode (multi-agent orchestration)
+    /// When set, the agent runs as a coordinator with restricted tool access,
+    /// orchestrating parallel work across multiple worker agents.
+    #[arg(long)]
+    pub(crate) coordinator: bool,
 }
 
 /// Color theme for terminal output

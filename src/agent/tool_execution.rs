@@ -266,6 +266,15 @@ impl Agent {
             duration_ms,
         });
 
+        // Record file access for compression tracking (file_read, file_edit, etc.)
+        if success {
+            if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                self.record_file_access(path);
+            } else if let Some(file) = args.get("file").and_then(|v| v.as_str()) {
+                self.record_file_access(file);
+            }
+        }
+
         // Record in self-improvement
         self.self_improvement.record_tool(
             name,
@@ -313,7 +322,20 @@ impl Agent {
     ) -> Result<bool> {
         use crate::safety::{ExecutionMode, PermissionChecker, PermissionResult};
 
-        // Skip permission checks in plan mode - plan mode is handled separately
+        // Check plan mode restrictions - in planning phase, only read-only tools allowed
+        if self.is_in_plan_mode() && self.is_planning_phase() {
+            if !tool.is_readonly() {
+                let error_msg = format!(
+                    "Tool '{}' is not allowed in planning mode. Only read-only tools (file_read, grep_search, etc.) can be used during planning.",
+                    name
+                );
+                warn!("{}", error_msg);
+                return Ok(false);
+            }
+            return Ok(true);
+        }
+
+        // Skip permission checks in config plan mode - handled separately
         if self.plan_mode {
             return Ok(true);
         }

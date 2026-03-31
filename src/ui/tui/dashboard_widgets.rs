@@ -60,6 +60,21 @@ pub enum TuiEvent {
     InputQueued { message: String, position: usize },
 }
 
+/// Coordinator status for UI display
+#[derive(Debug, Clone, Default)]
+pub struct CoordinatorUiStatus {
+    /// Whether coordinator mode is active
+    pub is_active: bool,
+    /// Current workflow phase
+    pub current_phase: String,
+    /// Number of active workers
+    pub active_workers: usize,
+    /// Total workers
+    pub total_workers: usize,
+    /// Task ID
+    pub task_id: Option<String>,
+}
+
 /// Dashboard state containing all widget data
 #[derive(Debug, Clone)]
 pub struct DashboardState {
@@ -79,6 +94,8 @@ pub struct DashboardState {
     pub connected: bool,
     /// Current status message
     pub status_message: String,
+    /// Coordinator mode status
+    pub coordinator_status: CoordinatorUiStatus,
 }
 
 impl Default for DashboardState {
@@ -92,6 +109,7 @@ impl Default for DashboardState {
             logs: Vec::new(),
             connected: true,
             status_message: "Ready".to_string(),
+            coordinator_status: CoordinatorUiStatus::default(),
         }
     }
 }
@@ -327,7 +345,28 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, state: &DashboardState) 
         state.tokens_used.to_string()
     };
 
-    let spans = vec![
+    // Build coordinator indicator if active
+    let coordinator_spans = if state.coordinator_status.is_active {
+        let phase = &state.coordinator_status.current_phase;
+        let workers = format!(
+            "{} workers",
+            state.coordinator_status.active_workers
+        );
+        vec![
+            Span::styled(" │ ", TuiPalette::muted_style()),
+            Span::styled("👑 ", Style::default().fg(TuiPalette::AMBER)),
+            Span::styled(
+                format!("Coordinator [{} | {}]", phase, workers),
+                Style::default()
+                    .fg(TuiPalette::AMBER)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]
+    } else {
+        vec![]
+    };
+
+    let mut spans = vec![
         Span::styled(format!(" {} ", connection_icon), connection_style),
         Span::styled(
             format!("{} ", state.model),
@@ -344,16 +383,20 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, state: &DashboardState) 
             state.elapsed_formatted(),
             Style::default().fg(TuiPalette::SAGE),
         ),
-        Span::styled(" │ ", TuiPalette::muted_style()),
-        Span::styled(
-            &state.status_message,
-            if state.status_message.contains("Error") {
-                TuiPalette::error_style()
-            } else {
-                TuiPalette::muted_style()
-            },
-        ),
     ];
+
+    // Add coordinator indicator if active
+    spans.extend(coordinator_spans);
+
+    spans.push(Span::styled(" │ ", TuiPalette::muted_style()));
+    spans.push(Span::styled(
+        &state.status_message,
+        if state.status_message.contains("Error") {
+            TuiPalette::error_style()
+        } else {
+            TuiPalette::muted_style()
+        },
+    ));
 
     let block = Block::default()
         .borders(Borders::ALL)

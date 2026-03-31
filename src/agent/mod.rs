@@ -46,6 +46,7 @@ macro_rules! cli_println {
 
 mod assistant_response;
 mod checkpointing;
+pub mod compression;
 pub mod context;
 mod context_display;
 mod context_files;
@@ -57,6 +58,7 @@ mod interactive;
 pub mod last_tool;
 mod learning;
 pub mod loop_control;
+pub mod plan_mode;
 mod plan_step;
 pub mod planning;
 pub mod prompt_builder;
@@ -70,6 +72,7 @@ pub mod tui_events;
 mod verification;
 
 use crate::errors::{is_confirmation_error, is_no_action_error};
+use compression::CompressionOrchestrator;
 use context::ContextCompressor;
 use loop_control::{AgentLoop, AgentState};
 use planning::Planner;
@@ -322,6 +325,8 @@ pub struct Agent {
     hook_registry: HookRegistry,
     /// Plan mode: propose tool calls without executing them
     plan_mode: bool,
+    /// Plan mode manager for structured plan mode with approval workflow
+    pub plan_mode_manager: plan_mode::PlanModeManager,
     /// Audit logger for JSONL tool execution logging
     audit_logger: Option<crate::safety::audit::AuditLogger>,
     /// Persistent per-session execution log with raw args/results
@@ -368,6 +373,8 @@ pub struct Agent {
     /// When this exceeds a threshold the agent forces completion instead of
     /// looping until max_iterations.
     consecutive_suppressions: usize,
+    /// Three-layer context compression orchestrator
+    compression_orchestrator: CompressionOrchestrator,
 }
 
 impl Agent {
@@ -812,6 +819,7 @@ To call a tool, use this EXACT XML structure:
             recent_failed_tool_attempts: VecDeque::new(),
             hook_registry,
             plan_mode,
+            plan_mode_manager: plan_mode::PlanModeManager::new(),
             audit_logger,
             session_logger,
             pending_failure_hint: None,
@@ -833,6 +841,7 @@ To call a tool, use this EXACT XML structure:
             rag_engine: None,
             explanation_level: ExplanationLevel::Intermediate,
             consecutive_suppressions: 0,
+            compression_orchestrator: CompressionOrchestrator::new(),
         };
 
         let reconcile_report = crate::tools::process::reconcile_managed_processes(true).await;
@@ -1143,6 +1152,75 @@ To call a tool, use this EXACT XML structure:
         self.plan_mode = enabled;
     }
 
+    // === Plan Mode Manager API ===
+
+    /// Enter structured plan mode - restricts tools to read-only
+    pub fn enter_plan_mode(&mut self) {
+        self.plan_mode_manager.enter_plan_mode();
+        info!("Entered plan mode - only read-only tools allowed");
+    }
+
+    /// Exit structured plan mode - return to normal execution
+    pub fn exit_plan_mode(&mut self) {
+        self.plan_mode_manager.exit_plan_mode();
+        info!("Exited plan mode");
+    }
+
+    /// Check if in structured plan mode (planning or executing)
+    pub fn is_in_plan_mode(&self) -> bool {
+        self.plan_mode_manager.is_in_plan_mode()
+    }
+
+    /// Check if currently in the planning phase (before approval)
+    pub fn is_planning_phase(&self) -> bool {
+        self.plan_mode_manager.is_planning()
+    }
+
+    /// Approve the current plan and switch to executing
+    pub fn approve_plan(&mut self) {
+        self.plan_mode_manager.approve_plan();
+        info!("Plan approved - switching to execution");
+    }
+
+    /// Store a structured plan
+    pub fn store_plan(&mut self, plan: plan_mode::Plan) {
+        self.plan_mode_manager.store_plan(plan);
+    }
+
+    /// Get the current plan
+    pub fn get_plan(&self) -> Option<&plan_mode::Plan> {
+        self.plan_mode_manager.get_plan()
+    }
+
+    /// Get the current plan text
+    pub fn get_plan_text(&self) -> Option<&str> {
+        self.plan_mode_manager.get_plan_text()
+    }
+
+    /// Check if the current plan is approved
+    pub fn is_plan_approved(&self) -> bool {
+        self.plan_mode_manager.is_approved()
+    }
+
+    /// Clear the current plan and exit plan mode
+    pub fn clear_plan(&mut self) {
+        self.plan_mode_manager.clear_plan();
+    }
+
+    /// Get tools for API calls - in plan mode, returns only read-only tools
+    fn api_tools_for_mode(&self) -> Option<Vec<crate::api::types::ToolDefinition>> {
+        if !self.config.agent.native_function_calling {
+            return None;
+        }
+
+        // In planning phase, only provide read-only tools
+        if self.is_planning_phase() {
+            Some(self.tools.readonly_definitions())
+        } else {
+            Some(self.tools.definitions())
+        }
+    }
+
     /// Get a reference to the hook registry.
     pub fn hook_registry(&self) -> &HookRegistry {
         &self.hook_registry
@@ -1170,6 +1248,82 @@ To call a tool, use this EXACT XML structure:
         let count = self.messages.len();
         info!("Resumed named session '{}' with {} messages", name, count);
         Ok(count)
+    }
+
+    // ========================================================================
+    // Three-Layer Context Compression Methods
+    // ========================================================================
+
+    /// Run MicroCompact - fast local compression with no API call
+    pub fn compact_micro(&mut self) -> compression::CompressionMetrics {
+        let metrics = self.compression_orchestrator.run_micro(&mut self.messages);
+        info!("MicroCompact: {}", metrics.summary());
+        metrics
+    }
+
+    /// Run AutoCompact - LLM-based summarization
+    pub async fn compact_auto(&mut self) -> anyhow::Result<compression::CompressionMetrics> {
+        let metrics = self.compression_orchestrator.run_auto(&self.client, &mut self.messages).await?;
+        info!("AutoCompact: {}", metrics.summary());
+        Ok(metrics)
+    }
+
+    /// Run FullCompact - nuclear option with file re-injection
+    pub async fn compact_full(&mut self) -> anyhow::Result<compression::CompressionMetrics> {
+        let metrics = self.compression_orchestrator.run_full(&self.client, &mut self.messages).await?;
+        info!("FullCompact: {}", metrics.summary());
+        Ok(metrics)
+    }
+
+    /// Run compression based on current context usage
+    pub async fn compact_auto_trigger(&mut self) -> Option<compression::CompressionMetrics> {
+        let current_tokens = self.total_tokens_used();
+        let context_window = self.max_context_tokens;
+        
+        self.compression_orchestrator
+            .check_and_compress(&self.client, &mut self.messages, current_tokens, context_window)
+            .await
+    }
+
+    /// Record a file access for FullCompact re-injection
+    pub fn record_file_access(&mut self, path: &str) {
+        self.compression_orchestrator.record_file_access(path);
+    }
+
+    /// Get compression statistics
+    pub fn compression_stats(&self) -> String {
+        let total_saved = self.compression_orchestrator.total_tokens_saved();
+        let history = self.compression_orchestrator.metrics_history();
+        
+        let mut stats = format!(
+            "Total tokens saved: {}\nCompression operations: {}\n",
+            total_saved,
+            history.len()
+        );
+        
+        if let Some(last) = history.last() {
+            stats.push_str(&format!("\nLast compression:\n  {}", last.summary()));
+        }
+        
+        let recent_files = self.compression_orchestrator.file_tracker().get_recent_files(5);
+        if !recent_files.is_empty() {
+            stats.push_str("\n\nRecently accessed files:\n");
+            for (i, path) in recent_files.iter().enumerate() {
+                stats.push_str(&format!("  {}. {}\n", i + 1, path));
+            }
+        }
+        
+        stats
+    }
+
+    /// Get the compression orchestrator (for advanced usage)
+    pub fn compression_orchestrator(&self) -> &CompressionOrchestrator {
+        &self.compression_orchestrator
+    }
+
+    /// Get mutable access to the compression orchestrator
+    pub fn compression_orchestrator_mut(&mut self) -> &mut CompressionOrchestrator {
+        &mut self.compression_orchestrator
     }
 }
 

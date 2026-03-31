@@ -127,8 +127,28 @@ pub static COMMANDS: &[CommandEntry] = &[
     // Display
     CommandEntry {
         name: "/compact",
-        description: "Switch to compact output mode",
-        category: CommandCategory::Display,
+        description: "Compress context (auto mode)",
+        category: CommandCategory::Context,
+    },
+    CommandEntry {
+        name: "/compact micro",
+        description: "Fast local compression (no API call)",
+        category: CommandCategory::Context,
+    },
+    CommandEntry {
+        name: "/compact auto",
+        description: "LLM-based summarization",
+        category: CommandCategory::Context,
+    },
+    CommandEntry {
+        name: "/compact full",
+        description: "Full compression with file re-injection",
+        category: CommandCategory::Context,
+    },
+    CommandEntry {
+        name: "/compact stats",
+        description: "Show compression statistics",
+        category: CommandCategory::Context,
     },
     CommandEntry {
         name: "/verbose",
@@ -198,7 +218,17 @@ pub static COMMANDS: &[CommandEntry] = &[
     },
     CommandEntry {
         name: "/plan",
-        description: "Create an execution plan",
+        description: "Enter plan mode (read-only tools only)",
+        category: CommandCategory::Tools,
+    },
+    CommandEntry {
+        name: "/execute",
+        description: "Approve plan and start execution",
+        category: CommandCategory::Tools,
+    },
+    CommandEntry {
+        name: "/modify",
+        description: "Exit plan mode without executing",
         category: CommandCategory::Tools,
     },
     CommandEntry {
@@ -288,6 +318,22 @@ pub static COMMANDS: &[CommandEntry] = &[
         name: "/explain",
         description: "Explain code in a file or set explanation level",
         category: CommandCategory::Tools,
+    },
+    // Dream System (Memory Consolidation)
+    CommandEntry {
+        name: "/dream",
+        description: "Trigger or check status of memory consolidation (dream)",
+        category: CommandCategory::Context,
+    },
+    CommandEntry {
+        name: "/dream status",
+        description: "Show dream system status",
+        category: CommandCategory::Context,
+    },
+    CommandEntry {
+        name: "/dream force",
+        description: "Force immediate memory consolidation",
+        category: CommandCategory::Context,
     },
 ];
 
@@ -388,6 +434,10 @@ mod tests {
             "/scan",
             "/memory",
             "/compact",
+            "/compact micro",
+            "/compact auto",
+            "/compact full",
+            "/compact stats",
             "/verbose",
             "/clear",
             "/theme",
@@ -415,6 +465,9 @@ mod tests {
             "/chat delete",
             "/vim",
             "/explain",
+            "/dream",
+            "/dream status",
+            "/dream force",
         ];
         let registry: HashSet<&str> = COMMANDS.iter().map(|c| c.name).collect();
         for name in &expected {
@@ -797,6 +850,11 @@ mod tests {
             "/ctx copy",
             "/context",
             "/compress",
+            "/compact",
+            "/compact micro",
+            "/compact auto",
+            "/compact full",
+            "/compact stats",
             "/memory",
         ];
         let registry: std::collections::HashMap<&str, CommandCategory> =
@@ -834,7 +892,7 @@ mod tests {
 
     #[test]
     fn test_display_commands_are_in_display_category() {
-        let display_commands = ["/compact", "/verbose", "/clear", "/theme"];
+        let display_commands = ["/verbose", "/clear", "/theme"];
         let registry: std::collections::HashMap<&str, CommandCategory> =
             COMMANDS.iter().map(|c| (c.name, c.category)).collect();
 

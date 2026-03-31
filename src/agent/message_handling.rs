@@ -169,6 +169,11 @@ impl Agent {
         // compression is skipped or fails.
         self.trim_message_history();
 
+        // Three-Layer Context Compression: Check and auto-trigger if needed
+        if let Some(metrics) = self.compact_auto_trigger().await {
+            info!("Auto-triggered compression: {}", metrics.summary());
+        }
+
         let compression_threshold = self.compressor.compression_threshold();
         let before_compression_messages = self.messages.len();
         let before_compression_tokens = self.compressor.estimate_tokens(&self.messages);

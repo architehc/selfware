@@ -1,6 +1,7 @@
 use anyhow::Result;
 use colored::*;
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -658,6 +659,10 @@ impl Agent {
                     "🧠".bright_white()
                 );
                 println!(
+                    "│  {} /dream            Memory consolidation     │",
+                    "🌙".bright_white()
+                );
+                println!(
                     "│  {} /clear            Clear conversation       │",
                     "🗑️ ".bright_white()
                 );
@@ -690,7 +695,23 @@ impl Agent {
                     "🤖".bright_white()
                 );
                 println!(
-                    "│  {} /compact           Toggle compact mode          │",
+                    "│  {} /compact           Compress context (auto)      │",
+                    "📦".bright_white()
+                );
+                println!(
+                    "│  {} /compact micro     Fast local compression       │",
+                    "📦".bright_white()
+                );
+                println!(
+                    "│  {} /compact auto      LLM summarization            │",
+                    "📦".bright_white()
+                );
+                println!(
+                    "│  {} /compact full      Nuclear + file re-inject     │",
+                    "📦".bright_white()
+                );
+                println!(
+                    "│  {} /compact stats     Show compression stats       │",
                     "📦".bright_white()
                 );
                 println!(
@@ -1062,22 +1083,73 @@ impl Agent {
                 continue;
             }
 
+            // Three-Layer Context Compression commands
             if input == "/compact" {
-                let new_compact = !output::is_compact();
-                output::init(
-                    new_compact,
-                    output::is_verbose(),
-                    output::should_show_tokens(),
-                );
-                println!(
-                    "{} Compact mode: {}",
-                    "⚙".bright_cyan(),
-                    if new_compact {
-                        "ON".bright_green()
-                    } else {
-                        "OFF".bright_red()
+                // Default: AutoCompact
+                match self.compact_auto().await {
+                    Ok(metrics) => {
+                        println!(
+                            "{} {}",
+                            "✓".bright_green(),
+                            metrics.summary()
+                        );
                     }
+                    Err(e) => {
+                        println!("{} AutoCompact failed: {}", "✗".bright_red(), e);
+                        println!("{} Falling back to MicroCompact...", "→".bright_yellow());
+                        let metrics = self.compact_micro();
+                        println!("{}", metrics.summary());
+                    }
+                }
+                continue;
+            }
+
+            if input == "/compact micro" {
+                let metrics = self.compact_micro();
+                println!(
+                    "{} {}",
+                    "✓".bright_green(),
+                    metrics.summary()
                 );
+                continue;
+            }
+
+            if input == "/compact auto" {
+                match self.compact_auto().await {
+                    Ok(metrics) => {
+                        println!(
+                            "{} {}",
+                            "✓".bright_green(),
+                            metrics.summary()
+                        );
+                    }
+                    Err(e) => {
+                        println!("{} AutoCompact failed: {}", "✗".bright_red(), e);
+                    }
+                }
+                continue;
+            }
+
+            if input == "/compact full" {
+                match self.compact_full().await {
+                    Ok(metrics) => {
+                        println!(
+                            "{} {}",
+                            "✓".bright_green(),
+                            metrics.summary()
+                        );
+                    }
+                    Err(e) => {
+                        println!("{} FullCompact failed: {}", "✗".bright_red(), e);
+                    }
+                }
+                continue;
+            }
+
+            if input == "/compact stats" {
+                println!();
+                println!("{}", "📊 Context Compression Stats".bright_cyan());
+                println!("{}", self.compression_stats());
                 continue;
             }
 
@@ -1511,19 +1583,55 @@ impl Agent {
                 continue;
             }
 
-            // /plan toggle
+            // /plan - Enter structured plan mode
             if input == "/plan" {
-                let enabled = self.toggle_plan_mode();
-                if enabled {
-                    println!(
-                        "{} Plan mode ON — tool calls will be proposed but not executed",
-                        "📝".bright_cyan()
-                    );
+                self.enter_plan_mode();
+                println!();
+                println!("{}", "🔍 Plan Mode Enabled".bright_cyan().bold());
+                println!("{}", "─".repeat(50).bright_black());
+                println!("{} In planning mode, only read-only tools are available:", "ℹ".bright_yellow());
+                println!("   • file_read, grep_search, glob_find");
+                println!("   • directory_tree, symbol_search, tool_search");
+                println!();
+                println!("{} Type your request to analyze the codebase.", "→".bright_black());
+                println!("{} The agent will create a structured plan.", "→".bright_black());
+                println!("{} Use /execute to approve, or /modify to cancel.", "→".bright_black());
+                println!();
+                continue;
+            }
+
+            // /execute - Approve plan and execute
+            if input == "/execute" {
+                if !self.is_in_plan_mode() {
+                    println!("{} Not in plan mode. Use /plan first.", "ℹ".bright_yellow());
+                } else if self.is_plan_approved() {
+                    println!("{} Plan is already being executed.", "ℹ".bright_yellow());
                 } else {
-                    println!(
-                        "{} Plan mode OFF — tool calls will execute normally",
-                        "⚡".bright_green()
-                    );
+                    self.approve_plan();
+                    println!();
+                    println!("{}", "✅ Plan Approved".bright_green().bold());
+                    println!("{}", "─".repeat(50).bright_black());
+                    if let Some(plan) = self.get_plan() {
+                        println!("{}", plan.format().bright_white());
+                    }
+                    println!("{} The agent will now execute the plan.", "⚡".bright_yellow());
+                    println!();
+                }
+                continue;
+            }
+
+            // /modify - Exit plan mode without executing
+            if input == "/modify" {
+                if !self.is_in_plan_mode() {
+                    println!("{} Not in plan mode.", "ℹ".bright_yellow());
+                } else {
+                    self.clear_plan();
+                    println!();
+                    println!("{}", "📝 Plan Cancelled".bright_yellow().bold());
+                    println!("{}", "─".repeat(50).bright_black());
+                    println!("{} Exited plan mode.", "ℹ".bright_yellow());
+                    println!("{} You can now make new requests or enter /plan again.", "→".bright_black());
+                    println!();
                 }
                 continue;
             }
@@ -1722,6 +1830,121 @@ impl Agent {
                     "→".bright_black()
                 );
                 println!();
+                continue;
+            }
+
+            // /dream - Memory consolidation (dream system)
+            if input == "/dream" || input == "/dream status" {
+                use crate::cognitive::dream_subprocess::get_dream_status;
+                use crate::cognitive::dream::DreamConfig;
+                
+                let dream_config = DreamConfig::new();
+                let status = get_dream_status(&dream_config).await;
+                
+                println!();
+                println!("  {} Dream System Status", "🌙".bright_cyan());
+                println!("  {}", "─".repeat(40).bright_black());
+                
+                // Last dream info
+                if let Some(ts) = status.last_dream_timestamp {
+                    let dt = chrono::DateTime::from_timestamp(ts as i64, 0)
+                        .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_else(|| "Unknown".to_string());
+                    println!("  Last dream: {}", dt.bright_white());
+                } else {
+                    println!("  Last dream: {}", "Never".dimmed());
+                }
+                
+                // Dream count
+                println!("  Total dreams: {}", status.dream_count.to_string().bright_white());
+                
+                // Sessions since last dream
+                println!(
+                    "  Sessions since last: {}",
+                    status.sessions_since_last_dream.to_string().bright_white()
+                );
+                
+                // Until next dream
+                println!();
+                if status.is_running {
+                    println!("  Status: {}", "🔄 Consolidation in progress".bright_yellow());
+                } else if status.hours_until_next == 0 && status.sessions_until_next == 0 {
+                    println!("  Status: {}", "✓ Ready for next dream".bright_green());
+                } else {
+                    println!("  Until next dream:",);
+                    if status.hours_until_next > 0 {
+                        println!(
+                            "    {} hours remaining",
+                            status.hours_until_next.to_string().bright_yellow()
+                        );
+                    }
+                    if status.sessions_until_next > 0 {
+                        println!(
+                            "    {} sessions remaining",
+                            status.sessions_until_next.to_string().bright_yellow()
+                        );
+                    }
+                }
+                
+                println!();
+                println!(
+                    "  {} Use {} to force consolidation",
+                    "💡".bright_yellow(),
+                    "/dream force".bright_cyan()
+                );
+                println!();
+                continue;
+            }
+            
+            if input == "/dream force" {
+                use crate::cognitive::memory_system::DreamIntegratedMemorySystem;
+                
+                println!("  {} Force-triggering dream consolidation...", "🌙".bright_cyan());
+                
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let dream_system = DreamIntegratedMemorySystem::new(&cwd);
+                
+                match dream_system.force_dream(&cwd).await {
+                    Ok(result) => {
+                        if result.success {
+                            println!();
+                            println!("  {} Dream completed successfully", "✓".bright_green());
+                            println!(
+                                "  Phases completed: {}",
+                                result.phases_completed.len().to_string().bright_white()
+                            );
+                            println!(
+                                "  Memories consolidated: {}",
+                                result.memories_consolidated.to_string().bright_white()
+                            );
+                            println!(
+                                "  Memories pruned: {}",
+                                result.memories_pruned.to_string().bright_white()
+                            );
+                            println!(
+                                "  Duration: {}s",
+                                result.duration_secs.to_string().bright_white()
+                            );
+                            if !result.errors.is_empty() {
+                                println!();
+                                println!("  {} Warnings:", "⚠".bright_yellow());
+                                for error in &result.errors {
+                                    println!("    • {}", error.dimmed());
+                                }
+                            }
+                        } else {
+                            println!();
+                            println!("  {} Dream failed", "✗".bright_red());
+                            for error in &result.errors {
+                                println!("    • {}", error.bright_red());
+                            }
+                        }
+                        println!();
+                    }
+                    Err(e) => {
+                        println!("  {} Dream error: {}", "✗".bright_red(), e);
+                    }
+                }
                 continue;
             }
 
