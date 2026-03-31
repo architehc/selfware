@@ -220,7 +220,7 @@ pub enum SafetyError {
     SymlinkChainTooDeep { path: String },
 
     // Command validation errors
-    #[error("Dangerous command blocked: {command}")]
+    #[error("Dangerous command blocked: {command} (reason: {reason})")]
     BlockedCommand { command: String, reason: String },
 
     #[error("Dangerous command blocked: {description}")]
