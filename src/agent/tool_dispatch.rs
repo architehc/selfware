@@ -560,6 +560,7 @@ impl Agent {
 
     pub(super) fn clear_failed_tool_attempts(&mut self) {
         self.recent_failed_tool_attempts.clear();
+        self.consecutive_suppressions = 0;
     }
 
     pub(super) fn maybe_block_redundant_reread(
@@ -614,6 +615,7 @@ impl Agent {
         self.log_tool_call(name, args_str, &err, false, start_time, false);
         self.remember_failed_tool(name, &err);
         self.record_failed_tool_attempt(name, args_str, "task_state", &err);
+        self.consecutive_suppressions += 1;
 
         // After 3+ suppressed rereads, trigger phase-2 synthesis.
         // The model has the data in context but can't produce a text answer.
@@ -774,6 +776,7 @@ impl Agent {
             tool_name,
             None,
         );
+        self.consecutive_suppressions += 1;
         true
     }
 

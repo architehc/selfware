@@ -248,6 +248,34 @@ impl Agent {
 
         self.reset_no_action_prompt_state();
         self.execute_tool_batch(tool_calls).await?;
+
+        // After tool batch execution, check if all tool calls were suppressed.
+        // When the model keeps emitting identical tool calls that are all
+        // suppressed (retry suppressed / no-op), it is stuck in tool-calling
+        // mode and cannot produce a final text response on its own.
+        if self.consecutive_suppressions >= 5 {
+            info!(
+                "Task appears complete ({} consecutive tool calls suppressed) — forcing completion",
+                self.consecutive_suppressions
+            );
+            self.consecutive_suppressions = 0;
+            output::final_answer("Task completed (agent detected repeated no-op tool calls and stopped).");
+            return Ok(true);
+        } else if self.consecutive_suppressions >= 3 {
+            info!(
+                "Injecting stop-tools directive after {} consecutive suppressions",
+                self.consecutive_suppressions
+            );
+            self.messages.push(crate::api::types::Message::user(
+                "<selfware_system_directive>\n\
+                 STOP CALLING TOOLS. The task is complete. Your previous tool calls were \
+                 all suppressed because the work is already done. Provide your final \
+                 summary as plain text with no tool calls.\n\
+                 </selfware_system_directive>"
+                    .to_string(),
+            ));
+        }
+
         Ok(false)
     }
 }

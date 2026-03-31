@@ -362,6 +362,10 @@ pub struct Agent {
     rag_engine: Option<Arc<RwLock<RagEngine>>>,
     /// Detail level for `/explain` code education output.
     explanation_level: ExplanationLevel,
+    /// Consecutive tool calls that were suppressed (retry suppressed / no-op).
+    /// When this exceeds a threshold the agent forces completion instead of
+    /// looping until max_iterations.
+    consecutive_suppressions: usize,
 }
 
 impl Agent {
@@ -771,6 +775,7 @@ To call a tool, use this EXACT XML structure:
             context_map: ctx_map,
             rag_engine: None,
             explanation_level: ExplanationLevel::Intermediate,
+            consecutive_suppressions: 0,
         };
 
         let reconcile_report = crate::tools::process::reconcile_managed_processes(true).await;
