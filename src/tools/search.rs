@@ -341,6 +341,10 @@ impl Tool for GrepSearch {
         .await??;
         Ok(result)
     }
+
+    fn metadata(&self) -> crate::safety::ToolMetadata {
+        crate::safety::ToolMetadata::read_only()
+    }
 }
 
 #[async_trait]
@@ -450,6 +454,10 @@ impl Tool for GlobFind {
         })
         .await??;
         Ok(result)
+    }
+
+    fn metadata(&self) -> crate::safety::ToolMetadata {
+        crate::safety::ToolMetadata::read_only()
     }
 }
 
@@ -584,6 +592,10 @@ impl Tool for SymbolSearch {
         })
         .await??;
         Ok(result)
+    }
+
+    fn metadata(&self) -> crate::safety::ToolMetadata {
+        crate::safety::ToolMetadata::read_only()
     }
 }
 

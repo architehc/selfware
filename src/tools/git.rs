@@ -277,6 +277,10 @@ impl Tool for GitCheckpoint {
             "tag": tag
         }))
     }
+
+    fn metadata(&self) -> crate::safety::ToolMetadata {
+        crate::safety::ToolMetadata::git()
+    }
 }
 
 #[async_trait]
@@ -342,6 +346,10 @@ impl Tool for GitStatus {
             "untracked": untracked
         }))
     }
+
+    fn metadata(&self) -> crate::safety::ToolMetadata {
+        crate::safety::ToolMetadata::read_only()
+    }
 }
 
 #[async_trait]
@@ -387,6 +395,10 @@ impl Tool for GitDiff {
             "diff": diff.to_string(),
             "has_changes": !diff.is_empty()
         }))
+    }
+
+    fn metadata(&self) -> crate::safety::ToolMetadata {
+        crate::safety::ToolMetadata::read_only()
     }
 }
 
@@ -494,6 +506,10 @@ impl Tool for GitCommit {
             "output": stdout.to_string()
         }))
     }
+
+    fn metadata(&self) -> crate::safety::ToolMetadata {
+        crate::safety::ToolMetadata::git()
+    }
 }
 
 #[async_trait]
@@ -573,6 +589,17 @@ impl Tool for GitPush {
             "force": force,
             "output": format!("{}{}", stdout, stderr)
         }))
+    }
+
+    fn metadata(&self) -> crate::safety::ToolMetadata {
+        // Git push is high risk due to potential for remote changes
+        crate::safety::ToolMetadata::custom(
+            false,
+            false,
+            crate::safety::RiskLevel::High,
+            true,
+            false,
+        )
     }
 }
 

@@ -2,7 +2,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 pub mod analyzer;
 pub mod browser;
@@ -13,6 +14,7 @@ pub mod computer;
 pub mod container;
 pub mod context;
 pub mod file;
+pub mod file_read;
 pub mod fim;
 pub mod git;
 #[cfg(feature = "hot-reload")]
@@ -25,12 +27,16 @@ pub mod net_policy;
 pub mod package;
 pub mod page_controller;
 pub mod process;
+pub mod grep_search;
+pub mod prompt;
 pub mod pty_shell;
 pub mod screen_capture;
 pub mod search;
 pub mod shell;
+pub mod shell_exec;
 pub mod swarm_tool;
 pub mod task_focus;
+pub mod tool_search;
 pub mod vision;
 
 use browser::{BrowserEval, BrowserFetch, BrowserLinks, BrowserPdf, BrowserScreenshot};
@@ -39,7 +45,8 @@ use container::{
     ComposeDown, ComposeUp, ContainerBuild, ContainerExec, ContainerImages, ContainerList,
     ContainerLogs, ContainerPull, ContainerRemove, ContainerRun, ContainerStop,
 };
-use file::{DirectoryTree, FileDelete, FileEdit, FileRead, FileWrite};
+use file::{DirectoryTree, FileDelete, FileEdit, FileWrite};
+use file_read::FileRead;
 use git::{GitCheckpoint, GitCommit, GitDiff, GitPush, GitStatus};
 use http::HttpRequest;
 use knowledge::{
@@ -51,8 +58,9 @@ use page_controller::PageControlTool;
 use process::{PortCheck, ProcessList, ProcessLogs, ProcessRestart, ProcessStart, ProcessStop};
 use pty_shell::PtyShellTool;
 use screen_capture::ScreenCapture;
-use search::{GlobFind, GrepSearch, SymbolSearch};
-use shell::ShellExec;
+use grep_search::GrepSearch;
+use search::{GlobFind, SymbolSearch};
+use shell_exec::ShellExec;
 use vision::{VisionAnalyze, VisionCompare};
 
 /// Pagination metadata for truncated tool output.
@@ -172,17 +180,104 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &str;
     fn schema(&self) -> Value;
     async fn execute(&self, args: Value) -> Result<Value>;
+
+    /// Returns true if this tool only reads data, never modifies.
+    ///
+    /// Default implementation delegates to `metadata()`.
+    /// Tools should override `metadata()` to provide custom safety information.
+    fn is_readonly(&self) -> bool {
+        self.metadata().read_only
+    }
+
+    /// Returns true if this tool can cause data loss (rm, overwrite, etc.)
+    ///
+    /// Default implementation delegates to `metadata()`.
+    /// Tools should override `metadata()` to provide custom safety information.
+    fn is_destructive(&self) -> bool {
+        self.metadata().destructive
+    }
+
+    /// Returns the risk level for this tool.
+    ///
+    /// Default implementation delegates to `metadata()`.
+    /// Tools should override `metadata()` to provide custom safety information.
+    fn risk_level(&self) -> crate::safety::RiskLevel {
+        self.metadata().risk_level
+    }
+
+    /// Returns the full safety metadata for this tool.
+    ///
+    /// Default implementation uses the tool name to look up metadata.
+    /// Tools should override this to provide custom metadata.
+    fn metadata(&self) -> crate::safety::ToolMetadata {
+        crate::safety::default_tool_metadata(self.name())
+    }
 }
 
-/// Name-keyed registry of available tools. Created with all built-in tools
-/// pre-registered; additional tools can be added at runtime via [`register`](Self::register).
-pub struct ToolRegistry {
-    tools: HashMap<String, Box<dyn Tool>>,
+// Implement Tool for Arc<dyn Tool> so we can store tools in Arc and still use them
+#[async_trait]
+impl Tool for Arc<dyn Tool> {
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+
+    fn description(&self) -> &str {
+        (**self).description()
+    }
+
+    fn schema(&self) -> Value {
+        (**self).schema()
+    }
+
+    async fn execute(&self, args: Value) -> Result<Value> {
+        (**self).execute(args).await
+    }
 }
+
+/// Metadata about a registered tool for search and categorization.
+#[derive(Clone)]
+pub struct ToolInfo {
+    /// The tool instance
+    pub tool: Arc<dyn Tool>,
+    /// Whether this tool is critical (always available) or deferred
+    pub is_critical: bool,
+    /// Category for grouping (e.g., "git", "file", "container")
+    pub category: String,
+}
+
+/// Name-keyed registry of available tools with support for deferred loading.
+///
+/// Critical tools are always included in the system prompt and immediately available.
+/// Deferred tools are only included after being discovered via `tool_search`.
+/// This reduces context window usage by 60-80%.
+pub struct ToolRegistry {
+    /// All registered tools (both critical and deferred)
+    all_tools: HashMap<String, ToolInfo>,
+    /// Set of tool names that are currently "activated" (available for use)
+    /// This starts with critical tools and grows as tools are discovered.
+    activated_tools: HashSet<String>,
+}
+
+/// List of critical tools that are always available.
+/// These are the minimal tools needed for basic operations.
+pub const CRITICAL_TOOLS: &[&str] = &[
+    // File operations - essential for reading/writing files
+    "file_read",
+    "file_write",
+    "file_edit",
+    "file_delete",
+    "directory_tree",
+    // Shell execution - essential for running commands
+    "shell_exec",
+    // Search operations - essential for finding code
+    "grep_search",
+    "glob_find",
+    // Tool search - essential for discovering deferred tools
+    "tool_search",
+];
 
 impl ToolRegistry {
     /// Create a new registry pre-populated with all built-in tools.
-    /// Create a registry with default tools and no per-instance safety config.
     ///
     /// Tools created this way fall back to the process-global `SAFETY_CONFIG`
     /// (set by `init_safety_config()` during agent startup). If the global has
@@ -200,180 +295,284 @@ impl ToolRegistry {
     /// per-instance configs instead of relying on the deprecated global fallback.
     pub fn with_safety_config(safety_config: Option<&crate::config::SafetyConfig>) -> Self {
         let mut registry = Self {
-            tools: HashMap::new(),
+            all_tools: HashMap::new(),
+            activated_tools: HashSet::new(),
         };
 
-        // File operations
+        // Register critical tools first (File operations)
         if let Some(cfg) = safety_config {
-            registry.register(FileRead::with_safety_config(cfg.clone()));
-            registry.register(FileWrite::with_safety_config(cfg.clone()));
-            registry.register(FileEdit::with_safety_config(cfg.clone()));
-            registry.register(FileDelete::with_safety_config(cfg.clone()));
-            registry.register(DirectoryTree::with_safety_config(cfg.clone()));
+            registry.register_critical(FileRead::with_safety_config(cfg.clone()));
+            registry.register_critical(FileWrite::with_safety_config(cfg.clone()));
+            registry.register_critical(FileEdit::with_safety_config(cfg.clone()));
+            registry.register_critical(FileDelete::with_safety_config(cfg.clone()));
+            registry.register_critical(DirectoryTree::with_safety_config(cfg.clone()));
         } else {
-            registry.register(FileRead::new());
-            registry.register(FileWrite::new());
-            registry.register(FileEdit::new());
-            registry.register(FileDelete::new());
-            registry.register(DirectoryTree::new());
+            registry.register_critical(FileRead::new());
+            registry.register_critical(FileWrite::new());
+            registry.register_critical(FileEdit::new());
+            registry.register_critical(FileDelete::new());
+            registry.register_critical(DirectoryTree::new());
         }
 
-        // Git operations
+        // Critical: Shell execution
+        registry.register_critical(ShellExec);
+
+        // Critical: Search operations
+        registry.register_critical(GrepSearch);
+        registry.register_critical(GlobFind);
+        // SymbolSearch is deferred - less commonly used
+
+        // Critical: ToolSearch - enables discovering deferred tools
+        // Note: tool_search is handled specially by the agent dispatch
+        registry.register_critical(tool_search::ToolSearchTool::placeholder());
+
+        // Deferred: Git operations (can be discovered via tool_search)
         if let Some(cfg) = safety_config {
-            registry.register(GitStatus::with_safety_config(cfg.clone()));
-            registry.register(GitDiff::with_safety_config(cfg.clone()));
-            registry.register(GitCommit::with_safety_config(cfg.clone()));
-            registry.register(GitPush::with_safety_config(cfg.clone()));
-            registry.register(GitCheckpoint::with_safety_config(cfg.clone()));
+            registry.register_deferred(GitStatus::with_safety_config(cfg.clone()));
+            registry.register_deferred(GitDiff::with_safety_config(cfg.clone()));
+            registry.register_deferred(GitCommit::with_safety_config(cfg.clone()));
+            registry.register_deferred(GitPush::with_safety_config(cfg.clone()));
+            registry.register_deferred(GitCheckpoint::with_safety_config(cfg.clone()));
         } else {
-            registry.register(GitStatus::new());
-            registry.register(GitDiff::new());
-            registry.register(GitCommit::new());
-            registry.register(GitPush::new());
-            registry.register(GitCheckpoint::new());
+            registry.register_deferred(GitStatus::new());
+            registry.register_deferred(GitDiff::new());
+            registry.register_deferred(GitCommit::new());
+            registry.register_deferred(GitPush::new());
+            registry.register_deferred(GitCheckpoint::new());
         }
 
-        // Cargo/Build operations
-        registry.register(CargoTest);
-        registry.register(CargoCheck);
-        registry.register(CargoClippy);
-        registry.register(CargoFmt);
+        // Deferred: Cargo/Build operations
+        registry.register_deferred(CargoTest);
+        registry.register_deferred(CargoCheck);
+        registry.register_deferred(CargoClippy);
+        registry.register_deferred(CargoFmt);
 
-        // System operations
-        registry.register(ShellExec);
-        registry.register(PtyShellTool);
+        // Deferred: System operations
+        registry.register_deferred(PtyShellTool);
 
-        // Search operations
-        registry.register(GrepSearch);
-        registry.register(GlobFind);
-        registry.register(SymbolSearch);
+        // Deferred: Search operations
+        registry.register_deferred(SymbolSearch);
 
-        // HTTP/Web operations
-        registry.register(HttpRequest);
+        // Deferred: HTTP/Web operations
+        registry.register_deferred(HttpRequest);
 
-        // Process management operations
-        registry.register(ProcessStart);
-        registry.register(ProcessStop);
-        registry.register(ProcessList);
-        registry.register(ProcessLogs);
-        registry.register(ProcessRestart);
-        registry.register(PortCheck);
+        // Deferred: Process management operations
+        registry.register_deferred(ProcessStart);
+        registry.register_deferred(ProcessStop);
+        registry.register_deferred(ProcessList);
+        registry.register_deferred(ProcessLogs);
+        registry.register_deferred(ProcessRestart);
+        registry.register_deferred(PortCheck);
 
-        // Package manager operations
-        registry.register(NpmInstall);
-        registry.register(NpmRun);
-        registry.register(NpmScripts);
-        registry.register(PipInstall);
-        registry.register(PipList);
-        registry.register(PipFreeze);
-        registry.register(YarnInstall);
+        // Deferred: Package manager operations
+        registry.register_deferred(NpmInstall);
+        registry.register_deferred(NpmRun);
+        registry.register_deferred(NpmScripts);
+        registry.register_deferred(PipInstall);
+        registry.register_deferred(PipList);
+        registry.register_deferred(PipFreeze);
+        registry.register_deferred(YarnInstall);
 
-        // Container operations (Docker/Podman)
-        registry.register(ContainerRun);
-        registry.register(ContainerStop);
-        registry.register(ContainerList);
-        registry.register(ContainerLogs);
-        registry.register(ContainerExec);
-        registry.register(ContainerBuild);
-        registry.register(ContainerImages);
-        registry.register(ContainerPull);
-        registry.register(ContainerRemove);
-        registry.register(ComposeUp);
-        registry.register(ComposeDown);
+        // Deferred: Container operations (Docker/Podman)
+        registry.register_deferred(ContainerRun);
+        registry.register_deferred(ContainerStop);
+        registry.register_deferred(ContainerList);
+        registry.register_deferred(ContainerLogs);
+        registry.register_deferred(ContainerExec);
+        registry.register_deferred(ContainerBuild);
+        registry.register_deferred(ContainerImages);
+        registry.register_deferred(ContainerPull);
+        registry.register_deferred(ContainerRemove);
+        registry.register_deferred(ComposeUp);
+        registry.register_deferred(ComposeDown);
 
-        // Screen capture
-        registry.register(ScreenCapture);
+        // Deferred: Screen capture
+        registry.register_deferred(ScreenCapture);
 
-        // Vision tools
-        registry.register(VisionAnalyze);
-        registry.register(VisionCompare);
+        // Deferred: Vision tools
+        registry.register_deferred(VisionAnalyze);
+        registry.register_deferred(VisionCompare);
 
-        // Browser automation
-        registry.register(BrowserFetch);
-        registry.register(BrowserScreenshot);
-        registry.register(BrowserPdf);
-        registry.register(BrowserEval);
-        registry.register(BrowserLinks);
+        // Deferred: Browser automation
+        registry.register_deferred(BrowserFetch);
+        registry.register_deferred(BrowserScreenshot);
+        registry.register_deferred(BrowserPdf);
+        registry.register_deferred(BrowserEval);
+        registry.register_deferred(BrowserLinks);
 
-        // Playwright page controller (full browser automation)
-        registry.register(PageControlTool::new());
+        // Deferred: Playwright page controller
+        registry.register_deferred(PageControlTool::new());
 
-        // Knowledge graph
-        registry.register(KnowledgeAdd);
-        registry.register(KnowledgeAutoExtract);
-        registry.register(KnowledgeRelate);
-        registry.register(KnowledgeQuery);
-        registry.register(KnowledgeStatsTool);
-        registry.register(KnowledgeClear);
-        registry.register(KnowledgeRemove);
-        registry.register(KnowledgeExport);
+        // Deferred: Knowledge graph
+        registry.register_deferred(KnowledgeAdd);
+        registry.register_deferred(KnowledgeAutoExtract);
+        registry.register_deferred(KnowledgeRelate);
+        registry.register_deferred(KnowledgeQuery);
+        registry.register_deferred(KnowledgeStatsTool);
+        registry.register_deferred(KnowledgeClear);
+        registry.register_deferred(KnowledgeRemove);
+        registry.register_deferred(KnowledgeExport);
 
-        // Swarm orchestration — intentionally NOT registered as an LLM-invocable tool.
-        // Swarm dispatch is exposed via the `/swarm` CLI command, which calls
-        // `run_swarm_task` directly.  Registering it here would let the model
-        // spawn sub-agents autonomously, which we want gated behind explicit
-        // user invocation.
-        // registry.register(swarm_tool::SwarmDispatchTool::new());
+        // Deferred: Computer control (mouse, keyboard, screen, window)
+        registry.register_deferred(computer::ComputerMouseTool);
+        registry.register_deferred(computer::ComputerKeyboardTool);
+        registry.register_deferred(computer::ComputerScreenTool);
+        registry.register_deferred(computer::ComputerWindowTool);
 
-        // Computer control (mouse, keyboard, screen, window)
-        registry.register(computer::ComputerMouseTool);
-        registry.register(computer::ComputerKeyboardTool);
-        registry.register(computer::ComputerScreenTool);
-        registry.register(computer::ComputerWindowTool);
-
-        // LSP code intelligence tools
+        // Deferred: LSP code intelligence tools
         let project_root =
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let (lsp_goto, lsp_refs, lsp_syms, lsp_hover) = lsp_tools::create_lsp_tools(project_root);
-        registry.register(lsp_goto);
-        registry.register(lsp_refs);
-        registry.register(lsp_syms);
-        registry.register(lsp_hover);
+        registry.register_deferred(lsp_goto);
+        registry.register_deferred(lsp_refs);
+        registry.register_deferred(lsp_syms);
+        registry.register_deferred(lsp_hover);
 
-        // Code introspection tools for evolution
-        registry.register(introspect::CodeIntrospect::new());
-        registry.register(introspect::CodeQuery::new());
-        registry.register(introspect::CodePlan::new());
-        registry.register(introspect::CodeDiffPlan::new());
+        // Deferred: Code introspection tools for evolution
+        registry.register_deferred(introspect::CodeIntrospect::new());
+        registry.register_deferred(introspect::CodeQuery::new());
+        registry.register_deferred(introspect::CodePlan::new());
+        registry.register_deferred(introspect::CodeDiffPlan::new());
 
-        // Code metrics tool
-        registry.register(code_metrics::CodeMetricsTool::new());
+        // Deferred: Code metrics tool
+        registry.register_deferred(code_metrics::CodeMetricsTool::new());
 
-        // Code map / context budget tools
-        registry.register(codemap::CodeMapTool);
-        registry.register(codemap::ContextBudgetTool);
-        registry.register(codemap::ContextActionTool);
+        // Deferred: Code map / context budget tools
+        registry.register_deferred(codemap::CodeMapTool);
+        registry.register_deferred(codemap::ContextBudgetTool);
+        registry.register_deferred(codemap::ContextActionTool);
 
         registry
     }
 
+    /// Register a critical tool that's always available.
+    pub fn register_critical<T: Tool + 'static>(&mut self, tool: T) {
+        let name = tool.name().to_string();
+        let category = tool_search::categorize_tool(&name).to_string();
+        self.all_tools.insert(
+            name.clone(),
+            ToolInfo {
+                tool: Arc::new(tool),
+                is_critical: true,
+                category,
+            },
+        );
+        self.activated_tools.insert(name);
+    }
+
+    /// Register a deferred tool that's only available after discovery.
+    pub fn register_deferred<T: Tool + 'static>(&mut self, tool: T) {
+        let name = tool.name().to_string();
+        let category = tool_search::categorize_tool(&name).to_string();
+        self.all_tools.insert(
+            name.clone(),
+            ToolInfo {
+                tool: Arc::new(tool),
+                is_critical: false,
+                category,
+            },
+        );
+    }
+
     /// Register a tool, replacing any existing tool with the same name.
+    /// Defaults to deferred registration.
     pub fn register<T: Tool + 'static>(&mut self, tool: T) {
-        self.tools.insert(tool.name().to_string(), Box::new(tool));
+        self.register_deferred(tool);
     }
 
     /// Look up a tool by name, returning `None` if not found.
+    /// This checks all tools, not just activated ones.
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
-        self.tools.get(name).map(|t| t.as_ref())
+        self.all_tools.get(name).map(|info| info.tool.as_ref())
     }
 
-    /// Return references to all registered tools.
+    /// Look up a tool by name, but only if it's been activated.
+    pub fn get_activated(&self, name: &str) -> Option<&dyn Tool> {
+        if self.activated_tools.contains(name) {
+            self.all_tools.get(name).map(|info| info.tool.as_ref())
+        } else {
+            None
+        }
+    }
+
+    /// Check if a tool is activated (available for use).
+    pub fn is_activated(&self, name: &str) -> bool {
+        self.activated_tools.contains(name)
+    }
+
+    /// Activate a tool by name, making it available for use.
+    /// Returns true if the tool was found and activated, false otherwise.
+    pub fn activate(&mut self, name: &str) -> bool {
+        if self.all_tools.contains_key(name) {
+            self.activated_tools.insert(name.to_string());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Activate multiple tools at once.
+    pub fn activate_many(&mut self, names: &[&str]) {
+        for name in names {
+            self.activate(name);
+        }
+    }
+
+    /// Return references to all registered tools (both critical and deferred).
     pub fn list(&self) -> Vec<&dyn Tool> {
-        self.tools.values().map(|t| t.as_ref()).collect()
+        self.all_tools
+            .values()
+            .map(|info| info.tool.as_ref())
+            .collect()
     }
 
-    /// Execute a tool by name with the given arguments
+    /// Return only the activated tools (available for use).
+    pub fn list_activated(&self) -> Vec<&dyn Tool> {
+        self.activated_tools
+            .iter()
+            .filter_map(|name| self.all_tools.get(name).map(|info| info.tool.as_ref()))
+            .collect()
+    }
+
+    /// Return only the critical tools.
+    pub fn list_critical(&self) -> Vec<&dyn Tool> {
+        self.all_tools
+            .values()
+            .filter(|info| info.is_critical)
+            .map(|info| info.tool.as_ref())
+            .collect()
+    }
+
+    /// Return references to all deferred (not yet activated) tools.
+    pub fn list_deferred(&self) -> Vec<&dyn Tool> {
+        self.all_tools
+            .values()
+            .filter(|info| !info.is_critical && !self.activated_tools.contains(info.tool.name()))
+            .map(|info| info.tool.as_ref())
+            .collect()
+    }
+
+    /// Execute a tool by name with the given arguments.
+    /// Only activated tools can be executed.
     pub async fn execute(&self, name: &str, args: serde_json::Value) -> Result<serde_json::Value> {
+        let tool = self
+            .get_activated(name)
+            .ok_or_else(|| anyhow::anyhow!("Unknown or inactive tool: {}", name))?;
+        tool.execute(args).await
+    }
+
+    /// Execute any tool (including deferred ones) - for internal use.
+    pub async fn execute_any(&self, name: &str, args: serde_json::Value) -> Result<serde_json::Value> {
         let tool = self
             .get(name)
             .ok_or_else(|| anyhow::anyhow!("Unknown tool: {}", name))?;
         tool.execute(args).await
     }
 
-    /// Build API-compatible tool definitions for all registered tools.
+    /// Build API-compatible tool definitions for all activated tools.
     pub fn definitions(&self) -> Vec<crate::api::types::ToolDefinition> {
-        self.tools
-            .values()
+        self.list_activated()
+            .into_iter()
             .map(|tool| crate::api::types::ToolDefinition {
                 def_type: "function".to_string(),
                 function: crate::api::types::FunctionDefinition {
@@ -383,6 +582,64 @@ impl ToolRegistry {
                 },
             })
             .collect()
+    }
+
+    /// Build API-compatible tool definitions for critical tools only.
+    /// Use this for the initial system prompt to reduce context window usage.
+    pub fn critical_definitions(&self) -> Vec<crate::api::types::ToolDefinition> {
+        self.list_critical()
+            .into_iter()
+            .map(|tool| crate::api::types::ToolDefinition {
+                def_type: "function".to_string(),
+                function: crate::api::types::FunctionDefinition {
+                    name: tool.name().to_string(),
+                    description: tool.description().to_string(),
+                    parameters: tool.schema(),
+                },
+            })
+            .collect()
+    }
+
+    /// Search for tools by name or description.
+    /// Returns up to `limit` matching tools.
+    pub fn search(&self, query: &str, limit: usize) -> Vec<tool_search::ToolSearchResult> {
+        let query_lower = query.to_lowercase();
+        self.all_tools
+            .values()
+            .filter(|info| {
+                let name_match = info.tool.name().to_lowercase().contains(&query_lower);
+                let desc_match = info.tool.description().to_lowercase().contains(&query_lower);
+                name_match || desc_match
+            })
+            .take(limit)
+            .map(|info| tool_search::ToolSearchResult {
+                name: info.tool.name().to_string(),
+                description: info.tool.description().to_string(),
+                schema: info.tool.schema(),
+                is_critical: info.is_critical,
+                category: info.category.clone(),
+            })
+            .collect()
+    }
+
+    /// Get the count of all registered tools.
+    pub fn total_count(&self) -> usize {
+        self.all_tools.len()
+    }
+
+    /// Get the count of activated tools.
+    pub fn activated_count(&self) -> usize {
+        self.activated_tools.len()
+    }
+
+    /// Get the count of critical tools.
+    pub fn critical_count(&self) -> usize {
+        self.all_tools.values().filter(|info| info.is_critical).count()
+    }
+
+    /// Get info about a tool by name.
+    pub fn get_info(&self, name: &str) -> Option<&ToolInfo> {
+        self.all_tools.get(name)
     }
 }
 
@@ -661,5 +918,209 @@ mod tests {
         let (page, info) = truncate_with_pagination("hello", 100, 10);
         assert_eq!(page, "");
         assert!(!info.has_more);
+    }
+
+    // ---- Deferred tool loading tests ----
+
+    #[test]
+    fn test_critical_tools_are_activated() {
+        let registry = ToolRegistry::new();
+        
+        // Critical tools should be activated by default
+        for tool_name in CRITICAL_TOOLS {
+            assert!(
+                registry.is_activated(tool_name),
+                "Critical tool {} should be activated",
+                tool_name
+            );
+        }
+    }
+
+    #[test]
+    fn test_tool_search_is_critical() {
+        let registry = ToolRegistry::new();
+        assert!(registry.is_activated("tool_search"));
+    }
+
+    #[test]
+    fn test_git_tools_deferred() {
+        let mut registry = ToolRegistry::new();
+        
+        // Git tools should exist but not be activated initially
+        assert!(registry.get("git_status").is_some());
+        assert!(!registry.is_activated("git_status"));
+        
+        // Activate and check
+        assert!(registry.activate("git_status"));
+        assert!(registry.is_activated("git_status"));
+    }
+
+    #[test]
+    fn test_list_critical_vs_list_activated() {
+        let registry = ToolRegistry::new();
+        
+        let critical = registry.list_critical();
+        let activated = registry.list_activated();
+        
+        // Initially, activated should equal critical
+        assert_eq!(critical.len(), activated.len());
+        
+        // But total tools should be more
+        assert!(registry.total_count() > critical.len());
+    }
+
+    #[test]
+    fn test_search_and_activate() {
+        let mut registry = ToolRegistry::new();
+        
+        // Search for git tools
+        let results = registry.search("git", 10);
+        assert!(!results.is_empty());
+        
+        // Activate git tools
+        for result in &results {
+            if !result.is_critical {
+                registry.activate(&result.name);
+            }
+        }
+        
+        // Now git_status should be activated
+        assert!(registry.is_activated("git_status"));
+    }
+
+    #[test]
+    fn test_definitions_returns_activated_only() {
+        let mut registry = ToolRegistry::new();
+        
+        let initial_count = registry.definitions().len();
+        assert_eq!(initial_count, registry.activated_count());
+        
+        // Activate a deferred tool
+        registry.activate("cargo_test");
+        
+        // Definitions should now include the activated tool
+        let new_count = registry.definitions().len();
+        assert_eq!(new_count, initial_count + 1);
+    }
+
+    #[test]
+    fn test_critical_definitions_count() {
+        let registry = ToolRegistry::new();
+        
+        let critical_defs = registry.critical_definitions();
+        let all_defs = registry.definitions();
+        
+        // Initially, critical_definitions should equal definitions
+        assert_eq!(critical_defs.len(), all_defs.len());
+        assert_eq!(critical_defs.len(), CRITICAL_TOOLS.len());
+    }
+
+    #[test]
+    fn test_cargo_tools_deferred() {
+        let registry = ToolRegistry::new();
+        
+        // Cargo tools should exist but not be activated
+        assert!(registry.get("cargo_test").is_some());
+        assert!(!registry.is_activated("cargo_test"));
+        assert!(!registry.is_activated("cargo_check"));
+    }
+
+    #[test]
+    fn test_container_tools_deferred() {
+        let registry = ToolRegistry::new();
+        
+        // Container tools should exist but not be activated
+        assert!(registry.get("container_run").is_some());
+        assert!(!registry.is_activated("container_run"));
+    }
+
+    // =========================================================================
+    // Tool Metadata Tests
+    // =========================================================================
+
+    #[test]
+    fn test_file_read_is_readonly() {
+        let tool = FileRead::new();
+        assert!(tool.is_readonly());
+        assert_eq!(tool.risk_level(), crate::safety::RiskLevel::Low);
+        assert!(!tool.is_destructive());
+    }
+
+    #[test]
+    fn test_file_write_is_not_readonly() {
+        let tool = FileWrite::new();
+        assert!(!tool.is_readonly());
+        assert_eq!(tool.risk_level(), crate::safety::RiskLevel::Medium);
+        assert!(!tool.is_destructive());
+    }
+
+    #[test]
+    fn test_file_delete_is_destructive() {
+        let tool = FileDelete::new();
+        assert!(!tool.is_readonly());
+        assert_eq!(tool.risk_level(), crate::safety::RiskLevel::High);
+        assert!(tool.is_destructive());
+    }
+
+    #[test]
+    fn test_shell_exec_is_high_risk() {
+        let tool = ShellExec;
+        assert!(!tool.is_readonly());
+        assert_eq!(tool.risk_level(), crate::safety::RiskLevel::High);
+        assert!(tool.is_destructive());
+    }
+
+    #[test]
+    fn test_directory_tree_is_readonly() {
+        let tool = DirectoryTree::new();
+        assert!(tool.is_readonly());
+        assert_eq!(tool.risk_level(), crate::safety::RiskLevel::Low);
+    }
+
+    #[test]
+    fn test_grep_search_is_readonly() {
+        use crate::tools::search::GrepSearch;
+        let tool = GrepSearch;
+        assert!(tool.is_readonly());
+        assert_eq!(tool.risk_level(), crate::safety::RiskLevel::Low);
+    }
+
+    #[test]
+    fn test_git_status_is_readonly() {
+        use crate::tools::git::GitStatus;
+        let tool = GitStatus::new();
+        assert!(tool.is_readonly());
+        assert_eq!(tool.risk_level(), crate::safety::RiskLevel::Low);
+    }
+
+    #[test]
+    fn test_git_push_is_high_risk() {
+        use crate::tools::git::GitPush;
+        let tool = GitPush::new();
+        assert!(!tool.is_readonly());
+        assert_eq!(tool.risk_level(), crate::safety::RiskLevel::High);
+    }
+
+    #[test]
+    fn test_tool_metadata_via_registry() {
+        let registry = ToolRegistry::new();
+
+        // Test that we can get metadata for registered tools
+        let file_read = registry.get("file_read").unwrap();
+        assert!(file_read.is_readonly());
+        assert_eq!(file_read.risk_level(), crate::safety::RiskLevel::Low);
+
+        let file_write = registry.get("file_write").unwrap();
+        assert!(!file_write.is_readonly());
+        assert_eq!(file_write.risk_level(), crate::safety::RiskLevel::Medium);
+
+        let file_delete = registry.get("file_delete").unwrap();
+        assert!(file_delete.is_destructive());
+        assert_eq!(file_delete.risk_level(), crate::safety::RiskLevel::High);
+
+        let shell_exec = registry.get("shell_exec").unwrap();
+        assert!(!shell_exec.is_readonly());
+        assert_eq!(shell_exec.risk_level(), crate::safety::RiskLevel::High);
+        assert!(shell_exec.is_destructive());
     }
 }

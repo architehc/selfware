@@ -11,12 +11,14 @@ pub mod garden_view;
 pub mod layout;
 mod markdown;
 pub mod palette;
+pub mod status_line;
 mod swarm_app;
 pub mod swarm_state;
 mod swarm_widgets;
 mod widgets;
 
 pub use app::{App, AppState, ChatMessage, MessageRole, TaskProgress};
+pub use status_line::{StatusLine, StatusMode};
 pub use dashboard_widgets::{
     render_active_tools, render_garden_health, render_help_overlay, render_logs, render_status_bar,
     ActiveTool, DashboardState, LogEntry, LogLevel, SharedDashboardState, TuiEvent,
@@ -993,6 +995,18 @@ pub fn run_tui_dashboard_with_events(
     let mut paused = false;
     let mut quit_armed_at: Option<Instant> = None;
 
+    // Discover user skills
+    let skill_registry = crate::skills::SkillRegistry::discover();
+    if !skill_registry.is_empty() {
+        with_dashboard_state(&shared_state, |state| {
+            state.log(
+                LogLevel::Info,
+                &format!("Discovered {} skill(s)", skill_registry.len()),
+            );
+        });
+    }
+    app.skill_registry = Some(skill_registry);
+
     // Channel for receiving background git command results
     let (git_cmd_tx, git_cmd_rx) = std::sync::mpsc::channel::<String>();
 
@@ -1329,6 +1343,10 @@ pub fn run_tui_dashboard_with_events(
                                                /diff           -- Show git diff --stat\n  \
                                                /git            -- Show git status\n\
                                              \n\
+                                             Skills:\n  \
+                                               /skills         -- List available skills\n  \
+                                               /<skill>        -- Activate a skill\n\
+                                             \n\
                                              Keyboard: q (quit), ? (help), Ctrl+D (dashboard), Ctrl+G (garden), Tab (cycle panes)"
                                         );
                                         with_dashboard_state(&shared_state, |state| {
@@ -1551,6 +1569,28 @@ pub fn run_tui_dashboard_with_events(
                                             state.log(LogLevel::Info, "Ran git status");
                                         });
                                     }
+                                    "/skills" => {
+                                        let msg = if let Some(ref registry) = app.skill_registry {
+                                            if registry.is_empty() {
+                                                "No skills discovered.\n\nPlace skill markdown files in:\n  ~/.selfware/skills/\n  ./.selfware/skills/".to_string()
+                                            } else {
+                                                let mut lines = vec!["Available skills:".to_string()];
+                                                for skill in registry.list() {
+                                                    lines.push(format!(
+                                                        "  /{} -- {}",
+                                                        skill.name, skill.description
+                                                    ));
+                                                }
+                                                lines.join("\n")
+                                            }
+                                        } else {
+                                            "Skill registry not initialized.".to_string()
+                                        };
+                                        app.add_system_message(&msg);
+                                        with_dashboard_state(&shared_state, |state| {
+                                            state.log(LogLevel::Info, "Listed available skills");
+                                        });
+                                    }
                                     // CLI-only commands that don't apply in TUI
                                     "/queue" | "/swarm" | "/spawn" | "/delegate" | "/pipe"
                                     | "/batch" | "/schedule" | "/cron" | "/webhook" => {
@@ -1563,6 +1603,45 @@ pub fn run_tui_dashboard_with_events(
                                                 &format!("CLI-only command attempted: {}", cmd),
                                             );
                                         });
+                                    }
+                                    // Dynamic skill execution: /<skill_name>
+                                    cmd if cmd.starts_with('/') => {
+                                        let skill_name = &cmd[1..];
+                                        let skill_opt = app
+                                            .skill_registry
+                                            .as_ref()
+                                            .and_then(|r| r.get(skill_name).cloned());
+                                        if let Some(skill) = skill_opt {
+                                            let prompt = if arg.is_empty() {
+                                                skill.content.clone()
+                                            } else {
+                                                format!("{}\n\nUser request: {}", skill.content, arg)
+                                            };
+                                            let skill_name = skill.name.clone();
+                                            app.add_system_message(&format!(
+                                                "Activated skill: /{}",
+                                                skill_name
+                                            ));
+                                            // Inject skill instructions as a system message
+                                            app.add_system_message(&prompt);
+                                            with_dashboard_state(&shared_state, |state| {
+                                                state.log(
+                                                    LogLevel::Info,
+                                                    &format!("Activated skill: /{}", skill_name),
+                                                );
+                                            });
+                                        } else {
+                                            app.add_system_message(&format!(
+                                                "Unknown command: {}. Type /help for available commands.",
+                                                cmd
+                                            ));
+                                            with_dashboard_state(&shared_state, |state| {
+                                                state.log(
+                                                    LogLevel::Warning,
+                                                    &format!("Unknown command: {}", cmd),
+                                                );
+                                            });
+                                        }
                                     }
                                     _ => {
                                         app.add_system_message(&format!(

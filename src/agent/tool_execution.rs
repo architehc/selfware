@@ -196,6 +196,30 @@ impl Agent {
             return Ok(());
         }
 
+        // Permission check based on execution mode and tool metadata
+        let permission_result = self.check_tool_permission(name, tool, &args).await;
+        match permission_result {
+            Ok(true) => {
+                // Permission granted, continue with execution
+            }
+            Ok(false) => {
+                // Permission denied, record and return
+                let error_msg = format!("Tool '{}' was denied by permission check", name);
+                warn!("{}", error_msg);
+                self.push_tool_result_message(use_native_fc, call_id, name, false, &error_msg);
+                self.log_tool_call(name, args_str, &error_msg, false, start_time, false);
+                self.emit_event(AgentEvent::ToolCompleted {
+                    name: name.to_string(),
+                    success: false,
+                    duration_ms: start_time.elapsed().as_millis() as u64,
+                });
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        }
+
         // Check for tool result cache hit
         let cached_result = self.cache_manager.tool_cache.get(name, &args);
         let result = if let Some(cached) = cached_result {
@@ -273,5 +297,54 @@ impl Agent {
         let _ = self.hook_registry.after_tool(&hook_context, success);
 
         Ok(())
+    }
+
+    /// Check if a tool has permission to execute based on execution mode and metadata
+    ///
+    /// Returns:
+    /// - Ok(true): Permission granted
+    /// - Ok(false): Permission denied (tool should be skipped)
+    /// - Err(e): Error during permission check
+    async fn check_tool_permission(
+        &self,
+        name: &str,
+        tool: &dyn crate::tools::Tool,
+        args: &Value,
+    ) -> Result<bool> {
+        use crate::safety::{ExecutionMode, PermissionChecker, PermissionResult};
+
+        // Skip permission checks in plan mode - plan mode is handled separately
+        if self.plan_mode {
+            return Ok(true);
+        }
+
+        // Map config ExecutionMode to safety ExecutionMode
+        let mode = match self.config.execution_mode {
+            crate::config::ExecutionMode::Normal => ExecutionMode::Normal,
+            crate::config::ExecutionMode::AutoEdit => ExecutionMode::Auto,
+            crate::config::ExecutionMode::Yolo => ExecutionMode::Yolo,
+            crate::config::ExecutionMode::Daemon => ExecutionMode::Yolo,
+        };
+
+        // Create permission checker with the current mode
+        let checker = PermissionChecker::new(mode);
+
+        // Get tool metadata
+        let metadata = tool.metadata();
+
+        // Check permission
+        match checker.check(name, &metadata, args) {
+            PermissionResult::Allow => Ok(true),
+            PermissionResult::Deny { reason } => {
+                info!("Tool '{}' denied: {}", name, reason);
+                Ok(false)
+            }
+            PermissionResult::Prompt { reason } => {
+                // For now, log and allow - in a full implementation this would prompt the user
+                // TODO: Implement interactive prompting for permission confirmation
+                info!("Tool '{}' requires confirmation: {} (allowing for now)", name, reason);
+                Ok(true)
+            }
+        }
     }
 }

@@ -4,7 +4,7 @@
 
 // Feature-gated module - dead_code lint disabled at crate level
 
-use super::{wrap_chat_message, CommandPalette, TuiPalette};
+use super::{wrap_chat_message, CommandPalette, StatusLine, TuiPalette};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
@@ -94,6 +94,10 @@ pub struct App {
     pub verbose: bool,
     /// Garden view for codebase visualization
     pub garden_view: super::GardenView,
+    /// Intelligent status line
+    pub status_line: StatusLine,
+    /// Discovered skills for slash-command execution
+    pub skill_registry: Option<crate::skills::SkillRegistry>,
 }
 
 impl App {
@@ -119,6 +123,8 @@ impl App {
             animation_speed: ANIMATION_SPEED_DEFAULT,
             verbose: false,
             garden_view: super::GardenView::new(),
+            status_line: StatusLine::with_session(model),
+            skill_registry: None,
         }
     }
 
@@ -384,41 +390,28 @@ impl App {
 
     /// Render status bar
     fn render_status_bar(&self, frame: &mut Frame, area: Rect) {
-        use ratatui::text::Line;
-        use ratatui::text::Span;
+        self.status_line.render(frame, area);
+    }
 
-        let connection_status = if self.connected {
-            Span::styled("●", TuiPalette::success_style())
-        } else {
-            Span::styled("○", TuiPalette::error_style())
-        };
+    /// Update the status line with current app state
+    pub fn refresh_status_line(&mut self) {
+        self.status_line.connected = self.connected;
+        self.status_line.status_message = Some(self.status.clone());
+    }
 
-        // Build status bar based on current state
-        let help_hint = match self.state {
-            AppState::Chatting => "Ctrl+P: palette │ Enter: send │ ↑/↓: scroll │ Ctrl+C: quit",
-            AppState::Palette => "↑/↓: navigate │ Enter: select │ Esc: close │ Type: filter",
-            AppState::RunningTask => "Task running... │ Esc: cancel (if possible)",
-            AppState::Confirming(_) => "y: yes │ n: no │ Enter: confirm │ Esc: cancel",
-            AppState::FileBrowser => "arrows: navigate | Enter: open | Esc: close",
-            AppState::Help => "Esc: close help",
-            AppState::GardenView => {
-                "arrows: navigate | Enter: expand | r: refresh | Ctrl+G: exit garden"
-            }
-        };
+    /// Set the execution mode displayed in the status line
+    pub fn set_status_mode(&mut self, mode: super::StatusMode) {
+        self.status_line.mode = mode;
+    }
 
-        let status_line = Line::from(vec![
-            connection_status,
-            Span::raw(format!(" {} │ ", self.model)),
-            Span::styled(format!("{} │ ", self.status), TuiPalette::muted_style()),
-            Span::styled(
-                format!("{} msgs │ ", self.messages.len()),
-                TuiPalette::muted_style(),
-            ),
-            Span::raw(help_hint),
-        ]);
+    /// Update token usage in the status line
+    pub fn set_token_usage(&mut self, input: usize, output: usize) {
+        self.status_line.tokens_used = (input, output);
+    }
 
-        let status = Paragraph::new(status_line);
-        frame.render_widget(status, area);
+    /// Update context window percentage in the status line
+    pub fn set_context_percent(&mut self, percent: f32) {
+        self.status_line.context_percent = percent.clamp(0.0, 100.0);
     }
 
     /// Render command palette overlay

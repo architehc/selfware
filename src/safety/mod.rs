@@ -16,6 +16,7 @@ pub mod redact;
 pub mod sandbox;
 pub mod scanner;
 pub mod threat_modeling;
+pub mod tool_metadata;
 
 #[cfg(feature = "execution-modes")]
 pub mod confirm;
@@ -35,3 +36,7 @@ pub use scanner::{
     SecretScanner, SecurityCategory, SecurityFinding, SecurityScanner, SecuritySeverity,
 };
 pub use threat_modeling::{Asset, SecurityControl, StrideCategory, Threat};
+pub use tool_metadata::{
+    default_tool_metadata, ExecutionMode, PermissionChecker, PermissionResult, RiskLevel,
+    ToolMetadata,
+};

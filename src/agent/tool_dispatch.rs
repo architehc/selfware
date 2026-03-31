@@ -1608,6 +1608,79 @@ impl Agent {
         }
     }
 
+    /// Execute tool_search - search for deferred tools and activate them.
+    /// This allows the LLM to discover tools on demand, reducing context window usage.
+    async fn execute_tool_search(
+        &mut self,
+        args: &serde_json::Value,
+    ) -> serde_json::Value {
+        use crate::tools::tool_search::ToolSearchResult;
+
+        let query = args
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if query.is_empty() {
+            return serde_json::json!({
+                "error": "query parameter is required",
+                "found_tools": [],
+                "count": 0,
+            });
+        }
+
+        let limit = args
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(5)
+            .min(20)
+            .max(1);
+
+        // Search for tools in the registry
+        let results: Vec<ToolSearchResult> = self.tools.search(query, limit);
+
+        // Activate the found tools (make them available for use)
+        let mut activated = Vec::new();
+        for result in &results {
+            if !result.is_critical && !self.tools.is_activated(&result.name) {
+                self.tools.activate(&result.name);
+                activated.push(result.name.clone());
+            }
+        }
+
+        // Build response
+        let found_tools: Vec<serde_json::Value> = results
+            .into_iter()
+            .map(|r| {
+                serde_json::json!({
+                    "name": r.name,
+                    "description": r.description,
+                    "schema": r.schema,
+                    "is_critical": r.is_critical,
+                    "category": r.category,
+                })
+            })
+            .collect();
+
+        let total_tools = self.tools.total_count();
+        let activated_tools = self.tools.activated_count();
+
+        serde_json::json!({
+            "found_tools": found_tools,
+            "count": found_tools.len(),
+            "query": query,
+            "newly_activated": activated,
+            "total_tools_available": total_tools,
+            "activated_tools_count": activated_tools,
+            "note": if activated.is_empty() {
+                "These tools are available for use in this session."
+            } else {
+                "These tools are now available for use in this session."
+            },
+        })
+    }
+
     pub(super) fn build_tool_call_context(
         &self,
         name: &str,
@@ -1812,6 +1885,17 @@ impl Agent {
         // not the filesystem, so they bypass the normal tool registry.
         if crate::tools::context::is_context_tool(name) {
             let result = self.execute_context_tool_async(name, args).await;
+            let elapsed = start_time.elapsed().as_millis() as u64;
+            let result_str = serde_json::to_string(&result)?;
+            let summary =
+                crate::output::semantic_summary(name, args, Some(&result_str), true, elapsed);
+            self.log_tool_call(name, args_str, &result_str, true, start_time, true);
+            return Ok((true, result_str, summary));
+        }
+
+        // Intercept tool_search — it activates deferred tools and returns their schemas
+        if name == "tool_search" {
+            let result = self.execute_tool_search(args).await;
             let elapsed = start_time.elapsed().as_millis() as u64;
             let result_str = serde_json::to_string(&result)?;
             let summary =

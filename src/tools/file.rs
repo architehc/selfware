@@ -225,6 +225,10 @@ impl Tool for FileRead {
             "encoding": "utf-8"
         }))
     }
+
+    fn metadata(&self) -> crate::safety::ToolMetadata {
+        crate::safety::ToolMetadata::read_only()
+    }
 }
 
 #[async_trait]
@@ -295,6 +299,10 @@ impl Tool for FileWrite {
             "path": args.path
         }))
     }
+
+    fn metadata(&self) -> crate::safety::ToolMetadata {
+        crate::safety::ToolMetadata::file_write()
+    }
 }
 
 #[async_trait]
@@ -353,6 +361,10 @@ impl Tool for FileEdit {
             "path": args.path
         }))
     }
+
+    fn metadata(&self) -> crate::safety::ToolMetadata {
+        crate::safety::ToolMetadata::file_write()
+    }
 }
 
 #[async_trait]
@@ -410,6 +422,10 @@ impl Tool for FileDelete {
             "deleted": true,
             "path": args.path
         }))
+    }
+
+    fn metadata(&self) -> crate::safety::ToolMetadata {
+        crate::safety::ToolMetadata::file_destructive()
     }
 }
 
@@ -531,6 +547,10 @@ impl Tool for DirectoryTree {
             "entries": entries,
             "total": entries.len()
         }))
+    }
+
+    fn metadata(&self) -> crate::safety::ToolMetadata {
+        crate::safety::ToolMetadata::read_only()
     }
 }
 
