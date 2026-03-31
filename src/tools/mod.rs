@@ -17,6 +17,7 @@ pub mod file;
 pub mod file_read;
 pub mod fim;
 pub mod git;
+pub mod grep_search;
 #[cfg(feature = "hot-reload")]
 pub mod hot_reload;
 pub mod http;
@@ -27,7 +28,6 @@ pub mod net_policy;
 pub mod package;
 pub mod page_controller;
 pub mod process;
-pub mod grep_search;
 pub mod prompt;
 pub mod pty_shell;
 pub mod screen_capture;
@@ -48,6 +48,7 @@ use container::{
 use file::{DirectoryTree, FileDelete, FileEdit, FileWrite};
 use file_read::FileRead;
 use git::{GitCheckpoint, GitCommit, GitDiff, GitPush, GitStatus};
+use grep_search::GrepSearch;
 use http::HttpRequest;
 use knowledge::{
     KnowledgeAdd, KnowledgeAutoExtract, KnowledgeClear, KnowledgeExport, KnowledgeQuery,
@@ -58,7 +59,6 @@ use page_controller::PageControlTool;
 use process::{PortCheck, ProcessList, ProcessLogs, ProcessRestart, ProcessStart, ProcessStop};
 use pty_shell::PtyShellTool;
 use screen_capture::ScreenCapture;
-use grep_search::GrepSearch;
 use search::{GlobFind, SymbolSearch};
 use shell_exec::ShellExec;
 use vision::{VisionAnalyze, VisionCompare};
@@ -562,7 +562,11 @@ impl ToolRegistry {
     }
 
     /// Execute any tool (including deferred ones) - for internal use.
-    pub async fn execute_any(&self, name: &str, args: serde_json::Value) -> Result<serde_json::Value> {
+    pub async fn execute_any(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value> {
         let tool = self
             .get(name)
             .ok_or_else(|| anyhow::anyhow!("Unknown tool: {}", name))?;
@@ -608,7 +612,11 @@ impl ToolRegistry {
             .values()
             .filter(|info| {
                 let name_match = info.tool.name().to_lowercase().contains(&query_lower);
-                let desc_match = info.tool.description().to_lowercase().contains(&query_lower);
+                let desc_match = info
+                    .tool
+                    .description()
+                    .to_lowercase()
+                    .contains(&query_lower);
                 name_match || desc_match
             })
             .take(limit)
@@ -634,7 +642,10 @@ impl ToolRegistry {
 
     /// Get the count of critical tools.
     pub fn critical_count(&self) -> usize {
-        self.all_tools.values().filter(|info| info.is_critical).count()
+        self.all_tools
+            .values()
+            .filter(|info| info.is_critical)
+            .count()
     }
 
     /// Get info about a tool by name.
@@ -925,7 +936,7 @@ mod tests {
     #[test]
     fn test_critical_tools_are_activated() {
         let registry = ToolRegistry::new();
-        
+
         // Critical tools should be activated by default
         for tool_name in CRITICAL_TOOLS {
             assert!(
@@ -945,11 +956,11 @@ mod tests {
     #[test]
     fn test_git_tools_deferred() {
         let mut registry = ToolRegistry::new();
-        
+
         // Git tools should exist but not be activated initially
         assert!(registry.get("git_status").is_some());
         assert!(!registry.is_activated("git_status"));
-        
+
         // Activate and check
         assert!(registry.activate("git_status"));
         assert!(registry.is_activated("git_status"));
@@ -958,13 +969,13 @@ mod tests {
     #[test]
     fn test_list_critical_vs_list_activated() {
         let registry = ToolRegistry::new();
-        
+
         let critical = registry.list_critical();
         let activated = registry.list_activated();
-        
+
         // Initially, activated should equal critical
         assert_eq!(critical.len(), activated.len());
-        
+
         // But total tools should be more
         assert!(registry.total_count() > critical.len());
     }
@@ -972,18 +983,18 @@ mod tests {
     #[test]
     fn test_search_and_activate() {
         let mut registry = ToolRegistry::new();
-        
+
         // Search for git tools
         let results = registry.search("git", 10);
         assert!(!results.is_empty());
-        
+
         // Activate git tools
         for result in &results {
             if !result.is_critical {
                 registry.activate(&result.name);
             }
         }
-        
+
         // Now git_status should be activated
         assert!(registry.is_activated("git_status"));
     }
@@ -991,13 +1002,13 @@ mod tests {
     #[test]
     fn test_definitions_returns_activated_only() {
         let mut registry = ToolRegistry::new();
-        
+
         let initial_count = registry.definitions().len();
         assert_eq!(initial_count, registry.activated_count());
-        
+
         // Activate a deferred tool
         registry.activate("cargo_test");
-        
+
         // Definitions should now include the activated tool
         let new_count = registry.definitions().len();
         assert_eq!(new_count, initial_count + 1);
@@ -1006,10 +1017,10 @@ mod tests {
     #[test]
     fn test_critical_definitions_count() {
         let registry = ToolRegistry::new();
-        
+
         let critical_defs = registry.critical_definitions();
         let all_defs = registry.definitions();
-        
+
         // Initially, critical_definitions should equal definitions
         assert_eq!(critical_defs.len(), all_defs.len());
         assert_eq!(critical_defs.len(), CRITICAL_TOOLS.len());
@@ -1018,7 +1029,7 @@ mod tests {
     #[test]
     fn test_cargo_tools_deferred() {
         let registry = ToolRegistry::new();
-        
+
         // Cargo tools should exist but not be activated
         assert!(registry.get("cargo_test").is_some());
         assert!(!registry.is_activated("cargo_test"));
@@ -1028,7 +1039,7 @@ mod tests {
     #[test]
     fn test_container_tools_deferred() {
         let registry = ToolRegistry::new();
-        
+
         // Container tools should exist but not be activated
         assert!(registry.get("container_run").is_some());
         assert!(!registry.is_activated("container_run"));

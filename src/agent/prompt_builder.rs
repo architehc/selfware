@@ -23,14 +23,14 @@ impl<T> DynamicSection for T where T: Fn() -> String + Send + Sync {}
 /// # Example
 /// ```
 /// let mut builder = SystemPromptBuilder::new();
-/// 
+///
 /// // Static content - cached across conversations
 /// builder.add_static("You are an AI assistant.".to_string());
 /// builder.add_static("Core tool descriptions...".to_string());
-/// 
+///
 /// // Dynamic content - computed fresh per request
 /// builder.add_dynamic(|| format!("Current time: {}", chrono::Local::now()));
-/// 
+///
 /// // Build the full prompt
 /// let prompt = builder.build();
 /// ```
@@ -91,9 +91,8 @@ impl SystemPromptBuilder {
     where
         F: Fn() -> Option<String> + Send + Sync + 'static,
     {
-        self.dynamic_sections.push(Box::new(move || {
-            generator().unwrap_or_default()
-        }));
+        self.dynamic_sections
+            .push(Box::new(move || generator().unwrap_or_default()));
     }
 
     /// Build the full prompt by combining static and dynamic sections
@@ -115,9 +114,7 @@ impl SystemPromptBuilder {
         } else {
             format!(
                 "{}\n{}\n{}",
-                static_part,
-                PROMPT_DYNAMIC_BOUNDARY,
-                dynamic_part
+                static_part, PROMPT_DYNAMIC_BOUNDARY, dynamic_part
             )
         }
     }
@@ -149,10 +146,10 @@ impl SystemPromptBuilder {
     pub fn build_cached(&self) -> (String, String) {
         let static_part = self.build_static();
         let dynamic_part = self.build_dynamic();
-        
+
         // Compute cache key from static portion only
         let cache_key = compute_cache_key(&static_part);
-        
+
         let full_prompt = if dynamic_part.is_empty() {
             static_part
         } else if static_part.is_empty() {
@@ -160,12 +157,10 @@ impl SystemPromptBuilder {
         } else {
             format!(
                 "{}\n{}\n{}",
-                static_part,
-                PROMPT_DYNAMIC_BOUNDARY,
-                dynamic_part
+                static_part, PROMPT_DYNAMIC_BOUNDARY, dynamic_part
             )
         };
-        
+
         (cache_key, full_prompt)
     }
 
@@ -278,11 +273,11 @@ mod tests {
         builder.add_dynamic(|| "Dynamic content".to_string());
 
         let (cache_key, full_prompt) = builder.build_cached();
-        
+
         // Cache key should be non-empty and consistent
         assert!(!cache_key.is_empty());
         assert_eq!(cache_key, builder.static_cache_key());
-        
+
         // Full prompt should contain both parts
         assert!(full_prompt.contains("Static content"));
         assert!(full_prompt.contains("Dynamic content"));
@@ -306,7 +301,7 @@ mod tests {
     fn test_split_at_boundary() {
         let prompt = format!("Static\n{}\nDynamic", PROMPT_DYNAMIC_BOUNDARY);
         let (static_part, dynamic_part) = split_at_boundary(&prompt);
-        
+
         assert_eq!(static_part, "Static");
         assert_eq!(dynamic_part, "Dynamic");
     }
@@ -315,7 +310,7 @@ mod tests {
     fn test_split_no_boundary() {
         let prompt = "Just static content";
         let (static_part, dynamic_part) = split_at_boundary(prompt);
-        
+
         assert_eq!(static_part, "Just static content");
         assert_eq!(dynamic_part, "");
     }
@@ -324,7 +319,7 @@ mod tests {
     fn test_empty_dynamic() {
         let mut builder = SystemPromptBuilder::new();
         builder.add_static("Static only".to_string());
-        
+
         let prompt = builder.build();
         assert!(!prompt.contains(PROMPT_DYNAMIC_BOUNDARY));
         assert_eq!(prompt, "Static only");
@@ -334,7 +329,7 @@ mod tests {
     fn test_empty_static() {
         let mut builder = SystemPromptBuilder::new();
         builder.add_dynamic(|| "Dynamic only".to_string());
-        
+
         let prompt = builder.build();
         assert!(!prompt.contains(PROMPT_DYNAMIC_BOUNDARY));
         assert_eq!(prompt, "Dynamic only");
@@ -369,12 +364,12 @@ mod tests {
         builder.add_dynamic(|| "Dynamic 2".to_string());
 
         let prompt = builder.build();
-        
+
         assert!(prompt.contains("Static 1"));
         assert!(prompt.contains("Static 2"));
         assert!(prompt.contains("Dynamic 1"));
         assert!(prompt.contains("Dynamic 2"));
-        
+
         // Should have exactly one boundary
         assert_eq!(prompt.matches(PROMPT_DYNAMIC_BOUNDARY).count(), 1);
     }

@@ -1,5 +1,8 @@
 # Kubernetes Deployment
 
+These manifests run Selfware as a CLI toolbox pod. They do not expose an HTTP
+service or a health endpoint, so there is no `Service` manifest.
+
 ## Quick Start
 
 1. Create the namespace:
@@ -7,22 +10,17 @@
    kubectl apply -f k8s/namespace.yaml
    ```
 
-2. Create the secret (replace with your actual API key):
+2. Deploy the toolbox pod:
    ```bash
-   kubectl create secret generic selfware-secrets \
-     --namespace selfware \
-     --from-literal=anthropic-api-key=YOUR_API_KEY
-   ```
-
-3. Deploy:
-   ```bash
-   kubectl apply -f k8s/configmap.yaml
    kubectl apply -f k8s/deployment.yaml
-   kubectl apply -f k8s/service.yaml
    ```
 
-4. Verify:
+3. Verify and use it:
    ```bash
    kubectl -n selfware get pods
-   kubectl -n selfware logs -f deployment/selfware
+   kubectl -n selfware exec -it deployment/selfware -- selfware doctor
+   kubectl -n selfware exec -it deployment/selfware -- env \
+     SELFWARE_ENDPOINT=http://<your-endpoint>/v1 \
+     SELFWARE_MODEL=<your-model> \
+     selfware chat
    ```

@@ -1,5 +1,4 @@
-# Selfware Docker Image - Using pre-built binary
-# Optimized for 2x RTX 4090 with local vLLM endpoint
+# Selfware Docker Image - CLI toolbox image using a pre-built binary
 
 FROM ubuntu:24.04
 
@@ -41,9 +40,6 @@ ENV SELFWARE_ENDPOINT=http://host.docker.internal:8000/v1
 ENV SELFWARE_MODEL=qwen3.5-27b
 ENV SELFWARE_MAX_TOKENS=131072
 ENV RUST_LOG=info
-
-# Expose ports for dashboards
-EXPOSE 7777 8888 9999
 
 # Entry point
 ENTRYPOINT ["selfware"]

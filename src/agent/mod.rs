@@ -486,7 +486,7 @@ Additional tools can be discovered using tool_search.
             // Deferred tools are discovered via tool_search, reducing context window usage
             let critical_tools = tools.list_critical();
             let deferred_count = tools.total_count() - critical_tools.len();
-            
+
             info!(
                 "Using deferred tool loading: {} critical tools, {} deferred",
                 critical_tools.len(),

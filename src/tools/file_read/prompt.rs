@@ -26,7 +26,8 @@ impl ToolPrompt for FileReadPrompt {
          and properly handles various text encodings. \\n\\n\
          **When to use:** Use this tool whenever you need to see what's in a file. \
          It's the primary way to understand existing code, read logs, or examine \
-         configuration.".to_string()
+         configuration."
+            .to_string()
     }
 
     fn when_to_use(&self) -> String {
@@ -39,7 +40,8 @@ impl ToolPrompt for FileReadPrompt {
          - It handles large files without memory issues\\n\
          - It properly handles text encodings\\n\
          - It provides structured output with line counts\\n\
-         - It supports reading specific line ranges".to_string()
+         - It supports reading specific line ranges"
+            .to_string()
     }
 
     fn examples(&self) -> Vec<ToolExample> {
@@ -51,7 +53,8 @@ impl ToolPrompt for FileReadPrompt {
                 }),
                 output: Some(
                     "Returns the full file content with total line count. \
-                     Use this when you need to understand the complete file.".to_string(),
+                     Use this when you need to understand the complete file."
+                        .to_string(),
                 ),
             },
             ToolExample {
@@ -73,7 +76,8 @@ impl ToolPrompt for FileReadPrompt {
                 }),
                 output: Some(
                     "Returns the configuration file content. Use this to understand \
-                     project dependencies, settings, and metadata.".to_string(),
+                     project dependencies, settings, and metadata."
+                        .to_string(),
                 ),
             },
         ]
@@ -137,7 +141,7 @@ mod tests {
         let prompt = FileReadPrompt::new();
         let examples = prompt.examples();
         assert_eq!(examples.len(), 3);
-        
+
         // Check first example
         assert!(examples[0].description.contains("entire file"));
         assert!(examples[0].input.get("path").is_some());

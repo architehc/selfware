@@ -1,13 +1,12 @@
 # ZED Extension Guide
 
-Selfware includes a ZED editor extension that provides AI-powered coding assistance via the Language Server Protocol (LSP).
+Selfware includes a Zed editor extension that launches `selfware lsp` for editor navigation and exposes `/selfware-graph` in the Assistant for workspace graph exploration.
 
 ## Features
 
 - Language server integration for **Rust**, **Python**, **TypeScript**, **JavaScript**, **Go**
-- Inline completions and suggestions
-- Code actions: Fix, Refactor, Explain, Generate Tests
-- Context menu items: Ask Selfware, Explain Code, Generate Tests
+- Workspace graph slash command: `/selfware-graph`
+- Context server wiring for MCP-style integrations
 
 ## Prerequisites
 
@@ -42,15 +41,13 @@ The extension is published as `selfware` in the ZED extension marketplace. Insta
 
 ### ZED Settings
 
-Add selfware configuration to your ZED `settings.json`:
+Add selfware configuration to your Zed `settings.json`:
 
 ```json
 {
   "selfware": {
     "endpoint": "http://localhost:8000/v1",
-    "model": "Qwen/Qwen3-Coder-Next-FP8",
-    "auto_suggest": true,
-    "inline_completions": true
+    "model": "Qwen/Qwen3-Coder-Next-FP8"
   }
 }
 ```
@@ -61,53 +58,13 @@ Add selfware configuration to your ZED `settings.json`:
 |---------|------|---------|-------------|
 | `endpoint` | string | `"http://localhost:8000/v1"` | LLM API endpoint URL |
 | `model` | string | `"Qwen/Qwen3-Coder-Next-FP8"` | Model identifier |
-| `auto_suggest` | boolean | `true` | Enable automatic code suggestions |
-| `inline_completions` | boolean | `true` | Enable inline completion popups |
+| `binary_path` | string | none | Optional explicit path to the `selfware` binary |
 
-The extension passes `endpoint` and `model` as environment variables (`SELFWARE_ENDPOINT`, `SELFWARE_MODEL`) to the `selfware lsp` process. You can also set these in your shell environment if you prefer.
+The extension passes `endpoint` and `model` as environment variables (`SELFWARE_ENDPOINT`, `SELFWARE_MODEL`) to the `selfware lsp` process. You can also set `binary_path` or override the context-server command path if you need to point at a custom build.
 
-## Keybindings
+## Slash Commands
 
-The extension provides these default keybindings:
-
-| Shortcut | Command | Description |
-|----------|---------|-------------|
-| `Ctrl+Shift+S` | `selfware::ask` | Ask Selfware about selected code |
-| `Ctrl+Shift+E` | `selfware::explain` | Explain selected code |
-| `Ctrl+Shift+T` | `selfware::generate_tests` | Generate tests for selected code |
-| `Ctrl+Shift+R` | `selfware::refactor` | Refactor selected code |
-
-### Custom Keybindings
-
-Override the defaults in your ZED `keybindings.json`:
-
-```json
-[
-  { "key": "ctrl-shift-s", "command": "selfware::ask" },
-  { "key": "ctrl-shift-e", "command": "selfware::explain" },
-  { "key": "ctrl-shift-t", "command": "selfware::generate_tests" },
-  { "key": "ctrl-shift-r", "command": "selfware::refactor" }
-]
-```
-
-## Code Actions
-
-Right-click on code (or use the lightbulb menu) to access:
-
-| Action | Kind | Description |
-|--------|------|-------------|
-| Fix with Selfware | `quickfix` | AI-powered code fix |
-| Refactor with Selfware | `refactor` | AI-powered refactoring |
-| Explain Code | `source` | Get an explanation of the selected code |
-| Generate Tests | `source` | Generate unit tests for the selected code |
-
-## Context Menu
-
-Right-click selected code to see:
-
-- **Ask Selfware** -- send a question about the selection
-- **Explain Code** -- get an explanation
-- **Generate Tests** -- generate test cases
+Use `/selfware-graph` in the Assistant to render a workspace graph for the current worktree. The command accepts an optional format plus an optional focus path.
 
 ## How It Works
 
@@ -116,7 +73,7 @@ The extension starts `selfware lsp` as a background process. Communication happe
 1. Resolves the `selfware` binary on your PATH (looks in common locations: `selfware`, `/usr/local/bin/selfware`, `/opt/homebrew/bin/selfware`)
 2. Starts `selfware lsp` with the configured environment variables
 3. Passes initialization options including endpoint, model, and capabilities
-4. Forwards code actions and completion requests through the LSP protocol
+4. Routes `/selfware-graph` through the editor command path for workspace graph generation
 
 ## Supported Languages
 
@@ -138,7 +95,7 @@ which selfware
 selfware --version
 ```
 
-### No completions appearing
+### LSP features not appearing
 
 1. Check your LLM backend is running:
    ```bash

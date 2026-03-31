@@ -134,18 +134,21 @@ pub(crate) enum Commands {
     /// Check system dependencies and tool availability
     Doctor,
 
+    /// Diagnose the configured LLM backend and model setup
+    LlmDoctor,
+
     /// Test local development workflow
     #[command(alias = "t")]
     Test {
         /// Test pattern to run (all, unit, integration, e2e, workflow)
         #[arg(short, long, default_value = "workflow")]
         pattern: String,
-        /// Output format (text, json)
+        /// Output format (text, pretty, json)
         #[arg(short, long, default_value = "text")]
         format: String,
     },
 
-    /// Run SWE-bench Pro evaluation
+    /// Experimental SWE-bench entrypoint (currently disabled)
     #[command(alias = "swe")]
     SWEBench {
         /// Dataset to use (public, held-out, commercial)
@@ -381,7 +384,7 @@ pub(crate) enum Commands {
     /// Start selfware in LSP server mode (for editor extensions)
     Lsp,
 
-    /// Execute multiple tasks in parallel (batch mode)
+    /// Experimental batch entrypoint (currently disabled)
     #[command(alias = "bat")]
     Batch {
         /// File containing tasks (one per line)
@@ -401,7 +404,7 @@ pub(crate) enum Commands {
         aggregate: bool,
     },
 
-    /// Validate a website visually (screenshot + analysis)
+    /// Experimental visual validation entrypoint (capture exists; scoring is placeholder)
     #[command(alias = "v")]
     Validate {
         /// URL to validate

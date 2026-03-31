@@ -26,9 +26,9 @@ pub mod state;
 pub mod cognitive_system;
 pub mod compilation_manager;
 pub mod memory_hierarchy;
+pub mod memory_system;
 #[cfg(feature = "self-improvement")]
 pub mod rsi_orchestrator;
-pub mod memory_system;
 pub mod self_reference;
 pub mod token_budget;
 

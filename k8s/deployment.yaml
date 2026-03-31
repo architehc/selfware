@@ -6,6 +6,7 @@ metadata:
   labels:
     app.kubernetes.io/name: selfware
     app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/component: toolbox
 spec:
   replicas: 1
   selector:
@@ -15,9 +16,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: selfware
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9090"
+        app.kubernetes.io/component: toolbox
     spec:
       securityContext:
         runAsNonRoot: true
@@ -27,38 +26,8 @@ spec:
         - name: selfware
           image: selfware:latest
           imagePullPolicy: IfNotPresent
-          ports:
-            - name: health
-              containerPort: 9091
-              protocol: TCP
-            - name: metrics
-              containerPort: 9090
-              protocol: TCP
-          env:
-            - name: SELFWARE_HEALTH_PORT
-              value: "9091"
-            - name: RUST_LOG
-              value: "info"
-            - name: ANTHROPIC_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: selfware-secrets
-                  key: anthropic-api-key
-          livenessProbe:
-            httpGet:
-              path: /
-              port: health
-            initialDelaySeconds: 10
-            periodSeconds: 30
-            timeoutSeconds: 3
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /
-              port: health
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            timeoutSeconds: 3
+          workingDir: /workspace
+          command: ["sleep", "infinity"]
           resources:
             requests:
               cpu: 100m

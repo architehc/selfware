@@ -166,7 +166,8 @@ pub fn categorize_tool(name: &str) -> &'static str {
         "computer_control"
     } else if name == "shell_exec" || name == "pty_shell" {
         "shell"
-    } else if name.starts_with("grep_") || name.starts_with("glob_") || name.starts_with("symbol_") {
+    } else if name.starts_with("grep_") || name.starts_with("glob_") || name.starts_with("symbol_")
+    {
         "search"
     } else {
         "other"

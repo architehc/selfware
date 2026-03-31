@@ -18,7 +18,6 @@ mod swarm_widgets;
 mod widgets;
 
 pub use app::{App, AppState, ChatMessage, MessageRole, TaskProgress};
-pub use status_line::{StatusLine, StatusMode};
 pub use dashboard_widgets::{
     render_active_tools, render_garden_health, render_help_overlay, render_logs, render_status_bar,
     ActiveTool, DashboardState, LogEntry, LogLevel, SharedDashboardState, TuiEvent,
@@ -27,6 +26,7 @@ pub use garden_view::{render_garden_view, GardenFocus, GardenItem, GardenView};
 pub use layout::{LayoutEngine, LayoutNode, LayoutPreset, Pane, PaneId, PaneType, SplitDirection};
 pub use markdown::MarkdownRenderer;
 pub use palette::CommandPalette;
+pub use status_line::{StatusLine, StatusMode};
 pub use widgets::{GardenSpinner, GrowthGauge, StatusIndicator, StatusType, ToolOutput};
 
 // Re-export swarm components
@@ -1574,7 +1574,8 @@ pub fn run_tui_dashboard_with_events(
                                             if registry.is_empty() {
                                                 "No skills discovered.\n\nPlace skill markdown files in:\n  ~/.selfware/skills/\n  ./.selfware/skills/".to_string()
                                             } else {
-                                                let mut lines = vec!["Available skills:".to_string()];
+                                                let mut lines =
+                                                    vec!["Available skills:".to_string()];
                                                 for skill in registry.list() {
                                                     lines.push(format!(
                                                         "  /{} -- {}",
@@ -1615,7 +1616,10 @@ pub fn run_tui_dashboard_with_events(
                                             let prompt = if arg.is_empty() {
                                                 skill.content.clone()
                                             } else {
-                                                format!("{}\n\nUser request: {}", skill.content, arg)
+                                                format!(
+                                                    "{}\n\nUser request: {}",
+                                                    skill.content, arg
+                                                )
                                             };
                                             let skill_name = skill.name.clone();
                                             app.add_system_message(&format!(

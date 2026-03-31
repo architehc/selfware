@@ -248,7 +248,12 @@ impl PermissionChecker {
     /// This is the main entry point for permission checking. It uses the tool's
     /// metadata and the current execution mode to decide whether to allow,
     /// deny, or prompt for the operation.
-    pub fn check(&self, tool_name: &str, metadata: &ToolMetadata, _input: &Value) -> PermissionResult {
+    pub fn check(
+        &self,
+        tool_name: &str,
+        metadata: &ToolMetadata,
+        _input: &Value,
+    ) -> PermissionResult {
         match self.mode {
             ExecutionMode::Plan => self.check_plan_mode(metadata),
             ExecutionMode::Normal => self.check_normal_mode(metadata),
@@ -265,7 +270,11 @@ impl PermissionChecker {
             PermissionResult::Deny {
                 reason: format!(
                     "Plan mode only allows read-only operations. '{}' is a modifying tool.",
-                    if metadata.destructive { "destructive" } else { "modifying" }
+                    if metadata.destructive {
+                        "destructive"
+                    } else {
+                        "modifying"
+                    }
                 ),
             }
         }
@@ -469,9 +478,10 @@ mod tests {
             checker.check("file_read", &read_meta, &Value::Null),
             PermissionResult::Allow
         );
-        assert!(
-            matches!(checker.check("file_write", &write_meta, &Value::Null), PermissionResult::Deny { .. })
-        );
+        assert!(matches!(
+            checker.check("file_write", &write_meta, &Value::Null),
+            PermissionResult::Deny { .. }
+        ));
     }
 
     #[test]
@@ -481,15 +491,18 @@ mod tests {
         let write_meta = ToolMetadata::file_write();
         let destructive_meta = ToolMetadata::file_destructive();
 
-        assert!(
-            matches!(checker.check("file_read", &read_meta, &Value::Null), PermissionResult::Allow)
-        );
-        assert!(
-            matches!(checker.check("file_write", &write_meta, &Value::Null), PermissionResult::Prompt { .. })
-        );
-        assert!(
-            matches!(checker.check("file_delete", &destructive_meta, &Value::Null), PermissionResult::Prompt { .. })
-        );
+        assert!(matches!(
+            checker.check("file_read", &read_meta, &Value::Null),
+            PermissionResult::Allow
+        ));
+        assert!(matches!(
+            checker.check("file_write", &write_meta, &Value::Null),
+            PermissionResult::Prompt { .. }
+        ));
+        assert!(matches!(
+            checker.check("file_delete", &destructive_meta, &Value::Null),
+            PermissionResult::Prompt { .. }
+        ));
     }
 
     #[test]
@@ -498,12 +511,14 @@ mod tests {
         let read_meta = ToolMetadata::read_only();
         let write_meta = ToolMetadata::file_write();
 
-        assert!(
-            matches!(checker.check("file_read", &read_meta, &Value::Null), PermissionResult::Allow)
-        );
-        assert!(
-            matches!(checker.check("file_write", &write_meta, &Value::Null), PermissionResult::Allow)
-        );
+        assert!(matches!(
+            checker.check("file_read", &read_meta, &Value::Null),
+            PermissionResult::Allow
+        ));
+        assert!(matches!(
+            checker.check("file_write", &write_meta, &Value::Null),
+            PermissionResult::Allow
+        ));
     }
 
     #[test]
@@ -511,9 +526,10 @@ mod tests {
         let checker = PermissionChecker::new(ExecutionMode::Yolo);
         let read_meta = ToolMetadata::read_only();
 
-        assert!(
-            matches!(checker.check("file_read", &read_meta, &Value::Null), PermissionResult::Allow)
-        );
+        assert!(matches!(
+            checker.check("file_read", &read_meta, &Value::Null),
+            PermissionResult::Allow
+        ));
     }
 
     #[test]

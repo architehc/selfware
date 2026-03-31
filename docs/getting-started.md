@@ -24,13 +24,13 @@ selfware --version
 
 ### Run doctor first
 
-Before doing anything else, run the system doctor to verify all dependencies are available and your LLM backend is reachable:
+Before doing anything else, run the system doctor to verify core dependencies are available:
 
 ```bash
 selfware doctor
 ```
 
-This checks core tools (rustc, cargo, git), optional language runtimes, browser automation, computer control, and runs the [LLM Doctor](doctor.md) to validate your backend configuration. Fix any issues it reports before proceeding.
+This checks core tools (rustc, cargo, git), optional language runtimes, browser automation, and computer control. Run `selfware llm-doctor` separately if you want backend/model diagnostics.
 
 ## First Run
 
@@ -131,10 +131,9 @@ Set the API key securely (do not put it in the config file):
 ```bash
 # Option 1: Environment variable (recommended)
 export SELFWARE_API_KEY="sk-..."
-
-# Option 2: System keyring (persisted)
-selfware config set-key
 ```
+
+Selfware also reads from the OS keyring if a key is already stored there, but this repo does not expose a dedicated command for writing to the keyring.
 
 ### Multiple model profiles
 
@@ -182,12 +181,15 @@ This checks:
 | `selfware run "<task>"` | `selfware r "<task>"` | Run a specific task |
 | `selfware analyze <path>` | `selfware a <path>` | Analyze a codebase |
 | `selfware doctor` | | System diagnostics |
+| `selfware llm-doctor` | | LLM backend diagnostics |
 | `selfware init` | | First-time setup wizard |
 | `selfware journal` | `selfware j` | Browse task history |
 | `selfware status` | | Show agent statistics |
 | `selfware lsp` | | Start LSP server mode |
 | `selfware mcp-server` | | Run as MCP server (expose tools to other AI clients) |
-| `selfware workflow <file>` | `selfware w <file>` | Execute a YAML workflow |
+| `selfware workflow validate <file>` | `selfware w validate <file>` | Validate a workflow file |
+| `selfware workflow run <file>` | `selfware w run <file>` | Execute a workflow |
+| `selfware workflow list` | `selfware w list` | List workflows in the current directory |
 
 ## CLI Flags
 

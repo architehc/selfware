@@ -35,15 +35,15 @@ temperature = 1.0
 The API key is resolved in this priority order:
 
 1. `SELFWARE_API_KEY` environment variable (highest priority, never persisted)
-2. System keyring via `selfware config set-key` (secure, persistent)
+2. System keyring if a key is already stored there
 3. `api_key` field in config file (plaintext on disk -- warns, errors in strict mode)
 
 ```bash
 # Set via environment (recommended for CI/scripts)
 export SELFWARE_API_KEY="sk-..."
 
-# Store in system keyring (recommended for local use)
-selfware config set-key
+# Selfware reads from the system keyring automatically if a key is already stored there.
+# This repo does not expose a dedicated CLI command for writing to the keyring.
 ```
 
 ### Extra Body Fields

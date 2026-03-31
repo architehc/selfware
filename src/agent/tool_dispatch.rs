@@ -1610,16 +1610,10 @@ impl Agent {
 
     /// Execute tool_search - search for deferred tools and activate them.
     /// This allows the LLM to discover tools on demand, reducing context window usage.
-    async fn execute_tool_search(
-        &mut self,
-        args: &serde_json::Value,
-    ) -> serde_json::Value {
+    async fn execute_tool_search(&mut self, args: &serde_json::Value) -> serde_json::Value {
         use crate::tools::tool_search::ToolSearchResult;
 
-        let query = args
-            .get("query")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
 
         if query.is_empty() {
             return serde_json::json!({

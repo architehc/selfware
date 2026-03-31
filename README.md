@@ -624,11 +624,11 @@ Semantic code intelligence via language servers (rust-analyzer, pyright, tsserve
 
 ### Doctor Mode
 
-`selfware doctor` checks 30+ system dependencies (git, cargo, rustc, node, python, docker, etc.) and reports what is available. `selfware llm-doctor` analyzes your LLM backend, model configuration, template setup, and gives optimization recommendations.
+`selfware doctor` checks 30+ system dependencies (git, cargo, rustc, node, python, docker, etc.) and reports what is available. Use `selfware llm-doctor` for backend/model diagnostics and optimization hints.
 
 ### Interview Mode
 
-Structured pre-task questions (language, framework, scope, testing preference) with smart defaults and auto-detection. Launch with `selfware chat --interview` to guide the agent before it begins work.
+Structured pre-task questions (language, framework, scope, testing preference) with smart defaults and auto-detection. Start `selfware chat`, then run `/interview` before the agent begins work.
 
 ### Claude Code-like UI
 
@@ -636,7 +636,7 @@ ESC to interrupt generation, fixed input line for typing anytime, work queue wit
 
 ### Visual Verification
 
-VLM-powered screenshot analysis for UI testing. The agent can capture screenshots and use a vision-language model to verify that UI changes look correct.
+Experimental screenshot capture and analysis scaffolding for UI testing. Screenshot capture works today; richer scoring and reporting are still being wired.
 
 ### Active Selections
 
@@ -652,7 +652,7 @@ Colored unified and side-by-side diffs with word-level highlighting before apply
 
 ### ZED Extension
 
-IDE integration via the ZED editor extension (WASM-based). Use selfware directly from ZED with full tool access.
+IDE integration via the Zed editor extension. It launches `selfware lsp` for navigation and exposes `/selfware-graph` for workspace graph exploration.
 
 ---
 
@@ -870,11 +870,14 @@ bash system_tests/projecte2e/run_full_sab.sh
 | `selfware journal` | `j` | Browse checkpoint entries |
 | `selfware resume <id>` | | Resume from checkpoint |
 | `selfware status` | | Show workshop stats |
-| `selfware workflow <file>` | `w` | Run a YAML workflow |
+| `selfware workflow validate <file>` | `w validate` | Validate a workflow file |
+| `selfware workflow run <file>` | `w run` | Run a workflow file |
+| `selfware workflow list` | `w list` | List workflows in the current directory |
 | `selfware init` | | Setup wizard |
 | `selfware evolve` | | Run evolution engine* |
 | `selfware improve` | | Self-improvement pass* |
 | `selfware doctor` | | System dependency check |
+| `selfware llm-doctor` | | LLM backend diagnostics |
 | `selfware mcp-server` | | Run as MCP server |
 | `selfware lsp` | | Run as LSP server (stub) |
 | `selfware demo` | | Run animated demo** |
@@ -899,7 +902,6 @@ bash system_tests/projecte2e/run_full_sab.sh
 | `--ascii` | ASCII-only output (no emoji) |
 | `--plan` | Plan mode (read-only, no edits) |
 | `--resume-session <name>` | Resume a named session |
-| `--interview` | Pre-task interview mode |
 | `--no-color` | Disable colored output |
 
 ### Environment Variables

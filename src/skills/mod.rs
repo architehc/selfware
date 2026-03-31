@@ -111,11 +111,7 @@ impl SkillRegistry {
 
             match Skill::from_file(&path) {
                 Ok(skill) => {
-                    debug!(
-                        "Discovered skill '{}' from {}",
-                        skill.name,
-                        path.display()
-                    );
+                    debug!("Discovered skill '{}' from {}", skill.name, path.display());
                     self.skills.insert(skill.name.clone(), skill);
                 }
                 Err(e) => {
@@ -233,7 +229,11 @@ Review the code for bugs, style issues, and performance problems.
             },
         );
 
-        let names: Vec<_> = registry.list().into_iter().map(|s| s.name.clone()).collect();
+        let names: Vec<_> = registry
+            .list()
+            .into_iter()
+            .map(|s| s.name.clone())
+            .collect();
         assert_eq!(names, vec!["alpha", "beta"]);
     }
 }

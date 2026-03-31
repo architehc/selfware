@@ -259,7 +259,9 @@ impl Agent {
                 self.consecutive_suppressions
             );
             self.consecutive_suppressions = 0;
-            output::final_answer("Task completed (agent detected repeated no-op tool calls and stopped).");
+            output::final_answer(
+                "Task completed (agent detected repeated no-op tool calls and stopped).",
+            );
             return Ok(true);
         } else if self.consecutive_suppressions >= 3 {
             info!(

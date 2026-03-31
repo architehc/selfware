@@ -24,7 +24,8 @@ impl ToolPrompt for GrepSearchPrompt {
          file paths, and line/column numbers. \\n\\n\
          This is the primary tool for finding code patterns, function usages, \
          error messages, or any text within files. It supports case-insensitive search, \
-         file filtering, and returns context lines around each match.".to_string()
+         file filtering, and returns context lines around each match."
+            .to_string()
     }
 
     fn when_to_use(&self) -> String {
@@ -42,7 +43,8 @@ impl ToolPrompt for GrepSearchPrompt {
          **Prefer other tools when:**\\n\
          - Finding files by name: Use glob_find instead\\n\
          - Finding Rust symbols (structs, traits): Use symbol_search instead\\n\
-         - Reading file contents: Use file_read instead".to_string()
+         - Reading file contents: Use file_read instead"
+            .to_string()
     }
 
     fn examples(&self) -> Vec<ToolExample> {
@@ -85,7 +87,8 @@ impl ToolPrompt for GrepSearchPrompt {
                 }),
                 output: Some(
                     "Finds all unwrap(), expect(), and panic!() calls regardless of case. \
-                     Useful for finding potential panic points in code.".to_string(),
+                     Useful for finding potential panic points in code."
+                        .to_string(),
                 ),
             },
             ToolExample {
@@ -98,7 +101,8 @@ impl ToolPrompt for GrepSearchPrompt {
                 }),
                 output: Some(
                     "Finds all TODO and FIXME markers in Rust files. The \\b ensures \
-                     word boundaries so it doesn't match 'TODO' inside other words.".to_string(),
+                     word boundaries so it doesn't match 'TODO' inside other words."
+                        .to_string(),
                 ),
             },
             ToolExample {
@@ -181,11 +185,17 @@ mod tests {
         let prompt = GrepSearchPrompt::new();
         let examples = prompt.examples();
         assert_eq!(examples.len(), 5);
-        
+
         // Check TODO example
         let todo_example = &examples[3];
         assert!(todo_example.description.contains("TODO"));
-        assert!(todo_example.input.get("pattern").unwrap().as_str().unwrap().contains("TODO"));
+        assert!(todo_example
+            .input
+            .get("pattern")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains("TODO"));
     }
 
     #[test]

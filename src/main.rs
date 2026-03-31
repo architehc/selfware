@@ -19,6 +19,9 @@ async fn main() -> ExitCode {
         std::process::exit(1);
     });
 
+    // Optional localhost health endpoint for container probes.
+    selfware::supervision::health::maybe_start_health_endpoint();
+
     // Let cli::run() complete naturally.  The task runner, interactive
     // REPL, and TUI all have their own signal handling and will wind
     // down when a signal arrives — we no longer race them with

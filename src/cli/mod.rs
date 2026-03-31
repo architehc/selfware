@@ -1194,35 +1194,16 @@ async fn handle_command(
             if !quiet {
                 println!("{}", render_header(ctx));
             }
-            let file_for_print = file.clone();
-            println!("\n{} Batch Execution Mode\n", "⚡".emphasis());
-            println!("   Tasks file: {}", file_for_print.emphasis());
-            println!("   Workers: {}", workers.to_string().emphasis());
-            println!("   Timeout: {}s per task", timeout);
-            println!("   Output: {}", output);
-            println!();
-
-            use crate::batch::{parse_tasks_file, BatchConfig, BatchExecutor};
-
-            let tasks = parse_tasks_file(&file.into())?;
-            println!("   Loaded {} tasks\n", tasks.len());
-
-            let batch_config = BatchConfig {
-                max_workers: workers,
-                timeout_secs: timeout,
+            anyhow::bail!(
+                "Batch mode is not implemented safely yet. It would currently report synthetic success.\n\
+                 Use a shell-level fan-out with `selfware run` for now, for example:\n\
+                 xargs -P {} -I{{}} selfware run -- \"{{}}\" < {}\n\
+                 Requested timeout={}s aggregate={} output={}",
+                workers,
+                file,
+                timeout,
                 aggregate,
-                output_dir: output.into(),
-                continue_on_error: true,
-            };
-
-            let executor = BatchExecutor::new(batch_config);
-            let results = executor.execute_tasks(tasks).await?;
-
-            println!("\n✓ Batch Complete\n");
-            println!(
-                "   Successful: {}/{}",
-                results.iter().filter(|r| r.success).count(),
-                results.len()
+                output
             );
         }
 
@@ -1236,31 +1217,16 @@ async fn handle_command(
             if !quiet {
                 println!("{}", render_header(ctx));
             }
-            println!("\n{} Visual Validation\n", "🎨".emphasis());
-            println!("   URL: {}", url.clone().emphasis());
-            println!("   Iterations: {}", iterations);
-            println!("   Target score: {:.1}/10\n", target);
-
-            use crate::validation::{Device, ScreenshotConfig, ValidationWorkflow};
-
-            let _workflow = ValidationWorkflow {
-                url: url.clone(),
-                local_dir: dir.map(|d| d.into()),
-                max_iterations: iterations,
-                target_score: target,
-                screenshot_config: ScreenshotConfig {
-                    url: url.clone(),
-                    output_dir: "./validation_screenshots".into(),
-                    devices: vec![Device::desktop(), Device::mobile()],
-                    wait_ms: 2000,
-                    full_page: true,
-                },
-            };
-
-            println!("   Running validation workflow...\n");
-            // Note: Actual async execution would require tokio runtime setup
-            println!("   ✓ Validation workflow configured");
-            println!("   (Full execution requires Playwright installation)");
+            anyhow::bail!(
+                "Visual validation is not fully wired yet. Screenshot capture exists, but scoring/reporting is still placeholder-only.\n\
+                 Requested target={} iterations={} url={}{}",
+                target,
+                iterations,
+                url,
+                dir.as_ref()
+                    .map(|value| format!(" dir={}", value))
+                    .unwrap_or_default()
+            );
         }
 
         Commands::Workflow { command } => {
@@ -1721,10 +1687,104 @@ async fn handle_command(
         }
 
         Commands::State { command } => {
-            anyhow::bail!(
-                "State commands are not wired into the current CLI yet: {:?}",
-                command
-            );
+            use crate::swl::state::backend::{FileBackend, StateBackend};
+            use crate::swl::state::StateManager;
+            use args::{StateCommands, StateOutputFormat};
+
+            match command {
+                StateCommands::Show {
+                    workflow,
+                    format,
+                    dir,
+                } => {
+                    let base_dir = resolve_state_dir(dir);
+                    let mut manager = StateManager::new_file_based(&workflow, base_dir)?;
+                    manager.load().await?;
+                    let state = manager.get_all();
+
+                    match format {
+                        StateOutputFormat::Json => {
+                            println!("{}", serde_json::to_string_pretty(state)?);
+                        }
+                        StateOutputFormat::Text | StateOutputFormat::Table => {
+                            if state.is_empty() {
+                                println!("No saved state for workflow '{}'.", workflow);
+                            } else {
+                                println!("Workflow state: {}", workflow.emphasis());
+                                for key in sorted_json_keys(state) {
+                                    if let Some(value) = state.get(&key) {
+                                        println!("  {} = {}", key, value);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                StateCommands::List { dir } => {
+                    let backend = FileBackend::new(resolve_state_dir(dir))?;
+                    let mut workflows = backend.list().await?;
+                    workflows.sort();
+                    if workflows.is_empty() {
+                        println!("No saved workflow state found.");
+                    } else {
+                        for workflow in workflows {
+                            println!("{workflow}");
+                        }
+                    }
+                }
+                StateCommands::Delete {
+                    workflow,
+                    dir,
+                    force,
+                } => {
+                    if !force {
+                        anyhow::bail!(
+                            "Refusing to delete workflow state without --force: {}",
+                            workflow
+                        );
+                    }
+                    let backend = FileBackend::new(resolve_state_dir(dir))?;
+                    backend.delete(&workflow).await?;
+                    println!("Deleted state for workflow '{}'.", workflow);
+                }
+                StateCommands::Export {
+                    workflow,
+                    output,
+                    dir,
+                } => {
+                    let base_dir = resolve_state_dir(dir);
+                    let mut manager = StateManager::new_file_based(&workflow, base_dir)?;
+                    manager.load().await?;
+                    let payload = serde_json::to_string_pretty(manager.get_all())?;
+                    std::fs::write(&output, payload)?;
+                    println!("Exported state for '{}' to {}.", workflow, output);
+                }
+                StateCommands::Import {
+                    workflow,
+                    input,
+                    dir,
+                    force,
+                } => {
+                    let base_dir = resolve_state_dir(dir);
+                    let backend = FileBackend::new(base_dir.clone())?;
+                    if backend.exists(&workflow).await && !force {
+                        anyhow::bail!(
+                            "State for '{}' already exists. Re-run with --force to overwrite.",
+                            workflow
+                        );
+                    }
+
+                    let content = std::fs::read_to_string(&input)?;
+                    let state: std::collections::HashMap<String, serde_json::Value> =
+                        serde_json::from_str(&content)?;
+
+                    let mut manager = StateManager::new_file_based(&workflow, base_dir)?;
+                    manager.clear();
+                    manager.set_all(state)?;
+                    manager.save().await?;
+                    println!("Imported state for '{}' from {}.", workflow, input);
+                }
+            }
         }
 
         Commands::McpServer => {
@@ -1735,32 +1795,21 @@ async fn handle_command(
             crate::lsp::run_lsp_server().await?;
         }
 
+        Commands::LlmDoctor => {
+            if !quiet {
+                println!("{}", render_header(ctx));
+            }
+            crate::llm_doctor::run_llm_doctor(&config).await?;
+        }
+
         Commands::Test { pattern, format } => {
             if !quiet {
                 println!("{}", render_header(ctx));
             }
-            let pattern_clone = pattern.clone();
             println!("\n{} Running Tests\n", "🧪".emphasis());
-            println!("   Pattern: {}", pattern.emphasis());
+            println!("   Pattern: {}", pattern.clone().emphasis());
             println!("   Format: {}\n", format);
-
-            use crate::swebench::LocalDevWorkflow;
-
-            let workflow = LocalDevWorkflow {
-                test_patterns: vec![pattern_clone],
-                endpoints: vec![config.endpoint.clone()],
-            };
-
-            let report = workflow.test_workflow().await?;
-
-            println!(
-                "\n{} Test Results\n",
-                if report.all_passed { "✓" } else { "✗" }
-            );
-            for (name, passed) in &report.results {
-                let icon = if *passed { "✓" } else { "✗" };
-                println!("   {} {}", icon, name);
-            }
+            run_local_tests(&pattern, &format).await?;
         }
 
         Commands::SWEBench {
@@ -1771,27 +1820,15 @@ async fn handle_command(
             if !quiet {
                 println!("{}", render_header(ctx));
             }
-            let dataset_clone = dataset.clone();
-            println!("\n{} SWE-bench Pro Evaluation\n", "📊".emphasis());
-            println!("   Dataset: {}", dataset.emphasis());
-            if let Some(l) = limit {
-                println!("   Limit: {} tasks", l);
-            }
-            println!("   Output: {}\n", output);
-
-            use crate::swebench::{SWEBenchEvaluator, SWEBenchTask};
-
-            let evaluator = SWEBenchEvaluator::new(std::path::PathBuf::from("./swebench_work"));
-            let tasks = evaluator.load_tasks(&dataset_clone)?;
-
-            let tasks_to_run: Vec<SWEBenchTask> = match limit {
-                Some(n) => tasks.into_iter().take(n).collect(),
-                None => tasks,
-            };
-
-            println!("   Loaded {} tasks\n", tasks_to_run.len());
-            println!("   (Full evaluation would run selfware on each task)");
-            println!("   Results would be saved to: {}\n", output);
+            anyhow::bail!(
+                "SWE-bench evaluation is not implemented yet. The current path only uses embedded demo data and placeholder success.\n\
+                 Requested dataset={}{} output={}. Use the repo's experimental examples/scripts instead.",
+                dataset,
+                limit
+                    .map(|value| format!(", limit {}", value))
+                    .unwrap_or_default(),
+                output
+            );
         }
 
         Commands::Bench {
@@ -2305,6 +2342,91 @@ fn default_workflow_name(path: &std::path::Path) -> String {
             DEFAULT_WORKFLOW_NAME.to_string()
         }
     }
+}
+
+fn resolve_state_dir(dir: Option<String>) -> std::path::PathBuf {
+    dir.map(std::path::PathBuf::from)
+        .unwrap_or_else(crate::swl::state::StateBackendType::default_state_dir)
+}
+
+fn sorted_json_keys(state: &std::collections::HashMap<String, serde_json::Value>) -> Vec<String> {
+    let mut keys: Vec<String> = state.keys().cloned().collect();
+    keys.sort();
+    keys
+}
+
+fn local_test_command(pattern: &str) -> Result<Vec<String>> {
+    let args = match pattern {
+        "all" => vec!["test".to_string(), "--all-targets".to_string()],
+        "unit" => vec!["test".to_string(), "--test".to_string(), "unit".to_string()],
+        "integration" => vec![
+            "test".to_string(),
+            "--features".to_string(),
+            "integration".to_string(),
+            "--test".to_string(),
+            "integration".to_string(),
+        ],
+        "e2e" => vec![
+            "test".to_string(),
+            "--all-targets".to_string(),
+            "e2e".to_string(),
+        ],
+        "workflow" => vec![
+            "test".to_string(),
+            "--all-targets".to_string(),
+            "workflow".to_string(),
+        ],
+        other if !other.trim().is_empty() => vec![
+            "test".to_string(),
+            "--all-targets".to_string(),
+            other.to_string(),
+        ],
+        _ => anyhow::bail!("Test pattern must not be empty"),
+    };
+
+    Ok(args)
+}
+
+async fn run_local_tests(pattern: &str, format: &str) -> Result<()> {
+    let args = local_test_command(pattern)?;
+    let output = tokio::process::Command::new("cargo")
+        .args(&args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let exit_code = output.status.code().unwrap_or(1);
+
+    match format {
+        "json" => {
+            let payload = serde_json::json!({
+                "command": format!("cargo {}", args.join(" ")),
+                "success": output.status.success(),
+                "exit_code": exit_code,
+                "stdout": stdout,
+                "stderr": stderr,
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        }
+        "text" | "pretty" => {
+            if !stdout.trim().is_empty() {
+                print!("{stdout}");
+            }
+            if !stderr.trim().is_empty() {
+                eprint!("{stderr}");
+            }
+        }
+        other => anyhow::bail!("Unsupported test output format: {}", other),
+    }
+
+    if !output.status.success() {
+        anyhow::bail!("Test command failed with exit code {}", exit_code);
+    }
+
+    Ok(())
 }
 
 fn load_related_yaml_workflows(

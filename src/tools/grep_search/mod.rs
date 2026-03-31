@@ -319,9 +319,8 @@ pub fn grep_search(
 ) -> GrepSearchResult {
     let mut matches = Vec::new();
     let mut file_count = 0;
-    let re = cached_regex(pattern).unwrap_or_else(|_| {
-        regex::Regex::new(pattern).expect("Invalid regex pattern")
-    });
+    let re = cached_regex(pattern)
+        .unwrap_or_else(|_| regex::Regex::new(pattern).expect("Invalid regex pattern"));
 
     if Path::new(path).is_file() {
         let content = std::fs::read_to_string(path).unwrap_or_default();
@@ -403,7 +402,10 @@ mod tests {
         let tool = GrepSearch;
         let schema = tool.schema();
         assert_eq!(schema["type"], "object");
-        assert!(schema["required"].as_array().unwrap().contains(&serde_json::json!("pattern")));
+        assert!(schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("pattern")));
     }
 
     #[tokio::test]
@@ -458,11 +460,11 @@ mod tests {
         let result = tool.execute(args).await.unwrap();
         let matches = result["matches"].as_array().unwrap();
         assert_eq!(matches.len(), 1);
-        
+
         let match_obj = &matches[0];
         let context_before = match_obj["context_before"].as_array().unwrap();
         let context_after = match_obj["context_after"].as_array().unwrap();
-        
+
         assert_eq!(context_before.len(), 1);
         assert_eq!(context_after.len(), 1);
     }

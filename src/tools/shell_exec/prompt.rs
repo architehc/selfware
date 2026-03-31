@@ -23,7 +23,8 @@ impl ToolPrompt for ShellExecPrompt {
         "Execute shell commands. Use this for builds, tests, package installations, \
          git operations, and system administration tasks. \\n\\n\
          Commands run with a configurable timeout (default 60s, max 1 hour) and \
-         return exit code, stdout, stderr, and execution duration.".to_string()
+         return exit code, stdout, stderr, and execution duration."
+            .to_string()
     }
 
     fn when_to_use(&self) -> String {
@@ -39,7 +40,8 @@ impl ToolPrompt for ShellExecPrompt {
          - Writing files: Use file_write instead (safer, atomic writes)\\n\
          - Editing files: Use file_edit instead (surgical string replacement)\\n\
          - Searching code: Use grep_search instead (with context and pagination)\\n\
-         - Finding files: Use glob_find instead (structured results)".to_string()
+         - Finding files: Use glob_find instead (structured results)"
+            .to_string()
     }
 
     fn examples(&self) -> Vec<ToolExample> {
@@ -81,7 +83,8 @@ impl ToolPrompt for ShellExecPrompt {
                 }),
                 output: Some(
                     "Runs tests in the specified directory with custom environment variables. \
-                     Use env to set variables like RUST_BACKTRACE for debugging.".to_string(),
+                     Use env to set variables like RUST_BACKTRACE for debugging."
+                        .to_string(),
                 ),
             },
             ToolExample {
@@ -92,7 +95,8 @@ impl ToolPrompt for ShellExecPrompt {
                 }),
                 output: Some(
                     "Returns the total size of the current directory. \
-                     Useful for understanding project size or available space.".to_string(),
+                     Useful for understanding project size or available space."
+                        .to_string(),
                 ),
             },
         ]
@@ -161,10 +165,16 @@ mod tests {
         let prompt = ShellExecPrompt::new();
         let examples = prompt.examples();
         assert_eq!(examples.len(), 4);
-        
+
         // Check build example
         assert!(examples[1].description.contains("Build"));
-        assert!(examples[1].input.get("command").unwrap().as_str().unwrap().contains("cargo build"));
+        assert!(examples[1]
+            .input
+            .get("command")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains("cargo build"));
     }
 
     #[test]

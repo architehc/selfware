@@ -1,5 +1,5 @@
 # =============================================================================
-# Selfware Dockerfile - Multi-stage Production Build
+# Selfware Dockerfile - Multi-stage CLI toolbox build
 # =============================================================================
 # Build: docker build -t selfware .
 # Run:   docker run --rm -it selfware --help
@@ -104,11 +104,6 @@ WORKDIR /home/selfware
 # Set environment variables
 ENV RUST_LOG=info
 ENV HOME=/home/selfware
-ENV SELFWARE_HEALTH_PORT=9091
-
-# Health check using HTTP endpoint with fallback to version check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -sf http://127.0.0.1:9091/ || selfware --version || exit 1
 
 # Default entrypoint
 ENTRYPOINT ["selfware"]
