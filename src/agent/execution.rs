@@ -98,6 +98,36 @@ impl Agent {
 
         debug!("Total tool calls to execute: {}", tool_calls.len());
 
+        // Check if the response contains code alongside tool calls.
+        // Models often output file_read tool calls AND code text in the same
+        // response. The tool calls get executed, but the code gets ignored.
+        // If we detect code in the residual text, auto-write it.
+        if !tool_calls.is_empty() && contains_unwritten_code(&content) {
+            if let Some((path, code)) = extract_code_and_path(&content) {
+                info!(
+                    "Response contains tool calls AND code text — auto-writing {} lines to {}",
+                    code.lines().count(),
+                    path
+                );
+                let write_call: Vec<super::execution::CollectedToolCall> = vec![(
+                    "file_write".to_string(),
+                    serde_json::json!({"path": path, "content": code}).to_string(),
+                    None,
+                )];
+                // Prepend the file_write to the tool calls list would be ideal,
+                // but we'll execute it after the original tool calls
+                self.execute_tool_batch(write_call).await?;
+                self.consecutive_read_only_steps = 0;
+                self.messages.push(crate::api::types::Message::user(
+                    "<selfware_system_directive>\n\
+                     Code from your response was automatically written to a file. \
+                     Now verify with cargo check or cargo test.\n\
+                     </selfware_system_directive>"
+                        .to_string(),
+                ));
+            }
+        }
+
         // Detect malformed tool calls and inject correction before treating as completion
         if self.detect_and_correct_malformed_tools(&content, &tool_calls) {
             return Ok(false);
@@ -524,6 +554,7 @@ pub(super) fn contains_unwritten_code(content: &str) -> bool {
         "pub fn ", "fn ", "pub struct ", "struct ", "impl ", "pub enum ",
         "enum ", "use ", "mod ", "#[", "let ", "pub mod ", "async fn ",
         "pub async fn ", "-> Result", "-> Option", "pub trait ", "trait ",
+        "pub(crate)", "pub(super)",
     ];
     let mut raw_code_lines = 0;
     for line in stripped.lines() {
@@ -540,24 +571,13 @@ pub(super) fn contains_unwritten_code(content: &str) -> bool {
         }
     }
 
-    if raw_code_lines >= 8 {
-        // Also check it's presenting code, not discussing it
-        let has_presentation = stripped.contains("Here is")
-            || stripped.contains("Here's")
-            || stripped.contains("content for")
-            || stripped.contains("implementation")
-            || stripped.contains("complete code")
-            || stripped.contains("updated")
-            || stripped.contains("following code")
-            || stripped.contains("src/");
-
-        if has_presentation {
-            tracing::debug!(
-                "Detected {} raw code lines with presentation markers",
-                raw_code_lines
-            );
-            return true;
-        }
+    // Low threshold: 5+ code lines is substantial enough to auto-write
+    if raw_code_lines >= 5 {
+        tracing::debug!(
+            "Detected {} raw code lines in response",
+            raw_code_lines
+        );
+        return true;
     }
 
     false
