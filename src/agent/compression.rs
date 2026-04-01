@@ -298,7 +298,12 @@ pub fn micro_compact(messages: &mut Vec<Message>) -> CompressionMetrics {
     }
 
     // Process messages to compress
-    let to_compress = &messages[1..keep_start];
+    // Ensure valid range - if keep_start <= 1, there's nothing to compress
+    let to_compress = if keep_start > 1 {
+        &messages[1..keep_start]
+    } else {
+        &[]
+    };
     let recent = &messages[keep_start..];
 
     // Add compressed summary message for old content
@@ -737,50 +742,43 @@ mod tests {
 
     #[test]
     fn test_micro_compact_basic() {
-        let mut messages = vec![
-            Message::system("System prompt"),
-            Message::user("First question"),
-            Message::assistant("First answer"),
-            Message::user("Second question"),
-            Message::assistant("Second answer"),
-            Message::user("Third question"),
-            Message::assistant("Third answer"),
-            Message::user("Fourth question"),
-            Message::assistant("Fourth answer"),
-            Message::user("Fifth question"),
-            Message::assistant("Fifth answer"),
-            Message::user("Sixth question"),
-            Message::assistant("Sixth answer"),
-            Message::user("Current question"),
-        ];
+        // Need many messages for meaningful compression (> MIN_MESSAGES_TO_KEEP + buffer)
+        let mut messages = vec![Message::system("System prompt")];
+        
+        // Add 30 message pairs to have significant compression
+        for i in 0..15 {
+            messages.push(Message::user(format!("Question {}", i)));
+            messages.push(Message::assistant(format!("Answer {}", i)));
+        }
+        messages.push(Message::user("Current question"));
+        // Total: 1 + 30 + 1 = 32 messages
+        // After compression: 1 (system) + 1 (summary) + 22 (recent) + 1 = 25
 
         let metrics = micro_compact(&mut messages);
 
         assert_eq!(metrics.method, CompressionMethod::Micro);
         assert!(metrics.tokens_saved >= 0);
-        assert!(messages.len() < 13); // Should be compressed
+        // Should be compressed
+        assert!(messages.len() <= 26, "Expected at most 26 messages, got {}", messages.len());
         assert_eq!(messages[0].role, "system"); // System preserved
     }
 
     #[test]
     fn test_micro_compact_keeps_recent() {
-        let mut messages = vec![
-            Message::system("System prompt"),
-            Message::user("Old 1"),
-            Message::assistant("Old 2"),
-            Message::user("Old 3"),
-            Message::assistant("Old 4"),
-            Message::user("Old 5"),
-            Message::assistant("Old 6"),
-            Message::user("Old 7"),
-            Message::assistant("Old 8"),
-            Message::user("Old 9"),
-            Message::assistant("Old 10"),
-            Message::user("Old 11"),
-            Message::assistant("Old 12"),
-            Message::user("Recent user"),
-            Message::assistant("Recent assistant"),
-        ];
+        // Need at least 23 messages for compression to trigger
+        let mut messages = vec![Message::system("System prompt")];
+        
+        // Add 20 older exchanges
+        for i in 0..10 {
+            messages.push(Message::user(format!("Old user {}", i)));
+            messages.push(Message::assistant(format!("Old assistant {}", i)));
+        }
+        
+        // Add recent messages that should be preserved
+        messages.push(Message::user("Recent user"));
+        messages.push(Message::assistant("Recent assistant"));
+        // Add one more to ensure we're over the threshold
+        messages.push(Message::user("Final question"));
 
         micro_compact(&mut messages);
 
@@ -791,24 +789,35 @@ mod tests {
 
     #[test]
     fn test_micro_compact_strips_reasoning() {
-        let mut messages = vec![
-            Message::system("System prompt"),
-            Message::user("Old question"),
-            Message::assistant_with_reasoning("Old answer", "Old reasoning"),
-            Message::user("Recent question"),
-            Message::assistant_with_reasoning("Recent answer", "Recent reasoning"),
-        ];
+        // Need many messages for meaningful compression
+        let mut messages = vec![Message::system("System prompt")];
+        
+        // Add 20 old exchanges (40 messages) with reasoning
+        for i in 0..20 {
+            messages.push(Message::user(format!("Old question {}", i)));
+            messages.push(Message::assistant_with_reasoning(
+                format!("Old answer {}", i), 
+                format!("Old reasoning {}", i)
+            ));
+        }
+        
+        // Add recent messages
+        messages.push(Message::user("Recent question"));
+        messages.push(Message::assistant_with_reasoning("Recent answer", "Recent reasoning"));
+        // Total: 1 + 40 + 2 = 43 messages
+        // keep_start = 43 - 22 = 21, so messages[1..21] (20 messages) get compressed
 
         micro_compact(&mut messages);
 
-        // Check that old reasoning is stripped but recent is kept
-        let old_msg = messages.iter().find(|m| m.content.text().contains("Old answer"));
-        let recent_msg = messages.iter().find(|m| m.content.text().contains("Recent answer"));
+        // After compression, old messages are summarized into a single message
+        // The "Old answer" messages should no longer exist individually
+        let has_old_answer = messages.iter().any(|m| m.content.text().contains("Old answer 0"));
+        let has_recent_answer = messages.iter().any(|m| m.content.text().contains("Recent answer"));
         
-        // The old message should have reasoning stripped
-        if let Some(old) = old_msg {
-            assert!(old.reasoning_content.is_none(), "Old reasoning should be stripped");
-        }
+        // Old messages should be compressed away
+        assert!(!has_old_answer, "Old messages should be compressed");
+        // Recent messages should be kept
+        assert!(has_recent_answer, "Recent messages should be kept");
     }
 
     #[test]

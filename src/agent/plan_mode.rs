@@ -168,14 +168,14 @@ impl Plan {
         !self.steps.is_empty() && self.completed_count() == self.steps.len()
     }
 
-    /// Get the next pending step
+    /// Get the next pending step (first step that is not done)
     pub fn next_pending_step(&self) -> Option<&PlanStep> {
-        self.steps.iter().find(|s| matches!(s.status, StepStatus::Pending))
+        self.steps.iter().find(|s| !matches!(s.status, StepStatus::Done))
     }
 
-    /// Get the next pending step mutably
+    /// Get the next pending step mutably (first step that is not done)
     pub fn next_pending_step_mut(&mut self) -> Option<&mut PlanStep> {
-        self.steps.iter_mut().find(|s| matches!(s.status, StepStatus::Pending))
+        self.steps.iter_mut().find(|s| !matches!(s.status, StepStatus::Done))
     }
 
     /// Format the plan as a human-readable string
