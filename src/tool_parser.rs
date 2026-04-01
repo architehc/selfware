@@ -253,6 +253,26 @@ pub fn parse_tool_calls(content: &str) -> ParseResult {
         }
     }
 
+    // Strategy 3: Try plain function-call syntax as last resort
+    // Models sometimes output tool_name("arg1", "arg2") or tool_name(json) without XML tags
+    if result.tool_calls.is_empty() {
+        if let Some(func_results) = try_parse_plain_function_calls(content) {
+            for (tool_call, raw) in func_results {
+                match tool_call {
+                    Ok(tc) => {
+                        result.text_content = result.text_content.replace(&raw, "");
+                        result.tool_calls.push(tc);
+                    }
+                    Err(e) => {
+                        result
+                            .parse_errors
+                            .push(format!("Plain function parse error: {}", e));
+                    }
+                }
+            }
+        }
+    }
+
     // Clean up text content
     result.text_content = result.text_content.trim().to_string();
 
@@ -683,6 +703,183 @@ fn try_parse_json_blocks(content: &str) -> Option<Vec<(Result<ParsedToolCall>, S
     } else {
         Some(results)
     }
+}
+
+/// Try to parse plain function-call syntax from model output.
+/// Matches patterns like:
+///   file_read("src/main.rs")
+///   file_edit("path", "old_str", "new_str")
+///   shell_exec("cargo test")
+///   tool_name({"key": "value"})
+///
+/// This is a last-resort fallback for models that don't wrap tool calls in XML tags.
+fn try_parse_plain_function_calls(
+    content: &str,
+) -> Option<Vec<(Result<ParsedToolCall>, String)>> {
+    // Known tool name prefixes — we only match calls that look like real tools
+    const KNOWN_TOOLS: &[&str] = &[
+        "file_read",
+        "file_write",
+        "file_edit",
+        "file_delete",
+        "directory_tree",
+        "shell_exec",
+        "grep_search",
+        "glob_find",
+        "symbol_search",
+        "cargo_check",
+        "cargo_test",
+        "cargo_clippy",
+        "cargo_fmt",
+        "git_status",
+        "git_diff",
+        "git_commit",
+        "git_push",
+        "git_log",
+        "tool_search",
+        "context_bulk_read",
+    ];
+
+    static FUNC_CALL_REGEX: OnceLock<Regex> = OnceLock::new();
+    let regex = FUNC_CALL_REGEX.get_or_init(|| {
+        // Match tool_name( ... ) where the parens can contain strings, JSON, etc.
+        // Use a simple balanced-paren matcher for the arguments.
+        Regex::new(r"(?m)^([a-z_]+)\((.+)\)\s*$").expect("Invalid function call regex")
+    });
+
+    let mut results = Vec::new();
+
+    for cap in regex.captures_iter(content) {
+        let raw = cap[0].to_string();
+        let name = cap[1].to_string();
+        let args_raw = cap[2].trim();
+
+        if !KNOWN_TOOLS.contains(&name.as_str()) {
+            continue;
+        }
+
+        // Try to parse arguments:
+        // 1. If it's JSON object directly: file_read({"path": "src/main.rs"})
+        // 2. If it's a quoted string: file_read("src/main.rs") → {"path": "src/main.rs"}
+        // 3. If it's multiple quoted strings: file_edit("path", "old", "new")
+        let arguments = if args_raw.starts_with('{') {
+            // Direct JSON
+            match serde_json::from_str::<serde_json::Value>(args_raw) {
+                Ok(v) => v,
+                Err(_) => continue,
+            }
+        } else {
+            // Try to map positional args to known parameter names
+            let positional = parse_positional_args(args_raw);
+            if positional.is_empty() {
+                continue;
+            }
+            match name.as_str() {
+                "file_read" | "directory_tree" => {
+                    serde_json::json!({"path": positional[0]})
+                }
+                "file_write" if positional.len() >= 2 => {
+                    serde_json::json!({"path": positional[0], "content": positional[1]})
+                }
+                "file_edit" if positional.len() >= 3 => {
+                    serde_json::json!({
+                        "path": positional[0],
+                        "old_str": positional[1],
+                        "new_str": positional[2]
+                    })
+                }
+                "shell_exec" | "cargo_check" | "cargo_test" | "cargo_clippy" | "cargo_fmt" => {
+                    serde_json::json!({"command": positional[0]})
+                }
+                "grep_search" => {
+                    if positional.len() >= 2 {
+                        serde_json::json!({"pattern": positional[0], "path": positional[1]})
+                    } else {
+                        serde_json::json!({"pattern": positional[0]})
+                    }
+                }
+                "glob_find" => {
+                    serde_json::json!({"pattern": positional[0]})
+                }
+                "tool_search" => {
+                    serde_json::json!({"query": positional[0]})
+                }
+                _ => {
+                    // Generic: first arg as the first schema field
+                    serde_json::json!({"input": positional[0]})
+                }
+            }
+        };
+
+        tracing::debug!(
+            "Parsed plain function call: {}({}) → {}",
+            name,
+            args_raw,
+            arguments
+        );
+
+        results.push((
+            Ok(ParsedToolCall {
+                tool_name: name,
+                arguments,
+                raw_text: raw.clone(),
+                parse_method: ParseMethod::Json,
+            }),
+            raw,
+        ));
+    }
+
+    if results.is_empty() {
+        None
+    } else {
+        Some(results)
+    }
+}
+
+/// Parse positional arguments from a function call.
+/// Handles: "arg1", "arg2", "arg3" and 'arg1', 'arg2'
+fn parse_positional_args(input: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut chars = input.chars().peekable();
+    let mut current = String::new();
+    let mut in_quote = false;
+    let mut quote_char = '"';
+
+    while let Some(&ch) = chars.peek() {
+        chars.next();
+        if !in_quote {
+            if ch == '"' || ch == '\'' {
+                in_quote = true;
+                quote_char = ch;
+                current.clear();
+            } else if ch == ',' {
+                // skip comma between args
+            }
+        } else if ch == quote_char {
+            args.push(current.clone());
+            current.clear();
+            in_quote = false;
+        } else if ch == '\\' {
+            // Handle escape sequences
+            if let Some(&next) = chars.peek() {
+                chars.next();
+                match next {
+                    'n' => current.push('\n'),
+                    't' => current.push('\t'),
+                    '\\' => current.push('\\'),
+                    c if c == quote_char => current.push(c),
+                    _ => {
+                        current.push('\\');
+                        current.push(next);
+                    }
+                }
+            }
+        } else {
+            current.push(ch);
+        }
+    }
+
+    args
 }
 
 /// Validate that a parsed tool call has the required structure

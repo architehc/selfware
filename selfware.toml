@@ -21,7 +21,7 @@ enabled = true
 checkpoint_interval_tools = 10
 checkpoint_interval_secs = 300
 auto_recovery = true
-max_recovery_attempts = 50
+max_recovery_attempts = 10
 
 # Thinking mode disabled — model consumes all tokens on reasoning
 # with small max_tokens, leaving content empty.

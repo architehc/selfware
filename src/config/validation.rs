@@ -134,9 +134,9 @@ impl Config {
         }
 
         // --- Continuous work recovery settings ---
-        if self.continuous_work.max_recovery_attempts > 10 {
+        if self.continuous_work.max_recovery_attempts > 100 {
             bail!(
-                "continuous_work.max_recovery_attempts must be <= 10, got: {}",
+                "continuous_work.max_recovery_attempts must be <= 100, got: {}",
                 self.continuous_work.max_recovery_attempts
             );
         }
