@@ -640,6 +640,41 @@ impl Agent {
                         info!("Running phase-2 synthesis for stuck model");
                         match self.synthesize_answer(synthesis_task).await {
                             Ok(Some(answer)) => {
+                                // Check if synthesis produced code that should be
+                                // written to a file instead of accepted as text.
+                                if super::execution::contains_unwritten_code(&answer) {
+                                    if let Some((path, code)) =
+                                        super::execution::extract_code_and_path(&answer)
+                                    {
+                                        info!(
+                                            "Synthesis produced code — auto-writing to {}",
+                                            path
+                                        );
+                                        let calls: Vec<super::execution::CollectedToolCall> =
+                                            vec![(
+                                                "file_write".to_string(),
+                                                serde_json::json!({"path": path, "content": code})
+                                                    .to_string(),
+                                                None,
+                                            )];
+                                        self.consecutive_read_only_steps = 0;
+                                        if let Err(e) = self.execute_tool_batch(calls).await {
+                                            warn!("Auto-write from synthesis failed: {}", e);
+                                        }
+                                        self.messages.push(Message::user(
+                                            "<selfware_system_directive>\n\
+                                             Code from your response was auto-written to file. \
+                                             Now run cargo check or cargo test to verify.\n\
+                                             </selfware_system_directive>"
+                                                .to_string(),
+                                        ));
+                                        // Don't complete — let the agent verify
+                                        continue;
+                                    }
+                                    // Has code but can't extract path — skip synthesis completion
+                                    info!("Synthesis produced unwritable code — continuing loop");
+                                    continue;
+                                }
                                 output::final_answer(&answer);
                                 self.last_assistant_response = answer;
                                 record_state_transition("Executing", "Completed");

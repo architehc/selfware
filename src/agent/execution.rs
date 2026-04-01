@@ -207,6 +207,57 @@ impl Agent {
                 return Ok(false);
             }
 
+            // Detect text responses that contain code — the model should
+            // use file_write/file_edit tools, not output code as text.
+            // If we can extract the code and a target path, auto-write it.
+            let has_code = contains_unwritten_code(&content);
+            tracing::debug!(
+                "Code check: has_code={} content_len={} has_backticks={} lines={}",
+                has_code,
+                content.len(),
+                content.contains("```"),
+                content.lines().count()
+            );
+            if has_code {
+                if let Some((path, code)) = extract_code_and_path(&content) {
+                    info!(
+                        "Auto-writing {} lines of code to {} (model outputted code as text)",
+                        code.lines().count(),
+                        path
+                    );
+                    // Synthesize a file_write tool call from the model's text output
+                    let synthetic_calls: Vec<super::execution::CollectedToolCall> = vec![(
+                        "file_write".to_string(),
+                        serde_json::json!({"path": path, "content": code}).to_string(),
+                        None,
+                    )];
+                    self.consecutive_read_only_steps = 0;
+                    self.execute_tool_batch(synthetic_calls).await?;
+                    self.messages.push(crate::api::types::Message::user(
+                        "<selfware_system_directive>\n\
+                         Your code was automatically written to the file. \
+                         Now verify it compiles: use shell_exec with \"cargo check\" or \"cargo test\".\n\
+                         </selfware_system_directive>"
+                            .to_string(),
+                    ));
+                    return Ok(false);
+                } else {
+                    // Can't extract a clear path — ask the model to use tools
+                    info!("Rejected text response containing code — nudging to use tools");
+                    self.messages.push(crate::api::types::Message::user(
+                        "<selfware_system_directive>\n\
+                         You wrote code in your text response instead of using tools. \
+                         DO NOT output code as text. Use file_write to write it to a file:\n\n\
+                         <tool>\n<name>file_write</name>\n\
+                         <arguments>{\"path\": \"src/lib.rs\", \"content\": \"YOUR CODE HERE\"}</arguments>\n\
+                         </tool>\n\
+                         </selfware_system_directive>"
+                            .to_string(),
+                    ));
+                    return Ok(false);
+                }
+            }
+
             // Check completion gate before accepting task as done
             if let Some(gate_msg) = self.check_completion_gate() {
                 info!("Completion gate rejected: {}", gate_msg);
@@ -349,6 +400,168 @@ impl Agent {
 // get_assistant_step_response moved to assistant_response.rs
 // collect_tool_calls, message_has_tool_calls moved to tool_collect.rs
 // plan moved to plan_step.rs
+
+/// Try to extract a target file path and code content from a model's text response.
+/// Public so task_runner can use it for synthesis code extraction.
+/// Returns Some((path, code)) if both can be identified.
+pub(super) fn extract_code_and_path(content: &str) -> Option<(String, String)> {
+    let stripped = super::recovery::strip_think_blocks(content);
+
+    // Extract path from mentions like "src/lib.rs", "src/main.rs", etc.
+    static PATH_REGEX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let path_re = PATH_REGEX.get_or_init(|| {
+        regex::Regex::new(r#"(?:content for |file |in )?[`"]?((?:src|tests|examples)/[\w/]+\.rs)[`"]?"#)
+            .expect("Invalid path regex")
+    });
+    let path = path_re
+        .captures(&stripped)
+        .map(|c| c[1].to_string())
+        .unwrap_or_else(|| {
+            // Default: if code looks like a library module, use src/lib.rs
+            // If it has fn main(), use src/main.rs
+            if stripped.contains("fn main(") {
+                "src/main.rs".to_string()
+            } else {
+                "src/lib.rs".to_string()
+            }
+        });
+
+    // Extract code: prefer fenced code blocks, fall back to raw code
+    let code = if stripped.contains("```") {
+        // Extract content between first pair of ```
+        let mut in_block = false;
+        let mut code_lines = Vec::new();
+        for line in stripped.lines() {
+            if line.starts_with("```") {
+                if in_block {
+                    break; // end of first block
+                }
+                in_block = true;
+                continue;
+            }
+            if in_block {
+                code_lines.push(line);
+            }
+        }
+        if code_lines.len() >= 5 {
+            Some(code_lines.join("\n"))
+        } else {
+            None
+        }
+    } else {
+        // Extract raw code lines (Rust-like patterns)
+        let code_start_patterns = [
+            "use ", "pub ", "fn ", "struct ", "enum ", "impl ", "mod ",
+            "trait ", "async ", "#[", "//!", "///",
+        ];
+        let mut code_lines = Vec::new();
+        let mut collecting = false;
+        for line in stripped.lines() {
+            let trimmed = line.trim();
+            if !collecting {
+                if code_start_patterns.iter().any(|p| trimmed.starts_with(p)) {
+                    collecting = true;
+                    code_lines.push(line);
+                }
+            } else {
+                // Stop collecting when we hit a blank line followed by non-code
+                if trimmed.is_empty() {
+                    code_lines.push(line);
+                } else if trimmed.starts_with("This ")
+                    || trimmed.starts_with("The ")
+                    || trimmed.starts_with("Note:")
+                    || trimmed.starts_with("To run")
+                {
+                    break; // Hit explanatory text after code
+                } else {
+                    code_lines.push(line);
+                }
+            }
+        }
+        if code_lines.len() >= 5 {
+            Some(code_lines.join("\n"))
+        } else {
+            None
+        }
+    };
+
+    code.map(|c| (path, c))
+}
+
+/// Detect when the model outputs code in text instead of using tools.
+/// Returns true if the response contains substantial code that should have been
+/// written to a file via file_write or file_edit.
+/// Public so task_runner can use it for synthesis code detection.
+pub(super) fn contains_unwritten_code(content: &str) -> bool {
+    let stripped = super::recovery::strip_think_blocks(content);
+
+    // Strategy 1: Check markdown fenced code blocks
+    let code_block_count = stripped.matches("```").count() / 2;
+    if code_block_count > 0 {
+        let mut in_code_block = false;
+        let mut code_lines = 0;
+        for line in stripped.lines() {
+            if line.starts_with("```") {
+                in_code_block = !in_code_block;
+                continue;
+            }
+            if in_code_block && !line.trim().is_empty() {
+                code_lines += 1;
+            }
+        }
+        if code_lines >= 10 {
+            tracing::debug!(
+                "Detected {} code lines in {} fenced code blocks",
+                code_lines, code_block_count
+            );
+            return true;
+        }
+    }
+
+    // Strategy 2: Detect raw unfenced code in the response.
+    // Count lines that look like code (Rust-centric patterns).
+    let code_indicators = [
+        "pub fn ", "fn ", "pub struct ", "struct ", "impl ", "pub enum ",
+        "enum ", "use ", "mod ", "#[", "let ", "pub mod ", "async fn ",
+        "pub async fn ", "-> Result", "-> Option", "pub trait ", "trait ",
+    ];
+    let mut raw_code_lines = 0;
+    for line in stripped.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        if code_indicators.iter().any(|ind| trimmed.starts_with(ind))
+            || trimmed.ends_with('{')
+            || trimmed == "}"
+            || trimmed.ends_with(';')
+        {
+            raw_code_lines += 1;
+        }
+    }
+
+    if raw_code_lines >= 8 {
+        // Also check it's presenting code, not discussing it
+        let has_presentation = stripped.contains("Here is")
+            || stripped.contains("Here's")
+            || stripped.contains("content for")
+            || stripped.contains("implementation")
+            || stripped.contains("complete code")
+            || stripped.contains("updated")
+            || stripped.contains("following code")
+            || stripped.contains("src/");
+
+        if has_presentation {
+            tracing::debug!(
+                "Detected {} raw code lines with presentation markers",
+                raw_code_lines
+            );
+            return true;
+        }
+    }
+
+    false
+}
 
 #[cfg(test)]
 mod tests {
