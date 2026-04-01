@@ -525,10 +525,18 @@ impl Agent {
                 "RETRY SUPPRESSED: `{}` with these exact arguments already failed the safety check. Change the tool or arguments before retrying. Last error: {}",
                 failure.tool_name, failure.error_preview
             ),
-            other => format!(
-                "RETRY SUPPRESSED: `{}` with these exact arguments already failed due to {}. Do not rerun it until a different successful tool call changes the situation or you change the inputs. Last error: {}",
-                failure.tool_name, other, failure.error_preview
-            ),
+            other => {
+                // For file_read failures, hint that the file may need to be created first
+                let hint = if failure.tool_name == "file_read" && failure.error_preview.contains("Failed to read") {
+                    " If the file does not exist yet, use file_write to CREATE it first."
+                } else {
+                    ""
+                };
+                format!(
+                    "RETRY SUPPRESSED: `{}` with these exact arguments already failed due to {}. Do not rerun it until a different successful tool call changes the situation or you change the inputs.{} Last error: {}",
+                    failure.tool_name, other, hint, failure.error_preview
+                )
+            },
         }
     }
 
@@ -754,6 +762,25 @@ impl Agent {
         else {
             return false;
         };
+
+        // For file_read failures, check if the file exists now — it may have
+        // been created by file_write since the last failed attempt.
+        if tool_name == "file_read" {
+            if let Ok(args) = serde_json::from_str::<serde_json::Value>(args_str) {
+                if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                    if std::path::Path::new(path).exists() {
+                        info!(
+                            "file_read('{}') was previously suppressed but file now exists — allowing retry",
+                            path
+                        );
+                        // Remove the old failure record so it doesn't block again
+                        self.recent_failed_tool_attempts
+                            .retain(|a| !(a.tool_name == tool_name && a.args_hash == args_hash));
+                        return false;
+                    }
+                }
+            }
+        }
 
         let err = self.build_failed_tool_retry_suppressed_message(&failure);
         warn!(
