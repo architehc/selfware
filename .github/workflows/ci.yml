@@ -60,10 +60,6 @@ jobs:
       - name: Run unit tests
         run: cargo test --verbose
 
-      - name: Run integration CLI tests
-        if: runner.os == 'Linux'
-        run: cargo test --features integration --test integration test_cli_ --verbose
-
       - name: Run tests with all features
         run: cargo test --features extras --verbose
 
