@@ -263,6 +263,22 @@ impl Agent {
         }
 
         self.reset_no_action_prompt_state();
+
+        // Track whether this step contains any write/modify tools
+        let has_write_tool = tool_calls.iter().any(|(name, _, _)| {
+            matches!(
+                name.as_str(),
+                "file_edit" | "file_write" | "file_delete" | "shell_exec"
+                    | "cargo_check" | "cargo_test" | "cargo_clippy" | "cargo_fmt"
+                    | "git_commit" | "git_push"
+            )
+        });
+        if has_write_tool {
+            self.consecutive_read_only_steps = 0;
+        } else {
+            self.consecutive_read_only_steps += 1;
+        }
+
         self.execute_tool_batch(tool_calls).await?;
 
         // After tool batch execution, check if all tool calls were suppressed.
@@ -300,6 +316,30 @@ impl Agent {
                  </selfware_system_directive>"
                     .to_string(),
             ));
+        }
+
+        // Nudge the model to start making changes if it has been reading
+        // without editing for too many consecutive steps.
+        if self.consecutive_read_only_steps >= 5 && self.consecutive_read_only_steps % 5 == 0 {
+            info!(
+                "Injecting edit nudge after {} consecutive read-only steps",
+                self.consecutive_read_only_steps
+            );
+            self.messages.push(crate::api::types::Message::user(format!(
+                "<selfware_system_directive>\n\
+                 You have spent {} consecutive steps reading files without making any edits. \
+                 You now have enough context. It is time to ACT:\n\
+                 - Use file_edit to modify code\n\
+                 - Use file_write to create new files\n\
+                 - Use shell_exec to run commands\n\n\
+                 Example edit:\n\
+                 <tool>\n<name>file_edit</name>\n\
+                 <arguments>{{\"path\": \"src/main.rs\", \"old_str\": \"old code\", \"new_str\": \"new code\"}}</arguments>\n\
+                 </tool>\n\
+                 \nDo NOT read more files. Make your change NOW.\n\
+                 </selfware_system_directive>",
+                self.consecutive_read_only_steps
+            )));
         }
 
         Ok(false)

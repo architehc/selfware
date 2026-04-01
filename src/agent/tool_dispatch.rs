@@ -620,10 +620,10 @@ impl Agent {
         self.record_failed_tool_attempt(name, args_str, "task_state", &err);
         self.consecutive_suppressions += 1;
 
-        // After 3+ suppressed rereads, trigger phase-2 synthesis.
+        // After many suppressed rereads, trigger phase-2 synthesis.
         // The model has the data in context but can't produce a text answer.
-        // A separate tool-free API call will synthesize the response.
-        if read_count >= 3 && self.pending_synthesis.is_none() {
+        // Set high threshold to avoid premature synthesis that gives up.
+        if read_count >= 10 && self.pending_synthesis.is_none() {
             info!(
                 "Triggering phase-2 synthesis after {} suppressed rereads",
                 read_count

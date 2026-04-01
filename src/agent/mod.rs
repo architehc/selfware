@@ -373,6 +373,11 @@ pub struct Agent {
     /// When this exceeds a threshold the agent forces completion instead of
     /// looping until max_iterations.
     consecutive_suppressions: usize,
+    /// Tracks consecutive steps that only used read-only tools (file_read,
+    /// directory_tree, grep_search, etc.) without any write tool (file_edit,
+    /// file_write, shell_exec). When this exceeds a threshold, a nudge is
+    /// injected telling the model to start making changes.
+    consecutive_read_only_steps: usize,
     /// Three-layer context compression orchestrator
     compression_orchestrator: CompressionOrchestrator,
 }
@@ -548,24 +553,23 @@ To call a tool, use this EXACT XML structure:
 
 <tool>
 <name>file_read</name>
-<arguments>{{"path": "./src/main.rs"}}</arguments>
+<arguments>{{"path": "src/main.rs"}}</arguments>
 </tool>
 
 <tool>
-<name>directory_tree</name>
-<arguments>{{"path": "./src", "max_depth": 3}}</arguments>
+<name>file_edit</name>
+<arguments>{{"path": "src/main.rs", "old_str": "fn main() {{", "new_str": "fn main() {{\n    println!(\"hello\");"}}</arguments>
 </tool>
 
 <tool>
 <name>shell_exec</name>
-<arguments>{{"command": "cargo build"}}</arguments>
+<arguments>{{"command": "cargo check"}}</arguments>
 </tool>
 
 ### WRONG formats (DO NOT USE):
-- <function>tool_name</function> - WRONG
-- <function=tool_name> - WRONG
-- <name=tool_name> - WRONG
-- Any format other than <name>tool_name</name> - WRONG
+- file_read("path") — WRONG, must use XML tags
+- <function>tool_name</function> — WRONG
+- Any format other than <tool><name>...</name><arguments>...</arguments></tool> — WRONG
 
 ## MANDATORY WORKFLOW
 1. PLAN: Understand what needs to change — read relevant files first
@@ -841,6 +845,7 @@ To call a tool, use this EXACT XML structure:
             rag_engine: None,
             explanation_level: ExplanationLevel::Intermediate,
             consecutive_suppressions: 0,
+            consecutive_read_only_steps: 0,
             compression_orchestrator: CompressionOrchestrator::new(),
         };
 
