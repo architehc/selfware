@@ -222,6 +222,18 @@ impl Agent {
             ));
         }
 
+        // Reject completion if the last assistant response contains code that
+        // should have been written to a file. This catches the common pattern
+        // where models output code as text instead of using file_write/file_edit.
+        if super::execution::contains_unwritten_code(&self.last_assistant_response) {
+            return Some(
+                "Your response contains code that was NOT written to any file. \
+                 Use file_write to save it to a file, then verify with cargo check. \
+                 Do NOT output code as text — use tools."
+                    .to_string(),
+            );
+        }
+
         // Workflow validator: reject test-only edits when task requires source changes
         if let Some(msg) = self.validate_workflow_edits() {
             return Some(msg);
