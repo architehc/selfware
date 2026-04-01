@@ -11,7 +11,7 @@ allowed_paths = ["./**", "~/**"]
 denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
 
 [agent]
-max_iterations = 500
+max_iterations = 10000
 step_timeout_secs = 600
 # Enable native function calling (requires backend support like sglang --tool-call-parser)
 native_function_calling = true
@@ -21,7 +21,7 @@ enabled = true
 checkpoint_interval_tools = 10
 checkpoint_interval_secs = 300
 auto_recovery = true
-max_recovery_attempts = 3
+max_recovery_attempts = 50
 
 [retry]
 max_retries = 5

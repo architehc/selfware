@@ -582,7 +582,10 @@ impl Agent {
         let Some(state) = self.file_tracker.read_state.get(path) else {
             return false;
         };
-        if state.unchanged_read_count < 1 || self.file_tracker.stale_files.contains(path) {
+        // Allow up to 3 unchanged rereads before blocking — in long sessions
+        // the model may need to re-read files after context compression evicts
+        // earlier content. Only block truly excessive rereads.
+        if state.unchanged_read_count < 3 || self.file_tracker.stale_files.contains(path) {
             return false;
         }
 

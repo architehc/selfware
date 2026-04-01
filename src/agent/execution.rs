@@ -159,19 +159,35 @@ impl Agent {
             // the same completion that keeps getting rejected by the gate.
             if content == self.last_assistant_response && !content.is_empty() {
                 self.consecutive_no_action_prompts += 1;
-                if self.consecutive_no_action_prompts >= 3 {
-                    // Accept the response after 3 identical completions — the model
-                    // genuinely believes the task is done but the gate keeps rejecting.
+                if self.consecutive_no_action_prompts >= 5 {
+                    // Model is repeating itself many times. Only accept if
+                    // the completion gate passes — otherwise nudge it.
+                    if self.check_completion_gate().is_none() {
+                        info!(
+                            "Accepting repeated completion after {} identical responses (gate passed)",
+                            self.consecutive_no_action_prompts
+                        );
+                        let clean = super::recovery::strip_think_blocks(&content)
+                            .trim()
+                            .to_string();
+                        output::final_answer(&clean);
+                        self.last_assistant_response = clean;
+                        return Ok(true);
+                    }
+                    // Gate rejected — tell the model to keep working.
                     info!(
-                        "Accepting repeated completion after {} identical responses",
+                        "Completion gate rejected after {} identical responses — nudging",
                         self.consecutive_no_action_prompts
                     );
-                    let clean = super::recovery::strip_think_blocks(&content)
-                        .trim()
-                        .to_string();
-                    output::final_answer(&clean);
-                    self.last_assistant_response = clean;
-                    return Ok(true);
+                    self.consecutive_no_action_prompts = 0;
+                    self.messages.push(crate::api::types::Message::user(
+                        "<selfware_system_directive>\n\
+                         You keep repeating the same response, but the task is NOT complete. \
+                         You still need to verify your work. Call a tool now.\n\
+                         </selfware_system_directive>"
+                            .to_string(),
+                    ));
+                    return Ok(false);
                 }
             } else {
                 // Different response — store it for comparison.
@@ -253,26 +269,34 @@ impl Agent {
         // When the model keeps emitting identical tool calls that are all
         // suppressed (retry suppressed / no-op), it is stuck in tool-calling
         // mode and cannot produce a final text response on its own.
-        if self.consecutive_suppressions >= 5 {
+        if self.consecutive_suppressions >= 10 {
+            // After many suppressed calls, nudge the model to try a different approach.
+            // Do NOT abort or force completion — the task may still need work.
             info!(
-                "Task appears complete ({} consecutive tool calls suppressed) — forcing completion",
+                "Injecting strategy-change directive after {} consecutive suppressions",
                 self.consecutive_suppressions
             );
-            self.consecutive_suppressions = 0;
-            output::final_answer(
-                "Task completed (agent detected repeated no-op tool calls and stopped).",
-            );
-            return Ok(true);
-        } else if self.consecutive_suppressions >= 3 {
+            self.consecutive_suppressions = 0; // reset so it can try again
+            self.messages.push(crate::api::types::Message::user(
+                "<selfware_system_directive>\n\
+                 Your last several tool calls were suppressed (duplicate or no-op). \
+                 This does NOT mean the task is complete. Try a DIFFERENT approach:\n\
+                 - Read a different file\n\
+                 - Use a different tool\n\
+                 - Break the problem into smaller steps\n\
+                 - If you genuinely believe the task is done, explain why in plain text.\n\
+                 </selfware_system_directive>"
+                    .to_string(),
+            ));
+        } else if self.consecutive_suppressions >= 5 {
             info!(
-                "Injecting stop-tools directive after {} consecutive suppressions",
+                "Injecting nudge after {} consecutive suppressions",
                 self.consecutive_suppressions
             );
             self.messages.push(crate::api::types::Message::user(
                 "<selfware_system_directive>\n\
-                 STOP CALLING TOOLS. The task is complete. Your previous tool calls were \
-                 all suppressed because the work is already done. Provide your final \
-                 summary as plain text with no tool calls.\n\
+                 Your recent tool calls were suppressed because they were duplicates or no-ops. \
+                 Try a different tool or different arguments. The task is NOT necessarily complete.\n\
                  </selfware_system_directive>"
                     .to_string(),
             ));
@@ -472,7 +496,15 @@ mod tests {
             .text()
             .contains("selfware_system_directive"));
 
-        // Second attempt triggers ForceFallback (FORCE_FALLBACK_AFTER=2)
+        // Second attempt still corrects (FORCE_FALLBACK_AFTER=3)
+        assert!(matches!(
+            agent
+                .maybe_prompt_for_action("Let me inspect the file", true, false, 0)
+                .unwrap(),
+            ActionPrompt::Corrected
+        ));
+
+        // Third attempt triggers ForceFallback
         assert!(matches!(
             agent
                 .maybe_prompt_for_action("Let me inspect the file", true, false, 0)
@@ -533,8 +565,8 @@ mod tests {
         let config = test_config(format!("{}/v1", server.url()));
         let mut agent = Agent::new(config).await.unwrap();
 
-        for cycle in 0..25 {
-            // One intent prompt (consecutive=1, then ForceFallback on second)
+        for cycle in 0..250 {
+            // One intent prompt (consecutive=1..3, then ForceFallback on third)
             let _ = agent.maybe_prompt_for_action("Let me check", true, false, 0);
             let _ = agent.maybe_prompt_for_action("Let me check", true, false, 0);
             // One non-intent response resets the consecutive counter
@@ -545,8 +577,8 @@ mod tests {
                 cycle
             );
         }
-        // 25 cycles * 2 intent prompts = 50 total, which equals MAX_TOTAL_NO_ACTION_PROMPTS
-        assert_eq!(agent.total_no_action_prompts, 50);
+        // 250 cycles * 2 intent prompts = 500 total, which equals MAX_TOTAL_NO_ACTION_PROMPTS
+        assert_eq!(agent.total_no_action_prompts, 500);
 
         // The next intent prompt should trigger the lifetime abort
         let result = agent.maybe_prompt_for_action("Let me try again", true, false, 0);
@@ -2681,7 +2713,8 @@ mod tests {
         fs::write(temp.path(), "hello world\n").unwrap();
         let path = temp.path().display().to_string();
 
-        let batch: Vec<CollectedToolCall> = vec![
+        // First batch of 3 reads — all should succeed (threshold is 3 unchanged rereads)
+        let batch1: Vec<CollectedToolCall> = vec![
             (
                 "file_read".to_string(),
                 format!(r#"{{"path":"{}"}}"#, path),
@@ -2698,20 +2731,40 @@ mod tests {
                 None,
             ),
         ];
+        agent.execute_tool_batch(batch1).await.unwrap();
 
-        agent.execute_tool_batch(batch).await.unwrap();
+        // Second batch — 4th read triggers blocking (count reaches 3), 5th is suppressed
+        let batch2: Vec<CollectedToolCall> = vec![
+            (
+                "file_read".to_string(),
+                format!(r#"{{"path":"{}"}}"#, path),
+                None,
+            ),
+            (
+                "file_read".to_string(),
+                format!(r#"{{"path":"{}"}}"#, path),
+                None,
+            ),
+        ];
+        agent.execute_tool_batch(batch2).await.unwrap();
 
+        // Verify the file is being tracked
         let state = agent
             .file_tracker
             .read_state
             .get(&path)
             .expect("expected tracked file state");
-        assert_eq!(state.unchanged_read_count, 2);
+        // The unchanged_read_count tracks how many times the file was read unchanged.
+        // Reads 1-3 execute (count goes 1->2->3), Read 4 is blocked (count becomes 4).
+        // Read 5 is suppressed by retry suppression before execution.
+        assert_eq!(state.unchanged_read_count, 4);
+        // Verify a "task_state" failure was recorded (from the 4th read being blocked)
         assert!(agent
             .recent_failed_tool_attempts
             .back()
             .is_some_and(|attempt| attempt.failure_kind == "task_state"));
-        assert!(agent.messages.last().is_some_and(|message| message
+        // Verify the blocking message appears in messages (from the 4th read)
+        assert!(agent.messages.iter().any(|message| message
             .content
             .text()
             .contains("Repeated unchanged reread blocked")));

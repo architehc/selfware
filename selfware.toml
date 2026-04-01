@@ -11,8 +11,8 @@ denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**"]
 protected_branches = ["main"]
 
 [agent]
-max_iterations = 50
-step_timeout_secs = 300
+max_iterations = 10000
+step_timeout_secs = 600
 native_function_calling = false
 streaming = true
 
@@ -21,7 +21,7 @@ enabled = true
 checkpoint_interval_tools = 10
 checkpoint_interval_secs = 300
 auto_recovery = true
-max_recovery_attempts = 3
+max_recovery_attempts = 50
 
 # Thinking mode disabled — model consumes all tokens on reasoning
 # with small max_tokens, leaving content empty.

@@ -7,18 +7,17 @@ use crate::api::types::Message;
 use crate::testing::visual_verification::{LoopDetectionResult, RecoveryStrategy};
 
 /// Maximum consecutive no-action prompts before aborting.
-pub(super) const MAX_NO_ACTION_PROMPTS: usize = 6;
+/// Set high to support long-running agentic loops with local models that
+/// occasionally produce text-only responses between tool calls.
+pub(super) const MAX_NO_ACTION_PROMPTS: usize = 20;
 /// After this many text-only reprompts, force a deterministic fallback tool call
 /// instead of sending another text correction the model will ignore.
-/// Set to 2: one warning, then immediate force-fallback.
-pub(super) const FORCE_FALLBACK_AFTER: usize = 2;
+pub(super) const FORCE_FALLBACK_AFTER: usize = 3;
 /// Absolute lifetime cap on total no-action prompts across the entire task.
-/// Prevents infinite cycling when the consecutive counter gets reset by
-/// intervening responses that pass `should_prompt_for_action` (e.g. long
-/// responses, or responses without intent phrases after seeing forced tool output).
-/// Increased to 50 because smart fallbacks make real progress (reading files)
-/// even though the model itself isn't producing tool calls.
-pub(super) const MAX_TOTAL_NO_ACTION_PROMPTS: usize = 50;
+/// Set very high to support multi-hour/multi-day agentic sessions.
+/// Smart fallbacks make real progress (reading files, exploring code) even
+/// though the model itself isn't producing tool calls directly.
+pub(super) const MAX_TOTAL_NO_ACTION_PROMPTS: usize = 500;
 pub(super) const FILE_DISCOVERY_TOOLS: &str = "directory_tree, glob_find, or grep_search";
 
 /// Result of the intent-without-action check.

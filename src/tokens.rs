@@ -47,6 +47,8 @@ pub struct TokenTracker {
     start_time: RwLock<Option<Instant>>,
     /// Drift tracking: cumulative (estimated - actual) for prompt tokens
     drift: RwLock<DriftStats>,
+    /// Model identifier for cost estimation
+    model_id: RwLock<Option<String>>,
 }
 
 /// Tracks cumulative drift between estimated and actual token counts.
@@ -85,6 +87,7 @@ impl TokenTracker {
             step_usage: RwLock::new(Vec::new()),
             start_time: RwLock::new(Some(Instant::now())),
             drift: RwLock::new(DriftStats::default()),
+            model_id: RwLock::new(None),
         }
     }
 
@@ -166,19 +169,53 @@ impl TokenTracker {
         }
     }
 
-    /// Estimate cost based on typical pricing
-    /// Note: This is a rough estimate, actual pricing varies by model
+    /// Set the model identifier for cost estimation
+    pub fn set_model_id(&self, model_id: impl Into<String>) {
+        if let Ok(mut id) = self.model_id.write() {
+            *id = Some(model_id.into());
+        }
+    }
+
+    /// Get the model identifier if set
+    pub fn get_model_id(&self) -> Option<String> {
+        self.model_id.read().ok().and_then(|id| id.clone())
+    }
+
+    /// Get pricing information based on model_id
+    /// Returns model-specific pricing if known, otherwise returns default (sonnet) pricing
+    fn get_model_pricing(&self) -> ModelPricing {
+        if let Ok(model_id_guard) = self.model_id.read() {
+            if let Some(ref model_id) = *model_id_guard {
+                let lower = model_id.to_lowercase();
+                // Match model_id to known presets
+                if lower.contains("haiku") {
+                    return ModelPricing::claude_haiku();
+                } else if lower.contains("opus") {
+                    return ModelPricing::claude_opus();
+                } else if lower.contains("sonnet") {
+                    return ModelPricing::claude_sonnet();
+                }
+                // For unknown models, fall through to default
+            }
+        }
+        // Default fallback to sonnet pricing (matches original hardcoded values)
+        ModelPricing::claude_sonnet()
+    }
+
+    /// Estimate cost based on model-specific pricing
+    /// Uses the model_id to determine appropriate pricing, falling back to
+    /// default values if model_id is not set or unknown.
     pub fn estimate_cost(&self) -> f64 {
         let prompt = self.total_prompt_tokens() as f64;
         let completion = self.total_completion_tokens() as f64;
 
-        // Rough estimate based on typical LLM pricing (per 1M tokens)
-        // Adjust these values based on actual model pricing
-        let prompt_cost_per_1m = 3.0; // $3 per 1M prompt tokens
-        let completion_cost_per_1m = 15.0; // $15 per 1M completion tokens
+        let pricing = self.get_model_pricing();
 
-        (prompt / 1_000_000.0 * prompt_cost_per_1m)
-            + (completion / 1_000_000.0 * completion_cost_per_1m)
+        // Convert from per-1K pricing to per-token
+        let prompt_cost = (prompt / 1000.0) * pricing.input_cost_per_1k;
+        let completion_cost = (completion / 1000.0) * pricing.output_cost_per_1k;
+
+        prompt_cost + completion_cost
     }
 
     /// Record the difference between an estimated token count and the actual
@@ -1399,9 +1436,90 @@ mod tests {
         tracker.record_usage(1_000_000, 100_000);
 
         let cost = tracker.estimate_cost();
-        // 1M prompt tokens at $3/1M + 100K completion at $15/1M
+        // With no model_id set, uses sonnet pricing as default:
+        // 1M prompt tokens at $0.003/1K + 100K completion at $0.015/1K
         // = $3 + $1.5 = $4.5
         assert!((cost - 4.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_estimate_cost_with_haiku_model() {
+        let tracker = TokenTracker::new();
+        tracker.set_model_id("claude-3-haiku");
+        tracker.record_usage(1_000_000, 100_000);
+
+        let cost = tracker.estimate_cost();
+        // Haiku pricing: $0.00025/1K input, $0.00125/1K output
+        // 1M/1000 * 0.00025 + 100K/1000 * 0.00125
+        // = 1000 * 0.00025 + 100 * 0.00125
+        // = 0.25 + 0.125 = 0.375
+        assert!((cost - 0.375).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_estimate_cost_with_sonnet_model() {
+        let tracker = TokenTracker::new();
+        tracker.set_model_id("claude-3-5-sonnet");
+        tracker.record_usage(1_000_000, 100_000);
+
+        let cost = tracker.estimate_cost();
+        // Sonnet pricing: $0.003/1K input, $0.015/1K output
+        // 1M/1000 * 0.003 + 100K/1000 * 0.015
+        // = 1000 * 0.003 + 100 * 0.015
+        // = $3 + $1.5 = $4.5
+        assert!((cost - 4.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_estimate_cost_with_opus_model() {
+        let tracker = TokenTracker::new();
+        tracker.set_model_id("claude-3-opus");
+        tracker.record_usage(1_000_000, 100_000);
+
+        let cost = tracker.estimate_cost();
+        // Opus pricing: $0.015/1K input, $0.075/1K output
+        // 1M/1000 * 0.015 + 100K/1000 * 0.075
+        // = 1000 * 0.015 + 100 * 0.075
+        // = $15 + $7.5 = $22.5
+        assert!((cost - 22.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_estimate_cost_unknown_model_fallback() {
+        let tracker = TokenTracker::new();
+        // Unknown model should fall back to sonnet pricing
+        tracker.set_model_id("unknown-model-v1");
+        tracker.record_usage(1_000_000, 100_000);
+
+        let cost = tracker.estimate_cost();
+        // Should use sonnet pricing as fallback
+        assert!((cost - 4.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_set_and_get_model_id() {
+        let tracker = TokenTracker::new();
+        assert_eq!(tracker.get_model_id(), None);
+
+        tracker.set_model_id("claude-3-opus");
+        assert_eq!(tracker.get_model_id(), Some("claude-3-opus".to_string()));
+
+        tracker.set_model_id("claude-3-haiku");
+        assert_eq!(tracker.get_model_id(), Some("claude-3-haiku".to_string()));
+    }
+
+    #[test]
+    fn test_model_id_preserved_on_reset() {
+        let tracker = TokenTracker::new();
+        tracker.set_model_id("claude-3-opus");
+        tracker.record_usage(1000, 500);
+
+        tracker.reset();
+
+        // Model ID should be preserved after reset
+        assert_eq!(tracker.get_model_id(), Some("claude-3-opus".to_string()));
+        // But tokens should be reset
+        assert_eq!(tracker.total_tokens(), 0);
     }
 
     #[test]

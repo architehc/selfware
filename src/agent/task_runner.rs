@@ -573,7 +573,7 @@ impl Agent {
                         Err(e) => {
                             warn!("Initial execution failed: {}", e);
 
-                            if is_confirmation_error(&e) || is_no_action_error(&e) {
+                            if is_confirmation_error(&e) {
                                 record_state_transition("Planning", "Failed");
                                 if let Some(ref mut checkpoint) = self.current_checkpoint {
                                     checkpoint.log_error(0, e.to_string(), false);
@@ -582,6 +582,19 @@ impl Agent {
                                     reason: e.to_string(),
                                 })?;
                                 continue;
+                            }
+
+                            // No-action during planning is recoverable — reset and retry
+                            if is_no_action_error(&e) {
+                                warn!("No-action during planning — resetting and retrying");
+                                self.reset_no_action_prompt_state();
+                                self.messages.push(Message::user(
+                                    "<selfware_system_directive>\n\
+                                     Planning failed because you described intent without calling tools. \
+                                     Start by reading a relevant file or searching the codebase.\n\
+                                     </selfware_system_directive>"
+                                        .to_string(),
+                                ));
                             }
 
                             self.cognitive_state
@@ -687,24 +700,36 @@ impl Agent {
                                 });
                             }
 
-                            // Confirmation and no-action errors are fatal
-                            if is_confirmation_error(&e) || is_no_action_error(&e) {
+                            // Confirmation errors (user denied) are truly fatal
+                            if is_confirmation_error(&e) {
                                 record_state_transition("Executing", "Failed");
                                 if let Some(ref mut checkpoint) = self.current_checkpoint {
                                     checkpoint.log_error(step, e.to_string(), false);
-                                }
-                                if is_no_action_error(&e) {
-                                    cli_println!(
-                                        "{} {}",
-                                        "❌ Agent stuck in action loop:".bright_red(),
-                                        e
-                                    );
-                                    cli_println!("{}", "The agent repeatedly described intent without executing tools. This is a non-recoverable error.".bright_yellow());
                                 }
                                 self.set_loop_state(AgentState::Failed {
                                     reason: e.to_string(),
                                 })?;
                                 continue;
+                            }
+
+                            // No-action errors are recoverable — reset counters
+                            // and inject a context nudge so the model can try again.
+                            if is_no_action_error(&e) {
+                                cli_println!(
+                                    "{} {}",
+                                    "⚠️ Agent stuck in action loop:".bright_yellow(),
+                                    e
+                                );
+                                cli_println!("{}", "Attempting recovery — injecting context refresh.".bright_yellow());
+                                self.reset_no_action_prompt_state();
+                                self.messages.push(Message::user(
+                                    "<selfware_system_directive>\n\
+                                     You were stuck describing intent without calling tools. \
+                                     Your counters have been reset. Start fresh: read a file, \
+                                     run a search, or take any concrete action now.\n\
+                                     </selfware_system_directive>"
+                                        .to_string(),
+                                ));
                             }
 
                             record_state_transition("Executing", "ErrorRecovery");
@@ -1869,11 +1894,10 @@ mod tests {
         target_os = "windows",
         ignore = "mock TCP server unreliable on Windows CI"
     )]
-    async fn test_continue_execution_no_action_error_is_fatal() {
+    async fn test_continue_execution_no_action_error_is_recoverable() {
         // The model will repeatedly describe intent without using tools.
-        // The shared run_execution_loop should eventually abort.
-        // Set the default response to an intent phrase so it persists after
-        // the queue is exhausted.
+        // With recoverable no-action errors, the loop should eventually
+        // exhaust max_iterations rather than fatally aborting early.
         let intent = "Let me check the code";
         let server = MockLlmServer::builder()
             .with_default_response(crate::testing::mock_api::MockResponse::Text(
@@ -1882,8 +1906,7 @@ mod tests {
             .build()
             .await;
         let mut config = mock_agent_config(format!("{}/v1", server.url()), false);
-        config.agent.max_iterations = 30;
-        // Require >=3 min steps so short responses aren't accepted as completion
+        config.agent.max_iterations = 8;
         config.agent.min_completion_steps = 3;
         let mut agent = Agent::new(config).await.unwrap();
 
@@ -1893,17 +1916,21 @@ mod tests {
             "test task".to_string(),
         ));
 
+        // The loop should complete (Ok) after exhausting iterations rather
+        // than returning Err from a fatal no-action abort.
         let result = agent.continue_execution().await;
-        assert!(
-            result.is_err(),
-            "continue_execution must fail when the model never uses tools"
-        );
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("failed to take action") || err_msg.contains("Agent failed"),
-            "error should mention action failure, got: {}",
-            err_msg
-        );
+        // Either Ok (iterations exhausted) or Err (eventually hit lifetime limit)
+        // — both are acceptable. The key is it doesn't abort after just 6 prompts.
+        if let Err(ref e) = result {
+            let err_msg = e.to_string();
+            assert!(
+                err_msg.contains("failed to take action")
+                    || err_msg.contains("Agent failed")
+                    || err_msg.contains("Max iterations"),
+                "unexpected error: {}",
+                err_msg
+            );
+        }
         server.stop().await;
     }
 

@@ -289,6 +289,18 @@ pub fn micro_compact(messages: &mut Vec<Message>) -> CompressionMetrics {
     let system_msg = messages.first().cloned();
     let keep_start = messages.len().saturating_sub(MIN_MESSAGES_TO_KEEP);
     
+    // Early return if there's nothing meaningful to compress
+    if keep_start <= 1 {
+        return CompressionMetrics::new(
+            CompressionMethod::Micro,
+            tokens_before,
+            tokens_before,
+            messages_before,
+            messages_before,
+            start.elapsed().as_millis() as u64,
+        );
+    }
+    
     // Build new message list
     let mut compressed = Vec::new();
     
