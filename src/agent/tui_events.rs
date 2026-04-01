@@ -60,6 +60,15 @@ pub enum AgentEvent {
         message: String,
         position: usize,
     },
+    /// Permission requested for tool execution
+    PermissionRequested {
+        tool_name: String,
+        reason: String,
+    },
+    /// Mode change requested (e.g., user selected "Yolo" from permission prompt)
+    ModeChangeRequested {
+        mode: crate::config::ExecutionMode,
+    },
 }
 
 /// Trait for emitting real-time events during agent execution.
@@ -124,6 +133,10 @@ impl EventEmitter for TuiEmitter {
             AgentEvent::InputQueued { message, position } => {
                 TuiEvent::InputQueued { message, position }
             }
+            AgentEvent::PermissionRequested { tool_name, reason } => {
+                TuiEvent::PermissionRequested { tool_name, reason }
+            }
+            AgentEvent::ModeChangeRequested { mode } => TuiEvent::ModeChangeRequested { mode },
         };
         let _ = self.tx.send(tui_event);
     }

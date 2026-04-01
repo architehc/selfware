@@ -58,6 +58,10 @@ pub enum TuiEvent {
     SpinnerStop,
     /// User queued a message during generation
     InputQueued { message: String, position: usize },
+    /// Permission requested for tool execution
+    PermissionRequested { tool_name: String, reason: String },
+    /// Mode change requested (e.g., user selected "Yolo" from permission prompt)
+    ModeChangeRequested { mode: crate::config::ExecutionMode },
 }
 
 /// Coordinator status for UI display
@@ -254,6 +258,17 @@ impl DashboardState {
                     LogLevel::Info,
                     &format!("Queued ({}): {}", position, message),
                 );
+            }
+            TuiEvent::PermissionRequested { tool_name, reason } => {
+                self.status_message = format!("Permission needed: {}", tool_name);
+                self.log(
+                    LogLevel::Warning,
+                    &format!("Permission requested for {}: {}", tool_name, reason),
+                );
+            }
+            TuiEvent::ModeChangeRequested { mode } => {
+                self.status_message = format!("Mode change: {:?}", mode);
+                self.log(LogLevel::Info, &format!("Mode change requested: {:?}", mode));
             }
         }
     }

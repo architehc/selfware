@@ -1802,7 +1802,9 @@ impl Config {
 }
 
 pub fn process(input: &str) -> Result<(), Error> {
-    todo!()
+    // Process the input (placeholder implementation)
+    let _ = input;
+    Ok(())
 }
 
 mod tests {

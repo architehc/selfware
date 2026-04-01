@@ -272,6 +272,26 @@ pub static COMMANDS: &[CommandEntry] = &[
         description: "Undo the last file edit",
         category: CommandCategory::Git,
     },
+    CommandEntry {
+        name: "/worktree",
+        description: "Worktree management commands",
+        category: CommandCategory::Git,
+    },
+    CommandEntry {
+        name: "/worktree enter",
+        description: "Create and enter a git worktree",
+        category: CommandCategory::Git,
+    },
+    CommandEntry {
+        name: "/worktree exit",
+        description: "Exit current worktree",
+        category: CommandCategory::Git,
+    },
+    CommandEntry {
+        name: "/worktree list",
+        description: "List all git worktrees",
+        category: CommandCategory::Git,
+    },
     // Session
     CommandEntry {
         name: "/copy",
@@ -456,6 +476,10 @@ mod tests {
             "/diff",
             "/git",
             "/undo",
+            "/worktree",
+            "/worktree enter",
+            "/worktree exit",
+            "/worktree list",
             "/copy",
             "/restore",
             "/chat",
@@ -874,7 +898,7 @@ mod tests {
 
     #[test]
     fn test_git_commands_are_in_git_category() {
-        let git_commands = ["/diff", "/git", "/undo"];
+        let git_commands = ["/diff", "/git", "/undo", "/worktree", "/worktree enter", "/worktree exit", "/worktree list"];
         let registry: std::collections::HashMap<&str, CommandCategory> =
             COMMANDS.iter().map(|c| (c.name, c.category)).collect();
 

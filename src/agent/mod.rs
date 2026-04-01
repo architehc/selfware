@@ -1325,6 +1325,128 @@ To call a tool, use this EXACT XML structure:
     pub fn compression_orchestrator_mut(&mut self) -> &mut CompressionOrchestrator {
         &mut self.compression_orchestrator
     }
+
+    /// Prompt the user for permission to execute a tool.
+    ///
+    /// This method handles interactive prompting for tool execution permission.
+    /// It supports both TUI and CLI modes, and provides options for:
+    /// - Yes: Allow this invocation
+    /// - No: Deny this invocation
+    /// - Always: Remember choice for this session (adds to permission_store)
+    /// - Yolo: Switch execution mode to Yolo for the rest of the session
+    ///
+    /// In non-interactive mode, returns an error suggesting --yolo mode.
+    pub async fn prompt_for_permission(
+        &self,
+        tool_name: &str,
+        reason: &str,
+    ) -> Result<PermissionPromptResult> {
+        // Check if we're in non-interactive mode
+        if !self.is_interactive() {
+            return Err(anyhow::anyhow!(
+                "Tool '{}' requires confirmation: {}. \
+                 Run with --yolo flag or change execution mode to allow this operation.",
+                tool_name,
+                reason
+            ));
+        }
+
+        // Check if TUI is active - if so, we need to handle differently
+        if self.has_tui_renderer() {
+            // For TUI mode, emit an event and wait for user response
+            // The TUI will handle displaying the prompt and sending back the response
+            self.emit_event(AgentEvent::PermissionRequested {
+                tool_name: tool_name.to_string(),
+                reason: reason.to_string(),
+            });
+
+            // In TUI mode, we need to wait for the user response via a different mechanism
+            // For now, fall back to CLI prompt by temporarily suspending TUI
+            return self.prompt_for_permission_cli(tool_name, reason).await;
+        }
+
+        // CLI interactive mode
+        self.prompt_for_permission_cli(tool_name, reason).await
+    }
+
+    /// CLI-based permission prompt (used for both CLI and TUI fallback)
+    async fn prompt_for_permission_cli(
+        &self,
+        tool_name: &str,
+        reason: &str,
+    ) -> Result<PermissionPromptResult> {
+        use colored::Colorize;
+        use std::io::{self, Write};
+
+        eprintln!();
+        eprintln!(
+            "{} Tool '{}' requires confirmation",
+            "⚠️ ".bright_yellow(),
+            tool_name.bright_cyan()
+        );
+        eprintln!("  Reason: {}", reason);
+        eprintln!();
+        eprint!("  Allow? [Y]es / [N]o / [A]lways / Y[o]lo mode: ");
+        io::stderr().flush()?;
+
+        // Read user input without blocking the async runtime
+        let input = tokio::task::block_in_place(|| {
+            let mut buf = String::new();
+            io::stdin().read_line(&mut buf).map(|_| buf)
+        })?;
+
+        match input.trim().to_lowercase().as_str() {
+            "y" | "yes" => {
+                eprintln!("  {} Allowed.", "✓".bright_green());
+                Ok(PermissionPromptResult::Yes)
+            }
+            "n" | "no" => {
+                eprintln!("  {} Denied.", "✗".bright_red());
+                Ok(PermissionPromptResult::No)
+            }
+            "a" | "always" => {
+                eprintln!("  {} Always allowed for this session.", "✓".bright_green());
+                Ok(PermissionPromptResult::Always)
+            }
+            "o" | "yolo" => {
+                eprintln!("  {} Switching to YOLO mode for this session.", "⚡".bright_red());
+                // Emit event to request mode change - the agent loop will handle this
+                self.emit_event(AgentEvent::ModeChangeRequested {
+                    mode: crate::config::ExecutionMode::Yolo,
+                });
+                Ok(PermissionPromptResult::Yolo)
+            }
+            _ => {
+                eprintln!("  {} Invalid choice, denying.", "✗".bright_red());
+                Ok(PermissionPromptResult::No)
+            }
+        }
+    }
+}
+
+/// Result of a permission prompt
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermissionPromptResult {
+    /// User approved this invocation
+    Yes,
+    /// User denied this invocation
+    No,
+    /// User approved and wants to always allow this tool for this session
+    Always,
+    /// User wants to switch to YOLO mode
+    Yolo,
+}
+
+impl PermissionPromptResult {
+    /// Returns true if the operation should proceed
+    pub fn is_allowed(&self) -> bool {
+        matches!(
+            self,
+            PermissionPromptResult::Yes
+                | PermissionPromptResult::Always
+                | PermissionPromptResult::Yolo
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -687,6 +687,18 @@ impl Agent {
                     "↩ ".bright_white()
                 );
                 println!(
+                    "│  {} /worktree enter    Create and enter worktree    │",
+                    "🌳".bright_white()
+                );
+                println!(
+                    "│  {} /worktree exit     Exit current worktree        │",
+                    "🌲".bright_white()
+                );
+                println!(
+                    "│  {} /worktree list     List all worktrees           │",
+                    "📋".bright_white()
+                );
+                println!(
                     "│  {} /cost              Token usage & cost           │",
                     "💰".bright_white()
                 );
@@ -992,6 +1004,12 @@ impl Agent {
                     }
                     Err(e) => println!("{} git status failed: {}", "✗".bright_red(), e),
                 }
+                continue;
+            }
+
+            // Worktree commands
+            if input.starts_with("/worktree") {
+                self.handle_worktree_command(input).await;
                 continue;
             }
 
@@ -2387,6 +2405,218 @@ impl Agent {
             }
             println!();
         }
+    }
+
+    // ── /worktree implementation ─────────────────────────────────────
+    async fn handle_worktree_command(&mut self, input: &str) {
+        use colored::Colorize;
+
+        let args = input.strip_prefix("/worktree").map(str::trim).unwrap_or("");
+
+        if args.is_empty() || args == "list" {
+            // List worktrees
+            match tokio::process::Command::new("git")
+                .args(["worktree", "list", "--porcelain"])
+                .output()
+                .await
+            {
+                Ok(out) => {
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    if stdout.trim().is_empty() {
+                        println!("{} No worktrees found", "ℹ".bright_yellow());
+                    } else {
+                        println!("{} Git Worktrees:", "🌳".bright_cyan());
+                        println!();
+                        
+                        // Parse and display worktrees
+                        let mut current_path: Option<String> = None;
+                        let mut current_branch: Option<String> = None;
+                        let mut is_detached = false;
+                        
+                        for line in stdout.lines() {
+                            if line.is_empty() {
+                                // End of worktree entry, print it
+                                if let Some(path) = current_path.take() {
+                                    let branch_str = if is_detached {
+                                        "(detached)".dimmed()
+                                    } else {
+                                        current_branch.as_deref().unwrap_or("unknown").bright_green()
+                                    };
+                                    println!("  {} {} ({})", "📁".bright_white(), path.bright_white(), branch_str);
+                                }
+                                current_branch = None;
+                                is_detached = false;
+                            } else if let Some(path) = line.strip_prefix("worktree ") {
+                                current_path = Some(path.to_string());
+                            } else if let Some(branch) = line.strip_prefix("branch refs/heads/") {
+                                current_branch = Some(branch.to_string());
+                            } else if line == "detached" {
+                                is_detached = true;
+                            }
+                        }
+                        
+                        // Print last entry if exists
+                        if let Some(path) = current_path {
+                            let branch_str = if is_detached {
+                                "(detached)".dimmed()
+                            } else {
+                                current_branch.as_deref().unwrap_or("unknown").bright_green()
+                            };
+                            println!("  {} {} ({})", "📁".bright_white(), path.bright_white(), branch_str);
+                        }
+                        
+                        println!();
+                        println!("{} Usage:", "💡".bright_yellow());
+                        println!("  /worktree enter [branch]  - Create and enter worktree");
+                        println!("  /worktree exit            - Exit and return to main repo");
+                    }
+                }
+                Err(e) => println!("{} Failed to list worktrees: {}", "✗".bright_red(), e),
+            }
+            return;
+        }
+
+        if args.starts_with("enter") {
+            let branch_arg = args.strip_prefix("enter").map(str::trim).unwrap_or("");
+            
+            // Generate a unique worktree name
+            let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+            let worktree_name = format!("worktree_{}", timestamp);
+            
+            // Get git root
+            let git_root = match tokio::process::Command::new("git")
+                .args(["rev-parse", "--show-toplevel"])
+                .output()
+                .await
+            {
+                Ok(out) if out.status.success() => {
+                    String::from_utf8_lossy(&out.stdout).trim().to_string()
+                }
+                _ => {
+                    println!("{} Not in a git repository", "✗".bright_red());
+                    return;
+                }
+            };
+            
+            let worktree_path = format!("{}/.selfware/worktrees/{}", git_root, worktree_name);
+            
+            // Create parent directory
+            if let Err(e) = tokio::fs::create_dir_all(format!("{}/.selfware/worktrees", git_root)).await {
+                println!("{} Failed to create worktree directory: {}", "✗".bright_red(), e);
+                return;
+            }
+            
+            // Build git worktree add command
+            let mut cmd_args = vec!["worktree", "add"];
+            if branch_arg.is_empty() {
+                cmd_args.push("--detach");
+            }
+            cmd_args.push(&worktree_path);
+            if !branch_arg.is_empty() {
+                cmd_args.push(branch_arg);
+            }
+            
+            println!("{} Creating worktree at {}...", "🌳".bright_cyan(), worktree_path.dimmed());
+            
+            match tokio::process::Command::new("git")
+                .args(&cmd_args)
+                .output()
+                .await
+            {
+                Ok(out) if out.status.success() => {
+                    // Change to the worktree directory
+                    match std::env::set_current_dir(&worktree_path) {
+                        Ok(_) => {
+                            let branch_display = if branch_arg.is_empty() {
+                                "(detached)".dimmed()
+                            } else {
+                                branch_arg.bright_green()
+                            };
+                            println!("{} Entered worktree: {}", "✓".bright_green(), worktree_path.bright_white());
+                            println!("  Branch: {}", branch_display);
+                            println!();
+                            println!("{} Working directory changed. Use '/worktree exit' to return.", "💡".bright_yellow());
+                        }
+                        Err(e) => {
+                            println!("{} Worktree created but failed to change directory: {}", "⚠".bright_yellow(), e);
+                            println!("  You can manually cd to: {}", worktree_path);
+                        }
+                    }
+                }
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    println!("{} Failed to create worktree: {}", "✗".bright_red(), stderr.trim());
+                }
+                Err(e) => println!("{} Failed to execute git worktree: {}", "✗".bright_red(), e),
+            }
+            return;
+        }
+
+        if args == "exit" {
+            // First, find if we're in a worktree
+            let current_dir = match std::env::current_dir() {
+                Ok(d) => d,
+                Err(e) => {
+                    println!("{} Failed to get current directory: {}", "✗".bright_red(), e);
+                    return;
+                }
+            };
+            
+            // Find git root (main repo)
+            let git_root = match tokio::process::Command::new("git")
+                .args(["rev-parse", "--show-toplevel"])
+                .output()
+                .await
+            {
+                Ok(out) if out.status.success() => {
+                    String::from_utf8_lossy(&out.stdout).trim().to_string()
+                }
+                _ => {
+                    println!("{} Not in a git repository", "✗".bright_red());
+                    return;
+                }
+            };
+            
+            let current_dir_str = current_dir.to_string_lossy();
+            let is_worktree = current_dir_str != git_root && current_dir_str.starts_with(&git_root);
+            
+            if !is_worktree {
+                println!("{} Not currently in a worktree", "ℹ".bright_yellow());
+                println!("  Current: {}", current_dir_str.bright_white());
+                println!("  Git root: {}", git_root.bright_white());
+                return;
+            }
+            
+            // Get the worktree path before we change
+            let worktree_path = current_dir_str.to_string();
+            
+            // Change back to git root
+            match std::env::set_current_dir(&git_root) {
+                Ok(_) => {
+                    println!("{} Exited worktree", "✓".bright_green());
+                    println!("  Previous: {}", worktree_path.dimmed());
+                    println!("  Current: {}", git_root.bright_white());
+                    
+                    // Ask if user wants to remove the worktree
+                    println!();
+                    println!("{} Remove the worktree? (y/N)", "?".bright_cyan());
+                    
+                    // We can't easily do interactive input here, so just suggest the tool
+                    println!("  Use the tool to remove: enter_worktree with remove=true");
+                    println!("  Or run: git worktree remove {}", worktree_path.dimmed());
+                }
+                Err(e) => {
+                    println!("{} Failed to change directory: {}", "✗".bright_red(), e);
+                }
+            }
+            return;
+        }
+
+        println!("{} Unknown worktree command: {}", "✗".bright_red(), args);
+        println!("  Available commands:");
+        println!("    /worktree list   - List all worktrees");
+        println!("    /worktree enter [branch] - Create and enter worktree");
+        println!("    /worktree exit   - Exit current worktree");
     }
 
     fn print_execution_debug(&self) {

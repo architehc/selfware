@@ -17,6 +17,7 @@ pub mod file;
 pub mod file_read;
 pub mod fim;
 pub mod git;
+pub mod git_worktree;
 pub mod grep_search;
 #[cfg(feature = "hot-reload")]
 pub mod hot_reload;
@@ -48,6 +49,7 @@ use container::{
 use file::{DirectoryTree, FileDelete, FileEdit, FileWrite};
 use file_read::FileRead;
 use git::{GitCheckpoint, GitCommit, GitDiff, GitPush, GitStatus};
+use git_worktree::{EnterWorktreeTool, ExitWorktreeTool, ListWorktreesTool};
 use grep_search::GrepSearch;
 use http::HttpRequest;
 use knowledge::{
@@ -333,8 +335,14 @@ impl ToolRegistry {
             registry.register_deferred(GitCommit::with_safety_config(cfg.clone()));
             registry.register_deferred(GitPush::with_safety_config(cfg.clone()));
             registry.register_deferred(GitCheckpoint::with_safety_config(cfg.clone()));
+            registry.register_deferred(EnterWorktreeTool::with_safety_config(cfg.clone()));
+            registry.register_deferred(ExitWorktreeTool::with_safety_config(cfg.clone()));
+            registry.register_deferred(ListWorktreesTool::with_safety_config(cfg.clone()));
         } else {
             registry.register_deferred(GitStatus::new());
+            registry.register_deferred(EnterWorktreeTool::new());
+            registry.register_deferred(ExitWorktreeTool::new());
+            registry.register_deferred(ListWorktreesTool::new());
             registry.register_deferred(GitDiff::new());
             registry.register_deferred(GitCommit::new());
             registry.register_deferred(GitPush::new());
@@ -800,6 +808,28 @@ mod tests {
         assert!(registry.get("git_commit").is_some());
         assert!(registry.get("git_push").is_some());
         assert!(registry.get("git_checkpoint").is_some());
+    }
+
+    #[test]
+    fn test_git_worktree_tools_registered() {
+        let registry = ToolRegistry::new();
+
+        assert!(registry.get("enter_worktree").is_some());
+        assert!(registry.get("exit_worktree").is_some());
+        assert!(registry.get("list_worktrees").is_some());
+    }
+
+    #[test]
+    fn test_git_worktree_tools_deferred() {
+        let registry = ToolRegistry::new();
+
+        // Worktree tools should exist but not be activated initially
+        assert!(registry.get("enter_worktree").is_some());
+        assert!(registry.get("exit_worktree").is_some());
+        assert!(registry.get("list_worktrees").is_some());
+        assert!(!registry.is_activated("enter_worktree"));
+        assert!(!registry.is_activated("exit_worktree"));
+        assert!(!registry.is_activated("list_worktrees"));
     }
 
     #[test]

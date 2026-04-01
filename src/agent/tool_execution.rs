@@ -315,7 +315,7 @@ impl Agent {
     /// - Ok(false): Permission denied (tool should be skipped)
     /// - Err(e): Error during permission check
     async fn check_tool_permission(
-        &self,
+        &mut self,
         name: &str,
         tool: &dyn crate::tools::Tool,
         args: &Value,
@@ -362,10 +362,47 @@ impl Agent {
                 Ok(false)
             }
             PermissionResult::Prompt { reason } => {
-                // For now, log and allow - in a full implementation this would prompt the user
-                // TODO: Implement interactive prompting for permission confirmation
-                info!("Tool '{}' requires confirmation: {} (allowing for now)", name, reason);
-                Ok(true)
+                // Prompt the user for confirmation
+                match self.prompt_for_permission(name, &reason).await {
+                    Ok(super::PermissionPromptResult::Yes) => {
+                        // User approved this invocation
+                        info!("Tool '{}' approved by user: {}", name, reason);
+                        Ok(true)
+                    }
+                    Ok(super::PermissionPromptResult::Always) => {
+                        // User approved and wants to always allow this tool
+                        info!(
+                            "Tool '{}' approved by user (always allow for session): {}",
+                            name, reason
+                        );
+                        // Add to permission store for session-wide authorization
+                        self.permission_store.add(
+                            crate::safety::permissions::PermissionGrant::session(name)
+                                .with_reason(&reason),
+                        );
+                        Ok(true)
+                    }
+                    Ok(super::PermissionPromptResult::Yolo) => {
+                        // User wants to switch to YOLO mode
+                        info!(
+                            "Tool '{}' approved by user (switching to YOLO mode): {}",
+                            name, reason
+                        );
+                        // Switch to YOLO mode
+                        self.set_execution_mode(crate::config::ExecutionMode::Yolo);
+                        Ok(true)
+                    }
+                    Ok(super::PermissionPromptResult::No) => {
+                        // User denied
+                        info!("Tool '{}' denied by user: {}", name, reason);
+                        Ok(false)
+                    }
+                    Err(e) => {
+                        // Error during prompting (e.g., non-interactive mode)
+                        warn!("Permission prompt failed for '{}': {}", name, e);
+                        Err(e)
+                    }
+                }
             }
         }
     }
