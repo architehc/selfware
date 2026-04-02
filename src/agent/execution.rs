@@ -394,27 +394,39 @@ impl Agent {
             ));
         }
 
-        // Nudge the model to start making changes if it has been reading
-        // without editing for too many consecutive steps.
-        if self.consecutive_read_only_steps >= 5 && self.consecutive_read_only_steps % 5 == 0 {
+        // TERMINAL PROGRESS GUARD: After N read-only steps, force synthesis.
+        // This is terminal for the current phase — don't just warn, act.
+        if self.consecutive_read_only_steps >= 8 {
             info!(
-                "Injecting edit nudge after {} consecutive read-only steps",
+                "TERMINAL progress guard: {} read-only steps — forcing synthesis+write",
+                self.consecutive_read_only_steps
+            );
+            // Force immediate synthesis: extract task from first user message
+            let task = self
+                .messages
+                .iter()
+                .find(|m| m.role == "user")
+                .map(|m| m.content.to_string())
+                .unwrap_or_default();
+            self.pending_synthesis = Some(task);
+            self.consecutive_read_only_steps = 0;
+            // The synthesis will fire at the top of the next step in task_runner
+            return Ok(false);
+        } else if self.consecutive_read_only_steps >= 4 {
+            info!(
+                "Progress guard warning: {} read-only steps",
                 self.consecutive_read_only_steps
             );
             self.messages.push(crate::api::types::Message::user(format!(
                 "<selfware_system_directive>\n\
-                 You have spent {} consecutive steps reading files without making any edits. \
-                 You now have enough context. It is time to ACT:\n\
-                 - Use file_edit to modify code\n\
-                 - Use file_write to create new files\n\
-                 - Use shell_exec to run commands\n\n\
-                 Example edit:\n\
-                 <tool>\n<name>file_edit</name>\n\
-                 <arguments>{{\"path\": \"src/main.rs\", \"old_str\": \"old code\", \"new_str\": \"new code\"}}</arguments>\n\
+                 You have spent {} consecutive steps reading without writing. \
+                 You have {} steps before forced synthesis. Write code NOW:\n\n\
+                 <tool>\n<name>file_write</name>\n\
+                 <arguments>{{\"path\": \"src/lib.rs\", \"content\": \"YOUR FULL CODE\"}}</arguments>\n\
                  </tool>\n\
-                 \nDo NOT read more files. Make your change NOW.\n\
                  </selfware_system_directive>",
-                self.consecutive_read_only_steps
+                self.consecutive_read_only_steps,
+                8 - self.consecutive_read_only_steps
             )));
         }
 
@@ -435,8 +447,10 @@ pub(super) fn extract_code_and_path(content: &str) -> Option<(String, String)> {
     // Extract path from mentions like "src/lib.rs", "src/main.rs", etc.
     static PATH_REGEX: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let path_re = PATH_REGEX.get_or_init(|| {
-        regex::Regex::new(r#"(?:content for |file |in )?[`"]?((?:src|tests|examples)/[\w/]+\.rs)[`"]?"#)
-            .expect("Invalid path regex")
+        regex::Regex::new(
+            r#"(?:content for |file |in )?[`"]?((?:src|tests|examples)/[\w/]+\.rs)[`"]?"#,
+        )
+        .expect("Invalid path regex")
     });
     let path = path_re
         .captures(&stripped)
@@ -476,8 +490,8 @@ pub(super) fn extract_code_and_path(content: &str) -> Option<(String, String)> {
     } else {
         // Extract raw code lines (Rust-like patterns)
         let code_start_patterns = [
-            "use ", "pub ", "fn ", "struct ", "enum ", "impl ", "mod ",
-            "trait ", "async ", "#[", "//!", "///",
+            "use ", "pub ", "fn ", "struct ", "enum ", "impl ", "mod ", "trait ", "async ", "#[",
+            "//!", "///",
         ];
         let mut code_lines = Vec::new();
         let mut collecting = false;
@@ -537,7 +551,8 @@ pub(super) fn contains_unwritten_code(content: &str) -> bool {
         if code_lines >= 10 {
             tracing::debug!(
                 "Detected {} code lines in {} fenced code blocks",
-                code_lines, code_block_count
+                code_lines,
+                code_block_count
             );
             return true;
         }
@@ -546,10 +561,26 @@ pub(super) fn contains_unwritten_code(content: &str) -> bool {
     // Strategy 2: Detect raw unfenced code in the response.
     // Count lines that look like code (Rust-centric patterns).
     let code_indicators = [
-        "pub fn ", "fn ", "pub struct ", "struct ", "impl ", "pub enum ",
-        "enum ", "use ", "mod ", "#[", "let ", "pub mod ", "async fn ",
-        "pub async fn ", "-> Result", "-> Option", "pub trait ", "trait ",
-        "pub(crate)", "pub(super)",
+        "pub fn ",
+        "fn ",
+        "pub struct ",
+        "struct ",
+        "impl ",
+        "pub enum ",
+        "enum ",
+        "use ",
+        "mod ",
+        "#[",
+        "let ",
+        "pub mod ",
+        "async fn ",
+        "pub async fn ",
+        "-> Result",
+        "-> Option",
+        "pub trait ",
+        "trait ",
+        "pub(crate)",
+        "pub(super)",
     ];
     let mut raw_code_lines = 0;
     for line in stripped.lines() {
@@ -568,10 +599,7 @@ pub(super) fn contains_unwritten_code(content: &str) -> bool {
 
     // Low threshold: 5+ code lines is substantial enough to auto-write
     if raw_code_lines >= 5 {
-        tracing::debug!(
-            "Detected {} raw code lines in response",
-            raw_code_lines
-        );
+        tracing::debug!("Detected {} raw code lines in response", raw_code_lines);
         return true;
     }
 

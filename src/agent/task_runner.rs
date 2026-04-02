@@ -646,10 +646,7 @@ impl Agent {
                                     if let Some((path, code)) =
                                         super::execution::extract_code_and_path(&answer)
                                     {
-                                        info!(
-                                            "Synthesis produced code — auto-writing to {}",
-                                            path
-                                        );
+                                        info!("Synthesis produced code — auto-writing to {}", path);
                                         let calls: Vec<super::execution::CollectedToolCall> =
                                             vec![(
                                                 "file_write".to_string(),
@@ -755,7 +752,11 @@ impl Agent {
                                     "⚠️ Agent stuck in action loop:".bright_yellow(),
                                     e
                                 );
-                                cli_println!("{}", "Attempting recovery — injecting context refresh.".bright_yellow());
+                                cli_println!(
+                                    "{}",
+                                    "Attempting recovery — injecting context refresh."
+                                        .bright_yellow()
+                                );
                                 self.reset_no_action_prompt_state();
                                 self.messages.push(Message::user(
                                     "<selfware_system_directive>\n\
@@ -919,7 +920,8 @@ impl Agent {
                         progress.complete_phase();
                     }
                     output::task_completed();
-                    self.record_task_outcome(task_description, Outcome::Success, None);
+                    cli_println!("{}", "📊 Outcome: green".bright_green());
+                    self.record_task_outcome(task_description, Outcome::Success, Some("[green]"));
                     if let Err(e) = self.complete_checkpoint() {
                         warn!("Failed to save completed checkpoint: {}", e);
                     }
@@ -934,8 +936,9 @@ impl Agent {
                         });
                     }
 
-                    cli_println!("{} {}", "❌ Task failed:".bright_red(), reason);
-                    self.record_task_outcome(task_description, Outcome::Failure, Some(&reason));
+                    let label = self.classify_outcome_label();
+                    cli_println!("{} {} [{}]", "❌ Task failed:".bright_red(), reason, label);
+                    self.record_task_outcome(task_description, Outcome::Failure, Some(&format!("{} [{}]", reason, label)));
                     if let Err(e) = self.fail_checkpoint(&reason) {
                         warn!("Failed to save failed checkpoint: {}", e);
                     }
@@ -944,12 +947,56 @@ impl Agent {
             }
         }
 
+        // Classify the outcome for instrumentation
+        let outcome_label = self.classify_outcome_label();
+        let detail = format!("Execution stopped: {} (step {})", outcome_label, self.loop_control.current_step());
+        cli_println!("{} {}", "📊 Outcome:".bright_yellow(), outcome_label);
         self.record_task_outcome(
             task_description,
             Outcome::Partial,
-            Some("Execution stopped before completion"),
+            Some(&detail),
         );
         Ok(())
+    }
+
+    /// Classify the run outcome into a specific failure mode label.
+    /// These labels make it easy to grep logs and identify systemic issues.
+    fn classify_outcome_label(&self) -> &'static str {
+        let step = self.loop_control.current_step();
+        let has_writes = self.current_checkpoint.as_ref()
+            .map(|cp| cp.tool_calls.iter().any(|tc| {
+                matches!(tc.tool_name.as_str(), "file_write" | "file_edit") && tc.success
+            }))
+            .unwrap_or(false);
+        let has_verification = self.current_checkpoint.as_ref()
+            .map(|cp| cp.tool_calls.iter().any(|tc| {
+                matches!(tc.tool_name.as_str(), "cargo_check" | "cargo_test") && tc.success
+            }))
+            .unwrap_or(false);
+        let suppressed_count = self.current_checkpoint.as_ref()
+            .map(|cp| cp.tool_calls.iter().filter(|tc| !tc.success && tc.tool_name == "file_edit").count())
+            .unwrap_or(0);
+        let read_only_tools = self.current_checkpoint.as_ref()
+            .map(|cp| cp.tool_calls.iter().all(|tc| {
+                matches!(tc.tool_name.as_str(), "file_read" | "directory_tree" | "grep_search" | "glob_find" | "context_bulk_read")
+            }))
+            .unwrap_or(true);
+
+        if !has_writes && read_only_tools && step > 10 {
+            "read_loop"
+        } else if !has_writes && step <= 5 {
+            "no_write"
+        } else if suppressed_count > 5 {
+            "edit_failure_loop"
+        } else if has_writes && !has_verification {
+            "verification_missing"
+        } else if has_writes && has_verification {
+            "green_incomplete"
+        } else if self.consecutive_suppressions > 10 {
+            "invalid_tool_loop"
+        } else {
+            "max_iterations"
+        }
     }
 }
 

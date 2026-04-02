@@ -458,10 +458,7 @@ pub(super) fn extract_explicit_allowed_tools(
         let names = extract_backticked_tool_names(trimmed);
         let is_bullet = trimmed.starts_with('-')
             || trimmed.starts_with('*')
-            || trimmed
-                .chars()
-                .next()
-                .is_some_and(|ch| ch.is_ascii_digit());
+            || trimmed.chars().next().is_some_and(|ch| ch.is_ascii_digit());
 
         if names.is_empty() {
             if !allowed.is_empty() && !is_bullet {
@@ -998,10 +995,9 @@ impl Agent {
         self.record_failed_tool_attempt(name, args_str, "task_state", &err);
         self.consecutive_suppressions += 1;
 
-        // After many suppressed rereads, trigger phase-2 synthesis.
-        // The model has the data in context but can't produce a text answer.
-        // Set high threshold to avoid premature synthesis that gives up.
-        if read_count >= 10 && self.pending_synthesis.is_none() {
+        // After suppressed rereads, trigger phase-2 synthesis early.
+        // The model has the data in context — force it to produce code.
+        if read_count >= 3 && self.pending_synthesis.is_none() {
             info!(
                 "Triggering phase-2 synthesis after {} suppressed rereads",
                 read_count
@@ -1143,11 +1139,62 @@ impl Agent {
                             "file_read('{}') was previously suppressed but file now exists — allowing retry",
                             path
                         );
-                        // Remove the old failure record so it doesn't block again
                         self.recent_failed_tool_attempts
                             .retain(|a| !(a.tool_name == tool_name && a.args_hash == args_hash));
                         return false;
                     }
+                }
+            }
+        }
+
+        // For file_edit failures (old_str not found), escalate the workflow:
+        // 1. Force a file_read of the target so the model sees current content
+        // 2. Tell the model to use file_write instead of file_edit
+        // This prevents the 315-retry death spiral from the logs.
+        if tool_name == "file_edit" {
+            if let Ok(args) = serde_json::from_str::<serde_json::Value>(args_str) {
+                if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                    let edit_fail_count = self.recent_failed_tool_attempts.iter()
+                        .filter(|a| a.tool_name == "file_edit" && a.error_preview.contains("not found"))
+                        .count();
+
+                    info!(
+                        "file_edit failed on '{}' ({} prior edit failures) — escalating to file_write",
+                        path, edit_fail_count
+                    );
+
+                    // Clear ALL file_edit failures for this path to prevent further suppression
+                    self.recent_failed_tool_attempts
+                        .retain(|a| !(a.tool_name == "file_edit"));
+
+                    // Force-read the file so the model sees current content
+                    let read_result = if std::path::Path::new(path).exists() {
+                        match std::fs::read_to_string(path) {
+                            Ok(content) => {
+                                let lines = content.lines().count();
+                                format!("Current content of {} ({} lines):\n{}", path, lines, content)
+                            }
+                            Err(e) => format!("Could not read {}: {}", path, e),
+                        }
+                    } else {
+                        format!("File {} does not exist. Use file_write to create it.", path)
+                    };
+
+                    let escalation = format!(
+                        "<selfware_system_directive>\n\
+                         file_edit FAILED because old_str was not found in the file.\n\
+                         {}\n\n\
+                         DO NOT retry file_edit. Use file_write to REPLACE THE ENTIRE FILE:\n\n\
+                         <tool>\n<name>file_write</name>\n\
+                         <arguments>{{\"path\": \"{}\", \"content\": \"FULL FILE CONTENT HERE\"}}</arguments>\n\
+                         </tool>\n\
+                         </selfware_system_directive>",
+                        read_result, path
+                    );
+                    self.push_tool_result_message(use_native_fc, call_id, tool_name, false, &escalation);
+                    self.log_tool_call(tool_name, args_str, "escalated_to_file_write", false, start_time, false);
+                    self.consecutive_suppressions = 0; // reset — we gave the model new info
+                    return true;
                 }
             }
         }
@@ -3031,10 +3078,7 @@ mod tests {
             "shell_exec",
             r#"{"command":"cargo fmt"}"#
         ));
-        assert!(!tool_call_counts_as_state_change(
-            "shell_exec",
-            r#"{}"#
-        ));
+        assert!(!tool_call_counts_as_state_change("shell_exec", r#"{}"#));
     }
 
     #[tokio::test]
@@ -3053,7 +3097,10 @@ mod tests {
             .await
             .unwrap();
 
-        let last = agent.messages.last().expect("expected tool policy rejection");
+        let last = agent
+            .messages
+            .last()
+            .expect("expected tool policy rejection");
         assert!(last.content.text().contains("Task tool policy violation"));
         assert!(last.content.text().contains("Allowed tools"));
         assert!(agent
@@ -3069,7 +3116,9 @@ mod tests {
         let server = MockLlmServer::builder().with_response("done").build().await;
         let config = test_config(format!("{}/v1", server.url()));
         let mut agent = Agent::new(config).await.unwrap();
-        agent.current_task_context = "Fix the failing tests, make code changes, and keep going until everything is green.".to_string();
+        agent.current_task_context =
+            "Fix the failing tests, make code changes, and keep going until everything is green."
+                .to_string();
         agent.consecutive_read_only_steps = 8;
 
         agent
