@@ -400,6 +400,262 @@ pub(super) fn hash_tool_args(args_str: &str) -> u64 {
     hasher.finish()
 }
 
+fn extract_backticked_tool_names(text: &str) -> Vec<String> {
+    let mut tools = Vec::new();
+    let mut rest = text;
+
+    while let Some(start) = rest.find('`') {
+        let after_start = &rest[start + 1..];
+        let Some(end) = after_start.find('`') else {
+            break;
+        };
+        let candidate = after_start[..end].trim();
+        if !candidate.is_empty()
+            && candidate
+                .chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+        {
+            tools.push(candidate.to_string());
+        }
+        rest = &after_start[end + 1..];
+    }
+
+    tools
+}
+
+pub(super) fn extract_explicit_allowed_tools(
+    task_context: &str,
+) -> Option<std::collections::BTreeSet<String>> {
+    let mut allowed = std::collections::BTreeSet::new();
+    let mut collecting = false;
+
+    for line in task_context.lines() {
+        let trimmed = line.trim();
+        let lower = trimmed.to_lowercase();
+
+        if !collecting
+            && (lower.contains("use only these concrete tools")
+                || lower.contains("use only these tools")
+                || lower.contains("use only the following tools")
+                || lower.contains("allowed tools"))
+        {
+            collecting = true;
+            allowed.extend(extract_backticked_tool_names(trimmed));
+            continue;
+        }
+
+        if !collecting {
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            if !allowed.is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        let names = extract_backticked_tool_names(trimmed);
+        let is_bullet = trimmed.starts_with('-')
+            || trimmed.starts_with('*')
+            || trimmed
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_digit());
+
+        if names.is_empty() {
+            if !allowed.is_empty() && !is_bullet {
+                break;
+            }
+            continue;
+        }
+
+        if !is_bullet {
+            if !allowed.is_empty() {
+                break;
+            }
+            continue;
+        }
+
+        allowed.extend(names);
+    }
+
+    (!allowed.is_empty()).then_some(allowed)
+}
+
+fn extract_explicit_disallowed_tools(task_context: &str) -> std::collections::BTreeSet<String> {
+    let mut disallowed = std::collections::BTreeSet::new();
+
+    for line in task_context.lines() {
+        let lower = line.to_lowercase();
+        if lower.contains("never call")
+            || lower.contains("do not use")
+            || lower.contains("don't use")
+            || lower.contains("never use")
+            || lower.contains("avoid ")
+        {
+            disallowed.extend(extract_backticked_tool_names(line));
+        }
+    }
+
+    disallowed
+}
+
+pub(super) fn task_requires_mutation(task_context: &str) -> bool {
+    let lower = task_context.to_lowercase();
+    [
+        "fix",
+        "implement",
+        "edit",
+        "modify",
+        "update",
+        "write",
+        "create",
+        "refactor",
+        "rename",
+        "delete",
+        "remove",
+        "make tests pass",
+        "tests pass",
+        "turn green",
+        "until green",
+        "add at least",
+        "add ",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+pub(super) fn shell_command_is_observational(command: &str) -> bool {
+    let normalized = command.trim().to_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    let mutating_markers = [
+        " >",
+        ">>",
+        "| tee",
+        " tee ",
+        "touch ",
+        "mkdir ",
+        "mktemp",
+        "rm ",
+        "mv ",
+        "cp ",
+        "chmod ",
+        "chown ",
+        "sed -i",
+        "perl -pi",
+        "cargo fmt",
+        "cargo fix",
+        "cargo update",
+        "git add",
+        "git commit",
+        "git switch",
+        "git checkout",
+        "git apply",
+        "patch ",
+        "npm install",
+        "pnpm install",
+        "yarn add ",
+        "pip install",
+    ];
+    if mutating_markers
+        .iter()
+        .any(|marker| normalized.contains(marker))
+    {
+        return false;
+    }
+
+    let read_only_prefixes = [
+        "cargo test",
+        "cargo check",
+        "cargo clippy",
+        "cargo metadata",
+        "cargo locate-project",
+        "cargo nextest",
+        "git status",
+        "git diff",
+        "git log",
+        "ls",
+        "pwd",
+        "find",
+        "rg",
+        "grep",
+        "cat",
+        "sed -n",
+        "head",
+        "tail",
+        "wc",
+        "tree",
+        "pytest",
+        "python -m pytest",
+        "npm test",
+        "pnpm test",
+        "yarn test",
+        "go test",
+        "which",
+        "echo",
+        "env",
+        "printenv",
+    ];
+
+    read_only_prefixes.iter().any(|prefix| {
+        normalized == *prefix
+            || normalized.starts_with(&format!("{} ", prefix))
+            || normalized.starts_with(&format!("{} --", prefix))
+    })
+}
+
+pub(super) fn tool_call_is_observational(name: &str, args_str: &str) -> bool {
+    match name {
+        "file_read"
+        | "directory_tree"
+        | "glob_find"
+        | "grep_search"
+        | "symbol_search"
+        | "git_status"
+        | "git_diff"
+        | "git_log"
+        | "tool_search"
+        | "cargo_check"
+        | "cargo_test"
+        | "cargo_clippy"
+        | crate::tools::context::CONTEXT_BULK_READ
+        | crate::tools::context::CONTEXT_SUMMARY
+        | crate::tools::context::CONTEXT_STATUS
+        | crate::tools::context::CONTEXT_FOCUS
+        | crate::tools::context::CONTEXT_EVICT
+        | crate::tools::context::CONTEXT_RECOMMEND
+        | crate::tools::context::CONTEXT_LOAD_SKELETON => true,
+        "shell_exec" => serde_json::from_str::<Value>(args_str)
+            .ok()
+            .and_then(|args| {
+                args.get("command")
+                    .and_then(|value| value.as_str())
+                    .map(shell_command_is_observational)
+            })
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+pub(super) fn tool_call_counts_as_state_change(name: &str, args_str: &str) -> bool {
+    match name {
+        "shell_exec" => serde_json::from_str::<Value>(args_str)
+            .ok()
+            .and_then(|args| {
+                args.get("command")
+                    .and_then(|value| value.as_str())
+                    .map(|command| !shell_command_is_observational(command))
+            })
+            .unwrap_or(false),
+        "cargo_check" | "cargo_test" | "cargo_clippy" => false,
+        _ => !tool_call_is_observational(name, args_str),
+    }
+}
+
 fn configured_vision_profile(
     config: &crate::config::Config,
 ) -> Option<&crate::config::ModelProfile> {
@@ -462,6 +718,112 @@ pub(super) fn inject_runtime_tool_defaults(
 }
 
 impl Agent {
+    fn current_task_tool_policy_violation(&self, tool_name: &str) -> Option<String> {
+        let task = self.learning_context();
+        if task.trim().is_empty() || task == "general" {
+            return None;
+        }
+
+        let disallowed = extract_explicit_disallowed_tools(task);
+        if disallowed.contains(tool_name) {
+            return Some(format!(
+                "Task tool policy violation: `{}` is explicitly disallowed by the task instructions. Choose a different tool now.",
+                tool_name
+            ));
+        }
+
+        let allowed = extract_explicit_allowed_tools(task)?;
+        if allowed.contains(tool_name) {
+            return None;
+        }
+
+        let allowed_list = allowed
+            .iter()
+            .map(|tool| format!("`{}`", tool))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!(
+            "Task tool policy violation: `{}` is not allowed for this task. Allowed tools from the task prompt: {}. Use one of those tools instead.",
+            tool_name, allowed_list
+        ))
+    }
+
+    fn reject_tool_call_before_execution(
+        &mut self,
+        tool_name: &str,
+        args_str: &str,
+        call_id: &str,
+        use_native_fc: bool,
+        start_time: std::time::Instant,
+        failure_kind: &'static str,
+        error_msg: &str,
+    ) {
+        cli_println!("{} {}", "✗".bright_red(), error_msg);
+        self.pending_failure_hint = Some(error_msg.to_string());
+        self.push_tool_result_message(use_native_fc, call_id, tool_name, false, error_msg);
+        self.log_tool_call(tool_name, args_str, error_msg, false, start_time, false);
+        self.remember_failed_tool(tool_name, error_msg);
+        self.record_failed_tool_attempt(tool_name, args_str, failure_kind, error_msg);
+        self.consecutive_suppressions += 1;
+    }
+
+    fn maybe_block_progressless_batch(
+        &mut self,
+        tool_calls: Vec<super::execution::CollectedToolCall>,
+    ) -> Option<Vec<super::execution::CollectedToolCall>> {
+        if !task_requires_mutation(self.learning_context())
+            || self.consecutive_read_only_steps <= 5
+            || tool_calls.is_empty()
+            || !tool_calls
+                .iter()
+                .all(|(name, args_str, _)| tool_call_is_observational(name, args_str))
+        {
+            return Some(tool_calls);
+        }
+
+        let error_msg = format!(
+            "PROGRESS GUARD: This task requires making changes, but you have already spent {} consecutive steps on read-only or verification actions. Read-only tools are temporarily blocked. Your next action must change code or project state: use `file_edit`, `file_write`, `file_delete`, or `shell_exec` with a mutating command. Do NOT rerun more reads, status commands, or test commands until after you edit something.",
+            self.consecutive_read_only_steps
+        );
+
+        for (name, args_str, tool_call_id) in tool_calls {
+            let start_time = std::time::Instant::now();
+            let (call_id, use_native_fc, _) =
+                self.build_tool_call_context(&name, &args_str, tool_call_id);
+            self.reject_tool_call_before_execution(
+                &name,
+                &args_str,
+                &call_id,
+                use_native_fc,
+                start_time,
+                "progress_guard",
+                &error_msg,
+            );
+        }
+
+        self.messages.push(Message::user(
+            "<selfware_system_directive>\n\
+             Read-only and verification tools are blocked until you make a real change.\n\
+             Your NEXT response must do one of these:\n\
+             - use `file_edit`, `file_write`, or `file_delete`\n\
+             - use `shell_exec` with a mutating command\n\
+             - if you already know the exact code change, output the replacement code as text and include the target path; Selfware will write it automatically\n\
+             Do NOT call more file reads, directory listings, grep searches, cargo test, or cargo check right now.\n\
+             </selfware_system_directive>"
+                .to_string(),
+        ));
+
+        if self.consecutive_read_only_steps >= 8 && self.pending_synthesis.is_none() {
+            info!(
+                "Escalating progress-guard stall to phase-2 synthesis after {} read-only steps",
+                self.consecutive_read_only_steps
+            );
+            self.pending_synthesis = Some(self.learning_context().to_string());
+        }
+
+        None
+    }
+
     pub(super) fn push_task_state_note(&mut self, note: String) {
         if self.task_state_notes.back() == Some(&note) {
             return;
@@ -523,6 +885,14 @@ impl Agent {
             ),
             "safety" => format!(
                 "RETRY SUPPRESSED: `{}` with these exact arguments already failed the safety check. Change the tool or arguments before retrying. Last error: {}",
+                failure.tool_name, failure.error_preview
+            ),
+            "task_policy" => format!(
+                "RETRY SUPPRESSED: `{}` is blocked by the task's explicit tool constraints. Use a tool that matches the task instructions instead. Last error: {}",
+                failure.tool_name, failure.error_preview
+            ),
+            "progress_guard" => format!(
+                "RETRY SUPPRESSED: `{}` is blocked by the progress guard because you need to make an edit or other state-changing action before using more read-only or verification tools. Last error: {}",
                 failure.tool_name, failure.error_preview
             ),
             other => {
@@ -835,6 +1205,10 @@ impl Agent {
         &mut self,
         tool_calls: Vec<super::execution::CollectedToolCall>,
     ) -> Result<()> {
+        let Some(tool_calls) = self.maybe_block_progressless_batch(tool_calls) else {
+            return Ok(());
+        };
+
         // Phase 1: Partition into parallel-safe and sequential groups.
         // Read-only tools with no path conflicts go into the parallel batch.
         let mut parallel_batch: Vec<super::execution::CollectedToolCall> = Vec::new();
@@ -952,6 +1326,24 @@ impl Agent {
                 use_native_fc,
                 start_time,
             ) {
+                self.emit_event(AgentEvent::ToolCompleted {
+                    name: name.clone(),
+                    success: false,
+                    duration_ms: start_time.elapsed().as_millis() as u64,
+                });
+                continue;
+            }
+
+            if let Some(error_msg) = self.current_task_tool_policy_violation(&name) {
+                self.reject_tool_call_before_execution(
+                    &name,
+                    &args_str,
+                    &call_id,
+                    use_native_fc,
+                    start_time,
+                    "task_policy",
+                    &error_msg,
+                );
                 self.emit_event(AgentEvent::ToolCompleted {
                     name: name.clone(),
                     success: false,
@@ -1266,6 +1658,24 @@ impl Agent {
             use_native_fc,
             start_time,
         ) {
+            self.emit_event(AgentEvent::ToolCompleted {
+                name: name.clone(),
+                success: false,
+                duration_ms: start_time.elapsed().as_millis() as u64,
+            });
+            return Ok(());
+        }
+
+        if let Some(error_msg) = self.current_task_tool_policy_violation(&name) {
+            self.reject_tool_call_before_execution(
+                &name,
+                &args_str,
+                &call_id,
+                use_native_fc,
+                start_time,
+                "task_policy",
+                &error_msg,
+            );
             self.emit_event(AgentEvent::ToolCompleted {
                 name: name.clone(),
                 success: false,
@@ -2262,6 +2672,30 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use crate::testing::mock_api::MockLlmServer;
+
+    fn test_config(endpoint: String) -> Config {
+        Config {
+            endpoint,
+            model: "mock-model".to_string(),
+            agent: crate::config::AgentConfig {
+                max_iterations: 50,
+                step_timeout_secs: 10,
+                streaming: false,
+                native_function_calling: false,
+                min_completion_steps: 0,
+                require_verification_before_completion: false,
+                ..Default::default()
+            },
+            safety: crate::config::SafetyConfig {
+                allowed_paths: vec!["./**".to_string(), "/**".to_string()],
+                ..Default::default()
+            },
+            execution_mode: crate::config::ExecutionMode::Yolo,
+            ..Default::default()
+        }
+    }
 
     // =========================================================================
     // ToolErrorKind Classification Tests
@@ -2566,6 +3000,109 @@ mod tests {
         // The current implementation uses serde_json which preserves order
         // This test documents current behavior
         let _ = (hash1, hash2);
+    }
+
+    #[test]
+    fn test_extract_explicit_allowed_tools_from_task_prompt() {
+        let task = "Use only these concrete tools for this task:\n- `file_read`\n- `file_edit`\n- `file_write`\n- `shell_exec`\n";
+        let allowed = extract_explicit_allowed_tools(task).expect("expected allowlist");
+        assert!(allowed.contains("file_read"));
+        assert!(allowed.contains("file_edit"));
+        assert!(allowed.contains("file_write"));
+        assert!(allowed.contains("shell_exec"));
+        assert_eq!(allowed.len(), 4);
+    }
+
+    #[test]
+    fn test_shell_exec_verification_commands_are_observational() {
+        assert!(shell_command_is_observational("cargo test --quiet"));
+        assert!(shell_command_is_observational("cargo check"));
+        assert!(!shell_command_is_observational("cargo fmt"));
+        assert!(!shell_command_is_observational("mkdir tmp"));
+    }
+
+    #[test]
+    fn test_tool_call_counts_shell_exec_state_changes_correctly() {
+        assert!(!tool_call_counts_as_state_change(
+            "shell_exec",
+            r#"{"command":"cargo test"}"#
+        ));
+        assert!(tool_call_counts_as_state_change(
+            "shell_exec",
+            r#"{"command":"cargo fmt"}"#
+        ));
+        assert!(!tool_call_counts_as_state_change(
+            "shell_exec",
+            r#"{}"#
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_task_tool_policy_blocks_unlisted_tools() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.current_task_context = "Use only these concrete tools for this task:\n- `file_read`\n- `file_edit`\n- `file_write`\n- `shell_exec`\nNever call `tool_search`.".to_string();
+
+        agent
+            .execute_tool_batch(vec![(
+                crate::tools::context::CONTEXT_BULK_READ.to_string(),
+                r#"{"pattern":"src/**/*.rs","max_files":2}"#.to_string(),
+                None,
+            )])
+            .await
+            .unwrap();
+
+        let last = agent.messages.last().expect("expected tool policy rejection");
+        assert!(last.content.text().contains("Task tool policy violation"));
+        assert!(last.content.text().contains("Allowed tools"));
+        assert!(agent
+            .recent_failed_tool_attempts
+            .back()
+            .is_some_and(|attempt| attempt.failure_kind == "task_policy"));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_progress_guard_blocks_read_only_batches_after_threshold() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let config = test_config(format!("{}/v1", server.url()));
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.current_task_context = "Fix the failing tests, make code changes, and keep going until everything is green.".to_string();
+        agent.consecutive_read_only_steps = 8;
+
+        agent
+            .execute_tool_batch(vec![(
+                "shell_exec".to_string(),
+                r#"{"command":"cargo test"}"#.to_string(),
+                None,
+            )])
+            .await
+            .unwrap();
+
+        assert!(agent
+            .messages
+            .iter()
+            .any(|msg| msg.content.text().contains("PROGRESS GUARD")));
+        let last = agent
+            .messages
+            .last()
+            .expect("expected follow-up progress directive");
+        assert!(last
+            .content
+            .text()
+            .contains("output the replacement code as text"));
+        assert_eq!(
+            agent.pending_synthesis.as_deref(),
+            Some("Fix the failing tests, make code changes, and keep going until everything is green.")
+        );
+        assert!(agent
+            .recent_failed_tool_attempts
+            .back()
+            .is_some_and(|attempt| attempt.failure_kind == "progress_guard"));
+
+        server.stop().await;
     }
 
     #[test]

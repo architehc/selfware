@@ -373,10 +373,11 @@ pub struct Agent {
     /// When this exceeds a threshold the agent forces completion instead of
     /// looping until max_iterations.
     consecutive_suppressions: usize,
-    /// Tracks consecutive steps that only used read-only tools (file_read,
-    /// directory_tree, grep_search, etc.) without any write tool (file_edit,
-    /// file_write, shell_exec). When this exceeds a threshold, a nudge is
-    /// injected telling the model to start making changes.
+    /// Tracks consecutive steps that only used read-only or verification tools
+    /// (file_read, directory_tree, grep_search, shell_exec cargo test/check, etc.)
+    /// without any state-changing tool. When this exceeds a threshold, recovery
+    /// logic nudges or blocks more read-only batches until the agent edits code
+    /// or otherwise changes project state.
     consecutive_read_only_steps: usize,
     /// Three-layer context compression orchestrator
     compression_orchestrator: CompressionOrchestrator,
@@ -926,9 +927,15 @@ To call a tool, use this EXACT XML structure:
         // Also check message history for tool results containing file contents.
         if context_data.is_empty() {
             for msg in &self.messages {
-                if msg.role == "tool" && msg.content.len() > 100 {
-                    context_data
-                        .push_str(&format!("\n--- tool result ---\n{}\n", msg.content.text()));
+                let text = msg.content.text();
+                let looks_like_tool_result = msg.role == "tool" || text.contains("<tool_result>");
+                if looks_like_tool_result && text.len() > 100 {
+                    let cleaned = text
+                        .replace("<tool_result>", "")
+                        .replace("</tool_result>", "")
+                        .replace("<error>", "")
+                        .replace("</error>", "");
+                    context_data.push_str(&format!("\n--- tool result ---\n{}\n", cleaned));
                 }
             }
         }
@@ -937,13 +944,27 @@ To call a tool, use this EXACT XML structure:
             return Ok(None);
         }
 
-        let synthesis_prompt = format!(
-            "You are a helpful assistant. Answer the following task based ONLY on the provided file contents.\n\n\
-             TASK: {}\n\n\
-             FILE CONTENTS:\n{}\n\n\
-             Provide your answer now. Be concise and direct.",
-            task, context_data
-        );
+        let synthesis_prompt = if tool_dispatch::task_requires_mutation(task) {
+            format!(
+                "You are helping with a code-change task. Use ONLY the provided file contents.\n\n\
+                 TASK: {}\n\n\
+                 FILE CONTENTS:\n{}\n\n\
+                 If you can fix the task, output the exact replacement code needed.\n\
+                 Include the target file path in plain text and then a fenced code block with the full replacement content.\n\
+                 Do NOT describe what you would do. Produce the code directly.\n\
+                 If tests or notes also need updates and you have enough context, include those replacements too.\n\
+                 If the provided context is insufficient, say exactly which file is missing.",
+                task, context_data
+            )
+        } else {
+            format!(
+                "You are a helpful assistant. Answer the following task based ONLY on the provided file contents.\n\n\
+                 TASK: {}\n\n\
+                 FILE CONTENTS:\n{}\n\n\
+                 Provide your answer now. Be concise and direct.",
+                task, context_data
+            )
+        };
 
         let messages = vec![
             crate::api::types::Message::system(synthesis_prompt),

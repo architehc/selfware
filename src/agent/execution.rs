@@ -346,13 +346,8 @@ impl Agent {
         self.reset_no_action_prompt_state();
 
         // Track whether this step contains any write/modify tools
-        let has_write_tool = tool_calls.iter().any(|(name, _, _)| {
-            matches!(
-                name.as_str(),
-                "file_edit" | "file_write" | "file_delete" | "shell_exec"
-                    | "cargo_check" | "cargo_test" | "cargo_clippy" | "cargo_fmt"
-                    | "git_commit" | "git_push"
-            )
+        let has_write_tool = tool_calls.iter().any(|(name, args_str, _)| {
+            super::tool_dispatch::tool_call_counts_as_state_change(name, args_str)
         });
         if has_write_tool {
             self.consecutive_read_only_steps = 0;

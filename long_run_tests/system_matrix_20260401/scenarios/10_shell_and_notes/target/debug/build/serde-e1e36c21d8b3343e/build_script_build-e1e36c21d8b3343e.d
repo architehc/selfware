@@ -1,0 +1,5 @@
+/home/ivo/selfware/long_run_tests/system_matrix_20260401/scenarios/10_shell_and_notes/target/debug/build/serde-e1e36c21d8b3343e/build_script_build-e1e36c21d8b3343e.d: /home/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/build.rs
+
+/home/ivo/selfware/long_run_tests/system_matrix_20260401/scenarios/10_shell_and_notes/target/debug/build/serde-e1e36c21d8b3343e/build_script_build-e1e36c21d8b3343e: /home/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/build.rs
+
+/home/ivo/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/build.rs:
