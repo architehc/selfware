@@ -428,7 +428,38 @@ impl Agent {
         if self.consecutive_read_only_steps >= terminal_threshold {
             if !has_any_file_write && self.pending_synthesis.is_some() {
                 // Second time hitting terminal guard without any writes.
-                // Directly write a scaffold to src/lib.rs to unblock the agent.
+                // Check if src/lib.rs already has substantial content (template project).
+                // If so, do NOT overwrite with scaffold — nudge targeted edits instead.
+                let existing_content = std::fs::read_to_string("src/lib.rs").unwrap_or_default();
+                let meaningful_lines = existing_content
+                    .lines()
+                    .filter(|l| {
+                        let t = l.trim();
+                        !t.is_empty() && !t.starts_with("//") && !t.starts_with("/*")
+                    })
+                    .count();
+
+                if meaningful_lines > 5 {
+                    // Template project — src/lib.rs has real code. Don't overwrite.
+                    info!(
+                        "ESCALATED progress guard: {} read-only steps, but src/lib.rs has {} meaningful lines — nudging targeted edit instead of scaffold",
+                        self.consecutive_read_only_steps, meaningful_lines
+                    );
+                    self.consecutive_read_only_steps = 0;
+                    self.messages.push(crate::api::types::Message::user(
+                        "<selfware_system_directive>\n\
+                         src/lib.rs already has substantial code. Do NOT rewrite it from scratch.\n\
+                         Make TARGETED edits to fix the specific bugs:\n\
+                         1. Use file_edit to change only the buggy lines\n\
+                         2. Keep all existing function signatures and module structure intact\n\
+                         3. After editing, run cargo test to verify\n\
+                         </selfware_system_directive>"
+                            .to_string(),
+                    ));
+                    return Ok(false);
+                }
+
+                // Greenfield project — src/lib.rs is minimal/empty. Write scaffold.
                 info!(
                     "ESCALATED progress guard: {} read-only steps, no writes ever — injecting scaffold",
                     self.consecutive_read_only_steps
@@ -440,7 +471,6 @@ impl Agent {
                     .map(|m| m.content.to_string())
                     .unwrap_or_default();
 
-                // Write a minimal scaffold that prompts the agent to fill in
                 let scaffold = format!(
                     "// AUTO-SCAFFOLD: fill in the implementation\n\
                      // Task: {}\n\n\
