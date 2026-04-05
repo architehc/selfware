@@ -1,84 +1,230 @@
-#!/bin/bash
-# 8-hour system test v4: Enhanced monitoring + resilience + comprehensive reporting
-# Improvements over v3:
-# - Real-time health monitoring with automatic recovery
-# - Memory leak detection
-# - Disk space monitoring
-# - Structured JSON metrics output
-# - Automated checkpointing
-# - Better failure categorization
-set -u
+#!/usr/bin/env bash
+# 8-hour system test v4: time-bounded cyclic harness with live status files.
+set -euo pipefail
 
-SELFWARE="/home/ivo/selfware/target/release/selfware"
-ENDPOINT="https://crazyshit.ngrok.io/v1"
-MODEL="txn545/Qwen3.5-122B-A10B-NVFP4"
-TEMPLATES="/home/ivo/selfware/system_tests/projecte2e/templates"
-MASTER_DIR="/home/ivo/selfware/long_run_tests/system_test_8hr_v4_$(date +%Y%m%d_%H%M%S)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LONG_RUN_DIR="$ROOT_DIR/long_run_tests"
+SELFWARE="${SELFWARE:-$ROOT_DIR/target/release/selfware}"
+ENDPOINT="${ENDPOINT:-https://crazyshit.ngrok.io/v1}"
+MODEL="${MODEL:-txn545/Qwen3.5-122B-A10B-NVFP4}"
+TEMPLATES="${TEMPLATES:-$ROOT_DIR/system_tests/projecte2e/templates}"
+DURATION_HOURS="${DURATION_HOURS:-8}"
+DURATION_SECS="${DURATION_SECS:-$((DURATION_HOURS * 3600))}"
 TIMEOUT_PER_PROJECT="${TIMEOUT:-1200}"
-MAX_ITERS=100
-START_TIME=$(date +%s)
-MAX_DURATION=$((8 * 3600))
-CHECKPOINT_INTERVAL=600  # Save checkpoint every 10 minutes
+MIN_PROJECT_WINDOW_SECS="${MIN_PROJECT_WINDOW_SECS:-120}"
+MAX_ITERS="${MAX_ITERS:-100}"
+STATUS_INTERVAL_SECS="${STATUS_INTERVAL_SECS:-60}"
+DEFAULT_RUN_ID="system_test_8hr_v4_$(date +%Y%m%d_%H%M%S)"
+MASTER_DIR="${RESULTS_DIR_OVERRIDE:-$LONG_RUN_DIR/${RUN_ID_OVERRIDE:-$DEFAULT_RUN_ID}}"
+RUN_ID="$(basename "$MASTER_DIR")"
 
 mkdir -p "$MASTER_DIR"
 
 MASTER_LOG="$MASTER_DIR/master.log"
-METRICS_FILE="$MASTER_DIR/metrics.jsonl"
+STATE_FILE="$MASTER_DIR/current_state.env"
+STATUS_FILE="$MASTER_DIR/STATUS.md"
+EVENT_LOG="$MASTER_DIR/events.log"
+PID_FILE="$MASTER_DIR/run.pid"
+MONITOR_PID_FILE="$MASTER_DIR/monitor.pid"
+FINAL_REPORT="$MASTER_DIR/FINAL_REPORT.md"
+
+touch "$EVENT_LOG"
 exec > >(tee -a "$MASTER_LOG") 2>&1
 
-echo "════════════════════════════════════════════════════════════"
-echo "  8-HOUR SYSTEM TEST v4 — $(date)"
-echo "  IMPROVEMENTS: Health monitoring, auto-recovery, metrics"
-echo "  Endpoint: $ENDPOINT"
-echo "  Model: $MODEL"
-echo "  Timeout: ${TIMEOUT_PER_PROJECT}s per project"
-echo "  Max iterations: $MAX_ITERS per project"
-echo "  Results: $MASTER_DIR"
-echo "════════════════════════════════════════════════════════════"
-echo ""
+START_TIME="$(date +%s)"
+DEADLINE_TS="$((START_TIME + DURATION_SECS))"
+CURRENT_CYCLE=0
+ACTIVE_ROUND=0
+ACTIVE_ROUND_LABEL="idle"
+ACTIVE_ROUND_DIR=""
+ACTIVE_PROJECT=""
+ACTIVE_LOG=""
+LAST_EVENT="initialized"
+STOP_REQUESTED=0
+MONITOR_PID=""
+RUNNING=1
 
-# ── Helpers ──
+printf '%s\n' "$$" > "$PID_FILE"
 
-strip_ansi() { sed -r 's/\x1B\[[0-9;]*[A-Za-z]//g'; }
+strip_ansi() {
+  sed -r 's/\x1B\[[0-9;]*[A-Za-z]//g'
+}
 
-elapsed_hours() {
-  local now=$(date +%s)
-  printf "%dh%02dm" $(( (now - START_TIME) / 3600 )) $(( ((now - START_TIME) % 3600) / 60 ))
+elapsed_human() {
+  local delta
+  delta=$(( $(date +%s) - START_TIME ))
+  seconds_to_human "$delta"
+}
+
+seconds_to_human() {
+  local total="$1"
+  if (( total < 60 )); then
+    printf "%ss" "$total"
+  else
+    printf "%dh%02dm" $(( total / 3600 )) $(( (total % 3600) / 60 ))
+  fi
 }
 
 time_remaining() {
-  local remaining=$(( MAX_DURATION - ($(date +%s) - START_TIME) ))
-  [ "$remaining" -le 0 ] && echo "0" || echo "$remaining"
+  local remaining
+  remaining=$(( DEADLINE_TS - $(date +%s) ))
+  if (( remaining > 0 )); then
+    echo "$remaining"
+  else
+    echo 0
+  fi
 }
 
-log_metric() {
-  local metric_name="$1"
-  local value="$2"
-  local timestamp=$(date +%s)
-  echo "{\"timestamp\": $timestamp, \"metric\": \"$metric_name\", \"value\": $value}" >> "$METRICS_FILE"
+project_timeout() {
+  local remaining
+  remaining="$(time_remaining)"
+  if (( remaining <= 0 )); then
+    echo 0
+  elif (( remaining < TIMEOUT_PER_PROJECT )); then
+    echo "$remaining"
+  else
+    echo "$TIMEOUT_PER_PROJECT"
+  fi
 }
 
-# Health monitoring - runs in background
-health_monitor() {
-  while [ $(date +%s) -lt $((START_TIME + MAX_DURATION)) ]; do
-    local timestamp=$(date +%s)
-    local mem_usage=$(free -m | awk 'NR==2{printf "%.1f", $3*100/$2}')
-    local disk_usage=$(df -h "$MASTER_DIR" | awk 'NR==2{print $5}' | tr -d '%')
-    local load_avg=$(uptime | awk -F'load average:' '{print $2}' | awk '{print $1}' | tr -d ',')
-    
-    # Log health metrics
-    echo "{\"timestamp\": $timestamp, \"memory_percent\": $mem_usage, \"disk_percent\": $disk_usage, \"load_avg\": $load_avg}" >> "$MASTER_DIR/health.jsonl"
-    
-    # Alert on concerning metrics
-    if (( $(echo "$mem_usage > 90" | bc -l) )); then
-      echo "⚠️  HIGH MEMORY USAGE: ${mem_usage}%" | tee -a "$MASTER_DIR/alerts.log"
+count_status() {
+  local status="$1"
+  grep -c "| $status |" "$MASTER_DIR/ALL_RESULTS.md" 2>/dev/null || true
+}
+
+count_total_rows() {
+  grep -Ec '^\| C[0-9]+ \| R[0-9]+ \|' "$MASTER_DIR/ALL_RESULTS.md" 2>/dev/null || true
+}
+
+write_state() {
+  {
+    printf 'RUN_ID=%q\n' "$RUN_ID"
+    printf 'MASTER_DIR=%q\n' "$MASTER_DIR"
+    printf 'START_TIME=%q\n' "$START_TIME"
+    printf 'DEADLINE_TS=%q\n' "$DEADLINE_TS"
+    printf 'CURRENT_CYCLE=%q\n' "$CURRENT_CYCLE"
+    printf 'ACTIVE_ROUND=%q\n' "$ACTIVE_ROUND"
+    printf 'ACTIVE_ROUND_LABEL=%q\n' "$ACTIVE_ROUND_LABEL"
+    printf 'ACTIVE_ROUND_DIR=%q\n' "$ACTIVE_ROUND_DIR"
+    printf 'ACTIVE_PROJECT=%q\n' "$ACTIVE_PROJECT"
+    printf 'ACTIVE_LOG=%q\n' "$ACTIVE_LOG"
+    printf 'LAST_EVENT=%q\n' "$LAST_EVENT"
+    printf 'STOP_REQUESTED=%q\n' "$STOP_REQUESTED"
+    printf 'RUNNING=%q\n' "$RUNNING"
+  } > "$STATE_FILE"
+}
+
+snapshot_status() {
+  local now remaining tmp_status active_elapsed
+  now="$(date +%s)"
+  remaining="$(time_remaining)"
+  if [[ -n "$ACTIVE_PROJECT" && -n "$ACTIVE_LOG" && -f "$ACTIVE_LOG" ]]; then
+    active_elapsed=$(( now - $(stat -c %Y "$ACTIVE_LOG" 2>/dev/null || echo "$now") ))
+  else
+    active_elapsed=0
+  fi
+
+  tmp_status="$(mktemp "${STATUS_FILE}.XXXXXX")"
+  {
+    printf '# 8-Hour System Test v4 Status\n\n'
+    printf -- '- Run id: `%s`\n' "$RUN_ID"
+    printf -- '- Results dir: `%s`\n' "$MASTER_DIR"
+    printf -- '- Started: `%s`\n' "$(date -d "@$START_TIME" '+%Y-%m-%d %H:%M:%S %Z')"
+    printf -- '- Deadline: `%s`\n' "$(date -d "@$DEADLINE_TS" '+%Y-%m-%d %H:%M:%S %Z')"
+    printf -- '- Configured duration: `%s`\n' "$(seconds_to_human "$DURATION_SECS")"
+    printf -- '- Elapsed: `%s`\n' "$(elapsed_human)"
+    printf -- '- Seconds remaining: `%s`\n' "$remaining"
+    printf -- '- Cycle: `%s`\n' "$CURRENT_CYCLE"
+    printf -- '- Round: `%s`\n' "$ACTIVE_ROUND"
+    printf -- '- Round label: `%s`\n' "$ACTIVE_ROUND_LABEL"
+    printf -- '- Active project: `%s`\n' "${ACTIVE_PROJECT:-idle}"
+    printf -- '- Active round dir: `%s`\n' "${ACTIVE_ROUND_DIR:-none}"
+    printf -- '- Active log: `%s`\n' "${ACTIVE_LOG:-none}"
+    printf -- '- Active log age seconds: `%s`\n' "$active_elapsed"
+    printf -- '- Last event: `%s`\n' "$LAST_EVENT"
+    printf -- '- Running: `%s`\n' "$RUNNING"
+    printf '\n'
+
+    if [[ -f "$MASTER_DIR/ALL_RESULTS.md" ]]; then
+      printf '## Scoreboard\n\n'
+      printf -- '- Total rows: `%s`\n' "$(count_total_rows)"
+      printf -- '- GREEN: `%s`\n' "$(count_status GREEN)"
+      printf -- '- PARTIAL: `%s`\n' "$(count_status PARTIAL)"
+      printf -- '- COMPILES: `%s`\n' "$(count_status COMPILES)"
+      printf -- '- WROTE: `%s`\n' "$(count_status WROTE)"
+      printf -- '- FAIL: `%s`\n' "$(count_status FAIL)"
+      printf '\n'
+      printf '## Results So Far\n\n'
+      sed -n '1,120p' "$MASTER_DIR/ALL_RESULTS.md"
+      printf '\n'
     fi
-    if [ "$disk_usage" -gt 90 ]; then
-      echo "⚠️  HIGH DISK USAGE: ${disk_usage}%" | tee -a "$MASTER_DIR/alerts.log"
+
+    if [[ -n "$ACTIVE_LOG" && -f "$ACTIVE_LOG" ]]; then
+      printf '## Active Log Tail\n\n'
+      tail -10 "$ACTIVE_LOG" 2>/dev/null | strip_ansi
+      printf '\n'
     fi
-    
-    sleep 60
+
+    if [[ -f "$EVENT_LOG" ]]; then
+      printf '## Recent Events\n\n'
+      tail -20 "$EVENT_LOG"
+      printf '\n'
+    fi
+  } > "$tmp_status"
+
+  mv "$tmp_status" "$STATUS_FILE"
+}
+
+append_event() {
+  LAST_EVENT="$1"
+  printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')" "$1" | tee -a "$EVENT_LOG"
+  write_state
+  snapshot_status
+}
+
+monitor_loop() {
+  while true; do
+    if [[ -f "$STATE_FILE" ]]; then
+      # shellcheck disable=SC1090
+      source "$STATE_FILE"
+    fi
+    snapshot_status
+    if (( $(date +%s) >= DEADLINE_TS )); then
+      break
+    fi
+    sleep "$STATUS_INTERVAL_SECS"
   done
+}
+
+cleanup_on_exit() {
+  RUNNING=0
+  ACTIVE_PROJECT=""
+  ACTIVE_ROUND_LABEL="idle"
+  ACTIVE_LOG=""
+  write_state
+  snapshot_status
+  if [[ -n "${MONITOR_PID:-}" ]]; then
+    kill "$MONITOR_PID" 2>/dev/null || true
+  fi
+}
+
+shutdown_on_signal() {
+  STOP_REQUESTED=1
+  append_event "Received stop signal"
+  exit 130
+}
+
+trap cleanup_on_exit EXIT
+trap shutdown_on_signal INT TERM
+
+git_bootstrap() {
+  local dir="$1"
+  (
+    cd "$dir"
+    git init -q
+    git add -A
+    git commit -q -m init >/dev/null 2>&1 || true
+  )
 }
 
 make_config() {
@@ -117,137 +263,9 @@ max_delay_ms = 60000
 EOF
 }
 
-run_project() {
-  local name="$1"
-  local workdir="$2"
-  local task="$3"
-  local round="$4"
-  local log="$ROUND_DIR/${name}.log"
-  local attempt="${5:-1}"
-  local max_attempts=2
-
-  echo -n "  [$name] (attempt $attempt) "
-  local proj_start=$(date +%s)
-  
-  # Record start metric
-  log_metric "project_start" "{\"project\": \"$name\", \"round\": $round, \"attempt\": $attempt}"
-
-  timeout "$TIMEOUT_PER_PROJECT" "$SELFWARE" \
-    -c "$workdir/selfware.toml" \
-    -C "$workdir" \
-    --yolo \
-    --ascii \
-    --no-color \
-    -p "$task" \
-    > "$log" 2>&1 || true
-
-  local proj_end=$(date +%s)
-  local dur=$((proj_end - proj_start))
-  local steps=$(grep -c "Step.*Executing" "$log" 2>/dev/null || echo 0)
-  local label=$(grep -o "Outcome: [a-z_]*" "$log" 2>/dev/null | tail -1 || echo "none")
-  local error_type=$(grep -o "ERROR: [^ ]*" "$log" 2>/dev/null | head -1 || echo "none")
-
-  local compile="no" test_result="-" passed=0 failed_count=0 src_lines=0
-  local language="unknown"
-
-  # Rust
-  if [ -f "$workdir/Cargo.toml" ]; then
-    language="rust"
-    for f in "$workdir/src/"*.rs; do
-      [ -f "$f" ] && src_lines=$((src_lines + $(wc -l < "$f")))
-    done
-    local cargo_out
-    cargo_out=$(cd "$workdir" && cargo check 2>&1) || true
-    if echo "$cargo_out" | grep -q "Finished"; then
-      compile="YES"
-      local test_out
-      test_out=$(cd "$workdir" && cargo test 2>&1) || true
-      passed=$(echo "$test_out" | grep -o "[0-9]* passed" | awk '{s+=$1} END {print s+0}')
-      failed_count=$(echo "$test_out" | grep -o "[0-9]* failed" | awk '{s+=$1} END {print s+0}')
-      test_result="${passed}p/${failed_count}f"
-    fi
-  fi
-
-  # Python
-  local py_test_file
-  py_test_file=$(find "$workdir" -maxdepth 1 -name "test_*.py" -type f 2>/dev/null | head -1)
-  if [ -n "$py_test_file" ]; then
-    language="python"
-    src_lines=$(find "$workdir" -maxdepth 1 -name "*.py" ! -name "test_*" -exec wc -l {} + 2>/dev/null | tail -1 | awk '{print $1}') || src_lines=0
-    local py_out
-    py_out=$(cd "$workdir" && python3 -m pytest -v 2>&1) || true
-    if echo "$py_out" | grep -q "passed"; then
-      compile="YES"
-      passed=$(echo "$py_out" | grep -oP "\d+ passed" | grep -o "[0-9]*") || passed=0
-      failed_count=$(echo "$py_out" | grep -oP "\d+ failed" | grep -o "[0-9]*") || failed_count=0
-      test_result="${passed:-0}p/${failed_count:-0}f"
-    elif echo "$py_out" | grep -q "error"; then
-      compile="no"
-    fi
-  fi
-
-  # Go
-  if [ -f "$workdir/go.mod" ]; then
-    language="go"
-    src_lines=$(find "$workdir" -maxdepth 1 -name "*.go" ! -name "*_test.go" -exec wc -l {} + 2>/dev/null | tail -1 | awk '{print $1}') || src_lines=0
-    export XDG_RUNTIME_DIR=/tmp/xdg-run-selfware
-    mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
-    local go_out
-    go_out=$(cd "$workdir" && go test -v ./... 2>&1) || true
-    if echo "$go_out" | grep -q "^ok"; then
-      compile="YES"
-      passed=$(echo "$go_out" | grep -c "--- PASS" || echo 0)
-      failed_count=$(echo "$go_out" | grep -c "--- FAIL" || echo 0)
-      test_result="${passed}p/${failed_count}f"
-    elif echo "$go_out" | grep -q "FAIL"; then
-      compile="YES"
-      passed=$(echo "$go_out" | grep -c "--- PASS" || echo 0)
-      failed_count=$(echo "$go_out" | grep -c "--- FAIL" || echo 0)
-      test_result="${passed}p/${failed_count}f"
-    fi
-  fi
-
-  local status="FAIL"
-  if [ "$compile" = "YES" ] && [ "$passed" -gt 0 ] && [ "$failed_count" -eq 0 ]; then
-    status="GREEN"
-  elif [ "$compile" = "YES" ] && [ "$passed" -gt 0 ]; then
-    status="PARTIAL"
-  elif [ "$compile" = "YES" ]; then
-    status="COMPILES"
-  elif [ "$src_lines" -gt 2 ]; then
-    status="WROTE"
-  fi
-  
-  # Record detailed metric
-  echo "{\"timestamp\": $(date +%s), \"project\": \"$name\", \"round\": $round, \"status\": \"$status\", \"duration\": $dur, \"steps\": $steps, \"src_lines\": $src_lines, \"compile\": \"$compile\", \"tests\": \"$test_result\", \"outcome\": \"$label\", \"language\": \"$language\", \"error_type\": \"$error_type\"}" >> "$METRICS_FILE"
-
-  printf "%s | %ds steps=%d src=%dL comp=%s tests=%s %s\n" \
-    "$status" "$dur" "$steps" "$src_lines" "$compile" "$test_result" "$label"
-
-  printf "| %s | %s | %d | %d | %d | %s | %s | %s |\n" \
-    "$name" "$status" "$dur" "$steps" "$src_lines" "$compile" "$test_result" "$label" \
-    >> "$ROUND_DIR/SUMMARY.md"
-
-  printf "| R%d | %s | %s | %d | %d | %d | %s | %s |\n" \
-    "$round" "$name" "$status" "$dur" "$steps" "$src_lines" "$compile" "$test_result" \
-    >> "$MASTER_DIR/ALL_RESULTS.md"
-  
-  # Retry logic for failed projects
-  if [ "$status" = "FAIL" ] && [ "$attempt" -lt "$max_attempts" ] && [ "$src_lines" -lt 10 ]; then
-    echo "    ↳ Retrying $name (insufficient code written)..."
-    sleep 5
-    run_project "$name" "$workdir" "$task" "$round" $((attempt + 1))
-    return
-  fi
-  
-  # Save checkpoint periodically
-  if [ $(($(date +%s) % CHECKPOINT_INTERVAL)) -lt 60 ]; then
-    cp "$MASTER_DIR/ALL_RESULTS.md" "$MASTER_DIR/checkpoint_$(date +%H%M).md"
-  fi
-}
-
 setup_greenfield() {
-  local name="$1"; local dir="$2"
+  local name="$1"
+  local dir="$2"
   mkdir -p "$dir/src"
   cat > "$dir/Cargo.toml" << EOF
 [package]
@@ -255,28 +273,30 @@ name = "$name"
 version = "0.1.0"
 edition = "2021"
 EOF
-  echo '// implement here' > "$dir/src/lib.rs"
-  (cd "$dir" && git init -q && git add -A && git commit -q -m init)
+  printf '%s\n' '// implement here' > "$dir/src/lib.rs"
   make_config "$dir"
+  git_bootstrap "$dir"
 }
 
 setup_template() {
-  local template="$1"; local dir="$2"
+  local template="$1"
+  local dir="$2"
   cp -r "$TEMPLATES/$template" "$dir"
   rm -rf "$dir/target" "$dir/Cargo.lock" "$dir/node_modules"
-  (cd "$dir" && git init -q && git add -A && git commit -q -m init)
   make_config "$dir"
+  git_bootstrap "$dir"
 }
 
 setup_python() {
   local dir="$1"
   mkdir -p "$dir"
   make_config "$dir"
-  (cd "$dir" && git init -q)
+  git_bootstrap "$dir"
 }
 
 setup_go() {
-  local dir="$1"; local module="$2"
+  local dir="$1"
+  local module="$2"
   mkdir -p "$dir"
   cat > "$dir/go.mod" << EOF
 module $module
@@ -284,368 +304,622 @@ module $module
 go 1.21
 EOF
   make_config "$dir"
-  (cd "$dir" && git init -q && git add -A && git commit -q -m init)
+  git_bootstrap "$dir"
 }
 
-# ── Master results header ──
-cat > "$MASTER_DIR/ALL_RESULTS.md" << 'EOF'
-# 8-Hour System Test v4 — All Results
+extract_reason() {
+  local log="$1"
+  local exit_code="$2"
+  local outcome reason
 
-| Round | Project | Status | Time(s) | Steps | SrcLines | Compiles | Tests |
-|-------|---------|--------|---------|-------|----------|----------|-------|
-EOF
+  outcome="$(grep -o 'Outcome: [a-z_]*' "$log" 2>/dev/null | tail -1 | awk '{print $2}' || true)"
+  reason="$(grep -oE '\[[a-z_]+\]' "$log" 2>/dev/null | tail -1 | tr -d '[]' || true)"
 
-cat > "$MASTER_DIR/METRICS_README.md" << 'EOF'
-# Metrics Files
+  if [[ -z "$reason" && -n "$outcome" ]]; then
+    reason="$outcome"
+  fi
+  if [[ -z "$reason" && "$exit_code" == "124" ]]; then
+    reason="timeout"
+  fi
+  if [[ -z "$reason" ]] && grep -q "Max iterations exceeded" "$log" 2>/dev/null; then
+    reason="max_iterations"
+  fi
+  if [[ -z "$reason" ]] && grep -q "verification_missing" "$log" 2>/dev/null; then
+    reason="verification_missing"
+  fi
+  if [[ -z "$reason" ]]; then
+    reason="none"
+  fi
 
-- `metrics.jsonl` - Detailed per-project metrics (JSON Lines format)
-- `health.jsonl` - System health monitoring (memory, disk, load)
-- `alerts.log` - Alerts for concerning conditions
-
-## Metric Schema
-
-```json
-{
-  "timestamp": 1234567890,
-  "project": "project_name",
-  "round": 1,
-  "status": "GREEN|PARTIAL|COMPILES|WROTE|FAIL",
-  "duration": 120,
-  "steps": 15,
-  "src_lines": 150,
-  "compile": "YES|no",
-  "tests": "5p/0f",
-  "outcome": "completed|incomplete|...",
-  "language": "rust|python|go",
-  "error_type": "none|..."
+  printf '%s' "$reason"
 }
-```
+
+count_matching_lines() {
+  local root="$1"
+  shift
+  local total=0
+  local file
+  while IFS= read -r file; do
+    [[ -f "$file" ]] || continue
+    total=$(( total + $(wc -l < "$file") ))
+  done < <(find "$root" "$@" -type f 2>/dev/null)
+  printf '%s' "$total"
+}
+
+run_project() {
+  local name="$1"
+  local workdir="$2"
+  local task="$3"
+  local round="$4"
+  local log="$ROUND_DIR/${name}.log"
+  local timeout_secs
+  local exit_code
+  local proj_start
+  local proj_end
+  local dur
+  local steps
+  local reason
+  local compile="no"
+  local test_result="-"
+  local passed=0
+  local failed_count=0
+  local src_lines=0
+  local status="FAIL"
+
+  if (( STOP_REQUESTED == 1 )); then
+    return 1
+  fi
+
+  if (( $(time_remaining) < MIN_PROJECT_WINDOW_SECS )); then
+    STOP_REQUESTED=1
+    append_event "Stopping before $name because remaining budget is below ${MIN_PROJECT_WINDOW_SECS}s"
+    return 1
+  fi
+
+  timeout_secs="$(project_timeout)"
+  if (( timeout_secs <= 0 )); then
+    STOP_REQUESTED=1
+    append_event "Stopping before $name because no time remains"
+    return 1
+  fi
+
+  ACTIVE_PROJECT="$name"
+  ACTIVE_LOG="$log"
+  write_state
+  snapshot_status
+  append_event "Starting cycle $CURRENT_CYCLE round $round project $name timeout=${timeout_secs}s"
+
+  echo -n "  [$name] "
+  proj_start="$(date +%s)"
+
+  if timeout "$timeout_secs" "$SELFWARE" \
+    -c "$workdir/selfware.toml" \
+    -C "$workdir" \
+    --yolo \
+    --ascii \
+    --no-color \
+    -p "$task" \
+    > "$log" 2>&1; then
+    exit_code=0
+  else
+    exit_code=$?
+  fi
+
+  proj_end="$(date +%s)"
+  dur=$(( proj_end - proj_start ))
+  steps="$(grep -c 'Step.*Executing' "$log" 2>/dev/null || true)"
+  reason="$(extract_reason "$log" "$exit_code")"
+
+  if [[ -f "$workdir/Cargo.toml" ]]; then
+    src_lines="$(count_matching_lines "$workdir/src" -name '*.rs')"
+    local cargo_out test_out
+    if cargo_out="$(cd "$workdir" && cargo check 2>&1)"; then
+      compile="YES"
+      if test_out="$(cd "$workdir" && cargo test 2>&1)"; then
+        :
+      else
+        :
+      fi
+      passed="$(printf '%s\n' "$test_out" | grep -o '[0-9]\+ passed' | awk '{s+=$1} END {print s+0}')"
+      failed_count="$(printf '%s\n' "$test_out" | grep -o '[0-9]\+ failed' | awk '{s+=$1} END {print s+0}')"
+      test_result="${passed}p/${failed_count}f"
+    fi
+  fi
+
+  local py_test_file
+  py_test_file="$(find "$workdir" -maxdepth 1 -type f -name 'test_*.py' 2>/dev/null | head -1 || true)"
+  if [[ -n "$py_test_file" ]]; then
+    src_lines="$(count_matching_lines "$workdir" -maxdepth 1 -name '*.py' ! -name 'test_*')"
+    local py_out
+    if py_out="$(cd "$workdir" && python3 -m pytest -v 2>&1)"; then
+      compile="YES"
+    else
+      :
+    fi
+    if printf '%s\n' "$py_out" | grep -Eq '([0-9]+ passed|[0-9]+ failed|collected [0-9]+ items)'; then
+      compile="YES"
+      passed="$(printf '%s\n' "$py_out" | grep -o '[0-9]\+ passed' | awk '{print $1}' | tail -1)"
+      failed_count="$(printf '%s\n' "$py_out" | grep -o '[0-9]\+ failed' | awk '{print $1}' | tail -1)"
+      passed="${passed:-0}"
+      failed_count="${failed_count:-0}"
+      test_result="${passed}p/${failed_count}f"
+    fi
+  fi
+
+  if [[ -f "$workdir/go.mod" ]]; then
+    src_lines="$(count_matching_lines "$workdir" -maxdepth 1 -name '*.go' ! -name '*_test.go')"
+    export XDG_RUNTIME_DIR=/tmp/xdg-run-selfware
+    mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
+    local go_out
+    if go_out="$(cd "$workdir" && go test -v ./... 2>&1)"; then
+      compile="YES"
+    else
+      :
+    fi
+    if printf '%s\n' "$go_out" | grep -q '^ok'; then
+      compile="YES"
+      passed="$(printf '%s\n' "$go_out" | grep -cF -- '--- PASS' || true)"
+      failed_count="$(printf '%s\n' "$go_out" | grep -cF -- '--- FAIL' || true)"
+      test_result="${passed}p/${failed_count}f"
+    elif printf '%s\n' "$go_out" | grep -qF -- '--- FAIL'; then
+      compile="YES"
+      passed="$(printf '%s\n' "$go_out" | grep -cF -- '--- PASS' || true)"
+      failed_count="$(printf '%s\n' "$go_out" | grep -cF -- '--- FAIL' || true)"
+      test_result="${passed}p/${failed_count}f"
+    fi
+  fi
+
+  if [[ "$compile" == "YES" && "$passed" -gt 0 && "$failed_count" -eq 0 ]]; then
+    status="GREEN"
+  elif [[ "$compile" == "YES" && "$passed" -gt 0 ]]; then
+    status="PARTIAL"
+  elif [[ "$compile" == "YES" ]]; then
+    status="COMPILES"
+  elif [[ "$src_lines" -gt 2 ]]; then
+    status="WROTE"
+  fi
+
+  printf "%s | %ds steps=%s src=%sL comp=%s tests=%s reason=%s\n" \
+    "$status" "$dur" "$steps" "$src_lines" "$compile" "$test_result" "$reason"
+
+  printf "| %s | %s | %d | %s | %s | %s | %s | %s |\n" \
+    "$name" "$status" "$dur" "$steps" "$src_lines" "$compile" "$test_result" "$reason" \
+    >> "$ROUND_DIR/SUMMARY.md"
+
+  printf "| C%d | R%d | %s | %s | %d | %s | %s | %s | %s | %s |\n" \
+    "$CURRENT_CYCLE" "$round" "$name" "$status" "$dur" "$steps" "$src_lines" "$compile" "$test_result" "$reason" \
+    >> "$MASTER_DIR/ALL_RESULTS.md"
+
+  append_event "Finished cycle $CURRENT_CYCLE round $round project $name status=$status reason=$reason"
+  ACTIVE_PROJECT=""
+  ACTIVE_LOG=""
+  write_state
+  snapshot_status
+}
+
+start_round() {
+  local round="$1"
+  local slug="$2"
+  local label="$3"
+  local summary_title="$4"
+
+  ACTIVE_ROUND="$round"
+  ACTIVE_ROUND_LABEL="$label"
+  ACTIVE_ROUND_DIR="$MASTER_DIR/cycle_$(printf '%02d' "$CURRENT_CYCLE")_round_$(printf '%02d' "$round")_${slug}"
+  ROUND_DIR="$ACTIVE_ROUND_DIR"
+
+  mkdir -p "$ROUND_DIR"
+  cat > "$ROUND_DIR/SUMMARY.md" << EOF
+# Cycle $CURRENT_CYCLE Round $round: $summary_title
+
+| Project | Status | Time(s) | Steps | SrcLines | Compiles | Tests | Reason |
+|---------|--------|---------|-------|----------|----------|-------|--------|
 EOF
 
-# Check endpoint
-if ! curl -s --connect-timeout 5 "$ENDPOINT/models" | grep -q "Qwen3.5"; then
-  echo "ERROR: 122B endpoint not responding"; exit 1
-fi
-echo "Endpoint OK"
+  append_event "Starting cycle $CURRENT_CYCLE round $round: $label"
+  echo "== C${CURRENT_CYCLE} R${round}: $label ($(elapsed_human)) =="
+}
 
-# Start health monitor
-health_monitor &
-HEALTH_PID=$!
-echo "Health monitor started (PID: $HEALTH_PID)"
-echo ""
+finish_round() {
+  append_event "Finished cycle $CURRENT_CYCLE round $ACTIVE_ROUND"
+  echo "== Cycle $CURRENT_CYCLE Round $ACTIVE_ROUND complete ($(elapsed_human)) =="
+  echo
+}
 
-# ════════════════════════════════════════════════════════════════
-# ROUND 1: Greenfield fundamentals
-# ════════════════════════════════════════════════════════════════
-ROUND=1
-ROUND_DIR="$MASTER_DIR/round_${ROUND}_greenfield"
-mkdir -p "$ROUND_DIR"
-cat > "$ROUND_DIR/SUMMARY.md" << 'EOF'
-# Round 1: Greenfield Fundamentals
+run_round_1() {
+  start_round 1 "retry_greenfield" "Retry Greenfield" "Retry Greenfield (with early-quit fix)"
 
-| Project | Status | Time(s) | Steps | SrcLines | Compiles | Tests | Outcome |
-|---------|--------|---------|-------|----------|----------|-------|---------|
-EOF
+  P="expression_eval"; W="$ROUND_DIR/$P"
+  setup_greenfield "expression-eval" "$W"
+  run_project "$P" "$W" \
+    "Build an arithmetic expression evaluator in src/lib.rs using recursive descent parsing. Support: integers, +, -, *, /, parentheses, unary minus. pub fn eval(expr: &str) -> Result<f64, String>. Write 12 unit tests including: basic ops, precedence (2+3*4=14), parens ((2+3)*4=20), nested parens, unary minus, division by zero error, empty input error. Run cargo test." 1 || return 0
 
-echo "╔══ ROUND $ROUND: Greenfield Fundamentals ($(elapsed_hours)) ══╗"
+  P="lru_cache"; W="$ROUND_DIR/$P"
+  setup_greenfield "lru-cache" "$W"
+  run_project "$P" "$W" \
+    "Build an LRU cache in src/lib.rs: pub struct LruCache<K, V> with new(capacity), get(&mut self, key: &K) -> Option<&V>, put(&mut self, key: K, value: V), len(), contains_key(&K). Use HashMap + VecDeque. Evict LRU on capacity overflow. get() updates recency. Write 10 unit tests. Run cargo test." 1 || return 0
 
-P="expression_eval"; W="$ROUND_DIR/$P"
-setup_greenfield "expression-eval" "$W"
-run_project "$P" "$W" \
-  "Build an arithmetic expression evaluator in src/lib.rs using recursive descent parsing. Support: integers, +, -, *, /, parentheses, unary minus. pub fn eval(expr: &str) -> Result<f64, String>. Write 12 unit tests including: basic ops, precedence (2+3*4=14), parens ((2+3)*4=20), nested parens, unary minus, division by zero error, empty input error. Run cargo test." "$ROUND"
+  P="csv_parser"; W="$ROUND_DIR/$P"
+  setup_greenfield "csv-parser" "$W"
+  run_project "$P" "$W" \
+    "Build a CSV parser in src/lib.rs: pub fn parse_csv(input: &str) -> Vec<Vec<String>>. Handle commas, quoted fields, escaped quotes, newlines inside quotes, empty fields. Also pub fn to_csv(rows: &[Vec<&str>]) -> String. Write 10 unit tests. Run cargo test." 1 || return 0
 
-P="lru_cache"; W="$ROUND_DIR/$P"
-setup_greenfield "lru-cache" "$W"
-run_project "$P" "$W" \
-  "Build an LRU cache in src/lib.rs: pub struct LruCache<K, V> with new(capacity), get(&mut self, key: &K) -> Option<&V>, put(&mut self, key: K, value: V), len(), contains_key(&K). Use HashMap + VecDeque. Evict LRU on capacity overflow. get() updates recency. Write 10 unit tests. Run cargo test." "$ROUND"
+  P="matrix_ops"; W="$ROUND_DIR/$P"
+  setup_greenfield "matrix-ops" "$W"
+  run_project "$P" "$W" \
+    "Build a matrix library in src/lib.rs: pub struct Matrix with new(rows, cols, data: Vec<f64>), add, multiply, transpose, determinant (2x2 and 3x3), identity(n). Write 10 unit tests. Run cargo test." 1 || return 0
 
-P="csv_parser"; W="$ROUND_DIR/$P"
-setup_greenfield "csv-parser" "$W"
-run_project "$P" "$W" \
-  "Build a CSV parser in src/lib.rs: pub fn parse_csv(input: &str) -> Vec<Vec<String>>. Handle commas, quoted fields, escaped quotes, newlines inside quotes, empty fields. Also pub fn to_csv(rows: &[Vec<&str>]) -> String. Write 10 unit tests. Run cargo test." "$ROUND"
+  P="html_report"; W="$ROUND_DIR/$P"
+  setup_greenfield "html-report" "$W"
+  run_project "$P" "$W" \
+    "Create an HTML report generator in src/lib.rs. ReportBuilder with new(title), add_heading(text, level), add_paragraph(text), add_table(headers, rows), add_code_block(code, lang), build() -> String (valid HTML with CSS). Write 8 unit tests. Run cargo test." 1 || return 0
 
-P="matrix_ops"; W="$ROUND_DIR/$P"
-setup_greenfield "matrix-ops" "$W"
-run_project "$P" "$W" \
-  "Build a matrix library in src/lib.rs: pub struct Matrix with new(rows, cols, data: Vec<f64>), add, multiply, transpose, determinant (2x2 and 3x3), identity(n). Write 10 unit tests. Run cargo test." "$ROUND"
+  finish_round
+}
 
-P="html_report"; W="$ROUND_DIR/$P"
-setup_greenfield "html-report" "$W"
-run_project "$P" "$W" \
-  "Create an HTML report generator in src/lib.rs. ReportBuilder with new(title), add_heading(text, level), add_paragraph(text), add_table(headers, rows), add_code_block(code, lang), build() -> String (valid HTML with CSS). Write 8 unit tests. Run cargo test." "$ROUND"
+run_round_2() {
+  start_round 2 "templates_expanded" "More Templates" "More Templates"
 
-echo "╚══ Round $ROUND complete ($(elapsed_hours)) ══╝"; echo ""
-[ "$(time_remaining)" -le 0 ] && { echo "TIME LIMIT REACHED"; exit 0; }
+  P="viz_histogram"; W="$ROUND_DIR/$P"
+  setup_template "viz_histogram" "$W"
+  run_project "$P" "$W" \
+    "Read all source files in src/ and the test file in tests/. This is a histogram renderer with color support. Fix all bugs so every test passes. Do NOT change test files. Run cargo test." 2 || return 0
 
-# ════════════════════════════════════════════════════════════════
-# ROUND 2: Template fixes (visualization focus)
-# ════════════════════════════════════════════════════════════════
-ROUND=2
-ROUND_DIR="$MASTER_DIR/round_${ROUND}_templates"
-mkdir -p "$ROUND_DIR"
-cat > "$ROUND_DIR/SUMMARY.md" << 'EOF'
-# Round 2: Template Fixes
+  P="viz_ascii_table"; W="$ROUND_DIR/$P"
+  setup_template "viz_ascii_table" "$W"
+  run_project "$P" "$W" \
+    "Read src/lib.rs and tests/table_tests.rs carefully. The Table struct has 3 bugs: (1) column width off-by-one in saturating_sub(1), (2) horizontal lines use '-' instead of box char '─', (3) Right alignment uses left-align format. Fix ONLY these 3 bugs. Do NOT restructure the code or change function signatures. Do NOT change tests. Run cargo test." 2 || return 0
 
-| Project | Status | Time(s) | Steps | SrcLines | Compiles | Tests | Outcome |
-|---------|--------|---------|-------|----------|----------|-------|---------|
-EOF
+  P="viz_maze_gen"; W="$ROUND_DIR/$P"
+  setup_template "viz_maze_gen" "$W"
+  run_project "$P" "$W" \
+    "Read all source files in src/ and tests/. This is a maze generator with grid, generator, and ASCII renderer. Fix all incomplete or buggy functions. Do NOT change test files. Run cargo test." 2 || return 0
 
-echo "╔══ ROUND $ROUND: Template Fixes ($(elapsed_hours)) ══╗"
+  P="viz_svg_chart"; W="$ROUND_DIR/$P"
+  setup_template "viz_svg_chart" "$W"
+  run_project "$P" "$W" \
+    "Read all source files and tests. This is an SVG chart generator. Fix all bugs so tests pass. Do NOT change test files. Run cargo test." 2 || return 0
 
-P="viz_histogram"; W="$ROUND_DIR/$P"
-setup_template "viz_histogram" "$W"
-run_project "$P" "$W" \
-  "Read all source files in src/ and the test file in tests/. This is a histogram renderer with color support. Fix all bugs so every test passes. Do NOT change test files. Run cargo test." "$ROUND"
+  finish_round
+}
 
-P="viz_ascii_table"; W="$ROUND_DIR/$P"
-setup_template "viz_ascii_table" "$W"
-run_project "$P" "$W" \
-  "Read src/lib.rs and tests/table_tests.rs carefully. The Table struct has 3 bugs: (1) column width off-by-one in saturating_sub(1), (2) horizontal lines use '-' instead of box char '─', (3) Right alignment uses left-align format. Fix ONLY these 3 bugs. Do NOT restructure the code or change function signatures. Do NOT change tests. Run cargo test." "$ROUND"
+run_round_3() {
+  start_round 3 "multilang_retry" "Multi-Language Retry" "Multi-Language Retry"
 
-P="viz_maze_gen"; W="$ROUND_DIR/$P"
-setup_template "viz_maze_gen" "$W"
-run_project "$P" "$W" \
-  "Read all source files in src/ and tests/. This is a maze generator with grid, generator, and ASCII renderer. Fix all incomplete/buggy functions. Do NOT change test files. Run cargo test." "$ROUND"
+  P="python_json_tool"; W="$ROUND_DIR/$P"
+  setup_python "$W"
+  run_project "$P" "$W" \
+    "Create json_tool.py with: flatten_json(nested_dict, sep='.') -> dict, unflatten_json(flat_dict, sep='.') -> dict, diff_json(a, b) -> dict with 'added', 'removed', 'changed' keys. Create test_json_tool.py with 10 pytest tests. Run python3 -m pytest test_json_tool.py -v." 3 || return 0
 
-P="viz_svg_chart"; W="$ROUND_DIR/$P"
-setup_template "viz_svg_chart" "$W"
-run_project "$P" "$W" \
-  "Read all source files and tests. This is an SVG chart generator. Fix all bugs so tests pass. Do NOT change test files. Run cargo test." "$ROUND"
+  P="python_text_stats"; W="$ROUND_DIR/$P"
+  setup_python "$W"
+  run_project "$P" "$W" \
+    "Create text_stats.py with: word_count(text) -> int, char_frequency(text) -> dict, sentence_count(text) -> int, average_word_length(text) -> float, most_common_words(text, n=5) -> list[tuple]. Create test_text_stats.py with 8 pytest tests. Run python3 -m pytest -v." 3 || return 0
 
-echo "╚══ Round $ROUND complete ($(elapsed_hours)) ══╝"; echo ""
-[ "$(time_remaining)" -le 0 ] && { echo "TIME LIMIT REACHED"; exit 0; }
+  P="go_calculator"; W="$ROUND_DIR/$P"
+  setup_go "$W" "calculator"
+  run_project "$P" "$W" \
+    "Create calculator.go with package calculator and functions: Add(a, b float64) float64, Subtract(a, b float64) float64, Multiply(a, b float64) float64, Divide(a, b float64) (float64, error). Create calculator_test.go with 8 tests. Run go test -v ./..." 3 || return 0
 
-# ════════════════════════════════════════════════════════════════
-# ROUND 3: Multi-language (Python + Go)
-# ════════════════════════════════════════════════════════════════
-ROUND=3
-ROUND_DIR="$MASTER_DIR/round_${ROUND}_multilang"
-mkdir -p "$ROUND_DIR"
-cat > "$ROUND_DIR/SUMMARY.md" << 'EOF'
-# Round 3: Multi-Language
+  P="go_stack"; W="$ROUND_DIR/$P"
+  setup_go "$W" "stack"
+  run_project "$P" "$W" \
+    "Create stack.go with package stack and a generic Stack[T any] type: New[T]() *Stack[T], Push(val T), Pop() (T, bool), Peek() (T, bool), Len() int, IsEmpty() bool. Create stack_test.go with 8 tests. Run go test -v ./..." 3 || return 0
 
-| Project | Status | Time(s) | Steps | SrcLines | Compiles | Tests | Outcome |
-|---------|--------|---------|-------|----------|----------|-------|---------|
-EOF
+  finish_round
+}
 
-echo "╔══ ROUND $ROUND: Multi-Language ($(elapsed_hours)) ══╗"
+run_round_4() {
+  start_round 4 "hard_greenfield" "Hard Greenfield" "Hard Greenfield"
 
-P="python_json_tool"; W="$ROUND_DIR/$P"
-setup_python "$W"
-run_project "$P" "$W" \
-  "Create json_tool.py with: flatten_json(nested_dict, sep='.') -> dict, unflatten_json(flat_dict, sep='.') -> dict, diff_json(a, b) -> dict with 'added', 'removed', 'changed' keys. Create test_json_tool.py with 10 pytest tests. Run python3 -m pytest test_json_tool.py -v" "$ROUND"
+  P="trie"; W="$ROUND_DIR/$P"
+  setup_greenfield "trie" "$W"
+  run_project "$P" "$W" \
+    "Build a trie (prefix tree) in src/lib.rs: pub struct Trie with new(), insert(word: &str), contains(word: &str) -> bool, starts_with(prefix: &str) -> bool, words_with_prefix(prefix: &str) -> Vec<String>, remove(word: &str) -> bool. Write 10 unit tests. Run cargo test." 4 || return 0
 
-P="python_text_stats"; W="$ROUND_DIR/$P"
-setup_python "$W"
-run_project "$P" "$W" \
-  "Create text_stats.py with: word_count(text) -> int, char_frequency(text) -> dict, sentence_count(text) -> int, average_word_length(text) -> float, most_common_words(text, n=5) -> list[tuple]. Create test_text_stats.py with 8 pytest tests. Run python3 -m pytest -v" "$ROUND"
+  P="roman"; W="$ROUND_DIR/$P"
+  setup_greenfield "roman" "$W"
+  run_project "$P" "$W" \
+    "Create a Roman numeral converter in src/lib.rs. Two functions: pub fn to_roman(n: u32) -> String and pub fn from_roman(s: &str) -> Option<u32>. Use the standard subtractive Roman numeral rules. Write 10 unit tests. Run cargo test." 4 || return 0
 
-P="go_calculator"; W="$ROUND_DIR/$P"
-setup_go "$W" "calculator"
-run_project "$P" "$W" \
-  "Create calculator.go with package calculator and functions: Add(a, b float64) float64, Subtract(a, b float64) float64, Multiply(a, b float64) float64, Divide(a, b float64) (float64, error). Create calculator_test.go with 8 tests. Run go test -v ./..." "$ROUND"
-
-P="go_stack"; W="$ROUND_DIR/$P"
-setup_go "$W" "stack"
-run_project "$P" "$W" \
-  "Create stack.go with package stack and a generic Stack[T any] type: New[T]() *Stack[T], Push(val T), Pop() (T, bool), Peek() (T, bool), Len() int, IsEmpty() bool. Create stack_test.go with 8 tests. Run go test -v ./..." "$ROUND"
-
-echo "╚══ Round $ROUND complete ($(elapsed_hours)) ══╝"; echo ""
-[ "$(time_remaining)" -le 0 ] && { echo "TIME LIMIT REACHED"; exit 0; }
-
-# ════════════════════════════════════════════════════════════════
-# ROUND 4: Hard algorithms
-# ════════════════════════════════════════════════════════════════
-ROUND=4
-ROUND_DIR="$MASTER_DIR/round_${ROUND}_algorithms"
-mkdir -p "$ROUND_DIR"
-cat > "$ROUND_DIR/SUMMARY.md" << 'EOF'
-# Round 4: Algorithms
-
-| Project | Status | Time(s) | Steps | SrcLines | Compiles | Tests | Outcome |
-|---------|--------|---------|-------|----------|----------|-------|---------|
-EOF
-
-echo "╔══ ROUND $ROUND: Algorithms ($(elapsed_hours)) ══╗"
-
-P="trie"; W="$ROUND_DIR/$P"
-setup_greenfield "trie" "$W"
-run_project "$P" "$W" \
-  "Build a trie (prefix tree) in src/lib.rs: pub struct Trie with new(), insert(word: &str), contains(word: &str) -> bool, starts_with(prefix: &str) -> bool, words_with_prefix(prefix: &str) -> Vec<String>, remove(word: &str) -> bool. Write 10 unit tests. Run cargo test." "$ROUND"
-
-P="roman"; W="$ROUND_DIR/$P"
-setup_greenfield "roman" "$W"
-run_project "$P" "$W" \
-  "Create a Roman numeral converter in src/lib.rs. Two functions: pub fn to_roman(n: u32) -> String (map values 1000=M, 900=CM, 500=D, 400=CD, 100=C, 90=XC, 50=L, 40=XL, 10=X, 9=IX, 5=V, 4=IV, 1=I, subtract greedily). pub fn from_roman(s: &str) -> Option<u32> (map each char to value, if current < next then subtract else add). Write 10 unit tests. Run cargo test." "$ROUND"
-
-P="json_patch"; W="$ROUND_DIR/$P"
-setup_greenfield "json-patch" "$W"
-cat >> "$ROUND_DIR/$P/Cargo.toml" << 'DEPS'
+  P="json_patch"; W="$ROUND_DIR/$P"
+  setup_greenfield "json-patch" "$W"
+  cat >> "$W/Cargo.toml" << 'EOF'
 
 [dependencies]
 serde_json = "1"
-DEPS
-(cd "$ROUND_DIR/$P" && git add -A && git commit -q -m "add serde_json dep")
-run_project "$P" "$W" \
-  "Build a JSON merge patch (RFC 7396) in src/lib.rs using serde_json::Value. pub fn merge(base: &Value, patch: &Value) -> Value — recursively merge objects, null in patch removes keys, non-object patch replaces entirely. Write 10 unit tests. Run cargo test." "$ROUND"
-
-P="ring_buffer"; W="$ROUND_DIR/$P"
-setup_greenfield "ring-buffer" "$W"
-run_project "$P" "$W" \
-  "Build a ring buffer in src/lib.rs: pub struct RingBuffer<T> with new(capacity), push(val: T), pop() -> Option<T>, peek() -> Option<&T>, len(), is_full(), is_empty(), iter() -> impl Iterator. Use a fixed-size Vec with head/tail indices. Write 10 unit tests. Run cargo test." "$ROUND"
-
-echo "╚══ Round $ROUND complete ($(elapsed_hours)) ══╝"; echo ""
-[ "$(time_remaining)" -le 0 ] && { echo "TIME LIMIT REACHED"; exit 0; }
-
-# ════════════════════════════════════════════════════════════════
-# ROUND 5: Hard templates
-# ════════════════════════════════════════════════════════════════
-ROUND=5
-ROUND_DIR="$MASTER_DIR/round_${ROUND}_hard_templates"
-mkdir -p "$ROUND_DIR"
-cat > "$ROUND_DIR/SUMMARY.md" << 'EOF'
-# Round 5: Hard Templates
-
-| Project | Status | Time(s) | Steps | SrcLines | Compiles | Tests | Outcome |
-|---------|--------|---------|-------|----------|----------|-------|---------|
 EOF
+  (
+    cd "$W"
+    git add -A
+    git commit -q -m "add serde_json dep" >/dev/null 2>&1 || true
+  )
+  run_project "$P" "$W" \
+    "Build a JSON merge patch (RFC 7396) in src/lib.rs using serde_json::Value. pub fn merge(base: &Value, patch: &Value) -> Value. Recursively merge objects, null in patch removes keys, and non-object patch replaces entirely. Write 10 unit tests. Run cargo test." 4 || return 0
 
-echo "╔══ ROUND $ROUND: Hard Templates ($(elapsed_hours)) ══╗"
+  P="ring_buffer"; W="$ROUND_DIR/$P"
+  setup_greenfield "ring-buffer" "$W"
+  run_project "$P" "$W" \
+    "Build a ring buffer in src/lib.rs: pub struct RingBuffer<T> with new(capacity), push(val: T), pop() -> Option<T>, peek() -> Option<&T>, len(), is_full(), is_empty(), iter() -> impl Iterator. Use a fixed-size Vec with head and tail indices. Write 10 unit tests. Run cargo test." 4 || return 0
 
-P="hard_event_bus"; W="$ROUND_DIR/$P"
-setup_template "hard_event_bus" "$W"
-run_project "$P" "$W" \
-  "Read all source files in src/ and tests/. This is a pub-sub event bus with topic filtering. Fix all bugs so every test passes. Do NOT change test files. Run cargo test." "$ROUND"
+  finish_round
+}
 
-P="hard_scheduler"; W="$ROUND_DIR/$P"
-setup_template "hard_scheduler" "$W"
-run_project "$P" "$W" \
-  "Read all source files in src/ and tests/. This is a task scheduler with priority and duration. Fix all bugs so every test passes. Do NOT change test files. Run cargo test." "$ROUND"
+run_round_5() {
+  start_round 5 "template_hard" "Hard Templates" "Hard Templates"
 
-P="easy_calculator"; W="$ROUND_DIR/$P"
-setup_template "easy_calculator" "$W"
-run_project "$P" "$W" \
-  "Read src/lib.rs and tests/calc_tests.rs. The calculator has bugs. Fix ONLY the bugs — do NOT rewrite or restructure. Do NOT change function signatures or the test file. Run cargo test until all tests pass." "$ROUND"
+  P="hard_event_bus"; W="$ROUND_DIR/$P"
+  setup_template "hard_event_bus" "$W"
+  run_project "$P" "$W" \
+    "Read all source files in src/ and tests/. This is a pub-sub event bus with topic filtering. Fix all bugs so every test passes. Do NOT change test files. Run cargo test." 5 || return 0
 
-P="easy_string_ops"; W="$ROUND_DIR/$P"
-setup_template "easy_string_ops" "$W"
-run_project "$P" "$W" \
-  "Read all files in src/ and tests/. Fix all bugs in the string operations code. Do NOT change test files or function signatures. Run cargo test until all pass." "$ROUND"
+  P="hard_scheduler"; W="$ROUND_DIR/$P"
+  setup_template "hard_scheduler" "$W"
+  run_project "$P" "$W" \
+    "Read all source files in src/ and tests/. This is a task scheduler with priority and duration. Fix all bugs so every test passes. Do NOT change test files. Run cargo test." 5 || return 0
 
-echo "╚══ Round $ROUND complete ($(elapsed_hours)) ══╝"; echo ""
-[ "$(time_remaining)" -le 0 ] && { echo "TIME LIMIT REACHED"; exit 0; }
+  P="easy_calculator"; W="$ROUND_DIR/$P"
+  setup_template "easy_calculator" "$W"
+  run_project "$P" "$W" \
+    "Read src/lib.rs and tests/calc_tests.rs. The calculator has bugs. Fix only the bugs. Do NOT rewrite or restructure. Do NOT change function signatures or the test file. Run cargo test until all tests pass." 5 || return 0
 
-# ════════════════════════════════════════════════════════════════
-# ROUND 6: Data structures stress
-# ════════════════════════════════════════════════════════════════
-ROUND=6
-ROUND_DIR="$MASTER_DIR/round_${ROUND}_data_structures"
-mkdir -p "$ROUND_DIR"
-cat > "$ROUND_DIR/SUMMARY.md" << 'EOF'
-# Round 6: Data Structures
+  P="easy_string_ops"; W="$ROUND_DIR/$P"
+  setup_template "easy_string_ops" "$W"
+  run_project "$P" "$W" \
+    "Read all files in src/ and tests/. Fix all bugs in the string operations code. Do NOT change test files or function signatures. Run cargo test until all pass." 5 || return 0
 
-| Project | Status | Time(s) | Steps | SrcLines | Compiles | Tests | Outcome |
-|---------|--------|---------|-------|----------|----------|-------|---------|
-EOF
+  finish_round
+}
 
-echo "╔══ ROUND $ROUND: Data Structures ($(elapsed_hours)) ══╗"
+run_round_6() {
+  start_round 6 "stress_ds" "Data Structures Stress" "Data Structures Stress"
 
-P="hashmap"; W="$ROUND_DIR/$P"
-setup_greenfield "hashmap" "$W"
-run_project "$P" "$W" \
-  "Build a simple hash map in src/lib.rs: pub struct SimpleHashMap<V> (keys are String) with new(), insert(key: &str, value: V), get(key: &str) -> Option<&V>, remove(key: &str) -> Option<V>, len(), contains_key(key: &str). Use separate chaining (Vec of Vec of (String, V)). Write 10 unit tests. Run cargo test." "$ROUND"
+  P="hashmap"; W="$ROUND_DIR/$P"
+  setup_greenfield "hashmap" "$W"
+  run_project "$P" "$W" \
+    "Build a simple hash map in src/lib.rs: pub struct SimpleHashMap<V> with new(), insert(key: &str, value: V), get(key: &str) -> Option<&V>, remove(key: &str) -> Option<V>, len(), contains_key(key: &str). Use separate chaining. Write 10 unit tests. Run cargo test." 6 || return 0
 
-P="binary_search"; W="$ROUND_DIR/$P"
-setup_greenfield "binary-search" "$W"
-run_project "$P" "$W" \
-  "Build a sorted list with binary search in src/lib.rs: pub struct SortedList<T: Ord> with new(), insert(val: T), contains(val: &T) -> bool, remove(val: &T) -> bool, len(), get(index: usize) -> Option<&T>, range(from: &T, to: &T) -> Vec<&T>. Keep internal Vec sorted. Write 10 unit tests. Run cargo test." "$ROUND"
+  P="binary_search"; W="$ROUND_DIR/$P"
+  setup_greenfield "binary-search" "$W"
+  run_project "$P" "$W" \
+    "Build a sorted list with binary search in src/lib.rs: pub struct SortedList<T: Ord> with new(), insert(val: T), contains(val: &T) -> bool, remove(val: &T) -> bool, len(), get(index: usize) -> Option<&T>, range(from: &T, to: &T) -> Vec<&T>. Keep internal Vec sorted. Write 10 unit tests. Run cargo test." 6 || return 0
 
-P="state_machine"; W="$ROUND_DIR/$P"
-setup_greenfield "state-machine" "$W"
-run_project "$P" "$W" \
-  "Build a finite state machine in src/lib.rs: pub struct StateMachine with new(initial_state: &str), add_transition(from: &str, event: &str, to: &str), handle_event(&mut self, event: &str) -> Result<&str, String>, current_state() -> &str, valid_events() -> Vec<String>. Write 8 unit tests including invalid transitions. Run cargo test." "$ROUND"
+  P="state_machine"; W="$ROUND_DIR/$P"
+  setup_greenfield "state-machine" "$W"
+  run_project "$P" "$W" \
+    "Build a finite state machine in src/lib.rs: pub struct StateMachine with new(initial_state: &str), add_transition(from: &str, event: &str, to: &str), handle_event(&mut self, event: &str) -> Result<&str, String>, current_state() -> &str, valid_events() -> Vec<String>. Write 8 unit tests including invalid transitions. Run cargo test." 6 || return 0
 
-P="tokenizer"; W="$ROUND_DIR/$P"
-setup_greenfield "tokenizer" "$W"
-run_project "$P" "$W" \
-  "Build a simple tokenizer in src/lib.rs for arithmetic expressions. pub enum Token { Number(f64), Plus, Minus, Star, Slash, LParen, RParen }. pub fn tokenize(input: &str) -> Result<Vec<Token>, String>. Handle multi-digit numbers, decimals, whitespace. Write 10 unit tests. Run cargo test." "$ROUND"
+  P="tokenizer"; W="$ROUND_DIR/$P"
+  setup_greenfield "tokenizer" "$W"
+  run_project "$P" "$W" \
+    "Build a tokenizer in src/lib.rs for arithmetic expressions. pub enum Token { Number(f64), Plus, Minus, Star, Slash, LParen, RParen }. pub fn tokenize(input: &str) -> Result<Vec<Token>, String>. Handle multi-digit numbers, decimals, and whitespace. Write 10 unit tests. Run cargo test." 6 || return 0
 
-echo "╚══ Round $ROUND complete ($(elapsed_hours)) ══╝"; echo ""
+  finish_round
+}
 
-# ── Final Report ──
-echo ""
-echo "════════════════════════════════════════════════════════════"
-echo "  8-HOUR SYSTEM TEST v4 COMPLETE — $(date)"
-echo "  Total duration: $(elapsed_hours)"
-echo "════════════════════════════════════════════════════════════"
-echo ""
-cat "$MASTER_DIR/ALL_RESULTS.md"
-echo ""
+run_round_7() {
+  start_round 7 "reliability" "Reliability Check" "Reliability Check"
 
-# Calculate statistics
-TOTAL=$(grep "^| R" "$MASTER_DIR/ALL_RESULTS.md" 2>/dev/null | wc -l)
-GREEN=$(grep -c "| GREEN |" "$MASTER_DIR/ALL_RESULTS.md" 2>/dev/null || echo 0)
-PARTIAL=$(grep -c "| PARTIAL |" "$MASTER_DIR/ALL_RESULTS.md" 2>/dev/null || echo 0)
-COMPILES=$(grep -c "| COMPILES |" "$MASTER_DIR/ALL_RESULTS.md" 2>/dev/null || echo 0)
-WROTE=$(grep -c "| WROTE |" "$MASTER_DIR/ALL_RESULTS.md" 2>/dev/null || echo 0)
-FAIL=$(grep -c "| FAIL |" "$MASTER_DIR/ALL_RESULTS.md" 2>/dev/null || echo 0)
+  P="calculator_r2"; W="$ROUND_DIR/$P"
+  setup_greenfield "calculator" "$W"
+  run_project "$P" "$W" \
+    "Create a calculator in src/lib.rs with add, subtract, multiply, divide. divide returns Result on division by zero. Write 5 unit tests. Run cargo test until all pass." 7 || return 0
 
-# Language breakdown
-RUST_COUNT=$(grep '"language": "rust"' "$METRICS_FILE" 2>/dev/null | wc -l)
-PYTHON_COUNT=$(grep '"language": "python"' "$METRICS_FILE" 2>/dev/null | wc -l)
-GO_COUNT=$(grep '"language": "go"' "$METRICS_FILE" 2>/dev/null | wc -l)
+  P="money_split_r2"; W="$ROUND_DIR/$P"
+  setup_greenfield "money-split" "$W"
+  run_project "$P" "$W" \
+    "Build in src/lib.rs: pub fn split_amount_cents(total: i64, people: usize) -> Result<Vec<i64>, &'static str>. Reject negative totals and zero people. Split evenly and distribute remainder to earliest entries. Write 6 unit tests. Run cargo test." 7 || return 0
 
-# Generate final report
-cat > "$MASTER_DIR/FINAL_REPORT.md" << EOF
+  P="bounded_queue_r2"; W="$ROUND_DIR/$P"
+  setup_greenfield "bounded-queue" "$W"
+  run_project "$P" "$W" \
+    "Build a bounded FIFO queue in src/lib.rs: pub struct BoundedQueue<T> with new(capacity), push(value), pop() -> Option<T>, peek() -> Option<&T>, len(), is_empty(). When full, push evicts oldest. Capacity 0 discards everything. Write 8 unit tests. Run cargo test." 7 || return 0
+
+  P="slugify_r2"; W="$ROUND_DIR/$P"
+  setup_greenfield "slugify" "$W"
+  run_project "$P" "$W" \
+    "Build a slug generator in src/lib.rs: pub fn slugify(input: &str) -> String. Lowercase, keep ASCII alphanumeric, collapse whitespace, underscores, and hyphens to a single hyphen, strip punctuation, and trim edge separators. Write 7 unit tests. Run cargo test." 7 || return 0
+
+  finish_round
+}
+
+run_round_8() {
+  start_round 8 "algorithms" "Algorithms" "Algorithms"
+
+  P="graph_bfs"; W="$ROUND_DIR/$P"
+  setup_greenfield "graph-bfs" "$W"
+  run_project "$P" "$W" \
+    "Build a directed graph with BFS in src/lib.rs: pub struct Graph with new(), add_edge(from: usize, to: usize), bfs(start: usize) -> Vec<usize>, has_path(from: usize, to: usize) -> bool, shortest_path(from: usize, to: usize) -> Option<Vec<usize>>. Use adjacency lists. Write 10 unit tests. Run cargo test." 8 || return 0
+
+  P="base64_codec"; W="$ROUND_DIR/$P"
+  setup_greenfield "base64-codec" "$W"
+  run_project "$P" "$W" \
+    "Build base64 encode and decode in src/lib.rs: pub fn encode(input: &[u8]) -> String and pub fn decode(input: &str) -> Result<Vec<u8>, String>. Implement RFC 4648 base64 with padding. Write 10 unit tests including empty input, padding cases, and invalid chars. Run cargo test." 8 || return 0
+
+  P="interval_merge"; W="$ROUND_DIR/$P"
+  setup_greenfield "interval-merge" "$W"
+  run_project "$P" "$W" \
+    "Build an interval merger in src/lib.rs: pub fn merge_intervals(intervals: &[(i32, i32)]) -> Vec<(i32, i32)>. Sort by start and merge overlaps. Also add pub fn insert_interval(intervals: &[(i32, i32)], new: (i32, i32)) -> Vec<(i32, i32)>. Write 10 unit tests. Run cargo test." 8 || return 0
+
+  P="rate_limiter"; W="$ROUND_DIR/$P"
+  setup_greenfield "rate-limiter" "$W"
+  run_project "$P" "$W" \
+    "Build a token bucket rate limiter in src/lib.rs: pub struct RateLimiter with new(capacity: u32, refill_rate: u32), try_acquire(&mut self) -> bool, available(&self) -> u32, refill(&mut self, tokens: u32). Write 8 unit tests. Run cargo test." 8 || return 0
+
+  finish_round
+}
+
+run_round_9() {
+  start_round 9 "python_expanded" "Python Expanded" "Python Expanded"
+
+  P="python_csv"; W="$ROUND_DIR/$P"
+  setup_python "$W"
+  run_project "$P" "$W" \
+    "Create csv_tool.py with: read_csv(filepath) -> list[dict], write_csv(filepath, rows: list[dict]), filter_rows(rows, column, value) -> list[dict], sort_rows(rows, column, reverse=False) -> list[dict]. Create test_csv_tool.py with 8 pytest tests using tempfiles. Run python3 -m pytest -v." 9 || return 0
+
+  P="python_stack"; W="$ROUND_DIR/$P"
+  setup_python "$W"
+  run_project "$P" "$W" \
+    "Create stack.py with a Stack class: push(val), pop() -> val raising IndexError if empty, peek() -> val, is_empty() -> bool, size() -> int, and __iter__ for iteration. Create test_stack.py with 10 pytest tests. Run python3 -m pytest -v." 9 || return 0
+
+  P="python_linked_list"; W="$ROUND_DIR/$P"
+  setup_python "$W"
+  run_project "$P" "$W" \
+    "Create linked_list.py with a LinkedList class: append(val), prepend(val), delete(val) -> bool, find(val) -> bool, size() -> int, to_list() -> list, reverse(). Create test_linked_list.py with 10 pytest tests. Run python3 -m pytest -v." 9 || return 0
+
+  P="python_roman"; W="$ROUND_DIR/$P"
+  setup_python "$W"
+  run_project "$P" "$W" \
+    "Create roman.py with to_roman(n: int) -> str and from_roman(s: str) -> int. Handle 1 to 3999. Create test_roman.py with 12 pytest tests including edge cases. Run python3 -m pytest -v." 9 || return 0
+
+  finish_round
+}
+
+run_round_10() {
+  start_round 10 "template_retry" "Template Retry" "Template Retry"
+
+  P="viz_sparkline_r2"; W="$ROUND_DIR/$P"
+  setup_template "viz_sparkline" "$W"
+  run_project "$P" "$W" \
+    "Read all source files in src/ and the test file in tests/. Fix all bugs so every test passes. Do NOT change test files or function signatures. Run cargo test." 10 || return 0
+
+  P="viz_progress_bar_r2"; W="$ROUND_DIR/$P"
+  setup_template "viz_progress_bar" "$W"
+  run_project "$P" "$W" \
+    "Read all source files in src/ and tests/. Fix all bugs so tests pass. Do NOT change test files or function signatures. Run cargo test." 10 || return 0
+
+  P="medium_bitset_r2"; W="$ROUND_DIR/$P"
+  setup_template "medium_bitset" "$W"
+  run_project "$P" "$W" \
+    "Read src/lib.rs and tests/bitset_tests.rs. Fix all bugs so every test passes. Do NOT change test files or public API. Run cargo test." 10 || return 0
+
+  P="medium_json_merge_r2"; W="$ROUND_DIR/$P"
+  setup_template "medium_json_merge" "$W"
+  run_project "$P" "$W" \
+    "Read src/lib.rs and tests/merge_tests.rs. Implement RFC 7396 JSON Merge Patch correctly. Do NOT change tests. Run cargo test." 10 || return 0
+
+  finish_round
+}
+
+run_cycle() {
+  run_round_1
+  (( STOP_REQUESTED == 1 )) && return 0
+  run_round_2
+  (( STOP_REQUESTED == 1 )) && return 0
+  run_round_3
+  (( STOP_REQUESTED == 1 )) && return 0
+  run_round_4
+  (( STOP_REQUESTED == 1 )) && return 0
+  run_round_5
+  (( STOP_REQUESTED == 1 )) && return 0
+  run_round_6
+  (( STOP_REQUESTED == 1 )) && return 0
+  run_round_7
+  (( STOP_REQUESTED == 1 )) && return 0
+  run_round_8
+  (( STOP_REQUESTED == 1 )) && return 0
+  run_round_9
+  (( STOP_REQUESTED == 1 )) && return 0
+  run_round_10
+}
+
+check_endpoint() {
+  curl -fsS --connect-timeout 5 "$ENDPOINT/models" | grep -q "$MODEL"
+}
+
+generate_final_report() {
+  local total green partial compiles wrote fail
+  total="$(count_total_rows)"
+  green="$(count_status GREEN)"
+  partial="$(count_status PARTIAL)"
+  compiles="$(count_status COMPILES)"
+  wrote="$(count_status WROTE)"
+  fail="$(count_status FAIL)"
+
+  cat > "$FINAL_REPORT" << EOF
 # 8-Hour System Test v4 - Final Report
 
-**Completed**: $(date)  
-**Duration**: $(elapsed_hours)  
-**Results Directory**: $MASTER_DIR
+- Completed: $(date)
+- Results dir: $MASTER_DIR
+- Configured duration: $(seconds_to_human "$DURATION_SECS")
+- Actual duration: $(elapsed_human)
+- Cycles started: $CURRENT_CYCLE
 
-## Summary Statistics
+## Summary
 
-| Metric | Count | Percentage |
-|--------|-------|------------|
-| **Total Projects** | $TOTAL | 100% |
-| 🟢 GREEN (all pass) | $GREEN | $(awk "BEGIN {printf \"%.1f\", ($GREEN/$TOTAL)*100}")% |
-| 🟡 PARTIAL (some fail) | $PARTIAL | $(awk "BEGIN {printf \"%.1f\", ($PARTIAL/$TOTAL)*100}")% |
-| 🔵 COMPILES (no tests) | $COMPILES | $(awk "BEGIN {printf \"%.1f\", ($COMPILES/$TOTAL)*100}")% |
-| ⚪ WROTE (no compile) | $WROTE | $(awk "BEGIN {printf \"%.1f\", ($WROTE/$TOTAL)*100}")% |
-| 🔴 FAIL | $FAIL | $(awk "BEGIN {printf \"%.1f\", ($FAIL/$TOTAL)*100}")% |
+| Metric | Count |
+|--------|-------|
+| Total projects | $total |
+| GREEN | $green |
+| PARTIAL | $partial |
+| COMPILES | $compiles |
+| WROTE | $wrote |
+| FAIL | $fail |
+EOF
+}
 
-## Language Breakdown
+cat > "$MASTER_DIR/ALL_RESULTS.md" << 'EOF'
+# 8-Hour System Test v4 — All Results
 
-| Language | Projects |
-|----------|----------|
-| Rust | $RUST_COUNT |
-| Python | $PYTHON_COUNT |
-| Go | $GO_COUNT |
-
-## Success Criteria
-
-- **Target**: ≥70% GREEN or PARTIAL
-- **Minimum**: ≤10% FAIL
-
-## Result
-
-$(if [ "$GREEN" -ge $((TOTAL * 70 / 100)) ]; then echo "✅ **PASSED** - Target achieved"; elif [ "$FAIL" -le $((TOTAL * 10 / 100)) ]; then echo "⚠️ **PARTIAL** - Minimum achieved"; else echo "❌ **FAILED** - Below minimum threshold"; fi)
-
-## Files
-
-- Full results: \`ALL_RESULTS.md\`
-- Detailed metrics: \`metrics.jsonl\`
-- Health monitoring: \`health.jsonl\`
-- Alerts: \`alerts.log\`
-- Master log: \`master.log\`
+| Cycle | Round | Project | Status | Time(s) | Steps | SrcLines | Compiles | Tests | Reason |
+|-------|-------|---------|--------|---------|-------|----------|----------|-------|--------|
 EOF
 
-echo "📊 FINAL STATISTICS:"
-echo "  Total: $TOTAL | 🟢 $GREEN | 🟡 $PARTIAL | 🔵 $COMPILES | ⚪ $WROTE | 🔴 $FAIL"
-echo "  Rust: $RUST_COUNT | Python: $PYTHON_COUNT | Go: $GO_COUNT"
-echo ""
-echo "Results: $MASTER_DIR"
-echo "Report: $MASTER_DIR/FINAL_REPORT.md"
+echo "============================================================"
+echo "  8-HOUR SYSTEM TEST v4 - $(date)"
+echo "  Endpoint: $ENDPOINT"
+echo "  Model: $MODEL"
+echo "  Configured duration: $(seconds_to_human "$DURATION_SECS")"
+echo "  Timeout: ${TIMEOUT_PER_PROJECT}s per project"
+echo "  Minimum project window: ${MIN_PROJECT_WINDOW_SECS}s"
+echo "  Max iterations: $MAX_ITERS per project"
+echo "  Results: $MASTER_DIR"
+echo "============================================================"
+echo
 
-# Stop health monitor
-kill $HEALTH_PID 2>/dev/null || true
+if [[ ! -x "$SELFWARE" ]]; then
+  echo "ERROR: selfware binary not found or not executable at $SELFWARE"
+  exit 1
+fi
+
+if [[ ! -d "$TEMPLATES" ]]; then
+  echo "ERROR: template directory not found at $TEMPLATES"
+  exit 1
+fi
+
+write_state
+snapshot_status
+monitor_loop &
+MONITOR_PID="$!"
+printf '%s\n' "$MONITOR_PID" > "$MONITOR_PID_FILE"
+
+if ! check_endpoint; then
+  echo "ERROR: endpoint $ENDPOINT is not serving model $MODEL"
+  exit 1
+fi
+
+append_event "Endpoint OK"
+
+while (( $(time_remaining) >= MIN_PROJECT_WINDOW_SECS )); do
+  CURRENT_CYCLE=$((CURRENT_CYCLE + 1))
+  append_event "Starting cycle $CURRENT_CYCLE"
+  run_cycle
+  append_event "Finished cycle $CURRENT_CYCLE"
+  (( STOP_REQUESTED == 1 )) && break
+done
+
+if (( STOP_REQUESTED == 0 )) && (( $(time_remaining) < MIN_PROJECT_WINDOW_SECS )); then
+  append_event "Stopping because remaining time is below ${MIN_PROJECT_WINDOW_SECS}s"
+fi
+
+generate_final_report
+
+echo
+echo "============================================================"
+echo "  8-HOUR SYSTEM TEST v4 COMPLETE - $(date)"
+echo "  Actual duration: $(elapsed_human)"
+echo "============================================================"
+echo
+cat "$FINAL_REPORT"
+echo
+echo "Results: $MASTER_DIR"
