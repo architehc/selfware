@@ -119,7 +119,7 @@ tracing-appender = "0.2.4"
 opentelemetry = "0.21.0"
 opentelemetry_sdk = { version = "0.21.0", features = ["rt-tokio"] }
 opentelemetry-otlp = "0.14.0"
-tracing-opentelemetry = "0.22.0"
+tracing-opentelemetry = "0.32.1"
 metrics = "0.21.0"
 metrics-exporter-prometheus = "0.12.1"
 syn = { version = "2.0", features = ["full", "parsing"] }
