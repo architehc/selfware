@@ -1,0 +1,226 @@
+# Quick Wins Implementation
+# Apply these to improve test success rates immediately
+
+## 1. Enhanced Prompt Templates
+
+### For Go Projects (avoids progress guard)
+```rust
+const GO_PROMPT_TEMPLATE: &str = r#"
+CRITICAL: You must WRITE CODE IMMEDIATELY. 
+Do NOT read more than 1 source file before starting to write.
+Go projects require immediate code creation.
+
+Task: {task}
+
+REQUIRED ACTIONS (in order):
+1. Write the main .go file with all functions
+2. Write the _test.go file with all tests  
+3. Run 'go test -v ./...'
+4. Fix any compilation errors
+
+DO NOT spend steps reading documentation or exploring.
+Start writing code in step 1.
+"#;
+```
+
+### For Template Projects (reduces read-only steps)
+```rust
+const TEMPLATE_PROMPT_TEMPLATE: &str = r#"
+Task: Fix bugs in the template code so all tests pass.
+
+EFFICIENT APPROACH:
+1. Read src/lib.rs (or main source)
+2. Read tests/ to understand expected behavior
+3. Identify the bugs (usually 2-5 bugs)
+4. Fix them one by one
+5. Run cargo test
+
+DO NOT read the same file multiple times.
+DO NOT refactor or restructure - only fix bugs.
+Make minimal changes.
+
+Specific bugs to look for:
+- Off-by-one errors
+- Wrong comparison operators
+- Missing error handling
+- Incorrect string formatting
+"#;
+```
+
+### For Python Projects (avoids retry suppression)
+```rust
+const PYTHON_PROMPT_TEMPLATE: &str = r#"
+Task: {task}
+
+IMPORTANT: Avoid these common mistakes:
+1. Don't try to delete files that don't exist
+2. Don't write empty files
+3. Check if file exists before operations
+4. Run 'python3 -m pytest -v' to test
+
+If a file operation fails, try a different approach.
+Don't retry the same operation.
+"#;
+```
+
+## 2. Dynamic Configuration
+
+```rust
+impl LongRunningConfig {
+    pub fn for_project_type(&self, project_type: ProjectType) -> Self {
+        let mut config = self.clone();
+        
+        match project_type {
+            ProjectType::Go => {
+                // Go needs more iterations due to type strictness
+                config.max_iterations = self.max_iterations * 2;
+                config.step_timeout_secs = self.step_timeout_secs * 2;
+            }
+            ProjectType::Template => {
+                // Templates need more time for reading
+                config.max_iterations = self.max_iterations;
+                config.step_timeout_secs = self.step_timeout_secs + 300;
+            }
+            _ => {}
+        }
+        
+        config
+    }
+}
+```
+
+## 3. Retry Suppression Detector
+
+```rust
+pub fn detect_retry_suppression(log: &str) -> Option<RetryIssue> {
+    if log.contains("RETRY SUPPRESSED") {
+        if log.contains("file_delete") && log.contains("File not found") {
+            return Some(RetryIssue::DeleteNonExistent);
+        }
+        if log.contains("file_write") && log.contains("no-op edit") {
+            return Some(RetryIssue::NoOpEdit);
+        }
+        if log.contains("file_write") && log.contains("old_str not found") {
+            return Some(RetryIssue::OldStrMismatch);
+        }
+        if log.contains("context_bulk_read") {
+            return Some(RetryIssue::ProgressGuardBlocked);
+        }
+    }
+    None
+}
+
+pub fn suggest_recovery(issue: RetryIssue) -> String {
+    match issue {
+        RetryIssue::DeleteNonExistent => 
+            "Hint: The file doesn't exist. Just create it fresh.",
+        RetryIssue::NoOpEdit => 
+            "Hint: The edit didn't change anything. Check the exact content.",
+        RetryIssue::OldStrMismatch => 
+            "Hint: The text to replace doesn't match. Re-read the file first.",
+        RetryIssue::ProgressGuardBlocked => 
+            "Hint: You've been reading too much. Make an edit now.",
+    }.to_string()
+}
+```
+
+## 4. Test Harness Improvements
+
+```rust
+// Explicitly run tests after agent completes
+pub fn verify_project(&self, work_dir: &Path, project_type: ProjectType) -> VerificationResult {
+    let compile_check = self.check_compiles(work_dir, project_type);
+    
+    let test_result = if compile_check.success {
+        // Force run tests explicitly
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(match project_type {
+                ProjectType::Rust => "cargo test 2>&1",
+                ProjectType::Python => "python3 -m pytest -v 2>&1 || python3 -m unittest discover 2>&1",
+                ProjectType::Go => "go test -v ./... 2>&1",
+                _ => "echo 'unknown project type'",
+            })
+            .current_dir(work_dir)
+            .output();
+            
+        match output {
+            Ok(out) => parse_test_output(&String::from_utf8_lossy(&out.stdout)),
+            Err(e) => TestResult::Error(e.to_string()),
+        }
+    } else {
+        TestResult::Skipped
+    };
+    
+    VerificationResult {
+        compile: compile_check,
+        test: test_result,
+    }
+}
+```
+
+## 5. Prompt Injection System
+
+```rust
+pub struct PromptInjector;
+
+impl PromptInjector {
+    /// Inject context-specific hints into prompts
+    pub fn enhance(prompt: &str, context: &TaskContext) -> String {
+        let mut enhanced = prompt.to_string();
+        
+        // Add progress guard warning for read-heavy tasks
+        if context.estimated_files > 3 {
+            enhanced.push_str("\n\nNote: This task requires understanding multiple files. \
+                Read efficiently - don't re-read files. Track what you've learned.");
+        }
+        
+        // Add edit encouragement for stuck agents
+        if context.steps_without_edit > 5 {
+            enhanced.push_str("\n\n⚠️ You've gone 5+ steps without editing. \
+                Make a code change now, even if incomplete.");
+        }
+        
+        // Add language-specific hints
+        match context.language {
+            Language::Go => {
+                enhanced.push_str("\n\nGo tip: Start with package declaration and imports, \
+                    then write functions.");
+            }
+            Language::Python => {
+                enhanced.push_str("\n\nPython tip: Use 'if __name__ == \"__main__\":' for scripts, \
+                    or create proper modules with __init__.py.");
+            }
+            _ => {}
+        }
+        
+        enhanced
+    }
+}
+```
+
+## 6. Early Exit Detection
+
+```rust
+pub fn detect_early_exit_risk(log: &str, step: usize) -> Option<String> {
+    // Agent might be stuck in verification loop
+    if step > 20 && log.contains("verification") && !log.contains("✅ Task completed") {
+        return Some("Consider if the task is actually complete. \
+            If tests pass and code works, you can finish.".to_string());
+    }
+    
+    // Agent might be over-engineering
+    if step > 50 && log.matches("refactor").count() > 3 {
+        return Some("You've refactored multiple times. \
+            The current solution is likely good enough.".to_string());
+    }
+    
+    // Agent might be stuck on minor issues
+    if step > 60 && log.matches("error").count() < 3 {
+        return Some("You've spent many steps on this. \
+            Consider if remaining issues are critical.".to_string());
+    }
+    
+    None
+}
+```
