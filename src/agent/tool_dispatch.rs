@@ -3253,4 +3253,668 @@ mod tests {
         assert_eq!(parsed["temperature"], 0.5);
         assert_eq!(parsed["detail"], "high");
     }
+
+    // =========================================================================
+    // summarize_directory_tree tests
+    // =========================================================================
+
+    #[test]
+    fn test_summarize_directory_tree_basic() {
+        let raw = serde_json::json!({
+            "root": "/home/user/project",
+            "total": 5,
+            "entries": [
+                {"path": "/home/user/project/src/main.rs", "type": "file", "size": 1024},
+                {"path": "/home/user/project/src/lib.rs", "type": "file", "size": 512},
+                {"path": "/home/user/project/src", "type": "directory", "size": 0},
+                {"path": "/home/user/project/Cargo.toml", "type": "file", "size": 256},
+                {"path": "/home/user/project/README.md", "type": "file", "size": 128}
+            ]
+        });
+        let summary = summarize_directory_tree(&serde_json::to_string(&raw).unwrap());
+        assert!(summary.contains("/home/user/project"));
+        assert!(summary.contains("5 entries"));
+    }
+
+    #[test]
+    fn test_summarize_directory_tree_empty() {
+        let raw = serde_json::json!({"root": ".", "total": 0, "entries": []});
+        let summary = summarize_directory_tree(&serde_json::to_string(&raw).unwrap());
+        assert!(summary.contains("0 entries"));
+    }
+
+    #[test]
+    fn test_summarize_directory_tree_invalid_json() {
+        let summary = summarize_directory_tree("not json");
+        assert!(summary.contains("0 entries"));
+    }
+
+    // =========================================================================
+    // summarize_file_read tests
+    // =========================================================================
+
+    #[test]
+    fn test_summarize_file_read_short() {
+        let raw = serde_json::json!({
+            "total_lines": 5,
+            "content": "line1\nline2\nline3\nline4\nline5"
+        });
+        let summary = summarize_file_read(&serde_json::to_string(&raw).unwrap());
+        assert!(summary.contains("5 total lines"));
+        assert!(summary.contains("line1"));
+    }
+
+    #[test]
+    fn test_summarize_file_read_long() {
+        let lines: String = (0..200).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+        let raw = serde_json::json!({
+            "total_lines": 200,
+            "content": lines
+        });
+        let summary = summarize_file_read(&serde_json::to_string(&raw).unwrap());
+        assert!(summary.contains("200 total lines"));
+        assert!(summary.contains("First 100 lines"));
+        assert!(summary.contains("Last 50 lines"));
+        assert!(summary.contains("lines omitted"));
+    }
+
+    #[test]
+    fn test_summarize_file_read_empty() {
+        let raw = serde_json::json!({"total_lines": 0, "content": ""});
+        let summary = summarize_file_read(&serde_json::to_string(&raw).unwrap());
+        assert!(summary.contains("0 total lines"));
+    }
+
+    // =========================================================================
+    // summarize_git_diff tests
+    // =========================================================================
+
+    #[test]
+    fn test_summarize_git_diff_single_file() {
+        let diff = "diff --git a/src/main.rs b/src/main.rs\n--- a/src/main.rs\n+++ b/src/main.rs\n+added line\n-removed line\n+another add";
+        let raw = serde_json::json!({"diff": diff});
+        let summary = summarize_git_diff(&serde_json::to_string(&raw).unwrap());
+        assert!(summary.contains("1 files changed"));
+        assert!(summary.contains("+2"));
+        assert!(summary.contains("-1"));
+    }
+
+    #[test]
+    fn test_summarize_git_diff_multiple_files() {
+        let diff = "diff --git a/a.rs b/a.rs\n+line1\ndiff --git a/b.rs b/b.rs\n-line2";
+        let raw = serde_json::json!({"diff": diff});
+        let summary = summarize_git_diff(&serde_json::to_string(&raw).unwrap());
+        assert!(summary.contains("2 files changed"));
+    }
+
+    #[test]
+    fn test_summarize_git_diff_empty() {
+        let raw = serde_json::json!({"diff": ""});
+        let summary = summarize_git_diff(&serde_json::to_string(&raw).unwrap());
+        assert!(summary.contains("0 files changed"));
+    }
+
+    // =========================================================================
+    // summarize_bulk_read tests
+    // =========================================================================
+
+    #[test]
+    fn test_summarize_bulk_read() {
+        let raw = serde_json::json!({"loaded": 5, "skipped": 2, "tokens_added": 10000});
+        let summary = summarize_bulk_read(&serde_json::to_string(&raw).unwrap());
+        assert!(summary.contains("5 files loaded"));
+        assert!(summary.contains("2 skipped"));
+        assert!(summary.contains("10000 tokens"));
+    }
+
+    #[test]
+    fn test_summarize_bulk_read_empty() {
+        let raw = serde_json::json!({});
+        let summary = summarize_bulk_read(&serde_json::to_string(&raw).unwrap());
+        assert!(summary.contains("0 files loaded"));
+    }
+
+    // =========================================================================
+    // summarize_shell_exec tests
+    // =========================================================================
+
+    #[test]
+    fn test_summarize_shell_exec_basic() {
+        let raw = serde_json::json!({
+            "exit_code": 0,
+            "stdout": "Hello World\nLine 2",
+            "stderr": ""
+        });
+        let summary = summarize_shell_exec(&serde_json::to_string(&raw).unwrap());
+        assert!(summary.contains("Exit code: 0"));
+        assert!(summary.contains("Hello World"));
+    }
+
+    #[test]
+    fn test_summarize_shell_exec_with_stderr() {
+        let raw = serde_json::json!({
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": "error: something failed"
+        });
+        let summary = summarize_shell_exec(&serde_json::to_string(&raw).unwrap());
+        assert!(summary.contains("Exit code: 1"));
+        assert!(summary.contains("error: something failed"));
+    }
+
+    // =========================================================================
+    // summarize_generic tests
+    // =========================================================================
+
+    #[test]
+    fn test_summarize_generic_short() {
+        let summary = summarize_generic("hello world");
+        assert!(summary.contains("hello world"));
+        assert!(summary.contains("total chars"));
+    }
+
+    #[test]
+    fn test_summarize_generic_long() {
+        let long = "x".repeat(20000);
+        let summary = summarize_generic(&long);
+        assert!(summary.contains("see raw file"));
+    }
+
+    // =========================================================================
+    // task_requires_mutation tests
+    // =========================================================================
+
+    #[test]
+    fn test_task_requires_mutation_fix() {
+        assert!(task_requires_mutation("Fix the failing test"));
+    }
+
+    #[test]
+    fn test_task_requires_mutation_implement() {
+        assert!(task_requires_mutation("Implement the new feature"));
+    }
+
+    #[test]
+    fn test_task_requires_mutation_edit() {
+        assert!(task_requires_mutation("Edit the config file"));
+    }
+
+    #[test]
+    fn test_task_requires_mutation_modify() {
+        assert!(task_requires_mutation("Modify the agent loop"));
+    }
+
+    #[test]
+    fn test_task_requires_mutation_update() {
+        assert!(task_requires_mutation("Update the dependencies"));
+    }
+
+    #[test]
+    fn test_task_requires_mutation_write() {
+        assert!(task_requires_mutation("Write the new module"));
+    }
+
+    #[test]
+    fn test_task_requires_mutation_create() {
+        assert!(task_requires_mutation("Create a new tool"));
+    }
+
+    #[test]
+    fn test_task_requires_mutation_refactor() {
+        assert!(task_requires_mutation("Refactor the parser"));
+    }
+
+    #[test]
+    fn test_task_requires_mutation_rename() {
+        assert!(task_requires_mutation("Rename the variable"));
+    }
+
+    #[test]
+    fn test_task_requires_mutation_delete() {
+        assert!(task_requires_mutation("Delete the unused file"));
+    }
+
+    #[test]
+    fn test_task_requires_mutation_remove() {
+        assert!(task_requires_mutation("Remove dead code"));
+    }
+
+    #[test]
+    fn test_task_requires_mutation_make_tests_pass() {
+        assert!(task_requires_mutation("Make tests pass"));
+    }
+
+    #[test]
+    fn test_task_requires_mutation_until_green() {
+        assert!(task_requires_mutation("Keep going until green"));
+    }
+
+    #[test]
+    fn test_task_no_mutation_read() {
+        assert!(!task_requires_mutation("Read the log file"));
+    }
+
+    #[test]
+    fn test_task_no_mutation_explore() {
+        assert!(!task_requires_mutation("Explore the codebase structure"));
+    }
+
+    #[test]
+    fn test_task_no_mutation_understand() {
+        assert!(!task_requires_mutation("Understand how the system works"));
+    }
+
+    // =========================================================================
+    // shell_command_is_observational tests
+    // =========================================================================
+
+    #[test]
+    fn test_observational_cargo_test() {
+        assert!(shell_command_is_observational("cargo test"));
+    }
+
+    #[test]
+    fn test_observational_cargo_check() {
+        assert!(shell_command_is_observational("cargo check"));
+    }
+
+    #[test]
+    fn test_observational_cargo_clippy() {
+        assert!(shell_command_is_observational("cargo clippy"));
+    }
+
+    #[test]
+    fn test_observational_git_status() {
+        assert!(shell_command_is_observational("git status"));
+    }
+
+    #[test]
+    fn test_observational_git_diff() {
+        assert!(shell_command_is_observational("git diff"));
+    }
+
+    #[test]
+    fn test_observational_git_log() {
+        assert!(shell_command_is_observational("git log"));
+    }
+
+    #[test]
+    fn test_observational_ls() {
+        assert!(shell_command_is_observational("ls"));
+    }
+
+    #[test]
+    fn test_observational_pwd() {
+        assert!(shell_command_is_observational("pwd"));
+    }
+
+    #[test]
+    fn test_observational_find() {
+        assert!(shell_command_is_observational("find . -name '*.rs'"));
+    }
+
+    #[test]
+    fn test_observational_grep() {
+        assert!(shell_command_is_observational("grep -r 'pattern'"));
+    }
+
+    #[test]
+    fn test_observational_cat() {
+        assert!(shell_command_is_observational("cat file.txt"));
+    }
+
+    #[test]
+    fn test_observational_head() {
+        assert!(shell_command_is_observational("head -20 file.txt"));
+    }
+
+    #[test]
+    fn test_observational_tail() {
+        assert!(shell_command_is_observational("tail -f log.txt"));
+    }
+
+    #[test]
+    fn test_observational_wc() {
+        assert!(shell_command_is_observational("wc -l file.txt"));
+    }
+
+    #[test]
+    fn test_observational_tree() {
+        assert!(shell_command_is_observational("tree src/"));
+    }
+
+    #[test]
+    fn test_observational_which() {
+        assert!(shell_command_is_observational("which cargo"));
+    }
+
+    #[test]
+    fn test_observational_echo() {
+        assert!(shell_command_is_observational("echo hello"));
+    }
+
+    #[test]
+    fn test_observational_pytest() {
+        assert!(shell_command_is_observational("pytest tests/"));
+    }
+
+    #[test]
+    fn test_observational_sed_n() {
+        assert!(shell_command_is_observational("sed -n '1,10p' file.txt"));
+    }
+
+    #[test]
+    fn test_not_observational_cargo_fmt() {
+        assert!(!shell_command_is_observational("cargo fmt"));
+    }
+
+    #[test]
+    fn test_not_observational_cargo_fix() {
+        assert!(!shell_command_is_observational("cargo fix"));
+    }
+
+    #[test]
+    fn test_not_observational_cargo_update() {
+        assert!(!shell_command_is_observational("cargo update"));
+    }
+
+    #[test]
+    fn test_not_observational_mkdir() {
+        assert!(!shell_command_is_observational("mkdir new_dir"));
+    }
+
+    #[test]
+    fn test_not_observational_touch() {
+        assert!(!shell_command_is_observational("touch file.txt"));
+    }
+
+    #[test]
+    fn test_not_observational_rm() {
+        assert!(!shell_command_is_observational("rm file.txt"));
+    }
+
+    #[test]
+    fn test_not_observational_mv() {
+        assert!(!shell_command_is_observational("mv a.txt b.txt"));
+    }
+
+    #[test]
+    fn test_not_observational_cp() {
+        assert!(!shell_command_is_observational("cp a.txt b.txt"));
+    }
+
+    #[test]
+    fn test_not_observational_sed_inplace() {
+        assert!(!shell_command_is_observational("sed -i 's/foo/bar/' file.txt"));
+    }
+
+    #[test]
+    fn test_not_observational_git_add() {
+        assert!(!shell_command_is_observational("git add ."));
+    }
+
+    #[test]
+    fn test_not_observational_git_commit() {
+        assert!(!shell_command_is_observational("git commit -m 'msg'"));
+    }
+
+    #[test]
+    fn test_not_observational_redirect() {
+        assert!(!shell_command_is_observational("echo hi > file.txt"));
+    }
+
+    #[test]
+    fn test_not_observational_npm_install() {
+        assert!(!shell_command_is_observational("npm install express"));
+    }
+
+    #[test]
+    fn test_not_observational_pip_install() {
+        assert!(!shell_command_is_observational("pip install requests"));
+    }
+
+    #[test]
+    fn test_observational_empty() {
+        assert!(!shell_command_is_observational(""));
+    }
+
+    // =========================================================================
+    // tool_call_is_observational tests
+    // =========================================================================
+
+    #[test]
+    fn test_observational_file_read() {
+        assert!(tool_call_is_observational("file_read", "{}"));
+    }
+
+    #[test]
+    fn test_observational_directory_tree() {
+        assert!(tool_call_is_observational("directory_tree", "{}"));
+    }
+
+    #[test]
+    fn test_observational_glob_find() {
+        assert!(tool_call_is_observational("glob_find", "{}"));
+    }
+
+    #[test]
+    fn test_observational_grep_search() {
+        assert!(tool_call_is_observational("grep_search", "{}"));
+    }
+
+    #[test]
+    fn test_observational_symbol_search() {
+        assert!(tool_call_is_observational("symbol_search", "{}"));
+    }
+
+    #[test]
+    fn test_observational_git_status_tool() {
+        assert!(tool_call_is_observational("git_status", "{}"));
+    }
+
+    #[test]
+    fn test_observational_cargo_check_tool() {
+        assert!(tool_call_is_observational("cargo_check", "{}"));
+    }
+
+    #[test]
+    fn test_observational_cargo_test_tool() {
+        assert!(tool_call_is_observational("cargo_test", "{}"));
+    }
+
+    #[test]
+    fn test_not_observational_file_write() {
+        assert!(!tool_call_is_observational("file_write", "{}"));
+    }
+
+    #[test]
+    fn test_not_observational_file_edit() {
+        assert!(!tool_call_is_observational("file_edit", "{}"));
+    }
+
+    #[test]
+    fn test_observational_shell_exec_read_only() {
+        assert!(tool_call_is_observational(
+            "shell_exec",
+            r#"{"command":"cargo test"}"#
+        ));
+    }
+
+    #[test]
+    fn test_not_observational_shell_exec_mutating() {
+        assert!(!tool_call_is_observational(
+            "shell_exec",
+            r#"{"command":"cargo fmt"}"#
+        ));
+    }
+
+    #[test]
+    fn test_not_observational_shell_exec_no_command() {
+        assert!(!tool_call_is_observational("shell_exec", "{}"));
+    }
+
+    // =========================================================================
+    // tool_call_counts_as_state_change tests
+    // =========================================================================
+
+    #[test]
+    fn test_state_change_file_write() {
+        assert!(tool_call_counts_as_state_change("file_write", "{}"));
+    }
+
+    #[test]
+    fn test_state_change_file_edit() {
+        assert!(tool_call_counts_as_state_change("file_edit", "{}"));
+    }
+
+    #[test]
+    fn test_no_state_change_file_read() {
+        assert!(!tool_call_counts_as_state_change("file_read", "{}"));
+    }
+
+    #[test]
+    fn test_no_state_change_cargo_check() {
+        assert!(!tool_call_counts_as_state_change("cargo_check", "{}"));
+    }
+
+    #[test]
+    fn test_no_state_change_cargo_test() {
+        assert!(!tool_call_counts_as_state_change("cargo_test", "{}"));
+    }
+
+    #[test]
+    fn test_no_state_change_cargo_clippy() {
+        assert!(!tool_call_counts_as_state_change("cargo_clippy", "{}"));
+    }
+
+    // =========================================================================
+    // extract_backticked_tool_names tests
+    // =========================================================================
+
+    #[test]
+    fn test_extract_backticked_tool_names_basic() {
+        let names = extract_backticked_tool_names("Use `file_read` and `file_edit`");
+        assert_eq!(names, vec!["file_read", "file_edit"]);
+    }
+
+    #[test]
+    fn test_extract_backticked_tool_names_empty() {
+        let names = extract_backticked_tool_names("no tools here");
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn test_extract_backticked_tool_names_invalid_chars() {
+        let names = extract_backticked_tool_names("Use `File Read` and `hello-world`");
+        // Only lowercase, digits, underscore
+        assert!(names.is_empty());
+    }
+
+    #[test]
+    fn test_extract_backticked_tool_names_single() {
+        let names = extract_backticked_tool_names("`shell_exec`");
+        assert_eq!(names, vec!["shell_exec"]);
+    }
+
+    #[test]
+    fn test_extract_backticked_tool_names_with_digits() {
+        let names = extract_backticked_tool_names("`tool_v2`");
+        assert_eq!(names, vec!["tool_v2"]);
+    }
+
+    // =========================================================================
+    // extract_explicit_allowed_tools tests
+    // =========================================================================
+
+    #[test]
+    fn test_extract_allowed_tools_no_section() {
+        let task = "Just do something useful.";
+        assert!(extract_explicit_allowed_tools(task).is_none());
+    }
+
+    #[test]
+    fn test_extract_allowed_tools_with_bullets() {
+        let task = "Use only these concrete tools:\n- `file_read`\n- `shell_exec`\n\nDo the task.";
+        let allowed = extract_explicit_allowed_tools(task).unwrap();
+        assert!(allowed.contains("file_read"));
+        assert!(allowed.contains("shell_exec"));
+        assert_eq!(allowed.len(), 2);
+    }
+
+    #[test]
+    fn test_extract_allowed_tools_case_variations() {
+        let task = "Allowed tools:\n- `grep_search`\n- `glob_find`\n";
+        let allowed = extract_explicit_allowed_tools(task).unwrap();
+        assert!(allowed.contains("grep_search"));
+        assert!(allowed.contains("glob_find"));
+    }
+
+    // =========================================================================
+    // extract_explicit_disallowed_tools tests
+    // =========================================================================
+
+    #[test]
+    fn test_extract_disallowed_never_call() {
+        let task = "Never call `tool_search`.";
+        let disallowed = extract_explicit_disallowed_tools(task);
+        assert!(disallowed.contains("tool_search"));
+    }
+
+    #[test]
+    fn test_extract_disallowed_do_not_use() {
+        let task = "Do not use `file_delete`.";
+        let disallowed = extract_explicit_disallowed_tools(task);
+        assert!(disallowed.contains("file_delete"));
+    }
+
+    #[test]
+    fn test_extract_disallowed_dont_use() {
+        let task = "Don't use `shell_exec`.";
+        let disallowed = extract_explicit_disallowed_tools(task);
+        assert!(disallowed.contains("shell_exec"));
+    }
+
+    #[test]
+    fn test_extract_disallowed_avoid() {
+        let task = "Avoid `git_commit` for now.";
+        let disallowed = extract_explicit_disallowed_tools(task);
+        assert!(disallowed.contains("git_commit"));
+    }
+
+    #[test]
+    fn test_extract_disallowed_empty() {
+        let task = "Just do the task.";
+        let disallowed = extract_explicit_disallowed_tools(task);
+        assert!(disallowed.is_empty());
+    }
+
+    // =========================================================================
+    // insert_missing_tool_arg tests
+    // =========================================================================
+
+    #[test]
+    fn test_insert_missing_arg_adds_when_absent() {
+        let mut obj = serde_json::Map::new();
+        let inserted = insert_missing_tool_arg(&mut obj, "key", serde_json::json!("value"));
+        assert!(inserted);
+        assert_eq!(obj["key"], "value");
+    }
+
+    #[test]
+    fn test_insert_missing_arg_skips_when_present() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("key".to_string(), serde_json::json!("existing"));
+        let inserted = insert_missing_tool_arg(&mut obj, "key", serde_json::json!("new"));
+        assert!(!inserted);
+        assert_eq!(obj["key"], "existing");
+    }
+
+    #[test]
+    fn test_insert_missing_arg_replaces_null() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("key".to_string(), serde_json::Value::Null);
+        let inserted = insert_missing_tool_arg(&mut obj, "key", serde_json::json!("value"));
+        assert!(inserted);
+        assert_eq!(obj["key"], "value");
+    }
 }

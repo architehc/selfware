@@ -1221,4 +1221,257 @@ mod tests {
         worker4.set_status(WorkerStatus::Working);
         assert!(!worker4.is_finished());
     }
+
+    // =========================================================================
+    // CoordinatorConfig tests
+    // =========================================================================
+
+    #[test]
+    fn test_coordinator_config_default() {
+        let config = CoordinatorConfig::default();
+        assert_eq!(config.max_concurrent_workers, 4);
+        assert_eq!(config.worker_timeout_secs, 300);
+        assert!(config.allow_worker_spawn);
+        assert!(config.auto_advance);
+    }
+
+    #[test]
+    fn test_coordinator_config_custom() {
+        let config = CoordinatorConfig {
+            max_concurrent_workers: 8,
+            worker_timeout_secs: 600,
+            allow_worker_spawn: false,
+            auto_advance: false,
+        };
+        assert_eq!(config.max_concurrent_workers, 8);
+        assert_eq!(config.worker_timeout_secs, 600);
+        assert!(!config.allow_worker_spawn);
+        assert!(!config.auto_advance);
+    }
+
+    #[test]
+    fn test_coordinator_config_clone() {
+        let config = CoordinatorConfig::default();
+        let cloned = config.clone();
+        assert_eq!(config.max_concurrent_workers, cloned.max_concurrent_workers);
+        assert_eq!(config.worker_timeout_secs, cloned.worker_timeout_secs);
+    }
+
+    // =========================================================================
+    // WorkflowPhase tests
+    // =========================================================================
+
+    #[test]
+    fn test_workflow_phase_equality() {
+        assert_eq!(WorkflowPhase::Research, WorkflowPhase::Research);
+        assert_eq!(WorkflowPhase::Synthesis, WorkflowPhase::Synthesis);
+        assert_ne!(WorkflowPhase::Research, WorkflowPhase::Synthesis);
+    }
+
+    #[test]
+    fn test_workflow_phase_copy() {
+        let phase = WorkflowPhase::Implementation;
+        let copied = phase;
+        assert_eq!(phase, copied);
+    }
+
+    #[test]
+    fn test_workflow_phase_clone() {
+        let phase = WorkflowPhase::Verification;
+        let cloned = phase.clone();
+        assert_eq!(phase, cloned);
+    }
+
+    #[test]
+    fn test_workflow_phase_serialization() {
+        let phase = WorkflowPhase::Research;
+        let json = serde_json::to_string(&phase).unwrap();
+        let parsed: WorkflowPhase = serde_json::from_str(&json).unwrap();
+        assert_eq!(phase, parsed);
+    }
+
+    #[test]
+    fn test_all_workflow_phases_serialize() {
+        let phases = vec![
+            WorkflowPhase::Research,
+            WorkflowPhase::Synthesis,
+            WorkflowPhase::Implementation,
+            WorkflowPhase::Verification,
+            WorkflowPhase::Complete,
+            WorkflowPhase::Failed,
+        ];
+        for phase in phases {
+            let json = serde_json::to_string(&phase).unwrap();
+            let parsed: WorkflowPhase = serde_json::from_str(&json).unwrap();
+            assert_eq!(phase, parsed);
+        }
+    }
+
+    #[test]
+    fn test_all_workflow_phases_display() {
+        let expected = vec![
+            (WorkflowPhase::Research, "research"),
+            (WorkflowPhase::Synthesis, "synthesis"),
+            (WorkflowPhase::Implementation, "implementation"),
+            (WorkflowPhase::Verification, "verification"),
+            (WorkflowPhase::Complete, "complete"),
+            (WorkflowPhase::Failed, "failed"),
+        ];
+        for (phase, s) in expected {
+            assert_eq!(phase.to_string(), s);
+        }
+    }
+
+    // =========================================================================
+    // WorkerResult tests
+    // =========================================================================
+
+    #[test]
+    fn test_worker_result_serialization() {
+        let result = WorkerResult {
+            worker_id: "worker-123".to_string(),
+            success: true,
+            output: "Task completed".to_string(),
+            error: None,
+            tool_calls: 5,
+            duration_secs: 30,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("worker-123"));
+        assert!(json.contains("Task completed"));
+        assert!(!json.contains("error")); // skip_serializing_if = None
+    }
+
+    #[test]
+    fn test_worker_result_with_error() {
+        let result = WorkerResult {
+            worker_id: "worker-456".to_string(),
+            success: false,
+            output: "".to_string(),
+            error: Some("Connection timeout".to_string()),
+            tool_calls: 2,
+            duration_secs: 10,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("Connection timeout"));
+        assert!(!result.success);
+    }
+
+    #[test]
+    fn test_worker_result_deserialize() {
+        let json = r#"{"worker_id":"w1","success":true,"output":"done","tool_calls":3,"duration_secs":15}"#;
+        let result: WorkerResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.worker_id, "w1");
+        assert!(result.success);
+        assert_eq!(result.tool_calls, 3);
+        assert_eq!(result.duration_secs, 15);
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn test_worker_result_clone() {
+        let result = WorkerResult {
+            worker_id: "w1".to_string(),
+            success: true,
+            output: "output".to_string(),
+            error: None,
+            tool_calls: 1,
+            duration_secs: 5,
+        };
+        let cloned = result.clone();
+        assert_eq!(result.worker_id, cloned.worker_id);
+        assert_eq!(result.output, cloned.output);
+    }
+
+    // =========================================================================
+    // Tool restriction constants tests
+    // =========================================================================
+
+    #[test]
+    fn test_coordinator_allowed_tools_contains_read_tools() {
+        assert!(COORDINATOR_ALLOWED_TOOLS.contains(&"file_read"));
+        assert!(COORDINATOR_ALLOWED_TOOLS.contains(&"directory_tree"));
+        assert!(COORDINATOR_ALLOWED_TOOLS.contains(&"glob_find"));
+        assert!(COORDINATOR_ALLOWED_TOOLS.contains(&"grep_search"));
+        assert!(COORDINATOR_ALLOWED_TOOLS.contains(&"tool_search"));
+    }
+
+    #[test]
+    fn test_coordinator_denied_tools_contains_write_tools() {
+        assert!(COORDINATOR_DENIED_TOOLS.contains(&"file_write"));
+        assert!(COORDINATOR_DENIED_TOOLS.contains(&"file_edit"));
+        assert!(COORDINATOR_DENIED_TOOLS.contains(&"file_delete"));
+        assert!(COORDINATOR_DENIED_TOOLS.contains(&"shell_exec"));
+        assert!(COORDINATOR_DENIED_TOOLS.contains(&"bash"));
+    }
+
+    #[test]
+    fn test_coordinator_denied_tools_contains_container_tools() {
+        assert!(COORDINATOR_DENIED_TOOLS.contains(&"container_run"));
+        assert!(COORDINATOR_DENIED_TOOLS.contains(&"compose_up"));
+    }
+
+    #[test]
+    fn test_coordinator_denied_tools_contains_git_tools() {
+        assert!(COORDINATOR_DENIED_TOOLS.contains(&"git_commit"));
+        assert!(COORDINATOR_DENIED_TOOLS.contains(&"git_push"));
+    }
+
+    #[test]
+    fn test_no_overlap_between_allowed_and_denied() {
+        for tool in COORDINATOR_ALLOWED_TOOLS {
+            assert!(
+                !COORDINATOR_DENIED_TOOLS.contains(tool),
+                "Tool {} is in both allowed and denied lists",
+                tool
+            );
+        }
+    }
+
+    // =========================================================================
+    // Static method tests
+    // =========================================================================
+
+    #[test]
+    fn test_is_tool_allowed_positive() {
+        assert!(CoordinatorAgent::is_tool_allowed("file_read"));
+        assert!(CoordinatorAgent::is_tool_allowed("grep_search"));
+    }
+
+    #[test]
+    fn test_is_tool_allowed_negative() {
+        assert!(!CoordinatorAgent::is_tool_allowed("file_write"));
+        assert!(!CoordinatorAgent::is_tool_allowed("unknown_tool"));
+    }
+
+    #[test]
+    fn test_is_tool_denied_positive() {
+        assert!(CoordinatorAgent::is_tool_denied("shell_exec"));
+        assert!(CoordinatorAgent::is_tool_denied("file_delete"));
+    }
+
+    #[test]
+    fn test_is_tool_denied_negative() {
+        assert!(!CoordinatorAgent::is_tool_denied("file_read"));
+        assert!(!CoordinatorAgent::is_tool_denied("unknown_tool"));
+    }
+
+    // =========================================================================
+    // Coordinator with_config test
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_coordinator_with_config() {
+        let config = CoordinatorConfig {
+            max_concurrent_workers: 10,
+            worker_timeout_secs: 60,
+            allow_worker_spawn: false,
+            auto_advance: false,
+        };
+        let coordinator = CoordinatorAgent::new("Test")
+            .unwrap()
+            .with_config(config);
+        assert_eq!(coordinator.task(), "Test");
+        // Config is applied internally; we verify creation succeeds
+    }
 }

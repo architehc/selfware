@@ -1619,4 +1619,376 @@ mod tests {
         assert!(!text.contains("hidden"));
         assert!(!text.contains("function"));
     }
+
+    // =========================================================================
+    // escape_js_string tests
+    // =========================================================================
+
+    #[test]
+    fn test_escape_js_string_plain() {
+        assert_eq!(escape_js_string("hello"), "hello");
+    }
+
+    #[test]
+    fn test_escape_js_string_backslash() {
+        assert_eq!(escape_js_string(r"path\to\file"), r"path\\to\\file");
+    }
+
+    #[test]
+    fn test_escape_js_string_single_quote() {
+        assert_eq!(escape_js_string("it's"), r"it\'s");
+    }
+
+    #[test]
+    fn test_escape_js_string_double_quote() {
+        assert_eq!(escape_js_string(r#"say "hi""#), r#"say \"hi\""#);
+    }
+
+    #[test]
+    fn test_escape_js_string_newline() {
+        assert_eq!(escape_js_string("line1\nline2"), r"line1\nline2");
+    }
+
+    #[test]
+    fn test_escape_js_string_carriage_return() {
+        assert_eq!(escape_js_string("line1\rline2"), r"line1\rline2");
+    }
+
+    #[test]
+    fn test_escape_js_string_tab() {
+        assert_eq!(escape_js_string("col1\tcol2"), r"col1\tcol2");
+    }
+
+    #[test]
+    fn test_escape_js_string_null() {
+        assert_eq!(escape_js_string("before\0after"), r"before\0after");
+    }
+
+    #[test]
+    fn test_escape_js_string_line_separator() {
+        let input = "text\u{2028}more";
+        let escaped = escape_js_string(input);
+        assert!(escaped.contains("\\u2028"));
+    }
+
+    #[test]
+    fn test_escape_js_string_paragraph_separator() {
+        let input = "text\u{2029}more";
+        let escaped = escape_js_string(input);
+        assert!(escaped.contains("\\u2029"));
+    }
+
+    #[test]
+    fn test_escape_js_string_backtick() {
+        assert_eq!(escape_js_string("hello `world`"), r"hello \`world\`");
+    }
+
+    #[test]
+    fn test_escape_js_string_dollar() {
+        assert_eq!(escape_js_string("cost $5"), r"cost \$5");
+    }
+
+    #[test]
+    fn test_escape_js_string_empty() {
+        assert_eq!(escape_js_string(""), "");
+    }
+
+    #[test]
+    fn test_escape_js_string_all_special_chars() {
+        let input = "'\"\\\n\r\t\0`$";
+        let escaped = escape_js_string(input);
+        // Verify all special characters are escaped
+        assert!(escaped.contains(r"\'"));
+        assert!(escaped.contains(r#"\""#));
+        assert!(escaped.contains(r"\\"));
+        assert!(escaped.contains(r"\n"));
+        assert!(escaped.contains(r"\r"));
+        assert!(escaped.contains(r"\t"));
+        assert!(escaped.contains(r"\0"));
+        assert!(escaped.contains(r"\`"));
+        assert!(escaped.contains(r"\$"));
+        // Verify no raw special chars remain (check length changed)
+        assert!(escaped.len() > input.len());
+    }
+
+    // =========================================================================
+    // is_private_network_ip tests
+    // =========================================================================
+
+    #[test]
+    fn test_private_ip_loopback_v4() {
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(is_private_network_ip(&ip));
+    }
+
+    #[test]
+    fn test_private_ip_loopback_v6() {
+        let ip: IpAddr = "::1".parse().unwrap();
+        assert!(is_private_network_ip(&ip));
+    }
+
+    #[test]
+    fn test_private_ip_10_range() {
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        assert!(is_private_network_ip(&ip));
+    }
+
+    #[test]
+    fn test_private_ip_172_range() {
+        let ip: IpAddr = "172.16.0.1".parse().unwrap();
+        assert!(is_private_network_ip(&ip));
+    }
+
+    #[test]
+    fn test_private_ip_192_168_range() {
+        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        assert!(is_private_network_ip(&ip));
+    }
+
+    #[test]
+    fn test_private_ip_link_local() {
+        let ip: IpAddr = "169.254.1.1".parse().unwrap();
+        assert!(is_private_network_ip(&ip));
+    }
+
+    #[test]
+    fn test_private_ip_unspecified_v4() {
+        let ip: IpAddr = "0.0.0.0".parse().unwrap();
+        assert!(is_private_network_ip(&ip));
+    }
+
+    #[test]
+    fn test_private_ip_unspecified_v6() {
+        let ip: IpAddr = "::".parse().unwrap();
+        assert!(is_private_network_ip(&ip));
+    }
+
+    #[test]
+    fn test_public_ip_not_private() {
+        let ip: IpAddr = "8.8.8.8".parse().unwrap();
+        assert!(!is_private_network_ip(&ip));
+    }
+
+    #[test]
+    fn test_public_ip_1111() {
+        let ip: IpAddr = "1.1.1.1".parse().unwrap();
+        assert!(!is_private_network_ip(&ip));
+    }
+
+    #[test]
+    fn test_public_ip_93() {
+        let ip: IpAddr = "93.184.216.34".parse().unwrap();
+        assert!(!is_private_network_ip(&ip));
+    }
+
+    // =========================================================================
+    // is_trusted_local_browser_host tests
+    // =========================================================================
+
+    #[test]
+    fn test_trusted_localhost() {
+        assert!(is_trusted_local_browser_host("localhost"));
+    }
+
+    #[test]
+    fn test_trusted_127001() {
+        assert!(is_trusted_local_browser_host("127.0.0.1"));
+    }
+
+    #[test]
+    fn test_trusted_ipv6_loopback() {
+        assert!(is_trusted_local_browser_host("::1"));
+    }
+
+    #[test]
+    fn test_trusted_ipv6_loopback_bracketed() {
+        assert!(is_trusted_local_browser_host("[::1]"));
+    }
+
+    #[test]
+    fn test_trusted_0000() {
+        assert!(is_trusted_local_browser_host("0.0.0.0"));
+    }
+
+    #[test]
+    fn test_trusted_subdomain_localhost() {
+        assert!(is_trusted_local_browser_host("app.localhost"));
+    }
+
+    #[test]
+    fn test_not_trusted_example() {
+        assert!(!is_trusted_local_browser_host("example.com"));
+    }
+
+    #[test]
+    fn test_not_trusted_private_ip() {
+        assert!(!is_trusted_local_browser_host("192.168.1.1"));
+    }
+
+    #[test]
+    fn test_not_trusted_empty() {
+        assert!(!is_trusted_local_browser_host(""));
+    }
+
+    // =========================================================================
+    // resolve_and_pin_target edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_resolve_rejects_ftp_scheme() {
+        assert!(resolve_and_pin_target("ftp://example.com/file").is_err());
+    }
+
+    #[test]
+    fn test_resolve_rejects_javascript_scheme() {
+        assert!(resolve_and_pin_target("javascript:alert(1)").is_err());
+    }
+
+    #[test]
+    fn test_resolve_rejects_data_scheme() {
+        assert!(resolve_and_pin_target("data:text/html,<h1>hi</h1>").is_err());
+    }
+
+    #[test]
+    fn test_resolve_allows_https() {
+        // This may fail in CI with no DNS, but the scheme check happens before DNS
+        let result = resolve_and_pin_target("https://1.1.1.1/");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_resolve_pin_target_port_default_http() {
+        let pinned = resolve_and_pin_target("http://127.0.0.1/test").unwrap();
+        assert_eq!(pinned.port, 80);
+    }
+
+    #[test]
+    fn test_resolve_pin_target_port_default_https() {
+        let pinned = resolve_and_pin_target("https://1.1.1.1/").unwrap();
+        assert_eq!(pinned.port, 443);
+    }
+
+    #[test]
+    fn test_resolve_pin_target_custom_port() {
+        let pinned = resolve_and_pin_target("http://127.0.0.1:8080/api").unwrap();
+        assert_eq!(pinned.port, 8080);
+    }
+
+    #[test]
+    fn test_resolve_pin_target_host_is_ip_true() {
+        let pinned = resolve_and_pin_target("http://127.0.0.1/").unwrap();
+        assert!(pinned.host_is_ip);
+    }
+
+    #[test]
+    fn test_resolve_pin_target_host_is_ip_false() {
+        let pinned = resolve_and_pin_target("http://localhost/").unwrap();
+        assert!(!pinned.host_is_ip);
+    }
+
+    #[test]
+    fn test_resolve_pin_target_resolver_rule_format() {
+        let pinned = resolve_and_pin_target("http://localhost:3000/api").unwrap();
+        assert!(pinned.resolver_rule.starts_with("MAP localhost "));
+        assert!(pinned.resolver_rule.contains("EXCLUDE localhost"));
+    }
+
+    // =========================================================================
+    // should_stage_chrome_output tests
+    // =========================================================================
+
+    #[test]
+    fn test_should_stage_relative_path_no_staging() {
+        assert!(!should_stage_chrome_output_for_home(
+            Path::new("output.png"),
+            Some(Path::new("/home/user"))
+        ));
+    }
+
+    #[test]
+    fn test_should_stage_no_home_dir() {
+        assert!(!should_stage_chrome_output_for_home(
+            Path::new("/tmp/output.png"),
+            None
+        ));
+    }
+
+    #[test]
+    fn test_should_stage_home_subpath_no_staging() {
+        assert!(!should_stage_chrome_output_for_home(
+            Path::new("/home/user/project/output.png"),
+            Some(Path::new("/home/user"))
+        ));
+    }
+
+    #[test]
+    fn test_should_stage_outside_home_triggers_staging() {
+        assert!(should_stage_chrome_output_for_home(
+            Path::new("/var/output.png"),
+            Some(Path::new("/home/user"))
+        ));
+    }
+
+    // =========================================================================
+    // chrome_staging_output_path tests
+    // =========================================================================
+
+    #[test]
+    fn test_chrome_staging_preserves_extension() {
+        let staged = chrome_staging_output_path(Path::new("/tmp/test.pdf")).unwrap();
+        assert_eq!(staged.extension().and_then(|e| e.to_str()), Some("pdf"));
+    }
+
+    #[test]
+    fn test_chrome_staging_empty_filename_fallback() {
+        let staged = chrome_staging_output_path(Path::new("/tmp/")).unwrap();
+        assert!(staged.to_string_lossy().contains("browser-output"));
+    }
+
+    // =========================================================================
+    // extract_text_from_html more edge cases
+    // =========================================================================
+
+    #[test]
+    fn test_extract_text_multiple_scripts() {
+        let html = "<script>a()</script>Hello<script>b()</script>World";
+        let text = extract_text_from_html(html);
+        assert!(text.contains("Hello"));
+        assert!(text.contains("World"));
+        assert!(!text.contains("a()"));
+        assert!(!text.contains("b()"));
+    }
+
+    #[test]
+    fn test_extract_text_inline_style() {
+        let html = r#"<style>.x{display:none}</style><p style="color:red">Text</p>"#;
+        let text = extract_text_from_html(html);
+        assert!(text.contains("Text"));
+        assert!(!text.contains("display:none"));
+    }
+
+    #[test]
+    fn test_extract_text_all_entities() {
+        let html = "&amp;&lt;&gt;&quot;&#39;&nbsp;";
+        let text = extract_text_from_html(html);
+        assert!(text.contains("&"));
+        assert!(text.contains("<"));
+        assert!(text.contains(">"));
+        assert!(text.contains("\""));
+        assert!(text.contains("'"));
+    }
+
+    #[test]
+    fn test_extract_text_only_tags() {
+        let html = "<div><span></span></div>";
+        let text = extract_text_from_html(html);
+        assert!(text.trim().is_empty());
+    }
+
+    #[test]
+    fn test_extract_text_large_html() {
+        let html = "<p>word </p>".repeat(1000);
+        let text = extract_text_from_html(&html);
+        assert!(text.contains("word"));
+    }
 }

@@ -1202,4 +1202,278 @@ mod tests {
             None
         );
     }
+
+    // =========================================================================
+    // is_model_small extended tests
+    // =========================================================================
+
+    #[test]
+    fn test_is_model_small_1b() {
+        assert!(is_model_small("model-1b"));
+    }
+
+    #[test]
+    fn test_is_model_small_0_5b() {
+        assert!(is_model_small("model-0.5b"));
+    }
+
+    #[test]
+    fn test_is_model_small_1_5b() {
+        assert!(is_model_small("model-1.5b"));
+    }
+
+    #[test]
+    fn test_is_model_small_3b() {
+        assert!(is_model_small("llama-3b-instruct"));
+    }
+
+    #[test]
+    fn test_is_model_small_4b() {
+        assert!(is_model_small("phi-4b"));
+    }
+
+    #[test]
+    fn test_is_model_small_5b() {
+        assert!(is_model_small("model_5b"));
+    }
+
+    #[test]
+    fn test_is_model_small_6b() {
+        assert!(is_model_small("chatglm-6b"));
+    }
+
+    #[test]
+    fn test_is_model_small_7b_not_72b() {
+        assert!(is_model_small("qwen-7b"));
+        assert!(!is_model_small("qwen-72b"));
+    }
+
+    #[test]
+    fn test_not_small_14b() {
+        assert!(!is_model_small("qwen-14b"));
+    }
+
+    #[test]
+    fn test_not_small_32b() {
+        assert!(!is_model_small("qwen-32b"));
+    }
+
+    #[test]
+    fn test_not_small_70b() {
+        assert!(!is_model_small("llama-70b"));
+    }
+
+    #[test]
+    fn test_not_small_122b() {
+        assert!(!is_model_small("qwen3.5-122b"));
+    }
+
+    #[test]
+    fn test_is_model_small_underscore_separator() {
+        assert!(is_model_small("model_7b"));
+        assert!(is_model_small("model_3b_instruct"));
+    }
+
+    // =========================================================================
+    // is_qwen35_model extended tests
+    // =========================================================================
+
+    #[test]
+    fn test_is_qwen35_lowercase() {
+        assert!(is_qwen35_model("qwen3.5-27b"));
+    }
+
+    #[test]
+    fn test_is_qwen35_mixed_case() {
+        assert!(is_qwen35_model("QWEN3.5-122B-A10B"));
+    }
+
+    #[test]
+    fn test_is_qwen35_dash_variant() {
+        assert!(is_qwen35_model("qwen3-5-27b"));
+    }
+
+    #[test]
+    fn test_not_qwen35_qwen2() {
+        assert!(!is_qwen35_model("qwen2.5-72b"));
+    }
+
+    // =========================================================================
+    // is_qwen_model extended tests
+    // =========================================================================
+
+    #[test]
+    fn test_is_qwen_any_version() {
+        assert!(is_qwen_model("Qwen2-72B"));
+        assert!(is_qwen_model("qwen-1.5-7b"));
+        assert!(is_qwen_model("Qwen3.5-122B"));
+    }
+
+    #[test]
+    fn test_not_qwen_other_model() {
+        assert!(!is_qwen_model("llama-3-70b"));
+        assert!(!is_qwen_model("phi-3-mini"));
+    }
+
+    // =========================================================================
+    // parse_models extended tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_models_no_data_field() {
+        let body = serde_json::json!({"other": "value"});
+        let models = parse_models(&body);
+        assert!(models.is_empty());
+    }
+
+    #[test]
+    fn test_parse_models_data_not_array() {
+        let body = serde_json::json!({"data": "string"});
+        let models = parse_models(&body);
+        assert!(models.is_empty());
+    }
+
+    #[test]
+    fn test_parse_models_with_max_tokens_field() {
+        let body = serde_json::json!({
+            "data": [{"id": "model-1", "max_tokens": 4096}]
+        });
+        let models = parse_models(&body);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].max_model_len, Some(4096));
+    }
+
+    #[test]
+    fn test_parse_models_no_context_info() {
+        let body = serde_json::json!({
+            "data": [{"id": "minimal-model"}]
+        });
+        let models = parse_models(&body);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "minimal-model");
+        assert_eq!(models[0].max_model_len, None);
+    }
+
+    #[test]
+    fn test_parse_models_missing_id() {
+        let body = serde_json::json!({
+            "data": [{"max_model_len": 8192}]
+        });
+        let models = parse_models(&body);
+        assert_eq!(models[0].id, "unknown");
+    }
+
+    // =========================================================================
+    // Backend display tests (extended)
+    // =========================================================================
+
+    #[test]
+    fn test_backend_equality() {
+        assert_eq!(Backend::Sglang, Backend::Sglang);
+        assert_ne!(Backend::Sglang, Backend::Vllm);
+        assert_ne!(Backend::Ollama, Backend::LlamaCpp);
+        assert_eq!(
+            Backend::Unknown("test".to_string()),
+            Backend::Unknown("test".to_string())
+        );
+        assert_ne!(
+            Backend::Unknown("a".to_string()),
+            Backend::Unknown("b".to_string())
+        );
+    }
+
+    #[test]
+    fn test_backend_clone() {
+        let b = Backend::Vllm;
+        let cloned = b.clone();
+        assert_eq!(b, cloned);
+    }
+
+    // =========================================================================
+    // extract_tokens_per_second extended tests
+    // =========================================================================
+
+    #[test]
+    fn test_extract_tps_zero_seconds() {
+        let body = serde_json::json!({"usage": {"completion_tokens": 10}});
+        let tps = extract_tokens_per_second(&body, Duration::from_secs(0));
+        // 0 seconds -> secs_f64 == 0.0, condition `secs > 0.0` is false => None
+        assert_eq!(tps, None);
+    }
+
+    #[test]
+    fn test_extract_tps_zero_tokens() {
+        let body = serde_json::json!({"usage": {"completion_tokens": 0}});
+        let tps = extract_tokens_per_second(&body, Duration::from_secs(1));
+        assert_eq!(tps, None);
+    }
+
+    #[test]
+    fn test_extract_tps_no_usage() {
+        let body = serde_json::json!({"choices": []});
+        assert_eq!(
+            extract_tokens_per_second(&body, Duration::from_secs(1)),
+            None
+        );
+    }
+
+    #[test]
+    fn test_extract_tps_no_completion_tokens() {
+        let body = serde_json::json!({"usage": {"prompt_tokens": 100}});
+        assert_eq!(
+            extract_tokens_per_second(&body, Duration::from_secs(1)),
+            None
+        );
+    }
+
+    // =========================================================================
+    // truncate_str tests
+    // =========================================================================
+
+    #[test]
+    fn test_truncate_str_short() {
+        assert_eq!(truncate_str("hi", 10), "hi");
+    }
+
+    #[test]
+    fn test_truncate_str_exact() {
+        assert_eq!(truncate_str("12345", 5), "12345");
+    }
+
+    #[test]
+    fn test_truncate_str_long() {
+        assert_eq!(truncate_str("hello world", 8), "hello...");
+    }
+
+    #[test]
+    fn test_truncate_str_very_short_max() {
+        assert_eq!(truncate_str("hello", 3), "...");
+    }
+
+    // =========================================================================
+    // ModelInfo tests
+    // =========================================================================
+
+    #[test]
+    fn test_model_info_clone() {
+        let info = ModelInfo {
+            id: "test-model".to_string(),
+            max_model_len: Some(131072),
+            raw: serde_json::json!({}),
+        };
+        let cloned = info.clone();
+        assert_eq!(cloned.id, "test-model");
+        assert_eq!(cloned.max_model_len, Some(131072));
+    }
+
+    #[test]
+    fn test_model_info_debug() {
+        let info = ModelInfo {
+            id: "model".to_string(),
+            max_model_len: None,
+            raw: serde_json::json!({}),
+        };
+        let s = format!("{:?}", info);
+        assert!(s.contains("model"));
+    }
 }
