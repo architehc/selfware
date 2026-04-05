@@ -4,7 +4,20 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 find_latest_run() {
-  ls -td "$ROOT_DIR"/long_run_tests/system_test_8hr_v4_* 2>/dev/null | head -1 || true
+  local dir pid_file pid
+
+  while IFS= read -r dir; do
+    pid_file="$dir/run.pid"
+    if [[ -f "$pid_file" ]]; then
+      pid="$(cat "$pid_file" 2>/dev/null || true)"
+      if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        printf '%s\n' "$dir"
+        return 0
+      fi
+    fi
+  done < <(find "$ROOT_DIR/long_run_tests" -maxdepth 1 -type d -name 'system_test_8hr_v4_*' | sort -r)
+
+  find "$ROOT_DIR/long_run_tests" -maxdepth 1 -type d -name 'system_test_8hr_v4_*' | sort -r | head -1 || true
 }
 
 RUN_DIR="${1:-$(find_latest_run)}"

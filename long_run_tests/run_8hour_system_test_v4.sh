@@ -420,8 +420,10 @@ run_project() {
       else
         :
       fi
-      passed="$(printf '%s\n' "$test_out" | grep -o '[0-9]\+ passed' | awk '{s+=$1} END {print s+0}')"
-      failed_count="$(printf '%s\n' "$test_out" | grep -o '[0-9]\+ failed' | awk '{s+=$1} END {print s+0}')"
+      passed="$(printf '%s\n' "$test_out" | grep -o '[0-9]\+ passed' | awk '{s+=$1} END {print s+0}' || true)"
+      failed_count="$(printf '%s\n' "$test_out" | grep -o '[0-9]\+ failed' | awk '{s+=$1} END {print s+0}' || true)"
+      passed="${passed:-0}"
+      failed_count="${failed_count:-0}"
       test_result="${passed}p/${failed_count}f"
     fi
   fi
@@ -438,8 +440,8 @@ run_project() {
     fi
     if printf '%s\n' "$py_out" | grep -Eq '([0-9]+ passed|[0-9]+ failed|collected [0-9]+ items)'; then
       compile="YES"
-      passed="$(printf '%s\n' "$py_out" | grep -o '[0-9]\+ passed' | awk '{print $1}' | tail -1)"
-      failed_count="$(printf '%s\n' "$py_out" | grep -o '[0-9]\+ failed' | awk '{print $1}' | tail -1)"
+      passed="$(printf '%s\n' "$py_out" | grep -o '[0-9]\+ passed' | awk '{print $1}' | tail -1 || true)"
+      failed_count="$(printf '%s\n' "$py_out" | grep -o '[0-9]\+ failed' | awk '{print $1}' | tail -1 || true)"
       passed="${passed:-0}"
       failed_count="${failed_count:-0}"
       test_result="${passed}p/${failed_count}f"
