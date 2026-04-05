@@ -189,7 +189,7 @@ pub(crate) enum Commands {
     #[command(alias = "lt")]
     LongTest {
         /// Duration in hours (default: 8)
-        #[arg(short, long, default_value_t = 8)]
+        #[arg(short = 'H', long, default_value_t = 8)]
         hours: u64,
         /// Timeout per project in seconds (default: 900)
         #[arg(short, long, default_value_t = 900)]
@@ -201,10 +201,10 @@ pub(crate) enum Commands {
         #[arg(short, long)]
         endpoint: Option<String>,
         /// Model name (defaults to config)
-        #[arg(short, long)]
+        #[arg(long)]
         model: Option<String>,
         /// Templates directory
-        #[arg(short, long)]
+        #[arg(long)]
         templates: Option<String>,
         /// Output directory for results
         #[arg(short, long, default_value = "long_run_results")]

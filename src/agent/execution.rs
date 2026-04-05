@@ -751,6 +751,47 @@ mod tests {
         intent_phrases.iter().any(|p| lower.contains(p))
     }
 
+    /// Build a fake assistant message that contains a file_write tool call.
+    /// Tests that exercise the completion gate need this because the gate now
+    /// scans `self.messages` (not checkpoints) for evidence that the agent
+    /// actually wrote files.
+    fn fake_file_write_message() -> crate::api::types::Message {
+        crate::api::types::Message {
+            role: "assistant".to_string(),
+            content: crate::api::types::MessageContent::Text(String::new()),
+            reasoning_content: None,
+            tool_calls: Some(vec![crate::api::types::ToolCall {
+                id: "tc_fake".to_string(),
+                call_type: "function".to_string(),
+                function: crate::api::types::ToolFunction {
+                    name: "file_write".to_string(),
+                    arguments: r#"{"path":"dummy.py","content":"x"}"#.to_string(),
+                },
+            }]),
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    /// Same as above but for file_edit.
+    fn fake_file_edit_message() -> crate::api::types::Message {
+        crate::api::types::Message {
+            role: "assistant".to_string(),
+            content: crate::api::types::MessageContent::Text(String::new()),
+            reasoning_content: None,
+            tool_calls: Some(vec![crate::api::types::ToolCall {
+                id: "tc_fake".to_string(),
+                call_type: "function".to_string(),
+                function: crate::api::types::ToolFunction {
+                    name: "file_edit".to_string(),
+                    arguments: r#"{"path":"src/lib.rs","old_str":"a","new_str":"b"}"#.to_string(),
+                },
+            }]),
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
     // =========================================================================
     // should_prompt_for_action tests
     // =========================================================================
@@ -1669,7 +1710,20 @@ mod tests {
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(tmp.path()).unwrap();
 
-        // Task with file_write in a non-Rust project — should bypass gate
+        // Ensure CWD is restored even on panic
+        struct CwdGuard(std::path::PathBuf);
+        impl Drop for CwdGuard {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.0);
+            }
+        }
+        let _guard = CwdGuard(original_dir);
+
+        // Task with file_write in a non-Rust project — should bypass gate.
+        // The completion gate scans agent.messages for file_write tool calls,
+        // so we must add one there in addition to the checkpoint.
+        agent.messages.push(fake_file_write_message());
+
         let mut checkpoint = crate::checkpoint::TaskCheckpoint::new(
             "python-task".to_string(),
             "write a python script".to_string(),
@@ -1691,8 +1745,6 @@ mod tests {
             result,
         );
 
-        // Restore cwd
-        std::env::set_current_dir(original_dir).unwrap();
         server.stop().await;
     }
 
@@ -1752,7 +1804,21 @@ mod tests {
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(&nested).unwrap();
 
+        // Ensure CWD is restored even on panic
+        struct CwdGuard(std::path::PathBuf);
+        impl Drop for CwdGuard {
+            fn drop(&mut self) {
+                let _ = std::env::set_current_dir(&self.0);
+            }
+        }
+        let _guard = CwdGuard(original_dir);
+
         let mut agent = Agent::new(config).await.unwrap();
+
+        // The completion gate scans agent.messages for file_edit tool calls,
+        // so we must add one to pass the "has written files" check.
+        agent.messages.push(fake_file_edit_message());
+
         let mut checkpoint = crate::checkpoint::TaskCheckpoint::new(
             "rust-subdir".to_string(),
             "edit a rust file".to_string(),
@@ -1777,7 +1843,6 @@ mod tests {
             result
         );
 
-        std::env::set_current_dir(original_dir).unwrap();
         server.stop().await;
     }
 
@@ -2634,9 +2699,15 @@ mod tests {
         let config = test_config(format!("{}/v1", server.url()));
         let mut agent = Agent::new(config).await.unwrap();
 
+        // Use file_read of a known-existing temp file as the "successful" middle tool
+        // so the test doesn't depend on CWD being in a git repo.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "hello").unwrap();
+        let read_args = format!(r#"{{"path":"{}"}}"#, tmp.path().display());
+
         let batch: Vec<CollectedToolCall> = vec![
             ("shell_exec".to_string(), "{}".to_string(), None),
-            ("git_status".to_string(), "{}".to_string(), None),
+            ("file_read".to_string(), read_args, None),
             ("shell_exec".to_string(), "{}".to_string(), None),
         ];
 
@@ -3174,9 +3245,9 @@ mod tests {
         let config = test_config(format!("{}/v1", server.url()));
         let mut agent = Agent::new(config).await.unwrap();
 
-        let temp = NamedTempFile::new_in(std::env::current_dir().unwrap()).unwrap();
+        let temp = NamedTempFile::new().unwrap();
         fs::write(temp.path(), "hello world\n").unwrap();
-        let path = temp.path().display().to_string();
+        let path = temp.path().canonicalize().unwrap().display().to_string();
 
         // First batch of 3 reads — all should succeed (threshold is 3 unchanged rereads)
         let batch1: Vec<CollectedToolCall> = vec![
