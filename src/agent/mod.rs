@@ -379,6 +379,9 @@ pub struct Agent {
     /// logic nudges or blocks more read-only batches until the agent edits code
     /// or otherwise changes project state.
     consecutive_read_only_steps: usize,
+    /// Set to true once any file_write or file_edit has been successfully executed
+    /// (including synthetic/auto-writes). Used by progress guard to relax thresholds.
+    has_written_any_file: bool,
     /// Three-layer context compression orchestrator
     compression_orchestrator: CompressionOrchestrator,
 }
@@ -847,6 +850,7 @@ To call a tool, use this EXACT XML structure:
             explanation_level: ExplanationLevel::Intermediate,
             consecutive_suppressions: 0,
             consecutive_read_only_steps: 0,
+            has_written_any_file: false,
             compression_orchestrator: CompressionOrchestrator::new(),
         };
 

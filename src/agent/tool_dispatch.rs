@@ -768,8 +768,16 @@ impl Agent {
         &mut self,
         tool_calls: Vec<super::execution::CollectedToolCall>,
     ) -> Option<Vec<super::execution::CollectedToolCall>> {
+        // Use relaxed threshold when agent has already written source files.
+        // Verification loops (cargo check → cargo test → read output) are expected
+        // after writing and should not be blocked aggressively.
+        let has_written = self.has_written_any_file;
+
+        let block_threshold = if has_written { 16 } else { 6 };
+        let escalation_threshold = if has_written { 20 } else { 8 };
+
         if !task_requires_mutation(self.learning_context())
-            || self.consecutive_read_only_steps <= 5
+            || self.consecutive_read_only_steps <= block_threshold
             || tool_calls.is_empty()
             || !tool_calls
                 .iter()
@@ -810,7 +818,7 @@ impl Agent {
                 .to_string(),
         ));
 
-        if self.consecutive_read_only_steps >= 8 && self.pending_synthesis.is_none() {
+        if self.consecutive_read_only_steps >= escalation_threshold && self.pending_synthesis.is_none() {
             info!(
                 "Escalating progress-guard stall to phase-2 synthesis after {} read-only steps",
                 self.consecutive_read_only_steps
@@ -2512,6 +2520,7 @@ impl Agent {
                 // Display color-coded diff for file mutations
                 if let Some((ref path, ref old_content)) = pre_edit_content {
                     if matches!(name, "file_edit" | "file_write") {
+                        self.has_written_any_file = true;
                         if let Ok(new_content) = std::fs::read_to_string(path) {
                             crate::output::display_file_diff(path, old_content, &new_content);
                         }

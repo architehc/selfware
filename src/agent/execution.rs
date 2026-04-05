@@ -118,6 +118,7 @@ impl Agent {
                 // but we'll execute it after the original tool calls
                 self.execute_tool_batch(write_call).await?;
                 self.consecutive_read_only_steps = 0;
+                self.has_written_any_file = true;
                 self.messages.push(crate::api::types::Message::user(
                     "<selfware_system_directive>\n\
                      Code from your response was automatically written to a file. \
@@ -273,6 +274,7 @@ impl Agent {
                         None,
                     )];
                     self.consecutive_read_only_steps = 0;
+                    self.has_written_any_file = true;
                     self.execute_tool_batch(synthetic_calls).await?;
                     self.messages.push(crate::api::types::Message::user(
                         "<selfware_system_directive>\n\
@@ -375,11 +377,13 @@ impl Agent {
         if self.consecutive_suppressions >= 10 {
             // After many suppressed calls, nudge the model to try a different approach.
             // Do NOT abort or force completion — the task may still need work.
+            // Also clear the failed-tool cache so the agent gets fresh chances.
             info!(
-                "Injecting strategy-change directive after {} consecutive suppressions",
+                "Injecting strategy-change directive after {} consecutive suppressions — clearing failed-tool cache",
                 self.consecutive_suppressions
             );
             self.consecutive_suppressions = 0; // reset so it can try again
+            self.clear_failed_tool_attempts(); // give the agent a clean slate
             self.messages.push(crate::api::types::Message::user(
                 "<selfware_system_directive>\n\
                  Your last several tool calls were suppressed (duplicate or no-op). \
@@ -406,11 +410,11 @@ impl Agent {
         }
 
         // TERMINAL PROGRESS GUARD: After N read-only steps, force synthesis.
-        // This is terminal for the current phase — don't just warn, act.
-        if self.consecutive_read_only_steps >= 8 {
-            // Check if we've ALREADY tried synthesis before (no files written yet).
-            // If so, skip synthesis and directly write a scaffold file to unblock.
-            let has_any_file_write = self
+        // Use a relaxed threshold when the agent has already written source files —
+        // verification loops (cargo check → cargo test → read output) are expected
+        // after writing code and should not be punished.
+        let has_any_file_write = self.has_written_any_file
+            || self
                 .messages
                 .iter()
                 .filter(|m| m.role == "assistant")
@@ -418,6 +422,10 @@ impl Agent {
                 .flatten()
                 .any(|tc| matches!(tc.function.name.as_str(), "file_edit" | "file_write"));
 
+        let terminal_threshold = if has_any_file_write { 20 } else { 8 };
+        let warning_threshold = if has_any_file_write { 15 } else { 4 };
+
+        if self.consecutive_read_only_steps >= terminal_threshold {
             if !has_any_file_write && self.pending_synthesis.is_some() {
                 // Second time hitting terminal guard without any writes.
                 // Directly write a scaffold to src/lib.rs to unblock the agent.
@@ -446,6 +454,7 @@ impl Agent {
                     None,
                 )];
                 self.consecutive_read_only_steps = 0;
+                self.has_written_any_file = true;
                 if let Err(e) = self.execute_tool_batch(calls).await {
                     warn!("Scaffold write failed: {}", e);
                 }
@@ -476,10 +485,10 @@ impl Agent {
             self.consecutive_read_only_steps = 0;
             // The synthesis will fire at the top of the next step in task_runner
             return Ok(false);
-        } else if self.consecutive_read_only_steps >= 4 {
+        } else if self.consecutive_read_only_steps >= warning_threshold {
             info!(
-                "Progress guard warning: {} read-only steps",
-                self.consecutive_read_only_steps
+                "Progress guard warning: {} read-only steps (threshold: {})",
+                self.consecutive_read_only_steps, terminal_threshold
             );
             self.messages.push(crate::api::types::Message::user(format!(
                 "<selfware_system_directive>\n\
@@ -490,7 +499,7 @@ impl Agent {
                  </tool>\n\
                  </selfware_system_directive>",
                 self.consecutive_read_only_steps,
-                8 - self.consecutive_read_only_steps
+                terminal_threshold - self.consecutive_read_only_steps
             )));
         }
 
