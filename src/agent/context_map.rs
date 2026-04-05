@@ -1884,4 +1884,487 @@ mod tests {
         // Review mode: no files pre-loaded at L3.
         assert!(plan.l3_files.is_empty());
     }
+
+    // =========================================================================
+    // ContextLevel tests
+    // =========================================================================
+
+    #[test]
+    fn test_context_level_ordering() {
+        assert!(ContextLevel::Tree < ContextLevel::Skeleton);
+        assert!(ContextLevel::Skeleton < ContextLevel::Full);
+        assert!(ContextLevel::Tree < ContextLevel::Full);
+    }
+
+    #[test]
+    fn test_context_level_equality() {
+        assert_eq!(ContextLevel::Tree, ContextLevel::Tree);
+        assert_eq!(ContextLevel::Skeleton, ContextLevel::Skeleton);
+        assert_eq!(ContextLevel::Full, ContextLevel::Full);
+        assert_ne!(ContextLevel::Tree, ContextLevel::Full);
+    }
+
+    #[test]
+    fn test_context_level_hash() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(ContextLevel::Tree);
+        set.insert(ContextLevel::Skeleton);
+        set.insert(ContextLevel::Full);
+        set.insert(ContextLevel::Tree); // duplicate
+        assert_eq!(set.len(), 3);
+    }
+
+    #[test]
+    fn test_context_level_clone_copy() {
+        let level = ContextLevel::Skeleton;
+        let copied = level;
+        let cloned = level.clone();
+        assert_eq!(level, copied);
+        assert_eq!(level, cloned);
+    }
+
+    // =========================================================================
+    // ContextMap budget query tests
+    // =========================================================================
+
+    #[test]
+    fn test_budget_returns_content_budget() {
+        let map = ContextMap::new(200_000, 0.75, 0.20, 0.05);
+        assert_eq!(map.budget(), 150_000);
+    }
+
+    #[test]
+    fn test_compression_headroom_calculated() {
+        let map = ContextMap::new(200_000, 0.75, 0.20, 0.05);
+        assert_eq!(map.compression_headroom(), 40_000);
+    }
+
+    #[test]
+    fn test_thinking_reserve_calculated() {
+        let map = ContextMap::new(200_000, 0.75, 0.20, 0.05);
+        assert_eq!(map.thinking_reserve(), 10_000);
+    }
+
+    #[test]
+    fn test_remaining_equals_budget_when_empty() {
+        let map = ContextMap::new(100_000, 0.75, 0.20, 0.05);
+        assert_eq!(map.remaining(), map.budget());
+    }
+
+    #[test]
+    fn test_remaining_decreases_with_entries() {
+        let mut map = ContextMap::new(100_000, 0.75, 0.20, 0.05);
+        let before = map.remaining();
+        map.register_tree_entry("test.rs".into(), 5000);
+        assert!(map.remaining() < before);
+    }
+
+    #[test]
+    fn test_file_count_empty() {
+        let map = ContextMap::new(100_000, 0.75, 0.20, 0.05);
+        assert_eq!(map.file_count(), 0);
+    }
+
+    #[test]
+    fn test_file_count_after_registration() {
+        let mut map = ContextMap::new(100_000, 0.75, 0.20, 0.05);
+        map.register_tree_entry("a.rs".into(), 100);
+        map.register_tree_entry("b.rs".into(), 200);
+        assert_eq!(map.file_count(), 2);
+    }
+
+    #[test]
+    fn test_total_tokens_empty() {
+        let map = ContextMap::new(100_000, 0.75, 0.20, 0.05);
+        assert_eq!(map.total_tokens(), 0);
+    }
+
+    #[test]
+    fn test_total_tokens_increases_with_content() {
+        let mut map = ContextMap::new(100_000, 0.75, 0.20, 0.05);
+        map.register_tree_entry("test.rs".into(), 5000);
+        assert!(map.total_tokens() > 0);
+    }
+
+    #[test]
+    fn test_level_of_nonexistent() {
+        let map = ContextMap::new(100_000, 0.75, 0.20, 0.05);
+        assert_eq!(map.level_of(Path::new("nonexistent.rs")), None);
+    }
+
+    #[test]
+    fn test_level_of_tree_entry() {
+        let mut map = ContextMap::new(100_000, 0.75, 0.20, 0.05);
+        map.register_tree_entry("test.rs".into(), 100);
+        assert_eq!(map.level_of(Path::new("test.rs")), Some(ContextLevel::Tree));
+    }
+
+    // =========================================================================
+    // FileSkeleton render tests
+    // =========================================================================
+
+    #[test]
+    fn test_skeleton_render_function() {
+        let skeleton = FileSkeleton {
+            path: "src/lib.rs".into(),
+            items: vec![SkeletonItem::Function {
+                name: "process".to_string(),
+                signature: "pub fn process(data: &[u8]) -> Result<()>".to_string(),
+                line: 42,
+            }],
+            token_count: 10,
+        };
+        let rendered = skeleton.render();
+        assert!(rendered.contains("src/lib.rs"));
+        assert!(rendered.contains("L42:"));
+        assert!(rendered.contains("pub fn process"));
+    }
+
+    #[test]
+    fn test_skeleton_render_struct() {
+        let skeleton = FileSkeleton {
+            path: "src/config.rs".into(),
+            items: vec![SkeletonItem::Struct {
+                name: "Config".to_string(),
+                fields_summary: "name: String, value: usize".to_string(),
+                line: 10,
+            }],
+            token_count: 8,
+        };
+        let rendered = skeleton.render();
+        assert!(rendered.contains("struct Config"));
+        assert!(rendered.contains("name: String"));
+    }
+
+    #[test]
+    fn test_skeleton_render_enum() {
+        let skeleton = FileSkeleton {
+            path: "src/state.rs".into(),
+            items: vec![SkeletonItem::Enum {
+                name: "State".to_string(),
+                variants_summary: "Running, Stopped".to_string(),
+                line: 5,
+            }],
+            token_count: 6,
+        };
+        let rendered = skeleton.render();
+        assert!(rendered.contains("enum State"));
+        assert!(rendered.contains("Running"));
+    }
+
+    #[test]
+    fn test_skeleton_render_trait() {
+        let skeleton = FileSkeleton {
+            path: "src/handler.rs".into(),
+            items: vec![SkeletonItem::Trait {
+                name: "Handler".to_string(),
+                methods: vec!["fn handle(&self)".to_string()],
+                line: 1,
+            }],
+            token_count: 5,
+        };
+        let rendered = skeleton.render();
+        assert!(rendered.contains("trait Handler"));
+        assert!(rendered.contains("fn handle"));
+    }
+
+    #[test]
+    fn test_skeleton_render_impl() {
+        let skeleton = FileSkeleton {
+            path: "src/lib.rs".into(),
+            items: vec![SkeletonItem::Impl {
+                target: "Config".to_string(),
+                methods: vec!["fn new()".to_string(), "fn value(&self)".to_string()],
+                line: 20,
+            }],
+            token_count: 7,
+        };
+        let rendered = skeleton.render();
+        assert!(rendered.contains("impl Config"));
+        assert!(rendered.contains("fn new()"));
+    }
+
+    #[test]
+    fn test_skeleton_render_module() {
+        let skeleton = FileSkeleton {
+            path: "src/lib.rs".into(),
+            items: vec![SkeletonItem::Module {
+                name: "tests".to_string(),
+                line: 100,
+            }],
+            token_count: 3,
+        };
+        let rendered = skeleton.render();
+        assert!(rendered.contains("mod tests"));
+    }
+
+    #[test]
+    fn test_skeleton_render_const() {
+        let skeleton = FileSkeleton {
+            path: "src/lib.rs".into(),
+            items: vec![SkeletonItem::Const {
+                name: "MAX_SIZE".to_string(),
+                type_hint: "usize".to_string(),
+                line: 3,
+            }],
+            token_count: 3,
+        };
+        let rendered = skeleton.render();
+        assert!(rendered.contains("const MAX_SIZE: usize"));
+    }
+
+    #[test]
+    fn test_skeleton_render_use() {
+        let skeleton = FileSkeleton {
+            path: "src/lib.rs".into(),
+            items: vec![SkeletonItem::Use {
+                path: "use std::io".to_string(),
+                line: 1,
+            }],
+            token_count: 2,
+        };
+        let rendered = skeleton.render();
+        assert!(rendered.contains("use use std::io")); // "use " prefix from render + path
+    }
+
+    #[test]
+    fn test_skeleton_render_empty() {
+        let skeleton = FileSkeleton {
+            path: "src/empty.rs".into(),
+            items: vec![],
+            token_count: 0,
+        };
+        let rendered = skeleton.render();
+        assert!(rendered.contains("src/empty.rs"));
+    }
+
+    // =========================================================================
+    // ContextModality detection extended tests
+    // =========================================================================
+
+    #[test]
+    fn test_modality_wire() {
+        assert!(matches!(
+            ContextModality::from_task("wire up the new handler"),
+            ContextModality::Merge { .. }
+        ));
+    }
+
+    #[test]
+    fn test_modality_thread() {
+        assert!(matches!(
+            ContextModality::from_task("thread the context through calls"),
+            ContextModality::Merge { .. }
+        ));
+    }
+
+    #[test]
+    fn test_modality_integrate() {
+        assert!(matches!(
+            ContextModality::from_task("integrate the auth module"),
+            ContextModality::Merge { .. }
+        ));
+    }
+
+    #[test]
+    fn test_modality_extract() {
+        assert!(matches!(
+            ContextModality::from_task("extract the parsing logic"),
+            ContextModality::Refactor { .. }
+        ));
+    }
+
+    #[test]
+    fn test_modality_decompose() {
+        assert!(matches!(
+            ContextModality::from_task("decompose the monolith"),
+            ContextModality::Refactor { .. }
+        ));
+    }
+
+    #[test]
+    fn test_modality_split() {
+        assert!(matches!(
+            ContextModality::from_task("split the module"),
+            ContextModality::Refactor { .. }
+        ));
+    }
+
+    #[test]
+    fn test_modality_break_up() {
+        assert!(matches!(
+            ContextModality::from_task("break up the large file"),
+            ContextModality::Refactor { .. }
+        ));
+    }
+
+    #[test]
+    fn test_modality_audit() {
+        assert!(matches!(
+            ContextModality::from_task("audit the security code"),
+            ContextModality::Review
+        ));
+    }
+
+    #[test]
+    fn test_modality_investigate() {
+        assert!(matches!(
+            ContextModality::from_task("investigate the memory leak"),
+            ContextModality::Debug { .. }
+        ));
+    }
+
+    #[test]
+    fn test_modality_trace() {
+        assert!(matches!(
+            ContextModality::from_task("trace the request path"),
+            ContextModality::Debug { .. }
+        ));
+    }
+
+    #[test]
+    fn test_modality_why_does() {
+        assert!(matches!(
+            ContextModality::from_task("why does the loop hang"),
+            ContextModality::Debug { .. }
+        ));
+    }
+
+    #[test]
+    fn test_modality_new_feature() {
+        assert!(matches!(
+            ContextModality::from_task("add a new feature for caching"),
+            ContextModality::Greenfield { .. }
+        ));
+    }
+
+    #[test]
+    fn test_modality_new_module() {
+        assert!(matches!(
+            ContextModality::from_task("create a new module for logging"),
+            ContextModality::Greenfield { .. }
+        ));
+    }
+
+    #[test]
+    fn test_modality_greenfield_keyword() {
+        assert!(matches!(
+            ContextModality::from_task("greenfield implementation"),
+            ContextModality::Greenfield { .. }
+        ));
+    }
+
+    // =========================================================================
+    // LoadingPlan tests
+    // =========================================================================
+
+    #[test]
+    fn test_loading_plan_implement() {
+        let modality = ContextModality::Implement {
+            target: "src/main.rs".into(),
+            related: vec!["src/config.rs".into()],
+        };
+        let plan = modality.loading_plan();
+        assert_eq!(plan.l3_files.len(), 1);
+        assert_eq!(plan.l2_files.len(), 1);
+        assert!(plan.description.contains("Implement"));
+    }
+
+    #[test]
+    fn test_loading_plan_debug() {
+        let modality = ContextModality::Debug {
+            entry_point: "src/main.rs".into(),
+            call_chain: vec!["src/handler.rs".into(), "src/db.rs".into()],
+        };
+        let plan = modality.loading_plan();
+        assert_eq!(plan.l3_files.len(), 3); // entry + 2 chain items
+    }
+
+    #[test]
+    fn test_loading_plan_refactor() {
+        let modality = ContextModality::Refactor {
+            source: "src/big.rs".into(),
+            targets: vec!["src/part_a.rs".into()],
+            orchestrator: Some("src/mod.rs".into()),
+        };
+        let plan = modality.loading_plan();
+        assert_eq!(plan.l3_files.len(), 3); // source + target + orchestrator
+    }
+
+    #[test]
+    fn test_loading_plan_refactor_no_orchestrator() {
+        let modality = ContextModality::Refactor {
+            source: "src/big.rs".into(),
+            targets: vec![],
+            orchestrator: None,
+        };
+        let plan = modality.loading_plan();
+        assert_eq!(plan.l3_files.len(), 1);
+    }
+
+    #[test]
+    fn test_loading_plan_greenfield() {
+        let modality = ContextModality::Greenfield {
+            integration_points: vec!["src/main.rs".into(), "src/lib.rs".into()],
+        };
+        let plan = modality.loading_plan();
+        assert!(plan.l3_files.is_empty());
+        assert_eq!(plan.l2_files.len(), 2);
+    }
+
+    // =========================================================================
+    // LevelCosts tests
+    // =========================================================================
+
+    #[test]
+    fn test_level_costs_default() {
+        let costs = LevelCosts::default();
+        assert_eq!(costs.l1, 0);
+        assert_eq!(costs.l2, 0);
+        assert_eq!(costs.l3, 0);
+    }
+
+    // =========================================================================
+    // LoadEstimate tests
+    // =========================================================================
+
+    #[test]
+    fn test_load_estimate_struct() {
+        let est = LoadEstimate {
+            fits: true,
+            estimated_tokens: 1000,
+            usage_pct: 0.5,
+            current_total: 5000,
+            budget: 10000,
+        };
+        assert!(est.fits);
+        assert_eq!(est.estimated_tokens, 1000);
+    }
+
+    // =========================================================================
+    // Edge case budget tests
+    // =========================================================================
+
+    #[test]
+    fn test_zero_budget() {
+        let map = ContextMap::new(0, 0.75, 0.20, 0.05);
+        assert_eq!(map.budget(), 0);
+        assert_eq!(map.remaining(), 0);
+    }
+
+    #[test]
+    fn test_large_budget() {
+        let map = ContextMap::new(1_000_000, 0.75, 0.20, 0.05);
+        assert_eq!(map.budget(), 750_000);
+        assert_eq!(map.compression_headroom(), 200_000);
+    }
+
+    #[test]
+    fn test_custom_ratios() {
+        let map = ContextMap::new(100_000, 0.50, 0.30, 0.20);
+        assert_eq!(map.budget(), 50_000);
+        assert_eq!(map.compression_headroom(), 30_000);
+        assert_eq!(map.thinking_reserve(), 20_000);
+    }
 }
