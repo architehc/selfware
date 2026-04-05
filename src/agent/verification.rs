@@ -39,6 +39,55 @@ pub(super) fn is_confused_response(content: &str) -> bool {
         >= 2
 }
 
+/// Detect responses that describe future work instead of delivering a completed result.
+/// This catches false completions like "I need to read the tests first" or pseudo-tool
+/// plans embedded in plain text.
+pub(super) fn is_incomplete_action_response(content: &str) -> bool {
+    let lower = super::recovery::strip_think_blocks(content)
+        .trim()
+        .to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+
+    let strong_prefixes = [
+        "i need to ",
+        "first i need to ",
+        "first, i need to ",
+        "let me ",
+        "before i can ",
+        "the next step is to ",
+        "to continue, i need to ",
+    ];
+    if strong_prefixes
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+    {
+        return true;
+    }
+
+    let strong_markers = [
+        "i need to read",
+        "i need to inspect",
+        "i need to review",
+        "i need to understand",
+        "i need to look at",
+        "before making changes",
+        "before i can fix",
+        "before i can implement",
+        "file_read(",
+        "file_read:",
+        "file_edit(",
+        "file_edit:",
+        "file_write(",
+        "file_write:",
+        "shell_exec(",
+        "shell_exec:",
+    ];
+
+    strong_markers.iter().any(|marker| lower.contains(marker))
+}
+
 fn truncate_visual_note(input: &str, max_chars: usize) -> String {
     let mut out = String::new();
     let mut chars = input.chars();
@@ -222,6 +271,14 @@ impl Agent {
             ));
         }
 
+        if is_incomplete_action_response(&self.last_assistant_response) {
+            return Some(
+                "Your response describes work you still need to do instead of a completed result. \
+                 Do NOT stop to narrate your next step. Call the needed tool now and continue."
+                    .to_string(),
+            );
+        }
+
         // Reject completion if the last assistant response contains code that
         // should have been written to a file. This catches the common pattern
         // where models output code as text instead of using file_write/file_edit.
@@ -237,6 +294,44 @@ impl Agent {
         // Workflow validator: reject test-only edits when task requires source changes
         if let Some(msg) = self.validate_workflow_edits() {
             return Some(msg);
+        }
+
+        // Reject completion when the task requires code changes but no source files
+        // were written at all. This catches the "context insufficient" early-quit
+        // pattern where the model gives a text-only answer without doing any work.
+        if self.config.agent.require_verification_before_completion {
+            let has_any_file_write = self
+                .messages
+                .iter()
+                .filter(|m| m.role == "assistant")
+                .filter_map(|m| m.tool_calls.as_ref())
+                .flatten()
+                .any(|tc| matches!(tc.function.name.as_str(), "file_edit" | "file_write"));
+
+            if !has_any_file_write {
+                let task_desc = self
+                    .current_checkpoint
+                    .as_ref()
+                    .map(|cp| cp.task_description.to_lowercase())
+                    .unwrap_or_default();
+                let task_requires_code = task_desc.contains("implement")
+                    || task_desc.contains("create")
+                    || task_desc.contains("build")
+                    || task_desc.contains("write")
+                    || task_desc.contains("fix")
+                    || task_desc.contains("add")
+                    || task_desc.contains("make");
+
+                if task_requires_code {
+                    return Some(
+                        "You have not written or edited ANY files yet. The task requires you to \
+                         write code. Use file_write or file_edit to create the implementation, \
+                         then run cargo test to verify. Do NOT give up or say context is insufficient \
+                         — read the files and start coding."
+                            .to_string(),
+                    );
+                }
+            }
         }
 
         if self.config.agent.require_verification_before_completion {

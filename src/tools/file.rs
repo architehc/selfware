@@ -285,6 +285,8 @@ impl Tool for FileWrite {
             }
         }
 
+        validate_rust_source_if_needed(&path, &args.content)?;
+
         // Create backup if exists
         if args.backup && path.exists() {
             let backup_path = format!("{}.bak", args.path);
@@ -353,6 +355,7 @@ impl Tool for FileEdit {
         }
 
         let new_content = content.replace(&args.old_str, &args.new_str);
+        validate_rust_source_if_needed(Path::new(&args.path), &new_content)?;
         write_atomic(Path::new(&args.path), &new_content).await?;
 
         Ok(serde_json::json!({
@@ -596,6 +599,24 @@ pub(super) fn validate_tool_path(path: &str, config: &SafetyConfig) -> Result<()
     PathValidator::new(config, working_dir)
         .validate(path)
         .map_err(|e| anyhow::anyhow!(e))
+}
+
+fn validate_rust_source_if_needed(path: &Path, content: &str) -> Result<()> {
+    let is_rust_source = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"));
+    if !is_rust_source {
+        return Ok(());
+    }
+
+    syn::parse_file(content).map(|_| ()).map_err(|err| {
+        ToolError::InvalidRustSyntax {
+            path: path.display().to_string(),
+            message: err.to_string(),
+        }
+        .into()
+    })
 }
 
 /// Write content to a file atomically using a temporary file and rename.
@@ -1200,6 +1221,52 @@ mod tests {
 
         let content = fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "");
+    }
+
+    #[tokio::test]
+    async fn test_file_write_rejects_invalid_rust_source() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("lib.rs");
+
+        let tool = FileWrite::with_safety_config(permissive_safety_config());
+        let args = serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "content": "Alignment::Center => {"
+        });
+
+        let result = tool.execute(args).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Rust syntax validation failed"), "got: {err}");
+        assert!(
+            !file_path.exists(),
+            "invalid Rust write should not touch the file"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_file_edit_rejects_invalid_rust_source() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("lib.rs");
+        fs::write(&file_path, "pub fn render() {\n    println!(\"ok\");\n}\n").unwrap();
+
+        let tool = FileEdit::with_safety_config(permissive_safety_config());
+        let args = serde_json::json!({
+            "path": file_path.to_str().unwrap(),
+            "old_str": "println!(\"ok\");",
+            "new_str": "Alignment::Center => {"
+        });
+
+        let result = tool.execute(args).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Rust syntax validation failed"), "got: {err}");
+
+        let content = fs::read_to_string(&file_path).unwrap();
+        assert!(
+            content.contains("println!(\"ok\");"),
+            "invalid Rust edit should leave the original file intact"
+        );
     }
 
     #[tokio::test]

@@ -170,6 +170,9 @@ pub enum ToolError {
     #[error("old_str and new_str are identical — this is a no-op edit")]
     EditNoOp,
 
+    #[error("Rust syntax validation failed for {path}: {message}")]
+    InvalidRustSyntax { path: String, message: String },
+
     #[error("Test mode only valid for test fixtures, got: {path}")]
     TestModeInvalidPath { path: String },
 

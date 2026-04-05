@@ -185,6 +185,17 @@ impl Agent {
         }
 
         if tool_calls.is_empty() {
+            if super::verification::is_incomplete_action_response(&content) {
+                info!("Rejected incomplete planning response before completion");
+                self.last_assistant_response = content.clone();
+                self.messages.push(crate::api::types::Message::user(
+                    "Your response describes work you still need to do instead of a completed result. \
+                     Do NOT stop to narrate your next step. Call the needed tool now and continue."
+                        .to_string(),
+                ));
+                return Ok(false);
+            }
+
             // Detect repeated identical responses — the model is stuck producing
             // the same completion that keeps getting rejected by the gate.
             if content == self.last_assistant_response && !content.is_empty() {
@@ -397,6 +408,59 @@ impl Agent {
         // TERMINAL PROGRESS GUARD: After N read-only steps, force synthesis.
         // This is terminal for the current phase — don't just warn, act.
         if self.consecutive_read_only_steps >= 8 {
+            // Check if we've ALREADY tried synthesis before (no files written yet).
+            // If so, skip synthesis and directly write a scaffold file to unblock.
+            let has_any_file_write = self
+                .messages
+                .iter()
+                .filter(|m| m.role == "assistant")
+                .filter_map(|m| m.tool_calls.as_ref())
+                .flatten()
+                .any(|tc| matches!(tc.function.name.as_str(), "file_edit" | "file_write"));
+
+            if !has_any_file_write && self.pending_synthesis.is_some() {
+                // Second time hitting terminal guard without any writes.
+                // Directly write a scaffold to src/lib.rs to unblock the agent.
+                info!(
+                    "ESCALATED progress guard: {} read-only steps, no writes ever — injecting scaffold",
+                    self.consecutive_read_only_steps
+                );
+                let task = self
+                    .messages
+                    .iter()
+                    .find(|m| m.role == "user")
+                    .map(|m| m.content.to_string())
+                    .unwrap_or_default();
+
+                // Write a minimal scaffold that prompts the agent to fill in
+                let scaffold = format!(
+                    "// AUTO-SCAFFOLD: fill in the implementation\n\
+                     // Task: {}\n\n\
+                     // TODO: implement the functions described in the task\n\
+                     // Then run cargo test to verify\n",
+                    task.lines().next().unwrap_or("implement")
+                );
+                let calls: Vec<super::execution::CollectedToolCall> = vec![(
+                    "file_write".to_string(),
+                    serde_json::json!({"path": "src/lib.rs", "content": scaffold}).to_string(),
+                    None,
+                )];
+                self.consecutive_read_only_steps = 0;
+                if let Err(e) = self.execute_tool_batch(calls).await {
+                    warn!("Scaffold write failed: {}", e);
+                }
+                self.messages.push(crate::api::types::Message::user(
+                    "<selfware_system_directive>\n\
+                     A scaffold file was written to src/lib.rs. Now implement the full solution:\n\
+                     1. Use file_write to replace src/lib.rs with your complete implementation\n\
+                     2. Include unit tests in a #[cfg(test)] mod tests block\n\
+                     3. Run cargo test to verify\n\
+                     </selfware_system_directive>"
+                        .to_string(),
+                ));
+                return Ok(false);
+            }
+
             info!(
                 "TERMINAL progress guard: {} read-only steps — forcing synthesis+write",
                 self.consecutive_read_only_steps
@@ -1208,6 +1272,33 @@ mod tests {
         assert!(result.is_some());
         let msg = result.unwrap();
         assert!(msg.contains("verification"));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_gate_rejects_incomplete_planning_response() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.agent.min_completion_steps = 0;
+        config.agent.require_verification_before_completion = false;
+        let mut agent = Agent::new(config).await.unwrap();
+
+        agent.last_assistant_response =
+            "I need to read the tests to understand what to implement.\n\nfile_read: tests/chart_tests.rs"
+                .to_string();
+
+        let result = agent.check_completion_gate();
+        assert!(
+            result.is_some(),
+            "Incomplete planning response should reject completion"
+        );
+        assert!(
+            result
+                .unwrap()
+                .contains("describes work you still need to do"),
+            "Expected gate to explain why the planning response was rejected"
+        );
 
         server.stop().await;
     }
@@ -2739,6 +2830,45 @@ mod tests {
             .find(|m| m.role == "user")
             .unwrap();
         assert!(last_user_msg.content.text().contains("step"));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(
+        target_os = "windows",
+        ignore = "mock TCP server unreliable on Windows CI"
+    )]
+    async fn test_step_rejects_incomplete_planning_completion() {
+        let server = MockLlmServer::builder()
+            .with_response(
+                "I need to read the project files first to understand the codebase and identify what needs to be fixed.\n\nfile_read: \"Cargo.toml\"\nfile_read: \"src/lib.rs\"",
+            )
+            .build()
+            .await;
+
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.agent.min_completion_steps = 0;
+        config.agent.require_verification_before_completion = false;
+        let mut agent = Agent::new(config).await.unwrap();
+
+        let result = agent.execute_step_internal(false).await;
+        assert!(result.is_ok());
+        assert!(!result.unwrap());
+
+        let last_user_msg = agent
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .unwrap();
+        assert!(
+            last_user_msg
+                .content
+                .text()
+                .contains("describes work you still need to do"),
+            "Expected the incomplete planning response to be rejected"
+        );
 
         server.stop().await;
     }
