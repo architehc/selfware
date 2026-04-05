@@ -116,7 +116,7 @@ redis = { version = "0.27", optional = true, features = ["aio", "tokio-comp"] } 
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }  # For visual stuck-loop detection
 tokenizers = { version = "0.22.2", features = ["hf-hub", "http"] }
 tracing-appender = "0.2.4"
-opentelemetry = "0.21.0"
+opentelemetry = "0.31.0"
 opentelemetry_sdk = { version = "0.21.0", features = ["rt-tokio"] }
 opentelemetry-otlp = "0.14.0"
 tracing-opentelemetry = "0.22.0"
