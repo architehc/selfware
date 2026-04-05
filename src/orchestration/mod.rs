@@ -26,12 +26,9 @@ pub mod workflow_dsl;
 
 // Re-export coordinator types
 pub use coordinator::{
-    CoordinatorAgent, CoordinatorConfig, CoordinatorStatus, PhaseResult, 
-    WorkflowPhase, WorkflowResult, WorkerAgent, WorkerResult,
-    COORDINATOR_ALLOWED_TOOLS, COORDINATOR_DENIED_TOOLS,
+    CoordinatorAgent, CoordinatorConfig, CoordinatorStatus, PhaseResult, WorkerAgent, WorkerResult,
+    WorkflowPhase, WorkflowResult, COORDINATOR_ALLOWED_TOOLS, COORDINATOR_DENIED_TOOLS,
 };
 
 // Re-export scratchpad types
-pub use scratchpad::{
-    Scratchpad, ScratchpadEntry, WorkerInfo, WorkerStatus,
-};
+pub use scratchpad::{Scratchpad, ScratchpadEntry, WorkerInfo, WorkerStatus};

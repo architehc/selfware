@@ -938,7 +938,11 @@ impl Agent {
 
                     let label = self.classify_outcome_label();
                     cli_println!("{} {} [{}]", "❌ Task failed:".bright_red(), reason, label);
-                    self.record_task_outcome(task_description, Outcome::Failure, Some(&format!("{} [{}]", reason, label)));
+                    self.record_task_outcome(
+                        task_description,
+                        Outcome::Failure,
+                        Some(&format!("{} [{}]", reason, label)),
+                    );
                     if let Err(e) = self.fail_checkpoint(&reason) {
                         warn!("Failed to save failed checkpoint: {}", e);
                     }
@@ -949,13 +953,13 @@ impl Agent {
 
         // Classify the outcome for instrumentation
         let outcome_label = self.classify_outcome_label();
-        let detail = format!("Execution stopped: {} (step {})", outcome_label, self.loop_control.current_step());
-        cli_println!("{} {}", "📊 Outcome:".bright_yellow(), outcome_label);
-        self.record_task_outcome(
-            task_description,
-            Outcome::Partial,
-            Some(&detail),
+        let detail = format!(
+            "Execution stopped: {} (step {})",
+            outcome_label,
+            self.loop_control.current_step()
         );
+        cli_println!("{} {}", "📊 Outcome:".bright_yellow(), outcome_label);
+        self.record_task_outcome(task_description, Outcome::Partial, Some(&detail));
         Ok(())
     }
 
@@ -963,23 +967,49 @@ impl Agent {
     /// These labels make it easy to grep logs and identify systemic issues.
     fn classify_outcome_label(&self) -> &'static str {
         let step = self.loop_control.current_step();
-        let has_writes = self.current_checkpoint.as_ref()
-            .map(|cp| cp.tool_calls.iter().any(|tc| {
-                matches!(tc.tool_name.as_str(), "file_write" | "file_edit") && tc.success
-            }))
+        let has_writes = self
+            .current_checkpoint
+            .as_ref()
+            .map(|cp| {
+                cp.tool_calls.iter().any(|tc| {
+                    matches!(tc.tool_name.as_str(), "file_write" | "file_edit") && tc.success
+                })
+            })
             .unwrap_or(false);
-        let has_verification = self.current_checkpoint.as_ref()
-            .map(|cp| cp.tool_calls.iter().any(|tc| {
-                matches!(tc.tool_name.as_str(), "cargo_check" | "cargo_test") && tc.success
-            }))
+        let has_verification = self
+            .current_checkpoint
+            .as_ref()
+            .map(|cp| {
+                cp.tool_calls.iter().any(|tc| {
+                    matches!(tc.tool_name.as_str(), "cargo_check" | "cargo_test") && tc.success
+                })
+            })
             .unwrap_or(false);
-        let suppressed_count = self.current_checkpoint.as_ref()
-            .map(|cp| cp.tool_calls.iter().filter(|tc| !tc.success && tc.tool_name == "file_edit").count())
+        let suppressed_count = self
+            .current_checkpoint
+            .as_ref()
+            .map(|cp| {
+                cp.tool_calls
+                    .iter()
+                    .filter(|tc| !tc.success && tc.tool_name == "file_edit")
+                    .count()
+            })
             .unwrap_or(0);
-        let read_only_tools = self.current_checkpoint.as_ref()
-            .map(|cp| cp.tool_calls.iter().all(|tc| {
-                matches!(tc.tool_name.as_str(), "file_read" | "directory_tree" | "grep_search" | "glob_find" | "context_bulk_read")
-            }))
+        let read_only_tools = self
+            .current_checkpoint
+            .as_ref()
+            .map(|cp| {
+                cp.tool_calls.iter().all(|tc| {
+                    matches!(
+                        tc.tool_name.as_str(),
+                        "file_read"
+                            | "directory_tree"
+                            | "grep_search"
+                            | "glob_find"
+                            | "context_bulk_read"
+                    )
+                })
+            })
             .unwrap_or(true);
 
         if !has_writes && read_only_tools && step > 10 {

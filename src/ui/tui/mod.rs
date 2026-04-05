@@ -1622,32 +1622,39 @@ pub fn run_tui_dashboard_with_events(
                                     }
                                     "/workers" => {
                                         // Show coordinator worker status
-                                        let workers_msg = with_dashboard_state(&shared_state, |state| {
-                                            if state.coordinator_status.is_active {
-                                                let phase = &state.coordinator_status.current_phase;
-                                                let active = state.coordinator_status.active_workers;
-                                                let total = state.coordinator_status.total_workers;
-                                                if let Some(ref task_id) = state.coordinator_status.task_id {
-                                                    format!(
-                                                        "👑 Coordinator Mode Active\n\
+                                        let workers_msg =
+                                            with_dashboard_state(&shared_state, |state| {
+                                                if state.coordinator_status.is_active {
+                                                    let phase =
+                                                        &state.coordinator_status.current_phase;
+                                                    let active =
+                                                        state.coordinator_status.active_workers;
+                                                    let total =
+                                                        state.coordinator_status.total_workers;
+                                                    if let Some(ref task_id) =
+                                                        state.coordinator_status.task_id
+                                                    {
+                                                        format!(
+                                                            "👑 Coordinator Mode Active\n\
                                                          Task ID: {}\n\
                                                          Phase: {}\n\
                                                          Workers: {}/{} active",
-                                                        task_id, phase, active, total
-                                                    )
-                                                } else {
-                                                    format!(
-                                                        "👑 Coordinator Mode Active\n\
+                                                            task_id, phase, active, total
+                                                        )
+                                                    } else {
+                                                        format!(
+                                                            "👑 Coordinator Mode Active\n\
                                                          Phase: {}\n\
                                                          Workers: {}/{} active",
-                                                        phase, active, total
-                                                    )
+                                                            phase, active, total
+                                                        )
+                                                    }
+                                                } else {
+                                                    "Coordinator mode is not active.\n\
+                                                 Use --coordinator flag to enable."
+                                                        .to_string()
                                                 }
-                                            } else {
-                                                "Coordinator mode is not active.\n\
-                                                 Use --coordinator flag to enable.".to_string()
-                                            }
-                                        });
+                                            });
                                         app.add_system_message(&workers_msg);
                                         with_dashboard_state(&shared_state, |state| {
                                             state.log(LogLevel::Info, "Displayed worker status");
@@ -1656,10 +1663,11 @@ pub fn run_tui_dashboard_with_events(
                                     "/execute" => {
                                         let _ = user_input_tx.send("/execute".to_string());
                                         app.add_system_message(
-                                            "✅ Plan approved. Executing modifications..."
+                                            "✅ Plan approved. Executing modifications...",
                                         );
                                         with_dashboard_state(&shared_state, |state| {
-                                            state.log(LogLevel::Info, "Plan approved for execution");
+                                            state
+                                                .log(LogLevel::Info, "Plan approved for execution");
                                         });
                                     }
                                     "/modify" => {

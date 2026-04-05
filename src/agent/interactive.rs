@@ -1106,11 +1106,7 @@ impl Agent {
                 // Default: AutoCompact
                 match self.compact_auto().await {
                     Ok(metrics) => {
-                        println!(
-                            "{} {}",
-                            "✓".bright_green(),
-                            metrics.summary()
-                        );
+                        println!("{} {}", "✓".bright_green(), metrics.summary());
                     }
                     Err(e) => {
                         println!("{} AutoCompact failed: {}", "✗".bright_red(), e);
@@ -1124,22 +1120,14 @@ impl Agent {
 
             if input == "/compact micro" {
                 let metrics = self.compact_micro();
-                println!(
-                    "{} {}",
-                    "✓".bright_green(),
-                    metrics.summary()
-                );
+                println!("{} {}", "✓".bright_green(), metrics.summary());
                 continue;
             }
 
             if input == "/compact auto" {
                 match self.compact_auto().await {
                     Ok(metrics) => {
-                        println!(
-                            "{} {}",
-                            "✓".bright_green(),
-                            metrics.summary()
-                        );
+                        println!("{} {}", "✓".bright_green(), metrics.summary());
                     }
                     Err(e) => {
                         println!("{} AutoCompact failed: {}", "✗".bright_red(), e);
@@ -1151,11 +1139,7 @@ impl Agent {
             if input == "/compact full" {
                 match self.compact_full().await {
                     Ok(metrics) => {
-                        println!(
-                            "{} {}",
-                            "✓".bright_green(),
-                            metrics.summary()
-                        );
+                        println!("{} {}", "✓".bright_green(), metrics.summary());
                     }
                     Err(e) => {
                         println!("{} FullCompact failed: {}", "✗".bright_red(), e);
@@ -1607,13 +1591,25 @@ impl Agent {
                 println!();
                 println!("{}", "🔍 Plan Mode Enabled".bright_cyan().bold());
                 println!("{}", "─".repeat(50).bright_black());
-                println!("{} In planning mode, only read-only tools are available:", "ℹ".bright_yellow());
+                println!(
+                    "{} In planning mode, only read-only tools are available:",
+                    "ℹ".bright_yellow()
+                );
                 println!("   • file_read, grep_search, glob_find");
                 println!("   • directory_tree, symbol_search, tool_search");
                 println!();
-                println!("{} Type your request to analyze the codebase.", "→".bright_black());
-                println!("{} The agent will create a structured plan.", "→".bright_black());
-                println!("{} Use /execute to approve, or /modify to cancel.", "→".bright_black());
+                println!(
+                    "{} Type your request to analyze the codebase.",
+                    "→".bright_black()
+                );
+                println!(
+                    "{} The agent will create a structured plan.",
+                    "→".bright_black()
+                );
+                println!(
+                    "{} Use /execute to approve, or /modify to cancel.",
+                    "→".bright_black()
+                );
                 println!();
                 continue;
             }
@@ -1632,7 +1628,10 @@ impl Agent {
                     if let Some(plan) = self.get_plan() {
                         println!("{}", plan.format().bright_white());
                     }
-                    println!("{} The agent will now execute the plan.", "⚡".bright_yellow());
+                    println!(
+                        "{} The agent will now execute the plan.",
+                        "⚡".bright_yellow()
+                    );
                     println!();
                 }
                 continue;
@@ -1648,7 +1647,10 @@ impl Agent {
                     println!("{}", "📝 Plan Cancelled".bright_yellow().bold());
                     println!("{}", "─".repeat(50).bright_black());
                     println!("{} Exited plan mode.", "ℹ".bright_yellow());
-                    println!("{} You can now make new requests or enter /plan again.", "→".bright_black());
+                    println!(
+                        "{} You can now make new requests or enter /plan again.",
+                        "→".bright_black()
+                    );
                     println!();
                 }
                 continue;
@@ -1853,16 +1855,16 @@ impl Agent {
 
             // /dream - Memory consolidation (dream system)
             if input == "/dream" || input == "/dream status" {
-                use crate::cognitive::dream_subprocess::get_dream_status;
                 use crate::cognitive::dream::DreamConfig;
-                
+                use crate::cognitive::dream_subprocess::get_dream_status;
+
                 let dream_config = DreamConfig::new();
                 let status = get_dream_status(&dream_config).await;
-                
+
                 println!();
                 println!("  {} Dream System Status", "🌙".bright_cyan());
                 println!("  {}", "─".repeat(40).bright_black());
-                
+
                 // Last dream info
                 if let Some(ts) = status.last_dream_timestamp {
                     let dt = chrono::DateTime::from_timestamp(ts as i64, 0)
@@ -1872,20 +1874,26 @@ impl Agent {
                 } else {
                     println!("  Last dream: {}", "Never".dimmed());
                 }
-                
+
                 // Dream count
-                println!("  Total dreams: {}", status.dream_count.to_string().bright_white());
-                
+                println!(
+                    "  Total dreams: {}",
+                    status.dream_count.to_string().bright_white()
+                );
+
                 // Sessions since last dream
                 println!(
                     "  Sessions since last: {}",
                     status.sessions_since_last_dream.to_string().bright_white()
                 );
-                
+
                 // Until next dream
                 println!();
                 if status.is_running {
-                    println!("  Status: {}", "🔄 Consolidation in progress".bright_yellow());
+                    println!(
+                        "  Status: {}",
+                        "🔄 Consolidation in progress".bright_yellow()
+                    );
                 } else if status.hours_until_next == 0 && status.sessions_until_next == 0 {
                     println!("  Status: {}", "✓ Ready for next dream".bright_green());
                 } else {
@@ -1903,7 +1911,7 @@ impl Agent {
                         );
                     }
                 }
-                
+
                 println!();
                 println!(
                     "  {} Use {} to force consolidation",
@@ -1913,15 +1921,18 @@ impl Agent {
                 println!();
                 continue;
             }
-            
+
             if input == "/dream force" {
                 use crate::cognitive::memory_system::DreamIntegratedMemorySystem;
-                
-                println!("  {} Force-triggering dream consolidation...", "🌙".bright_cyan());
-                
+
+                println!(
+                    "  {} Force-triggering dream consolidation...",
+                    "🌙".bright_cyan()
+                );
+
                 let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                 let dream_system = DreamIntegratedMemorySystem::new(&cwd);
-                
+
                 match dream_system.force_dream(&cwd).await {
                     Ok(result) => {
                         if result.success {
@@ -2427,12 +2438,12 @@ impl Agent {
                     } else {
                         println!("{} Git Worktrees:", "🌳".bright_cyan());
                         println!();
-                        
+
                         // Parse and display worktrees
                         let mut current_path: Option<String> = None;
                         let mut current_branch: Option<String> = None;
                         let mut is_detached = false;
-                        
+
                         for line in stdout.lines() {
                             if line.is_empty() {
                                 // End of worktree entry, print it
@@ -2440,9 +2451,17 @@ impl Agent {
                                     let branch_str = if is_detached {
                                         "(detached)".dimmed()
                                     } else {
-                                        current_branch.as_deref().unwrap_or("unknown").bright_green()
+                                        current_branch
+                                            .as_deref()
+                                            .unwrap_or("unknown")
+                                            .bright_green()
                                     };
-                                    println!("  {} {} ({})", "📁".bright_white(), path.bright_white(), branch_str);
+                                    println!(
+                                        "  {} {} ({})",
+                                        "📁".bright_white(),
+                                        path.bright_white(),
+                                        branch_str
+                                    );
                                 }
                                 current_branch = None;
                                 is_detached = false;
@@ -2454,17 +2473,25 @@ impl Agent {
                                 is_detached = true;
                             }
                         }
-                        
+
                         // Print last entry if exists
                         if let Some(path) = current_path {
                             let branch_str = if is_detached {
                                 "(detached)".dimmed()
                             } else {
-                                current_branch.as_deref().unwrap_or("unknown").bright_green()
+                                current_branch
+                                    .as_deref()
+                                    .unwrap_or("unknown")
+                                    .bright_green()
                             };
-                            println!("  {} {} ({})", "📁".bright_white(), path.bright_white(), branch_str);
+                            println!(
+                                "  {} {} ({})",
+                                "📁".bright_white(),
+                                path.bright_white(),
+                                branch_str
+                            );
                         }
-                        
+
                         println!();
                         println!("{} Usage:", "💡".bright_yellow());
                         println!("  /worktree enter [branch]  - Create and enter worktree");
@@ -2478,11 +2505,11 @@ impl Agent {
 
         if args.starts_with("enter") {
             let branch_arg = args.strip_prefix("enter").map(str::trim).unwrap_or("");
-            
+
             // Generate a unique worktree name
             let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
             let worktree_name = format!("worktree_{}", timestamp);
-            
+
             // Get git root
             let git_root = match tokio::process::Command::new("git")
                 .args(["rev-parse", "--show-toplevel"])
@@ -2497,15 +2524,21 @@ impl Agent {
                     return;
                 }
             };
-            
+
             let worktree_path = format!("{}/.selfware/worktrees/{}", git_root, worktree_name);
-            
+
             // Create parent directory
-            if let Err(e) = tokio::fs::create_dir_all(format!("{}/.selfware/worktrees", git_root)).await {
-                println!("{} Failed to create worktree directory: {}", "✗".bright_red(), e);
+            if let Err(e) =
+                tokio::fs::create_dir_all(format!("{}/.selfware/worktrees", git_root)).await
+            {
+                println!(
+                    "{} Failed to create worktree directory: {}",
+                    "✗".bright_red(),
+                    e
+                );
                 return;
             }
-            
+
             // Build git worktree add command
             let mut cmd_args = vec!["worktree", "add"];
             if branch_arg.is_empty() {
@@ -2515,9 +2548,13 @@ impl Agent {
             if !branch_arg.is_empty() {
                 cmd_args.push(branch_arg);
             }
-            
-            println!("{} Creating worktree at {}...", "🌳".bright_cyan(), worktree_path.dimmed());
-            
+
+            println!(
+                "{} Creating worktree at {}...",
+                "🌳".bright_cyan(),
+                worktree_path.dimmed()
+            );
+
             match tokio::process::Command::new("git")
                 .args(&cmd_args)
                 .output()
@@ -2532,20 +2569,35 @@ impl Agent {
                             } else {
                                 branch_arg.bright_green()
                             };
-                            println!("{} Entered worktree: {}", "✓".bright_green(), worktree_path.bright_white());
+                            println!(
+                                "{} Entered worktree: {}",
+                                "✓".bright_green(),
+                                worktree_path.bright_white()
+                            );
                             println!("  Branch: {}", branch_display);
                             println!();
-                            println!("{} Working directory changed. Use '/worktree exit' to return.", "💡".bright_yellow());
+                            println!(
+                                "{} Working directory changed. Use '/worktree exit' to return.",
+                                "💡".bright_yellow()
+                            );
                         }
                         Err(e) => {
-                            println!("{} Worktree created but failed to change directory: {}", "⚠".bright_yellow(), e);
+                            println!(
+                                "{} Worktree created but failed to change directory: {}",
+                                "⚠".bright_yellow(),
+                                e
+                            );
                             println!("  You can manually cd to: {}", worktree_path);
                         }
                     }
                 }
                 Ok(out) => {
                     let stderr = String::from_utf8_lossy(&out.stderr);
-                    println!("{} Failed to create worktree: {}", "✗".bright_red(), stderr.trim());
+                    println!(
+                        "{} Failed to create worktree: {}",
+                        "✗".bright_red(),
+                        stderr.trim()
+                    );
                 }
                 Err(e) => println!("{} Failed to execute git worktree: {}", "✗".bright_red(), e),
             }
@@ -2557,11 +2609,15 @@ impl Agent {
             let current_dir = match std::env::current_dir() {
                 Ok(d) => d,
                 Err(e) => {
-                    println!("{} Failed to get current directory: {}", "✗".bright_red(), e);
+                    println!(
+                        "{} Failed to get current directory: {}",
+                        "✗".bright_red(),
+                        e
+                    );
                     return;
                 }
             };
-            
+
             // Find git root (main repo)
             let git_root = match tokio::process::Command::new("git")
                 .args(["rev-parse", "--show-toplevel"])
@@ -2576,31 +2632,31 @@ impl Agent {
                     return;
                 }
             };
-            
+
             let current_dir_str = current_dir.to_string_lossy();
             let is_worktree = current_dir_str != git_root && current_dir_str.starts_with(&git_root);
-            
+
             if !is_worktree {
                 println!("{} Not currently in a worktree", "ℹ".bright_yellow());
                 println!("  Current: {}", current_dir_str.bright_white());
                 println!("  Git root: {}", git_root.bright_white());
                 return;
             }
-            
+
             // Get the worktree path before we change
             let worktree_path = current_dir_str.to_string();
-            
+
             // Change back to git root
             match std::env::set_current_dir(&git_root) {
                 Ok(_) => {
                     println!("{} Exited worktree", "✓".bright_green());
                     println!("  Previous: {}", worktree_path.dimmed());
                     println!("  Current: {}", git_root.bright_white());
-                    
+
                     // Ask if user wants to remove the worktree
                     println!();
                     println!("{} Remove the worktree? (y/N)", "?".bright_cyan());
-                    
+
                     // We can't easily do interactive input here, so just suggest the tool
                     println!("  Use the tool to remove: enter_worktree with remove=true");
                     println!("  Or run: git worktree remove {}", worktree_path.dimmed());

@@ -107,11 +107,11 @@ impl AutoDreamHandle {
     /// Wait for the dream to complete with timeout
     pub async fn wait_with_timeout(&mut self, timeout: Duration) -> Result<DreamResult> {
         let wait_result = tokio::time::timeout(timeout, self.process.wait()).await;
-        
+
         match wait_result {
             Ok(Ok(exit_status)) => {
                 let duration = self.start_time.elapsed().as_secs();
-                
+
                 if exit_status.success() {
                     info!(
                         "AutoDream completed successfully for {} in {}s",
@@ -126,8 +126,14 @@ impl AutoDreamHandle {
                     .with_consolidated(0)) // Count would come from output parsing
                 } else {
                     let code = exit_status.code().unwrap_or(-1);
-                    warn!("AutoDream failed with exit code {} for {}", code, self.project_key);
-                    Ok(DreamResult::failure(format!("Process exited with code {}", code)))
+                    warn!(
+                        "AutoDream failed with exit code {} for {}",
+                        code, self.project_key
+                    );
+                    Ok(DreamResult::failure(format!(
+                        "Process exited with code {}",
+                        code
+                    )))
                 }
             }
             Ok(Err(e)) => {
@@ -170,7 +176,7 @@ pub async fn spawn_autodream(
 
     // Build command arguments for the subprocess mode
     let memory_file = dream_config.memory_file_path(project_key);
-    
+
     // Create the command with read-only file access
     // Note: We use --dream-mode flag to indicate this is a dream subprocess
     let mut cmd = Command::new(&current_exe);
@@ -195,9 +201,9 @@ pub async fn spawn_autodream(
     cmd.env("SELFWARE_READONLY", "1");
 
     // Spawn the process
-    let process = cmd.spawn().map_err(|e| {
-        anyhow!("Failed to spawn autoDream subprocess: {}", e)
-    })?;
+    let process = cmd
+        .spawn()
+        .map_err(|e| anyhow!("Failed to spawn autoDream subprocess: {}", e))?;
 
     info!("AutoDream subprocess spawned with PID: {:?}", process.id());
 
@@ -221,7 +227,10 @@ pub async fn run_dream_consolidation(
     let mut phases_completed = Vec::new();
     let mut errors = Vec::new();
 
-    info!("Starting in-process dream consolidation for {}", project_key);
+    info!(
+        "Starting in-process dream consolidation for {}",
+        project_key
+    );
 
     // Phase 1: Orient - Load recent sessions, identify memory files
     info!("Dream Phase 1: Orient");
@@ -270,24 +279,19 @@ pub async fn run_dream_consolidation(
 
     // Phase 4: Prune & Index - Cap size, remove stale, re-index
     info!("Dream Phase 4: Prune & Index");
-    let pruned_count = match prune_and_index_phase(
-        project_key,
-        dream_config,
-        consolidated_count,
-    )
-    .await
-    {
-        Ok(count) => {
-            debug!("Pruned {} memories", count);
-            phases_completed.push(DreamPhase::PruneAndIndex);
-            count
-        }
-        Err(e) => {
-            error!("Prune & Index phase failed: {}", e);
-            errors.push(format!("Prune & Index: {}", e));
-            0
-        }
-    };
+    let pruned_count =
+        match prune_and_index_phase(project_key, dream_config, consolidated_count).await {
+            Ok(count) => {
+                debug!("Pruned {} memories", count);
+                phases_completed.push(DreamPhase::PruneAndIndex);
+                count
+            }
+            Err(e) => {
+                error!("Prune & Index phase failed: {}", e);
+                errors.push(format!("Prune & Index: {}", e));
+                0
+            }
+        };
 
     let duration = start_time.elapsed().as_secs();
     let success = errors.is_empty() || phases_completed.len() >= 3; // Allow 1 phase to fail
@@ -323,9 +327,7 @@ async fn orient_phase(project_path: &Path) -> Result<Vec<PathBuf>> {
             let path = entry.path();
             if let Some(ext) = path.extension() {
                 if ext == "json" || ext == "jsonl" {
-                    let name = path.file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("");
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                     if name.contains("session") || name.contains("memory") {
                         session_files.push(path);
                     }
@@ -354,12 +356,12 @@ async fn orient_phase(project_path: &Path) -> Result<Vec<PathBuf>> {
 /// Phase 2: Gather - Collect memories from recent sessions
 async fn gather_phase(session_files: &[PathBuf], max_sessions: usize) -> Result<Vec<MemoryEntry>> {
     use crate::cognitive::dream::MemorySection;
-    
+
     let mut all_memories = Vec::new();
 
     for file in session_files.iter().take(max_sessions) {
         debug!("Gathering from session file: {:?}", file);
-        
+
         let content = match tokio::fs::read_to_string(file).await {
             Ok(c) => c,
             Err(e) => {
@@ -398,9 +400,9 @@ async fn consolidate_phase(_memories: &[MemoryEntry], config: &AutoDreamConfig) 
     // For now, we simulate consolidation by deduplicating
     // In a full implementation, this would call the LLM API
     let unique_count = _memories.len(); // Placeholder
-    
+
     debug!("Consolidation would reduce {} memories", unique_count);
-    
+
     // TODO: Implement actual LLM call for consolidation
     // This would involve:
     // 1. Sending the prompt to the LLM
@@ -443,7 +445,7 @@ async fn prune_and_index_phase(
     if let Some(parent) = memory_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    
+
     // Atomic write
     let temp_path = memory_path.with_extension(format!("tmp.{}", std::process::id()));
     tokio::fs::write(&temp_path, output).await?;
@@ -470,16 +472,16 @@ pub async fn check_and_spawn_autodream(
 ) -> Result<Option<AutoDreamHandle>> {
     // Load or create dream state
     let mut state = DreamState::load(&dream_config.state_path())?;
-    
+
     // Record that a session ended
     state.record_session_end();
-    
+
     // Check if dream should run
     let trigger = dream_config.trigger.clone();
     if !crate::cognitive::dream::should_run_dream(&mut state, &trigger) {
         // Save state (sessions count was incremented)
         state.save(&dream_config.state_path())?;
-        
+
         debug!(
             "AutoDream gates not passed for {}: {} sessions, last dream {} hours ago",
             project_key,
@@ -487,18 +489,20 @@ pub async fn check_and_spawn_autodream(
             (std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_secs() - state.last_dream_timestamp) / 3600
+                .as_secs()
+                - state.last_dream_timestamp)
+                / 3600
         );
-        
+
         return Ok(None);
     }
 
     // Spawn the autoDream subprocess
     let handle = spawn_autodream(project_path, project_key, auto_config, dream_config).await?;
-    
+
     // Save state (with lock held)
     state.save(&dream_config.state_path())?;
-    
+
     info!("AutoDream spawned for {}", project_key);
     Ok(Some(handle))
 }
@@ -538,18 +542,18 @@ mod tests {
     #[tokio::test]
     async fn test_orient_phase() {
         let dir = tempdir().unwrap();
-        
+
         // Create some session files
-        tokio::fs::create_dir(dir.path().join(".selfware")).await.unwrap();
-        tokio::fs::write(
-            dir.path().join(".selfware").join("session_1.json"),
-            "{}"
-        ).await.unwrap();
-        tokio::fs::write(
-            dir.path().join(".selfware").join("memory_log.jsonl"),
-            ""
-        ).await.unwrap();
-        
+        tokio::fs::create_dir(dir.path().join(".selfware"))
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join(".selfware").join("session_1.json"), "{}")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join(".selfware").join("memory_log.jsonl"), "")
+            .await
+            .unwrap();
+
         let files = orient_phase(dir.path()).await.unwrap();
         assert_eq!(files.len(), 2);
     }
@@ -564,14 +568,13 @@ mod tests {
     #[tokio::test]
     async fn test_prune_and_index_creates_memory_file() {
         let dir = tempdir().unwrap();
-        let dream_config = DreamConfig::new()
-            .with_base_dir(dir.path());
-        
+        let dream_config = DreamConfig::new().with_base_dir(dir.path());
+
         let count = prune_and_index_phase("test_project", &dream_config, 0)
             .await
             .unwrap();
         assert_eq!(count, 0);
-        
+
         // MEMORY.md should be created
         let memory_path = dream_config.memory_file_path("test_project");
         assert!(memory_path.exists());
@@ -583,7 +586,7 @@ mod tests {
             .with_phase(DreamPhase::Gather)
             .with_consolidated(10)
             .with_pruned(5);
-        
+
         assert!(result.success);
         assert_eq!(result.phases_completed.len(), 2);
         assert_eq!(result.memories_consolidated, 10);

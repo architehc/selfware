@@ -60,34 +60,44 @@ impl WorktreeState {
         self.initialize()?;
         self.directory_stack.push(worktree_path.clone());
         self.current_worktree = Some(worktree_path.clone());
-        env::set_current_dir(&worktree_path)
-            .with_context(|| format!("Failed to change to worktree directory: {}", worktree_path.display()))?;
+        env::set_current_dir(&worktree_path).with_context(|| {
+            format!(
+                "Failed to change to worktree directory: {}",
+                worktree_path.display()
+            )
+        })?;
         Ok(worktree_path)
     }
 
     fn pop_worktree(&mut self, remove: bool) -> Result<(PathBuf, Option<PathBuf>)> {
         self.initialize()?;
-        
+
         let current = self.directory_stack.pop();
         let _previous_path = current.clone();
-        
+
         // If we're removing the worktree, capture its path before we forget it
-        let removed_path = if remove {
-            current
-        } else {
-            None
-        };
+        let removed_path = if remove { current } else { None };
 
         // Update current worktree to the previous entry (or None if back at root)
         self.current_worktree = self.directory_stack.last().cloned();
-        
+
         // Change back to the previous directory (root of the stack)
         if let Some(ref root) = self.directory_stack.first() {
-            env::set_current_dir(root)
-                .with_context(|| format!("Failed to change back to root directory: {}", root.display()))?;
+            env::set_current_dir(root).with_context(|| {
+                format!(
+                    "Failed to change back to root directory: {}",
+                    root.display()
+                )
+            })?;
         }
 
-        Ok((self.directory_stack.first().cloned().unwrap_or_else(|| PathBuf::from(".")), removed_path))
+        Ok((
+            self.directory_stack
+                .first()
+                .cloned()
+                .unwrap_or_else(|| PathBuf::from(".")),
+            removed_path,
+        ))
     }
 
     #[allow(dead_code)]
@@ -162,19 +172,19 @@ fn validate_branch_name(name: &str) -> Result<()> {
     if name.len() > 255 {
         anyhow::bail!("Branch name too long (max 255 characters)");
     }
-    
+
     // Check for dangerous characters that could cause shell injection
     for c in name.chars() {
         if c.is_control() || matches!(c, ';' | '&' | '|' | '$' | '`' | '<' | '>') {
             anyhow::bail!("Invalid character '{}' in branch name", c);
         }
     }
-    
+
     // Branch name cannot start with '-' (could be interpreted as a flag)
     if name.starts_with('-') {
         anyhow::bail!("Branch name must not start with '-'");
     }
-    
+
     Ok(())
 }
 
@@ -184,16 +194,19 @@ fn validate_path(path: &str, _safety_config: Option<&SafetyConfig>) -> Result<()
     if path.contains("..") {
         // Allow .. in the middle but not at the start or as escape attempts
         let normalized = Path::new(path).components().collect::<PathBuf>();
-        if normalized.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        if normalized
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
             // This is ok - it's a relative path that happens to have ..
         }
     }
-    
+
     // Check for null bytes
     if path.contains('\0') {
         anyhow::bail!("Path contains null bytes");
     }
-    
+
     Ok(())
 }
 
@@ -321,14 +334,14 @@ impl Tool for EnterWorktreeTool {
         // Build git worktree add command
         let mut cmd = tokio::process::Command::new("git");
         cmd.arg("worktree").arg("add");
-        
+
         if branch_arg.is_none() {
             // Create detached worktree
             cmd.arg("--detach");
         }
-        
+
         cmd.arg(&worktree_path);
-        
+
         if let Some(branch) = branch_arg {
             cmd.arg(branch);
         }
@@ -349,10 +362,16 @@ impl Tool for EnterWorktreeTool {
         let branch_used = branch_arg.unwrap_or("(detached)").to_string();
 
         // Update the global state and change directory
-        let mut state = WORKTREE_STATE.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+        let mut state = WORKTREE_STATE
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
         state.push_worktree(worktree_path.clone())?;
 
-        info!("Entered worktree: {} (branch: {})", worktree_path.display(), branch_used);
+        info!(
+            "Entered worktree: {} (branch: {})",
+            worktree_path.display(),
+            branch_used
+        );
 
         Ok(serde_json::json!({
             "success": true,
@@ -405,11 +424,16 @@ impl Tool for ExitWorktreeTool {
 
     async fn execute(&self, args: Value) -> Result<Value> {
         let _path_arg = args.get("path").and_then(|v| v.as_str());
-        let remove = args.get("remove").and_then(|v| v.as_bool()).unwrap_or(false);
+        let remove = args
+            .get("remove")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         let (root_path, removed_path) = {
-            let mut state = WORKTREE_STATE.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
-            
+            let mut state = WORKTREE_STATE
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+
             if !state.is_in_worktree() {
                 anyhow::bail!("Not currently in a worktree");
             }
@@ -452,7 +476,7 @@ impl Tool for ExitWorktreeTool {
         // Medium risk - can remove directories
         crate::safety::ToolMetadata::custom(
             false,
-            true,  // Destructive - can remove worktrees
+            true, // Destructive - can remove worktrees
             crate::safety::RiskLevel::Medium,
             false,
             false,
@@ -493,8 +517,12 @@ impl Tool for ListWorktreesTool {
         let worktrees = parse_worktree_list(&stdout);
 
         // Check if we're currently in a worktree
-        let state = WORKTREE_STATE.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
-        let current_worktree = state.current_worktree.as_ref()
+        let state = WORKTREE_STATE
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+        let current_worktree = state
+            .current_worktree
+            .as_ref()
             .map(|p| p.to_string_lossy().to_string());
 
         Ok(serde_json::json!({
@@ -710,13 +738,13 @@ detached
 "#;
         let result = parse_worktree_list(output);
         assert_eq!(result.len(), 3);
-        
+
         assert_eq!(result[0].path, "/path/to/main");
         assert_eq!(result[0].branch, Some("main".to_string()));
-        
+
         assert_eq!(result[1].path, "/path/to/feature");
         assert_eq!(result[1].branch, Some("feature-branch".to_string()));
-        
+
         assert_eq!(result[2].path, "/path/to/detached");
         assert!(result[2].detached);
     }
@@ -771,7 +799,7 @@ detached
     #[tokio::test]
     async fn test_enter_worktree_validation() {
         let tool = EnterWorktreeTool::new();
-        
+
         // Test with invalid branch name
         let args = serde_json::json!({
             "branch": "branch; rm -rf /"
@@ -796,11 +824,14 @@ detached
 
         let tool = ExitWorktreeTool::new();
         let args = serde_json::json!({});
-        
+
         let result = tool.execute(args).await;
         // Should fail since we're not in a worktree
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Not currently in a worktree"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Not currently in a worktree"));
     }
 
     #[test]

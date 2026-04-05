@@ -19,7 +19,10 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
@@ -99,11 +102,11 @@ impl Default for CoordinatorConfig {
 }
 
 /// The restricted tool set available to the coordinator
-/// 
+///
 /// Coordinator CANNOT:
 /// - file_write, file_edit (cannot directly modify files)
 /// - shell_exec, bash (cannot execute shell commands directly)
-/// 
+///
 /// Coordinator CAN:
 /// - file_read (read files to understand structure)
 /// - scratchpad_write (communicate with workers via scratchpad)
@@ -196,7 +199,7 @@ impl CoordinatorAgent {
         let task = task.into();
         let task_id = format!("task-{}", uuid::Uuid::new_v4());
         let scratchpad = Scratchpad::for_task(&task_id)?;
-        
+
         // Create restricted tool registry
         let tools = Self::create_restricted_tool_registry()?;
 
@@ -221,19 +224,19 @@ impl CoordinatorAgent {
     }
 
     /// Create a restricted tool registry for the coordinator
-    /// 
+    ///
     /// The coordinator only has access to read-only tools and tool discovery.
     /// It cannot write files, execute shell commands, or perform other destructive operations.
     fn create_restricted_tool_registry() -> Result<ToolRegistry> {
-        use crate::tools::file::FileRead;
         use crate::tools::file::DirectoryTree;
+        use crate::tools::file::FileRead;
         use crate::tools::grep_search::GrepSearch;
         use crate::tools::search::GlobFind;
         use crate::tools::tool_search::ToolSearchTool;
-        
+
         // Create a completely fresh registry
         let mut restricted = ToolRegistry::with_safety_config(None);
-        
+
         // Since ToolRegistry::with_safety_config registers critical tools by default,
         // we need to deactivate the ones we don't want
         // First, deactivate all tools that are denied to coordinators
@@ -241,7 +244,7 @@ impl CoordinatorAgent {
             // We can't really deactivate, but we can track which ones shouldn't be used
             // The enforcement happens at the Agent level, not the registry level
         }
-        
+
         Ok(restricted)
     }
 
@@ -331,7 +334,10 @@ impl CoordinatorAgent {
             abort_handle: handle.abort_handle(),
         };
 
-        self.workers.write().await.insert(worker_id.clone(), worker_handle);
+        self.workers
+            .write()
+            .await
+            .insert(worker_id.clone(), worker_handle);
 
         Ok(worker_id)
     }
@@ -341,16 +347,18 @@ impl CoordinatorAgent {
     /// Messages are stored as scratchpad entries with the key format: `message:{worker_id}:{timestamp}`
     pub fn send_message(&self, worker_id: &str, message: impl Into<String>) -> Result<()> {
         let message = message.into();
-        let key = format!("message:{}:{}", worker_id, chrono::Utc::now().timestamp_millis());
-        
-        let entry = ScratchpadEntry::new(
-            key,
-            message,
-            self.task_id.clone(),
-        ).set_metadata(serde_json::json!({
-            "type": "coordinator_message",
-            "target_worker": worker_id,
-        }));
+        let key = format!(
+            "message:{}:{}",
+            worker_id,
+            chrono::Utc::now().timestamp_millis()
+        );
+
+        let entry = ScratchpadEntry::new(key, message, self.task_id.clone()).set_metadata(
+            serde_json::json!({
+                "type": "coordinator_message",
+                "target_worker": worker_id,
+            }),
+        );
 
         self.scratchpad.write(entry)?;
         Ok(())
@@ -393,7 +401,7 @@ impl CoordinatorAgent {
     /// 4. Verification: Workers verify each other's work
     pub async fn run_workflow(&self) -> Result<WorkflowResult> {
         self.running.store(true, Ordering::SeqCst);
-        
+
         let mut result = WorkflowResult {
             success: false,
             phase_results: HashMap::new(),
@@ -405,7 +413,9 @@ impl CoordinatorAgent {
         *self.phase.write().await = WorkflowPhase::Research;
         match self.run_research_phase().await {
             Ok(research_result) => {
-                result.phase_results.insert("research".to_string(), research_result);
+                result
+                    .phase_results
+                    .insert("research".to_string(), research_result);
             }
             Err(e) => {
                 warn!(error = %e, "Research phase failed");
@@ -424,7 +434,9 @@ impl CoordinatorAgent {
             *self.phase.write().await = WorkflowPhase::Synthesis;
             match self.run_synthesis_phase().await {
                 Ok(synthesis_result) => {
-                    result.phase_results.insert("synthesis".to_string(), synthesis_result);
+                    result
+                        .phase_results
+                        .insert("synthesis".to_string(), synthesis_result);
                 }
                 Err(e) => {
                     warn!(error = %e, "Synthesis phase failed");
@@ -444,7 +456,9 @@ impl CoordinatorAgent {
             *self.phase.write().await = WorkflowPhase::Implementation;
             match self.run_implementation_phase().await {
                 Ok(impl_result) => {
-                    result.phase_results.insert("implementation".to_string(), impl_result);
+                    result
+                        .phase_results
+                        .insert("implementation".to_string(), impl_result);
                 }
                 Err(e) => {
                     warn!(error = %e, "Implementation phase failed");
@@ -464,7 +478,9 @@ impl CoordinatorAgent {
             *self.phase.write().await = WorkflowPhase::Verification;
             match self.run_verification_phase().await {
                 Ok(verify_result) => {
-                    result.phase_results.insert("verification".to_string(), verify_result);
+                    result
+                        .phase_results
+                        .insert("verification".to_string(), verify_result);
                 }
                 Err(e) => {
                     warn!(error = %e, "Verification phase failed");
@@ -477,7 +493,7 @@ impl CoordinatorAgent {
         // Mark complete
         *self.phase.write().await = WorkflowPhase::Complete;
         result.success = true;
-        
+
         // Gather final output from scratchpad
         result.final_output = self.gather_final_output().await?;
 
@@ -495,7 +511,10 @@ impl CoordinatorAgent {
 
         let mut worker_ids = Vec::new();
 
-        for (task, role) in research_tasks.iter().take(self.config.max_concurrent_workers) {
+        for (task, role) in research_tasks
+            .iter()
+            .take(self.config.max_concurrent_workers)
+        {
             match self.spawn_worker(*task, *role).await {
                 Ok(worker_id) => {
                     worker_ids.push(worker_id);
@@ -538,9 +557,11 @@ impl CoordinatorAgent {
     async fn run_synthesis_phase(&self) -> Result<PhaseResult> {
         // Read all findings from scratchpad
         let findings = self.scratchpad.list_by_prefix("finding:");
-        
+
         // Read research summary
-        let summary = self.scratchpad.read("research:summary")
+        let summary = self
+            .scratchpad
+            .read("research:summary")
             .map(|e| e.value)
             .unwrap_or_default();
 
@@ -569,7 +590,9 @@ impl CoordinatorAgent {
     /// Run the implementation phase - workers execute the plan
     async fn run_implementation_phase(&self) -> Result<PhaseResult> {
         // Get the implementation plan
-        let plan = self.scratchpad.read("synthesis:plan")
+        let plan = self
+            .scratchpad
+            .read("synthesis:plan")
             .map(|e| e.value)
             .unwrap_or_else(|| "Implement the task".to_string());
 
@@ -602,7 +625,11 @@ impl CoordinatorAgent {
         Ok(PhaseResult {
             success: completed > 0,
             workers_completed: completed,
-            output: format!("Implementation phase: {}/{} workers completed", completed, impl_tasks.len()),
+            output: format!(
+                "Implementation phase: {}/{} workers completed",
+                completed,
+                impl_tasks.len()
+            ),
         })
     }
 
@@ -644,17 +671,21 @@ impl CoordinatorAgent {
         Ok(PhaseResult {
             success: completed == verify_tasks.len(),
             workers_completed: completed,
-            output: format!("Verification phase: {}/{} workers completed", completed, verify_tasks.len()),
+            output: format!(
+                "Verification phase: {}/{} workers completed",
+                completed,
+                verify_tasks.len()
+            ),
         })
     }
 
     /// Gather final output from scratchpad
     async fn gather_final_output(&self) -> Result<String> {
         let mut output = String::new();
-        
+
         // Collect all findings and results
         let findings = self.scratchpad.all_entries();
-        
+
         for entry in findings {
             output.push_str(&format!("\n=== {} ===\n{}", entry.key, entry.value));
         }
@@ -665,7 +696,7 @@ impl CoordinatorAgent {
     /// Stop the coordinator
     pub async fn stop(&self) {
         self.running.store(false, Ordering::SeqCst);
-        
+
         // Abort all active workers
         let workers = self.workers.read().await;
         for (_, handle) in workers.iter() {
@@ -729,7 +760,7 @@ impl WorkerAgent {
         _parent_id: Option<String>,
     ) -> Result<WorkerResult> {
         let start = std::time::Instant::now();
-        
+
         info!(worker_id = %id, role = %role, "Worker starting execution");
 
         // Update status to working
@@ -757,9 +788,9 @@ impl WorkerAgent {
                     output.clone(),
                     &id,
                 ))?;
-                
+
                 info!(worker_id = %id, duration = duration_secs, "Worker completed");
-                
+
                 Ok(WorkerResult {
                     worker_id: id,
                     success: true,
@@ -776,9 +807,9 @@ impl WorkerAgent {
                     e.to_string(),
                     &id,
                 ))?;
-                
+
                 warn!(worker_id = %id, error = %e, "Worker failed");
-                
+
                 Ok(WorkerResult {
                     worker_id: id,
                     success: false,
@@ -806,7 +837,7 @@ impl WorkerAgent {
     ) -> Result<String> {
         // Simulate task execution
         // In real implementation, this would use the Agent with tool execution
-        
+
         let output = format!(
             "Worker {} (role: {}) executed task: {}\n\
             Findings would be stored here with full tool access.",
@@ -837,8 +868,7 @@ impl WorkerAgent {
         let subworker_id = format!("subworker-{}", uuid::Uuid::new_v4());
 
         // Register subworker with parent reference
-        let worker_info = WorkerInfo::new(&subworker_id, &role, &task)
-            .with_parent(&self.id);
+        let worker_info = WorkerInfo::new(&subworker_id, &role, &task).with_parent(&self.id);
         self.scratchpad.register_worker(worker_info)?;
 
         info!(subworker_id = %subworker_id, parent_id = %self.id, "Spawned subworker");
@@ -900,7 +930,7 @@ mod tests {
         // Coordinator should be allowed file_read
         assert!(CoordinatorAgent::is_tool_allowed("file_read"));
         assert!(CoordinatorAgent::is_tool_allowed("directory_tree"));
-        
+
         // Coordinator should be denied file_write
         assert!(CoordinatorAgent::is_tool_denied("file_write"));
         assert!(CoordinatorAgent::is_tool_denied("file_edit"));
@@ -908,7 +938,7 @@ mod tests {
         assert!(CoordinatorAgent::is_tool_denied("bash"));
         assert!(CoordinatorAgent::is_tool_denied("cargo_test"));
         assert!(CoordinatorAgent::is_tool_denied("git_commit"));
-        
+
         // file_read should not be denied
         assert!(!CoordinatorAgent::is_tool_denied("file_read"));
         assert!(!CoordinatorAgent::is_tool_denied("grep_search"));
@@ -919,18 +949,18 @@ mod tests {
     fn test_coordinator_cannot_write_files() {
         // This test verifies that the coordinator tracks which tools are denied
         // The actual enforcement happens at the Agent level by checking is_tool_allowed/is_tool_denied
-        
+
         // Verify that write tools are marked as denied for coordinators
         assert!(CoordinatorAgent::is_tool_denied("file_write"));
         assert!(CoordinatorAgent::is_tool_denied("file_edit"));
         assert!(CoordinatorAgent::is_tool_denied("shell_exec"));
         assert!(CoordinatorAgent::is_tool_denied("bash"));
-        
+
         // But read tools should NOT be denied
         assert!(!CoordinatorAgent::is_tool_denied("file_read"));
         assert!(!CoordinatorAgent::is_tool_denied("directory_tree"));
         assert!(!CoordinatorAgent::is_tool_denied("grep_search"));
-        
+
         // And read tools should be allowed
         assert!(CoordinatorAgent::is_tool_allowed("file_read"));
         assert!(CoordinatorAgent::is_tool_allowed("directory_tree"));
@@ -947,10 +977,13 @@ mod tests {
     #[tokio::test]
     async fn test_worker_spawn() {
         let coordinator = CoordinatorAgent::new("Test task").unwrap();
-        
-        let worker_id = coordinator.spawn_worker("Test subtask", "researcher").await.unwrap();
+
+        let worker_id = coordinator
+            .spawn_worker("Test subtask", "researcher")
+            .await
+            .unwrap();
         assert!(worker_id.starts_with("worker-"));
-        
+
         // Check worker was registered
         let workers = coordinator.list_all_workers();
         assert_eq!(workers.len(), 1);
@@ -961,7 +994,7 @@ mod tests {
     #[tokio::test]
     async fn test_coordinator_status() {
         let coordinator = CoordinatorAgent::new("Test task").unwrap();
-        
+
         let status = coordinator.status().await;
         assert!(status.is_coordinator);
         assert_eq!(status.current_phase, WorkflowPhase::Research);
@@ -973,36 +1006,36 @@ mod tests {
     async fn test_scratchpad_read_write() {
         let coordinator = CoordinatorAgent::new("Test task").unwrap();
         let scratchpad = coordinator.scratchpad();
-        
+
         // Write entry
         let entry = ScratchpadEntry::new("test-key", "test-value", "test-author");
         scratchpad.write(entry.clone()).unwrap();
-        
+
         // Read it back
         let read = scratchpad.read("test-key").unwrap();
         assert_eq!(read.key, "test-key");
         assert_eq!(read.value, "test-value");
         assert_eq!(read.author, "test-author");
-        
+
         // Test typed read
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
         struct TestData {
             count: i32,
             name: String,
         }
-        
+
         let data = TestData {
             count: 42,
             name: "test".to_string(),
         };
-        
+
         let typed_entry = ScratchpadEntry::new(
             "typed-key",
             serde_json::to_string(&data).unwrap(),
             "test-author",
         );
         scratchpad.write(typed_entry).unwrap();
-        
+
         let read_data: Option<TestData> = scratchpad.read_typed("typed-key").unwrap();
         assert_eq!(read_data, Some(data));
     }
@@ -1011,16 +1044,26 @@ mod tests {
     async fn test_scratchpad_list_by_prefix() {
         let coordinator = CoordinatorAgent::new("Test task").unwrap();
         let scratchpad = coordinator.scratchpad();
-        
+
         // Write entries with different prefixes
-        scratchpad.write(ScratchpadEntry::new("finding:1", "bug in parser", "worker1")).unwrap();
-        scratchpad.write(ScratchpadEntry::new("finding:2", "missing docs", "worker2")).unwrap();
-        scratchpad.write(ScratchpadEntry::new("other:1", "unrelated", "worker3")).unwrap();
-        
+        scratchpad
+            .write(ScratchpadEntry::new(
+                "finding:1",
+                "bug in parser",
+                "worker1",
+            ))
+            .unwrap();
+        scratchpad
+            .write(ScratchpadEntry::new("finding:2", "missing docs", "worker2"))
+            .unwrap();
+        scratchpad
+            .write(ScratchpadEntry::new("other:1", "unrelated", "worker3"))
+            .unwrap();
+
         // List by prefix
         let findings = scratchpad.list_by_prefix("finding:");
         assert_eq!(findings.len(), 2);
-        
+
         for finding in &findings {
             assert!(finding.key.starts_with("finding:"));
         }
@@ -1029,16 +1072,16 @@ mod tests {
     #[tokio::test]
     async fn test_four_phase_workflow() {
         let coordinator = CoordinatorAgent::new("Implement feature X").unwrap();
-        
+
         // Start should be in Research phase
         assert_eq!(coordinator.current_phase().await, WorkflowPhase::Research);
-        
+
         // The workflow is run asynchronously - for this test we just verify
         // the phase transitions are set up correctly
-        
+
         // We can't run the full workflow in a unit test because it spawns
         // actual worker tasks, but we can verify the structure
-        
+
         // Check that coordinator was initialized correctly
         assert_eq!(coordinator.task(), "Implement feature X");
         assert!(coordinator.task_id().starts_with("task-"));
@@ -1047,27 +1090,36 @@ mod tests {
     #[tokio::test]
     async fn test_worker_lifecycle() {
         let coordinator = CoordinatorAgent::new("Test task").unwrap();
-        
+
         // Initially no workers
         assert_eq!(coordinator.active_worker_count().await, 0);
-        
+
         // Spawn a worker
-        let worker_id = coordinator.spawn_worker("Research task", "researcher").await.unwrap();
-        
+        let worker_id = coordinator
+            .spawn_worker("Research task", "researcher")
+            .await
+            .unwrap();
+
         // Should have registered worker
         let workers = coordinator.list_all_workers();
         assert_eq!(workers.len(), 1);
         assert_eq!(workers[0].status, WorkerStatus::Initializing);
-        
+
         // Update worker status
-        coordinator.scratchpad().update_worker_status(&worker_id, WorkerStatus::Working).unwrap();
-        
+        coordinator
+            .scratchpad()
+            .update_worker_status(&worker_id, WorkerStatus::Working)
+            .unwrap();
+
         let worker = coordinator.scratchpad().get_worker(&worker_id).unwrap();
         assert_eq!(worker.status, WorkerStatus::Working);
-        
+
         // Mark as completed
-        coordinator.scratchpad().update_worker_status(&worker_id, WorkerStatus::Completed).unwrap();
-        
+        coordinator
+            .scratchpad()
+            .update_worker_status(&worker_id, WorkerStatus::Completed)
+            .unwrap();
+
         let worker = coordinator.scratchpad().get_worker(&worker_id).unwrap();
         assert_eq!(worker.status, WorkerStatus::Completed);
         assert!(worker.is_finished());
@@ -1076,21 +1128,30 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_workers() {
         let coordinator = CoordinatorAgent::new("Test task").unwrap();
-        
+
         // Spawn multiple workers
-        let worker1 = coordinator.spawn_worker("Task 1", "researcher").await.unwrap();
+        let worker1 = coordinator
+            .spawn_worker("Task 1", "researcher")
+            .await
+            .unwrap();
         let worker2 = coordinator.spawn_worker("Task 2", "coder").await.unwrap();
         let worker3 = coordinator.spawn_worker("Task 3", "tester").await.unwrap();
-        
+
         // All should be registered
         let workers = coordinator.list_all_workers();
         assert_eq!(workers.len(), 3);
-        
+
         // Complete some workers
-        coordinator.scratchpad().update_worker_status(&worker1, WorkerStatus::Completed).unwrap();
-        coordinator.scratchpad().update_worker_status(&worker2, WorkerStatus::Failed).unwrap();
+        coordinator
+            .scratchpad()
+            .update_worker_status(&worker1, WorkerStatus::Completed)
+            .unwrap();
+        coordinator
+            .scratchpad()
+            .update_worker_status(&worker2, WorkerStatus::Failed)
+            .unwrap();
         // worker3 stays active
-        
+
         // Check active workers
         let active = coordinator.list_active_workers();
         assert_eq!(active.len(), 1); // Only worker3
@@ -1100,15 +1161,22 @@ mod tests {
     #[tokio::test]
     async fn test_message_passing() {
         let coordinator = CoordinatorAgent::new("Test task").unwrap();
-        
+
         // Spawn a worker
-        let worker_id = coordinator.spawn_worker("Test task", "researcher").await.unwrap();
-        
+        let worker_id = coordinator
+            .spawn_worker("Test task", "researcher")
+            .await
+            .unwrap();
+
         // Send a message to the worker
-        coordinator.send_message(&worker_id, "Please focus on finding bugs").unwrap();
-        
+        coordinator
+            .send_message(&worker_id, "Please focus on finding bugs")
+            .unwrap();
+
         // Message should be in scratchpad
-        let messages = coordinator.scratchpad().list_by_prefix(&format!("message:{}:", worker_id));
+        let messages = coordinator
+            .scratchpad()
+            .list_by_prefix(&format!("message:{}:", worker_id));
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].value, "Please focus on finding bugs");
         assert_eq!(messages[0].author, coordinator.task_id());
@@ -1137,18 +1205,18 @@ mod tests {
     fn test_worker_info_finished() {
         let mut worker = WorkerInfo::new("w1", "role", "task");
         assert!(!worker.is_finished());
-        
+
         worker.set_status(WorkerStatus::Completed);
         assert!(worker.is_finished());
-        
+
         let mut worker2 = WorkerInfo::new("w2", "role", "task");
         worker2.set_status(WorkerStatus::Failed);
         assert!(worker2.is_finished());
-        
+
         let mut worker3 = WorkerInfo::new("w3", "role", "task");
         worker3.set_status(WorkerStatus::Terminated);
         assert!(worker3.is_finished());
-        
+
         let mut worker4 = WorkerInfo::new("w4", "role", "task");
         worker4.set_status(WorkerStatus::Working);
         assert!(!worker4.is_finished());

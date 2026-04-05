@@ -43,12 +43,12 @@ pub use state::{
 // Re-export key types for new memory architecture
 pub use cognitive_system::CognitiveSystem;
 pub use dream::{
-    DreamConfig, DreamPhase, DreamResult, DreamState, DreamStatus, DreamTrigger,
-    MemoryEntry, MemorySection, MemoryStats, MemoryStore, should_run_dream,
+    should_run_dream, DreamConfig, DreamPhase, DreamResult, DreamState, DreamStatus, DreamTrigger,
+    MemoryEntry, MemorySection, MemoryStats, MemoryStore,
 };
 pub use dream_subprocess::{
-    AutoDreamConfig, AutoDreamHandle, check_and_spawn_autodream, get_dream_status,
-    run_dream_consolidation, spawn_autodream,
+    check_and_spawn_autodream, get_dream_status, run_dream_consolidation, spawn_autodream,
+    AutoDreamConfig, AutoDreamHandle,
 };
 pub use memory_hierarchy::HierarchicalMemory;
 pub use self_reference::SelfReferenceSystem;

@@ -29,7 +29,11 @@ pub struct ScratchpadEntry {
 
 impl ScratchpadEntry {
     /// Create a new scratchpad entry
-    pub fn new(key: impl Into<String>, value: impl Into<String>, author: impl Into<String>) -> Self {
+    pub fn new(
+        key: impl Into<String>,
+        value: impl Into<String>,
+        author: impl Into<String>,
+    ) -> Self {
         Self {
             key: key.into(),
             value: value.into(),
@@ -63,7 +67,9 @@ impl ScratchpadEntry {
 
     /// Get age of entry in seconds
     pub fn age_secs(&self) -> i64 {
-        Utc::now().signed_duration_since(self.timestamp).num_seconds()
+        Utc::now()
+            .signed_duration_since(self.timestamp)
+            .num_seconds()
     }
 }
 
@@ -149,15 +155,22 @@ impl WorkerInfo {
 
     /// Check if worker has finished (completed or failed)
     pub fn is_finished(&self) -> bool {
-        matches!(self.status, WorkerStatus::Completed | WorkerStatus::Failed | WorkerStatus::Terminated)
+        matches!(
+            self.status,
+            WorkerStatus::Completed | WorkerStatus::Failed | WorkerStatus::Terminated
+        )
     }
 
     /// Get duration in seconds since creation
     pub fn duration_secs(&self) -> i64 {
         if let Some(completed) = self.completed_at {
-            completed.signed_duration_since(self.created_at).num_seconds()
+            completed
+                .signed_duration_since(self.created_at)
+                .num_seconds()
         } else {
-            Utc::now().signed_duration_since(self.created_at).num_seconds()
+            Utc::now()
+                .signed_duration_since(self.created_at)
+                .num_seconds()
         }
     }
 }
@@ -180,7 +193,7 @@ impl Scratchpad {
     pub fn for_task(task_id: impl Into<String>) -> Result<Self> {
         let task_id = task_id.into();
         let base_path = Self::scratchpad_path(&task_id);
-        
+
         // Ensure directory exists
         std::fs::create_dir_all(&base_path)
             .with_context(|| format!("Failed to create scratchpad directory: {:?}", base_path))?;
@@ -445,24 +458,24 @@ mod tests {
         let task_id = format!("test-task-{}", uuid::Uuid::new_v4());
         let base_path = temp_dir.path().join("scratchpad").join(&task_id);
         std::fs::create_dir_all(&base_path).unwrap();
-        
+
         let scratchpad = Scratchpad {
             task_id,
             base_path,
             entries: Arc::new(RwLock::new(HashMap::new())),
             workers: Arc::new(RwLock::new(HashMap::new())),
         };
-        
+
         (scratchpad, temp_dir)
     }
 
     #[test]
     fn test_scratchpad_write_read() {
         let (scratchpad, _temp) = test_scratchpad();
-        
+
         let entry = ScratchpadEntry::new("test-key", "test-value", "coordinator");
         scratchpad.write(entry.clone()).unwrap();
-        
+
         let read = scratchpad.read("test-key").unwrap();
         assert_eq!(read.key, "test-key");
         assert_eq!(read.value, "test-value");
@@ -472,21 +485,22 @@ mod tests {
     #[test]
     fn test_scratchpad_typed_read() {
         let (scratchpad, _temp) = test_scratchpad();
-        
+
         #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
         struct TestData {
             name: String,
             count: i32,
         }
-        
+
         let data = TestData {
             name: "test".to_string(),
             count: 42,
         };
-        
-        let entry = ScratchpadEntry::new("typed-key", serde_json::to_string(&data).unwrap(), "worker");
+
+        let entry =
+            ScratchpadEntry::new("typed-key", serde_json::to_string(&data).unwrap(), "worker");
         scratchpad.write(entry).unwrap();
-        
+
         let read: Option<TestData> = scratchpad.read_typed("typed-key").unwrap();
         assert_eq!(read, Some(data));
     }
@@ -494,11 +508,17 @@ mod tests {
     #[test]
     fn test_scratchpad_list_by_prefix() {
         let (scratchpad, _temp) = test_scratchpad();
-        
-        scratchpad.write(ScratchpadEntry::new("finding:1", "value1", "worker1")).unwrap();
-        scratchpad.write(ScratchpadEntry::new("finding:2", "value2", "worker2")).unwrap();
-        scratchpad.write(ScratchpadEntry::new("other", "value3", "worker3")).unwrap();
-        
+
+        scratchpad
+            .write(ScratchpadEntry::new("finding:1", "value1", "worker1"))
+            .unwrap();
+        scratchpad
+            .write(ScratchpadEntry::new("finding:2", "value2", "worker2"))
+            .unwrap();
+        scratchpad
+            .write(ScratchpadEntry::new("other", "value3", "worker3"))
+            .unwrap();
+
         let findings = scratchpad.list_by_prefix("finding:");
         assert_eq!(findings.len(), 2);
     }
@@ -506,16 +526,18 @@ mod tests {
     #[test]
     fn test_worker_registration() {
         let (scratchpad, _temp) = test_scratchpad();
-        
+
         let worker = WorkerInfo::new("worker-1", "researcher", "Find all bugs in src/parser.rs");
         scratchpad.register_worker(worker.clone()).unwrap();
-        
+
         let retrieved = scratchpad.get_worker("worker-1").unwrap();
         assert_eq!(retrieved.id, "worker-1");
         assert_eq!(retrieved.role, "researcher");
         assert_eq!(retrieved.status, WorkerStatus::Initializing);
-        
-        scratchpad.update_worker_status("worker-1", WorkerStatus::Working).unwrap();
+
+        scratchpad
+            .update_worker_status("worker-1", WorkerStatus::Working)
+            .unwrap();
         let updated = scratchpad.get_worker("worker-1").unwrap();
         assert_eq!(updated.status, WorkerStatus::Working);
     }
@@ -523,15 +545,25 @@ mod tests {
     #[test]
     fn test_active_workers() {
         let (scratchpad, _temp) = test_scratchpad();
-        
-        scratchpad.register_worker(WorkerInfo::new("w1", "role", "task")).unwrap();
-        scratchpad.register_worker(WorkerInfo::new("w2", "role", "task")).unwrap();
-        scratchpad.register_worker(WorkerInfo::new("w3", "role", "task")).unwrap();
-        
-        scratchpad.update_worker_status("w1", WorkerStatus::Completed).unwrap();
-        scratchpad.update_worker_status("w2", WorkerStatus::Working).unwrap();
+
+        scratchpad
+            .register_worker(WorkerInfo::new("w1", "role", "task"))
+            .unwrap();
+        scratchpad
+            .register_worker(WorkerInfo::new("w2", "role", "task"))
+            .unwrap();
+        scratchpad
+            .register_worker(WorkerInfo::new("w3", "role", "task"))
+            .unwrap();
+
+        scratchpad
+            .update_worker_status("w1", WorkerStatus::Completed)
+            .unwrap();
+        scratchpad
+            .update_worker_status("w2", WorkerStatus::Working)
+            .unwrap();
         // w3 stays Initializing
-        
+
         let active = scratchpad.active_workers();
         assert_eq!(active.len(), 2);
     }
@@ -541,10 +573,14 @@ mod tests {
         let (scratchpad, _temp) = test_scratchpad();
         let base_path = scratchpad.base_path.clone();
         let task_id = scratchpad.task_id.clone();
-        
-        scratchpad.write(ScratchpadEntry::new("key1", "value1", "author1")).unwrap();
-        scratchpad.register_worker(WorkerInfo::new("w1", "role", "task")).unwrap();
-        
+
+        scratchpad
+            .write(ScratchpadEntry::new("key1", "value1", "author1"))
+            .unwrap();
+        scratchpad
+            .register_worker(WorkerInfo::new("w1", "role", "task"))
+            .unwrap();
+
         // Create new scratchpad instance pointing to same path
         let scratchpad2 = Scratchpad {
             task_id,
@@ -553,10 +589,10 @@ mod tests {
             workers: Arc::new(RwLock::new(HashMap::new())),
         };
         scratchpad2.load().unwrap();
-        
+
         let read = scratchpad2.read("key1").unwrap();
         assert_eq!(read.value, "value1");
-        
+
         let worker = scratchpad2.get_worker("w1").unwrap();
         assert_eq!(worker.role, "role");
     }

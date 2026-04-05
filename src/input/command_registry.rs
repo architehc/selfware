@@ -898,7 +898,15 @@ mod tests {
 
     #[test]
     fn test_git_commands_are_in_git_category() {
-        let git_commands = ["/diff", "/git", "/undo", "/worktree", "/worktree enter", "/worktree exit", "/worktree list"];
+        let git_commands = [
+            "/diff",
+            "/git",
+            "/undo",
+            "/worktree",
+            "/worktree enter",
+            "/worktree exit",
+            "/worktree list",
+        ];
         let registry: std::collections::HashMap<&str, CommandCategory> =
             COMMANDS.iter().map(|c| (c.name, c.category)).collect();
 

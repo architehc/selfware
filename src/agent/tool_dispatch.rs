@@ -1154,8 +1154,12 @@ impl Agent {
         if tool_name == "file_edit" {
             if let Ok(args) = serde_json::from_str::<serde_json::Value>(args_str) {
                 if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
-                    let edit_fail_count = self.recent_failed_tool_attempts.iter()
-                        .filter(|a| a.tool_name == "file_edit" && a.error_preview.contains("not found"))
+                    let edit_fail_count = self
+                        .recent_failed_tool_attempts
+                        .iter()
+                        .filter(|a| {
+                            a.tool_name == "file_edit" && a.error_preview.contains("not found")
+                        })
                         .count();
 
                     info!(
@@ -1172,7 +1176,10 @@ impl Agent {
                         match std::fs::read_to_string(path) {
                             Ok(content) => {
                                 let lines = content.lines().count();
-                                format!("Current content of {} ({} lines):\n{}", path, lines, content)
+                                format!(
+                                    "Current content of {} ({} lines):\n{}",
+                                    path, lines, content
+                                )
                             }
                             Err(e) => format!("Could not read {}: {}", path, e),
                         }
@@ -1191,8 +1198,21 @@ impl Agent {
                          </selfware_system_directive>",
                         read_result, path
                     );
-                    self.push_tool_result_message(use_native_fc, call_id, tool_name, false, &escalation);
-                    self.log_tool_call(tool_name, args_str, "escalated_to_file_write", false, start_time, false);
+                    self.push_tool_result_message(
+                        use_native_fc,
+                        call_id,
+                        tool_name,
+                        false,
+                        &escalation,
+                    );
+                    self.log_tool_call(
+                        tool_name,
+                        args_str,
+                        "escalated_to_file_write",
+                        false,
+                        start_time,
+                        false,
+                    );
                     self.consecutive_suppressions = 0; // reset — we gave the model new info
                     return true;
                 }

@@ -1289,14 +1289,20 @@ To call a tool, use this EXACT XML structure:
 
     /// Run AutoCompact - LLM-based summarization
     pub async fn compact_auto(&mut self) -> anyhow::Result<compression::CompressionMetrics> {
-        let metrics = self.compression_orchestrator.run_auto(&self.client, &mut self.messages).await?;
+        let metrics = self
+            .compression_orchestrator
+            .run_auto(&self.client, &mut self.messages)
+            .await?;
         info!("AutoCompact: {}", metrics.summary());
         Ok(metrics)
     }
 
     /// Run FullCompact - nuclear option with file re-injection
     pub async fn compact_full(&mut self) -> anyhow::Result<compression::CompressionMetrics> {
-        let metrics = self.compression_orchestrator.run_full(&self.client, &mut self.messages).await?;
+        let metrics = self
+            .compression_orchestrator
+            .run_full(&self.client, &mut self.messages)
+            .await?;
         info!("FullCompact: {}", metrics.summary());
         Ok(metrics)
     }
@@ -1305,9 +1311,14 @@ To call a tool, use this EXACT XML structure:
     pub async fn compact_auto_trigger(&mut self) -> Option<compression::CompressionMetrics> {
         let current_tokens = self.total_tokens_used();
         let context_window = self.max_context_tokens;
-        
+
         self.compression_orchestrator
-            .check_and_compress(&self.client, &mut self.messages, current_tokens, context_window)
+            .check_and_compress(
+                &self.client,
+                &mut self.messages,
+                current_tokens,
+                context_window,
+            )
             .await
     }
 
@@ -1320,25 +1331,28 @@ To call a tool, use this EXACT XML structure:
     pub fn compression_stats(&self) -> String {
         let total_saved = self.compression_orchestrator.total_tokens_saved();
         let history = self.compression_orchestrator.metrics_history();
-        
+
         let mut stats = format!(
             "Total tokens saved: {}\nCompression operations: {}\n",
             total_saved,
             history.len()
         );
-        
+
         if let Some(last) = history.last() {
             stats.push_str(&format!("\nLast compression:\n  {}", last.summary()));
         }
-        
-        let recent_files = self.compression_orchestrator.file_tracker().get_recent_files(5);
+
+        let recent_files = self
+            .compression_orchestrator
+            .file_tracker()
+            .get_recent_files(5);
         if !recent_files.is_empty() {
             stats.push_str("\n\nRecently accessed files:\n");
             for (i, path) in recent_files.iter().enumerate() {
                 stats.push_str(&format!("  {}. {}\n", i + 1, path));
             }
         }
-        
+
         stats
     }
 
@@ -1435,7 +1449,10 @@ To call a tool, use this EXACT XML structure:
                 Ok(PermissionPromptResult::Always)
             }
             "o" | "yolo" => {
-                eprintln!("  {} Switching to YOLO mode for this session.", "⚡".bright_red());
+                eprintln!(
+                    "  {} Switching to YOLO mode for this session.",
+                    "⚡".bright_red()
+                );
                 // Emit event to request mode change - the agent loop will handle this
                 self.emit_event(AgentEvent::ModeChangeRequested {
                     mode: crate::config::ExecutionMode::Yolo,

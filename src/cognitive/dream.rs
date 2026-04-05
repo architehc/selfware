@@ -129,14 +129,19 @@ impl DreamState {
         let content = std::fs::read_to_string(&path)?;
         let mut state: DreamState = serde_json::from_str(&content)?;
         state.lock_file_path = Some(base_dir.join("dream.lock"));
-        
+
         // Check if a lock file exists from a previous run
-        if state.lock_file_path.as_ref().map(|p| p.exists()).unwrap_or(false) {
+        if state
+            .lock_file_path
+            .as_ref()
+            .map(|p| p.exists())
+            .unwrap_or(false)
+        {
             warn!("Found existing dream lock file - previous dream may have crashed");
             // Clear the stale lock
             let _ = std::fs::remove_file(state.lock_file_path.as_ref().unwrap());
         }
-        
+
         Ok(state)
     }
 
@@ -144,12 +149,12 @@ impl DreamState {
     pub fn save(&self, base_dir: &Path) -> Result<()> {
         let path = Self::state_file_path(base_dir);
         std::fs::create_dir_all(base_dir)?;
-        
+
         let json = serde_json::to_string_pretty(self)?;
         let temp_path = path.with_extension(format!("tmp.{}", std::process::id()));
         std::fs::write(&temp_path, json)?;
         std::fs::rename(&temp_path, &path)?;
-        
+
         Ok(())
     }
 
@@ -179,7 +184,7 @@ impl DreamState {
     /// Release the consolidation lock
     pub fn release_consolidation_lock(&mut self) {
         self.consolidation_lock = false;
-        
+
         // Remove lock file
         if let Some(ref lock_path) = self.lock_file_path {
             let _ = std::fs::remove_file(lock_path);
@@ -210,13 +215,13 @@ impl DreamState {
             debug!("Dream gate 1 failed: no previous dream recorded");
             return false;
         }
-        
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
         let hours_since_last = (now - self.last_dream_timestamp) / 3600;
-        
+
         if hours_since_last < trigger.min_hours_since_last {
             debug!(
                 "Dream gate 1 failed: only {} hours since last dream (need {})",
@@ -244,7 +249,7 @@ impl DreamState {
             .unwrap_or_default()
             .as_secs();
         let hours_since_last = (now - self.last_dream_timestamp) / 3600;
-        
+
         if hours_since_last >= trigger.min_hours_since_last {
             0
         } else {
@@ -375,12 +380,10 @@ impl MemoryEntry {
             return false; // Undated memories are never stale
         };
 
-        let parsed_date = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
-            .or_else(|_| {
-                // Try parsing with time component
-                chrono::NaiveDateTime::parse_from_str(date_str, "%Y-%m-%d %H:%M")
-                    .map(|dt| dt.date())
-            });
+        let parsed_date = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").or_else(|_| {
+            // Try parsing with time component
+            chrono::NaiveDateTime::parse_from_str(date_str, "%Y-%m-%d %H:%M").map(|dt| dt.date())
+        });
 
         let Ok(memory_date) = parsed_date else {
             return false;
@@ -388,7 +391,7 @@ impl MemoryEntry {
 
         let today = chrono::Local::now().date_naive();
         let age_days = today.signed_duration_since(memory_date).num_days();
-        
+
         age_days > threshold_days as i64
     }
 }
@@ -418,7 +421,10 @@ impl MemoryStore {
             if let Some(entry) = MemoryEntry::parse(line, &current_section) {
                 let idx = entries.len();
                 entries.push(entry);
-                sections.entry(current_section.clone()).or_default().push(idx);
+                sections
+                    .entry(current_section.clone())
+                    .or_default()
+                    .push(idx);
             }
         }
 
@@ -502,7 +508,7 @@ impl MemoryStore {
     /// Cap memory size by removing oldest entries
     pub fn cap_size(&mut self, max_lines: usize, max_bytes: usize) -> usize {
         let content = self.format();
-        
+
         if content.lines().count() <= max_lines && content.len() <= max_bytes {
             return 0;
         }
@@ -527,7 +533,11 @@ impl MemoryStore {
         }
 
         // Add Facts entries until we hit the limit
-        let fact_indices = self.sections.get(&MemorySection::Facts).cloned().unwrap_or_default();
+        let fact_indices = self
+            .sections
+            .get(&MemorySection::Facts)
+            .cloned()
+            .unwrap_or_default();
         for idx in fact_indices {
             if !important_indices.contains(&idx) {
                 let test_entries: Vec<MemoryEntry> = new_entries
@@ -535,13 +545,13 @@ impl MemoryStore {
                     .chain(std::iter::once(&self.entries[idx]))
                     .cloned()
                     .collect();
-                
+
                 let test_store = MemoryStore {
                     entries: test_entries,
                     sections: HashMap::new(), // Simplified check
                 };
                 let test_content = test_store.format();
-                
+
                 if test_content.lines().count() > max_lines || test_content.len() > max_bytes {
                     removed += 1;
                 } else {
@@ -585,7 +595,7 @@ impl MemoryStore {
             .unwrap_or(0);
 
         let content = self.format();
-        
+
         MemoryStats {
             total_entries,
             facts_count,
@@ -814,9 +824,7 @@ mod tests {
 
     #[test]
     fn test_dream_trigger_builder() {
-        let trigger = DreamTrigger::new()
-            .with_min_hours(48)
-            .with_min_sessions(10);
+        let trigger = DreamTrigger::new().with_min_hours(48).with_min_sessions(10);
         assert_eq!(trigger.min_hours_since_last, 48);
         assert_eq!(trigger.min_sessions_since_last, 10);
     }
@@ -824,30 +832,32 @@ mod tests {
     #[test]
     fn test_dream_state_gate_checks() {
         let trigger = DreamTrigger::default();
-        
+
         // New state should not pass gates (0 hours, 0 sessions)
         let state = DreamState::new();
         assert!(!state.should_run_dream_check_gates(&trigger));
-        
+
         // State with enough hours but not enough sessions
         let mut state = DreamState::new();
         state.last_dream_timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_secs() - (25 * 3600); // 25 hours ago
+            .as_secs()
+            - (25 * 3600); // 25 hours ago
         assert!(!state.should_run_dream_check_gates(&trigger));
-        
+
         // State with enough sessions but not enough hours
         let mut state = DreamState::new();
         state.sessions_since_last_dream = 10;
         assert!(!state.should_run_dream_check_gates(&trigger));
-        
+
         // State with both requirements met
         let mut state = DreamState::new();
         state.last_dream_timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_secs() - (25 * 3600);
+            .as_secs()
+            - (25 * 3600);
         state.sessions_since_last_dream = 5;
         assert!(state.should_run_dream_check_gates(&trigger));
     }
@@ -856,25 +866,26 @@ mod tests {
     fn test_should_run_dream_with_lock() {
         let trigger = DreamTrigger::default();
         let mut state = DreamState::new();
-        
+
         // Set up state to pass gates 1 and 2
         state.last_dream_timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_secs() - (25 * 3600);
+            .as_secs()
+            - (25 * 3600);
         state.sessions_since_last_dream = 5;
-        
+
         // Should acquire lock and return true
         assert!(should_run_dream(&mut state, &trigger));
         assert!(state.consolidation_lock);
-        
+
         // Should fail now because lock is held
         assert!(!should_run_dream(&mut state, &trigger));
-        
+
         // Release lock
         state.release_consolidation_lock();
         assert!(!state.consolidation_lock);
-        
+
         // Should succeed again
         assert!(should_run_dream(&mut state, &trigger));
     }
@@ -886,10 +897,10 @@ mod tests {
         state.last_dream_timestamp = 12345;
         state.sessions_since_last_dream = 3;
         state.dream_count = 5;
-        
+
         // Save state
         state.save(dir.path()).unwrap();
-        
+
         // Load state
         let loaded = DreamState::load(dir.path()).unwrap();
         assert_eq!(loaded.last_dream_timestamp, 12345);
@@ -900,14 +911,19 @@ mod tests {
 
     #[test]
     fn test_memory_entry_parse() {
-        let entry = MemoryEntry::parse("- [2026-03-31] Project uses tokio", &MemorySection::Facts).unwrap();
+        let entry =
+            MemoryEntry::parse("- [2026-03-31] Project uses tokio", &MemorySection::Facts).unwrap();
         assert_eq!(entry.date, Some("2026-03-31".to_string()));
         assert_eq!(entry.content, "Project uses tokio");
-        
-        let entry = MemoryEntry::parse("- Always use 4-space indentation", &MemorySection::Preferences).unwrap();
+
+        let entry = MemoryEntry::parse(
+            "- Always use 4-space indentation",
+            &MemorySection::Preferences,
+        )
+        .unwrap();
         assert_eq!(entry.date, None);
         assert_eq!(entry.content, "Always use 4-space indentation");
-        
+
         assert!(MemoryEntry::parse("", &MemorySection::Facts).is_none());
         assert!(MemoryEntry::parse("## Header", &MemorySection::Facts).is_none());
     }
@@ -930,10 +946,25 @@ mod tests {
 
         let store = MemoryStore::parse(content);
         assert_eq!(store.entries.len(), 5); // 2 facts + 2 preferences + 1 architecture
-        assert_eq!(store.sections.get(&MemorySection::Facts).map(|v| v.len()), Some(2));
-        assert_eq!(store.sections.get(&MemorySection::Preferences).map(|v| v.len()), Some(2));
-        assert_eq!(store.sections.get(&MemorySection::ArchitectureDecisions).map(|v| v.len()), Some(1));
-        
+        assert_eq!(
+            store.sections.get(&MemorySection::Facts).map(|v| v.len()),
+            Some(2)
+        );
+        assert_eq!(
+            store
+                .sections
+                .get(&MemorySection::Preferences)
+                .map(|v| v.len()),
+            Some(2)
+        );
+        assert_eq!(
+            store
+                .sections
+                .get(&MemorySection::ArchitectureDecisions)
+                .map(|v| v.len()),
+            Some(1)
+        );
+
         // Format and re-parse should give same structure
         let reformatted = store.format();
         let reparsed = MemoryStore::parse(&reformatted);
@@ -953,7 +984,7 @@ mod tests {
             raw_line: format!("- [{}] Old fact", old_date),
         };
         assert!(old_entry.is_stale(90));
-        
+
         // Recent entry (10 days ago)
         let recent_date = (chrono::Local::now() - chrono::Duration::days(10))
             .format("%Y-%m-%d")
@@ -965,7 +996,7 @@ mod tests {
             raw_line: format!("- [{}] Recent fact", recent_date),
         };
         assert!(!recent_entry.is_stale(90));
-        
+
         // Undated entry is never stale
         let undated_entry = MemoryEntry {
             date: None,
@@ -1010,7 +1041,7 @@ mod tests {
                 raw_line: "- Use 4-space indent".to_string(),
             },
         ];
-        
+
         let prompt = generate_consolidation_prompt(&memories);
         assert!(prompt.contains("Project uses tokio"));
         assert!(prompt.contains("memory consolidation"));

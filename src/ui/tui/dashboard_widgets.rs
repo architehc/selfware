@@ -268,7 +268,10 @@ impl DashboardState {
             }
             TuiEvent::ModeChangeRequested { mode } => {
                 self.status_message = format!("Mode change: {:?}", mode);
-                self.log(LogLevel::Info, &format!("Mode change requested: {:?}", mode));
+                self.log(
+                    LogLevel::Info,
+                    &format!("Mode change requested: {:?}", mode),
+                );
             }
         }
     }
@@ -363,10 +366,7 @@ pub fn render_status_bar(frame: &mut Frame, area: Rect, state: &DashboardState) 
     // Build coordinator indicator if active
     let coordinator_spans = if state.coordinator_status.is_active {
         let phase = &state.coordinator_status.current_phase;
-        let workers = format!(
-            "{} workers",
-            state.coordinator_status.active_workers
-        );
+        let workers = format!("{} workers", state.coordinator_status.active_workers);
         vec![
             Span::styled(" │ ", TuiPalette::muted_style()),
             Span::styled("👑 ", Style::default().fg(TuiPalette::AMBER)),

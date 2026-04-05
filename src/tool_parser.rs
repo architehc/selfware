@@ -713,9 +713,7 @@ fn try_parse_json_blocks(content: &str) -> Option<Vec<(Result<ParsedToolCall>, S
 ///   tool_name({"key": "value"})
 ///
 /// This is a last-resort fallback for models that don't wrap tool calls in XML tags.
-fn try_parse_plain_function_calls(
-    content: &str,
-) -> Option<Vec<(Result<ParsedToolCall>, String)>> {
+fn try_parse_plain_function_calls(content: &str) -> Option<Vec<(Result<ParsedToolCall>, String)>> {
     // Known tool name prefixes — we only match calls that look like real tools
     const KNOWN_TOOLS: &[&str] = &[
         "file_read",

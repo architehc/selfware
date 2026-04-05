@@ -73,14 +73,14 @@ impl MemorySystem {
             .as_ref()
             .map(|h| h.join(".selfware").join("memory"))
             .unwrap_or_else(|| PathBuf::from(".selfware").join("memory"));
-        
+
         let mut memories = Vec::new();
 
         for ancestor in cwd.ancestors() {
             // Generate project key from path
             let project_key = Self::project_key_from_path(ancestor);
             let memory_path = memory_base.join(format!("{}_MEMORY.md", project_key));
-            
+
             if memory_path.is_file() {
                 if let Ok(content) = std::fs::read_to_string(&memory_path) {
                     memories.push(ConsolidatedMemory {
@@ -90,9 +90,13 @@ impl MemorySystem {
                     });
                 }
             }
-            
+
             // Stop at home directory
-            if home.as_ref().map(|h| ancestor == h.as_path()).unwrap_or(false) {
+            if home
+                .as_ref()
+                .map(|h| ancestor == h.as_path())
+                .unwrap_or(false)
+            {
                 break;
             }
         }
@@ -108,9 +112,13 @@ impl MemorySystem {
             .components()
             .filter_map(|c| c.as_os_str().to_str())
             .collect();
-        
+
         if components.len() >= 2 {
-            format!("{}_{}", components[components.len() - 2], components[components.len() - 1])
+            format!(
+                "{}_{}",
+                components[components.len() - 2],
+                components[components.len() - 1]
+            )
         } else if let Some(last) = components.last() {
             last.to_string()
         } else {
@@ -145,8 +153,7 @@ impl MemorySystem {
         for memory in memories {
             parts.push(format!(
                 "### Project: {}\n{}",
-                memory.project_key,
-                memory.content
+                memory.project_key, memory.content
             ));
         }
         parts.join("\n\n")
@@ -178,7 +185,7 @@ impl DreamIntegratedMemorySystem {
     /// Create a new dream-integrated memory system.
     pub fn new(project_path: &Path) -> Self {
         let project_key = MemorySystem::project_key_from_path(project_path);
-        
+
         Self {
             project_key,
             dream_config: crate::cognitive::dream::DreamConfig::new(),
@@ -204,7 +211,7 @@ impl DreamIntegratedMemorySystem {
     /// Load consolidated MEMORY.md for the project.
     pub fn load_consolidated_memory(&self) -> Option<ConsolidatedMemory> {
         let memory_path = self.dream_config.memory_file_path(&self.project_key);
-        
+
         if !memory_path.exists() {
             return None;
         }
@@ -248,17 +255,16 @@ impl DreamIntegratedMemorySystem {
     /// This should be called when a session ends, even if not spawning a dream.
     pub fn record_session_end(&self) -> anyhow::Result<()> {
         use crate::cognitive::dream::DreamState;
-        
+
         let mut state = DreamState::load(&self.dream_config.state_path())?;
         state.record_session_end();
         state.save(&self.dream_config.state_path())?;
-        
+
         debug!(
             "Recorded session end for {}: {} sessions since last dream",
-            self.project_key,
-            state.sessions_since_last_dream
+            self.project_key, state.sessions_since_last_dream
         );
-        
+
         Ok(())
     }
 
@@ -270,7 +276,7 @@ impl DreamIntegratedMemorySystem {
         project_path: &Path,
     ) -> anyhow::Result<crate::cognitive::dream::DreamResult> {
         info!("Force-triggering dream for {}", self.project_key);
-        
+
         crate::cognitive::dream_subprocess::run_dream_consolidation(
             project_path,
             &self.project_key,
@@ -384,16 +390,13 @@ mod tests {
         let home = temp.path().join("home");
         let project = home.join("projects").join("myapp");
         let memory_base = home.join(".selfware").join("memory");
-        
+
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(&memory_base).unwrap();
 
         // Create a consolidated memory file
         let memory_content = "# Project Memory\n\n## Facts\n- [2026-03-31] Test fact\n";
-        std::fs::write(
-            memory_base.join("projects_myapp_MEMORY.md"),
-            memory_content
-        ).unwrap();
+        std::fs::write(memory_base.join("projects_myapp_MEMORY.md"), memory_content).unwrap();
 
         // Set HOME to temp directory
         let original_home = std::env::var_os("HOME");
@@ -445,16 +448,13 @@ mod tests {
         let home = temp.path().join("home");
         let project = home.join("myapp");
         let memory_base = home.join(".selfware").join("memory");
-        
+
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(&memory_base).unwrap();
 
         // Create a consolidated memory file
         let memory_content = "# Project Memory\n\n## Facts\n- [2026-03-31] Test fact\n";
-        std::fs::write(
-            memory_base.join("home_myapp_MEMORY.md"),
-            memory_content
-        ).unwrap();
+        std::fs::write(memory_base.join("home_myapp_MEMORY.md"), memory_content).unwrap();
 
         // Set HOME to temp directory
         let original_home = std::env::var_os("HOME");
@@ -476,7 +476,7 @@ mod tests {
     #[tokio::test]
     async fn test_dream_integrated_record_session_end() {
         use crate::cognitive::dream::DreamConfig;
-        
+
         let temp = tempdir().unwrap();
         let memory_base = temp.path().join("memory");
         let project = temp.path().join("projects").join("myapp");
@@ -484,12 +484,11 @@ mod tests {
 
         // Create system with isolated dream config
         let dream_config = DreamConfig::new().with_base_dir(&memory_base);
-        let system = DreamIntegratedMemorySystem::new(&project)
-            .with_dream_config(dream_config);
-        
+        let system = DreamIntegratedMemorySystem::new(&project).with_dream_config(dream_config);
+
         // Record session end
         system.record_session_end().unwrap();
-        
+
         // Verify state was updated
         let status = system.dream_status().await;
         assert_eq!(status.sessions_since_last_dream, 1);

@@ -170,12 +170,16 @@ impl Plan {
 
     /// Get the next pending step (first step that is not done)
     pub fn next_pending_step(&self) -> Option<&PlanStep> {
-        self.steps.iter().find(|s| !matches!(s.status, StepStatus::Done))
+        self.steps
+            .iter()
+            .find(|s| !matches!(s.status, StepStatus::Done))
     }
 
     /// Get the next pending step mutably (first step that is not done)
     pub fn next_pending_step_mut(&mut self) -> Option<&mut PlanStep> {
-        self.steps.iter_mut().find(|s| !matches!(s.status, StepStatus::Done))
+        self.steps
+            .iter_mut()
+            .find(|s| !matches!(s.status, StepStatus::Done))
     }
 
     /// Format the plan as a human-readable string
@@ -218,10 +222,7 @@ impl Plan {
         }
 
         if self.estimated_tokens > 0 {
-            output.push_str(&format!(
-                "Estimated tokens: ~{}\n",
-                self.estimated_tokens
-            ));
+            output.push_str(&format!("Estimated tokens: ~{}\n", self.estimated_tokens));
         }
 
         output
