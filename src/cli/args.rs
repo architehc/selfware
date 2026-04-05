@@ -185,6 +185,32 @@ pub(crate) enum Commands {
         format: String,
     },
 
+    /// Run long-running system test (8+ hours)
+    #[command(alias = "lt")]
+    LongTest {
+        /// Duration in hours (default: 8)
+        #[arg(short, long, default_value_t = 8)]
+        hours: u64,
+        /// Timeout per project in seconds (default: 900)
+        #[arg(short, long, default_value_t = 900)]
+        timeout: u64,
+        /// Maximum iterations per project (default: 80)
+        #[arg(short, long, default_value_t = 80)]
+        max_iters: usize,
+        /// Endpoint URL (defaults to config)
+        #[arg(short, long)]
+        endpoint: Option<String>,
+        /// Model name (defaults to config)
+        #[arg(short, long)]
+        model: Option<String>,
+        /// Templates directory
+        #[arg(short, long)]
+        templates: Option<String>,
+        /// Output directory for results
+        #[arg(short, long, default_value = "long_run_results")]
+        output: String,
+    },
+
     /// Auto-detect and configure endpoint settings
     #[command(alias = "ac")]
     AutoConfig {

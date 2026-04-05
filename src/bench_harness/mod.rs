@@ -44,6 +44,7 @@ pub mod runner;
 pub mod task;
 
 pub mod computer_control;
+pub mod long_running;
 
 pub use config::HarnessConfig;
 pub use report::HarnessReport;

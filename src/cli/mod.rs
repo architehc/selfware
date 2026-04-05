@@ -11,6 +11,7 @@ use std::sync::mpsc;
 use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
+use std::path::PathBuf;
 use tracing::warn;
 
 // Use library exports instead of redeclaring modules
@@ -2039,6 +2040,171 @@ async fn handle_command(
                 "✓".green(),
                 elapsed.as_secs_f64()
             );
+        }
+
+        Commands::LongTest {
+            hours,
+            timeout,
+            max_iters,
+            endpoint,
+            model,
+            templates,
+            output,
+        } => {
+            if !quiet {
+                println!("{}", render_header(ctx));
+            }
+
+            println!("\n{} Selfware Long-Running Test\n", "⏱️ ".emphasis());
+            println!("   Duration: {} hours", hours.to_string().emphasis());
+            println!("   Timeout: {}s per project", timeout);
+            println!("   Max iterations: {}", max_iters);
+            println!("   Output: {}", output.emphasis());
+            if let Some(ref ep) = endpoint {
+                println!("   Endpoint: {}", ep);
+            }
+            if let Some(ref m) = model {
+                println!("   Model: {}", m);
+            }
+            println!();
+
+            #[cfg(feature = "bench-harness")]
+            {
+                use crate::bench_harness::long_running::*;
+                use std::time::Duration;
+
+                let ep = endpoint.as_deref().unwrap_or(&config.endpoint);
+                let mdl = model.as_deref().unwrap_or(&config.model);
+                let tmpl = templates
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("system_tests/projecte2e/templates"));
+
+                let test_config = LongRunningConfig::new(ep, mdl)
+                    .with_duration(Duration::from_secs(hours * 3600))
+                    .with_project_timeout(timeout)
+                    .with_max_iterations(max_iters)
+                    .with_templates_dir(tmpl)
+                    .with_output_dir(&output);
+
+                println!("{} Initializing test runner...", "⏳".dimmed());
+                let runner = match LongRunningRunner::new(test_config) {
+                    Ok(r) => {
+                        println!("{} Runner ready\n", "✓".green());
+                        r
+                    }
+                    Err(e) => {
+                        println!("{} Failed to initialize: {}\n", "✗".red(), e);
+                        return Ok(());
+                    }
+                };
+
+                println!(
+                    "{} Starting long-running test (press Ctrl+C to stop)\n",
+                    "🚀".emphasis()
+                );
+
+                let mut report = LongRunningReport::new();
+                let start = std::time::Instant::now();
+
+                // Example round: Core greenfield Rust projects
+                let mut round_num = 1;
+                while runner.should_continue() {
+                    println!(
+                        "  {} Round {} ({} remaining)",
+                        "▶".dimmed(),
+                        round_num,
+                        format!("{:.0}h", runner.time_remaining().as_secs_f64() / 3600.0).dimmed()
+                    );
+
+                    // Run a few example tasks
+                    let tasks = vec![
+                        TestTask {
+                            name: format!("calc_r{}", round_num),
+                            project_type: ProjectType::Rust,
+                            setup: TaskSetup::RustGreenfield {
+                                name: "calculator".into(),
+                            },
+                            prompt: "Create a Calculator in src/lib.rs with add, subtract, multiply, divide (returns Result for div by zero). Write 5 unit tests. Run cargo test.".into(),
+                        },
+                    ];
+
+                    let round_dir = PathBuf::from(&output).join(format!("round_{}", round_num));
+                    std::fs::create_dir_all(&round_dir).ok();
+
+                    let mut round_results = Vec::new();
+                    for task in tasks {
+                        let work_dir = round_dir.join(&task.name);
+                        let result = runner.run_task(&task, &work_dir).await;
+                        println!(
+                            "    {} {}: {} ({}s, {}p/{}f)",
+                            if matches!(result.status, ProjectStatus::Green) {
+                                "✓".green()
+                            } else if matches!(result.status, ProjectStatus::Partial | ProjectStatus::Compiles) {
+                                "◐".yellow()
+                            } else {
+                                "✗".red()
+                            },
+                            result.name,
+                            result.status.to_string().dimmed(),
+                            result.duration_secs,
+                            result.tests_passed,
+                            result.tests_failed
+                        );
+                        report.add_result(result.clone());
+                        round_results.push(result);
+                    }
+
+                    report.add_round(RoundSummary {
+                        round_num,
+                        name: format!("Round {}", round_num),
+                        results: round_results,
+                    });
+
+                    round_num += 1;
+
+                    // Save progress after each round
+                    report.set_duration(start.elapsed().as_secs());
+                    if let Err(e) = report.write_to_dir(Path::new(&output)) {
+                        println!("    {} Failed to save report: {}", "⚠".yellow(), e);
+                    }
+                }
+
+                println!();
+                let counts = report.count_by_status();
+                println!("{} Test complete!\n", "✓".green());
+                println!("  Total projects: {}", report.results.len());
+                println!(
+                    "  🟢 GREEN: {}",
+                    counts.get(&ProjectStatus::Green).copied().unwrap_or(0)
+                );
+                println!(
+                    "  🟡 PARTIAL: {}",
+                    counts.get(&ProjectStatus::Partial).copied().unwrap_or(0)
+                );
+                println!(
+                    "  🔵 COMPILES: {}",
+                    counts.get(&ProjectStatus::Compiles).copied().unwrap_or(0)
+                );
+                println!(
+                    "  ⚪ WROTE: {}",
+                    counts.get(&ProjectStatus::Wrote).copied().unwrap_or(0)
+                );
+                println!(
+                    "  🔴 FAIL: {}",
+                    counts.get(&ProjectStatus::Fail).copied().unwrap_or(0)
+                );
+                println!();
+                println!("  Report saved to: {}/report.md", output);
+                println!();
+            }
+
+            #[cfg(not(feature = "bench-harness"))]
+            {
+                println!(
+                    "{} Long-running test requires --features bench-harness\n",
+                    "✗".red()
+                );
+            }
         }
 
         Commands::Doctor => {
