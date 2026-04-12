@@ -547,13 +547,14 @@ impl GuardedRuntimeBuilder {
     pub fn build(self) -> GuardedSwlRuntime {
         if self.dry_run || self.client.is_none() {
             GuardedSwlRuntime::new_dry_run()
-        } else {
-            let client = self.client.unwrap();
+        } else if let Some(client) = self.client {
             if let Some(registry) = self.tool_registry {
                 GuardedSwlRuntime::with_tool_registry(client, registry)
             } else {
                 GuardedSwlRuntime::new(client)
             }
+        } else {
+            GuardedSwlRuntime::new_dry_run()
         }
     }
 }

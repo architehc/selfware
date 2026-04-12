@@ -835,9 +835,7 @@ fn yaml_to_var_value(value: serde_yaml::Value) -> VarValue {
         serde_yaml::Value::String(s) => VarValue::String(s),
         serde_yaml::Value::Bool(b) => VarValue::Boolean(b),
         serde_yaml::Value::Number(n) => VarValue::Number(
-            n.as_f64()
-                .ok_or_else(|| SelfwareError::Internal("Invalid YAML number value".to_string()))
-                .unwrap_or(0.0),
+            n.as_f64().unwrap_or(0.0),
         ),
         serde_yaml::Value::Sequence(seq) => {
             VarValue::List(seq.into_iter().map(yaml_to_var_value).collect())

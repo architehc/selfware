@@ -35,44 +35,97 @@ struct CheckpointEnvelope {
 }
 
 impl CheckpointEnvelope {
+    /// Get or create the HMAC key for checkpoint integrity verification.
+    ///
+    /// This function attempts to load an existing key from the data directory.
+    /// If no key exists or the key file is invalid, a new random key is generated
+    /// and persisted to disk with restrictive permissions (0o600 on Unix).
+    ///
+    /// # Returns
+    /// A 32-byte key for HMAC-SHA-256 operations.
     fn get_hmac_key() -> Vec<u8> {
         let path = dirs::data_local_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("selfware")
             .join("checkpoint_hmac_key");
 
+        // Try to load existing key
         if let Ok(key) = std::fs::read(&path) {
             if key.len() == 32 {
                 return key;
             }
+            tracing::warn!(
+                "Existing HMAC key at {:?} has invalid length (expected 32, got {}). Generating new key.",
+                path,
+                key.len()
+            );
         }
 
+        // Generate new key
         let mut key = vec![0u8; 32];
         rand::RngCore::fill_bytes(&mut rand::rng(), &mut key);
 
+        // Attempt to persist the key with best-effort error handling
+        if let Err(e) = Self::persist_hmac_key(&path, &key) {
+            tracing::warn!(
+                "Failed to persist HMAC key to {:?}: {}. Key will be ephemeral for this session.",
+                path,
+                e
+            );
+        }
+
+        key
+    }
+
+    /// Persist the HMAC key to disk with appropriate permissions.
+    fn persist_hmac_key(path: &PathBuf, key: &[u8]) -> Result<()> {
+        // Ensure parent directory exists
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create HMAC key directory {:?}. Check permissions and disk space.",
+                    parent
+                )
+            })?;
         }
 
         #[cfg(unix)]
         {
+            use std::io::Write;
             use std::os::unix::fs::OpenOptionsExt;
-            if let Ok(mut file) = std::fs::OpenOptions::new()
+            let mut file = std::fs::OpenOptions::new()
                 .write(true)
                 .create(true)
                 .truncate(true)
                 .mode(0o600)
-                .open(&path)
-            {
-                let _ = std::io::Write::write_all(&mut file, &key);
-            }
+                .open(path)
+                .with_context(|| {
+                    format!(
+                        "Failed to create HMAC key file {:?} with secure permissions (0o600). Check file permissions.",
+                        path
+                    )
+                })?;
+            file.write_all(key).with_context(|| {
+                format!(
+                    "Failed to write HMAC key to {:?}. Check disk space and permissions.",
+                    path
+                )
+            })?;
+            file.sync_all().with_context(|| {
+                format!("Failed to sync HMAC key file {:?} to disk", path)
+            })?;
         }
         #[cfg(not(unix))]
         {
-            let _ = std::fs::write(&path, &key);
+            std::fs::write(path, key).with_context(|| {
+                format!(
+                    "Failed to write HMAC key to {:?}. Check disk space and permissions.",
+                    path
+                )
+            })?;
         }
 
-        key
+        Ok(())
     }
 
     /// Create a new envelope by computing the HMAC-SHA-256 hash of the payload.
@@ -721,8 +774,8 @@ impl CheckpointManager {
         // Atomic write: write to a temp file in the same directory, then rename.
         let suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
         let tmp_path = path.with_extension(format!(
             "json.tmp.{}.{}.{}",
             checkpoint.task_id,
@@ -983,7 +1036,10 @@ impl CheckpointManager {
             }
         }
 
-        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("Checkpoint save failed")))
+        Err(last_err.map_or_else(
+            || anyhow::anyhow!("Checkpoint save failed: all {} retry attempts exhausted", DELAYS_MS.len()),
+            |e| anyhow::anyhow!("Checkpoint save failed after {} attempts: {}", DELAYS_MS.len(), e),
+        ))
     }
 
     /// List all saved tasks

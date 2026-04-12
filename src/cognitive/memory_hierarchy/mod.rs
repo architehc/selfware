@@ -258,7 +258,9 @@ impl HierarchicalMemory {
         // Fire-and-forget store (working memory is append-heavy)
         let working = self.working.clone();
         tokio::spawn(async move {
-            let _ = working.store(entry).await;
+            if let Err(e) = working.store(entry).await {
+                tracing::warn!(error = %e, "Failed to store entry in working memory");
+            }
         });
     }
 
@@ -304,7 +306,10 @@ impl HierarchicalMemory {
                 // Demote to short-term instead of dropping
                 if let Some(mut removed) = self.working.remove(entry.id).await {
                     removed.tier = MemoryTier::ShortTerm;
-                    let _ = self.short_term.store(removed).await;
+                    if let Err(e) = self.short_term.store(removed).await {
+                        tracing::warn!(error = %e, entry_id = entry.id, "Failed to demote entry to short-term memory");
+                        continue;
+                    }
                     let freed = entry_tokens.min(tokens_to_free);
                     tokens_to_free = tokens_to_free.saturating_sub(freed);
                     self.usage.working_tokens =
@@ -333,7 +338,10 @@ impl HierarchicalMemory {
             for entry in entries.iter().take(to_evict) {
                 if let Some(mut removed) = self.short_term.remove(entry.id).await {
                     removed.tier = MemoryTier::LongTerm;
-                    let _ = self.long_term.store(removed).await;
+                    if let Err(e) = self.long_term.store(removed).await {
+                        tracing::warn!(error = %e, entry_id = entry.id, "Failed to demote entry to long-term memory");
+                        continue;
+                    }
                     compressed = true;
                 }
             }

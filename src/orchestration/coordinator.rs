@@ -202,15 +202,34 @@ pub struct WorkerAgent {
 
 impl CoordinatorAgent {
     /// Create a new coordinator agent for the given task
+    ///
+    /// ⚠️ WARNING: Coordinator mode uses SIMULATED worker execution.
+    /// Workers do NOT actually use LLM calls or execute tools - they only
+    /// log messages and return placeholder results. See `WorkerAgent::execute_task`.
     pub fn new(task: impl Into<String>) -> Result<Self> {
         let task = task.into();
         let task_id = format!("task-{}", uuid::Uuid::new_v4());
+        
+        // Log prominent warning about simulated execution
+        warn!(
+            "\n{}
+{} {}
+{} {}
+{} {}
+{}",
+            "╔══════════════════════════════════════════════════════════════════╗",
+            "║", "⚠️  WARNING: COORDINATOR MODE USES SIMULATED WORKER EXECUTION",
+            "║", "   WorkerAgent::execute_task is a STUB that does NOT use LLM",
+            "║", "   or execute tools. Workers only log and return placeholders.",
+            "╚══════════════════════════════════════════════════════════════════╝"
+        );
+        
         let scratchpad = Scratchpad::for_task(&task_id)?;
 
         // Create restricted tool registry
         let tools = Self::create_restricted_tool_registry()?;
 
-        info!(task_id = %task_id, "Created coordinator agent");
+        info!(task_id = %task_id, "Created coordinator agent (SIMULATED MODE)");
 
         Ok(Self {
             task_id,
@@ -402,10 +421,14 @@ impl CoordinatorAgent {
 
     /// Execute the four-phase workflow
     ///
-    /// 1. Research: Spawn workers to investigate
+    /// 1. Research: Spawn workers to investigate (SIMULATED)
     /// 2. Synthesis: Read findings, create implementation plan
-    /// 3. Implementation: Workers execute plan
-    /// 4. Verification: Workers verify each other's work
+    /// 3. Implementation: Workers "execute" plan (SIMULATED)
+    /// 4. Verification: Workers "verify" each other's work (SIMULATED)
+    ///
+    /// ⚠️ WARNING: All worker execution is SIMULATED. No actual LLM calls
+    /// or tool execution occurs. Workers only log and return placeholder results.
+    /// See `WorkerAgent::execute_task` for details.
     pub async fn run_workflow(&self) -> Result<WorkflowResult> {
         self.running.store(true, Ordering::SeqCst);
 
@@ -735,6 +758,9 @@ pub struct WorkflowResult {
 
 impl WorkerAgent {
     /// Create a new worker agent (internal use, workers are spawned by coordinator)
+    ///
+    /// ⚠️ WARNING: Worker execution is SIMULATED. Workers created by this method
+    /// will NOT actually perform LLM calls or tool execution. See `execute_task`.
     fn new(
         id: impl Into<String>,
         coordinator_id: impl Into<String>,
@@ -756,8 +782,11 @@ impl WorkerAgent {
 
     /// Run the worker agent
     ///
-    /// This is the main entry point for worker execution. Workers have full
-    /// tool access and report results back to the coordinator via scratchpad.
+    /// This is the main entry point for worker execution. 
+    ///
+    /// ⚠️ WARNING: This method calls `execute_task` which is a STUB that
+    /// SIMULATES execution without using LLM or tools. The worker will log
+    /// and return placeholder results only.
     async fn run(
         id: String,
         _coordinator_id: String,
@@ -871,6 +900,9 @@ impl WorkerAgent {
     /// Spawn a sub-worker (hierarchical worker spawning)
     ///
     /// Workers can spawn sub-workers for further parallelization.
+    ///
+    /// ⚠️ WARNING: The spawned sub-worker will also use SIMULATED execution
+    /// (see `execute_task`). Sub-workers do NOT actually use LLM or tools.
     pub async fn spawn_subworker(
         &self,
         task: impl Into<String>,

@@ -14,7 +14,20 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+/// Helper to handle lock poisoning gracefully.
+/// 
+/// If a thread panics while holding a lock, the lock is "poisoned".
+/// This function recovers the data from the poisoned lock so operations can continue.
+fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Helper to handle write lock poisoning gracefully.
+fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(|e| e.into_inner())
+}
 
 /// A single entry in the scratchpad
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,7 +259,7 @@ impl Scratchpad {
         if entries_path.exists() {
             let content = std::fs::read_to_string(&entries_path)?;
             let loaded: HashMap<String, ScratchpadEntry> = serde_json::from_str(&content)?;
-            let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
+            let mut entries = write_lock(&self.entries);
             *entries = loaded;
         }
 
@@ -255,7 +268,7 @@ impl Scratchpad {
         if workers_path.exists() {
             let content = std::fs::read_to_string(&workers_path)?;
             let loaded: HashMap<String, WorkerInfo> = serde_json::from_str(&content)?;
-            let mut workers = self.workers.write().unwrap_or_else(|e| e.into_inner());
+            let mut workers = write_lock(&self.workers);
             *workers = loaded;
         }
 
@@ -265,12 +278,13 @@ impl Scratchpad {
     /// Persist all entries to disk
     pub fn persist(&self) -> Result<()> {
         // Persist entries
-        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
+        let entries = read_lock(&self.entries);
         let entries_json = serde_json::to_string_pretty(&*entries)?;
         std::fs::write(self.entries_path(), entries_json)?;
+        drop(entries); // Explicitly drop read lock before acquiring write lock
 
         // Persist workers
-        let workers = self.workers.read().unwrap_or_else(|e| e.into_inner());
+        let workers = read_lock(&self.workers);
         let workers_json = serde_json::to_string_pretty(&*workers)?;
         std::fs::write(self.workers_path(), workers_json)?;
 
@@ -280,7 +294,7 @@ impl Scratchpad {
     /// Write an entry to the scratchpad
     pub fn write(&self, entry: ScratchpadEntry) -> Result<()> {
         {
-            let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
+            let mut entries = write_lock(&self.entries);
             entries.insert(entry.key.clone(), entry);
         }
         self.persist()?;
@@ -289,7 +303,7 @@ impl Scratchpad {
 
     /// Read an entry by key
     pub fn read(&self, key: &str) -> Option<ScratchpadEntry> {
-        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
+        let entries = read_lock(&self.entries);
         entries.get(key).cloned()
     }
 
@@ -307,7 +321,7 @@ impl Scratchpad {
     /// Delete an entry
     pub fn delete(&self, key: &str) -> Result<bool> {
         let existed = {
-            let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
+            let mut entries = write_lock(&self.entries);
             entries.remove(key).is_some()
         };
         if existed {
@@ -318,13 +332,13 @@ impl Scratchpad {
 
     /// List all entry keys
     pub fn list_keys(&self) -> Vec<String> {
-        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
+        let entries = read_lock(&self.entries);
         entries.keys().cloned().collect()
     }
 
     /// List entries by prefix
     pub fn list_by_prefix(&self, prefix: &str) -> Vec<ScratchpadEntry> {
-        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
+        let entries = read_lock(&self.entries);
         entries
             .values()
             .filter(|e| e.key.starts_with(prefix))
@@ -334,7 +348,7 @@ impl Scratchpad {
 
     /// List entries by author
     pub fn list_by_author(&self, author: &str) -> Vec<ScratchpadEntry> {
-        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
+        let entries = read_lock(&self.entries);
         entries
             .values()
             .filter(|e| e.author == author)
@@ -344,14 +358,14 @@ impl Scratchpad {
 
     /// Get all entries
     pub fn all_entries(&self) -> Vec<ScratchpadEntry> {
-        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
+        let entries = read_lock(&self.entries);
         entries.values().cloned().collect()
     }
 
     /// Register a worker
     pub fn register_worker(&self, worker: WorkerInfo) -> Result<()> {
         {
-            let mut workers = self.workers.write().unwrap_or_else(|e| e.into_inner());
+            let mut workers = write_lock(&self.workers);
             workers.insert(worker.id.clone(), worker);
         }
         self.persist()?;
@@ -360,14 +374,14 @@ impl Scratchpad {
 
     /// Get worker info
     pub fn get_worker(&self, worker_id: &str) -> Option<WorkerInfo> {
-        let workers = self.workers.read().unwrap_or_else(|e| e.into_inner());
+        let workers = read_lock(&self.workers);
         workers.get(worker_id).cloned()
     }
 
     /// Update worker status
     pub fn update_worker_status(&self, worker_id: &str, status: WorkerStatus) -> Result<()> {
         {
-            let mut workers = self.workers.write().unwrap_or_else(|e| e.into_inner());
+            let mut workers = write_lock(&self.workers);
             if let Some(worker) = workers.get_mut(worker_id) {
                 worker.set_status(status);
             } else {
@@ -380,7 +394,7 @@ impl Scratchpad {
 
     /// List all workers
     pub fn list_workers(&self) -> Vec<WorkerInfo> {
-        let workers = self.workers.read().unwrap_or_else(|e| e.into_inner());
+        let workers = read_lock(&self.workers);
         workers.values().cloned().collect()
     }
 
@@ -403,7 +417,7 @@ impl Scratchpad {
     /// Remove a worker
     pub fn remove_worker(&self, worker_id: &str) -> Result<bool> {
         let existed = {
-            let mut workers = self.workers.write().unwrap_or_else(|e| e.into_inner());
+            let mut workers = write_lock(&self.workers);
             workers.remove(worker_id).is_some()
         };
         if existed {

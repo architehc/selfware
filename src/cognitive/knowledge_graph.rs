@@ -1023,8 +1023,14 @@ impl KnowledgeGraph {
                 if !visited.contains(target) {
                     self.find_cycles_dfs(target, visited, rec_stack, path, cycles);
                 } else if rec_stack.contains(target) {
-                    // Found a cycle
-                    let cycle_start = path.iter().position(|x| x == target).unwrap();
+                    // Found a cycle - target is guaranteed to be in path because:
+                    // 1. rec_stack tracks nodes in the current DFS path
+                    // 2. target was found in rec_stack, meaning it's an ancestor
+                    // 3. path contains all ancestors from root to current node
+                    // SAFETY: position() will always succeed since target is in rec_stack
+                    // and rec_stack is always a subset of path during DFS
+                    let cycle_start = path.iter().position(|x| x == target)
+                        .expect("target must be in path - this is guaranteed by DFS invariant");
                     cycles.push(path[cycle_start..].to_vec());
                 }
             }

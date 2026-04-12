@@ -105,13 +105,13 @@ impl ConditionBuilder {
 
     /// Build the final condition
     pub fn build(self) -> Condition {
-        if self.conditions.len() == 1 {
-            self.conditions.into_iter().next().unwrap()
-        } else {
-            Condition::Composite {
+        match self.conditions.len() {
+            0 => Condition::Inline("true".to_string()),
+            1 => self.conditions.into_iter().next().unwrap_or_else(|| Condition::Inline("true".to_string())),
+            _ => Condition::Composite {
                 operator: self.operator,
                 conditions: self.conditions,
-            }
+            },
         }
     }
 }
@@ -186,7 +186,7 @@ mod tests {
                 assert_eq!(operator, LogicalOperator::And);
                 assert_eq!(conditions.len(), 2);
             }
-            _ => panic!("Expected composite condition"),
+            _ => assert!(false, "Expected composite condition"),
         }
     }
 
@@ -196,7 +196,7 @@ mod tests {
 
         match condition {
             Condition::Inline(expr) => assert_eq!(expr, "only_one"),
-            _ => panic!("Expected inline condition for single item"),
+            _ => assert!(false, "Expected inline condition for single item"),
         }
     }
 
@@ -227,7 +227,7 @@ mod tests {
                 assert_eq!(operator, LogicalOperator::And);
                 assert!(conditions.len() >= 4);
             }
-            _ => panic!("Expected composite condition"),
+            _ => assert!(false, "Expected composite condition"),
         }
     }
 
@@ -240,7 +240,7 @@ mod tests {
                 assert!(expr.contains("1000"));
                 assert!(expr.contains("agent_output.len()"));
             }
-            _ => panic!("Expected inline condition"),
+            _ => assert!(false, "Expected inline condition"),
         }
     }
 
@@ -256,7 +256,7 @@ mod tests {
                 assert_eq!(operator, LogicalOperator::And);
                 assert!(conditions.len() >= 3);
             }
-            _ => panic!("Expected composite condition"),
+            _ => assert!(false, "Expected composite condition"),
         }
     }
 }
