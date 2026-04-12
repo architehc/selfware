@@ -390,7 +390,7 @@ pub const READONLY_TOOLS: &[&str] = &[
 
 /// Check if a tool name is in the read-only list
 pub fn is_readonly_tool(tool_name: &str) -> bool {
-    READONLY_TOOLS.iter().any(|&name| name == tool_name)
+    READONLY_TOOLS.contains(&tool_name)
 }
 
 #[cfg(test)]

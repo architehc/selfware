@@ -120,8 +120,10 @@ impl AutoCompactManager {
     }
 
     pub fn with_threshold(percentage: usize) -> Self {
-        let mut config = AutoCompactConfig::default();
-        config.token_threshold = percentage;
+        let config = AutoCompactConfig {
+            token_threshold: percentage,
+            ..Default::default()
+        };
         Self::new(config)
     }
 
@@ -520,12 +522,11 @@ pub async fn full_compact(
     }
 
     // Build comprehensive summary prompt
-    let summary_prompt = format!(
-        "Create a comprehensive but concise summary of this entire conversation. \
+    let summary_prompt = "Create a comprehensive but concise summary of this entire conversation. \
          Include: 1) Task goal and current status, 2) Key files modified/accessed, \
          3) Important decisions made, 4) Current blockers or next steps, \
          5) Any active plans or schemas in use."
-    );
+        .to_string();
 
     let summary_request = vec![
         Message::system("You are a comprehensive context summarizer. Preserve all critical information for continuing the task."),

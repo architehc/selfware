@@ -566,7 +566,7 @@ fn parse_worktree_list(output: &str) -> Vec<WorktreeEntry> {
             current.path = path.to_string();
         } else if let Some(branch) = line.strip_prefix("branch ") {
             // Extract branch name from ref (refs/heads/branch-name)
-            current.branch = branch.split('/').last().map(|s| s.to_string());
+            current.branch = branch.split('/').next_back().map(|s| s.to_string());
         } else if line == "detached" {
             current.detached = true;
         } else if line == "bare" {

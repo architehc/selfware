@@ -13,7 +13,6 @@ use clap::Parser;
 use colored::Colorize;
 #[cfg(feature = "bench-harness")]
 use std::path::Path;
-use std::path::PathBuf;
 use tracing::warn;
 
 // Use library exports instead of redeclaring modules

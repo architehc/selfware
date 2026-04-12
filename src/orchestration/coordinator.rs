@@ -237,7 +237,7 @@ impl CoordinatorAgent {
         use crate::tools::tool_search::ToolSearchTool;
 
         // Create a completely fresh registry
-        let mut restricted = ToolRegistry::with_safety_config(None);
+        let restricted = ToolRegistry::with_safety_config(None);
 
         // Since ToolRegistry::with_safety_config registers critical tools by default,
         // we need to deactivate the ones we don't want
