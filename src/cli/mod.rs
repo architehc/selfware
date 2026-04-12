@@ -2049,7 +2049,7 @@ async fn handle_command(
             max_iters,
             endpoint,
             model,
-            templates,
+            templates: _,
             output,
         } => {
             if !quiet {
