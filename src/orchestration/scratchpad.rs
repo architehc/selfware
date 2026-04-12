@@ -1,10 +1,13 @@
-//! Scratchpad for Coordinator Mode
+//! Scratchpad for Coordinator Mode (Work in Progress)
 //!
 //! Provides durable, shared state storage for coordinator-worker communication.
 //! Persisted to disk at `.selfware/scratchpad/{task_id}/` for durability across
 //! agent restarts.
+//!
+//! Status: Implementation complete but not yet integrated into main agent loop.
+//! Used only by the coordinator module; pending full integration.
 
-#![allow(dead_code)] // Work-in-progress: Coordinator mode not yet fully integrated
+#![allow(dead_code)] // Types exported for API stability; integration pending
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};

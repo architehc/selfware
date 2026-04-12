@@ -2,9 +2,14 @@
 # Copy this file to selfware.toml and adjust values for your setup.
 
 # Set this to your OpenAI-compatible API endpoint (e.g., local vLLM/sglang server, ngrok tunnel, etc.)
-endpoint = "http://localhost:8080/v1"
-model = "your-model-name-here"
+endpoint = "https://crazyshit.ngrok.io/v1"
+model = "/media/thread/trebuchet6/qwen35/models/Qwen3.5-122B-A10B-NVFP4-yarn-1010k"
 max_tokens = 98304
+context_length = 1010000
+
+[extra_body]
+# Disable thinking for tool-heavy workflows
+chat_template_kwargs = { enable_thinking = false }
 
 [safety]
 allowed_paths = ["./**", "~/**"]
@@ -13,8 +18,8 @@ denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**", "**/target/**"]
 [agent]
 max_iterations = 10000
 step_timeout_secs = 600
-# Enable native function calling (requires backend support like sglang --tool-call-parser)
-native_function_calling = true
+# Use XML-based tool calling for SGLang
+native_function_calling = false
 
 [continuous_work]
 enabled = true

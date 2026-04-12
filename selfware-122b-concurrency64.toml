@@ -1,10 +1,10 @@
 # Selfware Configuration - 122B SGLang (Remote, Concurrency 64)
-# Optimized for high-throughput tool calling with 262K context
+# Optimized for high-throughput tool calling with 1M context
 
 endpoint = "https://crazyshit.ngrok.io/v1"
-model = "txn545/Qwen3.5-122B-A10B-NVFP4"
+model = "/media/thread/trebuchet6/qwen35/models/Qwen3.5-122B-A10B-NVFP4-yarn-1010k"
 max_tokens = 8192
-context_length = 262144  # 262K context from endpoint
+context_length = 1010000  # 1M context from endpoint
 temperature = 0.6
 
 [extra_body]
@@ -16,15 +16,15 @@ min_p = 0.0
 chat_template_kwargs = { enable_thinking = false }
 
 [agent]
-# Token budget for 262K context:
-# 262K - 50K safety - 8K max_tokens = ~200K for messages
-token_budget = 180000
+# Token budget for 1M context:
+# 1M - 50K safety - 8K max_tokens = ~940K for messages
+token_budget = 942000
 token_safety_margin = 50000
 max_iterations = 50
 step_timeout_secs = 600
 
-# SGLang has excellent native function calling support
-native_function_calling = true
+# SGLang with XML-based tool calling (native_function_calling = false)
+native_function_calling = false
 streaming = false
 
 # Aggressive parallel execution for high concurrency

@@ -1,4 +1,4 @@
-//! Coordinator Mode - Multi-Agent Orchestration
+//! Coordinator Mode - Multi-Agent Orchestration (Work in Progress)
 //!
 //! A dedicated coordinator agent that orchestrates parallel work across multiple
 //! worker agents, enabling complex multi-step tasks.
@@ -15,8 +15,12 @@
 //! 2. **Synthesis**: Coordinator reads findings, creates implementation plan
 //! 3. **Implementation**: Workers execute plan in parallel
 //! 4. **Verification**: Workers verify each other's work
+//!
+//! Status: Implementation complete but not yet integrated into main agent loop.
+//! The coordinator types are exported for future use but currently have no production
+//! consumers. Kept as active code for upcoming multi-agent coordination features.
 
-#![allow(dead_code)] // Work-in-progress: Coordinator mode not yet fully integrated
+#![allow(dead_code)] // Types exported for API stability; integration pending
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -242,7 +246,7 @@ impl CoordinatorAgent {
         // Since ToolRegistry::with_safety_config registers critical tools by default,
         // we need to deactivate the ones we don't want
         // First, deactivate all tools that are denied to coordinators
-        for tool_name in COORDINATOR_DENIED_TOOLS {
+        for _tool_name in COORDINATOR_DENIED_TOOLS {
             // We can't really deactivate, but we can track which ones shouldn't be used
             // The enforcement happens at the Agent level, not the registry level
         }

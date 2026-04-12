@@ -173,7 +173,9 @@ pub fn parse_rust(content: &str) -> ParsedFile {
     let mut module_doc = None;
 
     // Extract module-level doc comment
-    let doc_regex = Regex::new(r"^\s*//!\s*(.+)$").unwrap();
+    let doc_regex = Regex::new(r"^\s* //!\s*(.+)$")
+        .map_err(|e| format!("Invalid doc regex: {}", e))
+        .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
     for line in content.lines().take(20) {
         if let Some(cap) = doc_regex.captures(line) {
             let doc = cap.get(1).map(|m| m.as_str().to_string());
@@ -183,7 +185,9 @@ pub fn parse_rust(content: &str) -> ParsedFile {
     }
 
     // Extract imports (use statements)
-    let use_regex = Regex::new(r"^\s*use\s+(.+);$").unwrap();
+    let use_regex = Regex::new(r"^\s*use\s+(.+);$")
+        .map_err(|e| format!("Invalid use regex: {}", e))
+        .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
     for line in content.lines() {
         if let Some(cap) = use_regex.captures(line) {
             let path = cap.get(1).map(|m| m.as_str().to_string());
@@ -200,7 +204,9 @@ pub fn parse_rust(content: &str) -> ParsedFile {
     // Extract function signatures
     let fn_regex = Regex::new(
         r"(?m)^\s*((?:pub(?:\s*\([^)]*\))?\s+)?)(?:async\s+)?(?:fn|const\s+fn)\s+(\w+)\s*(<[^>]*>)?\s*\(([^)]*)\)(?:\s*->\s*([^\{;]+))?"
-    ).unwrap();
+    )
+    .map_err(|e| format!("Invalid fn regex: {}", e))
+    .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
 
     for cap in fn_regex.captures_iter(content) {
         let vis_str = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
@@ -240,8 +246,9 @@ pub fn parse_rust(content: &str) -> ParsedFile {
     }
 
     // Extract structs
-    let struct_regex =
-        Regex::new(r"(?m)^\s*((?:pub(?:\s*\([^)]*\))?\s+)?)(?:struct|enum)\s+(\w+)").unwrap();
+    let struct_regex = Regex::new(r"(?m)^\s*((?:pub(?:\s*\([^)]*\))?\s+)?)(?:struct|enum)\s+(\w+)")
+        .map_err(|e| format!("Invalid struct regex: {}", e))
+        .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
     for cap in struct_regex.captures_iter(content) {
         let vis_str = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
         let name = cap
@@ -264,7 +271,9 @@ pub fn parse_rust(content: &str) -> ParsedFile {
     }
 
     // Extract traits
-    let trait_regex = Regex::new(r"(?m)^\s*((?:pub(?:\s*\([^)]*\))?\s+)?)trait\s+(\w+)").unwrap();
+    let trait_regex = Regex::new(r"(?m)^\s*((?:pub(?:\s*\([^)]*\))?\s+)?)trait\s+(\w+)")
+        .map_err(|e| format!("Invalid trait regex: {}", e))
+        .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
     for cap in trait_regex.captures_iter(content) {
         let vis_str = cap.get(1).map(|m| m.as_str().trim()).unwrap_or("");
         let name = cap
@@ -318,7 +327,9 @@ fn parse_python(content: &str) -> ParsedFile {
     let mut imports = Vec::new();
 
     // Extract imports
-    let import_regex = Regex::new(r"^\s*(?:from\s+(\S+)\s+import\s+(.+)|import\s+(.+))$").unwrap();
+    let import_regex = Regex::new(r"^\s*(?:from\s+(\S+)\s+import\s+(.+)|import\s+(.+))$")
+        .map_err(|e| format!("Invalid import regex: {}", e))
+        .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
     for line in content.lines() {
         if let Some(cap) = import_regex.captures(line) {
             let path = cap
@@ -336,7 +347,9 @@ fn parse_python(content: &str) -> ParsedFile {
     }
 
     // Extract class definitions
-    let class_regex = Regex::new(r"(?m)^\s*class\s+(\w+)(?:\(([^)]*)\))?:").unwrap();
+    let class_regex = Regex::new(r"(?m)^\s*class\s+(\w+)(?:\(([^)]*)\))?:")
+        .map_err(|e| format!("Invalid class regex: {}", e))
+        .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
     for cap in class_regex.captures_iter(content) {
         let name = cap
             .get(1)
@@ -364,7 +377,9 @@ fn parse_python(content: &str) -> ParsedFile {
     }
 
     // Extract function definitions
-    let fn_regex = Regex::new(r"(?m)^\s*def\s+(\w+)\s*\(([^)]*)\)(?:\s*->\s*([^:]+))?:").unwrap();
+    let fn_regex = Regex::new(r"(?m)^\s*def\s+(\w+)\s*\(([^)]*)\)(?:\s*->\s*([^:]+))?:")
+        .map_err(|e| format!("Invalid fn regex: {}", e))
+        .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
     for cap in fn_regex.captures_iter(content) {
         let name = cap
             .get(1)
@@ -408,7 +423,9 @@ fn parse_typescript(content: &str) -> ParsedFile {
     let mut symbols = Vec::new();
 
     // Extract functions
-    let fn_regex = Regex::new(r"(?m)^\s*(?:export\s+)?(?:async\s+)?(?:function|const)\s+(\w+)\s*(?:=\s*)?(?:<[^>]*>)?\s*\(([^)]*)\)(?:\s*:\s*([^\{=]+))?").unwrap();
+    let fn_regex = Regex::new(r"(?m)^\s*(?:export\s+)?(?:async\s+)?(?:function|const)\s+(\w+)\s*(?:=\s*)?(?:<[^>]*>)?\s*\(([^)]*)\)(?:\s*:\s*([^\{=]+))?")
+        .map_err(|e| format!("Invalid fn regex: {}", e))
+        .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
 
     for cap in fn_regex.captures_iter(content) {
         let name = cap
@@ -441,7 +458,9 @@ fn parse_typescript(content: &str) -> ParsedFile {
     }
 
     // Extract interfaces and types
-    let type_regex = Regex::new(r"(?m)^\s*(?:export\s+)?(?:interface|type)\s+(\w+)").unwrap();
+    let type_regex = Regex::new(r"(?m)^\s*(?:export\s+)?(?:interface|type)\s+(\w+)")
+        .map_err(|e| format!("Invalid type regex: {}", e))
+        .unwrap_or_else(|_| Regex::new(r"^$").expect("fallback regex is valid"));
     for cap in type_regex.captures_iter(content) {
         let name = cap
             .get(1)

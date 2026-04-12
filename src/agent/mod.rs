@@ -1237,20 +1237,6 @@ To call a tool, use this EXACT XML structure:
         self.plan_mode_manager.clear_plan();
     }
 
-    /// Get tools for API calls - in plan mode, returns only read-only tools
-    fn api_tools_for_mode(&self) -> Option<Vec<crate::api::types::ToolDefinition>> {
-        if !self.config.agent.native_function_calling {
-            return None;
-        }
-
-        // In planning phase, only provide read-only tools
-        if self.is_planning_phase() {
-            Some(self.tools.readonly_definitions())
-        } else {
-            Some(self.tools.definitions())
-        }
-    }
-
     /// Get a reference to the hook registry.
     pub fn hook_registry(&self) -> &HookRegistry {
         &self.hook_registry

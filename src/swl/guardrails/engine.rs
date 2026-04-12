@@ -60,7 +60,7 @@ impl GuardrailEngine {
     }
 
     /// Evaluate an inline expression (simple pattern matching)
-    fn evaluate_inline_expression(
+    pub fn evaluate_inline_expression(
         &self,
         expr: &str,
         context: &GuardrailContext,
@@ -137,7 +137,7 @@ impl GuardrailEngine {
     }
 
     /// Evaluate a code block condition
-    fn evaluate_code_condition(
+    pub fn evaluate_code_condition(
         &self,
         language: &str,
         content: &str,
@@ -212,9 +212,10 @@ impl GuardrailEngine {
 
         let source_string = source_value.to_string();
         let source_str = source_value.as_str().unwrap_or(&source_string);
-        let pattern = pattern.trim_matches('\'').trim_matches('"');
+        let pattern_owned = pattern.to_string();
+        let pattern_str = pattern.trim_matches('\'').trim_matches('"');
 
-        if source_str.contains(pattern) {
+        if source_str.contains(pattern_str) {
             EvaluationResult::Pass
         } else {
             EvaluationResult::Fail {
@@ -348,9 +349,21 @@ impl GuardrailEngine {
         let right_val = if right.starts_with('\'') || right.starts_with('"') {
             serde_json::Value::String(right.trim_matches('\'').trim_matches('"').to_string())
         } else {
+            // Try to resolve as variable first
             match self.resolve_value(right, context) {
                 Some(v) => v,
-                None => serde_json::Value::String(right.to_string()),
+                None => {
+                    // Try parsing as number
+                    if let Ok(n) = right.trim().parse::<i64>() {
+                        serde_json::Value::Number(n.into())
+                    } else if let Ok(n) = right.trim().parse::<f64>() {
+                        serde_json::Number::from_f64(n)
+                            .map(serde_json::Value::Number)
+                            .unwrap_or_else(|| serde_json::Value::String(right.to_string()))
+                    } else {
+                        serde_json::Value::String(right.to_string())
+                    }
+                }
             }
         };
 
@@ -417,11 +430,409 @@ impl GuardrailEngine {
     }
 
     /// Evaluate JSON logic
-    fn evaluate_json_logic(&self, _logic: &str, _context: &GuardrailContext) -> EvaluationResult {
-        // TODO: Implement JSON Logic evaluation
-        // For now, return error to indicate not implemented
-        EvaluationResult::Error {
-            message: "JSON Logic evaluation not yet implemented".to_string(),
+    /// 
+    /// Supports a subset of JSON Logic operators:
+    /// - Comparison: "==", "!=", ">", "<", ">=", "<="
+    /// - Logic: "and", "or", "!" (not)
+    /// - Existence: "exists" (check if value exists in context)
+    /// - Regex: "match" (regex pattern matching)
+    /// - Context access: "var" (access context variables)
+    pub fn evaluate_json_logic(&self, logic: &str, context: &GuardrailContext) -> EvaluationResult {
+        // Try to parse as JSON
+        let json_value: serde_json::Value = match serde_json::from_str(logic.trim()) {
+            Ok(v) => v,
+            Err(e) => {
+                // Not valid JSON - try to evaluate as inline expression
+                return self.evaluate_inline_expression(logic, context);
+            }
+        };
+
+        self.evaluate_json_value(&json_value, context)
+    }
+
+    /// Recursively evaluate a JSON value as JSON Logic
+    fn evaluate_json_value(
+        &self,
+        value: &serde_json::Value,
+        context: &GuardrailContext,
+    ) -> EvaluationResult {
+        match value {
+            serde_json::Value::Object(map) => {
+                if map.is_empty() {
+                    return EvaluationResult::Pass;
+                }
+                // JSON Logic operators are single-key objects
+                for (op, args) in map {
+                    return self.evaluate_json_operator(op, args, context);
+                }
+                EvaluationResult::Pass
+            }
+            serde_json::Value::Bool(b) => {
+                if *b {
+                    EvaluationResult::Pass
+                } else {
+                    EvaluationResult::Fail {
+                        reason: "Boolean condition is false".to_string(),
+                    }
+                }
+            }
+            serde_json::Value::String(s) => {
+                // Treat as inline expression
+                self.evaluate_inline_expression(s, context)
+            }
+            _ => EvaluationResult::Error {
+                message: format!("Unsupported JSON Logic value: {:?}", value),
+            },
+        }
+    }
+
+    /// Evaluate a JSON Logic operator
+    fn evaluate_json_operator(
+        &self,
+        op: &str,
+        args: &serde_json::Value,
+        context: &GuardrailContext,
+    ) -> EvaluationResult {
+        match op {
+            // Comparison operators
+            "==" | "===" => self.evaluate_json_comparison(args, context, |a, b| a == b, "=="),
+            "!=" | "!==" => self.evaluate_json_comparison(args, context, |a, b| a != b, "!="),
+            ">" => self.evaluate_json_numeric_comparison(args, context, |a, b| a > b, ">"),
+            ">=" => self.evaluate_json_numeric_comparison(args, context, |a, b| a >= b, ">="),
+            "<" => self.evaluate_json_numeric_comparison(args, context, |a, b| a < b, "<"),
+            "<=" => self.evaluate_json_numeric_comparison(args, context, |a, b| a <= b, "<="),
+            
+            // Logic operators
+            "and" | "&&" => self.evaluate_json_and(args, context),
+            "or" | "||" => self.evaluate_json_or(args, context),
+            "!" | "not" => self.evaluate_json_not(args, context),
+            
+            // String operators
+            "contains" => self.evaluate_json_contains(args, context),
+            "match" => self.evaluate_json_match(args, context),
+            
+            // Existence check
+            "exists" => self.evaluate_json_exists(args, context),
+            "var" => self.evaluate_json_var(args, context),
+            
+            // Unknown operator
+            _ => EvaluationResult::Error {
+                message: format!("Unknown JSON Logic operator: '{}'", op),
+            },
+        }
+    }
+
+    /// Evaluate JSON Logic comparison (== and !=)
+    fn evaluate_json_comparison(
+        &self,
+        args: &serde_json::Value,
+        context: &GuardrailContext,
+        compare: fn(&serde_json::Value, &serde_json::Value) -> bool,
+        op_name: &str,
+    ) -> EvaluationResult {
+        let arr = match args.as_array() {
+            Some(a) if a.len() >= 2 => a,
+            _ => {
+                return EvaluationResult::Error {
+                    message: format!("'{}' requires 2 arguments", op_name),
+                }
+            }
+        };
+
+        let left = self.resolve_json_value(&arr[0], context);
+        let right = self.resolve_json_value(&arr[1], context);
+
+        if compare(&left, &right) {
+            EvaluationResult::Pass
+        } else {
+            EvaluationResult::Fail {
+                reason: format!("{} {} {} is false", left, op_name, right),
+            }
+        }
+    }
+
+    /// Evaluate JSON Logic numeric comparison (>, >=, <, <=)
+    fn evaluate_json_numeric_comparison(
+        &self,
+        args: &serde_json::Value,
+        context: &GuardrailContext,
+        compare: fn(f64, f64) -> bool,
+        op_name: &str,
+    ) -> EvaluationResult {
+        let arr = match args.as_array() {
+            Some(a) if a.len() >= 2 => a,
+            _ => {
+                return EvaluationResult::Error {
+                    message: format!("'{}' requires 2 numeric arguments", op_name),
+                }
+            }
+        };
+
+        let left_val = self.resolve_json_value(&arr[0], context);
+        let right_val = self.resolve_json_value(&arr[1], context);
+
+        let left_num = match left_val.as_f64() {
+            Some(n) => n,
+            None => {
+                return EvaluationResult::Error {
+                    message: format!("Left operand '{}' is not a number", left_val),
+                }
+            }
+        };
+
+        let right_num = match right_val.as_f64() {
+            Some(n) => n,
+            None => {
+                return EvaluationResult::Error {
+                    message: format!("Right operand '{}' is not a number", right_val),
+                }
+            }
+        };
+
+        if compare(left_num, right_num) {
+            EvaluationResult::Pass
+        } else {
+            EvaluationResult::Fail {
+                reason: format!("{} {} {} is false", left_num, op_name, right_num),
+            }
+        }
+    }
+
+    /// Evaluate JSON Logic AND
+    fn evaluate_json_and(
+        &self,
+        args: &serde_json::Value,
+        context: &GuardrailContext,
+    ) -> EvaluationResult {
+        let arr = match args.as_array() {
+            Some(a) => a,
+            None => {
+                // Single argument
+                return self.evaluate_json_value(args, context);
+            }
+        };
+
+        for (i, arg) in arr.iter().enumerate() {
+            match self.evaluate_json_value(arg, context) {
+                EvaluationResult::Pass => continue,
+                fail @ EvaluationResult::Fail { .. } => {
+                    return EvaluationResult::Fail {
+                        reason: format!("AND condition {} failed: {:?}", i, fail),
+                    }
+                }
+                error => return error,
+            }
+        }
+        EvaluationResult::Pass
+    }
+
+    /// Evaluate JSON Logic OR
+    fn evaluate_json_or(
+        &self,
+        args: &serde_json::Value,
+        context: &GuardrailContext,
+    ) -> EvaluationResult {
+        let arr = match args.as_array() {
+            Some(a) => a,
+            None => {
+                return self.evaluate_json_value(args, context);
+            }
+        };
+
+        let mut fail_reasons = Vec::new();
+        for arg in arr.iter() {
+            match self.evaluate_json_value(arg, context) {
+                EvaluationResult::Pass => return EvaluationResult::Pass,
+                EvaluationResult::Fail { reason } => fail_reasons.push(reason),
+                error => return error,
+            }
+        }
+        EvaluationResult::Fail {
+            reason: format!("All OR conditions failed: {}", fail_reasons.join("; ")),
+        }
+    }
+
+    /// Evaluate JSON Logic NOT
+    fn evaluate_json_not(
+        &self,
+        args: &serde_json::Value,
+        context: &GuardrailContext,
+    ) -> EvaluationResult {
+        let result = self.evaluate_json_value(args, context);
+        match result {
+            EvaluationResult::Pass => EvaluationResult::Fail {
+                reason: "NOT condition: inner was true".to_string(),
+            },
+            EvaluationResult::Fail { .. } => EvaluationResult::Pass,
+            error => error,
+        }
+    }
+
+    /// Evaluate JSON Logic contains
+    fn evaluate_json_contains(
+        &self,
+        args: &serde_json::Value,
+        context: &GuardrailContext,
+    ) -> EvaluationResult {
+        let arr = match args.as_array() {
+            Some(a) if a.len() >= 2 => a,
+            _ => {
+                return EvaluationResult::Error {
+                    message: "'contains' requires [source, pattern] arguments".to_string(),
+                }
+            }
+        };
+
+        let source = self.resolve_json_value(&arr[0], context);
+        let pattern = self.resolve_json_value(&arr[1], context);
+
+        let source_owned = source.to_string();
+        let pattern_owned = pattern.to_string();
+        let source_str = source.as_str().unwrap_or(&source_owned);
+        let pattern_str = pattern.as_str().unwrap_or(&pattern_owned);
+
+        if source_str.contains(pattern_str) {
+            EvaluationResult::Pass
+        } else {
+            EvaluationResult::Fail {
+                reason: format!("'{}' does not contain '{}'", source_str, pattern_str),
+            }
+        }
+    }
+
+    /// Evaluate JSON Logic regex match
+    fn evaluate_json_match(
+        &self,
+        args: &serde_json::Value,
+        context: &GuardrailContext,
+    ) -> EvaluationResult {
+        let arr = match args.as_array() {
+            Some(a) if a.len() >= 2 => a,
+            _ => {
+                return EvaluationResult::Error {
+                    message: "'match' requires [source, pattern] arguments".to_string(),
+                }
+            }
+        };
+
+        let source = self.resolve_json_value(&arr[0], context);
+        let pattern = self.resolve_json_value(&arr[1], context);
+
+        let source_owned = source.to_string();
+        let pattern_owned = pattern.to_string();
+        let source_str = source.as_str().unwrap_or(&source_owned);
+        let pattern_str = pattern.as_str().unwrap_or(&pattern_owned);
+
+        match Regex::new(pattern_str) {
+            Ok(regex) => {
+                if regex.is_match(source_str) {
+                    EvaluationResult::Pass
+                } else {
+                    EvaluationResult::Fail {
+                        reason: format!("'{}' does not match pattern '{}'", source_str, pattern_str),
+                    }
+                }
+            }
+            Err(e) => EvaluationResult::Error {
+                message: format!("Invalid regex pattern '{}': {}", pattern_str, e),
+            },
+        }
+    }
+
+    /// Evaluate JSON Logic exists
+    fn evaluate_json_exists(
+        &self,
+        args: &serde_json::Value,
+        context: &GuardrailContext,
+    ) -> EvaluationResult {
+        let var_path = match args {
+            serde_json::Value::String(s) => s.as_str(),
+            _ => {
+                return EvaluationResult::Error {
+                    message: "'exists' requires a variable path string".to_string(),
+                }
+            }
+        };
+
+        match self.resolve_value(var_path, context) {
+            Some(_) => EvaluationResult::Pass,
+            None => EvaluationResult::Fail {
+                reason: format!("Variable '{}' does not exist", var_path),
+            },
+        }
+    }
+
+    /// Evaluate JSON Logic var (resolve value from context)
+    fn evaluate_json_var(
+        &self,
+        args: &serde_json::Value,
+        context: &GuardrailContext,
+    ) -> EvaluationResult {
+        let var_path = match args {
+            serde_json::Value::String(s) => s.as_str(),
+            _ => {
+                return EvaluationResult::Error {
+                    message: "'var' requires a variable path string".to_string(),
+                }
+            }
+        };
+
+        // Try standard resolution, then fallback to state lookup
+        let value = self.resolve_value(var_path, context)
+            .or_else(|| context.state.get(var_path).cloned());
+
+        match value {
+            Some(val) => {
+                if Self::is_truthy(&val) {
+                    EvaluationResult::Pass
+                } else {
+                    EvaluationResult::Fail {
+                        reason: format!("Variable '{}' is falsy", var_path),
+                    }
+                }
+            }
+            None => EvaluationResult::Fail {
+                reason: format!("Variable '{}' does not exist", var_path),
+            },
+        }
+    }
+
+    /// Resolve a JSON value (either literal or context reference)
+    fn resolve_json_value(
+        &self,
+        value: &serde_json::Value,
+        context: &GuardrailContext,
+    ) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(map) if map.contains_key("var") => {
+                // It's a var reference
+                let var_path = match map.get("var") {
+                    Some(serde_json::Value::String(s)) => s.as_str(),
+                    Some(v) => return v.clone(),
+                    None => return serde_json::Value::Null,
+                };
+                // First try standard resolution, then fallback to state lookup
+                self.resolve_value(var_path, context)
+                    .or_else(|| context.state.get(var_path).cloned())
+                    .unwrap_or(serde_json::Value::Null)
+            }
+            serde_json::Value::Object(map) if map.len() == 1 => {
+                // Might be another operator - evaluate it
+                match self.evaluate_json_value(value, context) {
+                    EvaluationResult::Pass => serde_json::Value::Bool(true),
+                    EvaluationResult::Fail { .. } => serde_json::Value::Bool(false),
+                    EvaluationResult::Error { message } => {
+                        serde_json::Value::String(format!("error: {}", message))
+                    }
+                }
+            }
+            serde_json::Value::String(s) => {
+                // Try to resolve as variable (standard and state fallback), otherwise return as string literal
+                self.resolve_value(s, context)
+                    .or_else(|| context.state.get(s).cloned())
+                    .unwrap_or_else(|| serde_json::Value::String(s.clone()))
+            }
+            _ => value.clone(),
         }
     }
 
@@ -543,12 +954,12 @@ fn get_matches_pattern() -> &'static Regex {
 
 fn get_comparison_pattern() -> &'static Regex {
     COMPARISON_PATTERN
-        .get_or_init(|| Regex::new(r"(\w+(?:\.\w+)*)\s*([><]=?)\s*(.+?)").expect("Invalid regex"))
+        .get_or_init(|| Regex::new(r"(\w+(?:\.\w+)*)\s*([><]=?)\s*(.+)$").expect("Invalid regex"))
 }
 
 fn get_equality_pattern() -> &'static Regex {
     EQUALITY_PATTERN
-        .get_or_init(|| Regex::new(r"(\w+(?:\.\w+)*)\s*([!=]=)\s*(.+?)").expect("Invalid regex"))
+        .get_or_init(|| Regex::new(r"(\w+(?:\.\w+)*)\s*([!=]=)\s*(.+)$").expect("Invalid regex"))
 }
 
 #[cfg(test)]
@@ -646,5 +1057,53 @@ mod tests {
             result.is_fail(),
             "Should detect CRITICAL in code evaluation"
         );
+    }
+
+    #[test]
+    fn test_evaluate_equality() {
+        let engine = GuardrailEngine::new();
+        let ctx = GuardrailContext::new().with_state("count", 42);
+
+        // Test numeric equality
+        let result = engine.evaluate_inline_expression("state.count == 42", &ctx);
+        assert!(result.is_pass(), "state.count == 42 should pass, got: {:?}", result);
+
+        // Test inequality
+        let result = engine.evaluate_inline_expression("state.count != 10", &ctx);
+        assert!(result.is_pass(), "state.count != 10 should pass, got: {:?}", result);
+
+        // Test string equality
+        let ctx2 = GuardrailContext::new().with_state("name", "test");
+        let result = engine.evaluate_inline_expression("state.name == 'test'", &ctx2);
+        assert!(result.is_pass(), "state.name == 'test' should pass, got: {:?}", result);
+    }
+
+    #[test]
+    fn test_json_logic_comparison_operators() {
+        let engine = GuardrailEngine::new();
+        let ctx = GuardrailContext::new().with_state("count", 10);
+
+        // Test >= operator
+        let json_logic = r#"{">=": [{"var": "count"}, 5]}"#;
+        let result = engine.evaluate_json_logic(json_logic, &ctx);
+        assert!(result.is_pass(), ">= should pass when count is 10, got: {:?}", result);
+
+        // Test < operator
+        let json_logic = r#"{"<": [{"var": "count"}, 20]}"#;
+        let result = engine.evaluate_json_logic(json_logic, &ctx);
+        assert!(result.is_pass(), "< should pass when count is 10 and comparing to 20, got: {:?}", result);
+    }
+
+    #[test]
+    fn test_json_logic_and_operator() {
+        let engine = GuardrailEngine::new();
+        let ctx = GuardrailContext::new()
+            .with_state("count", 10)
+            .with_state("enabled", true);
+
+        // Test AND with two true conditions
+        let json_logic = r#"{"and": [{"var": "count"}, {"var": "enabled"}]}"#;
+        let result = engine.evaluate_json_logic(json_logic, &ctx);
+        assert!(result.is_pass(), "AND should pass when both conditions are true, got: {:?}", result);
     }
 }

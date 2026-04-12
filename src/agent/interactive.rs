@@ -268,13 +268,17 @@ fn spawn_esc_listener(
                                     showing_prompt = false;
                                     if !is_effectively_empty_message(&msg) {
                                         let count = {
-                                            let mut q = queued_clone.lock().unwrap();
-                                            q.push(PendingMessage::new(
-                                                msg.clone(),
-                                                PendingMessageOrigin::InteractiveQueue,
-                                                Instant::now(),
-                                            ));
-                                            q.len()
+                                            match queued_clone.lock() {
+                                                Ok(mut q) => {
+                                                    q.push(PendingMessage::new(
+                                                        msg.clone(),
+                                                        PendingMessageOrigin::InteractiveQueue,
+                                                        Instant::now(),
+                                                    ));
+                                                    q.len()
+                                                }
+                                                Err(_) => 0,
+                                            }
                                         };
                                         // Show confirmation
                                         let notice = format!(
@@ -308,9 +312,9 @@ fn spawn_esc_listener(
                             }
                             KeyCode::Up => {
                                 // Edit last queued message
-                                let popped = {
-                                    let mut q = queued_clone.lock().unwrap();
-                                    q.pop()
+                                let popped = match queued_clone.lock() {
+                                    Ok(mut q) => q.pop(),
+                                    Err(_) => None,
                                 };
                                 if let Some(msg) = popped {
                                     input_buf = msg.content;

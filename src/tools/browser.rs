@@ -1230,15 +1230,15 @@ fn is_private_network_ip(ip: &IpAddr) -> bool {
 }
 
 static LINK_HREF_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"href=["']([^"']+)["']"#).expect("valid href regex"));
+    LazyLock::new(|| Regex::new(r#"href=["']([^"']+)["']"#).expect("href regex is valid"));
 static SCRIPT_TAG_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?is)<script[^>]*>.*?</script>").expect("valid script regex"));
+    LazyLock::new(|| Regex::new(r"(?is)<script[^>]*>.*?</script>").expect("script regex is valid"));
 static STYLE_TAG_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?is)<style[^>]*>.*?</style>").expect("valid style regex"));
+    LazyLock::new(|| Regex::new(r"(?is)<style[^>]*>.*?</style>").expect("style regex is valid"));
 static HTML_TAG_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"<[^>]+>").expect("valid html tag regex"));
+    LazyLock::new(|| Regex::new(r"<[^>]+>").expect("html tag regex is valid"));
 static WHITESPACE_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\s+").expect("valid whitespace regex"));
+    LazyLock::new(|| Regex::new(r"\s+").expect("whitespace regex is valid"));
 
 /// Extract text content from HTML (simple implementation)
 fn extract_text_from_html(html: &str) -> String {

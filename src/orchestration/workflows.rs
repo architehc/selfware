@@ -199,6 +199,21 @@ pub enum StepType {
         #[serde(default)]
         inputs: HashMap<String, String>,
     },
+    /// Guardrail enforcement step
+    Guardrail {
+        /// Guardrail name
+        name: String,
+        /// Condition expression to evaluate
+        condition: String,
+        /// Action on violation: "block", "warn", "log", "alert"
+        on_violation: String,
+        /// Severity level: "info", "low", "medium", "high", "critical"
+        #[serde(default)]
+        severity: String,
+        /// Description of what this guardrail checks
+        #[serde(default)]
+        description: String,
+    },
 }
 
 /// Log level
@@ -1847,6 +1862,137 @@ impl WorkflowExecutor {
                     }
                 } else {
                     Err(anyhow!("Sub-workflow '{}' not found", workflow_name))
+                }
+            }
+
+            StepType::Guardrail {
+                name,
+                condition,
+                on_violation,
+                severity,
+                description: _,
+            } => {
+                use crate::swl::guardrails::{GuardrailContext, GuardrailEngine, EvaluationResult};
+
+                // Build guardrail context from workflow context
+                let mut guard_ctx = GuardrailContext::new();
+                
+                // Add state variables to guardrail context
+                fn var_value_to_json(value: &VarValue) -> serde_json::Value {
+                    match value {
+                        VarValue::String(s) => serde_json::Value::String(s.clone()),
+                        VarValue::Number(n) => serde_json::Value::Number(
+                            serde_json::Number::from_f64(*n).unwrap_or_else(|| 0.into())
+                        ),
+                        VarValue::Boolean(b) => serde_json::Value::Bool(*b),
+                        VarValue::List(items) => {
+                            serde_json::Value::Array(
+                                items.iter().map(var_value_to_json).collect()
+                            )
+                        }
+                        VarValue::Map(m) => {
+                            serde_json::Value::Object(
+                                m.iter().map(|(k, v)| (k.clone(), var_value_to_json(v))).collect()
+                            )
+                        }
+                        VarValue::Null => serde_json::Value::Null,
+                    }
+                }
+                
+                for (key, value) in &context.variables {
+                    guard_ctx.state.insert(key.clone(), var_value_to_json(value));
+                }
+
+                // Resolve the condition string with variable substitution
+                let resolved_condition = context.substitute(condition);
+
+                if self.dry_run {
+                    context.log(
+                        LogLevel::Info,
+                        format!(
+                            "[DRY-RUN] Would evaluate guardrail '{}': condition='{}', action='{}'",
+                            name, resolved_condition, on_violation
+                        ),
+                        None,
+                    );
+                    return Ok(VarValue::String(format!(
+                        "(dry-run) guardrail '{}' checked",
+                        name
+                    )));
+                }
+
+                // Create guardrail engine and evaluate condition
+                let engine = GuardrailEngine::new();
+                
+                // Determine if this is a JSON Logic condition or inline expression
+                let result = if resolved_condition.starts_with("[") && resolved_condition.contains("]:") {
+                    // Code block condition - parse the language prefix
+                    if let Some(end_idx) = resolved_condition.find("]:") {
+                        let lang = &resolved_condition[1..end_idx];
+                        let code = &resolved_condition[end_idx + 2..];
+                        engine.evaluate_code_condition(lang, code, &guard_ctx)
+                    } else {
+                        EvaluationResult::Error {
+                            message: "Invalid code block format in condition".to_string(),
+                        }
+                    }
+                } else {
+                    // Treat as inline expression
+                    engine.evaluate_inline_expression(&resolved_condition, &guard_ctx)
+                };
+
+                match &result {
+                    EvaluationResult::Pass => {
+                        context.log(
+                            LogLevel::Info,
+                            format!("Guardrail '{}' passed", name),
+                            None,
+                        );
+                        Ok(VarValue::String(format!("guardrail '{}' passed", name)))
+                    }
+                    EvaluationResult::Fail { reason } => {
+                        let action = on_violation.as_str();
+                        let log_level = match action {
+                            "block" => LogLevel::Error,
+                            "alert" => LogLevel::Warn,
+                            "warn" => LogLevel::Warn,
+                            _ => LogLevel::Info,
+                        };
+
+                        context.log(
+                            log_level,
+                            format!(
+                                "Guardrail '{}' violated: {} (action={}, severity={})",
+                                name, reason, on_violation, severity
+                            ),
+                            None,
+                        );
+
+                        // Only block causes failure - other actions are warnings
+                        if action == "block" {
+                            Err(anyhow!(
+                                "Guardrail '{}' blocked execution: {} (severity: {})",
+                                name, reason, severity
+                            ))
+                        } else {
+                            // For warn/log/alert, return success but with violation noted
+                            Ok(VarValue::String(format!(
+                                "guardrail '{}' violated but action='{}' allows continuation: {}",
+                                name, on_violation, reason
+                            )))
+                        }
+                    }
+                    EvaluationResult::Error { message } => {
+                        context.log(
+                            LogLevel::Error,
+                            format!("Guardrail '{}' evaluation error: {}", name, message),
+                            None,
+                        );
+                        Err(anyhow!(
+                            "Guardrail '{}' evaluation failed: {}",
+                            name, message
+                        ))
+                    }
                 }
             }
         }

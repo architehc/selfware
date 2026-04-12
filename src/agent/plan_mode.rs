@@ -135,11 +135,11 @@ impl Plan {
     }
 
     /// Add a step to the plan
-    pub fn add_step(&mut self, description: impl Into<String>) -> &mut PlanStep {
+    pub fn add_step(&mut self, description: impl Into<String>) -> Option<&mut PlanStep> {
         let id = self.steps.len() + 1;
         let step = PlanStep::new(id, description);
         self.steps.push(step);
-        self.steps.last_mut().unwrap()
+        self.steps.last_mut()
     }
 
     /// Add a file to read
@@ -442,8 +442,9 @@ mod tests {
     fn test_plan_add_step() {
         let mut plan = Plan::new();
         {
-            let step = plan.add_step("Step 1");
-            step.tool_hint = Some("file_read".to_string());
+            if let Some(step) = plan.add_step("Step 1") {
+                step.tool_hint = Some("file_read".to_string());
+            }
         }
         plan.add_step("Step 2");
         assert_eq!(plan.step_count(), 2);
@@ -483,8 +484,9 @@ mod tests {
     fn test_plan_format() {
         let mut plan = Plan::with_summary("Test plan");
         {
-            let step = plan.add_step("Step 1");
-            step.tool_hint = Some("file_read".to_string());
+            if let Some(step) = plan.add_step("Step 1") {
+                step.tool_hint = Some("file_read".to_string());
+            }
         }
         plan.add_file_to_read("src/main.rs");
         plan.estimated_tokens = 1000;

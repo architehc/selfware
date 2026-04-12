@@ -319,8 +319,17 @@ pub fn grep_search(
 ) -> GrepSearchResult {
     let mut matches = Vec::new();
     let mut file_count = 0;
-    let re = cached_regex(pattern)
-        .unwrap_or_else(|_| regex::Regex::new(pattern).expect("Invalid regex pattern"));
+    let re = match cached_regex(pattern) {
+        Ok(re) => re,
+        Err(_) => {
+            // Return empty result on invalid regex
+            return GrepSearchResult {
+                matches: Vec::new(),
+                total_matches: 0,
+                file_count: 0,
+            };
+        }
+    };
 
     if Path::new(path).is_file() {
         let content = std::fs::read_to_string(path).unwrap_or_default();

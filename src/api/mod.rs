@@ -238,7 +238,10 @@ pub mod mock {
             _tools: Option<Vec<ToolDefinition>>,
             _thinking: ThinkingMode,
         ) -> anyhow::Result<ChatResponse> {
-            let mut queue = self.responses.lock().unwrap();
+            let mut queue = self
+                .responses
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Mock responses mutex poisoned"))?;
             queue
                 .pop_front()
                 .ok_or_else(|| anyhow::anyhow!("No more mock responses"))

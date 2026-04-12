@@ -74,32 +74,23 @@ impl DreamTrigger {
 }
 
 /// Persisted dream state
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DreamState {
     /// Unix timestamp of last dream
+    #[serde(default)]
     pub last_dream_timestamp: u64,
     /// Number of sessions since last dream
+    #[serde(default)]
     pub sessions_since_last_dream: usize,
     /// Whether consolidation is currently running (lock)
     #[serde(skip)]
     pub consolidation_lock: bool,
     /// Total number of dreams run
+    #[serde(default)]
     pub dream_count: usize,
     /// Lock file path for cross-process coordination
     #[serde(skip)]
     lock_file_path: Option<PathBuf>,
-}
-
-impl Default for DreamState {
-    fn default() -> Self {
-        Self {
-            last_dream_timestamp: 0,
-            sessions_since_last_dream: 0,
-            consolidation_lock: false,
-            dream_count: 0,
-            lock_file_path: None,
-        }
-    }
 }
 
 impl DreamState {
@@ -250,20 +241,12 @@ impl DreamState {
             .as_secs();
         let hours_since_last = (now - self.last_dream_timestamp) / 3600;
 
-        if hours_since_last >= trigger.min_hours_since_last {
-            0
-        } else {
-            trigger.min_hours_since_last - hours_since_last
-        }
+        trigger.min_hours_since_last.saturating_sub(hours_since_last)
     }
 
     /// Get sessions until next dream based on trigger
     pub fn sessions_until_next(&self, trigger: &DreamTrigger) -> usize {
-        if self.sessions_since_last_dream >= trigger.min_sessions_since_last {
-            0
-        } else {
-            trigger.min_sessions_since_last - self.sessions_since_last_dream
-        }
+        trigger.min_sessions_since_last.saturating_sub(self.sessions_since_last_dream)
     }
 }
 
@@ -345,13 +328,10 @@ impl MemoryEntry {
         }
 
         // Remove bullet point prefix if present (- or *)
-        let content_start = if trimmed.starts_with("- ") {
-            &trimmed[2..]
-        } else if trimmed.starts_with("* ") {
-            &trimmed[2..]
-        } else {
-            trimmed
-        };
+        let content_start = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+            .unwrap_or(trimmed);
 
         // Parse date if present: [YYYY-MM-DD] or [YYYY-MM-DD HH:MM]
         let (date, content) = if let Some(end_bracket) = content_start.find(']') {

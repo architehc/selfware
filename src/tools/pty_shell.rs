@@ -40,8 +40,10 @@ const MIN_COMMAND_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_COMMAND_LENGTH: usize = 10_000;
 
 /// Regex for stripping ANSI escape codes from output.
-static ANSI_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07|\x1b\[.*?[@-~]").unwrap());
+static ANSI_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07|\x1b\[.*?[@-~]")
+        .expect("ANSI regex pattern is valid")
+});
 
 /// Global session store.
 static SESSIONS: Lazy<Arc<RwLock<HashMap<String, PtySession>>>> =

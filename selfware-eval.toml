@@ -2,9 +2,14 @@
 # Usage: selfware --config selfware-eval.toml -y run "your task"
 
 endpoint = "https://crazyshit.ngrok.io/v1"
-model = "Qwen/Qwen3-Coder-Next-FP8"
+model = "/media/thread/trebuchet6/qwen35/models/Qwen3.5-122B-A10B-NVFP4-yarn-1010k"
 max_tokens = 65536
+context_length = 1010000
 temperature = 1.0
+
+[extra_body]
+# Disable thinking for tool-heavy workflows
+chat_template_kwargs = { enable_thinking = false }
 
 [safety]
 allowed_paths = ["./**", "/tmp/**"]
@@ -15,7 +20,7 @@ require_confirmation = []
 [agent]
 max_iterations = 2000
 step_timeout_secs = 600
-token_budget = 900000
+token_budget = 942000
 native_function_calling = false
 streaming = true
 

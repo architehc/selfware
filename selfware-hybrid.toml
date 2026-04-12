@@ -11,9 +11,9 @@
 # Best for: Tool calling, evolution, complex reasoning, throughput
 
 endpoint = "https://crazyshit.ngrok.io/v1"
-model = "txn545/Qwen3.5-122B-A10B-NVFP4"
+model = "/media/thread/trebuchet6/qwen35/models/Qwen3.5-122B-A10B-NVFP4-yarn-1010k"
 max_tokens = 8192
-context_length = 262144
+context_length = 1010000
 temperature = 0.6
 
 [extra_body]
@@ -23,11 +23,11 @@ min_p = 0.0
 chat_template_kwargs = { enable_thinking = false }
 
 [agent]
-token_budget = 180000
+token_budget = 942000
 token_safety_margin = 50000
 max_iterations = 50
 step_timeout_secs = 600
-native_function_calling = true
+native_function_calling = false
 streaming = false
 max_parallel_tools = 16
 
@@ -108,7 +108,7 @@ tool_code = [
 ]
 
 cognitive = [
-    "src/cognitive/memory_hierarchy.rs",
+    "src/cognitive/memory_hierarchy/mod.rs",
     "src/cognitive/episodic.rs",
 ]
 

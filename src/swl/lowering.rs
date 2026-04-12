@@ -115,7 +115,7 @@ impl<'a> LoweringContext<'a> {
         }
 
         let _final_exits = if !self.doc.guardrails.is_empty() {
-            self.lower_guardrail_warnings(&self.doc.guardrails, current_exits, &mut steps)
+            self.lower_guardrail_enforcements(&self.doc.guardrails, current_exits, &mut steps)
         } else {
             current_exits
         };
@@ -264,9 +264,9 @@ impl<'a> LoweringContext<'a> {
         }
 
         if let Some(guard) = &step.guard {
-            return Ok(self.lower_guard_warning(
+            return Ok(self.lower_guard_enforcement(
                 &format!(
-                    "step guard ({})",
+                    "step_guard_{}",
                     step.name.clone().unwrap_or_else(|| "unnamed".to_string())
                 ),
                 &guard.condition,
@@ -486,7 +486,7 @@ impl<'a> LoweringContext<'a> {
         }
     }
 
-    fn lower_guardrail_warnings(
+    fn lower_guardrail_enforcements(
         &mut self,
         guardrails: &[Guardrail],
         incoming: Vec<String>,
@@ -498,7 +498,7 @@ impl<'a> LoweringContext<'a> {
                 .name
                 .clone()
                 .unwrap_or_else(|| "unnamed_guardrail".to_string());
-            current = self.lower_guard_warning(
+            current = self.lower_guard_enforcement(
                 &name,
                 &guardrail.condition,
                 &guardrail.on_violation,
@@ -509,6 +509,65 @@ impl<'a> LoweringContext<'a> {
         current
     }
 
+    fn lower_guard_enforcement(
+        &mut self,
+        name: &str,
+        condition: &GuardCondition,
+        on_violation: &str,
+        incoming: Vec<String>,
+        steps: &mut Vec<WorkflowStep>,
+    ) -> Vec<String> {
+        // Convert condition to string representation
+        let condition_str = match condition {
+            GuardCondition::Inline(text) => text.clone(),
+            GuardCondition::Code(block) => {
+                // For code blocks, use the language prefix to indicate type
+                format!("[{}]: {}", block.language.as_str(), block.code)
+            }
+        };
+
+        // Normalize on_violation to lowercase
+        let action = on_violation.to_lowercase();
+
+        // Determine severity based on action
+        let severity = match action.as_str() {
+            "block" => "critical",
+            "alert" => "high",
+            "warn" => "medium",
+            "log" => "low",
+            _ => "medium",
+        }
+        .to_string();
+
+        // Determine if this guardrail is required (blocking)
+        // Only "block" action causes workflow failure
+        let required = action == "block";
+
+        let step_id = self.next_step_id(&format!("guard_{}", name));
+        steps.push(WorkflowStep {
+            id: step_id.clone(),
+            name: format!("Guardrail: {}", name),
+            description: format!(
+                "Enforces guardrail '{}' with '{}' action",
+                name, on_violation
+            ),
+            step_type: StepType::Guardrail {
+                name: name.to_string(),
+                condition: condition_str,
+                on_violation: action,
+                severity,
+                description: format!("Guardrail '{}' enforcement step", name),
+            },
+            required,
+            retry: RetryConfig::default(),
+            timeout_secs: Some(30),
+            depends_on: incoming,
+        });
+        vec![step_id]
+    }
+
+    /// Legacy alias for backward compatibility during transition
+    #[deprecated(note = "Use lower_guard_enforcement instead")]
     fn lower_guard_warning(
         &mut self,
         name: &str,
@@ -517,33 +576,7 @@ impl<'a> LoweringContext<'a> {
         incoming: Vec<String>,
         steps: &mut Vec<WorkflowStep>,
     ) -> Vec<String> {
-        let condition_summary = match condition {
-            GuardCondition::Inline(text) => text.clone(),
-            GuardCondition::Code(block) => format!("{} block", block.language.as_str()),
-        };
-        self.warnings.push(format!(
-            "SWL workflow '{}' contains unenforced guard '{}': {} ({})",
-            self.workflow_name, name, on_violation, condition_summary
-        ));
-
-        let step_id = self.next_step_id(&format!("guard_{}", name));
-        steps.push(WorkflowStep {
-            id: step_id.clone(),
-            name: format!("Guard {}", name),
-            description: "Lowered SWL guard warning".to_string(),
-            step_type: StepType::Log {
-                message: format!(
-                    "[SWL lowering] Guard '{}' with on_violation='{}' is not enforced by WorkflowExecutor yet",
-                    name, on_violation
-                ),
-                level: LogLevel::Warn,
-            },
-            required: false,
-            retry: RetryConfig::default(),
-            timeout_secs: Some(30),
-            depends_on: incoming,
-        });
-        vec![step_id]
+        self.lower_guard_enforcement(name, condition, on_violation, incoming, steps)
     }
 
     fn next_step_id(&mut self, hint: &str) -> String {
@@ -784,7 +817,11 @@ fn yaml_to_var_value(value: serde_yaml::Value) -> VarValue {
     match value {
         serde_yaml::Value::String(s) => VarValue::String(s),
         serde_yaml::Value::Bool(b) => VarValue::Boolean(b),
-        serde_yaml::Value::Number(n) => VarValue::Number(n.as_f64().unwrap_or_default()),
+        serde_yaml::Value::Number(n) => VarValue::Number(
+            n.as_f64()
+                .ok_or_else(|| SelfwareError::Internal("Invalid YAML number value".to_string()))
+                .unwrap_or(0.0),
+        ),
         serde_yaml::Value::Sequence(seq) => {
             VarValue::List(seq.into_iter().map(yaml_to_var_value).collect())
         }

@@ -1,12 +1,12 @@
 # Selfware Evolution Configuration - External 122B Model
-# Model: txn545/Qwen3.5-122B-A10B-NVFP4
+# Model: /media/thread/trebuchet6/qwen35/models/Qwen3.5-122B-A10B-NVFP4-yarn-1010k
 # Endpoint: https://crazyshit.ngrok.io/v1
-# Context: 262,144 tokens
+# Context: 1,010,000 tokens
 
 endpoint = "https://crazyshit.ngrok.io/v1"
-model = "txn545/Qwen3.5-122B-A10B-NVFP4"
+model = "/media/thread/trebuchet6/qwen35/models/Qwen3.5-122B-A10B-NVFP4-yarn-1010k"
 max_tokens = 8192
-context_length = 262144
+context_length = 1010000
 temperature = 0.6
 
 # Qwen3.5 sampling parameters
@@ -14,11 +14,13 @@ temperature = 0.6
 top_p = 0.95
 top_k = 20
 min_p = 0.0
+# Disable thinking for tool-heavy workflows
+chat_template_kwargs = { enable_thinking = false }
 
 [agent]
-# Conservative token budget for 262K context
-# 262K - 50K safety - 50K tools = ~160K for messages
-token_budget = 180000
+# Token budget for 1M context
+# 1M - 50K safety - 50K tools = ~900K for messages
+token_budget = 942000
 token_safety_margin = 50000
 max_iterations = 50
 step_timeout_secs = 600
@@ -44,7 +46,7 @@ tool_code = [
 ]
 
 cognitive = [
-    "src/cognitive/memory_hierarchy.rs",
+    "src/cognitive/memory_hierarchy/mod.rs",
     "src/cognitive/episodic.rs",
     "src/cognitive/self_improvement.rs",
 ]

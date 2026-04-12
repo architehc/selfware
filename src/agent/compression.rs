@@ -178,22 +178,19 @@ pub struct FileAccessTracker {
     recent_accesses: VecDeque<(String, std::time::Instant)>,
     /// Maximum number of tool calls to track
     max_tracked_calls: usize,
-    /// Cap per file in tokens for re-injection
-    file_token_cap: usize,
 }
 
 impl Default for FileAccessTracker {
     fn default() -> Self {
-        Self::new(20, 5_000)
+        Self::new(20)
     }
 }
 
 impl FileAccessTracker {
-    pub fn new(max_tracked_calls: usize, file_token_cap: usize) -> Self {
+    pub fn new(max_tracked_calls: usize) -> Self {
         Self {
             recent_accesses: VecDeque::with_capacity(max_tracked_calls),
             max_tracked_calls,
-            file_token_cap,
         }
     }
 
@@ -849,7 +846,7 @@ mod tests {
 
     #[test]
     fn test_file_access_tracker() {
-        let mut tracker = FileAccessTracker::new(5, 1000);
+        let mut tracker = FileAccessTracker::new(5);
 
         tracker.record_access("file1.rs");
         tracker.record_access("file2.rs");
@@ -863,7 +860,7 @@ mod tests {
 
     #[test]
     fn test_file_access_tracker_updates_timestamp() {
-        let mut tracker = FileAccessTracker::new(5, 1000);
+        let mut tracker = FileAccessTracker::new(5);
 
         tracker.record_access("file1.rs");
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1000,7 +997,7 @@ mod tests {
 
     #[test]
     fn test_file_access_tracker_get_tracked_files() {
-        let mut tracker = FileAccessTracker::new(5, 1000);
+        let mut tracker = FileAccessTracker::new(5);
 
         // Initially empty
         let tracked = tracker.get_tracked_files();
@@ -1022,7 +1019,7 @@ mod tests {
 
     #[test]
     fn test_file_access_tracker_is_empty_and_len() {
-        let mut tracker = FileAccessTracker::new(5, 1000);
+        let mut tracker = FileAccessTracker::new(5);
 
         assert!(tracker.is_empty());
         assert_eq!(tracker.len(), 0);
@@ -1038,7 +1035,7 @@ mod tests {
 
     #[test]
     fn test_file_access_tracker_clear() {
-        let mut tracker = FileAccessTracker::new(5, 1000);
+        let mut tracker = FileAccessTracker::new(5);
 
         tracker.record_access("file1.rs");
         tracker.record_access("file2.rs");
@@ -1053,7 +1050,7 @@ mod tests {
 
     #[test]
     fn test_file_access_tracker_capacity_limit() {
-        let mut tracker = FileAccessTracker::new(3, 1000);
+        let mut tracker = FileAccessTracker::new(3);
 
         // Add more files than capacity
         tracker.record_access("file1.rs");

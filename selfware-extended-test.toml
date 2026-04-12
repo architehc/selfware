@@ -5,17 +5,22 @@
 #   SELFWARE_TIMEOUT=28800 cargo test --features integration extended_
 
 # Top-level config fields (match Config struct schema)
-endpoint = "http://localhost:8000/v1"
-model = "Qwen/Qwen3-Coder-Next-FP8"
+endpoint = "https://crazyshit.ngrok.io/v1"
+model = "/media/thread/trebuchet6/qwen35/models/Qwen3.5-122B-A10B-NVFP4-yarn-1010k"
 # api_key = ""  # Optional, uncomment if needed
 max_tokens = 65536
+context_length = 1010000
 temperature = 0.7
+
+[extra_body]
+# Disable thinking for tool-heavy workflows
+chat_template_kwargs = { enable_thinking = false }
 
 [agent]
 max_iterations = 500
 step_timeout_secs = 1800    # 30 minutes per step
-token_budget = 500000
-native_function_calling = true
+token_budget = 942000
+native_function_calling = false
 
 [safety]
 # Safety settings for extended tests
