@@ -7,7 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0-beta.1] - 2026-04-12
+
 ### Added
+- SWL lowering now generates warnings for guardrail enforcement steps
+- Guardrails attached to delegate steps are now properly lowered
+- `as_str()` method added to `sandbox::RiskLevel` enum
+
+### Fixed
+- Missing `PathBuf` import in CLI module when `bench-harness` feature enabled
+- Missing `warn` imports in `batch`, `browser` modules  
+- Clippy error: never_loop in `swl/guardrails/engine.rs`
+- Test failure: `swebench::tests::test_load_tasks` mock data mismatch
+- Test failure: `swl::lowering::tests::lower_code_review_produces_executor_workflow` missing warnings
+- Various clippy warnings (unused variables, boolean simplification, clamp patterns)
+
+## [0.3.0-beta.1] - 2026-04-12
+
+### Added
+- 16 concurrent stream support for Qwen3.5-122B-A10B-NVFP4-yarn-1010k (1M context)
+- Full codebase audit completed with 6 specialized agents
+- Endpoint verification and configuration fixes
+- Stub documentation - all placeholder modules now clearly marked
+- Code coverage improvements (targeting 90%)
+- Configuration cleanup - obsolete configs moved to configs/obsolete/
 - TUI dashboard mode with real-time telemetry display
 - Event infrastructure for agent-TUI communication (`TuiEvent`, `SharedDashboardState`)
 - Dependabot configuration for automated dependency updates

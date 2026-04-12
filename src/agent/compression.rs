@@ -768,7 +768,7 @@ mod tests {
         let metrics = micro_compact(&mut messages);
 
         assert_eq!(metrics.method, CompressionMethod::Micro);
-        assert!(metrics.tokens_saved >= 0);
+        // tokens_saved is usize, always >= 0 by definition
         // Should be compressed
         assert!(
             messages.len() <= 26,
@@ -1289,7 +1289,7 @@ mod tests {
             ));
         }
 
-        let metrics = micro_compact(&mut messages);
+        let _metrics = micro_compact(&mut messages);
 
         // Count how many messages still have reasoning content
         let reasoning_count = messages

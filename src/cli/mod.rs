@@ -2076,7 +2076,8 @@ async fn handle_command(
 
                 let ep = endpoint.as_deref().unwrap_or(&config.endpoint);
                 let mdl = model.as_deref().unwrap_or(&config.model);
-                let tmpl = templates
+                let _templates = templates; // Used to suppress unused warning when bench-harness disabled
+                let tmpl = _templates
                     .map(PathBuf::from)
                     .unwrap_or_else(|| PathBuf::from("system_tests/projecte2e/templates"));
 

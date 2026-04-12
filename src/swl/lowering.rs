@@ -554,6 +554,12 @@ impl<'a> LoweringContext<'a> {
         // Only "block" action causes workflow failure
         let required = action == "block";
 
+        // Add warning that guardrail will be enforced at runtime
+        self.warnings.push(format!(
+            "Guardrail '{}' will be enforced at runtime with '{}' action",
+            name, on_violation
+        ));
+
         let step_id = self.next_step_id(&format!("guard_{}", name));
         steps.push(WorkflowStep {
             id: step_id.clone(),
