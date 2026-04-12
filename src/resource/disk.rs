@@ -277,10 +277,14 @@ impl DiskManager {
         }
     }
 
-    /// Get total size of models directory
+    /// Get total size of models directory (STUB - HARDCODED VALUE)
+    ///
+    /// ⚠️ WARNING: This returns a HARDCODED 10GB placeholder.
+    /// It does NOT actually calculate the directory size.
+    /// TODO: Implement recursive directory size calculation
     fn get_models_size(&self) -> u64 {
-        // In a real implementation, this would recursively calculate directory size
-        10_000_000_000 // 10GB placeholder
+        warn!("STUB: get_models_size returning hardcoded 10GB - not actually calculating directory size");
+        10_000_000_000 // STUB: 10GB placeholder - NOT REAL
     }
 
     /// Get available space

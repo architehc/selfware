@@ -107,8 +107,7 @@ impl Tool for ToolSearchTool {
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
             .unwrap_or(5)
-            .min(20)
-            .max(1);
+            .clamp(1, 20);
 
         let registry = self.registry.read().await;
         let results = registry.search(query, limit);

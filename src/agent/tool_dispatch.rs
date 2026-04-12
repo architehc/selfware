@@ -1177,7 +1177,7 @@ impl Agent {
 
                     // Clear ALL file_edit failures for this path to prevent further suppression
                     self.recent_failed_tool_attempts
-                        .retain(|a| !(a.tool_name == "file_edit"));
+                        .retain(|a| a.tool_name != "file_edit");
 
                     // Force-read the file so the model sees current content
                     let read_result = if std::path::Path::new(path).exists() {
@@ -2143,8 +2143,7 @@ impl Agent {
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
             .unwrap_or(5)
-            .min(20)
-            .max(1);
+            .clamp(1, 20);
 
         // Search for tools in the registry
         let results: Vec<ToolSearchResult> = self.tools.search(query, limit);

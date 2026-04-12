@@ -264,7 +264,6 @@ pub struct ProjectResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     #[test]
     fn test_project_type_detect_rust() {
