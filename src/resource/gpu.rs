@@ -55,22 +55,43 @@ impl GpuManager {
                     for i in 0..count {
                         match nvml.device_by_index(i) {
                             Ok(device) => {
-                                let uuid = device.uuid().unwrap_or_default();
-                                let name = device.name().unwrap_or_default();
-                                let memory = device.memory_info().unwrap();
+                                // Get device info with proper error handling
+                                let uuid = match device.uuid() {
+                                    Ok(u) => u,
+                                    Err(e) => {
+                                        warn!(index = i, error = %e, "Failed to get GPU UUID");
+                                        format!("unknown-{}", i)
+                                    }
+                                };
+                                let name = match device.name() {
+                                    Ok(n) => n,
+                                    Err(e) => {
+                                        warn!(index = i, error = %e, "Failed to get GPU name");
+                                        format!("Unknown GPU {}", i)
+                                    }
+                                };
+                                
+                                // Try to get memory info - skip device if we can't
+                                let memory_total = match device.memory_info() {
+                                    Ok(mem) => mem.total,
+                                    Err(e) => {
+                                        warn!(index = i, error = %e, "Failed to get GPU memory info, skipping device");
+                                        continue;
+                                    }
+                                };
 
                                 devices.push(GpuDevice {
                                     index: i,
                                     uuid,
                                     name: name.clone(),
-                                    memory_total: memory.total,
+                                    memory_total,
                                     memory_allocated: Arc::new(AtomicU64::new(0)),
                                 });
 
                                 info!(
                                     index = i,
                                     name = %name,
-                                    memory_gb = memory.total / 1_000_000_000,
+                                    memory_gb = memory_total / 1_000_000_000,
                                     "GPU device found"
                                 );
                             }

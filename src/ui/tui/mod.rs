@@ -410,14 +410,14 @@ fn with_dashboard_state<R>(
     shared_state: &SharedDashboardState,
     f: impl FnOnce(&mut DashboardState) -> R,
 ) -> R {
-    let mut state = shared_state.lock().unwrap_or_else(|e| e.into_inner());
+    let mut state = shared_state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     f(&mut state)
 }
 
 fn dashboard_state_snapshot(shared_state: &SharedDashboardState) -> DashboardState {
     shared_state
         .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone()
 }
 

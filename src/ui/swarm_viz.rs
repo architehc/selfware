@@ -202,7 +202,8 @@ impl SwarmVisualization {
             description: format!("{} joined swarm", role),
         });
         self.agents.push(AgentStatus::new(role));
-        self.agents.last_mut().unwrap()
+        // SAFETY: We just pushed an element, so this will never panic
+        self.agents.last_mut().expect("agent just pushed")
     }
 
     /// Update an existing agent's state, task, and progress.

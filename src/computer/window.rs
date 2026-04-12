@@ -227,6 +227,11 @@ impl WindowManager {
     }
 
     /// Resize a window by ID.
+    /// 
+    /// # Platform Support
+    /// - **Linux**: Fully implemented using `wmctrl` and `xdotool`
+    /// - **macOS**: STUB - Not yet implemented. Requires Accessibility permissions
+    ///   and AppleScript or CoreGraphics API integration.
     pub async fn resize_window(&self, id: &WindowId, width: u32, height: u32) -> Result<()> {
         debug!("Resizing window {:?} to {}x{}", id, width, height);
         #[cfg(target_os = "linux")]
@@ -235,13 +240,19 @@ impl WindowManager {
         }
         #[cfg(target_os = "macos")]
         {
-            // macOS resize not yet implemented
-            warn!("Window resize not implemented for macOS");
+            // STUB: macOS resize not yet implemented
+            // Would require AppleScript or CoreGraphics API
+            warn!("STUB: Window resize not implemented for macOS - window {:?} not resized", id);
         }
         Ok(())
     }
 
     /// Move a window to specific coordinates.
+    /// 
+    /// # Platform Support
+    /// - **Linux**: Fully implemented using `wmctrl` and `xdotool`
+    /// - **macOS**: STUB - Not yet implemented. Requires Accessibility permissions
+    ///   and AppleScript or CoreGraphics API integration.
     pub async fn move_window(&self, id: &WindowId, x: i32, y: i32) -> Result<()> {
         debug!("Moving window {:?} to position {}, {}", id, x, y);
         #[cfg(target_os = "linux")]
@@ -250,13 +261,18 @@ impl WindowManager {
         }
         #[cfg(target_os = "macos")]
         {
-            // macOS move not yet implemented
-            warn!("Window move not implemented for macOS");
+            // STUB: macOS move not yet implemented
+            // Would require AppleScript or CoreGraphics API
+            warn!("STUB: Window move not implemented for macOS - window {:?} not moved", id);
         }
         Ok(())
     }
 
     /// Minimize a window.
+    /// 
+    /// # Platform Support
+    /// - **Linux**: Fully implemented using `xdotool` and `wmctrl`
+    /// - **macOS**: STUB - Not yet implemented. Requires Accessibility permissions.
     pub async fn minimize_window(&self, id: &WindowId) -> Result<()> {
         debug!("Minimizing window {:?}", id);
         #[cfg(target_os = "linux")]
@@ -265,13 +281,17 @@ impl WindowManager {
         }
         #[cfg(target_os = "macos")]
         {
-            // macOS minimize not yet implemented
-            warn!("Window minimize not implemented for macOS");
+            // STUB: macOS minimize not yet implemented
+            warn!("STUB: Window minimize not implemented for macOS - window {:?} not minimized", id);
         }
         Ok(())
     }
 
     /// Close a window.
+    /// 
+    /// # Platform Support
+    /// - **Linux**: Fully implemented using `wmctrl` and `xdotool`
+    /// - **macOS**: STUB - Not yet implemented. Requires Accessibility permissions.
     pub async fn close_window(&self, id: &WindowId) -> Result<()> {
         debug!("Closing window {:?}", id);
         #[cfg(target_os = "linux")]
@@ -280,8 +300,8 @@ impl WindowManager {
         }
         #[cfg(target_os = "macos")]
         {
-            // macOS close not yet implemented
-            warn!("Window close not implemented for macOS");
+            // STUB: macOS close not yet implemented
+            warn!("STUB: Window close not implemented for macOS - window {:?} not closed", id);
         }
         Ok(())
     }

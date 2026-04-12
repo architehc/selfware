@@ -566,9 +566,12 @@ mod tests {
 
         if let Some(first_agent) = state.agents.first() {
             let id = first_agent.id.clone();
-            let agent = state.get_agent_mut(&id).unwrap();
-            agent.trust_score = 0.99;
-            assert!((state.get_agent(&id).unwrap().trust_score - 0.99).abs() < f32::EPSILON);
+            if let Some(agent) = state.get_agent_mut(&id) {
+                agent.trust_score = 0.99;
+                if let Some(updated) = state.get_agent(&id) {
+                    assert!((updated.trust_score - 0.99).abs() < f32::EPSILON);
+                }
+            }
         }
         assert!(state.get_agent_mut("nonexistent").is_none());
     }

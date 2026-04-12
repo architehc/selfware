@@ -353,7 +353,7 @@ impl ToolExplorer {
         categories.sort_by_key(|c| c.as_str());
 
         for category in categories {
-            let tools = self.tools.get(&category).unwrap();
+            let tools = self.tools.get(&category).unwrap_or(&Vec::new());
             let is_expanded = self.expanded_categories.contains(&category);
             let is_selected = self.selected_category == Some(category);
 

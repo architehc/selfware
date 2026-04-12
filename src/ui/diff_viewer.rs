@@ -527,8 +527,8 @@ fn word_level_highlight(old_line: &str, new_line: &str) -> (String, String) {
 /// Uses `DiffOp::as_tag_tuple()` which returns `(tag, i1, i2, j1, j2)` where
 /// `i1..i2` is the old range and `j1..j2` is the new range.
 fn hunk_range(group: &[similar::DiffOp]) -> (usize, usize, usize, usize) {
-    let first = group.first().unwrap();
-    let last = group.last().unwrap();
+    let first = group.first().expect("group should not be empty");
+    let last = group.last().expect("group should not be empty");
 
     let (_, old_range_first, new_range_first) = first.as_tag_tuple();
     let (_, old_range_last, new_range_last) = last.as_tag_tuple();
