@@ -4,6 +4,8 @@
 //! Persisted to disk at `.selfware/scratchpad/{task_id}/` for durability across
 //! agent restarts.
 
+#![allow(dead_code)] // Work-in-progress: Coordinator mode not yet fully integrated
+
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

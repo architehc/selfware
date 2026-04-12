@@ -954,7 +954,10 @@ impl WindowManager {
         };
 
         let mut windows = Vec::new();
-        let mut id_to_app = self.window_id_to_app.lock().expect("Window ID map poisoned");
+        let mut id_to_app = self
+            .window_id_to_app
+            .lock()
+            .map_err(|e| anyhow::anyhow!("macOS window ID map poisoned: {}", e))?;
         id_to_app.clear();
 
         for (i, app_name) in app_names.iter().enumerate() {

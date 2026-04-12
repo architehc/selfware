@@ -16,6 +16,8 @@
 //! 3. **Implementation**: Workers execute plan in parallel
 //! 4. **Verification**: Workers verify each other's work
 
+#![allow(dead_code)] // Work-in-progress: Coordinator mode not yet fully integrated
+
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -559,9 +559,12 @@ impl ContextMap {
     /// Load or upgrade a file to L2 (skeleton). Returns the skeleton for injection.
     pub fn load_skeleton(&mut self, path: &Path, skeleton: FileSkeleton) -> &FileSkeleton {
         let token_cost = skeleton.token_count;
+        let path_buf = path.to_path_buf();
+        
+        // Get or create the entry first.
         let entry = self
             .entries
-            .entry(path.to_path_buf())
+            .entry(path_buf)
             .or_insert_with(|| FileEntry {
                 path: path.to_path_buf(),
                 level: ContextLevel::Tree,
@@ -581,12 +584,15 @@ impl ContextMap {
         entry.level = ContextLevel::Skeleton;
         entry.current_tokens = token_cost;
         entry.costs.l2 = token_cost;
-        entry.skeleton = Some(skeleton);
         entry.last_accessed = Instant::now();
         // Drop full content if downgrading from L3.
         entry.full_content = None;
         self.total_tokens += token_cost;
-
+        
+        // Store skeleton and return reference to it.
+        // This is safe because we just set it to Some above.
+        entry.skeleton = Some(skeleton);
+        
         debug!(
             "Loaded skeleton for {}: {} tokens (total: {}/{})",
             path.display(),
@@ -594,8 +600,12 @@ impl ContextMap {
             self.total_tokens,
             self.budget
         );
-
-        entry.skeleton.as_ref().unwrap()
+        
+        // Return reference to skeleton - we know it's Some because we just set it.
+        match entry.skeleton.as_ref() {
+            Some(s) => s,
+            None => unreachable!("skeleton was just set to Some above"),
+        }
     }
 
     /// Load or upgrade a file to L3 (full content).

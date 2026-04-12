@@ -140,6 +140,8 @@ pub use testing::visual_verification;
 // New feature modules
 // ============================================================================
 pub(crate) mod batch;
+// Browser automation module (stub implementation - requires 'browser' feature)
+#[cfg(feature = "browser")]
 pub mod browser;
 pub mod profiles;
 pub mod swebench;

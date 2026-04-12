@@ -1351,9 +1351,8 @@ impl Agent {
                 continue;
             }
 
-            if input.starts_with("/explain ") {
-                let args = input.strip_prefix("/explain ").unwrap().trim();
-                self.handle_explain_command(args);
+            if let Some(args) = input.strip_prefix("/explain ") {
+                self.handle_explain_command(args.trim());
                 continue;
             }
 

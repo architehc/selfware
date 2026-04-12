@@ -30,25 +30,26 @@ impl Agent {
         reasoning_content: Option<&str>,
         native_tool_calls: Option<&Vec<crate::api::types::ToolCall>>,
     ) -> Vec<(String, String, Option<String>)> {
-        if self.config.agent.native_function_calling
-            && native_tool_calls.is_some_and(|calls| !calls.is_empty())
-        {
-            let native_calls = native_tool_calls.unwrap();
-            info!("Using {} native tool calls from API", native_calls.len());
-            return native_calls
-                .iter()
-                .map(|tc| {
-                    debug!(
-                        "Native tool call: {} (id: {}) with args: {}",
-                        tc.function.name, tc.id, tc.function.arguments
-                    );
-                    (
-                        tc.function.name.clone(),
-                        tc.function.arguments.clone(),
-                        Some(tc.id.clone()),
-                    )
-                })
-                .collect();
+        if self.config.agent.native_function_calling {
+            if let Some(native_calls) = native_tool_calls {
+                if !native_calls.is_empty() {
+                    info!("Using {} native tool calls from API", native_calls.len());
+                    return native_calls
+                        .iter()
+                        .map(|tc| {
+                            debug!(
+                                "Native tool call: {} (id: {}) with args: {}",
+                                tc.function.name, tc.id, tc.function.arguments
+                            );
+                            (
+                                tc.function.name.clone(),
+                                tc.function.arguments.clone(),
+                                Some(tc.id.clone()),
+                            )
+                        })
+                        .collect();
+                }
+            }
         }
 
         info!(
