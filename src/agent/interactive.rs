@@ -1437,7 +1437,10 @@ impl Agent {
                 if let Ok(idx) = idx_str.trim().parse::<usize>() {
                     let idx = idx.saturating_sub(1); // 1-based to 0-based
                     if idx < self.pending_messages.len() {
-                        let removed = self.pending_messages.remove(idx).unwrap();
+                        let removed = self
+                            .pending_messages
+                            .remove(idx)
+                            .expect("index checked above");
                         let preview =
                             preview_with_ellipsis(&removed.content, QUEUE_DROP_PREVIEW_BYTES);
                         println!(
@@ -1687,7 +1690,10 @@ impl Agent {
 
             // /think - Toggle thinking mode
             if input == "/think" || input.starts_with("/think ") {
-                let arg = input.strip_prefix("/think").unwrap().trim();
+                let arg = input
+                    .strip_prefix("/think")
+                    .expect("checked by starts_with above")
+                    .trim();
                 match arg {
                     "" | "toggle" => {
                         // Toggle between Enabled and Disabled
@@ -2151,7 +2157,10 @@ impl Agent {
                     && next.origin == PendingMessageOrigin::InteractiveQueue
                     && within_window
                 {
-                    let next = self.pending_messages.pop_front().unwrap();
+                    let next = self
+                        .pending_messages
+                        .pop_front()
+                        .expect("just verified with pending_messages.front()");
                     if !queued.content.is_empty() {
                         queued.content.push('\n');
                     }
@@ -3103,7 +3112,10 @@ impl Agent {
             }
 
             if input.starts_with("/explain ") {
-                let args = input.strip_prefix("/explain ").unwrap().trim();
+                let args = input
+                    .strip_prefix("/explain ")
+                    .expect("checked by starts_with above")
+                    .trim();
                 self.handle_explain_command(args);
                 continue;
             }
@@ -3192,7 +3204,10 @@ impl Agent {
                 if let Ok(idx) = idx_str.trim().parse::<usize>() {
                     let idx = idx.saturating_sub(1); // 1-based to 0-based
                     if idx < self.pending_messages.len() {
-                        let removed = self.pending_messages.remove(idx).unwrap();
+                        let removed = self
+                            .pending_messages
+                            .remove(idx)
+                            .expect("index checked above");
                         let preview =
                             preview_with_ellipsis(&removed.content, QUEUE_DROP_PREVIEW_BYTES);
                         println!(

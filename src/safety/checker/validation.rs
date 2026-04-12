@@ -251,11 +251,17 @@ impl SafetyChecker {
     }
 
     /// Check if a shell command is safe to execute
+    ///
+    /// SECURITY: This function implements multiple layers of protection:
+    /// 1. Pattern matching against known dangerous commands (rm -rf /, mkfs, etc.)
+    /// 2. Base64/hex encoded command detection (prevents "echo <base64> | base64 -d | sh")
+    /// 3. Command chaining analysis (checks each segment of chained commands)
+    /// 4. Environment variable injection prevention
     pub fn check_shell_command(&self, cmd: &str) -> Result<()> {
         let normalized = normalize_shell_command(cmd);
         let dequoted = dequote_and_lowercase(&normalized);
 
-        // Check for dangerous patterns
+        // SECURITY: Check for dangerous patterns
         for (pattern, description) in DANGEROUS_COMMAND_PATTERNS.iter() {
             if pattern.is_match(&normalized) || pattern.is_match(&dequoted) {
                 return Err(SelfwareError::Safety(
@@ -415,6 +421,13 @@ impl SafetyChecker {
     }
 
     /// Check URL for SSRF with options
+    ///
+    /// SECURITY: Implements SSRF (Server-Side Request Forgery) protection by:
+    /// 1. Blocking dangerous URI schemes (file:, gopher:, dict:, ftp:)
+    /// 2. Blocking cloud metadata endpoints (169.254.169.254, etc.)
+    /// 3. Blocking encoded IP bypass attempts (hex, octal, decimal representations)
+    /// 4. Blocking link-local addresses
+    /// 5. Validating IP literals against private/internal ranges
     pub(crate) fn check_url_ssrf_with_options(
         &self,
         url: &str,
@@ -423,7 +436,7 @@ impl SafetyChecker {
     ) -> Result<()> {
         let lower = url.to_lowercase();
 
-        // Block dangerous URI schemes
+        // SECURITY: Block dangerous URI schemes that could access local resources
         for scheme in &["file:", "gopher:", "dict:", "ftp:"] {
             if *scheme == "file:" && options.allow_file_scheme && lower.starts_with("file:") {
                 return Ok(());

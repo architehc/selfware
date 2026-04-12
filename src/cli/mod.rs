@@ -2049,7 +2049,8 @@ async fn handle_command(
             max_iters,
             endpoint,
             model,
-            templates: _,
+            #[allow(unused_variables)]
+            templates,
             output,
         } => {
             if !quiet {

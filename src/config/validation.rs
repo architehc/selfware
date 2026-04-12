@@ -48,6 +48,9 @@ impl Config {
         if self.max_tokens == 0 {
             bail!("Config error: max_tokens must be greater than 0");
         }
+        if self.context_length == 0 {
+            bail!("Config error: context_length must be greater than 0");
+        }
         const MAX_TOKEN_LIMIT: usize = 10_000_000;
         if self.max_tokens > MAX_TOKEN_LIMIT {
             bail!(

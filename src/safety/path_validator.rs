@@ -87,14 +87,18 @@ impl PathValidator {
 
     /// Canonicalize and check a file path for safety.
     pub fn validate(&self, path: &str) -> Result<()> {
-        // Reject null bytes early — they can truncate paths at the OS/C-library
+        // SECURITY: Reject null bytes early — they can truncate paths at the OS/C-library
         // boundary, allowing an attacker to bypass later validation checks.
+        // Example: "/safe/path\0/../../../etc/passwd" could be interpreted as just
+        // "/safe/path" by some APIs but open "/etc/passwd" when passed to C functions.
         if path.contains('\0') {
             return Err(SelfwareError::Safety(SafetyError::PathNullBytes));
         }
 
-        // Unicode normalization bypass prevention.
+        // SECURITY: Unicode normalization bypass prevention.
         // Reject paths with characters that look like ASCII but are not.
+        // These "homoglyph" characters could fool visual inspection and bypass
+        // filters that only check for standard ASCII path separators.
         let suspicious_unicode: &[(char, &str)] = &[
             ('\u{FF0E}', "fullwidth full stop (.)"),
             ('\u{FF0F}', "fullwidth solidus (/)"),
@@ -138,8 +142,10 @@ impl PathValidator {
             self.working_dir.join(path_buf)
         };
 
-        // Use O_NOFOLLOW atomic open to eliminate TOCTOU symlink races.
+        // SECURITY: Use O_NOFOLLOW atomic open to eliminate TOCTOU symlink races.
         // Try to open with O_NOFOLLOW and resolve from the fd directly.
+        // This prevents attackers from swapping a file with a symlink between
+        // the time we check the path and the time we open it.
         let canonical = match open_nofollow_and_resolve(&resolved) {
             Ok(real_path) => real_path,
             Err(e) if e.raw_os_error() == Some(ELOOP) => {
@@ -656,6 +662,141 @@ mod tests {
 
         unsafe {
             std::env::remove_var("SELFWARE_TEST_MODE");
+        }
+    }
+
+    /// Test that encoding-based path bypasses are blocked.
+    /// These tests verify defense against path traversal using Unicode homoglyphs.
+    #[test]
+    fn test_validate_rejects_fullwidth_dot() {
+        let config = make_config(vec![], vec![]);
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd);
+        // Fullwidth full stop (U+FF0E) looks like a period
+        let result = validator.validate("src\u{FF0E}./etc/passwd");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unicode"));
+    }
+
+    #[test]
+    fn test_validate_rejects_fullwidth_slash() {
+        let config = make_config(vec![], vec![]);
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd);
+        // Fullwidth solidus (U+FF0F) looks like a forward slash
+        let result = validator.validate(".\u{FF0F}..\u{FF0F}etc\u{FF0F}passwd");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_two_dot_leader() {
+        let config = make_config(vec![], vec![]);
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd);
+        // Two dot leader (U+2025) looks like two periods
+        let result = validator.validate("src\u{2025}\u{2025}/etc/passwd");
+        assert!(result.is_err());
+    }
+
+    /// Test for path traversal with mixed ASCII and non-ASCII characters
+    #[test]
+    fn test_validate_rejects_suspicious_mix() {
+        let config = make_config(vec![], vec![]);
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd);
+        // Mixing dots with non-ASCII characters in a short component
+        let result = validator.validate("foo./\u{FF0E}/etc/passwd");
+        assert!(result.is_err());
+    }
+
+    /// Test for absolute path access outside workspace
+    #[test]
+    fn test_validate_rejects_absolute_system_path() {
+        let config = make_config(vec![], vec![]);
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd);
+        // Direct access to system files should be blocked
+        let result = validator.validate("/etc/passwd");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("outside") || err.contains("traversal") || err.contains("system"),
+            "Expected outside/traversal/system error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_absolute_root() {
+        let config = make_config(vec![], vec![]);
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd);
+        let result = validator.validate("/");
+        assert!(result.is_err());
+    }
+
+    /// Test for dangerous system paths
+    #[test]
+    fn test_validate_rejects_etc_passwd() {
+        let config = make_config(vec!["./**"], vec![]);
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd);
+        let result = validator.validate("/etc/passwd");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("system"));
+    }
+
+    #[test]
+    fn test_validate_rejects_etc_shadow() {
+        let config = make_config(vec!["./**"], vec![]);
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd);
+        let result = validator.validate("/etc/shadow");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("system"));
+    }
+
+    #[test]
+    fn test_validate_rejects_proc_access() {
+        let config = make_config(vec!["./**"], vec![]);
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd);
+        let result = validator.validate("/proc/self/environ");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("system"));
+    }
+
+    #[test]
+    fn test_validate_rejects_ssh_directory() {
+        let config = make_config(vec![], vec!["**/.ssh/**"]); 
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd);
+        let result = validator.validate("/home/user/.ssh/id_rsa");
+        assert!(result.is_err());
+    }
+
+    /// Test for double encoding/path normalization bypass attempts
+    #[test]
+    fn test_validate_rejects_double_dot_variations() {
+        let config = make_config(vec![], vec![]);
+        let cwd = std::env::current_dir().unwrap();
+        let validator = PathValidator::new(&config, cwd);
+        
+        // Multiple variations of path traversal
+        let traversal_attempts = [
+            "../../etc/passwd",
+            "..\../etc/passwd",
+            "...//...//etc/passwd",
+            "....//....//etc/passwd",
+        ];
+        
+        for attempt in &traversal_attempts {
+            let result = validator.validate(attempt);
+            assert!(
+                result.is_err(),
+                "Path traversal attempt '{}' should be blocked",
+                attempt
+            );
         }
     }
 }

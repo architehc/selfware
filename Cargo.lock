@@ -4254,7 +4254,7 @@ dependencies = [
 
 [[package]]
 name = "selfware"
-version = "0.4.0-beta.1"
+version = "0.3.0-beta.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
