@@ -671,8 +671,9 @@ pub async fn analyze_impact(
                 let file_name = path.to_string_lossy().to_lowercase();
 
                 // Simple text-based search for references
-                if content.contains(&target_name)
-                    || (symbol.is_some() && content.contains(symbol.unwrap()))
+                let symbol_matches =
+                    symbol.is_some_and(|s: &str| content.contains(s));
+                if content.contains(&target_name) || symbol_matches
                 {
                     let info = CallerInfo {
                         file: path.to_string_lossy().to_string(),

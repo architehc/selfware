@@ -119,6 +119,31 @@ pub(super) fn current_project_root() -> std::path::PathBuf {
     .unwrap_or(cwd)
 }
 
+fn extract_candidate_paths_from_text(text: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    let path_re = regex::Regex::new(
+        r#"(?:^|[\s`"'(])((?:src|tests|examples|benches)/[\w./-]+\.(?:rs|toml|md|txt|json|yaml|yml)|Cargo\.toml|README\.md|RUN_NOTES\.md)"#,
+    )
+    .expect("candidate path regex must compile");
+
+    for caps in path_re.captures_iter(text) {
+        if let Some(path) = caps.get(1) {
+            let candidate = path.as_str().trim().to_string();
+            if !paths.contains(&candidate) {
+                paths.push(candidate);
+            }
+        }
+    }
+
+    paths
+}
+
+fn read_bounded_file(path: &std::path::Path, max_chars: usize) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let bounded: String = content.chars().take(max_chars).collect();
+    Some(bounded)
+}
+
 /// Detect the project type from marker files in the working directory or its ancestors.
 fn detect_project_type() -> ProjectType {
     let root = current_project_root();
@@ -893,6 +918,145 @@ To call a tool, use this EXACT XML structure:
         self.events.emit(event);
     }
 
+    fn collect_synthesis_tool_history(&self) -> String {
+        let mut tool_history = String::new();
+
+        for msg in self.messages.iter().rev().take(24).rev() {
+            let text = msg.content.text_all();
+            let looks_like_tool_result = msg.role == "tool" || text.contains("<tool_result>");
+            if !looks_like_tool_result {
+                continue;
+            }
+
+            let cleaned = text
+                .replace("<tool_result>", "")
+                .replace("</tool_result>", "")
+                .replace("<error>", "")
+                .replace("</error>", "");
+            let cleaned = cleaned.trim();
+            if cleaned.len() < 40 {
+                continue;
+            }
+
+            let bounded: String = cleaned.chars().take(6000).collect();
+            tool_history.push_str(&format!("\n--- tool result ---\n{}\n", bounded));
+            if tool_history.len() >= 24_000 {
+                break;
+            }
+        }
+
+        tool_history
+    }
+
+    fn collect_direct_project_context(&self, task: &str) -> String {
+        const MAX_FILES: usize = 8;
+        const MAX_CHARS_PER_FILE: usize = 8_000;
+        const MAX_TOTAL_CHARS: usize = 40_000;
+
+        fn add_candidate_path(
+            root: &std::path::Path,
+            relative: String,
+            candidates: &mut Vec<String>,
+            seen: &mut HashSet<String>,
+        ) {
+            if candidates.len() >= MAX_FILES
+                || relative.is_empty()
+                || !seen.insert(relative.clone())
+            {
+                return;
+            }
+
+            let full = root.join(&relative);
+            if full.is_file() {
+                candidates.push(relative);
+            }
+        }
+
+        let root = current_project_root();
+        let mut candidates = Vec::new();
+        let mut seen = HashSet::new();
+
+        for relative in extract_candidate_paths_from_text(task) {
+            add_candidate_path(&root, relative, &mut candidates, &mut seen);
+        }
+
+        for relative in extract_candidate_paths_from_text(self.learning_context()) {
+            add_candidate_path(&root, relative, &mut candidates, &mut seen);
+        }
+
+        for msg in self.messages.iter().rev().take(20) {
+            for relative in extract_candidate_paths_from_text(&msg.content.text_all()) {
+                add_candidate_path(&root, relative, &mut candidates, &mut seen);
+            }
+        }
+
+        for relative in [
+            "Cargo.toml",
+            "src/lib.rs",
+            "src/main.rs",
+            "README.md",
+            "RUN_NOTES.md",
+        ] {
+            add_candidate_path(&root, relative.to_string(), &mut candidates, &mut seen);
+        }
+
+        for folder in ["src", "tests"] {
+            let folder_path = root.join(folder);
+            if !folder_path.exists() {
+                continue;
+            }
+
+            let mut discovered = Vec::new();
+            for entry in walkdir::WalkDir::new(&folder_path)
+                .max_depth(3)
+                .into_iter()
+                .filter_map(Result::ok)
+            {
+                let path = entry.path();
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+                    continue;
+                };
+                if !matches!(ext, "rs" | "toml" | "md") {
+                    continue;
+                }
+                let Some(relative) = path.strip_prefix(&root).ok().and_then(|p| p.to_str()) else {
+                    continue;
+                };
+                discovered.push(relative.replace('\\', "/"));
+            }
+            discovered.sort();
+
+            for relative in discovered {
+                add_candidate_path(&root, relative, &mut candidates, &mut seen);
+                if candidates.len() >= MAX_FILES {
+                    break;
+                }
+            }
+
+            if candidates.len() >= MAX_FILES {
+                break;
+            }
+        }
+
+        let mut file_context = String::new();
+        for relative in candidates {
+            if file_context.len() >= MAX_TOTAL_CHARS {
+                break;
+            }
+
+            let full = root.join(&relative);
+            let Some(content) = read_bounded_file(&full, MAX_CHARS_PER_FILE) else {
+                continue;
+            };
+            file_context.push_str(&format!("\n--- {} ---\n{}\n", relative, content));
+        }
+
+        file_context
+    }
+
     /// Phase-2 synthesis: make a single tool-free API call to produce a text
     /// answer from data already in context. Used when the model gathered data
     /// via tools but can't transition to a text response (Qwen3.5 limitation).
@@ -900,26 +1064,27 @@ To call a tool, use this EXACT XML structure:
     /// Builds a minimal prompt with just the task + gathered data, no tool
     /// definitions, no XML. Forces the model to produce text.
     pub(super) async fn synthesize_answer(&mut self, task: &str) -> Result<Option<String>> {
+        let mut file_context = String::new();
+
         // Collect file contents from context map (the data gathered in phase 1).
         // Try Full level first, then fall back to Skeleton (signatures).
-        let mut context_data = String::new();
         for path in self
             .context_map
             .files_at_level(context_map::ContextLevel::Full)
         {
             if let Some(content) = self.context_map.full_content(path) {
-                context_data.push_str(&format!("\n--- {} ---\n{}\n", path.display(), content));
+                file_context.push_str(&format!("\n--- {} ---\n{}\n", path.display(), content));
             }
         }
 
         // Fall back to Skeleton level if no Full content available.
-        if context_data.is_empty() {
+        if file_context.is_empty() {
             for path in self
                 .context_map
                 .files_at_level(context_map::ContextLevel::Skeleton)
             {
                 if let Some(skeleton) = self.context_map.skeleton(path) {
-                    context_data.push_str(&format!(
+                    file_context.push_str(&format!(
                         "\n--- {} (signatures) ---\n{}\n",
                         path.display(),
                         skeleton.render()
@@ -928,25 +1093,31 @@ To call a tool, use this EXACT XML structure:
             }
         }
 
-        // Also check message history for tool results containing file contents.
-        if context_data.is_empty() {
-            for msg in &self.messages {
-                let text = msg.content.text();
-                let looks_like_tool_result = msg.role == "tool" || text.contains("<tool_result>");
-                if looks_like_tool_result && text.len() > 100 {
-                    let cleaned = text
-                        .replace("<tool_result>", "")
-                        .replace("</tool_result>", "")
-                        .replace("<error>", "")
-                        .replace("</error>", "");
-                    context_data.push_str(&format!("\n--- tool result ---\n{}\n", cleaned));
-                }
-            }
+        let is_mutation_task = tool_dispatch::task_requires_mutation(task);
+        if file_context.is_empty() && is_mutation_task {
+            file_context = self.collect_direct_project_context(task);
         }
 
-        if context_data.is_empty() {
+        let tool_history = self.collect_synthesis_tool_history();
+
+        if is_mutation_task && file_context.is_empty() {
             return Ok(None);
         }
+
+        if file_context.is_empty() && tool_history.is_empty() {
+            return Ok(None);
+        }
+
+        let context_data = if tool_history.is_empty() {
+            file_context.clone()
+        } else if file_context.is_empty() {
+            format!("\n--- tool history ---\n{}\n", tool_history)
+        } else {
+            format!(
+                "{}\n--- recent tool history ---\n{}\n",
+                file_context, tool_history
+            )
+        };
 
         let synthesis_prompt = if tool_dispatch::task_requires_mutation(task) {
             format!(
