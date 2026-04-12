@@ -16,6 +16,9 @@ mod factory;
 mod memory;
 mod types;
 
+#[cfg(test)]
+mod tests;
+
 // Re-export all public types
 pub use coordinator::{ConflictStrategy, Swarm, SwarmStats};
 pub use factory::{create_dev_swarm, create_security_swarm};

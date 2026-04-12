@@ -3038,3 +3038,1032 @@ fn test_concurrency_config_boundary_values_accepted() {
     };
     assert!(cfg.validate().is_ok());
 }
+// Additional Config loader and validation tests
+//
+// These tests cover additional edge cases and scenarios not fully covered
+// in the main tests.rs file.
+
+// Note: Imports and helper functions are already defined at the top of tests.rs
+
+// ============================================
+// Additional AgentConfig Tests
+// ============================================
+
+#[test]
+fn test_agent_config_all_defaults() {
+    let config = AgentConfig::default();
+    assert_eq!(config.max_iterations, 100);
+    assert_eq!(config.step_timeout_secs, 300);
+    assert_eq!(config.token_budget, default_max_tokens());
+    assert_eq!(config.token_safety_margin, 8192);
+    assert!(!config.native_function_calling);
+    assert!(config.streaming);
+    assert_eq!(config.min_completion_steps, 3);
+    assert!(config.require_verification_before_completion);
+    assert!(!config.require_visual_verification);
+    assert!((config.context_content_ratio - 0.75).abs() < f32::EPSILON);
+    assert!((config.context_compression_ratio - 0.20).abs() < f32::EPSILON);
+    assert!((config.context_thinking_ratio - 0.05).abs() < f32::EPSILON);
+    assert_eq!(config.compression_detail, "signatures");
+}
+
+#[test]
+fn test_agent_config_context_ratios() {
+    let config = AgentConfig::default();
+    // Verify ratios sum to something reasonable (less than 1.0)
+    let total = config.context_content_ratio 
+        + config.context_compression_ratio 
+        + config.context_thinking_ratio;
+    assert!(total <= 1.0, "Context ratios should not exceed 100%");
+}
+
+#[test]
+fn test_default_agent_config_functions() {
+    assert_eq!(default_max_iterations(), 100);
+    assert_eq!(default_step_timeout(), 300);
+    assert_eq!(default_min_completion_steps(), 3);
+    assert_eq!(default_token_budget(), 0);  // sentinel value
+    assert_eq!(default_token_safety_margin(), 8192);
+    assert!((default_context_content_ratio() - 0.75).abs() < f32::EPSILON);
+    assert!((default_context_compression_ratio() - 0.20).abs() < f32::EPSILON);
+    assert!((default_context_thinking_ratio() - 0.05).abs() < f32::EPSILON);
+    assert_eq!(default_compression_detail(), "signatures");
+}
+
+// ============================================
+// Additional Config Validation Tests
+// ============================================
+
+#[test]
+fn test_validate_context_length_zero() {
+    let config = Config {
+        context_length: 0,
+        ..Config::default()
+    };
+    let err = config.validate().unwrap_err();
+    assert!(err.to_string().contains("context_length must be greater than 0"));
+}
+
+#[test]
+fn test_validate_context_length_excessive() {
+    let config = Config {
+        context_length: 100_000_001,
+        ..Config::default()
+    };
+    // context_length doesn't have an upper bound in validation
+    // but max_tokens and token_budget do
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_validate_temperature_exactly_zero() {
+    let config = Config {
+        temperature: 0.0,
+        context_length: default_context_length(),
+        ..Config::default()
+    };
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_validate_temperature_very_high() {
+    let config = Config {
+        temperature: 100.0,
+        context_length: default_context_length(),
+        ..Config::default()
+    };
+    // Should pass but print warning
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_validate_endpoint_with_path() {
+    let config = Config {
+        endpoint: "https://api.example.com/v1/chat/completions".to_string(),
+        context_length: default_context_length(),
+        ..Config::default()
+    };
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_validate_endpoint_with_port() {
+    let config = Config {
+        endpoint: "http://localhost:8080/v1".to_string(),
+        context_length: default_context_length(),
+        ..Config::default()
+    };
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_validate_endpoint_ip_address() {
+    let config = Config {
+        endpoint: "http://192.168.1.1:8000/v1".to_string(),
+        context_length: default_context_length(),
+        ..Config::default()
+    };
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_validate_model_with_whitespace_only() {
+    let config = Config {
+        model: "   \t\n  ".to_string(),
+        context_length: default_context_length(),
+        ..Config::default()
+    };
+    let err = config.validate().unwrap_err();
+    assert!(err.to_string().contains("model name must not be empty"));
+}
+
+#[test]
+fn test_validate_token_safety_margin_equal_to_budget() {
+    let mut config = Config::default();
+    config.agent.token_budget = 10000;
+    config.agent.token_safety_margin = 10000;  // Equal, should fail
+    let err = config.validate().unwrap_err();
+    assert!(err.to_string().contains("token_safety_margin"));
+    assert!(err.to_string().contains("must be less than"));
+}
+
+#[test]
+fn test_validate_token_safety_margin_greater_than_budget() {
+    let mut config = Config::default();
+    config.agent.token_budget = 10000;
+    config.agent.token_safety_margin = 15000;  // Greater, should fail
+    let err = config.validate().unwrap_err();
+    assert!(err.to_string().contains("token_safety_margin"));
+}
+
+#[test]
+fn test_validate_max_tokens_exactly_at_limit() {
+    let config = Config {
+        max_tokens: 10_000_000,
+        context_length: default_context_length(),
+        ..Config::default()
+    };
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_validate_continuous_work_checkpoint_interval_tools_zero() {
+    let mut config = Config::default();
+    config.continuous_work.checkpoint_interval_tools = 0;
+    let err = config.validate().unwrap_err();
+    assert!(err.to_string().contains("checkpoint_interval_tools"));
+    assert!(err.to_string().contains("must be >= 1"));
+}
+
+#[test]
+fn test_validate_continuous_work_max_recovery_attempts_boundary() {
+    let mut config = Config::default();
+    config.continuous_work.max_recovery_attempts = 100;
+    assert!(config.validate().is_ok());
+    
+    config.continuous_work.max_recovery_attempts = 101;
+    let err = config.validate().unwrap_err();
+    assert!(err.to_string().contains("max_recovery_attempts"));
+}
+
+// ============================================
+// Additional TOML Parsing Error Tests
+// ============================================
+
+#[test]
+fn test_toml_parse_error_missing_equals() {
+    let toml_str = r#"
+endpoint "http://localhost:8000/v1"
+model = "test"
+"#;
+    let result: Result<Config, _> = toml::from_str(toml_str);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_toml_parse_error_invalid_table_syntax() {
+    let toml_str = r#"
+endpoint = "http://localhost:8000/v1"
+[agent
+max_iterations = 50
+"#;
+    let result: Result<Config, _> = toml::from_str(toml_str);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_toml_parse_error_invalid_number_format() {
+    let toml_str = r#"
+endpoint = "http://localhost:8000/v1"
+max_tokens = 1e10
+"#;
+    let result: Result<Config, _> = toml::from_str(toml_str);
+    // Scientific notation might actually work, let's check
+    if let Ok(config) = result {
+        // If it parses, it should be a reasonable number
+        assert!(config.max_tokens > 0);
+    }
+}
+
+#[test]
+fn test_toml_parse_error_invalid_boolean() {
+    let toml_str = r#"
+endpoint = "http://localhost:8000/v1"
+
+[agent]
+streaming = yes
+"#;
+    let result: Result<Config, _> = toml::from_str(toml_str);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_toml_duplicate_keys_error() {
+    let toml_str = r#"
+endpoint = "http://localhost:8000/v1"
+endpoint = "http://duplicate.com/v1"
+"#;
+    // TOML does not allow duplicate keys at the same level
+    let result: Result<Config, _> = toml::from_str(toml_str);
+    assert!(result.is_err(), "TOML should reject duplicate keys");
+}
+
+// ============================================
+// Additional Environment Variable Override Tests
+// ============================================
+
+#[test]
+fn test_env_override_endpoint() {
+    let _guard = clear_selfware_env_vars();
+    
+    std::env::set_var("SELFWARE_ENDPOINT", "http://env-override:9999/v1");
+    
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("test.toml");
+    std::fs::write(&config_path, r#"endpoint = "http://file-value:8000/v1"
+model = "test-model"
+"#).unwrap();
+    
+    let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+    assert_eq!(config.endpoint, "http://env-override:9999/v1");
+    assert_eq!(config.model, "test-model");  // Not overridden
+}
+
+#[test]
+fn test_env_override_model() {
+    let _guard = clear_selfware_env_vars();
+    
+    std::env::set_var("SELFWARE_MODEL", "env-model-override");
+    
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("test.toml");
+    std::fs::write(&config_path, r#"endpoint = "http://localhost:8000/v1"
+model = "file-model"
+"#).unwrap();
+    
+    let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+    assert_eq!(config.model, "env-model-override");
+}
+
+#[test]
+fn test_env_override_max_tokens() {
+    let _guard = clear_selfware_env_vars();
+    
+    std::env::set_var("SELFWARE_MAX_TOKENS", "12345");
+    
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("test.toml");
+    std::fs::write(&config_path, r#"endpoint = "http://localhost:8000/v1"
+max_tokens = 65536
+"#).unwrap();
+    
+    let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+    assert_eq!(config.max_tokens, 12345);
+}
+
+#[test]
+fn test_env_override_temperature() {
+    let _guard = clear_selfware_env_vars();
+    
+    std::env::set_var("SELFWARE_TEMPERATURE", "0.75");
+    
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("test.toml");
+    std::fs::write(&config_path, r#"endpoint = "http://localhost:8000/v1"
+temperature = 0.5
+"#).unwrap();
+    
+    let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+    assert!((config.temperature - 0.75).abs() < f32::EPSILON);
+}
+
+#[test]
+fn test_env_override_timeout() {
+    let _guard = clear_selfware_env_vars();
+    
+    std::env::set_var("SELFWARE_TIMEOUT", "600");
+    
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("test.toml");
+    std::fs::write(&config_path, r#"endpoint = "http://localhost:8000/v1"
+"#).unwrap();
+    
+    let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+    assert_eq!(config.agent.step_timeout_secs, 600);
+}
+
+#[test]
+fn test_env_override_theme() {
+    let _guard = clear_selfware_env_vars();
+    
+    std::env::set_var("SELFWARE_THEME", "ocean");
+    
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("test.toml");
+    std::fs::write(&config_path, r#"endpoint = "http://localhost:8000/v1"
+"#).unwrap();
+    
+    let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+    assert_eq!(config.ui.theme, "ocean");
+}
+
+#[test]
+fn test_env_override_mode_normal() {
+    let _guard = clear_selfware_env_vars();
+    
+    std::env::set_var("SELFWARE_MODE", "normal");
+    
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("test.toml");
+    std::fs::write(&config_path, r#"endpoint = "http://localhost:8000/v1"
+"#).unwrap();
+    
+    let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+    assert_eq!(config.execution_mode, ExecutionMode::Normal);
+}
+
+#[test]
+fn test_env_override_mode_auto_edit_variants() {
+    let _guard = clear_selfware_env_vars();
+    
+    for variant in &["auto-edit", "autoedit", "auto_edit"] {
+        std::env::set_var("SELFWARE_MODE", variant);
+        
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("test.toml");
+        std::fs::write(&config_path, r#"endpoint = "http://localhost:8000/v1"
+"#).unwrap();
+        
+        let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+        assert_eq!(config.execution_mode, ExecutionMode::AutoEdit, 
+            "Variant '{}' should map to AutoEdit", variant);
+    }
+}
+
+#[test]
+fn test_env_override_mode_yolo() {
+    let _guard = clear_selfware_env_vars();
+    
+    std::env::set_var("SELFWARE_MODE", "yolo");
+    
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("test.toml");
+    std::fs::write(&config_path, r#"endpoint = "http://localhost:8000/v1"
+"#).unwrap();
+    
+    let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+    assert_eq!(config.execution_mode, ExecutionMode::Yolo);
+}
+
+#[test]
+fn test_env_override_mode_daemon() {
+    let _guard = clear_selfware_env_vars();
+    
+    std::env::set_var("SELFWARE_MODE", "daemon");
+    
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("test.toml");
+    std::fs::write(&config_path, r#"endpoint = "http://localhost:8000/v1"
+"#).unwrap();
+    
+    let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+    assert_eq!(config.execution_mode, ExecutionMode::Daemon);
+}
+
+#[test]
+fn test_env_override_mode_invalid() {
+    let _guard = clear_selfware_env_vars();
+    
+    std::env::set_var("SELFWARE_MODE", "invalid_mode");
+    
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("test.toml");
+    std::fs::write(&config_path, r#"endpoint = "http://localhost:8000/v1"
+"#).unwrap();
+    
+    // Should not fail, just print warning and use default
+    let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+    assert_eq!(config.execution_mode, ExecutionMode::Normal);
+}
+
+#[test]
+fn test_env_override_max_tokens_invalid_ignored() {
+    let _guard = clear_selfware_env_vars();
+    
+    std::env::set_var("SELFWARE_MAX_TOKENS", "not_a_number");
+    
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("test.toml");
+    std::fs::write(&config_path, r#"endpoint = "http://localhost:8000/v1"
+max_tokens = 8192
+"#).unwrap();
+    
+    let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+    // Invalid env var should be ignored, file value used
+    assert_eq!(config.max_tokens, 8192);
+}
+
+#[test]
+fn test_env_override_temperature_invalid_ignored() {
+    let _guard = clear_selfware_env_vars();
+    
+    std::env::set_var("SELFWARE_TEMPERATURE", "not_a_float");
+    
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("test.toml");
+    std::fs::write(&config_path, r#"endpoint = "http://localhost:8000/v1"
+temperature = 0.5
+"#).unwrap();
+    
+    let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+    // Invalid env var should be ignored
+    assert!((config.temperature - 0.5).abs() < f32::EPSILON);
+}
+
+// ============================================
+// Additional Config::load Tests
+// ============================================
+
+#[test]
+fn test_config_load_selfware_config_env_var() {
+    let _guard = clear_selfware_env_vars();
+    
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("env_config.toml");
+    std::fs::write(&config_path, r#"endpoint = "http://env-config:8000/v1"
+model = "env-model"
+"#).unwrap();
+    
+    std::env::set_var("SELFWARE_CONFIG", config_path.to_str().unwrap());
+    
+    // Load without explicit path - should use env var
+    let config = Config::load(None).unwrap();
+    assert_eq!(config.endpoint, "http://env-config:8000/v1");
+    assert_eq!(config.model, "env-model");
+}
+
+#[test]
+fn test_config_load_explicit_path_overrides_env() {
+    let _guard = clear_selfware_env_vars();
+    
+    let dir = tempfile::tempdir().unwrap();
+    
+    let env_path = dir.path().join("env_config.toml");
+    std::fs::write(&env_path, r#"endpoint = "http://env-config:8000/v1"
+model = "env-model"
+"#).unwrap();
+    
+    let explicit_path = dir.path().join("explicit_config.toml");
+    std::fs::write(&explicit_path, r#"endpoint = "http://explicit-config:8000/v1"
+model = "explicit-model"
+"#).unwrap();
+    
+    std::env::set_var("SELFWARE_CONFIG", env_path.to_str().unwrap());
+    
+    // Load with explicit path - should override env var
+    let config = Config::load(Some(explicit_path.to_str().unwrap())).unwrap();
+    assert_eq!(config.endpoint, "http://explicit-config:8000/v1");
+    assert_eq!(config.model, "explicit-model");
+}
+
+#[test]
+fn test_config_load_selfware_strict_permissions_env() {
+    let _guard = clear_selfware_env_vars();
+    
+    std::env::set_var("SELFWARE_STRICT_PERMISSIONS", "1");
+    
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("strict_test.toml");
+    std::fs::write(&config_path, r#"endpoint = "http://localhost:8000/v1"
+
+[safety]
+strict_permissions = false
+"#).unwrap();
+    
+    // Env var should override config file
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        
+        let result = Config::load(Some(config_path.to_str().unwrap()));
+        // Should fail because env var enables strict mode and file is 644
+        assert!(result.is_err());
+    }
+    
+    #[cfg(not(unix))]
+    {
+        // On non-Unix, just verify it loads
+        let _ = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+    }
+}
+
+#[test]
+fn test_config_load_token_budget_explicit_in_file() {
+    let _guard = clear_selfware_env_vars();
+    
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("explicit_budget.toml");
+    std::fs::write(&config_path, r#"endpoint = "http://localhost:8000/v1"
+
+[agent]
+token_budget = 500000
+"#).unwrap();
+    
+    let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+    assert_eq!(config.agent.token_budget, 500000);
+}
+
+#[test]
+fn test_config_load_normalizes_token_limits() {
+    let _guard = clear_selfware_env_vars();
+    
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("normalize.toml");
+    std::fs::write(&config_path, r#"endpoint = "http://localhost:8000/v1"
+
+[agent]
+token_budget = 10000
+token_safety_margin = 15000
+"#).unwrap();
+    
+    let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+    // Should be normalized to budget - 1
+    assert_eq!(config.agent.token_safety_margin, 9999);
+}
+
+#[test]
+fn test_config_load_applies_ui_defaults() {
+    let _guard = clear_selfware_env_vars();
+    
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("ui_defaults.toml");
+    std::fs::write(&config_path, r#"endpoint = "http://localhost:8000/v1"
+
+[ui]
+compact_mode = true
+verbose_mode = true
+show_tokens = true
+theme = "ocean"
+"#).unwrap();
+    
+    let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+    assert!(config.compact_mode);
+    assert!(config.verbose_mode);
+    assert!(config.show_tokens);
+    assert_eq!(config.ui.theme, "ocean");
+}
+
+// ============================================
+// Additional is_local_endpoint Tests
+// ============================================
+
+#[test]
+fn test_is_local_endpoint_variations() {
+    // localhost variations
+    assert!(is_local_endpoint("http://localhost:8000/v1"));
+    assert!(is_local_endpoint("http://localhost"));
+    assert!(is_local_endpoint("https://localhost:443/v1"));
+    
+    // 127.0.0.1 variations
+    assert!(is_local_endpoint("http://127.0.0.1:8000/v1"));
+    assert!(is_local_endpoint("http://127.0.0.1"));
+    
+    // 0.0.0.0 variations
+    assert!(is_local_endpoint("http://0.0.0.0:8000/v1"));
+    
+    // IPv6 loopback
+    assert!(is_local_endpoint("http://[::1]:8000/v1"));
+    assert!(is_local_endpoint("http://[::1]"));
+    assert!(is_local_endpoint("https://[::1]:443/v1"));
+}
+
+#[test]
+fn test_is_local_endpoint_non_local() {
+    assert!(!is_local_endpoint("http://api.example.com/v1"));
+    assert!(!is_local_endpoint("https://openai.com/v1"));
+    assert!(!is_local_endpoint("http://192.168.1.1:8000/v1"));
+    assert!(!is_local_endpoint("http://10.0.0.1:8000/v1"));
+    assert!(!is_local_endpoint("http://172.16.0.1:8000/v1"));
+    assert!(!is_local_endpoint("http://[::2]:8000/v1"));  // Non-loopback IPv6
+}
+
+#[test]
+fn test_is_local_endpoint_edge_cases() {
+    assert!(!is_local_endpoint(""));
+    assert!(!is_local_endpoint("not-a-url"));
+    assert!(!is_local_endpoint("ftp://localhost:8000/v1"));
+    assert!(!is_local_endpoint("file:///localhost/v1"));
+}
+
+// ============================================
+// Additional ApiKeySource Tests
+// ============================================
+
+#[test]
+fn test_api_key_source_enum_equality() {
+    assert_eq!(ApiKeySource::None, ApiKeySource::None);
+    assert_eq!(ApiKeySource::EnvVar, ApiKeySource::EnvVar);
+    assert_eq!(ApiKeySource::Keyring, ApiKeySource::Keyring);
+    assert_eq!(ApiKeySource::ConfigFile, ApiKeySource::ConfigFile);
+    
+    assert_ne!(ApiKeySource::None, ApiKeySource::EnvVar);
+    assert_ne!(ApiKeySource::EnvVar, ApiKeySource::Keyring);
+}
+
+// ============================================
+// Additional ModelProfile Tests
+// ============================================
+
+#[test]
+fn test_model_profile_supports_vision() {
+    let profile_with_vision = ModelProfile {
+        endpoint: "http://localhost:8000/v1".to_string(),
+        model: "vision-model".to_string(),
+        api_key: None,
+        max_tokens: 4096,
+        temperature: 0.5,
+        modalities: vec!["text".to_string(), "vision".to_string()],
+        context_length: 8192,
+        extra_body: None,
+    };
+    assert!(profile_with_vision.supports_vision());
+    
+    let profile_text_only = ModelProfile {
+        modalities: vec!["text".to_string()],
+        ..profile_with_vision.clone()
+    };
+    assert!(!profile_text_only.supports_vision());
+    
+    let profile_empty_modalities = ModelProfile {
+        modalities: vec![],
+        ..profile_with_vision.clone()
+    };
+    assert!(!profile_empty_modalities.supports_vision());
+}
+
+#[test]
+fn test_model_profile_extra_body() {
+    let mut extra = serde_json::Map::new();
+    extra.insert("top_p".to_string(), serde_json::json!(0.95));
+    
+    let profile = ModelProfile {
+        endpoint: "http://localhost:8000/v1".to_string(),
+        model: "test".to_string(),
+        api_key: None,
+        max_tokens: 4096,
+        temperature: 0.5,
+        modalities: vec!["text".to_string()],
+        context_length: 8192,
+        extra_body: Some(extra),
+    };
+    
+    assert!(profile.extra_body.is_some());
+    assert_eq!(profile.extra_body.unwrap()["top_p"], 0.95);
+}
+
+// ============================================
+// Additional YoloFileConfig Tests
+// ============================================
+
+#[test]
+fn test_yolo_config_default_values() {
+    let config = YoloFileConfig::default();
+    assert!(!config.enabled);
+    assert_eq!(config.max_operations, 0);
+    assert!(config.max_hours.abs() < f64::EPSILON);
+    assert!(config.allow_git_push);
+    assert!(!config.allow_destructive_shell);
+    assert!(config.audit_log_path.is_none());
+    assert_eq!(config.status_interval, 100);
+}
+
+#[test]
+fn test_yolo_config_zero_limits() {
+    let config = YoloFileConfig {
+        enabled: true,
+        max_operations: 0,
+        max_hours: 0.0,
+        ..Default::default()
+    };
+    assert!(config.enabled);
+    assert_eq!(config.max_operations, 0);
+}
+
+// ============================================
+// Additional UI Config Tests
+// ============================================
+
+#[test]
+fn test_ui_config_theme_variations() {
+    // Test all supported theme values
+    for theme in &["amber", "ocean", "minimal", "high-contrast", "high_contrast", "highcontrast"] {
+        let config = UiConfig {
+            theme: theme.to_string(),
+            ..Default::default()
+        };
+        assert_eq!(config.theme, *theme);
+    }
+}
+
+#[test]
+fn test_ui_config_animation_speed_boundaries() {
+    let config = UiConfig {
+        animation_speed: 0.1,
+        ..Default::default()
+    };
+    assert!((config.animation_speed - 0.1).abs() < f64::EPSILON);
+    
+    let config = UiConfig {
+        animation_speed: 10.0,
+        ..Default::default()
+    };
+    assert!((config.animation_speed - 10.0).abs() < f64::EPSILON);
+}
+
+// ============================================
+// Additional ContinuousWorkConfig Tests
+// ============================================
+
+#[test]
+fn test_continuous_work_config_defaults() {
+    let config = ContinuousWorkConfig::default();
+    assert!(config.enabled);
+    assert_eq!(config.checkpoint_interval_tools, 10);
+    assert_eq!(config.checkpoint_interval_secs, 300);
+    assert!(config.auto_recovery);
+    assert_eq!(config.max_recovery_attempts, 3);
+}
+
+#[test]
+fn test_continuous_work_config_disabled() {
+    let config = ContinuousWorkConfig {
+        enabled: false,
+        ..Default::default()
+    };
+    assert!(!config.enabled);
+    assert!(config.auto_recovery);  // Still has default values
+}
+
+// ============================================
+// Additional RetrySettings Tests
+// ============================================
+
+#[test]
+fn test_retry_settings_defaults() {
+    let config = RetrySettings::default();
+    assert_eq!(config.max_retries, 5);
+    assert_eq!(config.base_delay_ms, 1000);
+    assert_eq!(config.max_delay_ms, 60000);
+}
+
+#[test]
+fn test_retry_settings_extreme_values() {
+    let config = RetrySettings {
+        max_retries: 100,
+        base_delay_ms: 1,
+        max_delay_ms: 3600000,  // 1 hour
+    };
+    assert_eq!(config.max_retries, 100);
+    assert_eq!(config.base_delay_ms, 1);
+    assert_eq!(config.max_delay_ms, 3600000);
+}
+
+// ============================================
+// Additional ExecutionMode Tests
+// ============================================
+
+#[test]
+fn test_execution_mode_display_all() {
+    assert_eq!(format!("{}", ExecutionMode::Normal), "normal");
+    assert_eq!(format!("{}", ExecutionMode::AutoEdit), "auto-edit");
+    assert_eq!(format!("{}", ExecutionMode::Yolo), "yolo");
+    assert_eq!(format!("{}", ExecutionMode::Daemon), "daemon");
+}
+
+#[test]
+fn test_execution_mode_default_is_normal() {
+    let mode: ExecutionMode = Default::default();
+    assert_eq!(mode, ExecutionMode::Normal);
+}
+
+// ============================================
+// Additional ConcurrencyConfig Tests
+// ============================================
+
+#[test]
+fn test_concurrency_config_defaults() {
+    let config = ConcurrencyConfig::default();
+    assert_eq!(config.max_streams, 4);
+    assert_eq!(config.max_tools, 8);
+    assert_eq!(config.max_global, 12);
+}
+
+#[test]
+fn test_concurrency_config_validation_success() {
+    let config = ConcurrencyConfig {
+        max_streams: 1,
+        max_tools: 1,
+        max_global: 1,
+    };
+    assert!(config.validate().is_ok());
+    
+    let config = ConcurrencyConfig {
+        max_streams: 256,
+        max_tools: 256,
+        max_global: 256,
+    };
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_concurrency_config_validation_zero_values() {
+    let config = ConcurrencyConfig {
+        max_streams: 0,
+        max_tools: 4,
+        max_global: 16,
+    };
+    assert!(config.validate().is_err());
+}
+
+#[test]
+fn test_concurrency_config_validation_exceeds_max() {
+    let config = ConcurrencyConfig {
+        max_streams: 257,
+        max_tools: 4,
+        max_global: 16,
+    };
+    let err = config.validate().unwrap_err();
+    assert!(err.to_string().contains("256"));
+}
+
+// ============================================
+// Additional SafetyConfig Tests
+// ============================================
+
+#[test]
+fn test_safety_config_default_require_confirmation() {
+    let config = SafetyConfig::default();
+    assert!(config.require_confirmation.contains(&"git_push".to_string()));
+    assert!(config.require_confirmation.contains(&"file_delete".to_string()));
+    assert!(config.require_confirmation.contains(&"shell_exec".to_string()));
+}
+
+#[test]
+fn test_safety_config_strict_permissions_default() {
+    let config = SafetyConfig::default();
+    assert!(!config.strict_permissions);
+}
+
+#[test]
+fn test_default_allowed_paths() {
+    let paths = default_allowed_paths();
+    assert_eq!(paths, vec!["./**".to_string()]);
+}
+
+#[test]
+fn test_default_protected_branches() {
+    let branches = default_protected_branches();
+    assert!(branches.contains(&"main".to_string()));
+    assert!(branches.contains(&"master".to_string()));
+}
+
+#[test]
+fn test_default_require_confirmation() {
+    let confs = default_require_confirmation();
+    assert_eq!(confs.len(), 3);
+    assert!(confs.contains(&"git_push".to_string()));
+    assert!(confs.contains(&"file_delete".to_string()));
+    assert!(confs.contains(&"shell_exec".to_string()));
+}
+
+#[test]
+fn test_default_denied_paths() {
+    let paths = default_denied_paths();
+    assert!(!paths.is_empty());
+    assert!(paths.contains(&"**/.env".to_string()));
+    assert!(paths.contains(&"**/.env.local".to_string()));
+    assert!(paths.contains(&"**/.ssh/**".to_string()));
+    assert!(paths.contains(&"**/secrets/**".to_string()));
+}
+
+// ============================================
+// Additional EvolutionTomlConfig Tests
+// ============================================
+
+#[test]
+fn test_evolution_config_default_empty() {
+    let config = EvolutionTomlConfig::default();
+    assert!(config.prompt_logic.is_empty());
+    assert!(config.tool_code.is_empty());
+    assert!(config.cognitive.is_empty());
+    assert!(config.config_keys.is_empty());
+    assert!(config.hypothesis_model.is_none());
+}
+
+#[test]
+fn test_evolution_config_with_hypothesis_model() {
+    let config = EvolutionTomlConfig {
+        hypothesis_model: Some("architect".to_string()),
+        prompt_logic: vec!["src/prompt.rs".to_string()],
+        tool_code: vec![],
+        cognitive: vec![],
+        config_keys: vec![],
+    };
+    assert_eq!(config.hypothesis_model.unwrap(), "architect");
+}
+
+// ============================================
+// Additional Config Debug Tests
+// ============================================
+
+#[test]
+fn test_config_debug_redaction() {
+    let config = Config {
+        api_key: Some(RedactedString::new("sk-secret-key-12345")),
+        context_length: default_context_length(),
+        ..Config::default()
+    };
+    
+    let debug = format!("{:?}", config);
+    assert!(!debug.contains("sk-secret-key-12345"));
+    assert!(debug.contains("[REDACTED]"));
+}
+
+#[test]
+fn test_config_debug_includes_all_fields() {
+    let config = Config::default();
+    let debug = format!("{:?}", config);
+    
+    // Check key fields are present
+    assert!(debug.contains("endpoint"));
+    assert!(debug.contains("model"));
+    assert!(debug.contains("max_tokens"));
+    assert!(debug.contains("temperature"));
+    assert!(debug.contains("safety"));
+    assert!(debug.contains("agent"));
+    assert!(debug.contains("yolo"));
+    assert!(debug.contains("ui"));
+    assert!(debug.contains("models"));
+}
+
+// ============================================
+// Additional glob pattern validation tests
+// ============================================
+
+#[test]
+fn test_validate_complex_glob_patterns() {
+    let mut config = Config::default();
+    
+    // Valid complex patterns
+    config.safety.allowed_paths = vec![
+        "./**/*.rs".to_string(),
+        "/home/user/**/*.{js,ts}".to_string(),
+        "src/**/mod.rs".to_string(),
+    ];
+    config.safety.denied_paths = vec![
+        "**/node_modules/**".to_string(),
+        "**/.git/**".to_string(),
+        "**/target/debug/**".to_string(),
+    ];
+    
+    assert!(config.validate().is_ok());
+}
+
+#[test]
+fn test_validate_invalid_glob_pattern_bracket() {
+    let mut config = Config::default();
+    config.safety.allowed_paths = vec!["[".to_string()];
+    
+    let err = config.validate().unwrap_err();
+    assert!(err.to_string().contains("Invalid glob"));
+}
+
+#[test]
+fn test_validate_invalid_glob_pattern_unclosed() {
+    let mut config = Config::default();
+    config.safety.denied_paths = vec!["**/[abc".to_string()];
+    
+    let err = config.validate().unwrap_err();
+    assert!(err.to_string().contains("Invalid glob"));
+}

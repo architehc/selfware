@@ -561,7 +561,10 @@ pub mod prelude {
 }
 
 #[cfg(test)]
-mod tests {
+mod tests;
+
+#[cfg(test)]
+mod inline_tests {
     use super::*;
 
     // ── EpisodicMemory ────────────────────────────────────────────

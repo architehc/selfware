@@ -2973,3 +2973,620 @@ async fn test_non_retryable_401_fails_immediately() {
 
     server.stop().await;
 }
+// Additional API client and streaming tests
+// 
+// These tests cover edge cases and additional scenarios not covered
+// in the main tests.rs file.
+
+// Note: Imports are already defined at the top of tests.rs
+
+// ============================================
+// Additional Streaming Response Tests
+// ============================================
+
+#[test]
+fn test_stream_chunk_usage_clone() {
+    let usage = Usage {
+        prompt_tokens: 100,
+        completion_tokens: 50,
+        total_tokens: 150,
+    };
+    let chunk = StreamChunk::Usage(usage);
+    let cloned = chunk.clone();
+    
+    match (chunk, cloned) {
+        (StreamChunk::Usage(u1), StreamChunk::Usage(u2)) => {
+            assert_eq!(u1.total_tokens, u2.total_tokens);
+        }
+        _ => panic!("Expected Usage variants"),
+    }
+}
+
+#[test]
+fn test_parse_sse_event_reasoning_alias() {
+    // Test the "reasoning" alias (used by vLLM) instead of "reasoning_content"
+    let mut acc = ToolCallAccumulator::new();
+    let event = r#"data: {"choices":[{"delta":{"reasoning":"vllm thinking"}}]}"#;
+    let results = parse_sse_event(event, &mut acc);
+    assert_eq!(results.len(), 1);
+    assert!(matches!(&results[0], StreamChunk::Reasoning(t) if t == "vllm thinking"));
+}
+
+#[test]
+fn test_parse_sse_event_malformed_tool_calls() {
+    let mut acc = ToolCallAccumulator::new();
+    // Tool call without required fields should be handled gracefully
+    let event = r#"data: {"choices":[{"delta":{"tool_calls":[{"invalid":"data"}]}}]}"#;
+    let results = parse_sse_event(event, &mut acc);
+    // Should not panic, just return empty
+    assert!(results.is_empty());
+}
+
+#[test]
+fn test_parse_sse_event_negative_index_ignored() {
+    let mut acc = ToolCallAccumulator::new();
+    // Negative index should be ignored (can't convert to usize)
+    let delta = serde_json::json!({
+        "index": -1,
+        "id": "call_neg",
+        "function": {"name": "test", "arguments": "{}"}
+    });
+    let result = acc.process_delta(&delta);
+    assert!(result.is_none());
+    // Nothing should be in pending
+    let calls = acc.flush();
+    assert!(calls.is_empty());
+}
+
+#[test]
+fn test_parse_sse_event_large_index() {
+    let mut acc = ToolCallAccumulator::new();
+    // Large index should work fine
+    let delta = serde_json::json!({
+        "index": 999999,
+        "id": "call_large",
+        "type": "function",
+        "function": {"name": "test", "arguments": "{}"}
+    });
+    acc.process_delta(&delta);
+    let calls = acc.flush();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].id, "call_large");
+}
+
+// ============================================
+// Additional ToolCallAccumulator Tests
+// ============================================
+
+#[test]
+fn test_tool_call_accumulator_empty_function_name() {
+    let mut acc = ToolCallAccumulator::new();
+    let delta = serde_json::json!({
+        "index": 0,
+        "id": "call_empty",
+        "type": "function",
+        "function": {"name": "", "arguments": "{}"}
+    });
+    acc.process_delta(&delta);
+    let calls = acc.flush();
+    assert_eq!(calls[0].function.name, "");
+}
+
+#[test]
+fn test_tool_call_accumulator_partial_update_preserves_existing() {
+    let mut acc = ToolCallAccumulator::new();
+    
+    // First delta with full info
+    let d1 = serde_json::json!({
+        "index": 0,
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "original_name", "arguments": "{\"a\":1"}
+    });
+    acc.process_delta(&d1);
+    
+    // Second delta only updates arguments, not name
+    let d2 = serde_json::json!({
+        "index": 0,
+        "function": {"arguments": ",\"b\":2}"}
+    });
+    acc.process_delta(&d2);
+    
+    let calls = acc.flush();
+    assert_eq!(calls[0].id, "call_1");
+    assert_eq!(calls[0].function.name, "original_name");
+    assert_eq!(calls[0].function.arguments, "{\"a\":1,\"b\":2}");
+}
+
+#[test]
+fn test_tool_call_accumulator_multiple_flushes_idempotent() {
+    let mut acc = ToolCallAccumulator::new();
+    
+    let delta = serde_json::json!({
+        "index": 0,
+        "id": "call_multi",
+        "type": "function",
+        "function": {"name": "test", "arguments": "{}"}
+    });
+    acc.process_delta(&delta);
+    
+    // First flush
+    let calls1 = acc.flush();
+    assert_eq!(calls1.len(), 1);
+    
+    // Second flush should be empty
+    let calls2 = acc.flush();
+    assert!(calls2.is_empty());
+    
+    // Third flush still empty
+    let calls3 = acc.flush();
+    assert!(calls3.is_empty());
+}
+
+// ============================================
+// Additional RetryConfig Tests
+// ============================================
+
+#[test]
+fn test_retry_config_single_retryable_code() {
+    let config = RetryConfig {
+        max_retries: 3,
+        initial_delay_ms: 1000,
+        max_delay_ms: 30000,
+        retryable_status_codes: vec![429],
+    };
+    assert!(config.retryable_status_codes.contains(&429));
+    assert!(!config.retryable_status_codes.contains(&500));
+}
+
+#[test]
+fn test_retry_config_extreme_delays() {
+    let config = RetryConfig {
+        max_retries: 3,
+        initial_delay_ms: 1,  // 1ms
+        max_delay_ms: 3600000, // 1 hour
+        retryable_status_codes: vec![500],
+    };
+    assert_eq!(config.initial_delay_ms, 1);
+    assert_eq!(config.max_delay_ms, 3600000);
+}
+
+// ============================================
+// Additional Message and Content Tests
+// ============================================
+
+#[test]
+fn test_message_content_text_method() {
+    let content = MessageContent::Text("hello world".to_string());
+    assert_eq!(content.text(), "hello world");
+}
+
+#[test]
+fn test_message_content_text_all_from_blocks() {
+    use crate::api::types::{ContentBlock, ImageUrl};
+    
+    let blocks = vec![
+        ContentBlock::Text { text: "line1".to_string() },
+        ContentBlock::ImageUrl { 
+            image_url: ImageUrl { url: "data:image/png;base64,abc".to_string(), detail: None }
+        },
+        ContentBlock::Text { text: "line2".to_string() },
+    ];
+    let content = MessageContent::Blocks(blocks);
+    assert_eq!(content.text_all(), "line1\nline2");
+}
+
+#[test]
+fn test_message_content_strip_images_to_single_text() {
+    use crate::api::types::{ContentBlock, ImageUrl};
+    
+    let blocks = vec![
+        ContentBlock::Text { text: "only text".to_string() },
+        ContentBlock::ImageUrl { 
+            image_url: ImageUrl { url: "data:image/png;base64,abc".to_string(), detail: None }
+        },
+    ];
+    let content = MessageContent::Blocks(blocks);
+    let stripped = content.strip_images();
+    
+    // Should collapse to single Text variant
+    match stripped {
+        MessageContent::Text(t) => assert_eq!(t, "only text"),
+        MessageContent::Blocks(_) => panic!("Expected Text variant"),
+    }
+}
+
+#[test]
+fn test_message_content_with_image() {
+    let content = MessageContent::Text("describe this".to_string());
+    let with_image = content.with_image("base64encodeddata");
+    
+    match with_image {
+        MessageContent::Blocks(blocks) => {
+            assert_eq!(blocks.len(), 2);
+            match &blocks[1] {
+                ContentBlock::ImageUrl { image_url } => {
+                    assert!(image_url.url.contains("data:image/png;base64,base64encodeddata"));
+                }
+                _ => panic!("Expected ImageUrl block"),
+            }
+        }
+        _ => panic!("Expected Blocks variant"),
+    }
+}
+
+#[test]
+fn test_message_content_is_empty() {
+    assert!(MessageContent::Text("".to_string()).is_empty());
+    assert!(!MessageContent::Text("hello".to_string()).is_empty());
+}
+
+#[test]
+fn test_message_content_contains() {
+    let content = MessageContent::Text("hello world".to_string());
+    assert!(content.contains("world"));
+    assert!(!content.contains("foo"));
+}
+
+#[test]
+fn test_message_content_len() {
+    assert_eq!(MessageContent::Text("hello".to_string()).len(), 5);
+    assert_eq!(MessageContent::Text("".to_string()).len(), 0);
+}
+
+#[test]
+fn test_message_content_image_count() {
+    use crate::api::types::{ContentBlock, ImageUrl};
+    
+    let text_only = MessageContent::Text("hello".to_string());
+    assert_eq!(text_only.image_count(), 0);
+    
+    let blocks = vec![
+        ContentBlock::Text { text: "text".to_string() },
+        ContentBlock::ImageUrl { 
+            image_url: ImageUrl { url: "data:image/png;base64,abc".to_string(), detail: None }
+        },
+        ContentBlock::ImageUrl { 
+            image_url: ImageUrl { url: "data:image/png;base64,def".to_string(), detail: None }
+        },
+    ];
+    let with_images = MessageContent::Blocks(blocks);
+    assert_eq!(with_images.image_count(), 2);
+}
+
+#[test]
+fn test_message_content_has_images() {
+    use crate::api::types::{ContentBlock, ImageUrl};
+    
+    let text_only = MessageContent::Text("hello".to_string());
+    assert!(!text_only.has_images());
+    
+    let blocks = vec![
+        ContentBlock::Text { text: "text".to_string() },
+        ContentBlock::ImageUrl { 
+            image_url: ImageUrl { url: "data:image/png;base64,abc".to_string(), detail: None }
+        },
+    ];
+    let with_image = MessageContent::Blocks(blocks);
+    assert!(with_image.has_images());
+}
+
+#[test]
+fn test_message_content_default() {
+    let content: MessageContent = Default::default();
+    assert!(content.is_empty());
+}
+
+#[test]
+fn test_message_content_partial_eq_str() {
+    let content = MessageContent::Text("hello".to_string());
+    assert!(content == *"hello");
+    assert!(content == "hello");
+}
+
+#[test]
+fn test_message_content_partial_eq_string() {
+    let content = MessageContent::Text("hello".to_string());
+    assert!(content == "hello".to_string());
+}
+
+#[test]
+fn test_message_content_display() {
+    let content = MessageContent::Text("display test".to_string());
+    assert_eq!(format!("{}", content), "display test");
+}
+
+// ============================================
+// Additional rand_jitter Tests
+// ============================================
+
+#[test]
+fn test_rand_jitter_distribution() {
+    // Call many times and verify distribution is roughly uniform
+    let mut below_50 = 0;
+    let mut above_50 = 0;
+    
+    for _ in 0..100 {
+        let j = rand_jitter();
+        if j < 0.5 {
+            below_50 += 1;
+        } else {
+            above_50 += 1;
+        }
+        assert!(j >= 0.0 && j < 1.0);
+    }
+    
+    // Roughly balanced (within reasonable bounds for randomness)
+    // In 100 tries, we expect roughly 50/50 with some variance
+    assert!(below_50 > 20 && below_50 < 80, "Distribution seems skewed: {} vs {}", below_50, above_50);
+}
+
+// ============================================
+// Additional merge_extra_body Tests
+// ============================================
+
+#[test]
+fn test_merge_extra_body_empty_extra() {
+    let mut body = serde_json::json!({
+        "model": "test",
+        "messages": [],
+    });
+    
+    // Empty extra_body map
+    let extra = serde_json::Map::new();
+    
+    // Should succeed with no changes
+    merge_extra_body(&mut body, Some(&extra), "test").unwrap();
+    assert_eq!(body["model"], "test");
+}
+
+#[test]
+fn test_merge_extra_body_null_body() {
+    let mut body = serde_json::json!(null);
+    let mut extra = serde_json::Map::new();
+    extra.insert("top_p".to_string(), serde_json::json!(0.9));
+    
+    // Should fail because body is not an object
+    let result = merge_extra_body(&mut body, Some(&extra), "test");
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_merge_extra_body_guided_json() {
+    let mut body = serde_json::json!({
+        "model": "test",
+        "messages": [],
+    });
+    
+    let mut extra = serde_json::Map::new();
+    extra.insert("guided_json".to_string(), serde_json::json!({"type": "object"}));
+    
+    merge_extra_body(&mut body, Some(&extra), "test").unwrap();
+    assert!(body.get("guided_json").is_some());
+}
+
+#[test]
+fn test_merge_extra_body_sampling_params() {
+    let mut body = serde_json::json!({
+        "model": "test",
+        "messages": [],
+    });
+    
+    let mut extra = serde_json::Map::new();
+    extra.insert("top_k".to_string(), serde_json::json!(40));
+    extra.insert("repetition_penalty".to_string(), serde_json::json!(1.1));
+    extra.insert("frequency_penalty".to_string(), serde_json::json!(0.5));
+    extra.insert("presence_penalty".to_string(), serde_json::json!(0.3));
+    extra.insert("seed".to_string(), serde_json::json!(42));
+    
+    merge_extra_body(&mut body, Some(&extra), "test").unwrap();
+    assert_eq!(body["top_k"], 40);
+    assert_eq!(body["repetition_penalty"], 1.1);
+    assert_eq!(body["frequency_penalty"], 0.5);
+    assert_eq!(body["presence_penalty"], 0.3);
+    assert_eq!(body["seed"], 42);
+}
+
+#[test]
+fn test_merge_extra_body_rejects_user_field() {
+    let mut body = serde_json::json!({
+        "model": "test",
+        "messages": [],
+    });
+    
+    let mut extra = serde_json::Map::new();
+    extra.insert("user".to_string(), serde_json::json!("username"));
+    
+    let result = merge_extra_body(&mut body, Some(&extra), "test");
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("disallowed key 'user'"));
+}
+
+#[test]
+fn test_merge_extra_body_rejects_response_format() {
+    let mut body = serde_json::json!({
+        "model": "test",
+        "messages": [],
+    });
+    
+    let mut extra = serde_json::Map::new();
+    extra.insert("response_format".to_string(), serde_json::json!({"type": "json_object"}));
+    
+    let result = merge_extra_body(&mut body, Some(&extra), "test");
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("disallowed key 'response_format'"));
+}
+
+// ============================================
+// Additional ThinkingMode Tests
+// ============================================
+
+#[test]
+fn test_thinking_mode_equality() {
+    assert_eq!(ThinkingMode::Enabled, ThinkingMode::Enabled);
+    assert_eq!(ThinkingMode::Disabled, ThinkingMode::Disabled);
+    assert_eq!(ThinkingMode::Budget(1000), ThinkingMode::Budget(1000));
+    
+    assert_ne!(ThinkingMode::Enabled, ThinkingMode::Disabled);
+    assert_ne!(ThinkingMode::Budget(1000), ThinkingMode::Budget(2000));
+    assert_ne!(ThinkingMode::Enabled, ThinkingMode::Budget(1000));
+}
+
+#[test]
+fn test_thinking_mode_copy() {
+    let mode = ThinkingMode::Budget(4096);
+    let copied = mode;
+    assert_eq!(mode, copied);
+}
+
+// ============================================
+// Additional canonicalize_message_order Tests
+// ============================================
+
+#[test]
+fn test_canonicalize_user_at_start_single_system() {
+    // Single system message after user is NOT moved (only multiple system messages are merged)
+    let mut msgs = vec![
+        Message::user("first"),
+        Message::system("sys"),
+    ];
+    canonicalize_message_order(&mut msgs);
+    // Order preserved when only one system message
+    assert_eq!(msgs[0].role, "user");
+    assert_eq!(msgs[1].role, "system");
+}
+
+#[test]
+fn test_canonicalize_only_tool_messages() {
+    let mut msgs = vec![
+        Message::tool("result1", "call_1"),
+        Message::tool("result2", "call_2"),
+    ];
+    canonicalize_message_order(&mut msgs);
+    // Should inject user message at start
+    assert_eq!(msgs[0].role, "user");
+    assert_eq!(msgs[1].role, "tool");
+    assert_eq!(msgs[2].role, "tool");
+}
+
+#[test]
+fn test_canonicalize_system_after_user_single() {
+    // Single system message after user/assistant is NOT moved
+    let mut msgs = vec![
+        Message::user("question"),
+        Message::assistant("answer"),
+        Message::system("feedback"),
+    ];
+    canonicalize_message_order(&mut msgs);
+    // Order preserved when only one system message
+    assert_eq!(msgs[0].role, "user");
+    assert_eq!(msgs[1].role, "assistant");
+    assert_eq!(msgs[2].role, "system");
+}
+
+// ============================================
+// Additional Message Construction Tests
+// ============================================
+
+#[test]
+fn test_message_strip_images() {
+    use crate::api::types::MessageContent;
+    
+    let multimodal = MessageContent::Text("look at this".to_string())
+        .with_image("fakebase64");
+    let msg = Message::user_multimodal(multimodal);
+    let stripped = msg.strip_images();
+    
+    match stripped.content {
+        MessageContent::Text(t) => assert_eq!(t, "look at this"),
+        MessageContent::Blocks(blocks) => {
+            // Should only have text blocks
+            assert!(!blocks.iter().any(|b| matches!(b, ContentBlock::ImageUrl { .. })));
+        }
+    }
+}
+
+#[test]
+fn test_message_assistant_with_reasoning() {
+    let msg = Message::assistant_with_reasoning(
+        "The answer is 42.",
+        "I need to calculate 6 * 7..."
+    );
+    assert_eq!(msg.role, "assistant");
+    assert_eq!(msg.content.text(), "The answer is 42.");
+    assert_eq!(msg.reasoning_content, Some("I need to calculate 6 * 7...".to_string()));
+}
+
+#[test]
+fn test_message_tool_construction() {
+    let msg = Message::tool(r#"{"status": "ok"}"#, "call_abc123");
+    assert_eq!(msg.role, "tool");
+    assert_eq!(msg.tool_call_id, Some("call_abc123".to_string()));
+    assert_eq!(msg.content.text(), r#"{"status": "ok"}"#);
+}
+
+// ============================================
+// Additional ToolDefinition Tests
+// ============================================
+
+#[test]
+fn test_tool_definition_serialization() {
+    let tool = ToolDefinition {
+        def_type: "function".to_string(),
+        function: FunctionDefinition {
+            name: "test_tool".to_string(),
+            description: "A test tool".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "arg1": {"type": "string"}
+                },
+                "required": ["arg1"]
+            }),
+        },
+    };
+    
+    let json = serde_json::to_string(&tool).unwrap();
+    assert!(json.contains("\"type\":\"function\""));
+    assert!(json.contains("test_tool"));
+    assert!(json.contains("A test tool"));
+}
+
+// ============================================
+// Additional CompletionRequest Tests
+// ============================================
+
+#[test]
+fn test_completion_request_defaults() {
+    let req = types::CompletionRequest {
+        model: "test-model".to_string(),
+        prompt: "Once upon a time".to_string(),
+        max_tokens: None,
+        temperature: None,
+        top_p: None,
+        stop: None,
+    };
+    
+    let json = serde_json::to_string(&req).unwrap();
+    assert!(!json.contains("max_tokens"));
+    assert!(!json.contains("temperature"));
+    assert!(!json.contains("top_p"));
+    assert!(!json.contains("stop"));
+}
+
+#[test]
+fn test_completion_request_with_stop_sequences() {
+    let req = types::CompletionRequest {
+        model: "test-model".to_string(),
+        prompt: "Hello".to_string(),
+        max_tokens: Some(100),
+        temperature: Some(0.7),
+        top_p: Some(0.9),
+        stop: Some(vec!["\n".to_string(), "###".to_string()]),
+    };
+    
+    let json = serde_json::to_string(&req).unwrap();
+    // Newline is escaped as \\n in JSON, check for the escaped version
+    assert!(json.contains("\\n"));
+    assert!(json.contains("###"));
+}
