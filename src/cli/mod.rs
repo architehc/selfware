@@ -12,7 +12,7 @@ use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
 #[cfg(feature = "bench-harness")]
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::warn;
 
 // Use library exports instead of redeclaring modules

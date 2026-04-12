@@ -382,33 +382,30 @@ async fn gather_phase(session_files: &[PathBuf], max_sessions: usize) -> Result<
     Ok(all_memories)
 }
 
-/// Phase 3: Consolidate - Run LLM to merge similar memories
+/// Phase 3: Consolidate - Run LLM to merge similar memories (STUB)
+///
+/// ⚠️ WARNING: This is a STUB implementation. It does NOT actually call an LLM
+/// to consolidate memories. It simply returns the input count without any
+/// deduplication or merging.
+/// TODO: Implement actual LLM call for memory consolidation
 async fn consolidate_phase(_memories: &[MemoryEntry], config: &AutoDreamConfig) -> Result<usize> {
     if _memories.is_empty() {
         return Ok(0);
     }
 
-    // Generate consolidation prompt
+    // STUB: Would generate consolidation prompt
     let _prompt = crate::cognitive::dream::generate_consolidation_prompt(_memories);
 
-    // Call LLM for consolidation (simplified - would use actual LLM client)
-    info!(
-        "Calling consolidation LLM at {} with model {}",
+    // STUB: Would call LLM for consolidation
+    warn!(
+        "STUB: consolidate_phase NOT calling LLM at {} with model {}",
         config.endpoint, config.model
     );
 
-    // For now, we simulate consolidation by deduplicating
-    // In a full implementation, this would call the LLM API
-    let unique_count = _memories.len(); // Placeholder
+    // STUB: Just returns count without actual consolidation
+    let unique_count = _memories.len();
 
-    debug!("Consolidation would reduce {} memories", unique_count);
-
-    // TODO: Implement actual LLM call for consolidation
-    // This would involve:
-    // 1. Sending the prompt to the LLM
-    // 2. Parsing the response
-    // 3. Converting back to MemoryEntry objects
-    // 4. Returning the count of consolidated entries
+    warn!("STUB: Memory consolidation is no-op - returned {} without consolidation", unique_count);
 
     Ok(unique_count)
 }

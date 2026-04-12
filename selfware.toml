@@ -14,7 +14,7 @@ protected_branches = ["main"]
 [agent]
 max_iterations = 10000
 step_timeout_secs = 600
-native_function_calling = false
+native_function_calling = true
 streaming = true
 
 [continuous_work]

@@ -1,24 +1,25 @@
-//! Coordinator Mode - Multi-Agent Orchestration (Work in Progress)
+//! Coordinator Mode - Multi-Agent Orchestration (STUB - SIMULATED EXECUTION)
 //!
-//! A dedicated coordinator agent that orchestrates parallel work across multiple
-//! worker agents, enabling complex multi-step tasks.
+//! ⚠️ WARNING: Worker execution is SIMULATED. This module provides the framework
+//! for multi-agent orchestration but `WorkerAgent::execute_task` is a stub that
+//! does NOT actually use an LLM or execute tools. Workers only log and return
+//! placeholder results.
 //!
 //! ## Architecture
 //!
 //! - **CoordinatorAgent**: Owns high-level task decomposition, restricted tool set
-//! - **WorkerAgent**: Spawned by coordinator for specific subtasks, full tool access
+//! - **WorkerAgent**: Spawned by coordinator for specific subtasks, SIMULATED execution
 //! - **Scratchpad**: Shared state for cross-worker knowledge sharing
 //!
 //! ## Four-Phase Workflow
 //!
-//! 1. **Research**: Coordinator spawns parallel workers to investigate
+//! 1. **Research**: Coordinator spawns parallel workers (SIMULATED)
 //! 2. **Synthesis**: Coordinator reads findings, creates implementation plan
-//! 3. **Implementation**: Workers execute plan in parallel
-//! 4. **Verification**: Workers verify each other's work
+//! 3. **Implementation**: Workers "execute" plan in parallel (SIMULATED)
+//! 4. **Verification**: Workers "verify" each other's work (SIMULATED)
 //!
-//! Status: Implementation complete but not yet integrated into main agent loop.
-//! The coordinator types are exported for future use but currently have no production
-//! consumers. Kept as active code for upcoming multi-agent coordination features.
+//! Status: Framework complete but worker execution is STUBBED.
+//! TODO: Implement actual LLM-driven worker execution in `WorkerAgent::execute_task`.
 
 #![allow(dead_code)] // Types exported for API stability; integration pending
 
@@ -828,33 +829,39 @@ impl WorkerAgent {
         }
     }
 
-    /// Execute the actual task
+    /// Execute the actual task (STUB - SIMULATED EXECUTION)
     ///
-    /// In a real implementation, this would:
-    /// 1. Build a prompt with the task and role
-    /// 2. Make LLM calls with tool access
-    /// 3. Track tool calls and results
-    /// 4. Store findings in scratchpad
+    /// ⚠️ WARNING: This is a STUB that SIMULATES task execution.
+    /// It does NOT:
+    /// - Build a prompt with the task and role
+    /// - Make LLM calls with tool access
+    /// - Actually execute any tools
+    /// - Produce real results
+    ///
+    /// TODO: Implement actual LLM-driven task execution
     async fn execute_task(
         id: &str,
         task: &str,
         role: &str,
         scratchpad: &Scratchpad,
     ) -> Result<String> {
-        // Simulate task execution
-        // In real implementation, this would use the Agent with tool execution
-
-        let output = format!(
-            "Worker {} (role: {}) executed task: {}\n\
-            Findings would be stored here with full tool access.",
+        // STUB: Simulating task execution
+        warn!(
+            "STUB: Worker {} (role: {}) SIMULATING task execution: {}",
             id, role, task
         );
 
-        // Store a finding
+        let output = format!(
+            "STUB: Worker {} (role: {}) SIMULATED task: {}\n\
+            ⚠️ NO ACTUAL EXECUTION - This is placeholder output.",
+            id, role, task
+        );
+
+        // Store a STUB finding
         let finding_key = format!("finding:{}:{}", id, chrono::Utc::now().timestamp_millis());
         scratchpad.write(ScratchpadEntry::new(
             finding_key,
-            "Sample finding from worker execution",
+            "STUB: Sample finding from SIMULATED worker execution",
             id,
         ))?;
 

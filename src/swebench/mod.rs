@@ -1,7 +1,10 @@
-//! SWE-bench Pro Integration
+//! SWE-bench Pro Integration (STUB - RETURNS MOCK DATA)
 //!
-//! Testing framework for evaluating selfware on challenging software engineering tasks
-//! Reference: <https://scaleapi.github.io/SWE-bench_Pro-os/>
+//! ⚠️ WARNING: This module returns MOCK/FABRICATED data for all operations.
+//! - `load_tasks` returns hardcoded example tasks
+//! - `evaluate_task` returns fake success results
+//! - Test functions are all no-ops
+//! DO NOT USE FOR REAL EVALUATION - FOR DEVELOPMENT/DEMO ONLY.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -84,83 +87,79 @@ impl SWEBenchEvaluator {
         }
     }
 
-    /// Load tasks from SWE-bench Pro dataset
+    /// Load tasks from SWE-bench Pro dataset (STUB - RETURNS MOCK DATA)
+    ///
+    /// ⚠️ WARNING: This returns HARDCODED mock tasks, not real SWE-bench data.
+    /// TODO: Implement actual loading from JSON dataset file
     pub fn load_tasks(&self, dataset: &str) -> Result<Vec<SWEBenchTask>> {
-        info!("Loading SWE-bench Pro tasks from: {}", dataset);
+        warn!("STUB: load_tasks returning MOCK data for: {}", dataset);
 
-        // In real implementation, would load from JSON file
+        // STUB: Returns hardcoded example instead of loading from file
         let tasks = vec![SWEBenchTask {
-            repo: "example/repo".to_string(),
-            instance_id: "test-001".to_string(),
-            problem_statement: "Fix the authentication bug in login.py".to_string(),
-            base_commit: "abc123".to_string(),
-            solution_commit: Some("def456".to_string()),
+            repo: "STUB/example/repo".to_string(),
+            instance_id: "STUB-test-001".to_string(),
+            problem_statement: "STUB: Fix the authentication bug in login.py".to_string(),
+            base_commit: "STUB-abc123".to_string(),
+            solution_commit: Some("STUB-def456".to_string()),
             test_files: vec!["tests/test_auth.py".to_string()],
             target_files: vec!["auth/login.py".to_string()],
             difficulty: TaskDifficulty::Medium,
         }];
 
-        info!("Loaded {} tasks", tasks.len());
+        warn!("STUB: load_tasks returned {} MOCK tasks", tasks.len());
         Ok(tasks)
     }
 
-    /// Run selfware on a single task
+    /// Run selfware on a single task (STUB - RETURNS MOCK RESULTS)
+    ///
+    /// ⚠️ WARNING: This does NOT actually run the agent or evaluate the task.
+    /// It returns FABRICATED success results.
+    /// TODO: Implement actual agent execution and test validation
     pub async fn evaluate_task(
         &self,
         task: &SWEBenchTask,
         _agent: &crate::agent::Agent,
     ) -> Result<TestResult> {
-        info!("Evaluating task: {}", task.instance_id);
+        warn!("STUB: evaluate_task returning MOCK results for: {}", task.instance_id);
         let start = std::time::Instant::now();
 
         let mut trajectory = Vec::new();
 
-        // Step 1: Clone repository and checkout base commit
+        // STUB: Mock trajectory steps
         trajectory.push(TrajectoryStep {
             step: 1,
-            action: "setup_environment".to_string(),
-            observation: format!("Cloning {} at commit {}", task.repo, task.base_commit),
+            action: "STUB: setup_environment".to_string(),
+            observation: format!("STUB: Would clone {} at commit {}", task.repo, task.base_commit),
             timestamp: chrono::Local::now().to_rfc3339(),
         });
 
-        // Step 2: Run initial tests to confirm failure
         trajectory.push(TrajectoryStep {
             step: 2,
-            action: "reproduce_bug".to_string(),
-            observation: "Running test to confirm bug exists".to_string(),
+            action: "STUB: reproduce_bug".to_string(),
+            observation: "STUB: Would run test to confirm bug".to_string(),
             timestamp: chrono::Local::now().to_rfc3339(),
         });
-
-        // Step 3: Selfware solves the problem
-        let _task_prompt = format!(
-            "SWE-bench Pro Task: {}\n\nRepository: {}\nProblem: {}\n\nFiles to modify: {:?}\n\nPlease implement a fix for this issue.",
-            task.instance_id,
-            task.repo,
-            task.problem_statement,
-            task.target_files
-        );
 
         trajectory.push(TrajectoryStep {
             step: 3,
-            action: "agent_solve".to_string(),
-            observation: "Selfware agent working on solution".to_string(),
+            action: "STUB: agent_solve".to_string(),
+            observation: "STUB: Would run agent (NOT ACTUALLY RUNNING)".to_string(),
             timestamp: chrono::Local::now().to_rfc3339(),
         });
 
-        // In real implementation, would actually run the agent
-        // let result = agent.execute(&task_prompt).await?;
-
+        // STUB: NOT calling agent.execute()
         let duration = start.elapsed().as_secs_f64();
 
+        warn!("STUB: evaluate_task returning FABRICATED success result");
         Ok(TestResult {
             instance_id: task.instance_id.clone(),
-            success: true,
-            resolved: true, // Would check if tests pass
+            success: true,      // FABRICATED
+            resolved: true,     // FABRICATED
             duration_secs: duration,
-            iterations: 5,
-            tokens_used: 15000,
-            patch_applied: true,
-            tests_passed: true,
+            iterations: 5,      // FABRICATED
+            tokens_used: 15000, // FABRICATED
+            patch_applied: true, // FABRICATED
+            tests_passed: true, // FABRICATED
             error: None,
             trajectory,
         })
@@ -291,28 +290,34 @@ pub struct WorkflowReport {
     pub timestamp: String,
 }
 
-// Test functions
+// STUB Test functions - all no-ops
 fn test_code_generation() -> Result<()> {
+    warn!("STUB: test_code_generation - no actual test performed");
     Ok(())
 }
 
 fn test_file_editing() -> Result<()> {
+    warn!("STUB: test_file_editing - no actual test performed");
     Ok(())
 }
 
 fn test_git_operations() -> Result<()> {
+    warn!("STUB: test_git_operations - no actual test performed");
     Ok(())
 }
 
 fn test_multi_agent() -> Result<()> {
+    warn!("STUB: test_multi_agent - no actual test performed");
     Ok(())
 }
 
 fn test_visual_validation() -> Result<()> {
+    warn!("STUB: test_visual_validation - no actual test performed");
     Ok(())
 }
 
 fn test_browser_automation() -> Result<()> {
+    warn!("STUB: test_browser_automation - no actual test performed");
     Ok(())
 }
 

@@ -462,7 +462,7 @@ impl GuardrailEngine {
                     return EvaluationResult::Pass;
                 }
                 // JSON Logic operators are single-key objects
-                for (op, args) in map {
+                if let Some((op, args)) = map.iter().next() {
                     return self.evaluate_json_operator(op, args, context);
                 }
                 EvaluationResult::Pass

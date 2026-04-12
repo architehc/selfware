@@ -1,9 +1,12 @@
-//! Browser Automation Module
-//! Multimodal web interaction for visual validation and testing
+//! Browser Automation Module (STUB - NOT IMPLEMENTED)
+//!
+//! ⚠️ WARNING: This module is a complete stub. All methods only log and return Ok(()).
+//! NO ACTUAL BROWSER AUTOMATION IS PERFORMED.
+//! TODO: Implement actual browser automation using playwright or similar.
 
 use anyhow::Result;
 use std::path::PathBuf;
-use tracing::info;
+use tracing::warn;
 
 /// Browser automation configuration
 #[derive(Debug, Clone)]
@@ -23,36 +26,41 @@ impl Default for BrowserConfig {
     }
 }
 
-/// Browser session for automation
+/// Browser session for automation (STUB - NOT IMPLEMENTED)
 pub struct BrowserSession {
     _config: BrowserConfig,
 }
 
 impl BrowserSession {
     pub fn new(config: BrowserConfig) -> Self {
+        warn!("STUB: BrowserSession::new - browser automation not implemented");
         Self { _config: config }
     }
 
+    /// STUB: Does not actually navigate to URL
     pub async fn goto(&self, url: &str) -> Result<PageInfo> {
-        info!("Navigating to: {}", url);
+        warn!("STUB: BrowserSession::goto({}) - no actual navigation", url);
         Ok(PageInfo {
             url: url.to_string(),
-            title: "Loaded Page".to_string(),
+            title: "STUB: Not actually loaded".to_string(),
         })
     }
 
+    /// STUB: Does not actually take a screenshot
     pub async fn screenshot(&self, path: &PathBuf) -> Result<()> {
-        info!("Screenshot saved to: {:?}", path);
+        warn!("STUB: BrowserSession::screenshot({:?}) - no screenshot taken", path);
         Ok(())
     }
 
+    /// STUB: Does not actually click anything
     pub async fn click(&self, selector: &str) -> Result<()> {
-        info!("Clicked: {}", selector);
+        warn!("STUB: BrowserSession::click({}) - no click performed", selector);
         Ok(())
     }
 
+    /// STUB: Does not actually fill any form
     pub async fn fill(&self, selector: &str, text: &str) -> Result<()> {
-        info!("Filled {} with: {}", selector, text);
+        warn!("STUB: BrowserSession::fill({}, {}) - no form filled", selector, text);
         Ok(())
     }
 }

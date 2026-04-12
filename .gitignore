@@ -90,3 +90,8 @@ long_run_tests/
 test_output_*/
 test_real_*/
 live_test_*/
+# Additional test artifacts
+hybrid_demo_results_*/
+new_template_results_*/
+27b_longcontext_results_*/
+27b_*/
