@@ -977,4 +977,91 @@ mod tests {
         let output = result.unwrap();
         assert_eq!(output["success"], false);
     }
+
+    // Tests for validate_tag_name function
+
+    #[test]
+    fn test_validate_tag_name_valid() {
+        assert!(validate_tag_name("v1.0.0").is_ok());
+        assert!(validate_tag_name("release-2024").is_ok());
+        assert!(validate_tag_name("feature/new-thing").is_ok());
+        assert!(validate_tag_name("hotfix_123").is_ok());
+        assert!(validate_tag_name("a").is_ok());
+    }
+
+    #[test]
+    fn test_validate_tag_name_empty() {
+        assert!(validate_tag_name("").is_err());
+    }
+
+    #[test]
+    fn test_validate_tag_name_too_long() {
+        let long_name = "a".repeat(257);
+        assert!(validate_tag_name(&long_name).is_err());
+    }
+
+    #[test]
+    fn test_validate_tag_name_starts_with_dash() {
+        assert!(validate_tag_name("-v1.0.0").is_err());
+    }
+
+    #[test]
+    fn test_validate_tag_name_invalid_chars() {
+        assert!(validate_tag_name("v1.0 0").is_err()); // space
+        assert!(validate_tag_name("v1.0@0").is_err()); // @
+        assert!(validate_tag_name("v1.0#0").is_err()); // #
+        assert!(validate_tag_name("v1.0$0").is_err()); // $
+        assert!(validate_tag_name("v1.0!0").is_err()); // !
+        assert!(validate_tag_name("v1.0*0").is_err()); // *
+    }
+
+    #[test]
+    fn test_validate_tag_name_exactly_256() {
+        let name = "a".repeat(256);
+        assert!(validate_tag_name(&name).is_ok());
+    }
+
+    // Tests for write_commit_message_file
+
+    #[test]
+    fn test_write_commit_message_file_creates_file() {
+        let message = "Test commit message";
+        let path = write_commit_message_file(message);
+        assert!(path.is_some());
+        
+        let path = path.unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, message);
+        
+        // Clean up
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_write_commit_message_file_multiline() {
+        let message = "Line 1\nLine 2\nLine 3";
+        let path = write_commit_message_file(message);
+        assert!(path.is_some());
+        
+        let path = path.unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, message);
+        
+        // Clean up
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_write_commit_message_file_unique_names() {
+        let path1 = write_commit_message_file("msg1");
+        let path2 = write_commit_message_file("msg2");
+        
+        assert!(path1.is_some());
+        assert!(path2.is_some());
+        assert_ne!(path1, path2);
+        
+        // Clean up
+        let _ = std::fs::remove_file(&path1.unwrap());
+        let _ = std::fs::remove_file(&path2.unwrap());
+    }
 }
