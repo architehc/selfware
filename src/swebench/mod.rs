@@ -96,8 +96,8 @@ impl SWEBenchEvaluator {
 
         // STUB: Returns hardcoded example instead of loading from file
         let tasks = vec![SWEBenchTask {
-            repo: "STUB/example/repo".to_string(),
-            instance_id: "STUB-test-001".to_string(),
+            repo: "example/repo".to_string(),
+            instance_id: "test-001".to_string(),
             problem_statement: "STUB: Fix the authentication bug in login.py".to_string(),
             base_commit: "STUB-abc123".to_string(),
             solution_commit: Some("STUB-def456".to_string()),

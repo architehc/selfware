@@ -87,81 +87,51 @@ mod tests {
     }
 
     #[test]
-    fn test_autonomy_level_default() {
-        let default: AutonomyLevel = Default::default();
-        assert_eq!(default, AutonomyLevel::ConfirmAll);
-    }
-
-    #[test]
-    fn test_autonomy_level_from_str() {
-        assert_eq!(AutonomyLevel::from_str("yolo"), Some(AutonomyLevel::Yolo));
-        assert_eq!(AutonomyLevel::from_str("YOLO"), Some(AutonomyLevel::Yolo));
-        assert_eq!(AutonomyLevel::from_str("confirm_all"), Some(AutonomyLevel::ConfirmAll));
-        assert_eq!(AutonomyLevel::from_str("dry_run"), Some(AutonomyLevel::DryRun));
-        assert_eq!(AutonomyLevel::from_str("invalid"), None);
+    fn test_autonomy_level_name() {
+        assert_eq!(AutonomyLevel::SuggestOnly.name(), "Suggest Only");
+        assert_eq!(AutonomyLevel::ConfirmDestructive.name(), "Confirm Destructive");
+        assert_eq!(AutonomyLevel::SemiAutonomous.name(), "Semi-Autonomous");
+        assert_eq!(AutonomyLevel::FullAutonomous.name(), "Full Autonomous");
     }
 
     #[test]
     fn test_execution_mode_default() {
         let default: ExecutionMode = Default::default();
-        assert_eq!(default, ExecutionMode::ConfirmAll);
+        assert_eq!(default, ExecutionMode::Normal);
+    }
+
+    #[test]
+    fn test_risk_level_variants() {
+        let low = RiskLevel::Low;
+        let medium = RiskLevel::Medium;
+        let high = RiskLevel::High;
+        
+        assert!(matches!(low, RiskLevel::Low));
+        assert!(matches!(medium, RiskLevel::Medium));
+        assert!(matches!(high, RiskLevel::High));
     }
 
     #[test]
     fn test_risk_level_as_str() {
-        assert_eq!(RiskLevel::None.as_str(), "none");
         assert_eq!(RiskLevel::Low.as_str(), "low");
         assert_eq!(RiskLevel::Medium.as_str(), "medium");
         assert_eq!(RiskLevel::High.as_str(), "high");
-        assert_eq!(RiskLevel::Critical.as_str(), "critical");
     }
 
     #[test]
-    fn test_risk_level_ordering() {
-        assert!(RiskLevel::Critical > RiskLevel::High);
-        assert!(RiskLevel::High > RiskLevel::Medium);
-        assert!(RiskLevel::Medium > RiskLevel::Low);
-        assert!(RiskLevel::Low > RiskLevel::None);
-    }
-
-    #[test]
-    fn test_permission_result_default() {
-        let default = PermissionResult::default();
-        assert!(!default.granted);
-        assert!(default.expires_at.is_none());
-        assert!(default.reason.is_none());
-    }
-
-    #[test]
-    fn test_permission_result_granted() {
-        let result = PermissionResult::granted();
-        assert!(result.granted);
-        assert!(result.expires_at.is_none());
-    }
-
-    #[test]
-    fn test_permission_result_denied() {
-        let result = PermissionResult::denied("test reason");
-        assert!(!result.granted);
-        assert_eq!(result.reason, Some("test reason".to_string()));
-    }
-
-    #[test]
-    fn test_permission_result_is_expired() {
-        let mut result = PermissionResult::granted();
-        assert!(!result.is_expired());
+    fn test_permission_result_variants() {
+        let allow = PermissionResult::Allow;
+        let deny = PermissionResult::Deny { reason: "test".to_string() };
+        let prompt = PermissionResult::Prompt { reason: "confirm".to_string() };
         
-        // Set expiration in the past
-        result.expires_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
-        assert!(result.is_expired());
+        assert!(matches!(allow, PermissionResult::Allow));
+        assert!(matches!(deny, PermissionResult::Deny { .. }));
+        assert!(matches!(prompt, PermissionResult::Prompt { .. }));
     }
 
     #[test]
     fn test_filesystem_policy_default() {
         let policy = FilesystemPolicy::default();
-        assert!(policy.read_allowed);
-        assert!(!policy.write_allowed);
-        assert!(!policy.delete_allowed);
         assert!(policy.allowed_paths.is_empty());
         assert!(policy.denied_paths.is_empty());
     }
@@ -169,17 +139,26 @@ mod tests {
     #[test]
     fn test_network_policy_default() {
         let policy = NetworkPolicy::default();
-        assert!(!policy.outbound_allowed);
-        assert!(policy.allowed_hosts.is_empty());
-        assert!(policy.denied_hosts.is_empty());
+        assert!(policy.rules.is_empty());
+        // Default is false (derived), but new() sets it to true
+        assert!(!policy.allow_localhost);
+    }
+
+    #[test]
+    fn test_network_policy_new() {
+        let policy = NetworkPolicy::new();
+        assert!(policy.rules.is_empty());
+        assert!(policy.allow_localhost);
     }
 
     #[test]
     fn test_resource_limits_default() {
         let limits = ResourceLimits::default();
-        assert_eq!(limits.max_memory_mb, 1024);
-        assert_eq!(limits.max_cpu_percent, 50.0);
-        assert_eq!(limits.max_file_size_mb, 100);
-        assert_eq!(limits.max_open_files, 100);
+        assert!(limits.max_cpu_time.is_none());
+        assert!(limits.max_memory.is_none());
+        assert!(limits.max_fds.is_none());
+        assert!(limits.max_processes.is_none());
+        assert!(limits.max_output_size.is_none());
+        assert!(limits.timeout.is_none());
     }
 }

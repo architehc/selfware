@@ -337,6 +337,17 @@ impl<'a> LoweringContext<'a> {
             self.outputs.insert(output_key.to_string());
         }
 
+        // Handle guard attached to delegate step
+        if let Some(guard) = &step.guard {
+            exits = self.lower_guard_enforcement(
+                &format!("{}_guard", step_id),
+                &guard.condition,
+                &guard.on_violation,
+                exits,
+                steps,
+            );
+        }
+
         Ok(exits)
     }
 

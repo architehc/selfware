@@ -147,16 +147,22 @@ impl RiskLevel {
     }
 }
 
-impl std::fmt::Display for RiskLevel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = match self {
+impl RiskLevel {
+    /// Get the risk level as a string
+    pub fn as_str(&self) -> &'static str {
+        match self {
             RiskLevel::Safe => "Safe",
             RiskLevel::Low => "Low",
             RiskLevel::Medium => "Medium",
             RiskLevel::High => "High",
             RiskLevel::Critical => "Critical",
-        };
-        write!(f, "{}", name)
+        }
+    }
+}
+
+impl std::fmt::Display for RiskLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
     }
 }
 
