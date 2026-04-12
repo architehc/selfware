@@ -77,3 +77,16 @@ codegraph.json
 vscode-selfware/node_modules/
 vscode-selfware/out/
 vscode-selfware/package-lock.json
+
+# Additional test artifacts and generated files (from audit)
+/.selfware/tool_results/
+/hello
+/hello_test
+/coverage-llvm/
+.evolution-log.jsonl
+.pytest_cache/
+.mypy_cache/
+long_run_tests/
+test_output_*/
+test_real_*/
+live_test_*/

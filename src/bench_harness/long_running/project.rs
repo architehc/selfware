@@ -1,6 +1,6 @@
 //! Project types and scaffolding for long-running tests.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 /// The type of project to create.
@@ -204,7 +204,7 @@ fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result
 }
 
 /// Test project evaluation result.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ProjectStatus {
     /// All tests passed.
     Green,

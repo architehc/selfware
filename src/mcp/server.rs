@@ -458,18 +458,20 @@ impl McpServer {
                     None,
                 )
             }
-            _ if uri.starts_with("selfware://project/file/") => {
-                let file_path = uri.strip_prefix("selfware://project/file/").unwrap();
-                self.read_project_file(uri, file_path)
+            _ => {
+                if let Some(file_path) = uri.strip_prefix("selfware://project/file/") {
+                    self.read_project_file(uri, file_path)
+                } else {
+                    (
+                        None,
+                        Some(JsonRpcError {
+                            code: INVALID_PARAMS,
+                            message: format!("Unknown resource URI: {}", uri),
+                            data: None,
+                        }),
+                    )
+                }
             }
-            _ => (
-                None,
-                Some(JsonRpcError {
-                    code: INVALID_PARAMS,
-                    message: format!("Unknown resource URI: {}", uri),
-                    data: None,
-                }),
-            ),
         }
     }
 

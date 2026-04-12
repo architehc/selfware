@@ -1463,7 +1463,7 @@ impl SmellDetector {
                 num.push(c);
                 while let Some(&next) = chars.peek() {
                     if next.is_ascii_digit() {
-                        num.push(chars.next().unwrap());
+                        num.push(chars.next().expect("peek returned Some"));
                     } else {
                         break;
                     }

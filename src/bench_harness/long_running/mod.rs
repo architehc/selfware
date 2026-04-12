@@ -56,6 +56,7 @@ pub mod report;
 pub mod runner;
 
 pub use config::LongRunningConfig;
-pub use project::{ProjectResult, ProjectStatus, ProjectType, TaskSetup};
+pub use project::{ProjectResult, ProjectStatus, ProjectType};
+pub use runner::TaskSetup;
 pub use report::{LongRunningReport, RoundSummary};
 pub use runner::{LongRunningRunner, TestTask};

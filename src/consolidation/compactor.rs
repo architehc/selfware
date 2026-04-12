@@ -156,7 +156,10 @@ impl MemoryCompactor {
         let mut current_group: Vec<CollectedItem> = vec![items.remove(0)];
 
         for item in items {
-            let last_ts = current_group.last().unwrap().timestamp;
+            let last_ts = current_group
+                .last()
+                .expect("current_group is never empty")
+                .timestamp;
             let gap = (item.timestamp - last_ts).num_seconds().abs();
 
             // Also check if items are causally related

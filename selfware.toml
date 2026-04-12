@@ -1,8 +1,9 @@
-# Auto-configured for txn545/Qwen3.5-122B-A10B-NVFP4 (sglang) on https://crazyshit.ngrok.io/v1
+# Auto-configured for Qwen3.5-122B-A10B-NVFP4-yarn-1010k (sglang) on https://crazyshit.ngrok.io/v1
+# Updated after audit: 2026-04-09
 endpoint = "https://crazyshit.ngrok.io/v1"
-model = "txn545/Qwen3.5-122B-A10B-NVFP4"
+model = "/media/thread/trebuchet6/qwen35/models/Qwen3.5-122B-A10B-NVFP4-yarn-1010k"
 max_tokens = 16384
-context_length = 262144
+context_length = 1010000
 temperature = 0.6
 
 [safety]

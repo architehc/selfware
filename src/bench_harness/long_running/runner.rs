@@ -237,13 +237,13 @@ impl LongRunningRunner {
                             .lines()
                             .filter_map(|l| l.split("passed").next())
                             .filter_map(|l| l.trim().split_whitespace().last())
-                            .filter_map(|n| n.parse().ok())
+                            .filter_map(|n| n.parse::<usize>().ok())
                             .sum();
                         let failed: usize = stdout
                             .lines()
                             .filter_map(|l| l.split("failed").next())
                             .filter_map(|l| l.trim().split_whitespace().last())
-                            .filter_map(|n| n.parse().ok())
+                            .filter_map(|n| n.parse::<usize>().ok())
                             .sum();
                         (passed, failed)
                     }
@@ -262,13 +262,13 @@ impl LongRunningRunner {
                             .lines()
                             .filter_map(|l| l.split("passed").next())
                             .filter_map(|l| l.trim().split_whitespace().last())
-                            .filter_map(|n| n.parse().ok())
+                            .filter_map(|n| n.parse::<usize>().ok())
                             .sum();
                         let failed: usize = stdout
                             .lines()
                             .filter_map(|l| l.split("failed").next())
                             .filter_map(|l| l.trim().split_whitespace().last())
-                            .filter_map(|n| n.parse().ok())
+                            .filter_map(|n| n.parse::<usize>().ok())
                             .sum();
                         (passed, failed)
                     }

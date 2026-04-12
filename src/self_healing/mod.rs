@@ -225,8 +225,8 @@ impl ErrorLearner {
             let mut patterns = self.patterns.write();
             for (key, group) in groups {
                 if group.len() >= self.config.pattern_threshold as usize {
-                    let first = group.first().unwrap();
-                    let last = group.last().unwrap();
+                    let first = group.first().expect("group is non-empty");
+                    let last = group.last().expect("group is non-empty");
 
                     // Calculate recovery success rate
                     let recoveries: Vec<_> = group

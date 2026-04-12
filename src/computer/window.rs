@@ -954,7 +954,7 @@ impl WindowManager {
         };
 
         let mut windows = Vec::new();
-        let mut id_to_app = self.window_id_to_app.lock().unwrap();
+        let mut id_to_app = self.window_id_to_app.lock().expect("Window ID map poisoned");
         id_to_app.clear();
 
         for (i, app_name) in app_names.iter().enumerate() {
@@ -1069,7 +1069,7 @@ end tell"#,
         let id_to_app = self
             .window_id_to_app
             .lock()
-            .map_err(|e| anyhow::anyhow!("macOS window cache poisoned: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("macOS window ID map poisoned: {}", e))?;
         Ok(id_to_app.get(id).cloned())
     }
 }

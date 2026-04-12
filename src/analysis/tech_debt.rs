@@ -909,7 +909,7 @@ impl DebtTracker {
         let generator = RoadmapGenerator::new();
         let roadmap = generator.generate(title, &prioritized);
         self.roadmaps.push(roadmap);
-        self.roadmaps.last().unwrap()
+        self.roadmaps.last().expect("roadmap was just pushed")
     }
 
     pub fn critical_items(&self) -> Vec<&DebtItem> {

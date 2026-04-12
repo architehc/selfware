@@ -387,7 +387,11 @@ fn ask_multiple_choice(
             }
             // Single-char match?
             if trimmed.len() == 1 {
-                let ch = trimmed.chars().next().unwrap().to_ascii_lowercase();
+                let ch = trimmed
+                    .chars()
+                    .next()
+                    .expect("len == 1 guarantees a char")
+                    .to_ascii_lowercase();
                 if let Some(opt) = options.iter().find(|o| o.key == ch) {
                     // If this is the last option (write-your-own), prompt for text.
                     if Some(ch) == options.last().map(|o| o.key) {
@@ -555,9 +559,12 @@ fn framework_options_for(language: &str) -> Vec<QuestionOption> {
     };
 
     opts.into_iter()
-        .map(|(k, l)| QuestionOption {
-            key: k.chars().next().unwrap(),
-            label: l.to_string(),
+        .map(|(k, l)| {
+            let key = k.chars().next().expect("option key is non-empty");
+            QuestionOption {
+                key,
+                label: l.to_string(),
+            }
         })
         .collect()
 }

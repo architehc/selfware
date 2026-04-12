@@ -11,6 +11,8 @@ use std::sync::mpsc;
 use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
+#[cfg(feature = "bench-harness")]
+use std::path::Path;
 use std::path::PathBuf;
 use tracing::warn;
 
@@ -2059,7 +2061,7 @@ async fn handle_command(
             println!("   Duration: {} hours", hours.to_string().emphasis());
             println!("   Timeout: {}s per project", timeout);
             println!("   Max iterations: {}", max_iters);
-            println!("   Output: {}", output.emphasis());
+            println!("   Output: {}", output.clone().emphasis());
             if let Some(ref ep) = endpoint {
                 println!("   Endpoint: {}", ep);
             }
