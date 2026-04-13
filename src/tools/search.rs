@@ -612,22 +612,14 @@ struct SymbolRegexes {
 }
 
 static SYMBOL_REGEXES: Lazy<SymbolRegexes> = Lazy::new(|| SymbolRegexes {
-    fn_pattern: Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)")
-        .expect("valid function regex pattern"),
-    struct_pattern: Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?struct\s+(\w+)")
-        .expect("valid struct regex pattern"),
-    enum_pattern: Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?enum\s+(\w+)")
-        .expect("valid enum regex pattern"),
-    trait_pattern: Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?trait\s+(\w+)")
-        .expect("valid trait regex pattern"),
-    impl_pattern: Regex::new(r"impl(?:<[^>]*>)?\s+(?:(\w+)|(?:\w+\s+for\s+(\w+)))")
-        .expect("valid impl regex pattern"),
-    const_pattern: Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?const\s+(\w+)")
-        .expect("valid const regex pattern"),
-    type_pattern: Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?type\s+(\w+)")
-        .expect("valid type regex pattern"),
-    mod_pattern: Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+(\w+)")
-        .expect("valid mod regex pattern"),
+    fn_pattern: Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)").unwrap(),
+    struct_pattern: Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?struct\s+(\w+)").unwrap(),
+    enum_pattern: Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?enum\s+(\w+)").unwrap(),
+    trait_pattern: Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?trait\s+(\w+)").unwrap(),
+    impl_pattern: Regex::new(r"impl(?:<[^>]*>)?\s+(?:(\w+)|(?:\w+\s+for\s+(\w+)))").unwrap(),
+    const_pattern: Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?const\s+(\w+)").unwrap(),
+    type_pattern: Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?type\s+(\w+)").unwrap(),
+    mod_pattern: Regex::new(r"(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+(\w+)").unwrap(),
 });
 
 /// Build regex patterns for different Rust symbol types.
@@ -814,10 +806,7 @@ mod tests {
     #[test]
     fn test_fn_pattern_matches_pub_fn() {
         let sr = &*SYMBOL_REGEXES;
-        let caps = sr
-            .fn_pattern
-            .captures("pub fn my_function(x: i32)")
-            .unwrap();
+        let caps = sr.fn_pattern.captures("pub fn my_function(x: i32)").unwrap();
         assert_eq!(caps.get(1).unwrap().as_str(), "my_function");
     }
 
@@ -866,20 +855,14 @@ mod tests {
     #[test]
     fn test_const_pattern_matches() {
         let sr = &*SYMBOL_REGEXES;
-        let caps = sr
-            .const_pattern
-            .captures("pub const MAX_SIZE: usize = 100;")
-            .unwrap();
+        let caps = sr.const_pattern.captures("pub const MAX_SIZE: usize = 100;").unwrap();
         assert_eq!(caps.get(1).unwrap().as_str(), "MAX_SIZE");
     }
 
     #[test]
     fn test_type_pattern_matches() {
         let sr = &*SYMBOL_REGEXES;
-        let caps = sr
-            .type_pattern
-            .captures("pub type Result<T> = std::result::Result<T, Error>;")
-            .unwrap();
+        let caps = sr.type_pattern.captures("pub type Result<T> = std::result::Result<T, Error>;").unwrap();
         assert_eq!(caps.get(1).unwrap().as_str(), "Result");
     }
 
@@ -893,10 +876,7 @@ mod tests {
     #[test]
     fn test_fn_pattern_pub_crate() {
         let sr = &*SYMBOL_REGEXES;
-        let caps = sr
-            .fn_pattern
-            .captures("pub(crate) fn internal_fn()")
-            .unwrap();
+        let caps = sr.fn_pattern.captures("pub(crate) fn internal_fn()").unwrap();
         assert_eq!(caps.get(1).unwrap().as_str(), "internal_fn");
     }
 
