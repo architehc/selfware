@@ -1,10 +1,9 @@
-# Auto-configured for Qwen3.5-122B-A10B-NVFP4-yarn-1010k (sglang) on https://crazyshit.ngrok.io/v1
-# Updated after audit: 2026-04-09
-endpoint = "https://crazyshit.ngrok.io/v1"
-model = "/media/thread/trebuchet6/qwen35/models/Qwen3.5-122B-A10B-NVFP4-yarn-1010k"
-max_tokens = 16384
-context_length = 1010000
-temperature = 0.6
+# Selfware config — gemma-4-31b on LM Studio (localhost:1234)
+endpoint = "http://192.168.137.1:1234/v1"
+model = "google/gemma-4-31b"
+max_tokens = 4096
+context_length = 131072
+temperature = 0.7
 
 [safety]
 allowed_paths = ["./**", "/tmp/**"]
@@ -12,7 +11,7 @@ denied_paths = ["**/.env", "**/secrets/**", "**/.ssh/**"]
 protected_branches = ["main"]
 
 [agent]
-max_iterations = 10000
+max_iterations = 100
 step_timeout_secs = 600
 native_function_calling = true
 streaming = true
@@ -23,11 +22,6 @@ checkpoint_interval_tools = 10
 checkpoint_interval_secs = 300
 auto_recovery = true
 max_recovery_attempts = 10
-
-# Thinking mode disabled — model consumes all tokens on reasoning
-# with small max_tokens, leaving content empty.
-[extra_body]
-chat_template_kwargs = { enable_thinking = false }
 
 [retry]
 max_retries = 5

@@ -21,7 +21,7 @@ impl<T> DynamicSection for T where T: Fn() -> String + Send + Sync {}
 /// Builder for constructing system prompts with static/dynamic separation
 ///
 /// # Example
-/// ```
+/// ```ignore
 /// let mut builder = SystemPromptBuilder::new();
 ///
 /// // Static content - cached across conversations

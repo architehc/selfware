@@ -5,7 +5,7 @@
 //!
 //! # Example Workflow
 //!
-//! ```
+//! ```text
 //! // Enter a new worktree for isolated development
 //! EnterWorktreeTool::execute({"path": "feature-branch", "branch": "main"})
 //!

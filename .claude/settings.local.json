@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git reset:*)",
+      "Bash(rm -f .git/SQUASH_MSG .git/MERGE_MSG)"
+    ]
+  }
+}

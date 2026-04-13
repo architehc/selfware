@@ -90,8 +90,12 @@ pub(super) fn detect_oscillating_batch_pair(
     }
 }
 
-/// Strip `<think>...</think>` blocks and Qwen3.5 thinking from content.
+/// Strip `<think>...</think>` blocks, Qwen3.5 thinking, and gemma
+/// `<|channel>thought...<channel|>` blocks from content.
 pub(super) fn strip_think_blocks(content: &str) -> String {
+    // Handle gemma-4 format: <|channel>thought...<channel|> blocks
+    let content = strip_gemma_thinking(content);
+
     // Handle Qwen3.5 format: extensive thinking followed by </think> marker
     // The model outputs thinking as regular text, then </think>, then the answer
     if let Some(end_think) = content.find("</think>") {
@@ -102,12 +106,31 @@ pub(super) fn strip_think_blocks(content: &str) -> String {
 
     // Handle explicit <think>...</think> tags (for other models)
     let mut result = String::with_capacity(content.len());
-    let mut rest = content;
+    let mut rest = content.as_str();
     while let Some(start) = rest.find("<think>") {
         result.push_str(&rest[..start]);
         match rest[start..].find("</think>") {
             Some(end) => rest = &rest[start + end + 8..],
             None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    result.push_str(rest);
+    result
+}
+
+/// Strip gemma `<|channel>thought...<channel|>` blocks from content.
+fn strip_gemma_thinking(content: &str) -> String {
+    let mut result = String::with_capacity(content.len());
+    let mut rest = content;
+    while let Some(start) = rest.find("<|channel>") {
+        result.push_str(&rest[..start]);
+        match rest[start..].find("<channel|>") {
+            Some(end) => rest = &rest[start + end + 10..], // 10 = len("<channel|>")
+            None => {
+                // Unclosed thinking block — strip everything after the marker
                 rest = "";
                 break;
             }

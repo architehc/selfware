@@ -91,8 +91,8 @@ impl ShortTermMemory {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_secs();
-            if now.saturating_sub(entry.accessed_at) > config.demotion_threshold {
+                .as_millis() as u64;
+            if now.saturating_sub(entry.accessed_at) > config.demotion_threshold * 1000 {
                 return TierTransition::Demote;
             }
         }
