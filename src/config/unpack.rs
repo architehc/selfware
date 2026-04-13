@@ -290,9 +290,36 @@ async fn ollama_pull(model: &str) -> Result<bool> {
     }
 }
 
+/// Safely detect system specs, catching any panics from sysinfo/hardware probes.
+fn safe_detect_specs() -> Option<SystemSpecs> {
+    use std::panic::AssertUnwindSafe;
+    match std::panic::catch_unwind(AssertUnwindSafe(SystemSpecs::detect)) {
+        Ok(specs) => Some(specs),
+        Err(_) => {
+            warn!("SystemSpecs::detect() panicked — hardware detection unavailable");
+            None
+        }
+    }
+}
+
 /// Pick a good default model for Ollama based on hardware.
 fn pick_ollama_model_for_hardware() -> &'static str {
-    let specs = SystemSpecs::detect();
+    let specs = safe_detect_specs().unwrap_or_else(|| SystemSpecs {
+        total_ram_gb: 16.0,
+        available_ram_gb: 8.0,
+        total_cpu_cores: 4,
+        cpu_name: "unknown".to_string(),
+        has_gpu: false,
+        gpu_vram_gb: None,
+        total_gpu_vram_gb: None,
+        gpu_name: None,
+        gpu_count: 0,
+        unified_memory: false,
+        backend: llmfit_core::hardware::GpuBackend::CpuX86,
+        gpus: vec![],
+        cluster_mode: false,
+        cluster_node_count: 0,
+    });
 
     if specs.has_gpu {
         if specs.gpu_vram_gb.unwrap_or(0.0) >= 24.0 {
@@ -326,10 +353,6 @@ fn has_config_file() -> bool {
 /// Run the full unpack routine: discover local endpoints, auto-start backends,
 /// auto-pull models, and generate a matching Config.
 pub async fn unpack() -> Result<Option<Config>> {
-    auto_calibrate(&mut Config::default()).await?;
-    // auto_calibrate mutates the passed-in config, but unpack() is expected
-    // to return a fresh generated config. We run it on a default config and
-    // return that if calibration succeeded.
     let mut cfg = Config::default();
     if auto_calibrate(&mut cfg).await? {
         Ok(Some(cfg))
@@ -449,7 +472,16 @@ pub async fn auto_calibrate(config: &mut Config) -> Result<bool> {
     // ── Step 5: nothing is running — llmfit hardware analysis ───────────────
     warn!("No local LLM server found during auto-calibration");
 
-    let specs = SystemSpecs::detect();
+    let specs = match safe_detect_specs() {
+        Some(s) => s,
+        None => {
+            println!(
+                "  {} Could not analyse hardware. Using conservative defaults.",
+                "!".yellow()
+            );
+            return Ok(true);
+        }
+    };
     println!(
         "  {} No local server found. Analysing your hardware...",
         "!".yellow()
