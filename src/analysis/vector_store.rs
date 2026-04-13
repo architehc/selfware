@@ -1321,6 +1321,113 @@ impl CodeChunker {
     }
 }
 
+/// HTTP embedding provider that calls an OpenAI-compatible `/v1/embeddings` endpoint.
+pub struct HttpEmbeddingProvider {
+    endpoint: String,
+    model: String,
+    dimension: usize,
+    client: reqwest::Client,
+}
+
+impl HttpEmbeddingProvider {
+    /// Create a new HTTP embedding provider.
+    ///
+    /// `endpoint` should be the base URL (e.g. `http://192.168.137.1:1234/v1`).
+    /// `model` is the embedding model name (e.g. `text-embedding-nomic-embed-text-v1.5`).
+    /// `dimension` is the expected embedding vector size (e.g. 768 for nomic-embed).
+    pub fn new(endpoint: impl Into<String>, model: impl Into<String>, dimension: usize) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            model: model.into(),
+            dimension,
+            client: reqwest::Client::new(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl EmbeddingProvider for HttpEmbeddingProvider {
+    async fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        let url = format!("{}/embeddings", self.endpoint.trim_end_matches('/'));
+        let body = serde_json::json!({
+            "model": self.model,
+            "input": text,
+        });
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .context("HTTP embedding request failed")?;
+        let status = resp.status();
+        let json: serde_json::Value = resp.json().await.context("Failed to parse embedding response")?;
+        if !status.is_success() {
+            anyhow::bail!(
+                "Embedding endpoint returned {}: {}",
+                status,
+                json.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()).unwrap_or("unknown error")
+            );
+        }
+        let embedding = json["data"][0]["embedding"]
+            .as_array()
+            .context("Missing embedding array in response")?
+            .iter()
+            .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+            .collect::<Vec<f32>>();
+        if embedding.len() != self.dimension {
+            anyhow::bail!(
+                "Embedding dimension mismatch: expected {}, got {}",
+                self.dimension,
+                embedding.len()
+            );
+        }
+        Ok(embedding)
+    }
+
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let url = format!("{}/embeddings", self.endpoint.trim_end_matches('/'));
+        let body = serde_json::json!({
+            "model": self.model,
+            "input": texts,
+        });
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .context("HTTP batch embedding request failed")?;
+        let status = resp.status();
+        let json: serde_json::Value = resp.json().await.context("Failed to parse batch embedding response")?;
+        if !status.is_success() {
+            anyhow::bail!(
+                "Embedding endpoint returned {}: {}",
+                status,
+                json.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()).unwrap_or("unknown error")
+            );
+        }
+        let data = json["data"]
+            .as_array()
+            .context("Missing data array in batch embedding response")?;
+        let mut results = Vec::with_capacity(data.len());
+        for item in data {
+            let embedding = item["embedding"]
+                .as_array()
+                .context("Missing embedding in batch item")?
+                .iter()
+                .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+                .collect::<Vec<f32>>();
+            results.push(embedding);
+        }
+        Ok(results)
+    }
+
+    fn dimension(&self) -> usize {
+        self.dimension
+    }
+}
+
 /// Enum dispatch for embedding providers.
 ///
 /// Prefer using this enum over `Arc<dyn EmbeddingProvider>` trait objects.
@@ -1330,6 +1437,8 @@ pub enum EmbeddingBackend {
     Mock(MockEmbeddingProvider),
     /// TF-IDF based embedding provider (no external dependencies)
     TfIdf(TfIdfEmbeddingProvider),
+    /// HTTP provider calling an OpenAI-compatible `/v1/embeddings` endpoint
+    Http(HttpEmbeddingProvider),
 }
 
 impl EmbeddingBackend {
@@ -1338,6 +1447,7 @@ impl EmbeddingBackend {
         match self {
             Self::Mock(p) => p.embed(text).await,
             Self::TfIdf(p) => p.embed(text).await,
+            Self::Http(p) => p.embed(text).await,
         }
     }
 
@@ -1346,6 +1456,7 @@ impl EmbeddingBackend {
         match self {
             Self::Mock(p) => p.embed_batch(texts).await,
             Self::TfIdf(p) => p.embed_batch(texts).await,
+            Self::Http(p) => p.embed_batch(texts).await,
         }
     }
 
@@ -1354,6 +1465,7 @@ impl EmbeddingBackend {
         match self {
             Self::Mock(p) => p.dimension(),
             Self::TfIdf(p) => p.dimension(),
+            Self::Http(p) => p.dimension(),
         }
     }
 }

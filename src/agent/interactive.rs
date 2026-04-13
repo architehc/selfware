@@ -3375,7 +3375,19 @@ impl Agent {
             ..Default::default()
         };
 
-        let provider = Arc::new(EmbeddingBackend::TfIdf(TfIdfEmbeddingProvider::default()));
+        let provider = if let Some(profile) = self.config.resolve_model(Some("embedding")) {
+            // Use HTTP embedding backend from [models.embedding] config
+            let dim = profile.context_length.min(4096); // context_length doubles as dimension hint
+            Arc::new(EmbeddingBackend::Http(
+                crate::analysis::vector_store::HttpEmbeddingProvider::new(
+                    &profile.endpoint,
+                    &profile.model,
+                    if dim > 0 && dim <= 4096 { dim } else { 768 },
+                ),
+            ))
+        } else {
+            Arc::new(EmbeddingBackend::TfIdf(TfIdfEmbeddingProvider::default()))
+        };
         let mut engine = RagEngine::new(&scan_path, provider, config);
 
         match engine.build_index().await {

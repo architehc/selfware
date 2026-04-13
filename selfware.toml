@@ -27,3 +27,8 @@ max_recovery_attempts = 10
 max_retries = 5
 base_delay_ms = 1000
 max_delay_ms = 60000
+
+[models.embedding]
+endpoint = "http://192.168.137.1:1234/v1"
+model = "text-embedding-nomic-embed-text-v1.5"
+context_length = 768  # embedding dimension
