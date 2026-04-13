@@ -43,7 +43,7 @@ impl Default for ConsolidationConfig {
             min_importance: 1, // Importance::Low
             dedup_similarity: 0.95,
             summary_max_tokens: 1024,
-            endpoint: "http://localhost:8000/v1".into(),
+            endpoint: "http://127.0.0.1:1234/v1".into(),
             model: "qwen3.5-27b".into(),
             temperature: 0.1,
             timeout_secs: 120,

@@ -1,10 +1,13 @@
-//! Unpack — automatic local LLM discovery and setup via llmfit.
+//! Unpack — zero-touch local LLM auto-calibration via llmfit.
 //!
 //! When selfware starts without a valid config or reachable endpoint,
-//! `unpack()` scans for local LLM servers (LM Studio, Ollama, etc.),
-//! detects the best available model, and generates a matching Config.
-//! If nothing is running, it uses llmfit-core to recommend and optionally
-//! download a model that fits the user's hardware.
+//! `auto_calibrate()` does everything possible to get the user running:
+//!   1. Scan for local LLM servers (LM Studio, Ollama, vLLM, etc.)
+//!   2. If nothing is running, try to auto-start installed backends
+//!   3. If a backend is running but empty, auto-pull a hardware-matched model
+//!   4. Detect capabilities (context length, tool calling, multimodal, template)
+//!   5. Generate and optionally persist a matching Config
+//!   6. Fall back to llmfit hardware recommendations with actionable next steps
 
 use anyhow::Result;
 use colored::Colorize;
@@ -12,9 +15,9 @@ use llmfit_core::{
     fit::{rank_models_by_fit, FitLevel, ModelFit},
     hardware::SystemSpecs,
     models::{Capability, ModelDatabase, UseCase},
-    providers::{LmStudioProvider, OllamaProvider},
+    providers::{LmStudioProvider, ModelProvider, OllamaProvider},
 };
-use tracing::{info, warn};
+use tracing::warn;
 
 use crate::config::{auto_config::AutoConfigurator, Config};
 
@@ -32,18 +35,13 @@ pub struct DiscoveredEndpoint {
 pub async fn scan_local_endpoints() -> Vec<DiscoveredEndpoint> {
     let mut results = Vec::new();
 
-    // LM Studio default
     if let Some(ep) = probe_lmstudio().await {
         results.push(ep);
     }
-
-    // Ollama OpenAI-compatible
     if let Some(ep) = probe_ollama().await {
         results.push(ep);
     }
-
-    // Generic local servers on common ports
-    for port in [8000u16, 8080, 3000] {
+    for port in [8000u16, 8080, 3000, 5000] {
         if let Some(ep) = probe_generic(port).await {
             results.push(ep);
         }
@@ -67,13 +65,14 @@ async fn probe_lmstudio() -> Option<DiscoveredEndpoint> {
         .build()
         .ok()?;
 
-    let resp = client
+    let body = client
         .get(format!("{}/models", endpoint))
         .send()
         .await
+        .ok()?
+        .json::<serde_json::Value>()
+        .await
         .ok()?;
-
-    let body = resp.json::<serde_json::Value>().await.ok()?;
 
     let model_info = body
         .get("data")
@@ -113,7 +112,6 @@ async fn probe_ollama() -> Option<DiscoveredEndpoint> {
 
     let endpoint = "http://localhost:11434/v1".to_string();
     let model = models.iter().next().cloned()?;
-
     let context_length = infer_context_length(&model) as usize;
     let multimodal = is_multimodal_by_name(&model);
 
@@ -209,197 +207,184 @@ fn infer_context_length(model: &str) -> u64 {
     }
 }
 
-/// Run the full unpack routine: discover local endpoints, run auto-config,
-/// or fall back to llmfit-based hardware recommendations.
-pub async fn unpack() -> Result<Option<Config>> {
+// ── Backend auto-start helpers ───────────────────────────────────────────────
+
+fn is_ollama_installed() -> bool {
+    std::process::Command::new("ollama")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+fn is_lm_studio_installed() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        std::path::Path::new("/Applications/LM Studio.app").exists()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("lmstudio")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+            || std::path::Path::new("/opt/lmstudio/lmstudio").exists()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        dirs::home_dir()
+            .map(|h| h.join("AppData/Local/LM-Studio/bin/LM Studio.exe").exists())
+            .unwrap_or(false)
+    }
+}
+
+/// Try to start Ollama in the background and wait for it to come online.
+async fn try_start_ollama() -> bool {
+    if !is_ollama_installed() {
+        return false;
+    }
+
+    println!("  {} Ollama is installed but not running. Starting it now...", "⟳".cyan());
+
+    let _ = tokio::process::Command::new("ollama")
+        .arg("serve")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+
+    // Wait up to 10s for Ollama to come online
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let provider = OllamaProvider::new();
+        if provider.is_available() {
+            println!("  {} Ollama is now online!", "✓".green());
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Auto-pull a model via Ollama.
+async fn ollama_pull(model: &str) -> Result<bool> {
     println!(
-        "\n{}",
-        "🔍 Unpack — scanning for local LLM servers...".bold().cyan()
+        "  {} Pulling model {} via Ollama (this may take a few minutes)...",
+        "↓".cyan(),
+        model.bright_white()
     );
 
-    let endpoints = scan_local_endpoints().await;
+    let output = tokio::process::Command::new("ollama")
+        .args(["pull", model])
+        .output()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to run ollama pull: {}", e))?;
 
+    if output.status.success() {
+        println!("  {} Model {} ready.", "✓".green(), model.bright_white());
+        Ok(true)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("ollama pull failed: {}", stderr)
+    }
+}
+
+/// Pick a good default model for Ollama based on hardware.
+fn pick_ollama_model_for_hardware() -> &'static str {
+    let specs = SystemSpecs::detect();
+
+    if specs.has_gpu {
+        if specs.gpu_vram_gb.unwrap_or(0.0) >= 24.0 {
+            "qwen3.5:32b"
+        } else if specs.gpu_vram_gb.unwrap_or(0.0) >= 12.0 {
+            "qwen3.5:14b"
+        } else if specs.gpu_vram_gb.unwrap_or(0.0) >= 8.0 {
+            "qwen3.5:7b"
+        } else {
+            "qwen3.5:4b"
+        }
+    } else if specs.total_ram_gb >= 24.0 {
+        "qwen3.5:14b"
+    } else if specs.total_ram_gb >= 16.0 {
+        "qwen3.5:7b"
+    } else {
+        "qwen3.5:4b"
+    }
+}
+
+/// Check whether a config file was actually loaded (as opposed to defaults).
+fn has_config_file() -> bool {
+    std::path::Path::new("selfware.toml").exists()
+        || dirs::home_dir()
+            .map(|h| h.join(".config/selfware/config.toml").exists())
+            .unwrap_or(false)
+}
+
+// ── Public calibration API ───────────────────────────────────────────────────
+
+/// Run the full unpack routine: discover local endpoints, auto-start backends,
+/// auto-pull models, and generate a matching Config.
+pub async fn unpack() -> Result<Option<Config>> {
+    auto_calibrate(&mut Config::default()).await?;
+    // auto_calibrate mutates the passed-in config, but unpack() is expected
+    // to return a fresh generated config. We run it on a default config and
+    // return that if calibration succeeded.
+    let mut cfg = Config::default();
+    if auto_calibrate(&mut cfg).await? {
+        Ok(Some(cfg))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Aggressive auto-calibration: scan, start backends, pull models, detect,
+/// and update `config`. Returns `true` if the config was modified.
+pub async fn auto_calibrate(config: &mut Config) -> Result<bool> {
+    let is_default_endpoint = config.endpoint == super::default_endpoint()
+        || config.endpoint == "http://localhost:8000/v1"
+        || config.endpoint == "http://127.0.0.1:1234/v1";
+    let is_default_model = config.model == super::default_model();
+
+    // Skip calibration if the user explicitly configured things
+    if !is_default_endpoint && !is_default_model {
+        return Ok(false);
+    }
+
+    println!(
+        "\n{}",
+        "🔧 Auto-calibrating local LLM setup...".bold().cyan()
+    );
+
+    // ── Step 1: scan for running servers ────────────────────────────────────
+    let mut endpoints = scan_local_endpoints().await;
+
+    // ── Step 2: if nothing found, try to auto-start Ollama ──────────────────
+    if endpoints.is_empty() {
+        if try_start_ollama().await {
+            endpoints = scan_local_endpoints().await;
+        }
+    }
+
+    // ── Step 3: if Ollama is running but empty, auto-pull a model ───────────
+    if endpoints.is_empty() {
+        let provider = OllamaProvider::new();
+        if provider.is_available() {
+            let model = pick_ollama_model_for_hardware();
+            if ollama_pull(model).await.unwrap_or(false) {
+                endpoints = scan_local_endpoints().await;
+            }
+        }
+    }
+
+    // ── Step 4: if we found a running server, auto-configure ────────────────
     if let Some(best) = endpoints.first() {
         println!(
-            "  {} Found {} running at {} with model {}",
+            "  {} Connected to {} at {} — model: {}",
             "✓".green(),
             best.provider.bright_white(),
             best.endpoint.dimmed(),
             best.model.bright_white()
-        );
-
-        let mut config = generate_config_for_endpoint(best).await?;
-
-        // Update default model profile with modalities
-        if let Some(profile) = config.models.get_mut("default") {
-            if best.multimodal && !profile.modalities.contains(&"vision".to_string()) {
-                profile.modalities.push("vision".to_string());
-            }
-            profile.context_length = best.context_length;
-        }
-
-        println!(
-            "  {} Context: {} tokens | Multimodal: {} | Template: auto-detected\n",
-            "ℹ".cyan(),
-            best.context_length.to_string().bright_white(),
-            if best.multimodal { "yes".green() } else { "no".dimmed() }
-        );
-
-        return Ok(Some(config));
-    }
-
-    println!(
-        "  {} No local LLM server found. Analysing your hardware...",
-        "!".yellow()
-    );
-
-    // Hardware-based recommendation via llmfit-core
-    let specs = SystemSpecs::detect();
-    println!(
-        "     CPU: {} | RAM: {:.1} GB | GPU: {} | VRAM: {} GB",
-        specs.cpu_name.dimmed(),
-        specs.total_ram_gb,
-        specs.gpu_name.as_deref().unwrap_or("none").dimmed(),
-        specs
-            .gpu_vram_gb
-            .map(|v| format!("{:.1}", v))
-            .unwrap_or_else(|| "N/A".to_string())
-    );
-
-    let db = ModelDatabase::new();
-    let system = SystemSpecs::detect();
-    let fits: Vec<ModelFit> = db
-        .get_all_models()
-        .iter()
-        .map(|m| ModelFit::analyze(m, &system))
-        .collect();
-
-    let ranked = rank_models_by_fit(fits);
-    let coding_models: Vec<&ModelFit> = ranked
-        .iter()
-        .filter(|f| {
-            f.fit_level != FitLevel::TooTight
-                && (f.use_case == UseCase::Coding || f.use_case == UseCase::General)
-        })
-        .take(5)
-        .collect();
-
-    if coding_models.is_empty() {
-        println!(
-            "  {} No suitable coding model found for your hardware.",
-            "✗".red()
-        );
-        println!("     Try freeing up RAM or using a machine with more resources.\n");
-        return Ok(None);
-    }
-
-    println!(
-        "\n  {} Top recommended models for your hardware:\n",
-        "★".yellow()
-    );
-    for (i, fit) in coding_models.iter().enumerate() {
-        let caps = Capability::infer(&fit.model);
-        let vision = if caps.contains(&Capability::Vision) {
-            "vision".green()
-        } else {
-            "text".dimmed()
-        };
-        println!(
-            "     {}. {} — {} tokens | {} | {:.0}% fit | {:.1} tok/s",
-            i + 1,
-            fit.model.name.bright_white(),
-            fit.model.context_length.to_string().dimmed(),
-            vision,
-            fit.utilization_pct,
-            fit.estimated_tps
-        );
-    }
-
-    let top = coding_models.first().unwrap();
-    println!(
-        "\n  {} Best pick: {} (context: {}, quant: {})",
-        "→".cyan(),
-        top.model.name.bright_white().bold(),
-        top.model.context_length,
-        top.model.quantization.dimmed()
-    );
-
-    // Suggest how to get it running
-    println!(
-        "\n  {} To download and run this model automatically:\n",
-        "💡".yellow()
-    );
-    println!(
-        "     1. Install llmfit: {} (already integrated into selfware)",
-        "cargo install llmfit".bright_white()
-    );
-    println!(
-        "     2. Launch llmfit TUI and press 'd' on the highlighted model to download."
-    );
-    println!(
-        "     3. Or run: {}\n",
-        "llmfit recommend --use-case coding".bright_white()
-    );
-
-    // Still return a best-effort config pointing at the default LM Studio endpoint
-    // so that the user can start selfware once they've loaded a model.
-    let mut config = Config::default();
-    config.endpoint = "http://127.0.0.1:1234/v1".to_string();
-    config.model = top.model.name.clone();
-    config.context_length = top.model.context_length as usize;
-
-    let caps = Capability::infer(&top.model);
-    let mut modalities = vec!["text".to_string()];
-    if caps.contains(&Capability::Vision) {
-        modalities.push("vision".to_string());
-    }
-
-    if let Some(profile) = config.models.get_mut("default") {
-        profile.model = top.model.name.clone();
-        profile.context_length = top.model.context_length as usize;
-        profile.modalities = modalities;
-    }
-
-    Ok(Some(config))
-}
-
-async fn generate_config_for_endpoint(endpoint: &DiscoveredEndpoint) -> Result<Config> {
-    let cfg = AutoConfigurator::new(&endpoint.endpoint, None);
-    let mut config = cfg.generate_config(&endpoint.model).await?;
-
-    // Override context length with what we discovered
-    config.context_length = endpoint.context_length;
-
-    // If the endpoint is LM Studio, update the default endpoint to prefer it
-    if endpoint.provider == "LM Studio" {
-        info!("Auto-configuring for LM Studio backend");
-    }
-
-    Ok(config)
-}
-
-/// Attempt to auto-unpack into the provided config if it looks unconfigured.
-/// Returns `true` if the config was modified.
-pub async fn try_auto_unpack(config: &mut Config) -> Result<bool> {
-    // If the user explicitly set an endpoint other than defaults, don't override
-    let is_default_endpoint = config.endpoint == super::default_endpoint()
-        || config.endpoint == "http://localhost:8000/v1"
-        || config.endpoint == "http://127.0.0.1:1234/v1";
-
-    let is_default_model = config.model == super::default_model();
-
-    if !is_default_endpoint && !is_default_model {
-        // Looks explicitly configured — skip auto-unpack
-        return Ok(false);
-    }
-
-    // Try to discover a running local server
-    let endpoints = scan_local_endpoints().await;
-
-    if let Some(best) = endpoints.first() {
-        info!(
-            "Auto-unpack discovered {} at {} with model {}",
-            best.provider, best.endpoint, best.model
         );
 
         let cfg = AutoConfigurator::new(&best.endpoint, None);
@@ -415,7 +400,6 @@ pub async fn try_auto_unpack(config: &mut Config) -> Result<bool> {
         config.agent.token_budget = detected.agent.token_budget;
         config.extra_body = detected.extra_body.clone();
 
-        // Update default profile modalities
         if let Some(profile) = config.models.get_mut("default") {
             profile.endpoint = config.endpoint.clone();
             profile.model = config.model.clone();
@@ -429,21 +413,58 @@ pub async fn try_auto_unpack(config: &mut Config) -> Result<bool> {
         }
 
         println!(
-            "{} Auto-connected to {} ({}) — context: {}, multimodal: {}",
-            "✓".green(),
-            best.provider.bright_white(),
-            best.endpoint.dimmed(),
+            "  {} Context: {} tokens | Multimodal: {} | Tools: {} | Streaming: {}",
+            "ℹ".cyan(),
             best.context_length.to_string().bright_white(),
-            if best.multimodal { "yes".green() } else { "no".dimmed() }
+            if best.multimodal { "yes".green() } else { "no".dimmed() },
+            if config.agent.native_function_calling {
+                "yes".green()
+            } else {
+                "no".dimmed()
+            },
+            if config.agent.streaming { "yes".green() } else { "no".dimmed() }
         );
+
+        // Auto-save if no config file exists yet
+        if !has_config_file() {
+            match save_unpack_config(config) {
+                Ok(path) => {
+                    println!(
+                        "  {} Auto-saved configuration to {}\n",
+                        "💾".green(),
+                        path.display().to_string().bright_white()
+                    );
+                }
+                Err(e) => {
+                    warn!("Failed to auto-save config: {}", e);
+                }
+            }
+        } else {
+            println!();
+        }
 
         return Ok(true);
     }
 
-    // No running server found — fall back to llmfit recommendation
-    warn!("No local LLM server found during auto-unpack");
+    // ── Step 5: nothing is running — llmfit hardware analysis ───────────────
+    warn!("No local LLM server found during auto-calibration");
 
     let specs = SystemSpecs::detect();
+    println!(
+        "  {} No local server found. Analysing your hardware...",
+        "!".yellow()
+    );
+    println!(
+        "     CPU: {} | RAM: {:.1} GB | GPU: {} | VRAM: {} GB",
+        specs.cpu_name.dimmed(),
+        specs.total_ram_gb,
+        specs.gpu_name.as_deref().unwrap_or("none").dimmed(),
+        specs
+            .gpu_vram_gb
+            .map(|v| format!("{:.1}", v))
+            .unwrap_or_else(|| "N/A".to_string())
+    );
+
     let db = ModelDatabase::new();
     let fits: Vec<ModelFit> = db
         .get_all_models()
@@ -452,19 +473,42 @@ pub async fn try_auto_unpack(config: &mut Config) -> Result<bool> {
         .collect();
 
     let ranked = rank_models_by_fit(fits);
-    if let Some(top) = ranked.iter().find(|f| {
-        f.fit_level != FitLevel::TooTight
-            && (f.use_case == UseCase::Coding || f.use_case == UseCase::General)
-    }) {
-        info!(
-            "llmfit recommends {} as the best local model",
-            top.model.name
-        );
+    let coding_models: Vec<&ModelFit> = ranked
+        .iter()
+        .filter(|f| {
+            f.fit_level != FitLevel::TooTight
+                && (f.use_case == UseCase::Coding || f.use_case == UseCase::General)
+        })
+        .take(5)
+        .collect();
 
+    if !coding_models.is_empty() {
+        println!(
+            "\n  {} Top recommended models for your hardware:\n",
+            "★".yellow()
+        );
+        for (i, fit) in coding_models.iter().enumerate() {
+            let caps = Capability::infer(&fit.model);
+            let vision = if caps.contains(&Capability::Vision) {
+                "vision".green()
+            } else {
+                "text".dimmed()
+            };
+            println!(
+                "     {}. {} — {} tokens | {} | {:.0}% fit | {:.1} tok/s",
+                i + 1,
+                fit.model.name.bright_white(),
+                fit.model.context_length.to_string().dimmed(),
+                vision,
+                fit.utilization_pct,
+                fit.estimated_tps
+            );
+        }
+
+        let top = coding_models.first().unwrap();
         config.model = top.model.name.clone();
         config.context_length = top.model.context_length as usize;
         if config.endpoint == super::default_endpoint() {
-            // Prefer LM Studio endpoint since that's what the user asked for
             config.endpoint = "http://127.0.0.1:1234/v1".to_string();
         }
 
@@ -482,22 +526,56 @@ pub async fn try_auto_unpack(config: &mut Config) -> Result<bool> {
         }
 
         println!(
-            "{} No local server detected. llmfit recommends: {} (context: {}, fit: {:.0}%)",
-            "ℹ".yellow(),
-            top.model.name.bright_white(),
-            top.model.context_length.to_string().bright_white(),
-            top.utilization_pct
+            "\n  {} Best pick: {} (context: {}, quant: {})",
+            "→".cyan(),
+            top.model.name.bright_white().bold(),
+            top.model.context_length,
+            top.model.quantization.dimmed()
         );
-        println!(
-            "  {} Install a local backend (e.g. LM Studio on {}) and load this model to connect.\n",
-            "→".dimmed(),
-            config.endpoint.dimmed()
-        );
-
-        return Ok(true);
     }
 
-    Ok(false)
+    // ── Step 6: actionable next steps based on what's installed ─────────────
+    println!("\n  {} Get up and running in under 60 seconds:\n", "🚀".bright_cyan());
+
+    if is_ollama_installed() {
+        let model = pick_ollama_model_for_hardware();
+        println!(
+            "     {} Ollama is installed. Run this in another terminal:",
+            "●".green()
+        );
+        println!("       {}\n", format!("ollama pull {}", model).bright_white());
+    } else {
+        println!(
+            "     {} Install Ollama (fastest path to a working model):",
+            "●".green()
+        );
+        println!("       {}\n", "curl -fsSL https://ollama.com/install.sh | sh".bright_white());
+    }
+
+    if is_lm_studio_installed() {
+        println!(
+            "     {} LM Studio is installed. Launch it and load a model,",
+            "●".cyan()
+        );
+        println!("       then selfware will auto-detect it on the next run.\n");
+    } else {
+        println!(
+            "     {} Or download LM Studio for a GUI experience:",
+            "●".cyan()
+        );
+        println!(
+            "       {}\n",
+            "https://lmstudio.ai".bright_white().underline()
+        );
+    }
+
+    println!(
+        "     {} For more options, run: {}\n",
+        "●".yellow(),
+        "llmfit recommend --use-case coding".bright_white()
+    );
+
+    Ok(true)
 }
 
 /// Save the given config to `selfware.toml` in the current directory.

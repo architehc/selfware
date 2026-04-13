@@ -214,7 +214,7 @@ pub(crate) enum Commands {
     /// Auto-detect and configure endpoint settings
     #[command(alias = "ac")]
     AutoConfig {
-        /// API endpoint URL to test (e.g., http://localhost:8000/v1)
+        /// API endpoint URL to test (e.g., http://127.0.0.1:1234/v1)
         #[arg(short, long)]
         endpoint: Option<String>,
 

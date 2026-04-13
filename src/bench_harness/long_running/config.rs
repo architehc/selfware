@@ -41,7 +41,7 @@ pub struct LongRunningConfig {
 impl Default for LongRunningConfig {
     fn default() -> Self {
         Self {
-            endpoint: "http://localhost:8000/v1".into(),
+            endpoint: "http://127.0.0.1:1234/v1".into(),
             model: "qwen3.5-27b".into(),
             max_duration: Duration::from_secs(8 * 3600), // 8 hours
             timeout_per_project_secs: 900,               // 15 minutes
@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let cfg = LongRunningConfig::default();
-        assert_eq!(cfg.endpoint, "http://localhost:8000/v1");
+        assert_eq!(cfg.endpoint, "http://127.0.0.1:1234/v1");
         assert_eq!(cfg.model, "qwen3.5-27b");
         assert_eq!(cfg.max_iterations, 80);
         assert_eq!(cfg.timeout_per_project_secs, 900);

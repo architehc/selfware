@@ -326,6 +326,13 @@ pub async fn run() -> Result<()> {
 
     let mut config = Config::load(config_path.as_deref())?;
 
+    // ── Auto-calibration: make local LLM setup as automatic as possible ──
+    // If the config looks unconfigured (default endpoint/model), scan for local
+    // servers, auto-start backends if needed, and auto-generate configuration.
+    if let Err(e) = crate::config::unpack::auto_calibrate(&mut config).await {
+        tracing::warn!("Auto-calibration failed: {}", e);
+    }
+
     // Resolve execution mode: explicit CLI flags > --mode > env var (from Config::load)
     let exec_mode = if cli.daemon {
         ExecutionMode::Daemon

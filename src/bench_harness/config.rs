@@ -28,7 +28,7 @@ pub struct HarnessConfig {
 impl Default for HarnessConfig {
     fn default() -> Self {
         Self {
-            endpoint: "http://localhost:8000/v1".into(),
+            endpoint: "http://127.0.0.1:1234/v1".into(),
             model: "qwen3.5-27b".into(),
             max_concurrent: 32,
             max_tokens: 65536,
@@ -92,7 +92,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let cfg = HarnessConfig::default();
-        assert_eq!(cfg.endpoint, "http://localhost:8000/v1");
+        assert_eq!(cfg.endpoint, "http://127.0.0.1:1234/v1");
         assert_eq!(cfg.model, "qwen3.5-27b");
         assert_eq!(cfg.max_concurrent, 32);
         assert_eq!(cfg.max_tokens, 65536);
