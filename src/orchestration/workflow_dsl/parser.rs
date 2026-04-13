@@ -1,11 +1,26 @@
-//! Parser -- transforms a token stream into an [`AstNode`] tree.
+//! Parser -- recursive-descent parser that transforms a [`Token`] stream into
+//! an [`AstNode`] tree.
 //!
-//! All public methods return `Result<T, String>` so that callers can handle
-//! parse errors gracefully.  There are no `unwrap()`, `expect()`, or `panic!()`
-//! calls in the non-test production code -- every fallible operation propagates
-//! errors via `?` or explicit `Err(...)` returns.  The `panic!()` calls in the
-//! `#[cfg(test)]` module are intentional test assertions and do not affect
-//! production safety.
+//! The parser is a single-pass, predictive (LL(1)) recursive-descent parser.
+//! It uses `current()` to decide which production to enter and never backtracks.
+//!
+//! ## Precedence (lowest to highest)
+//!
+//! 1. Pipeline (`|`)
+//! 2. Logical OR (`||`)
+//! 3. Logical AND (`&&`)
+//! 4. Equality (`==`, `!=`)
+//! 5. Comparison (`<`, `>`, `<=`, `>=`)
+//! 6. Additive (`+`, `-`)
+//! 7. Multiplicative (`*`, `/`)
+//! 8. Unary (`!`, `-`)
+//! 9. Postfix (`.property`, `fn()`)
+//! 10. Primary (literals, identifiers, parenthesized expressions, arrays)
+//!
+//! All public methods return `Result<T, String>` so callers can handle parse
+//! errors gracefully.  There are no `unwrap()`, `expect()`, or `panic!()` calls
+//! in production code -- every fallible operation propagates errors via `?` or
+//! explicit `Err(...)` returns.
 
 #![allow(dead_code, unused_imports, unused_variables)]
 

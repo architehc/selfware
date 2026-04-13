@@ -1,21 +1,39 @@
 //! Concurrent Benchmark Harness
 //!
 //! High-throughput benchmark runner for evaluating LLM performance with
-//! bounded concurrency. Designed for local vLLM endpoints with 32+ concurrent
-//! streams.
+//! bounded concurrency.  Designed for local vLLM/sglang endpoints that can
+//! handle 32+ concurrent streams.
 //!
 //! # Architecture
 //!
-//! - `HarnessConfig`: Endpoint, model, concurrency, and timeout settings
-//! - `BenchTask` + `TaskEvaluator`: Pluggable task definitions with custom scoring
-//! - `HarnessRunner`: Semaphore-bounded concurrent execution engine
-//! - `HarnessReport`: Aggregated throughput, latency percentiles, and per-task scores
+//! ```text
+//! ┌────────────┐     ┌──────────────┐     ┌───────────────┐
+//! │ BenchTask  │────►│ HarnessRunner│────►│ HarnessReport │
+//! │ + Evaluator│     │ (semaphore-  │     │ (latency p50/ │
+//! │            │     │  bounded I/O)│     │  p95/p99, pass│
+//! └────────────┘     └──────────────┘     │  rate, tok/s) │
+//!                          │              └───────────────┘
+//!                    HarnessConfig
+//!                    (endpoint, model,
+//!                     concurrency, timeout)
+//! ```
 //!
-//! # Built-in Evaluators
+//! - [`HarnessConfig`]: Endpoint URL, model name, concurrency limit, and
+//!   per-request timeout.
+//! - [`BenchTask`] + [`TaskEvaluator`]: Each task carries a prompt and an
+//!   evaluator that scores the response.  Evaluators are pluggable -- implement
+//!   the trait or use a built-in.
+//! - [`HarnessRunner`]: Sends all tasks concurrently (bounded by a tokio
+//!   semaphore), collects streaming responses, and runs evaluators.
+//! - [`HarnessReport`]: Aggregated results -- throughput (tokens/sec), latency
+//!   percentiles (p50/p95/p99), per-task pass/fail with [`EvalDetail`]s.
+//!   Can be serialized to JSON and written to disk.
 //!
-//! - `KeywordEvaluator`: Check for keyword presence in responses
-//! - `JsonEvaluator`: Validate JSON structure and required fields
-//! - `NoopEvaluator`: Throughput-only benchmarks (always passes)
+//! # Built-in evaluators
+//!
+//! - [`KeywordEvaluator`]: Passes if all specified keywords appear in the response.
+//! - [`JsonEvaluator`]: Passes if the response is valid JSON containing required fields.
+//! - [`NoopEvaluator`]: Always passes -- useful for throughput-only benchmarks.
 //!
 //! # Example
 //!
@@ -35,6 +53,7 @@
 //! ];
 //!
 //! let report = runner.run(tasks).await?;
+//! println!("Pass rate: {:.1}%", report.pass_rate() * 100.0);
 //! report.write_to_dir(Path::new("bench_results"))?;
 //! ```
 

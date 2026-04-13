@@ -1,4 +1,21 @@
 //! Lexer -- tokenizes DSL source text into a stream of [`Token`]s.
+//!
+//! Single-pass, character-at-a-time scanner.  Produces tokens for:
+//!
+//! - **Keywords**: `workflow`, `step`, `if`/`else`, `for`, `while`, `parallel`,
+//!   `sequence`, `on`, `return`, `let`, `fn`
+//! - **Operators**: arithmetic (`+`, `-`, `*`, `/`), comparison (`==`, `!=`,
+//!   `<`, `>`, `<=`, `>=`), logical (`&&`, `||`, `!`), pipeline (`|`),
+//!   arrows (`->`, `=>`), assignment (`=`), dot (`.`)
+//! - **Delimiters**: `{` `}` `(` `)` `[` `]` `,` `:` `;`
+//! - **Literals**: integers, floats (requires digit after `.`), double- or
+//!   single-quoted strings (with `\n`, `\t`, `\r` escapes), booleans
+//!   (`true`/`false`)
+//! - **Identifiers**: `[a-zA-Z_][a-zA-Z0-9_]*`
+//!
+//! Whitespace and comments (`//` line, `/* */` block) are silently skipped.
+//! Unrecognized characters produce `Token::Error`.  The stream always ends
+//! with `Token::Eof`.
 
 #![allow(dead_code, unused_imports, unused_variables)]
 

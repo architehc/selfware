@@ -1,4 +1,17 @@
 //! AST -- Abstract Syntax Tree node definitions for the workflow DSL.
+//!
+//! Every syntactic construct in the DSL maps to one [`AstNode`] variant.
+//! The tree is produced by [`super::parser::Parser`] and consumed by
+//! [`super::runtime::Runtime`].
+//!
+//! Node categories:
+//!
+//! - **Declarations**: `Workflow`, `Step`, `FnDef`, `Let`
+//! - **Control flow**: `If`, `For`, `While`, `Return`, `OnError`
+//! - **Execution blocks**: `Parallel` (threaded), `Sequence`, `Pipeline`
+//! - **Expressions**: `Binary`, `Unary`, `Property`, `Call`
+//! - **Literals**: `Identifier`, `StringLit`, `IntegerLit`, `FloatLit`,
+//!   `BooleanLit`, `ArrayLit`, `Command`
 
 #![allow(dead_code, unused_imports, unused_variables)]
 
