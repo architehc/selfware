@@ -13,51 +13,37 @@ use super::ast_tools;
 use super::tournament::Hypothesis;
 use std::path::{Path, PathBuf};
 
-/// Detect if we should use micro mode based on model name
+/// Detect if we should use micro mode based on model name.
+/// Matches small parameter counts as word-bounded tokens to avoid
+/// false positives (e.g. "32b" matching "2b", "13b" matching "3b").
 pub fn is_micro_model(model_name: &str) -> bool {
     let name_lower = model_name.to_lowercase();
-    // Check for micro model sizes - use negative checks to avoid matching "32b" as "2b" or "3b"
-    name_lower.contains("0.8b")
-        || name_lower.contains("1.5b")
-        || (name_lower.contains("1b")
-            && !name_lower.contains("10b")
-            && !name_lower.contains("11b")
-            && !name_lower.contains("12b")
-            && !name_lower.contains("13b")
-            && !name_lower.contains("14b")
-            && !name_lower.contains("15b")
-            && !name_lower.contains("16b")
-            && !name_lower.contains("17b")
-            && !name_lower.contains("18b")
-            && !name_lower.contains("19b"))
-        || (name_lower.contains("2b")
-            && !name_lower.contains("20b")
-            && !name_lower.contains("21b")
-            && !name_lower.contains("22b")
-            && !name_lower.contains("23b")
-            && !name_lower.contains("24b")
-            && !name_lower.contains("25b")
-            && !name_lower.contains("26b")
-            && !name_lower.contains("27b")
-            && !name_lower.contains("28b")
-            && !name_lower.contains("29b")
-            && !name_lower.contains("12b")
-            && !name_lower.contains("32b"))
-        || (name_lower.contains("3b")
-            && !name_lower.contains("30b")
-            && !name_lower.contains("31b")
-            && !name_lower.contains("32b")
-            && !name_lower.contains("33b")
-            && !name_lower.contains("34b")
-            && !name_lower.contains("35b")
-            && !name_lower.contains("36b")
-            && !name_lower.contains("37b")
-            && !name_lower.contains("38b")
-            && !name_lower.contains("39b")
-            && !name_lower.contains("13b")
-            && !name_lower.contains("23b"))
-        || name_lower.contains("tiny")
-        || name_lower.contains("small")
+    if name_lower.contains("tiny") || name_lower.contains("small") {
+        return true;
+    }
+    let micro_sizes = ["0.8b", "1.5b", "1b", "2b", "3b", "4b"];
+    for size in &micro_sizes {
+        let mut search_from = 0;
+        while search_from < name_lower.len() {
+            if let Some(pos) = name_lower[search_from..].find(size) {
+                let abs_pos = search_from + pos;
+                let end_pos = abs_pos + size.len();
+                // Check word boundaries: preceding char must not be alphanumeric
+                let prev_ok = abs_pos == 0
+                    || !name_lower.as_bytes()[abs_pos - 1].is_ascii_alphanumeric();
+                // Following char must not be alphanumeric
+                let next_ok = end_pos >= name_lower.len()
+                    || !name_lower.as_bytes()[end_pos].is_ascii_alphanumeric();
+                if prev_ok && next_ok {
+                    return true;
+                }
+                search_from = abs_pos + 1;
+            } else {
+                break;
+            }
+        }
+    }
+    false
 }
 
 /// Maximum context size for micro mode (in characters)
@@ -210,11 +196,24 @@ mod tests {
 
     #[test]
     fn test_is_micro_model() {
+        // Positive: known micro sizes
         assert!(is_micro_model("qwen3.5-0.8b"));
         assert!(is_micro_model("Qwen3.5-1.5B-Instruct"));
         assert!(is_micro_model("Llama-3.2-1B"));
+        assert!(is_micro_model("phi-2b"));
+        assert!(is_micro_model("gemma-3b"));
+        assert!(is_micro_model("tiny-llama"));
+        assert!(is_micro_model("SmolLM-small"));
+        assert!(is_micro_model("model-4b-instruct"));
+
+        // Negative: larger models must NOT match
         assert!(!is_micro_model("qwen3.5-32b"));
+        assert!(!is_micro_model("qwen3.5-27b"));
+        assert!(!is_micro_model("Llama-3.2-13b"));
+        assert!(!is_micro_model("Llama-3.1-12b"));
+        assert!(!is_micro_model("Qwen-23b"));
         assert!(!is_micro_model("gpt-4"));
+        assert!(!is_micro_model("claude-opus"));
     }
 
     #[test]
