@@ -524,10 +524,16 @@ impl TaskCheckpoint {
         self.touch();
     }
 
-    /// Mark a pending visual assertion as verified and move it to the history
+    /// Mark a pending visual assertion as verified and move it to the history.
+    ///
+    /// Checks the ID before taking the assertion so it is not lost on mismatch.
     pub fn mark_assertion_verified(&mut self, assertion_id: &str, result: VerificationResult) {
-        if let Some(mut pending) = self.pending_visual_assertion.take() {
-            if pending.id == assertion_id {
+        let id_matches = self
+            .pending_visual_assertion
+            .as_ref()
+            .map_or(false, |p| p.id == assertion_id);
+        if id_matches {
+            if let Some(mut pending) = self.pending_visual_assertion.take() {
                 pending.verified = true;
                 pending.verification_result = Some(result);
                 pending.verified_at = Some(Utc::now());
