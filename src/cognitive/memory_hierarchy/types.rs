@@ -418,7 +418,7 @@ impl MemoryEntry {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
+            .as_millis() as u64;
         Self {
             id,
             content: content.into(),
@@ -437,7 +437,7 @@ impl MemoryEntry {
         self.accessed_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
+            .as_millis() as u64;
     }
 
     pub fn with_importance(mut self, importance: f32) -> Self {
