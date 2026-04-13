@@ -5,7 +5,7 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
 };
 use anyhow::{Context, Result};
-use rand::RngCore;
+use rand::Rng;
 use sha2::Sha256;
 use std::path::PathBuf;
 use std::sync::OnceLock;

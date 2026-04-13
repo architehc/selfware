@@ -63,7 +63,7 @@ impl CheckpointEnvelope {
 
         // Generate new key
         let mut key = vec![0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::rng(), &mut key);
+        rand::Rng::fill_bytes(&mut rand::rng(), &mut key);
 
         // Attempt to persist the key with best-effort error handling
         if let Err(e) = Self::persist_hmac_key(&path, &key) {
