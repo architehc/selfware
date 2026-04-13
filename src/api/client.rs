@@ -408,6 +408,12 @@ impl ApiClient {
 
                         let chat_response: ChatResponse = serde_json::from_str(&body_text)
                             .context("Failed to parse response JSON")?;
+                        if let Err(e) = chat_response.usage.validate() {
+                            warn!(
+                                "API returned inconsistent token usage: {}. Using response anyway.",
+                                e
+                            );
+                        }
                         return Ok(chat_response);
                     }
 

@@ -1440,6 +1440,25 @@ impl Agent {
                 continue;
             }
 
+            // Schema validation for native function calls
+            if use_native_fc {
+                let defs = self.tools.definitions();
+                if let Err(e) = crate::agent::tool_validator::validate_tool_call(&fake_call, &defs) {
+                    let error_msg = format!("Tool call validation failed: {}", e);
+                    warn!("{}", error_msg);
+                    self.push_tool_result_message(use_native_fc, &call_id, &name, false, &error_msg);
+                    self.log_tool_call(&name, &args_str, &error_msg, false, start_time, false);
+                    self.remember_failed_tool(&name, &error_msg);
+                    self.record_failed_tool_attempt(&name, &args_str, "validation", &error_msg);
+                    self.emit_event(crate::agent::AgentEvent::ToolCompleted {
+                        name: name.clone(),
+                        success: false,
+                        duration_ms: start_time.elapsed().as_millis() as u64,
+                    });
+                    continue;
+                }
+            }
+
             let args =
                 match self.parse_tool_args(&name, &args_str, &call_id, use_native_fc, start_time) {
                     Some(args) => args,

@@ -34,20 +34,36 @@ impl Agent {
             if let Some(native_calls) = native_tool_calls {
                 if !native_calls.is_empty() {
                     info!("Using {} native tool calls from API", native_calls.len());
-                    return native_calls
-                        .iter()
-                        .map(|tc| {
-                            debug!(
-                                "Native tool call: {} (id: {}) with args: {}",
-                                tc.function.name, tc.id, tc.function.arguments
+
+                    // Validate all native calls structurally and against schemas
+                    let defs = self.tools.definitions();
+                    if let Err(e) = crate::agent::tool_validator::validate_tool_calls(native_calls, &defs) {
+                        warn!("Native tool call batch validation failed: {}", e);
+                        // Continue anyway — individual bad calls will be rejected at dispatch time
+                    }
+
+                    let mut collected = Vec::with_capacity(native_calls.len());
+                    for tc in native_calls {
+                        if let Err(e) = tc.validate_structure() {
+                            warn!(
+                                "Skipping malformed native tool call '{}': {}",
+                                tc.function.name, e
                             );
-                            (
-                                tc.function.name.clone(),
-                                tc.function.arguments.clone(),
-                                Some(tc.id.clone()),
-                            )
-                        })
-                        .collect();
+                            continue;
+                        }
+                        debug!(
+                            "Native tool call: {} (id: {}) with args: {}",
+                            tc.function.name, tc.id, tc.function.arguments
+                        );
+                        collected.push((
+                            tc.function.name.clone(),
+                            tc.function.arguments.clone(),
+                            Some(tc.id.clone()),
+                        ));
+                    }
+                    if !collected.is_empty() {
+                        return collected;
+                    }
                 }
             }
         }

@@ -450,6 +450,90 @@ pub struct ToolFunction {
     pub arguments: String,
 }
 
+impl ToolCall {
+    /// Validate the structural integrity of a tool call.
+    ///
+    /// Checks that:
+    /// - `id` is non-empty
+    /// - `type` is `"function"`
+    /// - `function.name` is non-empty
+    /// - `function.arguments` is valid JSON
+    pub fn validate_structure(&self) -> anyhow::Result<()> {
+        if self.id.trim().is_empty() {
+            anyhow::bail!("Tool call is missing a valid 'id'");
+        }
+        if self.call_type != "function" {
+            anyhow::bail!(
+                "Tool call has unsupported type '{}', expected 'function'",
+                self.call_type
+            );
+        }
+        if self.function.name.trim().is_empty() {
+            anyhow::bail!("Tool call is missing a valid function name");
+        }
+        if let Err(e) = serde_json::from_str::<serde_json::Value>(&self.function.arguments) {
+            anyhow::bail!(
+                "Tool call arguments for '{}' are not valid JSON: {}",
+                self.function.name,
+                e
+            );
+        }
+        Ok(())
+    }
+}
+
+impl Usage {
+    /// Validate that token usage numbers are internally consistent.
+    ///
+    /// Checks that:
+    /// - `total_tokens` equals `prompt_tokens + completion_tokens`
+    /// - All values are within reasonable bounds
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let expected_total = self.prompt_tokens.saturating_add(self.completion_tokens);
+        if self.total_tokens != expected_total {
+            anyhow::bail!(
+                "Token usage mismatch: prompt_tokens ({}) + completion_tokens ({}) = {}, but total_tokens is {}",
+                self.prompt_tokens,
+                self.completion_tokens,
+                expected_total,
+                self.total_tokens
+            );
+        }
+        Ok(())
+    }
+
+    /// Validate usage against model configuration limits.
+    pub fn validate_against_limits(
+        &self,
+        context_length: usize,
+        max_tokens: usize,
+    ) -> anyhow::Result<()> {
+        self.validate()?;
+        if self.prompt_tokens > context_length {
+            anyhow::bail!(
+                "Prompt tokens ({}) exceed context_length ({})",
+                self.prompt_tokens,
+                context_length
+            );
+        }
+        if self.completion_tokens > max_tokens {
+            anyhow::bail!(
+                "Completion tokens ({}) exceed max_tokens ({})",
+                self.completion_tokens,
+                max_tokens
+            );
+        }
+        if self.total_tokens > context_length {
+            anyhow::bail!(
+                "Total tokens ({}) exceed context_length ({})",
+                self.total_tokens,
+                context_length
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Definition of a tool available to the model.
 ///
 /// Tool definitions describe functions the model can call, including

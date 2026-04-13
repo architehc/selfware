@@ -167,9 +167,30 @@ impl StreamingResponse {
                 StreamChunk::Content(text) => content.push_str(&text),
                 StreamChunk::Reasoning(text) => reasoning.push_str(&text),
                 StreamChunk::ToolCall(call) => tool_calls.push(call),
-                StreamChunk::Usage(u) => usage = u,
+                StreamChunk::Usage(u) => {
+                    if let Err(e) = u.validate() {
+                        tracing::warn!(
+                            "Streaming usage chunk has inconsistent token counts: {}. Ignoring chunk.",
+                            e
+                        );
+                    } else {
+                        usage = u;
+                    }
+                }
                 StreamChunk::Done => break,
             }
+        }
+
+        if let Err(e) = usage.validate() {
+            tracing::warn!(
+                "Final streamed usage has inconsistent token counts: {}. Using zeroed usage.",
+                e
+            );
+            usage = Usage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+            };
         }
 
         Ok(ChatResponse {

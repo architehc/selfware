@@ -132,6 +132,9 @@ pub enum ApiError {
 
     #[error("Context overflow: {0}")]
     ContextOverflow(String),
+
+    #[error("Invalid token usage from API: {0}")]
+    InvalidUsage(String),
 }
 
 #[derive(Error, Debug)]
@@ -141,6 +144,9 @@ pub enum ToolError {
 
     #[error("Tool '{name}' not found")]
     NotFound { name: String },
+
+    #[error("Invalid tool call for '{name}': {message}")]
+    InvalidToolCall { name: String, message: String },
 
     #[error("Invalid arguments for tool '{name}': {message}")]
     InvalidArguments { name: String, message: String },

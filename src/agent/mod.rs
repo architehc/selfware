@@ -96,6 +96,7 @@ mod streaming;
 mod task_runner;
 mod tool_collect;
 mod tool_dispatch;
+mod tool_validator;
 pub mod tui_events;
 mod verification;
 
