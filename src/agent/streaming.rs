@@ -16,6 +16,7 @@ const SUPPRESSED_TAGS: &[(&str, &str)] = &[
     ("<tool>", "</tool>"),
     ("<think>", "</think>"),
     ("<thinking>", "</thinking>"),
+    ("<|channel>", "<channel|>"),
 ];
 
 /// Find the earliest opening tag from `SUPPRESSED_TAGS` in `buf`.
