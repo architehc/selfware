@@ -22,7 +22,7 @@ fn lock_env() -> std::sync::MutexGuard<'static, ()> {
 #[test]
 fn test_config_default() {
     let config = Config::default();
-    assert_eq!(config.endpoint, "http://localhost:8000/v1");
+    assert_eq!(config.endpoint, "http://127.0.0.1:1234/v1");
     assert_eq!(config.model, "qwen3.5-27b");
     assert_eq!(config.max_tokens, 65536);
     assert!((config.temperature - 1.0).abs() < f32::EPSILON);
@@ -63,7 +63,7 @@ fn test_config_load_no_path_uses_defaults() {
     // When no config file exists in the specific path, it should return an error
     // Or wait, if we want to test default config values, just use Config::default()
     let config = Config::default();
-    assert_eq!(config.endpoint, "http://localhost:8000/v1");
+    assert_eq!(config.endpoint, "http://127.0.0.1:1234/v1");
 }
 
 #[test]
@@ -435,7 +435,7 @@ fn test_config_full_roundtrip() {
 fn test_empty_config_uses_all_defaults() {
     let toml_str = "";
     let config: Config = toml::from_str(toml_str).unwrap();
-    assert_eq!(config.endpoint, "http://localhost:8000/v1");
+    assert_eq!(config.endpoint, "http://127.0.0.1:1234/v1");
     assert_eq!(config.model, "qwen3.5-27b");
     assert_eq!(config.max_tokens, 65536);
     assert!(!config.yolo.enabled);
@@ -623,7 +623,7 @@ fn test_config_empty_protected_branches() {
 
 #[test]
 fn test_default_helpers() {
-    assert_eq!(default_endpoint(), "http://localhost:8000/v1");
+    assert_eq!(default_endpoint(), "http://127.0.0.1:1234/v1");
     assert_eq!(default_model(), "qwen3.5-27b");
     assert_eq!(default_max_tokens(), 65536);
     assert!((default_temperature() - 1.0).abs() < f32::EPSILON);
@@ -1797,7 +1797,7 @@ fn test_config_load_empty_file() {
     write!(file, "").unwrap();
 
     let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
-    assert_eq!(config.endpoint, "http://localhost:8000/v1");
+    assert_eq!(config.endpoint, "http://127.0.0.1:1234/v1");
     assert_eq!(config.model, "qwen3.5-27b");
     assert_eq!(config.max_tokens, 65536);
     assert!(config.models.contains_key("default"));

@@ -40,7 +40,7 @@ pub(crate) fn run_init_wizard(template: Option<String>) -> Result<()> {
     // Step 1: Endpoint
     println!("Step 1/4: API Endpoint");
     println!("  Where should Selfware connect?");
-    println!("  [1] Local (http://localhost:8080/v1) - Ollama, vLLM, LM Studio");
+    println!("  [1] Local (http://127.0.0.1:1234/v1) - LM Studio, Ollama, vLLM");
     println!("  [2] OpenAI-compatible API (https://api.openai.com/v1)");
     println!("  [3] Custom endpoint");
     print!("  > ");
@@ -56,7 +56,7 @@ pub(crate) fn run_init_wizard(template: Option<String>) -> Result<()> {
             io::stdin().lock().read_line(&mut url)?;
             url.trim().to_string()
         }
-        _ => "http://localhost:8080/v1".to_string(),
+        _ => "http://127.0.0.1:1234/v1".to_string(),
     };
     println!();
 
@@ -186,13 +186,13 @@ fn write_template_config(template: &str) -> Result<()> {
 
     let (endpoint, model, mode, allowed_paths) = match template {
         "rust" | "python" | "node" | "nodejs" | "typescript" => (
-            "http://localhost:8080/v1".to_string(),
+            "http://127.0.0.1:1234/v1".to_string(),
             "qwen3-coder".to_string(),
             "normal",
             format!("[\"{}\"]", cwd.display()),
         ),
         _ => (
-            "http://localhost:8080/v1".to_string(),
+            "http://127.0.0.1:1234/v1".to_string(),
             "qwen3-coder".to_string(),
             "normal",
             "[\".\"]".to_string(),
