@@ -22,6 +22,7 @@ pub mod model;
 pub mod resources;
 pub mod safety;
 pub mod types;
+pub mod unpack;
 mod validation;
 
 pub use agent::*;
@@ -102,7 +103,7 @@ pub fn default_context_length() -> usize {
     131072
 }
 pub fn default_endpoint() -> String {
-    "http://localhost:8000/v1".to_string()
+    "http://127.0.0.1:1234/v1".to_string()
 }
 pub fn default_model() -> String {
     "qwen3.5-27b".to_string()

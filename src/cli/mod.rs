@@ -2374,6 +2374,50 @@ max_recovery_attempts = 3
             println!();
         }
 
+        Commands::Unpack { scan, save } => {
+            use crate::config::unpack;
+            use colored::Colorize;
+
+            println!("{}", render_header(ctx));
+
+            match unpack::unpack().await {
+                Ok(Some(detected_config)) => {
+                    if !scan {
+                        if save {
+                            match unpack::save_unpack_config(&detected_config) {
+                                Ok(path) => {
+                                    println!(
+                                        "  {} Saved configuration to {}",
+                                        "✓".bright_green(),
+                                        path.display().to_string().bright_white()
+                                    );
+                                }
+                                Err(e) => {
+                                    eprintln!("  {} Failed to save config: {}", "✗".red(), e);
+                                }
+                            }
+                        } else {
+                            println!(
+                                "  {} Run {} to persist this configuration.",
+                                "→".dimmed(),
+                                "selfware unpack --save".bright_white()
+                            );
+                        }
+                    }
+                }
+                Ok(None) => {
+                    println!(
+                        "\n  {} Could not auto-configure. Please set up a local LLM backend first.",
+                        "⚠️".yellow()
+                    );
+                }
+                Err(e) => {
+                    eprintln!("\n  {} Unpack failed: {}", "✗".red(), e);
+                }
+            }
+            println!();
+        }
+
         Commands::Init { template } => {
             tokio::task::spawn_blocking(move || init_wizard::run_init_wizard(template))
                 .await

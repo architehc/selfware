@@ -235,6 +235,18 @@ pub(crate) enum Commands {
         save: bool,
     },
 
+    /// Zero-config auto-setup: scan local LLM servers, detect models, generate config
+    #[command(alias = "up")]
+    Unpack {
+        /// Just scan without writing config
+        #[arg(long)]
+        scan: bool,
+
+        /// Save generated config to selfware.toml
+        #[arg(long)]
+        save: bool,
+    },
+
     /// Interactive setup wizard for first-time configuration
     Init {
         /// Use a specific template (rust, python, node, minimal)
