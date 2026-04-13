@@ -198,7 +198,7 @@ jobs:
           fi
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.version }}
           name: Selfware ${{ steps.version.outputs.version }}
@@ -262,7 +262,7 @@ jobs:
           COSIGN_EXPERIMENTAL: "1"
 
       - name: Upload signatures to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           files: |
