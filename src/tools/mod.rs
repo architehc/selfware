@@ -1,3 +1,21 @@
+//! Tool subsystem: trait definition, registry, and built-in tool implementations.
+//!
+//! Every capability the agent can invoke (file I/O, git, shell, browser, etc.) is
+//! a struct that implements the [`Tool`] trait. Tools are collected into a
+//! [`ToolRegistry`] at agent startup — `ToolRegistry::new()` pre-registers all
+//! built-in tools, and additional tools (MCP server tools, FIM edit) can be added
+//! via [`ToolRegistry::register`].
+//!
+//! ## Tool execution lifecycle
+//!
+//! 1. The LLM emits a tool call with a name and JSON arguments.
+//! 2. The agent resolves the name against [`ToolRegistry::get`].
+//! 3. Arguments are validated against the tool's [`Tool::schema`] via
+//!    [`validate_tool_arguments_schema`] (required-field and type checks).
+//! 4. The safety checker gates execution (confirmation prompts, deny-lists).
+//! 5. [`Tool::execute`] runs asynchronously and returns a JSON result.
+//! 6. The result is fed back into the conversation for the next LLM turn.
+
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -173,14 +191,24 @@ pub fn validate_tool_arguments_schema(tool_name: &str, schema: &Value, args: &Va
     }
 }
 
-/// A tool that can be executed by the agent. Each tool has a name, description,
-/// JSON schema for its arguments, and an async `execute` method. Tools are
-/// registered in a [`ToolRegistry`] and invoked by name during agent execution.
+/// A capability the agent can invoke during task execution.
+///
+/// Each implementation represents a single action (e.g. reading a file, running
+/// a shell command). The trait is object-safe and stored as `Box<dyn Tool>` in
+/// the [`ToolRegistry`]. Tool definitions are serialised to the LLM via
+/// [`ToolRegistry::definitions`] so the model knows what it can call.
 #[async_trait]
 pub trait Tool: Send + Sync {
+    /// Unique identifier used by the LLM to invoke this tool (e.g. `"file_read"`).
     fn name(&self) -> &str;
+    /// Human-readable summary sent to the LLM as part of the tool definition.
     fn description(&self) -> &str;
+    /// JSON Schema describing the expected argument object. Must include `"type": "object"`
+    /// and a `"required"` array for mandatory fields; validated before execution by
+    /// [`validate_tool_arguments_schema`].
     fn schema(&self) -> Value;
+    /// Execute the tool with the given arguments and return a JSON result.
+    /// The result is injected into the conversation as the tool's response.
     async fn execute(&self, args: Value) -> Result<Value>;
 
     /// Returns true if this tool only reads data, never modifies.

@@ -512,15 +512,15 @@ mod tests {
     }
 
     #[test]
-    fn test_is_confirmation_error_safety_confirmation_required() {
-        // SafetyError also has a ConfirmationRequired variant, but it is NOT the agent one
-        let err: anyhow::Error = SelfwareError::Safety(SafetyError::ConfirmationRequired {
-            action: "delete all files".to_string(),
+    fn test_is_confirmation_error_safety_blocked_path() {
+        // SafetyError variants should not be detected as confirmation errors
+        let err: anyhow::Error = SelfwareError::Safety(SafetyError::BlockedPath {
+            path: "/etc/shadow".to_string(),
         })
         .into();
         assert!(
             !is_confirmation_error(&err),
-            "SafetyError::ConfirmationRequired is not the agent-level confirmation error"
+            "SafetyError::BlockedPath is not the agent-level confirmation error"
         );
     }
 
