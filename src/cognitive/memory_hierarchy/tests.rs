@@ -491,11 +491,11 @@ async fn test_short_term_memory_query_with_since() {
     let index = std::sync::Arc::new(MemoryIndex::new());
     let stm = ShortTermMemory::new(100, index);
 
-    // Get timestamp before storing
+    // Get timestamp before storing (millis to match MemoryEntry timestamps)
     let before = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs();
+        .as_millis() as u64;
 
     // Sleep to ensure entry is created after 'before'
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -511,7 +511,7 @@ async fn test_short_term_memory_query_with_since() {
     assert_eq!(results.len(), 1);
 
     // Query with since in the future should not find the entry
-    let future = before + 3600; // 1 hour in the future
+    let future = before + 3_600_000; // 1 hour in the future (millis)
     let query2 = MemoryQuery::new("test").since(future);
     let results2 = stm.query(&query2).await;
     assert_eq!(results2.len(), 0);
@@ -1748,17 +1748,17 @@ async fn test_query_with_all_filters() {
     .await
     .unwrap();
 
-    // Query with multiple filters
+    // Query with multiple filters (millis to match MemoryEntry timestamps)
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
-        .as_secs();
+        .as_millis() as u64;
 
     let query = MemoryQuery::new("specific")
         .with_tier(MemoryTier::ShortTerm)
         .with_tags(vec!["important".to_string(), "work".to_string()])
         .with_min_importance(0.7)
-        .since(now - 60)
+        .since(now - 60_000)
         .with_limit(5);
 
     let results = stm.query(&query).await;
