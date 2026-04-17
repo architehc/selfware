@@ -1490,10 +1490,17 @@ mod tests {
     #[test]
     fn test_semantic_summary_grep_search() {
         // Test that grep_search can find public functions in the codebase
-        // Note: This test requires the grep_search tool to be available
+        // Scope the search to this module tree so the test stays fast even in
+        // large worktrees with populated `target/` directories.
         #[allow(unused_imports)]
         use crate::tools::search::grep_search;
-        let results = grep_search("pub fn format_evolution_history", ".", true, 10, 0);
+        let results = grep_search(
+            "pub fn format_evolution_history",
+            "src/evolution",
+            true,
+            10,
+            0,
+        );
         assert!(
             results.total_matches > 0,
             "Should find at least one match for pub fn format_evolution_history"
