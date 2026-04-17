@@ -85,7 +85,10 @@ mod tests {
         let server = McpServerConfig {
             name: "github".to_string(),
             command: "npx".to_string(),
-            args: vec!["-y".to_string(), "@modelcontextprotocol/server-github".to_string()],
+            args: vec![
+                "-y".to_string(),
+                "@modelcontextprotocol/server-github".to_string(),
+            ],
             env: {
                 let mut m = std::collections::HashMap::new();
                 m.insert("GITHUB_TOKEN".to_string(), "ghp_test".to_string());
@@ -98,7 +101,10 @@ mod tests {
         assert_eq!(parsed.name, "github");
         assert_eq!(parsed.command, "npx");
         assert_eq!(parsed.args.len(), 2);
-        assert_eq!(parsed.env.get("GITHUB_TOKEN"), Some(&"ghp_test".to_string()));
+        assert_eq!(
+            parsed.env.get("GITHUB_TOKEN"),
+            Some(&"ghp_test".to_string())
+        );
         assert_eq!(parsed.init_timeout_secs, 30);
     }
 

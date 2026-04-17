@@ -280,24 +280,24 @@ impl DiskManager {
     /// Get total size of models directory (STUB - HARDCODED VALUE)
     ///
     /// # ⚠️ WARNING - STUB IMPLEMENTATION
-    /// 
+    ///
     /// This function returns a **HARDCODED 10GB placeholder value**.
     /// It does NOT actually calculate the directory size.
-    /// 
+    ///
     /// ## Why This Is a Stub
-    /// 
+    ///
     /// - Calculating directory size recursively is expensive for large model directories
     /// - Models may be stored in various locations (local, cache, external drives)
     /// - This value is used for storage estimation, not actual enforcement
-    /// 
+    ///
     /// ## TODO
     /// - Implement async recursive directory size calculation
     /// - Cache results to avoid repeated expensive operations
     /// - Support multiple model directories
     /// - Handle symlinks and mount points correctly
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// Hardcoded value of 10GB (10_000_000_000 bytes) for storage estimation purposes.
     fn get_models_size(&self) -> u64 {
         warn!(

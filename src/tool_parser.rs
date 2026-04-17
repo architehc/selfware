@@ -736,6 +736,12 @@ fn try_parse_plain_function_calls(content: &str) -> Option<Vec<(Result<ParsedToo
         "git_log",
         "tool_search",
         "context_bulk_read",
+        "radarcam_status",
+        "radarcam_frame",
+        "radarcam_control",
+        "radarcam_logs",
+        "radarcam_test",
+        "radarcam_introspect",
     ];
 
     static FUNC_CALL_REGEX: OnceLock<Regex> = OnceLock::new();

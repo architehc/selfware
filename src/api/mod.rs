@@ -120,7 +120,7 @@ const ALLOWED_EXTRA_BODY_KEYS: &[&str] = &[
     "early_stopping",
 ];
 
-fn merge_extra_body(
+pub(crate) fn merge_extra_body(
     body: &mut serde_json::Value,
     extra_body: Option<&serde_json::Map<String, serde_json::Value>>,
     context: &str,

@@ -37,7 +37,9 @@ impl Agent {
 
                     // Validate all native calls structurally and against schemas
                     let defs = self.tools.definitions();
-                    if let Err(e) = crate::agent::tool_validator::validate_tool_calls(native_calls, &defs) {
+                    if let Err(e) =
+                        crate::agent::tool_validator::validate_tool_calls(native_calls, &defs)
+                    {
                         warn!("Native tool call batch validation failed: {}", e);
                         // Continue anyway — individual bad calls will be rejected at dispatch time
                     }

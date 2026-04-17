@@ -998,7 +998,7 @@ docs/               User documentation (8 guides)
 ### Run Tests
 
 ```bash
-# All tests (6,000+ tests)
+# All tests (7,000+ tests)
 cargo test --all-features
 
 # Quick unit tests only
@@ -1019,7 +1019,7 @@ cargo test --features integration
 
 | Metric | Value |
 |--------|-------|
-| **Total Tests** | 6,000+ |
+| **Total Tests** | 7,291 |
 | **Line Coverage** | ~75% |
 | **Test Targets** | lib + external + integration + doc + property |
 

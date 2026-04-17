@@ -4,7 +4,7 @@
 //! - `load_tasks` returns hardcoded example tasks
 //! - `evaluate_task` returns fake success results
 //! - Test functions are all no-ops
-//! DO NOT USE FOR REAL EVALUATION - FOR DEVELOPMENT/DEMO ONLY.
+//!   DO NOT USE FOR REAL EVALUATION - FOR DEVELOPMENT/DEMO ONLY.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -120,7 +120,10 @@ impl SWEBenchEvaluator {
         task: &SWEBenchTask,
         _agent: &crate::agent::Agent,
     ) -> Result<TestResult> {
-        warn!("STUB: evaluate_task returning MOCK results for: {}", task.instance_id);
+        warn!(
+            "STUB: evaluate_task returning MOCK results for: {}",
+            task.instance_id
+        );
         let start = std::time::Instant::now();
 
         let mut trajectory = Vec::new();
@@ -129,7 +132,10 @@ impl SWEBenchEvaluator {
         trajectory.push(TrajectoryStep {
             step: 1,
             action: "STUB: setup_environment".to_string(),
-            observation: format!("STUB: Would clone {} at commit {}", task.repo, task.base_commit),
+            observation: format!(
+                "STUB: Would clone {} at commit {}",
+                task.repo, task.base_commit
+            ),
             timestamp: chrono::Local::now().to_rfc3339(),
         });
 
@@ -153,13 +159,13 @@ impl SWEBenchEvaluator {
         warn!("STUB: evaluate_task returning FABRICATED success result");
         Ok(TestResult {
             instance_id: task.instance_id.clone(),
-            success: true,      // FABRICATED
-            resolved: true,     // FABRICATED
+            success: true,  // FABRICATED
+            resolved: true, // FABRICATED
             duration_secs: duration,
-            iterations: 5,      // FABRICATED
-            tokens_used: 15000, // FABRICATED
+            iterations: 5,       // FABRICATED
+            tokens_used: 15000,  // FABRICATED
             patch_applied: true, // FABRICATED
-            tests_passed: true, // FABRICATED
+            tests_passed: true,  // FABRICATED
             error: None,
             trajectory,
         })

@@ -620,10 +620,7 @@ mod inline_tests {
                 .await;
         }
 
-        let results = em
-            .retrieve_relevant("q", 2, Importance::Low)
-            .await
-            .unwrap();
+        let results = em.retrieve_relevant("q", 2, Importance::Low).await.unwrap();
         assert_eq!(results.len(), 2);
     }
 
@@ -685,10 +682,7 @@ mod inline_tests {
         let sm = SemanticMemory::new();
         sm.index_codebase(&base).await.unwrap();
 
-        let ctx = sm
-            .retrieve_code_context("q", 100_000, false)
-            .await
-            .unwrap();
+        let ctx = sm.retrieve_code_context("q", 100_000, false).await.unwrap();
         // Should have indexed main.rs, lib.py, notes.md but not data.bin
         assert_eq!(ctx.files.len(), 3);
     }
@@ -706,10 +700,7 @@ mod inline_tests {
         let sm = SemanticMemory::new();
         sm.index_codebase(&base).await.unwrap();
 
-        let ctx = sm
-            .retrieve_code_context("q", 100_000, false)
-            .await
-            .unwrap();
+        let ctx = sm.retrieve_code_context("q", 100_000, false).await.unwrap();
         assert_eq!(ctx.files.len(), 1);
         assert_eq!(ctx.files[0].path, "visible.rs");
     }
@@ -731,10 +722,7 @@ mod inline_tests {
         let sm = SemanticMemory::new();
         sm.index_codebase(&base).await.unwrap();
 
-        let ctx = sm
-            .retrieve_code_context("q", 100_000, false)
-            .await
-            .unwrap();
+        let ctx = sm.retrieve_code_context("q", 100_000, false).await.unwrap();
 
         let langs: std::collections::HashSet<_> =
             ctx.files.iter().map(|f| f.language.as_str()).collect();
@@ -804,12 +792,8 @@ mod inline_tests {
     async fn test_hierarchical_memory_query_all_tiers() {
         let hm = HierarchicalMemory::default().await.unwrap();
         hm.store("alpha data", MemoryTier::Working).await.unwrap();
-        hm.store("alpha info", MemoryTier::ShortTerm)
-            .await
-            .unwrap();
-        hm.store("alpha note", MemoryTier::LongTerm)
-            .await
-            .unwrap();
+        hm.store("alpha info", MemoryTier::ShortTerm).await.unwrap();
+        hm.store("alpha note", MemoryTier::LongTerm).await.unwrap();
 
         let q = MemoryQuery::new("alpha").with_limit(10);
         let results = hm.query(q).await;
@@ -900,10 +884,7 @@ mod inline_tests {
     #[tokio::test]
     async fn test_hierarchical_memory_demote_from_short_term() {
         let hm = HierarchicalMemory::default().await.unwrap();
-        let id = hm
-            .store("demote me", MemoryTier::ShortTerm)
-            .await
-            .unwrap();
+        let id = hm.store("demote me", MemoryTier::ShortTerm).await.unwrap();
 
         hm.demote(id).await.unwrap();
 
@@ -1009,9 +990,7 @@ mod inline_tests {
         // Store a low-importance entry
         let id = hm.store("unimportant", MemoryTier::LongTerm).await.unwrap();
         // Set importance low by retrieving and checking
-        hm.long_term
-            .update(id, |e| e.importance = 0.1)
-            .await;
+        hm.long_term.update(id, |e| e.importance = 0.1).await;
 
         let result = hm.consolidate().await;
         assert_eq!(result.entries_removed, 1);

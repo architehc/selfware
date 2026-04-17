@@ -800,9 +800,6 @@ mod tests {
 
         // Classic path traversal
         let result = validator.validate("../../etc/passwd");
-        assert!(
-            result.is_err(),
-            "Classic path traversal should be blocked"
-        );
+        assert!(result.is_err(), "Classic path traversal should be blocked");
     }
 }

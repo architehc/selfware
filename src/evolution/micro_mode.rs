@@ -29,8 +29,8 @@ pub fn is_micro_model(model_name: &str) -> bool {
                 let abs_pos = search_from + pos;
                 let end_pos = abs_pos + size.len();
                 // Check word boundaries: preceding char must not be alphanumeric
-                let prev_ok = abs_pos == 0
-                    || !name_lower.as_bytes()[abs_pos - 1].is_ascii_alphanumeric();
+                let prev_ok =
+                    abs_pos == 0 || !name_lower.as_bytes()[abs_pos - 1].is_ascii_alphanumeric();
                 // Following char must not be alphanumeric
                 let next_ok = end_pos >= name_lower.len()
                     || !name_lower.as_bytes()[end_pos].is_ascii_alphanumeric();

@@ -326,6 +326,20 @@ pub async fn run() -> Result<()> {
 
     let mut config = Config::load(config_path.as_deref())?;
 
+    // ── Validate config and exit if requested ──
+    if cli.validate_config {
+        match config.validate() {
+            Ok(()) => {
+                println!("{} Configuration is valid.", Glyphs::bloom());
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("{} Configuration validation failed: {}", Glyphs::frost(), e);
+                std::process::exit(1);
+            }
+        }
+    }
+
     // ── Auto-calibration: make local LLM setup as automatic as possible ──
     // If the config looks unconfigured (default endpoint/model), scan for local
     // servers, auto-start backends if needed, and auto-generate configuration.
@@ -2152,7 +2166,10 @@ async fn handle_command(
                             "    {} {}: {} ({}s, {}p/{}f)",
                             if matches!(result.status, ProjectStatus::Green) {
                                 "✓".green()
-                            } else if matches!(result.status, ProjectStatus::Partial | ProjectStatus::Compiles) {
+                            } else if matches!(
+                                result.status,
+                                ProjectStatus::Partial | ProjectStatus::Compiles
+                            ) {
                                 "◐".yellow()
                             } else {
                                 "✗".red()

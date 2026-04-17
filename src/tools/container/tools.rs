@@ -1237,13 +1237,19 @@ mod tests {
     #[test]
     fn test_parse_build_output_successfully_built() {
         let stdout = "Step 3/3: COPY . /app\nSuccessfully built abc123def456";
-        assert_eq!(parse_build_output(stdout, ""), Some("abc123def456".to_string()));
+        assert_eq!(
+            parse_build_output(stdout, ""),
+            Some("abc123def456".to_string())
+        );
     }
 
     #[test]
     fn test_parse_build_output_sha256() {
         let stderr = "writing image sha256:deadbeef01234567890";
-        assert_eq!(parse_build_output("", stderr), Some("deadbeef01234567890".to_string()));
+        assert_eq!(
+            parse_build_output("", stderr),
+            Some("deadbeef01234567890".to_string())
+        );
     }
 
     #[test]
@@ -1254,7 +1260,10 @@ mod tests {
 
     #[test]
     fn test_parse_build_output_no_match() {
-        assert_eq!(parse_build_output("just some log output", "another line"), None);
+        assert_eq!(
+            parse_build_output("just some log output", "another line"),
+            None
+        );
     }
 
     #[test]
@@ -1264,7 +1273,8 @@ mod tests {
 
     #[test]
     fn test_parse_build_output_in_stderr() {
-        let stderr = "Step 1/3: FROM ubuntu\nStep 2/3: RUN apt-get update\nSuccessfully built xyz789";
+        let stderr =
+            "Step 1/3: FROM ubuntu\nStep 2/3: RUN apt-get update\nSuccessfully built xyz789";
         assert_eq!(parse_build_output("", stderr), Some("xyz789".to_string()));
     }
 

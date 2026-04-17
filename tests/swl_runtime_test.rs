@@ -504,20 +504,18 @@ workflows:
     assert_eq!(ctx.get("custom_input"), Some("custom_value".to_string()));
 }
 
-
 // ============================================================================
 // Guardrail Enforcement Tests
 // ============================================================================
 
 use selfware::swl::guardrails::{
-    GuardrailEnforcer, GuardrailContext, GuardrailType, Condition, ViolationAction,
-    GuardrailDef,
+    Condition, GuardrailContext, GuardrailDef, GuardrailEnforcer, GuardrailType, ViolationAction,
 };
 
 #[tokio::test]
 async fn test_guardrail_enforcer_blocks_on_violation() {
     let mut enforcer = GuardrailEnforcer::new();
-    
+
     // Register a guardrail that blocks when condition is false
     enforcer.register_guardrail(GuardrailDef {
         name: "block_always".to_string(),
@@ -541,7 +539,7 @@ async fn test_guardrail_enforcer_blocks_on_violation() {
 #[tokio::test]
 async fn test_guardrail_enforcer_allows_on_pass() {
     let mut enforcer = GuardrailEnforcer::new();
-    
+
     // Register a guardrail that passes
     enforcer.register_guardrail(GuardrailDef {
         name: "pass_always".to_string(),
@@ -564,7 +562,7 @@ async fn test_guardrail_enforcer_allows_on_pass() {
 #[tokio::test]
 async fn test_guardrail_enforcer_warn_action_does_not_block() {
     let mut enforcer = GuardrailEnforcer::new();
-    
+
     // Register a guardrail that warns but doesn't block
     enforcer.register_guardrail(GuardrailDef {
         name: "warn_always".to_string(),
@@ -577,7 +575,10 @@ async fn test_guardrail_enforcer_warn_action_does_not_block() {
     });
 
     let ctx = GuardrailContext::new();
-    let summary = enforcer.check(GuardrailType::PostAgent, &ctx).await.unwrap();
+    let summary = enforcer
+        .check(GuardrailType::PostAgent, &ctx)
+        .await
+        .unwrap();
 
     assert_eq!(summary.total_checked, 1);
     assert_eq!(summary.failed, 1);
@@ -590,32 +591,42 @@ async fn test_guardrail_enforcer_warn_action_does_not_block() {
 #[tokio::test]
 async fn test_guardrail_json_logic_evaluation() {
     use selfware::swl::guardrails::GuardrailEngine;
-    
+
     let engine = GuardrailEngine::new();
     let ctx = GuardrailContext::new().with_state("count", 10);
 
     // Test JSON Logic comparison
     let json_logic = r#"{">=": [{"var": "count"}, 5]}"#;
     let result = engine.evaluate_json_logic(json_logic, &ctx);
-    assert!(result.is_pass(), "JSON Logic >= should pass when count is 10, got: {:?}", result);
+    assert!(
+        result.is_pass(),
+        "JSON Logic >= should pass when count is 10, got: {:?}",
+        result
+    );
 
     // Test JSON Logic that should fail
     let json_logic_fail = r#"{"<": [{"var": "count"}, 5]}"#;
     let result = engine.evaluate_json_logic(json_logic_fail, &ctx);
-    assert!(result.is_fail(), "JSON Logic < should fail when count is 10");
+    assert!(
+        result.is_fail(),
+        "JSON Logic < should fail when count is 10"
+    );
 }
 
 #[tokio::test]
 async fn test_guardrail_json_logic_contains() {
     use selfware::swl::guardrails::GuardrailEngine;
-    
+
     let engine = GuardrailEngine::new();
     let ctx = GuardrailContext::new().with_agent_output("agent1", "This contains CRITICAL error");
 
     // Test contains operator
     let json_logic = r#"{"contains": ["agent_output", "CRITICAL"]}"#;
     let result = engine.evaluate_json_logic(json_logic, &ctx);
-    assert!(result.is_pass(), "JSON Logic contains should detect CRITICAL");
+    assert!(
+        result.is_pass(),
+        "JSON Logic contains should detect CRITICAL"
+    );
 
     // Test contains that should fail
     let json_logic_fail = r#"{"contains": ["agent_output", "SAFE"]}"#;
@@ -626,7 +637,7 @@ async fn test_guardrail_json_logic_contains() {
 #[tokio::test]
 async fn test_guardrail_json_logic_and_or() {
     use selfware::swl::guardrails::GuardrailEngine;
-    
+
     let engine = GuardrailEngine::new();
     let ctx = GuardrailContext::new()
         .with_state("count", 10)
@@ -635,91 +646,148 @@ async fn test_guardrail_json_logic_and_or() {
     // Test AND operator - both conditions true
     let json_logic = r#"{"and": [{"var": "count"}, {"var": "enabled"}]}"#;
     let result = engine.evaluate_json_logic(json_logic, &ctx);
-    assert!(result.is_pass(), "JSON Logic AND should pass when both conditions are true, got: {:?}", result);
+    assert!(
+        result.is_pass(),
+        "JSON Logic AND should pass when both conditions are true, got: {:?}",
+        result
+    );
 
     // Test OR operator - one condition true
     let json_logic_or = r#"{"or": [{"==": [{"var": "count"}, 5]}, {"var": "enabled"}]}"#;
     let result = engine.evaluate_json_logic(json_logic_or, &ctx);
-    assert!(result.is_pass(), "JSON Logic OR should pass when one condition is true");
+    assert!(
+        result.is_pass(),
+        "JSON Logic OR should pass when one condition is true"
+    );
 
     // Test NOT operator
     let json_logic_not = r#"{"not": {"==": [{"var": "count"}, 5]}}"#;
     let result = engine.evaluate_json_logic(json_logic_not, &ctx);
-    assert!(result.is_pass(), "JSON Logic NOT should pass when inner condition is false");
+    assert!(
+        result.is_pass(),
+        "JSON Logic NOT should pass when inner condition is false"
+    );
 }
 
 #[tokio::test]
 async fn test_guardrail_json_logic_regex_match() {
     use selfware::swl::guardrails::GuardrailEngine;
-    
+
     let engine = GuardrailEngine::new();
     let ctx = GuardrailContext::new().with_agent_output("agent1", "Error: connection timeout");
 
     // Test regex match
     let json_logic = r#"{"match": ["agent_output", "Error:.*timeout"]}"#;
     let result = engine.evaluate_json_logic(json_logic, &ctx);
-    assert!(result.is_pass(), "JSON Logic match should match regex pattern");
+    assert!(
+        result.is_pass(),
+        "JSON Logic match should match regex pattern"
+    );
 
     // Test regex that doesn't match
     let json_logic_fail = r#"{"match": ["agent_output", "Success"]}"#;
     let result = engine.evaluate_json_logic(json_logic_fail, &ctx);
-    assert!(result.is_fail(), "JSON Logic match should fail when pattern doesn't match");
+    assert!(
+        result.is_fail(),
+        "JSON Logic match should fail when pattern doesn't match"
+    );
 }
 
 #[test]
 fn test_guardrail_inline_expressions() {
     use selfware::swl::guardrails::GuardrailEngine;
-    
+
     let engine = GuardrailEngine::new();
-    
+
     // Test contains expression
     let ctx = GuardrailContext::new().with_agent_output("agent1", "test output with ERROR");
     let result = engine.evaluate_inline_expression("agent_output.contains('ERROR')", &ctx);
     assert!(result.is_pass(), "Contains expression should detect ERROR");
-    
+
     // Test negation
     let result = engine.evaluate_inline_expression("!agent_output.contains('SUCCESS')", &ctx);
-    assert!(result.is_pass(), "Negation should pass when pattern not found");
-    
+    assert!(
+        result.is_pass(),
+        "Negation should pass when pattern not found"
+    );
+
     // Test comparison
     let ctx = GuardrailContext::new().with_state("count", 42);
     let result = engine.evaluate_inline_expression("state.count > 10", &ctx);
     assert!(result.is_pass(), "Comparison should pass for 42 > 10");
-    
+
     // Test equality
     let result = engine.evaluate_inline_expression("state.count == 42", &ctx);
-    assert!(result.is_pass(), "Equality should pass for 42 == 42, got: {:?}", result);
+    assert!(
+        result.is_pass(),
+        "Equality should pass for 42 == 42, got: {:?}",
+        result
+    );
 }
 
 #[test]
 fn test_guardrail_violation_action_parsing() {
     use selfware::swl::guardrails::ViolationAction;
-    
-    assert_eq!(ViolationAction::parse_str("block"), Some(ViolationAction::Block));
-    assert_eq!(ViolationAction::parse_str("BLOCK"), None, "Parsing is case-sensitive");
-    assert_eq!(ViolationAction::parse_str("warn"), Some(ViolationAction::Warn));
-    assert_eq!(ViolationAction::parse_str("log"), Some(ViolationAction::Log));
-    assert_eq!(ViolationAction::parse_str("alert"), Some(ViolationAction::Alert));
+
+    assert_eq!(
+        ViolationAction::parse_str("block"),
+        Some(ViolationAction::Block)
+    );
+    assert_eq!(
+        ViolationAction::parse_str("BLOCK"),
+        None,
+        "Parsing is case-sensitive"
+    );
+    assert_eq!(
+        ViolationAction::parse_str("warn"),
+        Some(ViolationAction::Warn)
+    );
+    assert_eq!(
+        ViolationAction::parse_str("log"),
+        Some(ViolationAction::Log)
+    );
+    assert_eq!(
+        ViolationAction::parse_str("alert"),
+        Some(ViolationAction::Alert)
+    );
     assert_eq!(ViolationAction::parse_str("unknown"), None);
 }
 
 #[test]
 fn test_guardrail_type_parsing() {
     use selfware::swl::guardrails::GuardrailType;
-    
-    assert_eq!(GuardrailType::parse_str("pre_agent"), Some(GuardrailType::PreAgent));
-    assert_eq!(GuardrailType::parse_str("post_agent"), Some(GuardrailType::PostAgent));
-    assert_eq!(GuardrailType::parse_str("pre_tool"), Some(GuardrailType::PreTool));
-    assert_eq!(GuardrailType::parse_str("post_tool"), Some(GuardrailType::PostTool));
-    assert_eq!(GuardrailType::parse_str("pre_workflow"), Some(GuardrailType::PreWorkflow));
-    assert_eq!(GuardrailType::parse_str("post_workflow"), Some(GuardrailType::PostWorkflow));
+
+    assert_eq!(
+        GuardrailType::parse_str("pre_agent"),
+        Some(GuardrailType::PreAgent)
+    );
+    assert_eq!(
+        GuardrailType::parse_str("post_agent"),
+        Some(GuardrailType::PostAgent)
+    );
+    assert_eq!(
+        GuardrailType::parse_str("pre_tool"),
+        Some(GuardrailType::PreTool)
+    );
+    assert_eq!(
+        GuardrailType::parse_str("post_tool"),
+        Some(GuardrailType::PostTool)
+    );
+    assert_eq!(
+        GuardrailType::parse_str("pre_workflow"),
+        Some(GuardrailType::PreWorkflow)
+    );
+    assert_eq!(
+        GuardrailType::parse_str("post_workflow"),
+        Some(GuardrailType::PostWorkflow)
+    );
     assert_eq!(GuardrailType::parse_str("unknown"), None);
 }
 
 #[tokio::test]
 async fn test_guardrail_multiple_checks() {
     let mut enforcer = GuardrailEnforcer::new();
-    
+
     // Register multiple guardrails
     enforcer.register_guardrail(GuardrailDef {
         name: "check_1".to_string(),
@@ -730,7 +798,7 @@ async fn test_guardrail_multiple_checks() {
         severity: None,
         tags: Vec::new(),
     });
-    
+
     enforcer.register_guardrail(GuardrailDef {
         name: "check_2".to_string(),
         guardrail_type: GuardrailType::PreAgent,
@@ -740,7 +808,7 @@ async fn test_guardrail_multiple_checks() {
         severity: None,
         tags: Vec::new(),
     });
-    
+
     enforcer.register_guardrail(GuardrailDef {
         name: "check_3".to_string(),
         guardrail_type: GuardrailType::PreAgent,
@@ -758,14 +826,14 @@ async fn test_guardrail_multiple_checks() {
     assert_eq!(summary.passed, 1);
     assert_eq!(summary.failed, 2);
     assert_eq!(summary.warnings, 1); // check_2 has Warn action
-    assert_eq!(summary.blocked, 1);  // check_3 has Block action
+    assert_eq!(summary.blocked, 1); // check_3 has Block action
     assert!(summary.should_block());
 }
 
 #[tokio::test]
 async fn test_guardrail_telemetry_collection() {
     let mut enforcer = GuardrailEnforcer::new();
-    
+
     enforcer.register_guardrail(GuardrailDef {
         name: "telemetry_test".to_string(),
         guardrail_type: GuardrailType::PostAgent,
@@ -777,8 +845,11 @@ async fn test_guardrail_telemetry_collection() {
     });
 
     let ctx = GuardrailContext::new();
-    let _ = enforcer.check(GuardrailType::PostAgent, &ctx).await.unwrap();
-    
+    let _ = enforcer
+        .check(GuardrailType::PostAgent, &ctx)
+        .await
+        .unwrap();
+
     let telemetry = enforcer.get_telemetry_events().await;
     assert_eq!(telemetry.len(), 1);
     assert_eq!(telemetry[0].guardrail_name, "telemetry_test");

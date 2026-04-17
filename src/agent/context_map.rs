@@ -560,24 +560,21 @@ impl ContextMap {
     pub fn load_skeleton(&mut self, path: &Path, skeleton: FileSkeleton) -> &FileSkeleton {
         let token_cost = skeleton.token_count;
         let path_buf = path.to_path_buf();
-        
+
         // Get or create the entry first.
-        let entry = self
-            .entries
-            .entry(path_buf)
-            .or_insert_with(|| FileEntry {
-                path: path.to_path_buf(),
-                level: ContextLevel::Tree,
-                current_tokens: 10,
-                costs: LevelCosts {
-                    l1: 10,
-                    ..Default::default()
-                },
-                last_accessed: Instant::now(),
-                skeleton: None,
-                full_content: None,
-                file_size: 0,
-            });
+        let entry = self.entries.entry(path_buf).or_insert_with(|| FileEntry {
+            path: path.to_path_buf(),
+            level: ContextLevel::Tree,
+            current_tokens: 10,
+            costs: LevelCosts {
+                l1: 10,
+                ..Default::default()
+            },
+            last_accessed: Instant::now(),
+            skeleton: None,
+            full_content: None,
+            file_size: 0,
+        });
 
         // Update token accounting.
         self.total_tokens = self.total_tokens.saturating_sub(entry.current_tokens);
@@ -588,11 +585,11 @@ impl ContextMap {
         // Drop full content if downgrading from L3.
         entry.full_content = None;
         self.total_tokens += token_cost;
-        
+
         // Store skeleton and return reference to it.
         // This is safe because we just set it to Some above.
         entry.skeleton = Some(skeleton);
-        
+
         debug!(
             "Loaded skeleton for {}: {} tokens (total: {}/{})",
             path.display(),
@@ -600,7 +597,7 @@ impl ContextMap {
             self.total_tokens,
             self.budget
         );
-        
+
         // Return reference to skeleton - we know it's Some because we just set it.
         match entry.skeleton.as_ref() {
             Some(s) => s,

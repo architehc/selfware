@@ -198,9 +198,12 @@ fn infer_context_length(model: &str) -> u64 {
         32768
     } else if lower.contains("8k") || lower.contains("8192") {
         8192
-    } else if lower.contains("qwen3.5") || lower.contains("qwen3-5") || lower.contains("qwen3-coder") {
-        131072
-    } else if lower.contains("llama-3") || lower.contains("llama3") {
+    } else if lower.contains("qwen3.5")
+        || lower.contains("qwen3-5")
+        || lower.contains("qwen3-coder")
+        || lower.contains("llama-3")
+        || lower.contains("llama3")
+    {
         131072
     } else {
         32768
@@ -245,7 +248,10 @@ async fn try_start_ollama() -> bool {
         return false;
     }
 
-    println!("  {} Ollama is installed but not running. Starting it now...", "⟳".cyan());
+    println!(
+        "  {} Ollama is installed but not running. Starting it now...",
+        "⟳".cyan()
+    );
 
     let _ = tokio::process::Command::new("ollama")
         .arg("serve")
@@ -383,10 +389,8 @@ pub async fn auto_calibrate(config: &mut Config) -> Result<bool> {
     let mut endpoints = scan_local_endpoints().await;
 
     // ── Step 2: if nothing found, try to auto-start Ollama ──────────────────
-    if endpoints.is_empty() {
-        if try_start_ollama().await {
-            endpoints = scan_local_endpoints().await;
-        }
+    if endpoints.is_empty() && try_start_ollama().await {
+        endpoints = scan_local_endpoints().await;
     }
 
     // ── Step 3: if Ollama is running but empty, auto-pull a model ───────────
@@ -439,13 +443,21 @@ pub async fn auto_calibrate(config: &mut Config) -> Result<bool> {
             "  {} Context: {} tokens | Multimodal: {} | Tools: {} | Streaming: {}",
             "ℹ".cyan(),
             best.context_length.to_string().bright_white(),
-            if best.multimodal { "yes".green() } else { "no".dimmed() },
+            if best.multimodal {
+                "yes".green()
+            } else {
+                "no".dimmed()
+            },
             if config.agent.native_function_calling {
                 "yes".green()
             } else {
                 "no".dimmed()
             },
-            if config.agent.streaming { "yes".green() } else { "no".dimmed() }
+            if config.agent.streaming {
+                "yes".green()
+            } else {
+                "no".dimmed()
+            }
         );
 
         // Auto-save if no config file exists yet
@@ -567,7 +579,10 @@ pub async fn auto_calibrate(config: &mut Config) -> Result<bool> {
     }
 
     // ── Step 6: actionable next steps based on what's installed ─────────────
-    println!("\n  {} Get up and running in under 60 seconds:\n", "🚀".bright_cyan());
+    println!(
+        "\n  {} Get up and running in under 60 seconds:\n",
+        "🚀".bright_cyan()
+    );
 
     if is_ollama_installed() {
         let model = pick_ollama_model_for_hardware();
@@ -575,13 +590,19 @@ pub async fn auto_calibrate(config: &mut Config) -> Result<bool> {
             "     {} Ollama is installed. Run this in another terminal:",
             "●".green()
         );
-        println!("       {}\n", format!("ollama pull {}", model).bright_white());
+        println!(
+            "       {}\n",
+            format!("ollama pull {}", model).bright_white()
+        );
     } else {
         println!(
             "     {} Install Ollama (fastest path to a working model):",
             "●".green()
         );
-        println!("       {}\n", "curl -fsSL https://ollama.com/install.sh | sh".bright_white());
+        println!(
+            "       {}\n",
+            "curl -fsSL https://ollama.com/install.sh | sh".bright_white()
+        );
     }
 
     if is_lm_studio_installed() {

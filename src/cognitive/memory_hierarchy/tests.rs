@@ -9,13 +9,12 @@
 //! - Memory consolidation triggers
 //! - Query building and execution
 
-
 use super::types::{
-    ChangeType, CodeContent, CodeContext, CodeEdit, CodeModification, ConsolidationResult,
-    Episode, EpisodeType, FileContext, FileContextEntry, Importance, MemoryConfig, MemoryEntry,
-    MemoryIndex, MemoryMetrics, MemoryQuery, MemoryStats, MemoryTier, MemoryUsage,
-    SelfImprovementContext, SelfModel, SymbolContext, TaskContext, TierTransition, TokenBudget,
-    WorkingContext, TOTAL_CONTEXT_TOKENS,
+    ChangeType, CodeContent, CodeContext, CodeEdit, CodeModification, ConsolidationResult, Episode,
+    EpisodeType, FileContext, FileContextEntry, Importance, MemoryConfig, MemoryEntry, MemoryIndex,
+    MemoryMetrics, MemoryQuery, MemoryStats, MemoryTier, MemoryUsage, SelfImprovementContext,
+    SelfModel, SymbolContext, TaskContext, TierTransition, TokenBudget, WorkingContext,
+    TOTAL_CONTEXT_TOKENS,
 };
 use super::{ArchiveMemory, LongTermMemory, ShortTermMemory, WorkingMemory};
 
@@ -214,8 +213,8 @@ async fn test_memory_index_multiple_entries() {
         .with_tags(vec!["shared".to_string(), "unique1".to_string()]);
     let entry2 = MemoryEntry::new(2, "test2", MemoryTier::ShortTerm)
         .with_tags(vec!["shared".to_string(), "unique2".to_string()]);
-    let entry3 = MemoryEntry::new(3, "test3", MemoryTier::LongTerm)
-        .with_tags(vec!["unique3".to_string()]);
+    let entry3 =
+        MemoryEntry::new(3, "test3", MemoryTier::LongTerm).with_tags(vec!["unique3".to_string()]);
 
     index.index_entry(&entry1).await;
     index.index_entry(&entry2).await;
@@ -243,8 +242,8 @@ async fn test_memory_index_multiple_entries() {
 #[tokio::test]
 async fn test_memory_index_remove_entry() {
     let index = MemoryIndex::new();
-    let entry = MemoryEntry::new(1, "test", MemoryTier::ShortTerm)
-        .with_tags(vec!["tag1".to_string()]);
+    let entry =
+        MemoryEntry::new(1, "test", MemoryTier::ShortTerm).with_tags(vec!["tag1".to_string()]);
 
     index.index_entry(&entry).await;
     index.remove_entry(&entry).await;
@@ -260,10 +259,10 @@ async fn test_memory_index_remove_entry() {
 async fn test_memory_index_remove_partial() {
     let index = MemoryIndex::new();
 
-    let entry1 = MemoryEntry::new(1, "test1", MemoryTier::ShortTerm)
-        .with_tags(vec!["shared".to_string()]);
-    let entry2 = MemoryEntry::new(2, "test2", MemoryTier::ShortTerm)
-        .with_tags(vec!["shared".to_string()]);
+    let entry1 =
+        MemoryEntry::new(1, "test1", MemoryTier::ShortTerm).with_tags(vec!["shared".to_string()]);
+    let entry2 =
+        MemoryEntry::new(2, "test2", MemoryTier::ShortTerm).with_tags(vec!["shared".to_string()]);
 
     index.index_entry(&entry1).await;
     index.index_entry(&entry2).await;
@@ -444,14 +443,14 @@ async fn test_short_term_memory_query_with_tags() {
     .unwrap();
 
     stm.store(
-        MemoryEntry::new(2, "test", MemoryTier::ShortTerm)
-            .with_tags(vec!["important".to_string()]),
+        MemoryEntry::new(2, "test", MemoryTier::ShortTerm).with_tags(vec!["important".to_string()]),
     )
     .await
     .unwrap();
 
     // Query for both tags - should only find entry 1
-    let query = MemoryQuery::new("test").with_tags(vec!["important".to_string(), "work".to_string()]);
+    let query =
+        MemoryQuery::new("test").with_tags(vec!["important".to_string(), "work".to_string()]);
     let results = stm.query(&query).await;
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].id, 1);
@@ -467,17 +466,13 @@ async fn test_short_term_memory_query_with_min_importance() {
     let index = std::sync::Arc::new(MemoryIndex::new());
     let stm = ShortTermMemory::new(100, index);
 
-    stm.store(
-        MemoryEntry::new(1, "test", MemoryTier::ShortTerm).with_importance(0.3),
-    )
-    .await
-    .unwrap();
+    stm.store(MemoryEntry::new(1, "test", MemoryTier::ShortTerm).with_importance(0.3))
+        .await
+        .unwrap();
 
-    stm.store(
-        MemoryEntry::new(2, "test", MemoryTier::ShortTerm).with_importance(0.8),
-    )
-    .await
-    .unwrap();
+    stm.store(MemoryEntry::new(2, "test", MemoryTier::ShortTerm).with_importance(0.8))
+        .await
+        .unwrap();
 
     let query = MemoryQuery::new("test").with_min_importance(0.5);
     let results = stm.query(&query).await;
@@ -523,23 +518,17 @@ async fn test_short_term_memory_query_sorting() {
     let stm = ShortTermMemory::new(100, index);
 
     // Store entries with different importance
-    stm.store(
-        MemoryEntry::new(1, "test", MemoryTier::ShortTerm).with_importance(0.3),
-    )
-    .await
-    .unwrap();
+    stm.store(MemoryEntry::new(1, "test", MemoryTier::ShortTerm).with_importance(0.3))
+        .await
+        .unwrap();
 
-    stm.store(
-        MemoryEntry::new(2, "test", MemoryTier::ShortTerm).with_importance(0.9),
-    )
-    .await
-    .unwrap();
+    stm.store(MemoryEntry::new(2, "test", MemoryTier::ShortTerm).with_importance(0.9))
+        .await
+        .unwrap();
 
-    stm.store(
-        MemoryEntry::new(3, "test", MemoryTier::ShortTerm).with_importance(0.6),
-    )
-    .await
-    .unwrap();
+    stm.store(MemoryEntry::new(3, "test", MemoryTier::ShortTerm).with_importance(0.6))
+        .await
+        .unwrap();
 
     let query = MemoryQuery::new("test");
     let results = stm.query(&query).await;
@@ -1001,11 +990,9 @@ async fn test_long_term_memory_consolidate() {
     }
 
     // Add a high importance entry
-    ltm.store(
-        MemoryEntry::new(10, "important", MemoryTier::LongTerm).with_importance(0.9),
-    )
-    .await
-    .unwrap();
+    ltm.store(MemoryEntry::new(10, "important", MemoryTier::LongTerm).with_importance(0.9))
+        .await
+        .unwrap();
 
     let result = ltm.consolidate().await;
 
@@ -1022,11 +1009,9 @@ async fn test_long_term_memory_archive_oldest() {
     // Add entries with importance < 0.5 (eligible for archiving)
     for i in 0..3 {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        ltm.store(
-            MemoryEntry::new(i as u64, "test", MemoryTier::LongTerm).with_importance(0.3),
-        )
-        .await
-        .unwrap();
+        ltm.store(MemoryEntry::new(i as u64, "test", MemoryTier::LongTerm).with_importance(0.3))
+            .await
+            .unwrap();
     }
 
     // Count should be at capacity
@@ -1681,9 +1666,11 @@ async fn test_update_with_empty_callback() {
         .unwrap();
 
     // Update with empty callback
-    let updated = ltm.update(1, |_entry| {
-        // Do nothing
-    }).await;
+    let updated = ltm
+        .update(1, |_entry| {
+            // Do nothing
+        })
+        .await;
 
     assert!(updated);
 
@@ -1805,11 +1792,9 @@ async fn test_consolidation_all_high_importance() {
 
     // Add only high importance entries (all >= 0.3)
     for i in 0..5 {
-        ltm.store(
-            MemoryEntry::new(i as u64, "test", MemoryTier::LongTerm).with_importance(0.5),
-        )
-        .await
-        .unwrap();
+        ltm.store(MemoryEntry::new(i as u64, "test", MemoryTier::LongTerm).with_importance(0.5))
+            .await
+            .unwrap();
     }
 
     // None should be removed
@@ -1889,18 +1874,14 @@ async fn test_query_sorting_by_access_time() {
     let stm = ShortTermMemory::new(100, index);
 
     // Add entries with same importance but spaced out in time
-    stm.store(
-        MemoryEntry::new(100, "test", MemoryTier::ShortTerm).with_importance(0.5),
-    )
-    .await
-    .unwrap();
+    stm.store(MemoryEntry::new(100, "test", MemoryTier::ShortTerm).with_importance(0.5))
+        .await
+        .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    stm.store(
-        MemoryEntry::new(101, "test", MemoryTier::ShortTerm).with_importance(0.5),
-    )
-    .await
-    .unwrap();
+    stm.store(MemoryEntry::new(101, "test", MemoryTier::ShortTerm).with_importance(0.5))
+        .await
+        .unwrap();
 
     // Verify we have 2 entries
     let query = MemoryQuery::new("test");

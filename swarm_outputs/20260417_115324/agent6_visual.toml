@@ -1,0 +1,23 @@
+endpoint = "https://crazyshit.ngrok.io/v1"
+model = "/media/thread/trebuchet6/qwen35/models/Qwen3.5-122B-A10B-NVFP4-yarn-1010k"
+max_tokens = 32768
+context_length = 1010000
+temperature = 0.4
+
+[extra_body]
+chat_template_kwargs = { enable_thinking = false }
+
+[safety]
+allowed_paths = ["/home/ivo/selfware/**", "/tmp/**"]
+denied_paths = ["**/.env", "**/.ssh/**"]
+
+[agent]
+max_iterations = 25
+step_timeout_secs = 300
+native_function_calling = false
+streaming = true
+
+[retry]
+max_retries = 3
+base_delay_ms = 1000
+max_delay_ms = 30000

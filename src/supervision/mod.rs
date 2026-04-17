@@ -195,7 +195,6 @@ impl Supervisor {
             },
             children: Vec::new(),
             parent_tx: None,
-
         }
     }
 
@@ -271,11 +270,18 @@ impl Supervisor {
                                 tokio::time::sleep(backoff).await;
                                 if let Err(e) = self.restart_child(&child_id, &child_states).await {
                                     error!(child_id = %child_id, error = %e, "Failed to restart child, escalating");
-                                    self.escalate(&supervisor_id, &child_id, &error, &restart_counts).await;
+                                    self.escalate(
+                                        &supervisor_id,
+                                        &child_id,
+                                        &error,
+                                        &restart_counts,
+                                    )
+                                    .await;
                                 }
                             } else {
                                 error!(child_id = %child_id, "Max restarts exceeded, escalating");
-                                self.escalate(&supervisor_id, &child_id, &error, &restart_counts).await;
+                                self.escalate(&supervisor_id, &child_id, &error, &restart_counts)
+                                    .await;
                             }
                         } else {
                             info!(child_id = %child_id, "Child will not be restarted based on restart type");
@@ -284,7 +290,13 @@ impl Supervisor {
                     ChildEvent::Exited { child_id, reason } => {
                         if reason != ExitReason::Normal {
                             warn!(child_id = %child_id, reason = ?reason, "Child exited abnormally");
-                            self.handle_abnormal_exit(&child_id, reason, &child_states, &restart_counts).await;
+                            self.handle_abnormal_exit(
+                                &child_id,
+                                reason,
+                                &child_states,
+                                &restart_counts,
+                            )
+                            .await;
                         } else {
                             debug!(child_id = %child_id, "Child exited normally");
                             // Mark as stopped on normal exit
@@ -361,9 +373,7 @@ impl Supervisor {
         let factory = child_spec
             .factory
             .as_ref()
-            .ok_or_else(|| {
-                SelfwareError::Internal(format!("Child {} has no factory", child_id))
-            })?;
+            .ok_or_else(|| SelfwareError::Internal(format!("Child {} has no factory", child_id)))?;
 
         // Update state to starting
         {
@@ -587,10 +597,7 @@ impl Supervisor {
         // Get current restart count for context
         let restart_count = {
             let counts = _restart_counts.read().await;
-            counts
-                .get(child_id)
-                .map(|v| v.len() as u32)
-                .unwrap_or(0)
+            counts.get(child_id).map(|v| v.len() as u32).unwrap_or(0)
         };
 
         error!(
@@ -660,11 +667,7 @@ impl SupervisorBuilder {
     }
 
     /// Add a child to supervise
-    pub fn add_child(
-        mut self,
-        id: impl Into<String>,
-        factory: Arc<dyn ComponentFactory>,
-    ) -> Self {
+    pub fn add_child(mut self, id: impl Into<String>, factory: Arc<dyn ComponentFactory>) -> Self {
         self.children.push(ChildSpec {
             id: id.into(),
             restart_type: RestartType::Permanent,

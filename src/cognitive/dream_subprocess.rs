@@ -405,7 +405,10 @@ async fn consolidate_phase(_memories: &[MemoryEntry], config: &AutoDreamConfig) 
     // STUB: Just returns count without actual consolidation
     let unique_count = _memories.len();
 
-    warn!("STUB: Memory consolidation is no-op - returned {} without consolidation", unique_count);
+    warn!(
+        "STUB: Memory consolidation is no-op - returned {} without consolidation",
+        unique_count
+    );
 
     Ok(unique_count)
 }

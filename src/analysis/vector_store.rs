@@ -1361,12 +1361,18 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
             .await
             .context("HTTP embedding request failed")?;
         let status = resp.status();
-        let json: serde_json::Value = resp.json().await.context("Failed to parse embedding response")?;
+        let json: serde_json::Value = resp
+            .json()
+            .await
+            .context("Failed to parse embedding response")?;
         if !status.is_success() {
             anyhow::bail!(
                 "Embedding endpoint returned {}: {}",
                 status,
-                json.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()).unwrap_or("unknown error")
+                json.get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("unknown error")
             );
         }
         let embedding = json["data"][0]["embedding"]
@@ -1399,12 +1405,18 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
             .await
             .context("HTTP batch embedding request failed")?;
         let status = resp.status();
-        let json: serde_json::Value = resp.json().await.context("Failed to parse batch embedding response")?;
+        let json: serde_json::Value = resp
+            .json()
+            .await
+            .context("Failed to parse batch embedding response")?;
         if !status.is_success() {
             anyhow::bail!(
                 "Embedding endpoint returned {}: {}",
                 status,
-                json.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()).unwrap_or("unknown error")
+                json.get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("unknown error")
             );
         }
         let data = json["data"]

@@ -1872,35 +1872,35 @@ impl WorkflowExecutor {
                 severity,
                 description: _,
             } => {
-                use crate::swl::guardrails::{GuardrailContext, GuardrailEngine, EvaluationResult};
+                use crate::swl::guardrails::{EvaluationResult, GuardrailContext, GuardrailEngine};
 
                 // Build guardrail context from workflow context
                 let mut guard_ctx = GuardrailContext::new();
-                
+
                 // Add state variables to guardrail context
                 fn var_value_to_json(value: &VarValue) -> serde_json::Value {
                     match value {
                         VarValue::String(s) => serde_json::Value::String(s.clone()),
                         VarValue::Number(n) => serde_json::Value::Number(
-                            serde_json::Number::from_f64(*n).unwrap_or_else(|| 0.into())
+                            serde_json::Number::from_f64(*n).unwrap_or_else(|| 0.into()),
                         ),
                         VarValue::Boolean(b) => serde_json::Value::Bool(*b),
                         VarValue::List(items) => {
-                            serde_json::Value::Array(
-                                items.iter().map(var_value_to_json).collect()
-                            )
+                            serde_json::Value::Array(items.iter().map(var_value_to_json).collect())
                         }
-                        VarValue::Map(m) => {
-                            serde_json::Value::Object(
-                                m.iter().map(|(k, v)| (k.clone(), var_value_to_json(v))).collect()
-                            )
-                        }
+                        VarValue::Map(m) => serde_json::Value::Object(
+                            m.iter()
+                                .map(|(k, v)| (k.clone(), var_value_to_json(v)))
+                                .collect(),
+                        ),
                         VarValue::Null => serde_json::Value::Null,
                     }
                 }
-                
+
                 for (key, value) in &context.variables {
-                    guard_ctx.state.insert(key.clone(), var_value_to_json(value));
+                    guard_ctx
+                        .state
+                        .insert(key.clone(), var_value_to_json(value));
                 }
 
                 // Resolve the condition string with variable substitution
@@ -1923,31 +1923,28 @@ impl WorkflowExecutor {
 
                 // Create guardrail engine and evaluate condition
                 let engine = GuardrailEngine::new();
-                
+
                 // Determine if this is a JSON Logic condition or inline expression
-                let result = if resolved_condition.starts_with("[") && resolved_condition.contains("]:") {
-                    // Code block condition - parse the language prefix
-                    if let Some(end_idx) = resolved_condition.find("]:") {
-                        let lang = &resolved_condition[1..end_idx];
-                        let code = &resolved_condition[end_idx + 2..];
-                        engine.evaluate_code_condition(lang, code, &guard_ctx)
-                    } else {
-                        EvaluationResult::Error {
-                            message: "Invalid code block format in condition".to_string(),
+                let result =
+                    if resolved_condition.starts_with("[") && resolved_condition.contains("]:") {
+                        // Code block condition - parse the language prefix
+                        if let Some(end_idx) = resolved_condition.find("]:") {
+                            let lang = &resolved_condition[1..end_idx];
+                            let code = &resolved_condition[end_idx + 2..];
+                            engine.evaluate_code_condition(lang, code, &guard_ctx)
+                        } else {
+                            EvaluationResult::Error {
+                                message: "Invalid code block format in condition".to_string(),
+                            }
                         }
-                    }
-                } else {
-                    // Treat as inline expression
-                    engine.evaluate_inline_expression(&resolved_condition, &guard_ctx)
-                };
+                    } else {
+                        // Treat as inline expression
+                        engine.evaluate_inline_expression(&resolved_condition, &guard_ctx)
+                    };
 
                 match &result {
                     EvaluationResult::Pass => {
-                        context.log(
-                            LogLevel::Info,
-                            format!("Guardrail '{}' passed", name),
-                            None,
-                        );
+                        context.log(LogLevel::Info, format!("Guardrail '{}' passed", name), None);
                         Ok(VarValue::String(format!("guardrail '{}' passed", name)))
                     }
                     EvaluationResult::Fail { reason } => {
@@ -1972,7 +1969,9 @@ impl WorkflowExecutor {
                         if action == "block" {
                             Err(anyhow!(
                                 "Guardrail '{}' blocked execution: {} (severity: {})",
-                                name, reason, severity
+                                name,
+                                reason,
+                                severity
                             ))
                         } else {
                             // For warn/log/alert, return success but with violation noted
@@ -1990,7 +1989,8 @@ impl WorkflowExecutor {
                         );
                         Err(anyhow!(
                             "Guardrail '{}' evaluation failed: {}",
-                            name, message
+                            name,
+                            message
                         ))
                     }
                 }

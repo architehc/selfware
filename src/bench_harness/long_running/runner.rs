@@ -90,7 +90,10 @@ impl LongRunningRunner {
         let _ = std::fs::write(work_dir.join("selfware.toml"), config_toml);
 
         // Run selfware
-        let log_path = work_dir.parent().unwrap().join(format!("{}.log", task.name));
+        let log_path = work_dir
+            .parent()
+            .unwrap()
+            .join(format!("{}.log", task.name));
         let mut cmd = Command::new(&self.selfware_path);
         cmd.arg("-c")
             .arg(work_dir.join("selfware.toml"))
@@ -133,8 +136,7 @@ impl LongRunningRunner {
         let (compiles, tests_passed, tests_failed, src_lines) =
             self.evaluate_project(&task.project_type, work_dir);
 
-        let status =
-            ProjectStatus::from_results(compiles, tests_passed, tests_failed, src_lines);
+        let status = ProjectStatus::from_results(compiles, tests_passed, tests_failed, src_lines);
 
         ProjectResult {
             name: task.name.clone(),
@@ -200,13 +202,9 @@ impl LongRunningRunner {
                 let stderr = String::from_utf8_lossy(&output.stderr);
 
                 match project_type {
-                    ProjectType::Rust => {
-                        stdout.contains("Finished") || !stderr.contains("error")
-                    }
+                    ProjectType::Rust => stdout.contains("Finished") || !stderr.contains("error"),
                     ProjectType::Python => output.status.success(),
-                    ProjectType::Go => {
-                        stdout.contains("ok") || !stderr.contains("build failed")
-                    }
+                    ProjectType::Go => stdout.contains("ok") || !stderr.contains("build failed"),
                     ProjectType::Template => stdout.contains("Finished"),
                 }
             }
@@ -363,7 +361,9 @@ fn find_selfware_binary() -> Result<PathBuf, String> {
 /// Count steps from log output.
 fn count_steps(output: &[u8]) -> usize {
     let text = String::from_utf8_lossy(output);
-    text.lines().filter(|l| l.contains("Step") && l.contains("Executing")).count()
+    text.lines()
+        .filter(|l| l.contains("Step") && l.contains("Executing"))
+        .count()
 }
 
 /// Extract outcome label from log output.

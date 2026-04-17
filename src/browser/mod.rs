@@ -48,19 +48,28 @@ impl BrowserSession {
 
     /// STUB: Does not actually take a screenshot
     pub async fn screenshot(&self, path: &PathBuf) -> Result<()> {
-        warn!("STUB: BrowserSession::screenshot({:?}) - no screenshot taken", path);
+        warn!(
+            "STUB: BrowserSession::screenshot({:?}) - no screenshot taken",
+            path
+        );
         Ok(())
     }
 
     /// STUB: Does not actually click anything
     pub async fn click(&self, selector: &str) -> Result<()> {
-        warn!("STUB: BrowserSession::click({}) - no click performed", selector);
+        warn!(
+            "STUB: BrowserSession::click({}) - no click performed",
+            selector
+        );
         Ok(())
     }
 
     /// STUB: Does not actually fill any form
     pub async fn fill(&self, selector: &str, text: &str) -> Result<()> {
-        warn!("STUB: BrowserSession::fill({}, {}) - no form filled", selector, text);
+        warn!(
+            "STUB: BrowserSession::fill({}, {}) - no form filled",
+            selector, text
+        );
         Ok(())
     }
 }

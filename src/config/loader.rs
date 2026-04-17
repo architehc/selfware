@@ -151,8 +151,9 @@ impl Config {
                 loaded_from_path = Some(p.to_string());
                 token_budget_was_explicit = Self::content_sets_agent_token_budget(&content);
                 Self::warn_unknown_keys(&content);
-                toml::from_str(&content)
-                    .with_context(|| format!("Failed to parse config file: {}. Check TOML syntax.", p))?
+                toml::from_str(&content).with_context(|| {
+                    format!("Failed to parse config file: {}. Check TOML syntax.", p)
+                })?
             }
             None => {
                 // Try default locations - expand ~ to actual home directory
@@ -173,11 +174,9 @@ impl Config {
                         loaded_from_path = Some(p.to_string());
                         token_budget_was_explicit = Self::content_sets_agent_token_budget(&content);
                         Self::warn_unknown_keys(&content);
-                        loaded = Some(
-                            toml::from_str(&content).with_context(|| {
-                                format!("Failed to parse config file: {}. Check TOML syntax.", p)
-                            })?
-                        );
+                        loaded = Some(toml::from_str(&content).with_context(|| {
+                            format!("Failed to parse config file: {}. Check TOML syntax.", p)
+                        })?);
                         break;
                     }
                 }

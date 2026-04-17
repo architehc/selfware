@@ -806,7 +806,10 @@ mod tests {
     #[test]
     fn test_fn_pattern_matches_pub_fn() {
         let sr = &*SYMBOL_REGEXES;
-        let caps = sr.fn_pattern.captures("pub fn my_function(x: i32)").unwrap();
+        let caps = sr
+            .fn_pattern
+            .captures("pub fn my_function(x: i32)")
+            .unwrap();
         assert_eq!(caps.get(1).unwrap().as_str(), "my_function");
     }
 
@@ -855,14 +858,20 @@ mod tests {
     #[test]
     fn test_const_pattern_matches() {
         let sr = &*SYMBOL_REGEXES;
-        let caps = sr.const_pattern.captures("pub const MAX_SIZE: usize = 100;").unwrap();
+        let caps = sr
+            .const_pattern
+            .captures("pub const MAX_SIZE: usize = 100;")
+            .unwrap();
         assert_eq!(caps.get(1).unwrap().as_str(), "MAX_SIZE");
     }
 
     #[test]
     fn test_type_pattern_matches() {
         let sr = &*SYMBOL_REGEXES;
-        let caps = sr.type_pattern.captures("pub type Result<T> = std::result::Result<T, Error>;").unwrap();
+        let caps = sr
+            .type_pattern
+            .captures("pub type Result<T> = std::result::Result<T, Error>;")
+            .unwrap();
         assert_eq!(caps.get(1).unwrap().as_str(), "Result");
     }
 
@@ -876,7 +885,10 @@ mod tests {
     #[test]
     fn test_fn_pattern_pub_crate() {
         let sr = &*SYMBOL_REGEXES;
-        let caps = sr.fn_pattern.captures("pub(crate) fn internal_fn()").unwrap();
+        let caps = sr
+            .fn_pattern
+            .captures("pub(crate) fn internal_fn()")
+            .unwrap();
         assert_eq!(caps.get(1).unwrap().as_str(), "internal_fn");
     }
 

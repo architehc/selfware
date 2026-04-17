@@ -800,7 +800,11 @@ pub fn present_selection(menu: &SelectionMenu) -> Result<SelectionResult> {
 
             // Single-char selection
             if trimmed.len() == 1 {
-                let ch = trimmed.chars().next().map(|c| c.to_ascii_lowercase()).unwrap_or('?');
+                let ch = trimmed
+                    .chars()
+                    .next()
+                    .map(|c| c.to_ascii_lowercase())
+                    .unwrap_or('?');
                 if let Some(option) = menu.options.iter().find(|o| o.key == ch) {
                     // If this is the custom/"specify" option, prompt for text
                     if option.label.contains("specify") || option.label.contains("Let me") {

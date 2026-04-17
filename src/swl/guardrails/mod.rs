@@ -107,7 +107,11 @@ impl ConditionBuilder {
     pub fn build(self) -> Condition {
         match self.conditions.len() {
             0 => Condition::Inline("true".to_string()),
-            1 => self.conditions.into_iter().next().unwrap_or_else(|| Condition::Inline("true".to_string())),
+            1 => self
+                .conditions
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| Condition::Inline("true".to_string())),
             _ => Condition::Composite {
                 operator: self.operator,
                 conditions: self.conditions,

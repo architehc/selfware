@@ -73,7 +73,10 @@ mod tests {
 
     #[test]
     fn test_security_category_as_str() {
-        assert_eq!(SecurityCategory::HardcodedSecret.as_str(), "hardcoded_secret");
+        assert_eq!(
+            SecurityCategory::HardcodedSecret.as_str(),
+            "hardcoded_secret"
+        );
         assert_eq!(SecurityCategory::Injection.as_str(), "injection");
         assert_eq!(SecurityCategory::Authentication.as_str(), "authentication");
         assert_eq!(SecurityCategory::Authorization.as_str(), "authorization");
@@ -83,13 +86,19 @@ mod tests {
         assert_eq!(SecurityCategory::Dependency.as_str(), "dependency");
         assert_eq!(SecurityCategory::Compliance.as_str(), "compliance");
         assert_eq!(SecurityCategory::CodeQuality.as_str(), "code_quality");
-        assert_eq!(SecurityCategory::Custom("custom_cat".to_string()).as_str(), "custom_cat");
+        assert_eq!(
+            SecurityCategory::Custom("custom_cat".to_string()).as_str(),
+            "custom_cat"
+        );
     }
 
     #[test]
     fn test_autonomy_level_name() {
         assert_eq!(AutonomyLevel::SuggestOnly.name(), "Suggest Only");
-        assert_eq!(AutonomyLevel::ConfirmDestructive.name(), "Confirm Destructive");
+        assert_eq!(
+            AutonomyLevel::ConfirmDestructive.name(),
+            "Confirm Destructive"
+        );
         assert_eq!(AutonomyLevel::SemiAutonomous.name(), "Semi-Autonomous");
         assert_eq!(AutonomyLevel::FullAutonomous.name(), "Full Autonomous");
     }
@@ -105,7 +114,7 @@ mod tests {
         let low = RiskLevel::Low;
         let medium = RiskLevel::Medium;
         let high = RiskLevel::High;
-        
+
         assert!(matches!(low, RiskLevel::Low));
         assert!(matches!(medium, RiskLevel::Medium));
         assert!(matches!(high, RiskLevel::High));
@@ -121,9 +130,13 @@ mod tests {
     #[test]
     fn test_permission_result_variants() {
         let allow = PermissionResult::Allow;
-        let deny = PermissionResult::Deny { reason: "test".to_string() };
-        let prompt = PermissionResult::Prompt { reason: "confirm".to_string() };
-        
+        let deny = PermissionResult::Deny {
+            reason: "test".to_string(),
+        };
+        let prompt = PermissionResult::Prompt {
+            reason: "confirm".to_string(),
+        };
+
         assert!(matches!(allow, PermissionResult::Allow));
         assert!(matches!(deny, PermissionResult::Deny { .. }));
         assert!(matches!(prompt, PermissionResult::Prompt { .. }));

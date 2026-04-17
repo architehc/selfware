@@ -1,9 +1,19 @@
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
+const WORKSPACE_GUIDANCE_FILENAMES: &[&str] = &["AGENTS.md", "CLAUDE.md", ".claude.md"];
+const MAX_WORKSPACE_GUIDANCE_BYTES: usize = 24 * 1024;
+
 /// A discovered `.selfware.md` memory file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryFile {
+    pub path: PathBuf,
+    pub content: String,
+}
+
+/// A discovered workspace guidance file such as `AGENTS.md`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceGuidanceFile {
     pub path: PathBuf,
     pub content: String,
 }
@@ -38,6 +48,23 @@ pub struct DreamIntegratedMemorySystem {
 }
 
 impl MemorySystem {
+    fn read_capped_text(path: &Path, max_bytes: usize) -> Option<String> {
+        let text = std::fs::read_to_string(path).ok()?;
+        if text.len() <= max_bytes {
+            return Some(text);
+        }
+
+        let mut capped = String::with_capacity(max_bytes + 64);
+        for ch in text.chars() {
+            if capped.len() + ch.len_utf8() > max_bytes {
+                break;
+            }
+            capped.push(ch);
+        }
+        capped.push_str("\n... [truncated]");
+        Some(capped)
+    }
+
     /// Walk from `cwd` up to the home directory, collecting every `.selfware.md`
     /// found along the way. Files are returned in discovery order (closest to
     /// `cwd` first).
@@ -55,6 +82,36 @@ impl MemorySystem {
                     });
                 }
             }
+            if ancestor == home {
+                break;
+            }
+        }
+
+        files
+    }
+
+    /// Walk from `cwd` up to the home directory, collecting repo-local guidance
+    /// files such as `AGENTS.md`. These files provide project-specific operating
+    /// instructions and should be treated as high-priority prompt context.
+    pub fn discover_workspace_guidance(cwd: &Path) -> Vec<WorkspaceGuidanceFile> {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let mut files = Vec::new();
+
+        for ancestor in cwd.ancestors() {
+            for filename in WORKSPACE_GUIDANCE_FILENAMES {
+                let candidate = ancestor.join(filename);
+                if candidate.is_file() {
+                    if let Some(content) =
+                        Self::read_capped_text(&candidate, MAX_WORKSPACE_GUIDANCE_BYTES)
+                    {
+                        files.push(WorkspaceGuidanceFile {
+                            path: candidate,
+                            content,
+                        });
+                    }
+                }
+            }
+
             if ancestor == home {
                 break;
             }
@@ -133,6 +190,26 @@ impl MemorySystem {
         }
 
         let mut parts = vec!["## Memory Files".to_string()];
+        for file in files {
+            parts.push(format!(
+                "### From `{}`\n{}",
+                file.path.display(),
+                file.content
+            ));
+        }
+        parts.join("\n\n")
+    }
+
+    /// Format workspace guidance files for prompt injection.
+    pub fn format_workspace_guidance_for_prompt(files: &[WorkspaceGuidanceFile]) -> String {
+        if files.is_empty() {
+            return String::new();
+        }
+
+        let mut parts = vec![
+            "## Workspace Guidance".to_string(),
+            "Follow the most local guidance file when instructions conflict.".to_string(),
+        ];
         for file in files {
             parts.push(format!(
                 "### From `{}`\n{}",
@@ -366,6 +443,82 @@ mod tests {
         assert!(formatted.contains("Use Rust 2021 edition."));
         assert!(formatted.contains("### From `/home/.selfware.md`"));
         assert!(formatted.contains("Prefer anyhow for errors."));
+    }
+
+    #[test]
+    fn test_discover_workspace_guidance_finds_agents_files_up_to_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let project = home.join("projects").join("radarcam");
+        let src = project.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+
+        let project_guidance = project.join("AGENTS.md");
+        let home_guidance = home.join("CLAUDE.md");
+        let outside_guidance = temp.path().join("AGENTS.md");
+
+        std::fs::write(&project_guidance, "project guidance").unwrap();
+        std::fs::write(&home_guidance, "home guidance").unwrap();
+        std::fs::write(&outside_guidance, "outside guidance").unwrap();
+
+        let original_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+
+        let files = MemorySystem::discover_workspace_guidance(&src);
+
+        match original_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].path, project_guidance);
+        assert_eq!(files[0].content, "project guidance");
+        assert_eq!(files[1].path, home_guidance);
+        assert_eq!(files[1].content, "home guidance");
+    }
+
+    #[test]
+    fn test_format_workspace_guidance_for_prompt() {
+        let files = vec![WorkspaceGuidanceFile {
+            path: PathBuf::from("/project/AGENTS.md"),
+            content: "Operate on /home/ivo/radarcam.".to_string(),
+        }];
+
+        let formatted = MemorySystem::format_workspace_guidance_for_prompt(&files);
+        assert!(formatted.contains("## Workspace Guidance"));
+        assert!(formatted.contains("Follow the most local guidance file"));
+        assert!(formatted.contains("### From `/project/AGENTS.md`"));
+        assert!(formatted.contains("Operate on /home/ivo/radarcam."));
+    }
+
+    #[test]
+    fn test_discover_workspace_guidance_truncates_large_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let project = home.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+
+        let large_guidance = project.join("AGENTS.md");
+        std::fs::write(
+            &large_guidance,
+            "a".repeat(MAX_WORKSPACE_GUIDANCE_BYTES + 128),
+        )
+        .unwrap();
+
+        let original_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+
+        let files = MemorySystem::discover_workspace_guidance(&project);
+
+        match original_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+
+        assert_eq!(files.len(), 1);
+        assert!(files[0].content.ends_with("... [truncated]"));
+        assert!(files[0].content.len() <= MAX_WORKSPACE_GUIDANCE_BYTES + 32);
     }
 
     #[test]

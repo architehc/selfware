@@ -1,0 +1,66 @@
+# Selfware configuration for operating /home/ivo/radarcam with the remote
+# SGLang Qwen3.5-122B endpoint.
+#
+# Usage:
+#   cd /home/ivo/selfware
+#   cargo run -- --config selfware-radarcam.toml --validate-config
+#   cargo run -- -C /home/ivo/radarcam --config selfware-radarcam.toml -p "Inspect the current RadarCam health and summarize issues."
+
+endpoint = "https://crazyshit.ngrok.io/v1"
+model = "/media/thread/trebuchet6/qwen35/models/Qwen3.5-122B-A10B-NVFP4-yarn-1010k"
+max_tokens = 8192
+context_length = 1010000
+temperature = 0.4
+
+[extra_body]
+top_p = 0.95
+top_k = 20
+chat_template_kwargs = { enable_thinking = false }
+
+[agent]
+max_iterations = 40
+step_timeout_secs = 1200
+streaming = false
+native_function_calling = false
+token_safety_margin = 50000
+
+[safety]
+allowed_paths = [
+  "/home/ivo/radarcam/**",
+  "/home/ivo/selfware/**",
+  "/tmp/**",
+]
+denied_paths = [
+  "**/.env",
+  "**/secrets/**",
+  "**/.git/**",
+  "**/target/**",
+  "**/.ssh/**",
+]
+protected_branches = ["main", "master"]
+
+[continuous_work]
+enabled = true
+checkpoint_interval_tools = 10
+checkpoint_interval_secs = 300
+auto_recovery = true
+max_recovery_attempts = 5
+
+[retry]
+max_retries = 5
+base_delay_ms = 1000
+max_delay_ms = 60000
+
+[concurrency]
+max_streams = 4
+max_tools = 8
+max_global = 12
+
+[models.vision]
+endpoint = "https://crazyshit.ngrok.io/v1"
+model = "/media/thread/trebuchet6/qwen35/models/Qwen3.5-122B-A10B-NVFP4-yarn-1010k"
+max_tokens = 4096
+temperature = 0.2
+modalities = ["text", "vision"]
+context_length = 1010000
+extra_body = { chat_template_kwargs = { enable_thinking = false } }

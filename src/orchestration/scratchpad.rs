@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// Helper to handle lock poisoning gracefully.
-/// 
+///
 /// If a thread panics while holding a lock, the lock is "poisoned".
 /// This function recovers the data from the poisoned lock so operations can continue.
 fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {

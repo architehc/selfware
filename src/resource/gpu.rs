@@ -70,7 +70,7 @@ impl GpuManager {
                                         format!("Unknown GPU {}", i)
                                     }
                                 };
-                                
+
                                 // Try to get memory info - skip device if we can't
                                 let memory_total = match device.memory_info() {
                                     Ok(mem) => mem.total,

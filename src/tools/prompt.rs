@@ -58,6 +58,7 @@ pub trait ToolPrompt: Send + Sync {
 /// rich ToolPrompt trait.
 pub trait IntoToolPrompt {
     /// Convert to a ToolPrompt if rich descriptions are available.
+    #[allow(clippy::wrong_self_convention)]
     fn into_tool_prompt(&self) -> Option<&dyn ToolPrompt>;
 }
 

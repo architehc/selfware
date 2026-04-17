@@ -178,7 +178,7 @@ mod tests {
         assert!(is_context_tool("context_load_skeleton"));
         assert!(is_context_tool("context_bulk_read"));
         assert!(is_context_tool("context_summary"));
-        
+
         assert!(!is_context_tool("file_read"));
         assert!(!is_context_tool("shell_exec"));
         assert!(!is_context_tool(""));
@@ -189,7 +189,7 @@ mod tests {
     fn test_context_tool_descriptions() {
         let descriptions = context_tool_descriptions();
         assert_eq!(descriptions.len(), 7);
-        
+
         // Check each tool has required fields
         for desc in &descriptions {
             assert!(!desc.name.is_empty());
@@ -202,8 +202,11 @@ mod tests {
     #[test]
     fn test_context_status_schema() {
         let descriptions = context_tool_descriptions();
-        let status = descriptions.iter().find(|d| d.name == CONTEXT_STATUS).unwrap();
-        
+        let status = descriptions
+            .iter()
+            .find(|d| d.name == CONTEXT_STATUS)
+            .unwrap();
+
         assert!(status.description.contains("context window"));
         assert_eq!(status.schema["type"], "object");
     }
@@ -211,37 +214,55 @@ mod tests {
     #[test]
     fn test_context_focus_schema() {
         let descriptions = context_tool_descriptions();
-        let focus = descriptions.iter().find(|d| d.name == CONTEXT_FOCUS).unwrap();
-        
+        let focus = descriptions
+            .iter()
+            .find(|d| d.name == CONTEXT_FOCUS)
+            .unwrap();
+
         assert!(focus.description.contains("Promote"));
         assert_eq!(focus.schema["type"], "object");
         assert!(focus.schema["properties"]["query"].is_object());
-        assert!(focus.schema["required"].as_array().unwrap().contains(&json!("query")));
+        assert!(focus.schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("query")));
     }
 
     #[test]
     fn test_context_evict_schema() {
         let descriptions = context_tool_descriptions();
-        let evict = descriptions.iter().find(|d| d.name == CONTEXT_EVICT).unwrap();
-        
+        let evict = descriptions
+            .iter()
+            .find(|d| d.name == CONTEXT_EVICT)
+            .unwrap();
+
         assert!(evict.description.contains("Remove"));
         assert!(evict.schema["properties"]["path"].is_object());
-        assert!(evict.schema["required"].as_array().unwrap().contains(&json!("path")));
+        assert!(evict.schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("path")));
     }
 
     #[test]
     fn test_context_bulk_read_default_max_files() {
         let descriptions = context_tool_descriptions();
-        let bulk = descriptions.iter().find(|d| d.name == CONTEXT_BULK_READ).unwrap();
-        
+        let bulk = descriptions
+            .iter()
+            .find(|d| d.name == CONTEXT_BULK_READ)
+            .unwrap();
+
         assert_eq!(bulk.schema["properties"]["max_files"]["default"], 20);
     }
 
     #[test]
     fn test_context_focus_default_max_files() {
         let descriptions = context_tool_descriptions();
-        let focus = descriptions.iter().find(|d| d.name == CONTEXT_FOCUS).unwrap();
-        
+        let focus = descriptions
+            .iter()
+            .find(|d| d.name == CONTEXT_FOCUS)
+            .unwrap();
+
         assert_eq!(focus.schema["properties"]["max_files"]["default"], 5);
     }
 }

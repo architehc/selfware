@@ -671,10 +671,8 @@ pub async fn analyze_impact(
                 let file_name = path.to_string_lossy().to_lowercase();
 
                 // Simple text-based search for references
-                let symbol_matches =
-                    symbol.is_some_and(|s: &str| content.contains(s));
-                if content.contains(&target_name) || symbol_matches
-                {
+                let symbol_matches = symbol.is_some_and(|s: &str| content.contains(s));
+                if content.contains(&target_name) || symbol_matches {
                     let info = CallerInfo {
                         file: path.to_string_lossy().to_string(),
                         line: 1, // Would need line-by-line analysis
@@ -854,7 +852,12 @@ mod tests {
 
     #[test]
     fn test_strategy_fix_bug_is_targeted() {
-        let planner = EvolutionPlanner::new("Fix the failing test".to_string(), 20, 10000, PathBuf::from("."));
+        let planner = EvolutionPlanner::new(
+            "Fix the failing test".to_string(),
+            20,
+            10000,
+            PathBuf::from("."),
+        );
         let keywords = extract_keywords("Fix the failing test");
         let strategy = planner.determine_strategy(&keywords);
         assert!(matches!(strategy, PlanningStrategy::TargetedChange));
@@ -862,7 +865,12 @@ mod tests {
 
     #[test]
     fn test_strategy_error_is_targeted() {
-        let planner = EvolutionPlanner::new("Resolve error in parser".to_string(), 20, 10000, PathBuf::from("."));
+        let planner = EvolutionPlanner::new(
+            "Resolve error in parser".to_string(),
+            20,
+            10000,
+            PathBuf::from("."),
+        );
         let keywords = extract_keywords("Resolve error in parser");
         let strategy = planner.determine_strategy(&keywords);
         assert!(matches!(strategy, PlanningStrategy::TargetedChange));
@@ -870,7 +878,12 @@ mod tests {
 
     #[test]
     fn test_strategy_refactor_is_introspection() {
-        let planner = EvolutionPlanner::new("Refactor the agent module".to_string(), 20, 10000, PathBuf::from("."));
+        let planner = EvolutionPlanner::new(
+            "Refactor the agent module".to_string(),
+            20,
+            10000,
+            PathBuf::from("."),
+        );
         let keywords = extract_keywords("Refactor the agent module");
         let strategy = planner.determine_strategy(&keywords);
         assert!(matches!(strategy, PlanningStrategy::IntrospectionFirst));
@@ -878,7 +891,12 @@ mod tests {
 
     #[test]
     fn test_strategy_improve_is_introspection() {
-        let planner = EvolutionPlanner::new("Improve error handling".to_string(), 20, 10000, PathBuf::from("."));
+        let planner = EvolutionPlanner::new(
+            "Improve error handling".to_string(),
+            20,
+            10000,
+            PathBuf::from("."),
+        );
         let keywords = extract_keywords("Improve error handling");
         let strategy = planner.determine_strategy(&keywords);
         assert!(matches!(strategy, PlanningStrategy::IntrospectionFirst));
@@ -886,7 +904,12 @@ mod tests {
 
     #[test]
     fn test_strategy_add_is_exploratory() {
-        let planner = EvolutionPlanner::new("Add new logging module".to_string(), 20, 10000, PathBuf::from("."));
+        let planner = EvolutionPlanner::new(
+            "Add new logging module".to_string(),
+            20,
+            10000,
+            PathBuf::from("."),
+        );
         let keywords = extract_keywords("Add new logging module");
         let strategy = planner.determine_strategy(&keywords);
         assert!(matches!(strategy, PlanningStrategy::Exploratory));
@@ -894,7 +917,12 @@ mod tests {
 
     #[test]
     fn test_strategy_implement_is_exploratory() {
-        let planner = EvolutionPlanner::new("Implement rate limiting".to_string(), 20, 10000, PathBuf::from("."));
+        let planner = EvolutionPlanner::new(
+            "Implement rate limiting".to_string(),
+            20,
+            10000,
+            PathBuf::from("."),
+        );
         let keywords = extract_keywords("Implement rate limiting");
         let strategy = planner.determine_strategy(&keywords);
         assert!(matches!(strategy, PlanningStrategy::Exploratory));
@@ -902,7 +930,12 @@ mod tests {
 
     #[test]
     fn test_strategy_understand_is_exploratory() {
-        let planner = EvolutionPlanner::new("understand the codebase".to_string(), 20, 10000, PathBuf::from("."));
+        let planner = EvolutionPlanner::new(
+            "understand the codebase".to_string(),
+            20,
+            10000,
+            PathBuf::from("."),
+        );
         let keywords = extract_keywords("understand the codebase");
         let strategy = planner.determine_strategy(&keywords);
         assert!(matches!(strategy, PlanningStrategy::Exploratory));
@@ -910,7 +943,12 @@ mod tests {
 
     #[test]
     fn test_strategy_default_is_introspection() {
-        let planner = EvolutionPlanner::new("do something general".to_string(), 20, 10000, PathBuf::from("."));
+        let planner = EvolutionPlanner::new(
+            "do something general".to_string(),
+            20,
+            10000,
+            PathBuf::from("."),
+        );
         let keywords = extract_keywords("do something general");
         let strategy = planner.determine_strategy(&keywords);
         assert!(matches!(strategy, PlanningStrategy::IntrospectionFirst));
@@ -922,7 +960,8 @@ mod tests {
 
     #[test]
     fn test_risk_safety_file_is_critical() {
-        let planner = EvolutionPlanner::new("change safety".to_string(), 20, 10000, PathBuf::from("."));
+        let planner =
+            EvolutionPlanner::new("change safety".to_string(), 20, 10000, PathBuf::from("."));
         let files = vec![PathBuf::from("src/safety/checker.rs")];
         let risk = planner.assess_risk(&[], &files);
         assert!(matches!(risk, RiskLevel::Critical));
@@ -938,15 +977,23 @@ mod tests {
 
     #[test]
     fn test_risk_many_files_is_high() {
-        let planner = EvolutionPlanner::new("update docs".to_string(), 20, 10000, PathBuf::from("."));
-        let files: Vec<PathBuf> = (0..15).map(|i| PathBuf::from(format!("src/file{}.rs", i))).collect();
+        let planner =
+            EvolutionPlanner::new("update docs".to_string(), 20, 10000, PathBuf::from("."));
+        let files: Vec<PathBuf> = (0..15)
+            .map(|i| PathBuf::from(format!("src/file{}.rs", i)))
+            .collect();
         let risk = planner.assess_risk(&[], &files);
         assert!(matches!(risk, RiskLevel::High));
     }
 
     #[test]
     fn test_risk_api_goal_is_high() {
-        let planner = EvolutionPlanner::new("change the public api".to_string(), 20, 10000, PathBuf::from("."));
+        let planner = EvolutionPlanner::new(
+            "change the public api".to_string(),
+            20,
+            10000,
+            PathBuf::from("."),
+        );
         let files = vec![PathBuf::from("src/lib.rs")];
         let risk = planner.assess_risk(&[], &files);
         assert!(matches!(risk, RiskLevel::High));
@@ -954,7 +1001,12 @@ mod tests {
 
     #[test]
     fn test_risk_modify_is_medium() {
-        let planner = EvolutionPlanner::new("modify config loader".to_string(), 20, 10000, PathBuf::from("."));
+        let planner = EvolutionPlanner::new(
+            "modify config loader".to_string(),
+            20,
+            10000,
+            PathBuf::from("."),
+        );
         let files = vec![PathBuf::from("src/config.rs")];
         let risk = planner.assess_risk(&[], &files);
         assert!(matches!(risk, RiskLevel::Medium));

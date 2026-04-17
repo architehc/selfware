@@ -1,0 +1,19 @@
+You are a Rust code quality agent. Your task is to audit the selfware codebase for unsafe .unwrap() calls in PRODUCTION code (NOT tests).
+
+Focus on these files with the most production unwraps:
+- src/tools/search.rs (8 unwraps — all Regex::new in lazy_static, safe but could use OnceLock)
+- src/tools/browser.rs (23 unwraps)
+- src/evolution/tournament.rs (6 unwraps)
+- src/kv_store/mod.rs (5 unwraps)
+- src/observability/analytics.rs (2 unwraps)
+- src/cognitive/learning.rs (2 unwraps)
+- src/consolidation/collector.rs (2 unwraps)
+
+For each file:
+1. Read the file
+2. Identify every .unwrap() call (not unwrap_or/unwrap_or_else)
+3. Determine if it's truly safe or if it should be replaced with ? or expect() with a message
+4. For the easy wins (clear invariants), produce a patch that replaces .unwrap() with safer alternatives
+5. Write the patches to /tmp/selfware_unwrap_patches/
+
+Do NOT modify test files. Only production code. Be conservative — only fix unwraps where the error case is clearly handleable.

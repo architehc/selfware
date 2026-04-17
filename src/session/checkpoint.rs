@@ -111,9 +111,8 @@ impl CheckpointEnvelope {
                     path
                 )
             })?;
-            file.sync_all().with_context(|| {
-                format!("Failed to sync HMAC key file {:?} to disk", path)
-            })?;
+            file.sync_all()
+                .with_context(|| format!("Failed to sync HMAC key file {:?} to disk", path))?;
         }
         #[cfg(not(unix))]
         {
@@ -531,7 +530,7 @@ impl TaskCheckpoint {
         let id_matches = self
             .pending_visual_assertion
             .as_ref()
-            .map_or(false, |p| p.id == assertion_id);
+            .is_some_and(|p| p.id == assertion_id);
         if id_matches {
             if let Some(mut pending) = self.pending_visual_assertion.take() {
                 pending.verified = true;
@@ -1043,8 +1042,19 @@ impl CheckpointManager {
         }
 
         Err(last_err.map_or_else(
-            || anyhow::anyhow!("Checkpoint save failed: all {} retry attempts exhausted", DELAYS_MS.len()),
-            |e| anyhow::anyhow!("Checkpoint save failed after {} attempts: {}", DELAYS_MS.len(), e),
+            || {
+                anyhow::anyhow!(
+                    "Checkpoint save failed: all {} retry attempts exhausted",
+                    DELAYS_MS.len()
+                )
+            },
+            |e| {
+                anyhow::anyhow!(
+                    "Checkpoint save failed after {} attempts: {}",
+                    DELAYS_MS.len(),
+                    e
+                )
+            },
         ))
     }
 

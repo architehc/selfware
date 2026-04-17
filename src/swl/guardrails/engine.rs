@@ -430,7 +430,7 @@ impl GuardrailEngine {
     }
 
     /// Evaluate JSON logic
-    /// 
+    ///
     /// Supports a subset of JSON Logic operators:
     /// - Comparison: "==", "!=", ">", "<", ">=", "<="
     /// - Logic: "and", "or", "!" (not)
@@ -501,20 +501,20 @@ impl GuardrailEngine {
             ">=" => self.evaluate_json_numeric_comparison(args, context, |a, b| a >= b, ">="),
             "<" => self.evaluate_json_numeric_comparison(args, context, |a, b| a < b, "<"),
             "<=" => self.evaluate_json_numeric_comparison(args, context, |a, b| a <= b, "<="),
-            
+
             // Logic operators
             "and" | "&&" => self.evaluate_json_and(args, context),
             "or" | "||" => self.evaluate_json_or(args, context),
             "!" | "not" => self.evaluate_json_not(args, context),
-            
+
             // String operators
             "contains" => self.evaluate_json_contains(args, context),
             "match" => self.evaluate_json_match(args, context),
-            
+
             // Existence check
             "exists" => self.evaluate_json_exists(args, context),
             "var" => self.evaluate_json_var(args, context),
-            
+
             // Unknown operator
             _ => EvaluationResult::Error {
                 message: format!("Unknown JSON Logic operator: '{}'", op),
@@ -729,7 +729,10 @@ impl GuardrailEngine {
                     EvaluationResult::Pass
                 } else {
                     EvaluationResult::Fail {
-                        reason: format!("'{}' does not match pattern '{}'", source_str, pattern_str),
+                        reason: format!(
+                            "'{}' does not match pattern '{}'",
+                            source_str, pattern_str
+                        ),
                     }
                 }
             }
@@ -778,7 +781,8 @@ impl GuardrailEngine {
         };
 
         // Try standard resolution, then fallback to state lookup
-        let value = self.resolve_value(var_path, context)
+        let value = self
+            .resolve_value(var_path, context)
             .or_else(|| context.state.get(var_path).cloned());
 
         match value {
@@ -1066,16 +1070,28 @@ mod tests {
 
         // Test numeric equality
         let result = engine.evaluate_inline_expression("state.count == 42", &ctx);
-        assert!(result.is_pass(), "state.count == 42 should pass, got: {:?}", result);
+        assert!(
+            result.is_pass(),
+            "state.count == 42 should pass, got: {:?}",
+            result
+        );
 
         // Test inequality
         let result = engine.evaluate_inline_expression("state.count != 10", &ctx);
-        assert!(result.is_pass(), "state.count != 10 should pass, got: {:?}", result);
+        assert!(
+            result.is_pass(),
+            "state.count != 10 should pass, got: {:?}",
+            result
+        );
 
         // Test string equality
         let ctx2 = GuardrailContext::new().with_state("name", "test");
         let result = engine.evaluate_inline_expression("state.name == 'test'", &ctx2);
-        assert!(result.is_pass(), "state.name == 'test' should pass, got: {:?}", result);
+        assert!(
+            result.is_pass(),
+            "state.name == 'test' should pass, got: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -1086,12 +1102,20 @@ mod tests {
         // Test >= operator
         let json_logic = r#"{">=": [{"var": "count"}, 5]}"#;
         let result = engine.evaluate_json_logic(json_logic, &ctx);
-        assert!(result.is_pass(), ">= should pass when count is 10, got: {:?}", result);
+        assert!(
+            result.is_pass(),
+            ">= should pass when count is 10, got: {:?}",
+            result
+        );
 
         // Test < operator
         let json_logic = r#"{"<": [{"var": "count"}, 20]}"#;
         let result = engine.evaluate_json_logic(json_logic, &ctx);
-        assert!(result.is_pass(), "< should pass when count is 10 and comparing to 20, got: {:?}", result);
+        assert!(
+            result.is_pass(),
+            "< should pass when count is 10 and comparing to 20, got: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -1104,6 +1128,10 @@ mod tests {
         // Test AND with two true conditions
         let json_logic = r#"{"and": [{"var": "count"}, {"var": "enabled"}]}"#;
         let result = engine.evaluate_json_logic(json_logic, &ctx);
-        assert!(result.is_pass(), "AND should pass when both conditions are true, got: {:?}", result);
+        assert!(
+            result.is_pass(),
+            "AND should pass when both conditions are true, got: {:?}",
+            result
+        );
     }
 }

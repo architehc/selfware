@@ -227,7 +227,7 @@ impl WindowManager {
     }
 
     /// Resize a window by ID.
-    /// 
+    ///
     /// # Platform Support
     /// - **Linux**: Fully implemented using `wmctrl` and `xdotool`
     /// - **macOS**: STUB - Not yet implemented. Requires Accessibility permissions
@@ -242,13 +242,16 @@ impl WindowManager {
         {
             // STUB: macOS resize not yet implemented
             // Would require AppleScript or CoreGraphics API
-            warn!("STUB: Window resize not implemented for macOS - window {:?} not resized", id);
+            warn!(
+                "STUB: Window resize not implemented for macOS - window {:?} not resized",
+                id
+            );
         }
         Ok(())
     }
 
     /// Move a window to specific coordinates.
-    /// 
+    ///
     /// # Platform Support
     /// - **Linux**: Fully implemented using `wmctrl` and `xdotool`
     /// - **macOS**: STUB - Not yet implemented. Requires Accessibility permissions
@@ -263,13 +266,16 @@ impl WindowManager {
         {
             // STUB: macOS move not yet implemented
             // Would require AppleScript or CoreGraphics API
-            warn!("STUB: Window move not implemented for macOS - window {:?} not moved", id);
+            warn!(
+                "STUB: Window move not implemented for macOS - window {:?} not moved",
+                id
+            );
         }
         Ok(())
     }
 
     /// Minimize a window.
-    /// 
+    ///
     /// # Platform Support
     /// - **Linux**: Fully implemented using `xdotool` and `wmctrl`
     /// - **macOS**: STUB - Not yet implemented. Requires Accessibility permissions.
@@ -282,13 +288,16 @@ impl WindowManager {
         #[cfg(target_os = "macos")]
         {
             // STUB: macOS minimize not yet implemented
-            warn!("STUB: Window minimize not implemented for macOS - window {:?} not minimized", id);
+            warn!(
+                "STUB: Window minimize not implemented for macOS - window {:?} not minimized",
+                id
+            );
         }
         Ok(())
     }
 
     /// Close a window.
-    /// 
+    ///
     /// # Platform Support
     /// - **Linux**: Fully implemented using `wmctrl` and `xdotool`
     /// - **macOS**: STUB - Not yet implemented. Requires Accessibility permissions.
@@ -301,7 +310,10 @@ impl WindowManager {
         #[cfg(target_os = "macos")]
         {
             // STUB: macOS close not yet implemented
-            warn!("STUB: Window close not implemented for macOS - window {:?} not closed", id);
+            warn!(
+                "STUB: Window close not implemented for macOS - window {:?} not closed",
+                id
+            );
         }
         Ok(())
     }

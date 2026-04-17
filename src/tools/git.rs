@@ -1028,11 +1028,11 @@ mod tests {
         let message = "Test commit message";
         let path = write_commit_message_file(message);
         assert!(path.is_some());
-        
+
         let path = path.unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, message);
-        
+
         // Clean up
         let _ = std::fs::remove_file(&path);
     }
@@ -1042,11 +1042,11 @@ mod tests {
         let message = "Line 1\nLine 2\nLine 3";
         let path = write_commit_message_file(message);
         assert!(path.is_some());
-        
+
         let path = path.unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, message);
-        
+
         // Clean up
         let _ = std::fs::remove_file(&path);
     }
@@ -1055,11 +1055,11 @@ mod tests {
     fn test_write_commit_message_file_unique_names() {
         let path1 = write_commit_message_file("msg1");
         let path2 = write_commit_message_file("msg2");
-        
+
         assert!(path1.is_some());
         assert!(path2.is_some());
         assert_ne!(path1, path2);
-        
+
         // Clean up
         let _ = std::fs::remove_file(&path1.unwrap());
         let _ = std::fs::remove_file(&path2.unwrap());

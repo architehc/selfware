@@ -1,7 +1,7 @@
 //! Tests for threat modeling module
 
-use super::*;
 use super::analyzer::ScanResult;
+use super::*;
 use std::path::PathBuf;
 
 // ============================================================================
@@ -17,7 +17,10 @@ fn test_stride_category_display() {
         format!("{}", StrideCategory::InformationDisclosure),
         "Information Disclosure"
     );
-    assert_eq!(format!("{}", StrideCategory::DenialOfService), "Denial of Service");
+    assert_eq!(
+        format!("{}", StrideCategory::DenialOfService),
+        "Denial of Service"
+    );
     assert_eq!(
         format!("{}", StrideCategory::ElevationOfPrivilege),
         "Elevation of Privilege"
@@ -29,39 +32,65 @@ fn test_stride_category_description() {
     assert!(!StrideCategory::Spoofing.description().is_empty());
     assert!(!StrideCategory::Tampering.description().is_empty());
     assert!(!StrideCategory::Repudiation.description().is_empty());
-    assert!(!StrideCategory::InformationDisclosure.description().is_empty());
+    assert!(!StrideCategory::InformationDisclosure
+        .description()
+        .is_empty());
     assert!(!StrideCategory::DenialOfService.description().is_empty());
-    assert!(!StrideCategory::ElevationOfPrivilege.description().is_empty());
+    assert!(!StrideCategory::ElevationOfPrivilege
+        .description()
+        .is_empty());
 }
 
 #[test]
 fn test_stride_category_description_content() {
-    assert!(StrideCategory::Spoofing.description().contains("Impersonating"));
-    assert!(StrideCategory::Tampering.description().contains("Modifying"));
-    assert!(StrideCategory::Repudiation.description().contains("Claiming"));
-    assert!(StrideCategory::InformationDisclosure.description().contains("Exposing"));
-    assert!(StrideCategory::DenialOfService.description().contains("unavailable"));
-    assert!(StrideCategory::ElevationOfPrivilege.description().contains("capabilities"));
+    assert!(StrideCategory::Spoofing
+        .description()
+        .contains("Impersonating"));
+    assert!(StrideCategory::Tampering
+        .description()
+        .contains("Modifying"));
+    assert!(StrideCategory::Repudiation
+        .description()
+        .contains("Claiming"));
+    assert!(StrideCategory::InformationDisclosure
+        .description()
+        .contains("Exposing"));
+    assert!(StrideCategory::DenialOfService
+        .description()
+        .contains("unavailable"));
+    assert!(StrideCategory::ElevationOfPrivilege
+        .description()
+        .contains("capabilities"));
 }
 
 #[test]
 fn test_stride_category_mitigations() {
     let spoofing_mitigations = StrideCategory::Spoofing.typical_mitigations();
     assert!(!spoofing_mitigations.is_empty());
-    assert!(spoofing_mitigations.iter().any(|m| m.contains("authentication")));
-    assert!(spoofing_mitigations.iter().any(|m| m.contains("MFA") || m.contains("Certificate")));
+    assert!(spoofing_mitigations
+        .iter()
+        .any(|m| m.contains("authentication")));
+    assert!(spoofing_mitigations
+        .iter()
+        .any(|m| m.contains("MFA") || m.contains("Certificate")));
 
     let tampering_mitigations = StrideCategory::Tampering.typical_mitigations();
     assert!(!tampering_mitigations.is_empty());
-    assert!(tampering_mitigations.iter().any(|m| m.contains("signature") || m.contains("MAC")));
+    assert!(tampering_mitigations
+        .iter()
+        .any(|m| m.contains("signature") || m.contains("MAC")));
 
     let repudiation_mitigations = StrideCategory::Repudiation.typical_mitigations();
     assert!(!repudiation_mitigations.is_empty());
-    assert!(repudiation_mitigations.iter().any(|m| m.contains("Audit") || m.contains("logging")));
+    assert!(repudiation_mitigations
+        .iter()
+        .any(|m| m.contains("Audit") || m.contains("logging")));
 
     let info_disc_mitigations = StrideCategory::InformationDisclosure.typical_mitigations();
     assert!(!info_disc_mitigations.is_empty());
-    assert!(info_disc_mitigations.iter().any(|m| m.contains("Encryption")));
+    assert!(info_disc_mitigations
+        .iter()
+        .any(|m| m.contains("Encryption")));
 
     let dos_mitigations = StrideCategory::DenialOfService.typical_mitigations();
     assert!(!dos_mitigations.is_empty());
@@ -69,7 +98,9 @@ fn test_stride_category_mitigations() {
 
     let eop_mitigations = StrideCategory::ElevationOfPrivilege.typical_mitigations();
     assert!(!eop_mitigations.is_empty());
-    assert!(eop_mitigations.iter().any(|m| m.contains("privilege") || m.contains("RBAC")));
+    assert!(eop_mitigations
+        .iter()
+        .any(|m| m.contains("privilege") || m.contains("RBAC")));
 }
 
 #[test]
@@ -181,7 +212,10 @@ fn test_asset_type_display() {
     assert_eq!(format!("{}", AssetType::SourceCode), "Source Code");
     assert_eq!(format!("{}", AssetType::Infrastructure), "Infrastructure");
     assert_eq!(format!("{}", AssetType::FinancialData), "Financial Data");
-    assert_eq!(format!("{}", AssetType::IntellectualProperty), "Intellectual Property");
+    assert_eq!(
+        format!("{}", AssetType::IntellectualProperty),
+        "Intellectual Property"
+    );
     assert_eq!(format!("{}", AssetType::Availability), "Availability");
     assert_eq!(format!("{}", AssetType::Other), "Other");
 }
@@ -314,7 +348,10 @@ fn test_entry_point_type_display() {
     assert_eq!(format!("{}", EntryPointType::MessageQueue), "Message Queue");
     assert_eq!(format!("{}", EntryPointType::Environment), "Environment");
     assert_eq!(format!("{}", EntryPointType::ConfigFile), "Config File");
-    assert_eq!(format!("{}", EntryPointType::UserInterface), "User Interface");
+    assert_eq!(
+        format!("{}", EntryPointType::UserInterface),
+        "User Interface"
+    );
     assert_eq!(format!("{}", EntryPointType::Other), "Other");
 }
 
@@ -516,9 +553,12 @@ fn test_threat_with_affected_asset() {
 
 #[test]
 fn test_threat_with_attack_vector() {
-    let threat = Threat::new("MITM", StrideCategory::Spoofing)
-        .with_attack_vector("Network interception");
-    assert_eq!(threat.attack_vector, Some("Network interception".to_string()));
+    let threat =
+        Threat::new("MITM", StrideCategory::Spoofing).with_attack_vector("Network interception");
+    assert_eq!(
+        threat.attack_vector,
+        Some("Network interception".to_string())
+    );
 }
 
 #[test]
@@ -550,8 +590,8 @@ fn test_threat_with_recommendation() {
 
 #[test]
 fn test_threat_with_source() {
-    let threat = Threat::new("Bug", StrideCategory::Tampering)
-        .with_source(PathBuf::from("src/main.rs"), 42);
+    let threat =
+        Threat::new("Bug", StrideCategory::Tampering).with_source(PathBuf::from("src/main.rs"), 42);
 
     assert_eq!(threat.source_file, Some(PathBuf::from("src/main.rs")));
     assert_eq!(threat.source_line, Some(42));
@@ -684,8 +724,7 @@ fn test_security_control_with_description() {
 
 #[test]
 fn test_security_control_with_effectiveness() {
-    let control = SecurityControl::new("Test", ControlType::Preventive)
-        .with_effectiveness(5);
+    let control = SecurityControl::new("Test", ControlType::Preventive).with_effectiveness(5);
     assert_eq!(control.effectiveness, 5);
 }
 
@@ -712,8 +751,8 @@ fn test_security_control_mitigates_threat() {
 
 #[test]
 fn test_security_control_with_owner() {
-    let control = SecurityControl::new("Audit Log", ControlType::Detective)
-        .with_owner("Security Team");
+    let control =
+        SecurityControl::new("Audit Log", ControlType::Detective).with_owner("Security Team");
     assert_eq!(control.owner, Some("Security Team".to_string()));
 }
 
@@ -758,8 +797,8 @@ fn test_entry_point_default_values() {
 
 #[test]
 fn test_entry_point_with_description() {
-    let entry = EntryPoint::new("API", EntryPointType::RestApi)
-        .with_description("Main REST API endpoint");
+    let entry =
+        EntryPoint::new("API", EntryPointType::RestApi).with_description("Main REST API endpoint");
     assert_eq!(entry.description, "Main REST API endpoint");
 }
 
@@ -853,11 +892,26 @@ fn test_risk_matrix_different_cells() {
     let mut matrix = RiskMatrix::new();
     matrix.add_threat("high-likely", Severity::High, Likelihood::Likely);
     matrix.add_threat("low-unlikely", Severity::Low, Likelihood::Unlikely);
-    matrix.add_threat("critical-certain", Severity::Critical, Likelihood::AlmostCertain);
+    matrix.add_threat(
+        "critical-certain",
+        Severity::Critical,
+        Likelihood::AlmostCertain,
+    );
 
-    assert_eq!(matrix.threats_at(Severity::High, Likelihood::Likely).len(), 1);
-    assert_eq!(matrix.threats_at(Severity::Low, Likelihood::Unlikely).len(), 1);
-    assert_eq!(matrix.threats_at(Severity::Critical, Likelihood::AlmostCertain).len(), 1);
+    assert_eq!(
+        matrix.threats_at(Severity::High, Likelihood::Likely).len(),
+        1
+    );
+    assert_eq!(
+        matrix.threats_at(Severity::Low, Likelihood::Unlikely).len(),
+        1
+    );
+    assert_eq!(
+        matrix
+            .threats_at(Severity::Critical, Likelihood::AlmostCertain)
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -920,11 +974,15 @@ fn test_stride_analyzer_get_patterns() {
 
     let spoofing_patterns = analyzer.get_patterns(StrideCategory::Spoofing);
     assert!(!spoofing_patterns.is_empty());
-    assert!(spoofing_patterns.iter().any(|p| p.name.contains("Authentication")));
+    assert!(spoofing_patterns
+        .iter()
+        .any(|p| p.name.contains("Authentication")));
 
     let tampering_patterns = analyzer.get_patterns(StrideCategory::Tampering);
     assert!(!tampering_patterns.is_empty());
-    assert!(tampering_patterns.iter().any(|p| p.name.contains("Injection")));
+    assert!(tampering_patterns
+        .iter()
+        .any(|p| p.name.contains("Injection")));
 }
 
 #[test]
@@ -1090,7 +1148,9 @@ async fn get_users() -> impl IntoResponse {
 
     let entry_points = mapper.map(code);
     assert!(!entry_points.is_empty());
-    assert!(entry_points.iter().any(|e| e.entry_type == EntryPointType::RestApi));
+    assert!(entry_points
+        .iter()
+        .any(|e| e.entry_type == EntryPointType::RestApi));
 }
 
 #[test]
@@ -1105,7 +1165,9 @@ struct UserQuery {
 
     let entry_points = mapper.map(code);
     assert!(!entry_points.is_empty());
-    assert!(entry_points.iter().any(|e| e.entry_type == EntryPointType::GraphQL));
+    assert!(entry_points
+        .iter()
+        .any(|e| e.entry_type == EntryPointType::GraphQL));
 }
 
 #[test]
@@ -1119,7 +1181,9 @@ fn query_db() {
 
     let entry_points = mapper.map(code);
     assert!(!entry_points.is_empty());
-    assert!(entry_points.iter().any(|e| e.entry_type == EntryPointType::Database));
+    assert!(entry_points
+        .iter()
+        .any(|e| e.entry_type == EntryPointType::Database));
 }
 
 #[test]
@@ -1136,7 +1200,9 @@ struct Args {
 
     let entry_points = mapper.map(code);
     assert!(!entry_points.is_empty());
-    assert!(entry_points.iter().any(|e| e.entry_type == EntryPointType::Cli));
+    assert!(entry_points
+        .iter()
+        .any(|e| e.entry_type == EntryPointType::Cli));
 }
 
 #[test]
@@ -1356,7 +1422,10 @@ fn test_threat_model_get_threat_mut() {
         t.status = ThreatStatus::Mitigated;
     }
 
-    assert_eq!(model.get_threat(&id).unwrap().status, ThreatStatus::Mitigated);
+    assert_eq!(
+        model.get_threat(&id).unwrap().status,
+        ThreatStatus::Mitigated
+    );
 }
 
 #[test]
@@ -1518,14 +1587,14 @@ fn test_threat_model_overall_risk_score() {
         Threat::new("T1", StrideCategory::Spoofing)
             .with_severity(Severity::High) // 3
             .with_likelihood(Likelihood::Likely), // 3
-        // Risk score: 3 * 3 = 9
+                                                  // Risk score: 3 * 3 = 9
     );
 
     model.add_threat(
         Threat::new("T2", StrideCategory::Tampering)
             .with_severity(Severity::Medium) // 2
             .with_likelihood(Likelihood::Possible), // 2
-        // Risk score: 2 * 2 = 4
+                                                    // Risk score: 2 * 2 = 4
     );
 
     let score = model.overall_risk_score();
@@ -1595,9 +1664,17 @@ fn test_threat_model_stride_coverage() {
     assert_eq!(*coverage.get(&StrideCategory::Spoofing).unwrap(), 2);
     assert_eq!(*coverage.get(&StrideCategory::Tampering).unwrap(), 1);
     assert_eq!(*coverage.get(&StrideCategory::Repudiation).unwrap(), 0);
-    assert_eq!(*coverage.get(&StrideCategory::InformationDisclosure).unwrap(), 0);
+    assert_eq!(
+        *coverage
+            .get(&StrideCategory::InformationDisclosure)
+            .unwrap(),
+        0
+    );
     assert_eq!(*coverage.get(&StrideCategory::DenialOfService).unwrap(), 0);
-    assert_eq!(*coverage.get(&StrideCategory::ElevationOfPrivilege).unwrap(), 0);
+    assert_eq!(
+        *coverage.get(&StrideCategory::ElevationOfPrivilege).unwrap(),
+        0
+    );
 }
 
 #[test]
@@ -1727,7 +1804,10 @@ fn test_multiple_threats_same_category() {
     let mut model = ThreatModel::new("Test");
 
     for i in 0..100 {
-        model.add_threat(Threat::new(format!("Threat {}", i), StrideCategory::Spoofing));
+        model.add_threat(Threat::new(
+            format!("Threat {}", i),
+            StrideCategory::Spoofing,
+        ));
     }
 
     let spoofing = model.threats_by_category(StrideCategory::Spoofing);
@@ -1828,7 +1908,12 @@ mod property_tests {
         for score in 0..=20 {
             let level = RiskLevel::from_score(score);
             let (min, _max) = level.score_range();
-            assert!(score >= min || score < min, "Score {} should be in range for {:?}", score, level);
+            assert!(
+                score >= min || score < min,
+                "Score {} should be in range for {:?}",
+                score,
+                level
+            );
         }
     }
 
@@ -1870,7 +1955,11 @@ mod property_tests {
     fn test_all_stride_categories_have_mitigations() {
         for category in StrideCategory::all() {
             let mitigations = category.typical_mitigations();
-            assert!(!mitigations.is_empty(), "{:?} should have mitigations", category);
+            assert!(
+                !mitigations.is_empty(),
+                "{:?} should have mitigations",
+                category
+            );
         }
     }
 
@@ -1892,13 +1981,25 @@ mod property_tests {
 
         for _ in 0..100 {
             let threat = Threat::new("Test", StrideCategory::Spoofing);
-            assert!(threat_ids.insert(threat.id.clone()), "Duplicate threat ID: {}", threat.id);
+            assert!(
+                threat_ids.insert(threat.id.clone()),
+                "Duplicate threat ID: {}",
+                threat.id
+            );
 
             let asset = Asset::new("Test", AssetType::Other);
-            assert!(asset_ids.insert(asset.id.clone()), "Duplicate asset ID: {}", asset.id);
+            assert!(
+                asset_ids.insert(asset.id.clone()),
+                "Duplicate asset ID: {}",
+                asset.id
+            );
 
             let control = SecurityControl::new("Test", ControlType::Preventive);
-            assert!(control_ids.insert(control.id.clone()), "Duplicate control ID: {}", control.id);
+            assert!(
+                control_ids.insert(control.id.clone()),
+                "Duplicate control ID: {}",
+                control.id
+            );
         }
     }
 
@@ -1906,15 +2007,17 @@ mod property_tests {
     #[test]
     fn test_risk_matrix_consistency() {
         let mut matrix = RiskMatrix::new();
-        
+
         matrix.add_threat("test-id", Severity::High, Likelihood::Likely);
-        
+
         let threats = matrix.threats_at(Severity::High, Likelihood::Likely);
         assert_eq!(threats.len(), 1);
         assert_eq!(threats[0], "test-id");
-        
+
         // Different severity/likelihood should be empty
-        assert!(matrix.threats_at(Severity::Low, Likelihood::Unlikely).is_empty());
+        assert!(matrix
+            .threats_at(Severity::Low, Likelihood::Unlikely)
+            .is_empty());
     }
 }
 
@@ -1925,8 +2028,8 @@ mod property_tests {
 #[test]
 fn test_full_threat_model_workflow() {
     // Create a threat model
-    let mut model = ThreatModel::new("E-commerce System")
-        .with_description("Online shopping platform");
+    let mut model =
+        ThreatModel::new("E-commerce System").with_description("Online shopping platform");
 
     // Add assets
     let db_asset = Asset::new("Customer Database", AssetType::UserData)
@@ -1964,11 +2067,14 @@ fn test_full_threat_model_workflow() {
         .with_recommendation("Use parameterized queries");
     let sql_id = model.add_threat(sql_injection);
 
-    let data_leak = Threat::new("Sensitive Data Exposure", StrideCategory::InformationDisclosure)
-        .with_description("API keys in logs")
-        .with_severity(Severity::High)
-        .with_likelihood(Likelihood::Likely)
-        .with_affected_asset(&api_id);
+    let data_leak = Threat::new(
+        "Sensitive Data Exposure",
+        StrideCategory::InformationDisclosure,
+    )
+    .with_description("API keys in logs")
+    .with_severity(Severity::High)
+    .with_likelihood(Likelihood::Likely)
+    .with_affected_asset(&api_id);
     model.add_threat(data_leak);
 
     // Add controls

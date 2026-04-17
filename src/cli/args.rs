@@ -88,6 +88,10 @@ pub(crate) struct Cli {
     /// orchestrating parallel work across multiple worker agents.
     #[arg(long)]
     pub(crate) coordinator: bool,
+
+    /// Validate the configuration file and exit without running the agent
+    #[arg(long)]
+    pub(crate) validate_config: bool,
 }
 
 /// Color theme for terminal output

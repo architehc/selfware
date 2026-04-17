@@ -818,7 +818,9 @@ impl Agent {
                 .to_string(),
         ));
 
-        if self.consecutive_read_only_steps >= escalation_threshold && self.pending_synthesis.is_none() {
+        if self.consecutive_read_only_steps >= escalation_threshold
+            && self.pending_synthesis.is_none()
+        {
             info!(
                 "Escalating progress-guard stall to phase-2 synthesis after {} read-only steps",
                 self.consecutive_read_only_steps
@@ -1443,10 +1445,17 @@ impl Agent {
             // Schema validation for native function calls
             if use_native_fc {
                 let defs = self.tools.definitions();
-                if let Err(e) = crate::agent::tool_validator::validate_tool_call(&fake_call, &defs) {
+                if let Err(e) = crate::agent::tool_validator::validate_tool_call(&fake_call, &defs)
+                {
                     let error_msg = format!("Tool call validation failed: {}", e);
                     warn!("{}", error_msg);
-                    self.push_tool_result_message(use_native_fc, &call_id, &name, false, &error_msg);
+                    self.push_tool_result_message(
+                        use_native_fc,
+                        &call_id,
+                        &name,
+                        false,
+                        &error_msg,
+                    );
                     self.log_tool_call(&name, &args_str, &error_msg, false, start_time, false);
                     self.remember_failed_tool(&name, &error_msg);
                     self.record_failed_tool_attempt(&name, &args_str, "validation", &error_msg);
@@ -3324,7 +3333,10 @@ mod tests {
 
     #[test]
     fn test_summarize_file_read_long() {
-        let lines: String = (0..200).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+        let lines: String = (0..200)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         let raw = serde_json::json!({
             "total_lines": 200,
             "content": lines
@@ -3663,7 +3675,9 @@ mod tests {
 
     #[test]
     fn test_not_observational_sed_inplace() {
-        assert!(!shell_command_is_observational("sed -i 's/foo/bar/' file.txt"));
+        assert!(!shell_command_is_observational(
+            "sed -i 's/foo/bar/' file.txt"
+        ));
     }
 
     #[test]

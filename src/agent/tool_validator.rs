@@ -23,32 +23,32 @@ pub fn validate_tool_call(call: &ToolCall, definitions: &[ToolDefinition]) -> Re
     let definition = definitions
         .iter()
         .find(|d| d.function.name == tool_name)
-        .ok_or_else(|| {
-            ToolError::InvalidToolCall {
-                name: tool_name.to_string(),
-                message: format!(
-                    "Unknown tool '{}'. Available tools: {:?}",
-                    tool_name,
-                    definitions.iter().map(|d| &d.function.name).collect::<Vec<_>>()
-                ),
-            }
+        .ok_or_else(|| ToolError::InvalidToolCall {
+            name: tool_name.to_string(),
+            message: format!(
+                "Unknown tool '{}'. Available tools: {:?}",
+                tool_name,
+                definitions
+                    .iter()
+                    .map(|d| &d.function.name)
+                    .collect::<Vec<_>>()
+            ),
         })?;
 
     // Parse arguments
-    let args: Value = serde_json::from_str(&call.function.arguments).map_err(|e| {
-        ToolError::InvalidToolCall {
+    let args: Value =
+        serde_json::from_str(&call.function.arguments).map_err(|e| ToolError::InvalidToolCall {
             name: tool_name.to_string(),
             message: format!("Arguments are not valid JSON: {}", e),
-        }
-    })?;
+        })?;
 
     // Arguments must be an object
-    let args_obj = args.as_object().ok_or_else(|| {
-        ToolError::InvalidArguments {
+    let args_obj = args
+        .as_object()
+        .ok_or_else(|| ToolError::InvalidArguments {
             name: tool_name.to_string(),
             message: "Tool arguments must be a JSON object".to_string(),
-        }
-    })?;
+        })?;
 
     // Validate required fields from schema
     let schema = &definition.function.parameters;
@@ -129,7 +129,10 @@ mod tests {
     use crate::api::types::{FunctionDefinition, ToolDefinition, ToolFunction};
 
     fn make_definition(name: &str, required: Vec<&str>) -> ToolDefinition {
-        let required: Vec<Value> = required.into_iter().map(|s| Value::String(s.to_string())).collect();
+        let required: Vec<Value> = required
+            .into_iter()
+            .map(|s| Value::String(s.to_string()))
+            .collect();
         ToolDefinition {
             def_type: "function".to_string(),
             function: FunctionDefinition {

@@ -5,9 +5,7 @@ use std::sync::Arc;
 
 use super::coordinator::{ConflictStrategy, Swarm};
 use super::memory::SharedMemory;
-use super::types::{
-    Agent, AgentRole, AgentStatus, DecisionStatus, SwarmTask, TaskStatus, Vote,
-};
+use super::types::{Agent, AgentRole, AgentStatus, DecisionStatus, SwarmTask, TaskStatus, Vote};
 
 // ============================================================================
 // Agent Tests
@@ -366,7 +364,7 @@ fn test_decision_is_pending_false_when_resolved() {
     let mut decision = super::types::Decision::new("Test?", vec!["A".into()]);
     decision.add_vote(Vote::new("a1", AgentRole::Security, "A", 1.0, "r"));
     let trust: HashMap<String, f32> = [("a1".to_string(), 1.0)].into_iter().collect();
-    
+
     assert!(decision.is_pending());
     decision.resolve(&trust);
     assert!(!decision.is_pending());
@@ -377,7 +375,7 @@ fn test_decision_resolve_sets_resolved_at() {
     let mut decision = super::types::Decision::new("Test?", vec!["A".into()]);
     decision.add_vote(Vote::new("a1", AgentRole::Security, "A", 1.0, "r"));
     let trust: HashMap<String, f32> = [("a1".to_string(), 1.0)].into_iter().collect();
-    
+
     assert!(decision.resolved_at.is_none());
     decision.resolve(&trust);
     assert!(decision.resolved_at.is_some());
@@ -948,10 +946,10 @@ fn test_swarm_consensus_threshold_clamping() {
     // Test that threshold values are clamped to 0.0-1.0 range
     let swarm = Swarm::new().with_consensus_threshold(2.0);
     let _ = swarm;
-    
+
     let swarm2 = Swarm::new().with_consensus_threshold(-1.0);
     let _ = swarm2;
-    
+
     // Verify through behavior - these shouldn't panic
 }
 
@@ -973,7 +971,7 @@ fn test_resolve_conflict_priority_wins() {
 
     // Force conflict status through decision resolution
     swarm.resolve_decision(&did).ok();
-    
+
     let result = swarm.resolve_conflict(&did).unwrap();
     // Result may vary based on decision state
     assert!(result.is_some() || result.is_none());
@@ -1230,35 +1228,41 @@ fn test_queue_task_none_allowed() {
 #[test]
 fn test_swarm_agent_spawning_lifecycle() {
     let mut swarm = Swarm::new();
-    
+
     // Create agents with different roles
     let architect = Agent::new("Archie", AgentRole::Architect);
     let coder = Agent::new("Cody", AgentRole::Coder);
     let tester = Agent::new("Tessa", AgentRole::Tester);
-    
+
     let arch_id = swarm.add_agent(architect);
     let cod_id = swarm.add_agent(coder);
     let test_id = swarm.add_agent(tester);
-    
+
     // Verify all agents created
     assert_eq!(swarm.list_agents().len(), 3);
-    
+
     // Verify each agent can be retrieved
     assert!(swarm.get_agent(&arch_id).is_some());
     assert!(swarm.get_agent(&cod_id).is_some());
     assert!(swarm.get_agent(&test_id).is_some());
-    
+
     // Verify initial status
     assert_eq!(swarm.get_agent(&arch_id).unwrap().status, AgentStatus::Idle);
-    
+
     // Test lifecycle: Idle -> Working -> Completed
     swarm.get_agent_mut(&arch_id).unwrap().start_working();
-    assert_eq!(swarm.get_agent(&arch_id).unwrap().status, AgentStatus::Working);
-    
+    assert_eq!(
+        swarm.get_agent(&arch_id).unwrap().status,
+        AgentStatus::Working
+    );
+
     swarm.get_agent_mut(&arch_id).unwrap().complete_task(true);
-    assert_eq!(swarm.get_agent(&arch_id).unwrap().status, AgentStatus::Completed);
+    assert_eq!(
+        swarm.get_agent(&arch_id).unwrap().status,
+        AgentStatus::Completed
+    );
     assert_eq!(swarm.get_agent(&arch_id).unwrap().tasks_completed, 1);
-    
+
     // Remove agent
     let removed = swarm.remove_agent(&arch_id);
     assert!(removed.is_some());
@@ -1268,30 +1272,30 @@ fn test_swarm_agent_spawning_lifecycle() {
 #[test]
 fn test_swarm_task_distribution_with_trust() {
     let mut swarm = Swarm::new();
-    
+
     // Create two coders with different trust scores
     let coder1 = Agent::new("Coder1", AgentRole::Coder);
     let coder2 = Agent::new("Coder2", AgentRole::Coder);
-    
+
     let _id1 = swarm.add_agent(coder1);
     let id2 = swarm.add_agent(coder2);
-    
+
     // Give coder2 higher trust through successful tasks
     for _ in 0..5 {
         swarm.get_agent_mut(&id2).unwrap().complete_task(true);
     }
-    
+
     // Reset status to idle for task assignment
     swarm.get_agent_mut(&id2).unwrap().set_idle();
-    
+
     // Create task requiring coder
     let task = SwarmTask::new("Important task").with_role(AgentRole::Coder);
     let task_id = task.id.clone();
     swarm.queue_task(task).unwrap();
-    
+
     // Assign task
     let assigned = swarm.assign_task(&task_id);
-    
+
     // Should assign to one of the idle agents
     assert!(!assigned.is_empty());
 }
@@ -1299,25 +1303,25 @@ fn test_swarm_task_distribution_with_trust() {
 #[test]
 fn test_swarm_task_distribution_multiple_roles() {
     let mut swarm = Swarm::new();
-    
+
     // Create agents for different roles
     swarm.add_agent(Agent::new("Archie", AgentRole::Architect));
     swarm.add_agent(Agent::new("Cody", AgentRole::Coder));
     swarm.add_agent(Agent::new("Tessa", AgentRole::Tester));
     swarm.add_agent(Agent::new("Rex", AgentRole::Reviewer));
-    
+
     // Create task requiring multiple roles
     let task = SwarmTask::new("Complex task")
         .with_role(AgentRole::Architect)
         .with_role(AgentRole::Coder)
         .with_role(AgentRole::Tester);
-    
+
     let task_id = task.id.clone();
     swarm.queue_task(task).unwrap();
-    
+
     // Assign task
     let assigned = swarm.assign_task(&task_id);
-    
+
     // Should assign to agents matching required roles
     assert_eq!(assigned.len(), 3);
 }
@@ -1325,28 +1329,48 @@ fn test_swarm_task_distribution_multiple_roles() {
 #[test]
 fn test_swarm_consensus_with_multiple_votes() {
     let mut swarm = Swarm::new();
-    
+
     // Create agents with different roles and trust
     let architect = swarm.add_agent(Agent::new("Archie", AgentRole::Architect));
     let coder1 = swarm.add_agent(Agent::new("Coder1", AgentRole::Coder));
     let coder2 = swarm.add_agent(Agent::new("Coder2", AgentRole::Coder));
     let tester = swarm.add_agent(Agent::new("Tessa", AgentRole::Tester));
-    
+
     // Create decision
     let decision_id = swarm.create_decision(
         "Which architecture?",
-        vec!["Microservices".into(), "Monolith".into(), "Hybrid".into()]
+        vec!["Microservices".into(), "Monolith".into(), "Hybrid".into()],
     );
-    
+
     // Vote with different confidences
-    swarm.vote(&decision_id, &architect, "Microservices", 0.9, "Better scalability").unwrap();
-    swarm.vote(&decision_id, &coder1, "Monolith", 0.6, "Simpler deployment").unwrap();
-    swarm.vote(&decision_id, &coder2, "Microservices", 0.7, "Team autonomy").unwrap();
-    swarm.vote(&decision_id, &tester, "Microservices", 0.8, "Independent testing").unwrap();
-    
+    swarm
+        .vote(
+            &decision_id,
+            &architect,
+            "Microservices",
+            0.9,
+            "Better scalability",
+        )
+        .unwrap();
+    swarm
+        .vote(&decision_id, &coder1, "Monolith", 0.6, "Simpler deployment")
+        .unwrap();
+    swarm
+        .vote(&decision_id, &coder2, "Microservices", 0.7, "Team autonomy")
+        .unwrap();
+    swarm
+        .vote(
+            &decision_id,
+            &tester,
+            "Microservices",
+            0.8,
+            "Independent testing",
+        )
+        .unwrap();
+
     // Resolve decision
     let outcome = swarm.resolve_decision(&decision_id).unwrap();
-    
+
     // Should resolve to the option with highest weighted votes
     assert!(outcome.is_some());
 }
@@ -1354,44 +1378,59 @@ fn test_swarm_consensus_with_multiple_votes() {
 #[test]
 fn test_swarm_state_management() {
     let mut swarm = Swarm::new();
-    
+
     // Add agents in different states
     let _idle = swarm.add_agent(Agent::new("Idle", AgentRole::Coder));
     let working = swarm.add_agent(Agent::new("Working", AgentRole::Tester));
     let error = swarm.add_agent(Agent::new("Error", AgentRole::Reviewer));
-    
+
     swarm.get_agent_mut(&working).unwrap().start_working();
     swarm.get_agent_mut(&error).unwrap().set_error();
-    
+
     // Get stats
     let stats = swarm.stats();
-    
+
     assert_eq!(stats.total_agents, 3);
-    assert_eq!(*stats.agents_by_status.get(&AgentStatus::Idle).unwrap_or(&0), 1);
-    assert_eq!(*stats.agents_by_status.get(&AgentStatus::Working).unwrap_or(&0), 1);
-    assert_eq!(*stats.agents_by_status.get(&AgentStatus::Error).unwrap_or(&0), 1);
+    assert_eq!(
+        *stats.agents_by_status.get(&AgentStatus::Idle).unwrap_or(&0),
+        1
+    );
+    assert_eq!(
+        *stats
+            .agents_by_status
+            .get(&AgentStatus::Working)
+            .unwrap_or(&0),
+        1
+    );
+    assert_eq!(
+        *stats
+            .agents_by_status
+            .get(&AgentStatus::Error)
+            .unwrap_or(&0),
+        1
+    );
 }
 
 #[test]
 fn test_swarm_memory_shared_scratchpad() {
     let swarm = Swarm::new();
-    
+
     // Get memory handle
     let memory = swarm.memory();
-    
+
     // Write from one agent
     {
         let mut mem = memory.write().unwrap();
         mem.write("shared_key", "shared_value", "agent1");
     }
-    
+
     // Read from another agent
     {
         let mut mem = memory.write().unwrap();
         let value = mem.read("shared_key", "agent2");
         assert_eq!(value, Some("shared_value".to_string()));
     }
-    
+
     // Verify access log tracked both operations
     let mem = memory.read().unwrap();
     assert!(mem.access_log().len() >= 2);
@@ -1400,20 +1439,20 @@ fn test_swarm_memory_shared_scratchpad() {
 #[test]
 fn test_swarm_worker_timeout_handling() {
     let mut swarm = Swarm::new().with_decision_timeout(1); // 1 second timeout
-    
+
     // Create decision
     let decision_id = swarm.create_decision("Test?", vec!["A".into(), "B".into()]);
-    
+
     // Initially should not be timed out
     let timed_out = swarm.sweep_timed_out_decisions();
     assert!(timed_out.is_empty());
-    
+
     // Wait a bit and check again (with 1s timeout)
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    
+
     let timed_out = swarm.sweep_timed_out_decisions();
     assert!(timed_out.contains(&decision_id));
-    
+
     let decision = swarm.get_decision(&decision_id).unwrap();
     assert_eq!(decision.status, DecisionStatus::TimedOut);
 }
@@ -1421,24 +1460,24 @@ fn test_swarm_worker_timeout_handling() {
 #[test]
 fn test_swarm_error_handling_recovery() {
     let mut swarm = Swarm::new();
-    
+
     // Test error on nonexistent agent operations
     let result = swarm.get_agent("nonexistent");
     assert!(result.is_none());
-    
+
     let removed = swarm.remove_agent("nonexistent");
     assert!(removed.is_none());
-    
+
     // Test error on nonexistent decision operations
     let result = swarm.vote("nonexistent", "agent", "choice", 0.5, "reason");
     assert!(result.is_err());
-    
+
     let result = swarm.resolve_decision("nonexistent");
     assert!(result.is_err());
-    
+
     let result = swarm.resolve_conflict("nonexistent");
     assert!(result.is_err());
-    
+
     // Test completing nonexistent task (should not panic)
     swarm.complete_task("nonexistent", "agent", "result");
 }
@@ -1446,31 +1485,31 @@ fn test_swarm_error_handling_recovery() {
 #[test]
 fn test_swarm_task_priority_ordering() {
     let mut swarm = Swarm::new();
-    
+
     // Queue tasks with different priorities
     let low = SwarmTask::new("Low priority").with_priority(1);
     let medium = SwarmTask::new("Medium priority").with_priority(5);
     let high = SwarmTask::new("High priority").with_priority(10);
     let very_high = SwarmTask::new("Very high priority").with_priority(10);
-    
+
     swarm.queue_task(low).unwrap();
     swarm.queue_task(medium).unwrap();
     swarm.queue_task(high).unwrap();
     swarm.queue_task(very_high).unwrap();
-    
+
     // Should dequeue in priority order (highest first)
     let first_id = swarm.next_task().unwrap();
     let first = swarm.get_task(&first_id).unwrap();
     assert_eq!(first.priority, 10);
-    
+
     let second_id = swarm.next_task().unwrap();
     let second = swarm.get_task(&second_id).unwrap();
     assert_eq!(second.priority, 10);
-    
+
     let third_id = swarm.next_task().unwrap();
     let third = swarm.get_task(&third_id).unwrap();
     assert_eq!(third.priority, 5);
-    
+
     let fourth_id = swarm.next_task().unwrap();
     let fourth = swarm.get_task(&fourth_id).unwrap();
     assert_eq!(fourth.priority, 1);
@@ -1479,18 +1518,18 @@ fn test_swarm_task_priority_ordering() {
 #[test]
 fn test_swarm_task_assignment_with_busy_agents() {
     let mut swarm = Swarm::new();
-    
+
     // Add two coders, make one busy
     let coder1 = swarm.add_agent(Agent::new("Coder1", AgentRole::Coder));
     let coder2 = swarm.add_agent(Agent::new("Coder2", AgentRole::Coder));
-    
+
     swarm.get_agent_mut(&coder1).unwrap().start_working();
-    
+
     // Create task
     let task = SwarmTask::new("Coding task").with_role(AgentRole::Coder);
     let task_id = task.id.clone();
     swarm.queue_task(task).unwrap();
-    
+
     // Should only assign to idle coder
     let assigned = swarm.assign_task(&task_id);
     assert_eq!(assigned.len(), 1);
@@ -1500,24 +1539,24 @@ fn test_swarm_task_assignment_with_busy_agents() {
 #[test]
 fn test_swarm_concurrent_decisions() {
     let mut swarm = Swarm::new();
-    
+
     let agent = swarm.add_agent(Agent::new("Agent", AgentRole::Coder));
-    
+
     // Create multiple decisions
     let decision1 = swarm.create_decision("Q1?", vec!["A".into(), "B".into()]);
     let decision2 = swarm.create_decision("Q2?", vec!["X".into(), "Y".into()]);
     let decision3 = swarm.create_decision("Q3?", vec!["1".into(), "2".into()]);
-    
+
     // Vote on different decisions
     swarm.vote(&decision1, &agent, "A", 0.8, "reason1").unwrap();
     swarm.vote(&decision2, &agent, "Y", 0.7, "reason2").unwrap();
     swarm.vote(&decision3, &agent, "1", 0.9, "reason3").unwrap();
-    
+
     // Resolve each independently
     let outcome1 = swarm.resolve_decision(&decision1).unwrap();
     let outcome2 = swarm.resolve_decision(&decision2).unwrap();
     let outcome3 = swarm.resolve_decision(&decision3).unwrap();
-    
+
     assert_eq!(outcome1, Some("A".to_string()));
     assert_eq!(outcome2, Some("Y".to_string()));
     assert_eq!(outcome3, Some("1".to_string()));
@@ -1527,14 +1566,14 @@ fn test_swarm_concurrent_decisions() {
 fn test_swarm_agent_get_mut_operations() {
     let mut swarm = Swarm::new();
     let id = swarm.add_agent(Agent::new("Test", AgentRole::Coder));
-    
+
     // Test mutable operations
     {
         let agent = swarm.get_agent_mut(&id).unwrap();
         agent.start_working();
         agent.trust_score = 0.8;
     }
-    
+
     // Verify changes persisted
     let agent = swarm.get_agent(&id).unwrap();
     assert_eq!(agent.status, AgentStatus::Working);
@@ -1545,7 +1584,7 @@ fn test_swarm_agent_get_mut_operations() {
 fn test_swarm_memory_entries_retrieval() {
     let swarm = Swarm::new();
     let memory = swarm.memory();
-    
+
     // Write multiple entries
     {
         let mut mem = memory.write().unwrap();
@@ -1553,12 +1592,12 @@ fn test_swarm_memory_entries_retrieval() {
         mem.write("key2", "value2", "agent2");
         mem.write("key3", "value3", "agent1");
     }
-    
+
     // Retrieve and verify entries
     let mem = memory.read().unwrap();
     let entries = mem.entries();
     assert_eq!(entries.len(), 3);
-    
+
     let keys = mem.keys();
     assert_eq!(keys.len(), 3);
 }
@@ -1567,7 +1606,7 @@ fn test_swarm_memory_entries_retrieval() {
 fn test_swarm_memory_tag_and_find() {
     let swarm = Swarm::new();
     let memory = swarm.memory();
-    
+
     {
         let mut mem = memory.write().unwrap();
         mem.write("config", "app settings", "agent1");
@@ -1576,14 +1615,14 @@ fn test_swarm_memory_tag_and_find() {
         mem.tag("data", "user");
         mem.tag("config", "important");
     }
-    
+
     let mem = memory.read().unwrap();
     let system_entries = mem.find_by_tag("system");
     assert_eq!(system_entries.len(), 1);
-    
+
     let user_entries = mem.find_by_tag("user");
     assert_eq!(user_entries.len(), 1);
-    
+
     let important_entries = mem.find_by_tag("important");
     assert_eq!(important_entries.len(), 1);
 }
@@ -1596,10 +1635,10 @@ fn test_conflict_strategy_variants() {
     let _ = ConflictStrategy::MajorityWins;
     let _ = ConflictStrategy::HumanIntervention;
     let _ = ConflictStrategy::AcceptAll;
-    
+
     // Test default
     assert_eq!(ConflictStrategy::default(), ConflictStrategy::PriorityWins);
-    
+
     // Test with_swarm builder
     let swarm1 = Swarm::new().with_conflict_strategy(ConflictStrategy::MajorityWins);
     let swarm2 = Swarm::new().with_conflict_strategy(ConflictStrategy::ConfidenceWins);
@@ -1609,19 +1648,19 @@ fn test_conflict_strategy_variants() {
 #[test]
 fn test_decision_status_transitions() {
     use super::types::Decision;
-    
+
     let mut decision = Decision::new("Test?", vec!["A".into(), "B".into()]);
-    
+
     // Initially pending
     assert_eq!(decision.status, DecisionStatus::Pending);
     assert!(decision.is_pending());
-    
+
     // Add vote and resolve
     decision.add_vote(Vote::new("a1", AgentRole::Security, "A", 1.0, "reason"));
     let trust: HashMap<String, f32> = [("a1".to_string(), 1.0)].into_iter().collect();
-    
+
     decision.resolve(&trust);
-    
+
     // Now resolved
     assert_eq!(decision.status, DecisionStatus::Resolved);
     assert!(!decision.is_pending());
@@ -1631,14 +1670,14 @@ fn test_decision_status_transitions() {
 #[test]
 fn test_task_status_lifecycle() {
     let mut task = SwarmTask::new("Test task").with_role(AgentRole::Coder);
-    
+
     // Initial status
     assert_eq!(task.status, TaskStatus::Pending);
-    
+
     // After assignment (simulated)
     task.status = TaskStatus::InProgress;
     assert_eq!(task.status, TaskStatus::InProgress);
-    
+
     // After completion
     task.status = TaskStatus::Completed;
     assert_eq!(task.status, TaskStatus::Completed);
@@ -1648,16 +1687,16 @@ fn test_task_status_lifecycle() {
 fn test_swarm_complete_task_not_in_assigned() {
     let mut swarm = Swarm::new();
     let coder = swarm.add_agent(Agent::new("Coder", AgentRole::Coder));
-    
+
     // Create and queue task
     let task = SwarmTask::new("Task").with_role(AgentRole::Coder);
     let task_id = task.id.clone();
     swarm.queue_task(task).unwrap();
-    
+
     // Try to complete without assigning (task is in queue, not active_tasks)
     // This should log a warning but not panic
     swarm.complete_task(&task_id, &coder, "result");
-    
+
     // Task should still be in queue
     assert_eq!(swarm.list_tasks().len(), 1);
 }
@@ -1665,25 +1704,31 @@ fn test_swarm_complete_task_not_in_assigned() {
 #[test]
 fn test_swarm_stats_with_varied_trust() {
     let mut swarm = Swarm::new();
-    
+
     // Add agents with different trust levels
     let high_trust = swarm.add_agent(Agent::new("High", AgentRole::Coder));
     let low_trust = swarm.add_agent(Agent::new("Low", AgentRole::Tester));
-    
+
     // Build up trust for high_trust agent
     for _ in 0..10 {
-        swarm.get_agent_mut(&high_trust).unwrap().complete_task(true);
+        swarm
+            .get_agent_mut(&high_trust)
+            .unwrap()
+            .complete_task(true);
     }
-    
+
     // Reduce trust for low_trust agent
     for _ in 0..5 {
-        swarm.get_agent_mut(&low_trust).unwrap().complete_task(false);
+        swarm
+            .get_agent_mut(&low_trust)
+            .unwrap()
+            .complete_task(false);
     }
-    
+
     // Reset statuses
     swarm.get_agent_mut(&high_trust).unwrap().set_idle();
     swarm.get_agent_mut(&low_trust).unwrap().set_idle();
-    
+
     let stats = swarm.stats();
     assert_eq!(stats.total_agents, 2);
     assert!(stats.average_trust > 0.0);
@@ -1696,58 +1741,76 @@ fn test_swarm_complex_workflow() {
         .with_conflict_strategy(ConflictStrategy::PriorityWins)
         .with_consensus_threshold(0.6)
         .with_decision_timeout(300);
-    
+
     // Create a development team
     let architect = swarm.add_agent(Agent::new("Archie", AgentRole::Architect));
     let coder = swarm.add_agent(Agent::new("Cody", AgentRole::Coder));
     let tester = swarm.add_agent(Agent::new("Tessa", AgentRole::Tester));
     let _reviewer = swarm.add_agent(Agent::new("Rex", AgentRole::Reviewer));
-    
+
     // Step 1: Make an architectural decision
     let arch_decision = swarm.create_decision(
         "Which database?",
-        vec!["PostgreSQL".into(), "MongoDB".into(), "SQLite".into()]
+        vec!["PostgreSQL".into(), "MongoDB".into(), "SQLite".into()],
     );
-    
-    swarm.vote(&arch_decision, &architect, "PostgreSQL", 0.9, "Best for relational data").unwrap();
-    swarm.vote(&arch_decision, &coder, "PostgreSQL", 0.8, "Familiar with it").unwrap();
-    swarm.vote(&arch_decision, &tester, "SQLite", 0.6, "Simpler setup").unwrap();
-    
+
+    swarm
+        .vote(
+            &arch_decision,
+            &architect,
+            "PostgreSQL",
+            0.9,
+            "Best for relational data",
+        )
+        .unwrap();
+    swarm
+        .vote(
+            &arch_decision,
+            &coder,
+            "PostgreSQL",
+            0.8,
+            "Familiar with it",
+        )
+        .unwrap();
+    swarm
+        .vote(&arch_decision, &tester, "SQLite", 0.6, "Simpler setup")
+        .unwrap();
+
     let db_choice = swarm.resolve_decision(&arch_decision).unwrap();
     assert!(db_choice.is_some());
-    
+
     // Step 2: Create and assign implementation task
     let impl_task = SwarmTask::new("Implement database layer")
         .with_role(AgentRole::Coder)
         .with_role(AgentRole::Tester)
         .with_priority(8);
-    
+
     let task_id = impl_task.id.clone();
     swarm.queue_task(impl_task).unwrap();
-    
+
     let assigned = swarm.assign_task(&task_id);
     assert_eq!(assigned.len(), 2);
-    
+
     // Step 3: Complete the task
     for agent_id in &assigned {
         swarm.complete_task(&task_id, agent_id, "Task completed successfully");
     }
-    
+
     let task = swarm.get_task(&task_id).unwrap();
     assert_eq!(task.status, TaskStatus::Completed);
     assert_eq!(task.results.len(), 2);
-    
+
     // Step 4: Review task
     let review_task = SwarmTask::new("Review implementation")
         .with_role(AgentRole::Reviewer)
         .with_priority(9);
-    
+
     let review_id = review_task.id.clone();
     swarm.queue_task(review_task).unwrap();
-    
+
     let reviewers = swarm.assign_task(&review_id);
     assert!(!reviewers.is_empty());
-    
+
     // Verify final stats
     let stats = swarm.stats();
     assert_eq!(stats.total_agents, 4);
@@ -1757,24 +1820,24 @@ fn test_swarm_complex_workflow() {
 #[test]
 fn test_swarm_list_agents_filtering() {
     let mut swarm = Swarm::new();
-    
+
     // Add agents of different roles
     let _arch = swarm.add_agent(Agent::new("Arch", AgentRole::Architect));
     let _coder1 = swarm.add_agent(Agent::new("Coder1", AgentRole::Coder));
     let _coder2 = swarm.add_agent(Agent::new("Coder2", AgentRole::Coder));
     let _tester = swarm.add_agent(Agent::new("Tester", AgentRole::Tester));
-    
+
     // Test list_agents
     let all_agents = swarm.list_agents();
     assert_eq!(all_agents.len(), 4);
-    
+
     // Test agents_by_role
     let coders = swarm.agents_by_role(AgentRole::Coder);
     assert_eq!(coders.len(), 2);
-    
+
     let architects = swarm.agents_by_role(AgentRole::Architect);
     assert_eq!(architects.len(), 1);
-    
+
     let security = swarm.agents_by_role(AgentRole::Security);
     assert!(security.is_empty());
 }
@@ -1783,36 +1846,37 @@ fn test_swarm_list_agents_filtering() {
 fn test_swarm_get_task_from_active() {
     let mut swarm = Swarm::new();
     swarm.add_agent(Agent::new("Coder", AgentRole::Coder));
-    
+
     let task = SwarmTask::new("Test").with_role(AgentRole::Coder);
     let task_id = task.id.clone();
     swarm.queue_task(task).unwrap();
-    
+
     // Task initially in queue
     assert!(swarm.get_task(&task_id).is_some());
-    
+
     // Move to active
     swarm.next_task();
-    
+
     // Should still be findable
     assert!(swarm.get_task(&task_id).is_some());
 }
 
 #[test]
 fn test_decision_votes_for_with_multiple() {
-    let mut decision = super::types::Decision::new("Vote?", vec!["A".into(), "B".into(), "C".into()]);
-    
+    let mut decision =
+        super::types::Decision::new("Vote?", vec!["A".into(), "B".into(), "C".into()]);
+
     decision.add_vote(Vote::new("a1", AgentRole::Coder, "A", 0.8, "r1"));
     decision.add_vote(Vote::new("a2", AgentRole::Coder, "A", 0.7, "r2"));
     decision.add_vote(Vote::new("a3", AgentRole::Tester, "B", 0.9, "r3"));
     decision.add_vote(Vote::new("a4", AgentRole::Security, "A", 1.0, "r4"));
-    
+
     let votes_for_a = decision.votes_for("A");
     assert_eq!(votes_for_a.len(), 3);
-    
+
     let votes_for_b = decision.votes_for("B");
     assert_eq!(votes_for_b.len(), 1);
-    
+
     let votes_for_c = decision.votes_for("C");
     assert!(votes_for_c.is_empty());
 }
@@ -1820,12 +1884,12 @@ fn test_decision_votes_for_with_multiple() {
 #[test]
 fn test_memory_entry_metadata() {
     let mut memory = SharedMemory::new();
-    
+
     memory.write("test_key", "test_value", "creator_agent");
-    
+
     let entries = memory.entries();
     let entry = entries.iter().find(|e| e.key == "test_key").unwrap();
-    
+
     assert_eq!(entry.value, "test_value");
     assert_eq!(entry.created_by, "creator_agent");
     assert!(entry.created_at > 0);
@@ -1836,19 +1900,19 @@ fn test_memory_entry_metadata() {
 #[test]
 fn test_memory_write_updates_metadata() {
     let mut memory = SharedMemory::new();
-    
+
     memory.write("key", "original", "agent1");
-    
+
     // Read to increment access count
     memory.read("key", "agent2");
-    
+
     let entries = memory.entries();
     let entry = entries.iter().find(|e| e.key == "key").unwrap();
     assert_eq!(entry.access_count, 1);
-    
+
     // Write update
     memory.write("key", "updated", "agent3");
-    
+
     let entries = memory.entries();
     let entry = entries.iter().find(|e| e.key == "key").unwrap();
     assert_eq!(entry.value, "updated");

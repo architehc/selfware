@@ -209,7 +209,7 @@ impl CoordinatorAgent {
     pub fn new(task: impl Into<String>) -> Result<Self> {
         let task = task.into();
         let task_id = format!("task-{}", uuid::Uuid::new_v4());
-        
+
         // Log prominent warning about simulated execution
         warn!(
             "\n{}
@@ -218,12 +218,15 @@ impl CoordinatorAgent {
 {} {}
 {}",
             "╔══════════════════════════════════════════════════════════════════╗",
-            "║", "⚠️  WARNING: COORDINATOR MODE USES SIMULATED WORKER EXECUTION",
-            "║", "   WorkerAgent::execute_task is a STUB that does NOT use LLM",
-            "║", "   or execute tools. Workers only log and return placeholders.",
+            "║",
+            "⚠️  WARNING: COORDINATOR MODE USES SIMULATED WORKER EXECUTION",
+            "║",
+            "   WorkerAgent::execute_task is a STUB that does NOT use LLM",
+            "║",
+            "   or execute tools. Workers only log and return placeholders.",
             "╚══════════════════════════════════════════════════════════════════╝"
         );
-        
+
         let scratchpad = Scratchpad::for_task(&task_id)?;
 
         // Create restricted tool registry
@@ -533,7 +536,7 @@ impl CoordinatorAgent {
     /// Run the research phase - spawn workers to investigate different aspects
     async fn run_research_phase(&self) -> Result<PhaseResult> {
         // Default research tasks - analyze codebase structure
-        let research_tasks = vec![
+        let research_tasks = [
             ("Analyze project structure", "analyzer"),
             ("Find relevant code files", "researcher"),
             ("Identify dependencies", "researcher"),
@@ -627,7 +630,7 @@ impl CoordinatorAgent {
             .unwrap_or_else(|| "Implement the task".to_string());
 
         // Spawn implementation workers
-        let impl_tasks = vec![
+        let impl_tasks = [
             (format!("Implement main logic: {}", plan), "coder"),
             ("Add tests".to_string(), "tester"),
             ("Update documentation".to_string(), "documenter"),
@@ -666,7 +669,7 @@ impl CoordinatorAgent {
     /// Run the verification phase - workers verify each other's work
     async fn run_verification_phase(&self) -> Result<PhaseResult> {
         // Spawn verification workers to check the implementation
-        let verify_tasks = vec![
+        let verify_tasks = [
             ("Run cargo check to verify compilation", "verifier"),
             ("Run tests", "tester"),
             ("Code review", "reviewer"),
@@ -782,7 +785,7 @@ impl WorkerAgent {
 
     /// Run the worker agent
     ///
-    /// This is the main entry point for worker execution. 
+    /// This is the main entry point for worker execution.
     ///
     /// ⚠️ WARNING: This method calls `execute_task` which is a STUB that
     /// SIMULATES execution without using LLM or tools. The worker will log
@@ -1513,9 +1516,7 @@ mod tests {
             allow_worker_spawn: false,
             auto_advance: false,
         };
-        let coordinator = CoordinatorAgent::new("Test")
-            .unwrap()
-            .with_config(config);
+        let coordinator = CoordinatorAgent::new("Test").unwrap().with_config(config);
         assert_eq!(coordinator.task(), "Test");
         // Config is applied internally; we verify creation succeeds
     }

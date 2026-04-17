@@ -1029,7 +1029,9 @@ impl KnowledgeGraph {
                     // 3. path contains all ancestors from root to current node
                     // SAFETY: position() will always succeed since target is in rec_stack
                     // and rec_stack is always a subset of path during DFS
-                    let cycle_start = path.iter().position(|x| x == target)
+                    let cycle_start = path
+                        .iter()
+                        .position(|x| x == target)
                         .expect("target must be in path - this is guaranteed by DFS invariant");
                     cycles.push(path[cycle_start..].to_vec());
                 }
@@ -2399,10 +2401,7 @@ use super::helper::Helper;
             format!("{}", CodeSmell::TooManyParameters),
             "Too Many Parameters"
         );
-        assert_eq!(
-            format!("{}", CodeSmell::DeeplyNested),
-            "Deeply Nested Code"
-        );
+        assert_eq!(format!("{}", CodeSmell::DeeplyNested), "Deeply Nested Code");
         assert_eq!(format!("{}", CodeSmell::DuplicatedCode), "Duplicated Code");
         assert_eq!(format!("{}", CodeSmell::DeadCode), "Dead Code");
         assert_eq!(format!("{}", CodeSmell::UnusedImport), "Unused Import");
@@ -2416,10 +2415,7 @@ use super::helper::Helper;
             format!("{}", CodeSmell::PrimitiveObsession),
             "Primitive Obsession"
         );
-        assert_eq!(
-            format!("{}", CodeSmell::ShotgunSurgery),
-            "Shotgun Surgery"
-        );
+        assert_eq!(format!("{}", CodeSmell::ShotgunSurgery), "Shotgun Surgery");
         assert_eq!(
             format!("{}", CodeSmell::InappropriateIntimacy),
             "Inappropriate Intimacy"
@@ -2502,19 +2498,14 @@ use super::helper::Helper;
 
     #[test]
     fn test_entity_with_signature() {
-        let e =
-            Entity::new("bar", EntityType::Function).with_signature("fn bar(x: i32) -> bool");
+        let e = Entity::new("bar", EntityType::Function).with_signature("fn bar(x: i32) -> bool");
         assert_eq!(e.signature, Some("fn bar(x: i32) -> bool".to_string()));
     }
 
     #[test]
     fn test_code_smell_instance_defaults() {
-        let instance = CodeSmellInstance::new(
-            CodeSmell::GodObject,
-            "e1",
-            PathBuf::from("big.rs"),
-            1,
-        );
+        let instance =
+            CodeSmellInstance::new(CodeSmell::GodObject, "e1", PathBuf::from("big.rs"), 1);
         assert_eq!(instance.severity, 5);
         assert!(!instance.suggestion.is_empty());
         assert!(instance.description.contains("detected"));
@@ -2570,9 +2561,11 @@ use super::helper::Helper;
     fn test_knowledge_graph_remove_entity_cleans_indices() {
         let mut graph = KnowledgeGraph::new();
         let path = PathBuf::from("src/lib.rs");
-        let id = graph.add_entity(
-            Entity::new("fn1", EntityType::Function).with_location(path.clone(), 1, 1),
-        );
+        let id = graph.add_entity(Entity::new("fn1", EntityType::Function).with_location(
+            path.clone(),
+            1,
+            1,
+        ));
         let id2 = graph.add_entity(Entity::new("fn2", EntityType::Function));
 
         // Add a relation between them

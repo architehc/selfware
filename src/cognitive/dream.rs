@@ -241,12 +241,16 @@ impl DreamState {
             .as_secs();
         let hours_since_last = (now - self.last_dream_timestamp) / 3600;
 
-        trigger.min_hours_since_last.saturating_sub(hours_since_last)
+        trigger
+            .min_hours_since_last
+            .saturating_sub(hours_since_last)
     }
 
     /// Get sessions until next dream based on trigger
     pub fn sessions_until_next(&self, trigger: &DreamTrigger) -> usize {
-        trigger.min_sessions_since_last.saturating_sub(self.sessions_since_last_dream)
+        trigger
+            .min_sessions_since_last
+            .saturating_sub(self.sessions_since_last_dream)
     }
 }
 
@@ -392,8 +396,8 @@ impl MemoryStore {
 
         for line in content.lines() {
             // Check for section headers
-            if line.starts_with("## ") {
-                current_section = MemorySection::from_header(&line[3..]);
+            if let Some(header) = line.strip_prefix("## ") {
+                current_section = MemorySection::from_header(header);
                 continue;
             }
 

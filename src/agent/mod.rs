@@ -682,6 +682,20 @@ To call a tool, use this EXACT XML structure:
         };
         prompt_builder.add_dynamic(move || memory_section.clone());
 
+        let workspace_guidance_files = MemorySystem::discover_workspace_guidance(&cwd);
+        let workspace_guidance_section = if !workspace_guidance_files.is_empty() {
+            let section =
+                MemorySystem::format_workspace_guidance_for_prompt(&workspace_guidance_files);
+            info!(
+                "Injected {} workspace guidance file(s) into system prompt",
+                workspace_guidance_files.len()
+            );
+            section
+        } else {
+            String::new()
+        };
+        prompt_builder.add_dynamic(move || workspace_guidance_section.clone());
+
         // Episodic lessons - changes as agent learns
         let lessons: Vec<String> = cognitive_state.episodic_memory.recent_lessons(10);
         prompt_builder.add_dynamic(move || {

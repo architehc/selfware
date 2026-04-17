@@ -90,8 +90,7 @@ pub fn validate_extra_body(
         } else if !allowed.contains(k) {
             eprintln!(
                 "Config warning: extra_body field '{}' in {} is not a recognised safe field",
-                k,
-                label,
+                k, label,
             );
         }
     }

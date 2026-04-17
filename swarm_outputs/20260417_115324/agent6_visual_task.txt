@@ -1,0 +1,11 @@
+You are a visual UI/UX agent. The selfware project has a TUI dashboard and web UI components.
+
+Tasks:
+1. Read src/ui/tui/ to understand the dashboard structure
+2. Read src/ui/style.rs, src/ui/theme.rs for styling
+3. Check src/ui/demo/ for demo scenarios
+4. Produce a design critique at /tmp/selfware_ui_critique.md covering:
+   - Accessibility concerns
+   - Color contrast issues
+   - Missing keyboard shortcuts
+   - Visual hierarchy improvements

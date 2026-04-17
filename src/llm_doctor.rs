@@ -10,10 +10,13 @@ use reqwest::Client;
 use serde_json::Value;
 use std::time::{Duration, Instant};
 
+use crate::api::merge_extra_body;
 use crate::config::Config;
 
 // ── Timeout applied to every HTTP probe ──────────────────────────────────────
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+const MIN_CONNECTION_TEST_TIMEOUT_SECS: u64 = 30;
+const MAX_CONNECTION_TEST_TIMEOUT_SECS: u64 = 45;
 
 // ── Minimum recommended context length ───────────────────────────────────────
 const MIN_RECOMMENDED_CONTEXT: u64 = 32_768;
@@ -148,7 +151,7 @@ pub async fn run_llm_doctor(config: &Config) -> Result<()> {
 
     // Step 2: Model Analysis
     println!("{}", "Step 2: Model Analysis".bold().underline());
-    analyse_model(&det, &model_name);
+    analyse_model(&det, config);
     println!();
 
     // Step 3: Template / Chat Format Check
@@ -156,7 +159,7 @@ pub async fn run_llm_doctor(config: &Config) -> Result<()> {
         "{}",
         "Step 3: Template / Chat Format Check".bold().underline()
     );
-    check_template(&det, &model_name);
+    check_template(&det, config);
     println!();
 
     // Step 4: Capability Assessment
@@ -217,7 +220,7 @@ pub async fn run_llm_doctor(config: &Config) -> Result<()> {
 
     // Step 6: Recommendations Tree
     println!("{}", "Step 6: Recommendations".bold().underline());
-    print_recommendations(&det, &model_name, conn_result.as_ref().ok());
+    print_recommendations(&det, config, conn_result.as_ref().ok());
     println!();
 
     Ok(())
@@ -378,7 +381,9 @@ async fn identify_backend(client: &Client, base_url: &str, models_body: &Value) 
 
 // ── Step 2 implementation ────────────────────────────────────────────────────
 
-fn analyse_model(det: &DetectionResult, configured_model: &str) {
+fn analyse_model(det: &DetectionResult, config: &Config) {
+    let configured_model = config.model.as_str();
+
     // Try to find the configured model in the list
     let matching = det
         .models
@@ -393,6 +398,11 @@ fn analyse_model(det: &DetectionResult, configured_model: &str) {
             "ok".green().bold(),
             model.id.bright_white()
         );
+        println!(
+            "  {} Selfware config context_length: {} tokens",
+            ">>".green(),
+            config.context_length.to_string().bright_white()
+        );
 
         if let Some(ctx) = model.max_model_len {
             println!(
@@ -400,6 +410,35 @@ fn analyse_model(det: &DetectionResult, configured_model: &str) {
                 ">>".green(),
                 ctx.to_string().bright_white()
             );
+
+            if config.context_length < ctx as usize {
+                println!(
+                    "  {} Configured context_length ({}) is below backend max_model_len ({})",
+                    ">>".yellow(),
+                    config.context_length,
+                    ctx
+                );
+                println!(
+                    "     Raise selfware.toml {} to use the full window.",
+                    "context_length".bright_white()
+                );
+            } else if config.context_length > ctx as usize {
+                println!(
+                    "  {} Configured context_length ({}) exceeds backend max_model_len ({})",
+                    "!!".yellow().bold(),
+                    config.context_length,
+                    ctx
+                );
+                println!(
+                    "     Lower {} or increase the backend limit to avoid runtime overflows.",
+                    "context_length".bright_white()
+                );
+            } else {
+                println!(
+                    "  {} Selfware context_length matches the backend limit",
+                    "ok".green().bold()
+                );
+            }
 
             if ctx < MIN_RECOMMENDED_CONTEXT {
                 println!(
@@ -430,6 +469,11 @@ fn analyse_model(det: &DetectionResult, configured_model: &str) {
             "  {} Configured model '{}' was not found in the backend's model list",
             "!!".yellow().bold(),
             configured_model.bright_white()
+        );
+        println!(
+            "  {} Selfware config context_length: {} tokens",
+            ">>".green(),
+            config.context_length.to_string().bright_white()
         );
         if !det.models.is_empty() {
             println!("     Available models:");
@@ -502,7 +546,8 @@ fn print_context_extension_help(backend: &Backend) {
 
 // ── Step 3 implementation ────────────────────────────────────────────────────
 
-fn check_template(det: &DetectionResult, model_name: &str) {
+fn check_template(det: &DetectionResult, config: &Config) {
+    let model_name = config.model.as_str();
     let is_qwen = is_qwen_model(model_name);
 
     match det.backend {
@@ -525,6 +570,38 @@ fn check_template(det: &DetectionResult, model_name: &str) {
                     "       {}",
                     "--chat-template /path/to/qwen_tool_call.jinja".bright_white()
                 );
+                match configured_enable_thinking(config) {
+                    Some(false) => {
+                        println!(
+                            "  {} Selfware config already sets {}",
+                            "ok".green().bold(),
+                            "chat_template_kwargs.enable_thinking = false".bright_white()
+                        );
+                    }
+                    Some(true) => {
+                        println!(
+                            "  {} Selfware config enables thinking. For Qwen tool use on sglang, disable it.",
+                            "!!".yellow().bold()
+                        );
+                        println!(
+                            "     Add {}",
+                            "[extra_body]\nchat_template_kwargs = { enable_thinking = false }"
+                                .bright_white()
+                        );
+                    }
+                    None => {
+                        println!(
+                            "  {} Selfware config does not set {}",
+                            ">>".yellow(),
+                            "chat_template_kwargs.enable_thinking".bright_white()
+                        );
+                        println!(
+                            "     Add {} for faster, more reliable tool-heavy requests.",
+                            "[extra_body]\nchat_template_kwargs = { enable_thinking = false }"
+                                .bright_white()
+                        );
+                    }
+                }
             } else {
                 println!(
                     "  {} Use {} to let sglang auto-detect the template",
@@ -784,7 +861,8 @@ async fn connection_test(
     model: &str,
     config: &Config,
 ) -> Result<ConnectionTestResult> {
-    let client = Client::builder().timeout(HTTP_TIMEOUT).build()?;
+    let probe_timeout = connection_test_timeout(config);
+    let client = Client::builder().timeout(probe_timeout).build()?;
 
     let base = endpoint.trim_end_matches('/');
     let completions_url = format!("{}/chat/completions", base);
@@ -793,7 +871,7 @@ async fn connection_test(
     let api_key = config.api_key.as_ref().map(|k| k.expose().to_string());
 
     // Simple completion test
-    let request_body = serde_json::json!({
+    let mut request_body = serde_json::json!({
         "model": model,
         "messages": [
             {"role": "user", "content": "Say 'hello' and nothing else."}
@@ -801,6 +879,11 @@ async fn connection_test(
         "max_tokens": 16,
         "temperature": 0.0
     });
+    merge_extra_body(
+        &mut request_body,
+        config.extra_body.as_ref(),
+        "llm doctor completion probe",
+    )?;
 
     let start = Instant::now();
 
@@ -827,7 +910,7 @@ async fn connection_test(
 
     // Test tool calling
     let tool_calling_works =
-        test_tool_calling(&client, &completions_url, model, api_key.as_deref()).await;
+        test_tool_calling(&client, &completions_url, model, api_key.as_deref(), config).await?;
 
     Ok(ConnectionTestResult {
         latency,
@@ -856,8 +939,9 @@ async fn test_tool_calling(
     completions_url: &str,
     model: &str,
     api_key: Option<&str>,
-) -> Option<bool> {
-    let request_body = serde_json::json!({
+    config: &Config,
+) -> Result<Option<bool>> {
+    let mut request_body = serde_json::json!({
         "model": model,
         "messages": [
             {"role": "user", "content": "What is 2 + 2? Use the calculator tool."}
@@ -884,10 +968,15 @@ async fn test_tool_calling(
         "max_tokens": 128,
         "temperature": 0.0
     });
+    merge_extra_body(
+        &mut request_body,
+        config.extra_body.as_ref(),
+        "llm doctor tool-calling probe",
+    )?;
 
     let mut req = client
         .post(completions_url)
-        .timeout(HTTP_TIMEOUT)
+        .timeout(connection_test_timeout(config))
         .json(&request_body);
     if let Some(key) = api_key {
         req = req.bearer_auth(key);
@@ -895,16 +984,16 @@ async fn test_tool_calling(
 
     let resp = match req.send().await {
         Ok(r) => r,
-        Err(_) => return None,
+        Err(_) => return Ok(None),
     };
 
     if !resp.status().is_success() {
-        return Some(false);
+        return Ok(Some(false));
     }
 
     let body: Value = match resp.json().await {
         Ok(b) => b,
-        Err(_) => return Some(false),
+        Err(_) => return Ok(Some(false)),
     };
 
     // Check if the response contains tool_calls
@@ -917,16 +1006,17 @@ async fn test_tool_calling(
         .and_then(|tc| tc.as_array())
         .is_some_and(|arr| !arr.is_empty());
 
-    Some(has_tool_calls)
+    Ok(Some(has_tool_calls))
 }
 
 // ── Step 6 implementation ────────────────────────────────────────────────────
 
 fn print_recommendations(
     det: &DetectionResult,
-    model_name: &str,
+    config: &Config,
     conn: Option<&ConnectionTestResult>,
 ) {
+    let model_name = config.model.as_str();
     // Find the model in the list
     let model_info = det
         .models
@@ -955,6 +1045,24 @@ fn print_recommendations(
                     format!(
                         "Context length ({}) is below recommended ({})",
                         ctx, MIN_RECOMMENDED_CONTEXT
+                    ),
+                ));
+            }
+
+            if config.context_length < ctx as usize {
+                checks.push((
+                    CheckStatus::Info,
+                    format!(
+                        "Raise selfware context_length from {} to {} to use the full backend window",
+                        config.context_length, ctx
+                    ),
+                ));
+            } else if config.context_length > ctx as usize {
+                checks.push((
+                    CheckStatus::Warn,
+                    format!(
+                        "selfware context_length ({}) exceeds backend max_model_len ({})",
+                        config.context_length, ctx
                     ),
                 ));
             }
@@ -992,6 +1100,24 @@ fn print_recommendations(
                 CheckStatus::Info,
                 "Consider enabling --enable-torch-compile for better throughput".to_string(),
             ));
+            if is_qwen_model(model_name) {
+                match configured_enable_thinking(config) {
+                    Some(false) => checks.push((
+                        CheckStatus::Ok,
+                        "Qwen/SGLang thinking is disabled in selfware extra_body".to_string(),
+                    )),
+                    Some(true) => checks.push((
+                        CheckStatus::Warn,
+                        "Disable chat_template_kwargs.enable_thinking for Qwen/SGLang tool workflows"
+                            .to_string(),
+                    )),
+                    None => checks.push((
+                        CheckStatus::Warn,
+                        "Add chat_template_kwargs.enable_thinking = false to match the runtime path"
+                            .to_string(),
+                    )),
+                }
+            }
             if model_name.to_lowercase().contains("vision")
                 || model_name.to_lowercase().contains("vl")
             {
@@ -1106,6 +1232,23 @@ enum CheckStatus {
     Info,
 }
 
+fn connection_test_timeout(config: &Config) -> Duration {
+    Duration::from_secs(config.agent.step_timeout_secs.clamp(
+        MIN_CONNECTION_TEST_TIMEOUT_SECS,
+        MAX_CONNECTION_TEST_TIMEOUT_SECS,
+    ))
+}
+
+fn configured_enable_thinking(config: &Config) -> Option<bool> {
+    config
+        .extra_body
+        .as_ref()?
+        .get("chat_template_kwargs")?
+        .as_object()?
+        .get("enable_thinking")?
+        .as_bool()
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1165,6 +1308,47 @@ mod tests {
         assert_eq!(models[0].max_model_len, Some(131072));
         assert_eq!(models[1].id, "other-model");
         assert_eq!(models[1].max_model_len, Some(8192));
+    }
+
+    #[test]
+    fn test_configured_enable_thinking_false() {
+        let mut config = Config::default();
+        config.extra_body = Some({
+            let mut extra = serde_json::Map::new();
+            extra.insert(
+                "chat_template_kwargs".to_string(),
+                serde_json::json!({ "enable_thinking": false }),
+            );
+            extra
+        });
+
+        assert_eq!(configured_enable_thinking(&config), Some(false));
+    }
+
+    #[test]
+    fn test_configured_enable_thinking_missing() {
+        let config = Config::default();
+        assert_eq!(configured_enable_thinking(&config), None);
+    }
+
+    #[test]
+    fn test_connection_test_timeout_respects_minimum() {
+        let mut config = Config::default();
+        config.agent.step_timeout_secs = 5;
+        assert_eq!(
+            connection_test_timeout(&config),
+            Duration::from_secs(MIN_CONNECTION_TEST_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn test_connection_test_timeout_respects_maximum() {
+        let mut config = Config::default();
+        config.agent.step_timeout_secs = 600;
+        assert_eq!(
+            connection_test_timeout(&config),
+            Duration::from_secs(MAX_CONNECTION_TEST_TIMEOUT_SECS)
+        );
     }
 
     #[test]

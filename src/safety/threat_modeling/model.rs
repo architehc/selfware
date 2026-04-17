@@ -326,7 +326,12 @@ mod tests {
         }
     }
 
-    fn make_open_threat(id: &str, category: StrideCategory, severity: Severity, likelihood: Likelihood) -> Threat {
+    fn make_open_threat(
+        id: &str,
+        category: StrideCategory,
+        severity: Severity,
+        likelihood: Likelihood,
+    ) -> Threat {
         let mut threat = Threat::new(format!("Threat {}", id), category)
             .with_severity(severity)
             .with_likelihood(likelihood);
@@ -405,7 +410,12 @@ mod tests {
     #[test]
     fn test_add_threat() {
         let mut model = ThreatModel::new("Test");
-        let threat = make_open_threat("t1", StrideCategory::Spoofing, Severity::High, Likelihood::Likely);
+        let threat = make_open_threat(
+            "t1",
+            StrideCategory::Spoofing,
+            Severity::High,
+            Likelihood::Likely,
+        );
         let id = model.add_threat(threat);
         assert_eq!(id, "t1");
     }
@@ -413,7 +423,12 @@ mod tests {
     #[test]
     fn test_get_threat() {
         let mut model = ThreatModel::new("Test");
-        let threat = make_open_threat("t1", StrideCategory::Tampering, Severity::Medium, Likelihood::Possible);
+        let threat = make_open_threat(
+            "t1",
+            StrideCategory::Tampering,
+            Severity::Medium,
+            Likelihood::Possible,
+        );
         model.add_threat(threat);
         assert!(model.get_threat("t1").is_some());
     }
@@ -421,18 +436,36 @@ mod tests {
     #[test]
     fn test_get_threat_mut() {
         let mut model = ThreatModel::new("Test");
-        let threat = make_open_threat("t1", StrideCategory::Tampering, Severity::Medium, Likelihood::Possible);
+        let threat = make_open_threat(
+            "t1",
+            StrideCategory::Tampering,
+            Severity::Medium,
+            Likelihood::Possible,
+        );
         model.add_threat(threat);
         let t = model.get_threat_mut("t1").unwrap();
         t.status = ThreatStatus::Mitigated;
-        assert_eq!(model.get_threat("t1").unwrap().status, ThreatStatus::Mitigated);
+        assert_eq!(
+            model.get_threat("t1").unwrap().status,
+            ThreatStatus::Mitigated
+        );
     }
 
     #[test]
     fn test_threats_iterator() {
         let mut model = ThreatModel::new("Test");
-        model.add_threat(make_open_threat("t1", StrideCategory::Spoofing, Severity::Low, Likelihood::Unlikely));
-        model.add_threat(make_open_threat("t2", StrideCategory::Tampering, Severity::High, Likelihood::Likely));
+        model.add_threat(make_open_threat(
+            "t1",
+            StrideCategory::Spoofing,
+            Severity::Low,
+            Likelihood::Unlikely,
+        ));
+        model.add_threat(make_open_threat(
+            "t2",
+            StrideCategory::Tampering,
+            Severity::High,
+            Likelihood::Likely,
+        ));
         assert_eq!(model.threats().count(), 2);
     }
 
@@ -504,9 +537,24 @@ mod tests {
     #[test]
     fn test_threats_by_category() {
         let mut model = ThreatModel::new("Test");
-        model.add_threat(make_open_threat("t1", StrideCategory::Spoofing, Severity::High, Likelihood::Likely));
-        model.add_threat(make_open_threat("t2", StrideCategory::Tampering, Severity::Medium, Likelihood::Possible));
-        model.add_threat(make_open_threat("t3", StrideCategory::Spoofing, Severity::Low, Likelihood::Unlikely));
+        model.add_threat(make_open_threat(
+            "t1",
+            StrideCategory::Spoofing,
+            Severity::High,
+            Likelihood::Likely,
+        ));
+        model.add_threat(make_open_threat(
+            "t2",
+            StrideCategory::Tampering,
+            Severity::Medium,
+            Likelihood::Possible,
+        ));
+        model.add_threat(make_open_threat(
+            "t3",
+            StrideCategory::Spoofing,
+            Severity::Low,
+            Likelihood::Unlikely,
+        ));
 
         let spoofing = model.threats_by_category(StrideCategory::Spoofing);
         assert_eq!(spoofing.len(), 2);
@@ -518,8 +566,18 @@ mod tests {
     #[test]
     fn test_threats_by_status() {
         let mut model = ThreatModel::new("Test");
-        model.add_threat(make_open_threat("t1", StrideCategory::Spoofing, Severity::High, Likelihood::Likely));
-        let mut mitigated = make_open_threat("t2", StrideCategory::Tampering, Severity::Medium, Likelihood::Possible);
+        model.add_threat(make_open_threat(
+            "t1",
+            StrideCategory::Spoofing,
+            Severity::High,
+            Likelihood::Likely,
+        ));
+        let mut mitigated = make_open_threat(
+            "t2",
+            StrideCategory::Tampering,
+            Severity::Medium,
+            Likelihood::Possible,
+        );
         mitigated.status = ThreatStatus::Mitigated;
         model.add_threat(mitigated);
 
@@ -530,8 +588,18 @@ mod tests {
     #[test]
     fn test_open_threats() {
         let mut model = ThreatModel::new("Test");
-        model.add_threat(make_open_threat("t1", StrideCategory::Spoofing, Severity::High, Likelihood::Likely));
-        let mut closed = make_open_threat("t2", StrideCategory::Tampering, Severity::Low, Likelihood::Unlikely);
+        model.add_threat(make_open_threat(
+            "t1",
+            StrideCategory::Spoofing,
+            Severity::High,
+            Likelihood::Likely,
+        ));
+        let mut closed = make_open_threat(
+            "t2",
+            StrideCategory::Tampering,
+            Severity::Low,
+            Likelihood::Unlikely,
+        );
         closed.status = ThreatStatus::Closed;
         model.add_threat(closed);
 
@@ -542,9 +610,19 @@ mod tests {
     fn test_critical_threats() {
         let mut model = ThreatModel::new("Test");
         // Critical: severity=4 * likelihood=4 = 16 => Critical
-        model.add_threat(make_open_threat("t1", StrideCategory::ElevationOfPrivilege, Severity::Critical, Likelihood::AlmostCertain));
+        model.add_threat(make_open_threat(
+            "t1",
+            StrideCategory::ElevationOfPrivilege,
+            Severity::Critical,
+            Likelihood::AlmostCertain,
+        ));
         // Low risk
-        model.add_threat(make_open_threat("t2", StrideCategory::Spoofing, Severity::Low, Likelihood::Unlikely));
+        model.add_threat(make_open_threat(
+            "t2",
+            StrideCategory::Spoofing,
+            Severity::Low,
+            Likelihood::Unlikely,
+        ));
 
         let critical = model.critical_threats();
         assert_eq!(critical.len(), 1);
@@ -564,7 +642,12 @@ mod tests {
     #[test]
     fn test_overall_risk_score_with_threats() {
         let mut model = ThreatModel::new("Test");
-        model.add_threat(make_open_threat("t1", StrideCategory::Spoofing, Severity::High, Likelihood::Likely));
+        model.add_threat(make_open_threat(
+            "t1",
+            StrideCategory::Spoofing,
+            Severity::High,
+            Likelihood::Likely,
+        ));
         let score = model.overall_risk_score();
         assert!(score > 0.0);
     }
@@ -572,7 +655,12 @@ mod tests {
     #[test]
     fn test_overall_risk_score_ignores_closed_threats() {
         let mut model = ThreatModel::new("Test");
-        let mut closed = make_open_threat("t1", StrideCategory::Spoofing, Severity::Critical, Likelihood::AlmostCertain);
+        let mut closed = make_open_threat(
+            "t1",
+            StrideCategory::Spoofing,
+            Severity::Critical,
+            Likelihood::AlmostCertain,
+        );
         closed.status = ThreatStatus::Closed;
         model.add_threat(closed);
         assert_eq!(model.overall_risk_score(), 0.0);
@@ -592,8 +680,18 @@ mod tests {
     #[test]
     fn test_risk_distribution_with_threats() {
         let mut model = ThreatModel::new("Test");
-        model.add_threat(make_open_threat("t1", StrideCategory::Spoofing, Severity::Critical, Likelihood::AlmostCertain));
-        model.add_threat(make_open_threat("t2", StrideCategory::Tampering, Severity::Low, Likelihood::Unlikely));
+        model.add_threat(make_open_threat(
+            "t1",
+            StrideCategory::Spoofing,
+            Severity::Critical,
+            Likelihood::AlmostCertain,
+        ));
+        model.add_threat(make_open_threat(
+            "t2",
+            StrideCategory::Tampering,
+            Severity::Low,
+            Likelihood::Unlikely,
+        ));
         let dist = model.risk_distribution();
         assert!(dist.len() >= 2); // At least 2 different risk levels
     }
@@ -615,9 +713,24 @@ mod tests {
     #[test]
     fn test_stride_coverage_with_threats() {
         let mut model = ThreatModel::new("Test");
-        model.add_threat(make_open_threat("t1", StrideCategory::Spoofing, Severity::High, Likelihood::Likely));
-        model.add_threat(make_open_threat("t2", StrideCategory::Spoofing, Severity::Medium, Likelihood::Possible));
-        model.add_threat(make_open_threat("t3", StrideCategory::Tampering, Severity::Low, Likelihood::Unlikely));
+        model.add_threat(make_open_threat(
+            "t1",
+            StrideCategory::Spoofing,
+            Severity::High,
+            Likelihood::Likely,
+        ));
+        model.add_threat(make_open_threat(
+            "t2",
+            StrideCategory::Spoofing,
+            Severity::Medium,
+            Likelihood::Possible,
+        ));
+        model.add_threat(make_open_threat(
+            "t3",
+            StrideCategory::Tampering,
+            Severity::Low,
+            Likelihood::Unlikely,
+        ));
         let coverage = model.stride_coverage();
         assert_eq!(coverage[&StrideCategory::Spoofing], 2);
         assert_eq!(coverage[&StrideCategory::Tampering], 1);
@@ -631,7 +744,12 @@ mod tests {
     #[test]
     fn test_generate_risk_matrix() {
         let mut model = ThreatModel::new("Test");
-        model.add_threat(make_open_threat("t1", StrideCategory::Spoofing, Severity::High, Likelihood::Likely));
+        model.add_threat(make_open_threat(
+            "t1",
+            StrideCategory::Spoofing,
+            Severity::High,
+            Likelihood::Likely,
+        ));
         let matrix = model.generate_risk_matrix();
         let threats = matrix.threats_at(Severity::High, Likelihood::Likely);
         assert_eq!(threats.len(), 1);
@@ -652,7 +770,12 @@ mod tests {
     fn test_generate_report_contains_sections() {
         let mut model = ThreatModel::new("Test").with_description("Description");
         model.add_asset(make_asset("a1", "Data"));
-        model.add_threat(make_open_threat("t1", StrideCategory::Spoofing, Severity::High, Likelihood::Likely));
+        model.add_threat(make_open_threat(
+            "t1",
+            StrideCategory::Spoofing,
+            Severity::High,
+            Likelihood::Likely,
+        ));
         model.add_control(make_control("c1", "Auth"));
         let report = model.generate_report();
         assert!(report.contains("Executive Summary"));
