@@ -949,6 +949,9 @@ mod tests {
         assert!(super::verification::is_capability_disclaimer_response(
             "I cannot fulfill this request. I am an AI assistant and do not have the capability to execute external tools like `vision_analyze`, access local file systems, or view images directly. Additionally, I cannot call tools as described in your prompt; I can only generate text responses based on the information provided to me."
         ));
+        assert!(super::verification::is_capability_disclaimer_response(
+            "I cannot execute the `vision_analyze` tool or access the file system to analyze the image. As an AI text model, I do not have the capability to run external shell commands or interact with vision analysis tools directly."
+        ));
         assert!(!super::verification::is_capability_disclaimer_response(
             "The image shows a weathered coastal building beside the sea."
         ));
@@ -1426,6 +1429,45 @@ mod tests {
         agent.current_checkpoint = Some(checkpoint);
 
         assert!(agent.check_completion_gate().is_none());
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_gate_rejects_capability_disclaimer_after_required_tool_succeeds() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.agent.min_completion_steps = 0;
+        config.agent.require_verification_before_completion = false;
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.current_task_context = "Use vision_analyze on ./sample.jpg".to_string();
+        agent
+            .required_task_tools
+            .insert("vision_analyze".to_string());
+        agent.last_assistant_response =
+            "I cannot execute the `vision_analyze` tool or access the file system to analyze the image. As an AI text model, I do not have the capability to run external shell commands or interact with vision analysis tools directly."
+                .to_string();
+
+        let mut checkpoint = crate::checkpoint::TaskCheckpoint::new(
+            "vision-task".to_string(),
+            "Use vision_analyze on ./sample.jpg".to_string(),
+        );
+        checkpoint.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "vision_analyze".to_string(),
+            arguments: r#"{"image_path":"./sample.jpg"}"#.to_string(),
+            result: Some(r#"{"analysis":"aircraft"}"#.to_string()),
+            success: true,
+            duration_ms: Some(150),
+        });
+        agent.current_checkpoint = Some(checkpoint);
+
+        let result = agent.check_completion_gate();
+        assert!(result.is_some(), "Capability disclaimers should never pass");
+        assert!(
+            result.unwrap().contains("capability disclaimer"),
+            "Expected the gate to explain the disclaimer rejection"
+        );
 
         server.stop().await;
     }

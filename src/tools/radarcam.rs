@@ -20,13 +20,24 @@ const RADARCAM_BASE: &str = "http://localhost:8000";
 const RADARCAM_3DGEN: &str = "http://localhost:8001";
 const RADARCAM_LOG_DIR: &str = "/home/ivo/radarcam";
 
-/// Shared HTTP client helper
+/// Shared HTTP client — reused across all RadarCam API calls to enable connection pooling.
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .expect("Failed to build reqwest client")
+    })
+}
+
 async fn radarcam_get(path: &str) -> Result<Value> {
     let url = format!("{}{}", RADARCAM_BASE, path);
-    let client = reqwest::Client::builder()
+    let resp = http_client()
+        .get(&url)
         .timeout(Duration::from_secs(15))
-        .build()?;
-    let resp = client.get(&url).send().await?;
+        .send()
+        .await?;
     let status = resp.status();
     let text = resp.text().await?;
     if !status.is_success() {
@@ -41,10 +52,7 @@ async fn radarcam_get(path: &str) -> Result<Value> {
 
 async fn radarcam_post(path: &str, body: Option<Value>) -> Result<Value> {
     let url = format!("{}{}", RADARCAM_BASE, path);
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()?;
-    let mut req = client.post(&url);
+    let mut req = http_client().post(&url);
     if let Some(b) = body {
         req = req.json(&b);
     }
@@ -235,10 +243,11 @@ impl Tool for RadarCamFrame {
             ),
         };
 
-        let client = reqwest::Client::builder()
+        let resp = http_client()
+            .get(&url)
             .timeout(Duration::from_secs(15))
-            .build()?;
-        let resp = client.get(&url).send().await?;
+            .send()
+            .await?;
         if !resp.status().is_success() {
             anyhow::bail!("Failed to fetch frame: HTTP {}", resp.status());
         }
@@ -256,7 +265,14 @@ impl Tool for RadarCamFrame {
     }
 
     fn metadata(&self) -> crate::safety::ToolMetadata {
-        crate::safety::ToolMetadata::network()
+        // NOT read_only — live camera frames are time-varying and must never be cached.
+        crate::safety::ToolMetadata::custom(
+            false,
+            false,
+            crate::safety::RiskLevel::Medium,
+            true,
+            false,
+        )
     }
 }
 
@@ -509,11 +525,15 @@ impl Tool for RadarCamTest {
         };
 
         // Run via shell
-        let output = tokio::process::Command::new("bash")
-            .arg("-c")
-            .arg(&cmd)
-            .output()
-            .await?;
+        let output = tokio::time::timeout(
+            Duration::from_secs(300),
+            tokio::process::Command::new("bash")
+                .arg("-c")
+                .arg(&cmd)
+                .output(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("radarcam_test timed out after 300s"))??;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -589,10 +609,11 @@ impl Tool for RadarCamIntrospect {
         // 3. Fetch frame as base64 for multimodal analysis
         let frame_url = format!("{}/frame/{}.jpg", RADARCAM_BASE, args.camera_index);
         let frame_result = async {
-            let client = reqwest::Client::builder()
+            let resp = http_client()
+                .get(&frame_url)
                 .timeout(Duration::from_secs(15))
-                .build()?;
-            let resp = client.get(&frame_url).send().await?;
+                .send()
+                .await?;
             if !resp.status().is_success() {
                 anyhow::bail!("HTTP {}", resp.status());
             }
@@ -668,28 +689,48 @@ impl Tool for RadarCamIntrospect {
 // ---------------------------------------------------------------------------
 
 async fn check_service(url: &str) -> bool {
-    let client = reqwest::Client::builder()
+    match http_client()
+        .get(url)
         .timeout(Duration::from_secs(5))
-        .build();
-    match client {
-        Ok(c) => match c.get(url).send().await {
-            Ok(r) => r.status().is_success(),
-            Err(_) => false,
-        },
+        .send()
+        .await
+    {
+        Ok(r) => r.status().is_success(),
         Err(_) => false,
     }
 }
 
 fn read_log_file(path: &str, tail_lines: usize) -> Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
     let path = std::path::Path::new(path);
     if !path.exists() {
         return Ok(format!("Log file not found: {}", path.display()));
     }
-    let content = std::fs::read_to_string(path)?;
+
+    const MAX_CHUNK: u64 = 2 * 1024 * 1024; // 2 MiB
+
+    let metadata = std::fs::metadata(path)?;
+    let file_size = metadata.len();
+
+    let content = if file_size <= MAX_CHUNK {
+        std::fs::read_to_string(path)?
+    } else {
+        let mut file = std::fs::File::open(path)?;
+        file.seek(SeekFrom::End(-(MAX_CHUNK as i64)))?;
+        let mut buf = vec![0u8; MAX_CHUNK as usize];
+        file.read_exact(&mut buf)?;
+        String::from_utf8_lossy(&buf).to_string()
+    };
+
     let lines: Vec<&str> = content.lines().collect();
-    let start = lines.len().saturating_sub(tail_lines);
-    let tail = lines[start..].join("\n");
-    Ok(tail)
+    let start = if file_size <= MAX_CHUNK {
+        lines.len().saturating_sub(tail_lines)
+    } else {
+        // First line may be partial after seeking, skip it
+        1
+    };
+    Ok(lines[start..].join("\n"))
 }
 
 fn list_calibration_results() -> Result<String> {
@@ -926,7 +967,7 @@ mod tests {
     #[test]
     fn test_tool_metadata() {
         assert!(RadarCamStatus.metadata().read_only);
-        assert!(RadarCamFrame.metadata().read_only);
+        assert!(!RadarCamFrame.metadata().read_only); // live frames must not be cached
         assert!(RadarCamLogs.metadata().read_only);
         // Introspect is NOT read-only because include_validation=true performs a POST
         assert!(!RadarCamIntrospect.metadata().read_only);

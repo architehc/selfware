@@ -41,25 +41,47 @@ pub(super) fn is_confused_response(content: &str) -> bool {
 
 pub(super) fn is_capability_disclaimer_response(content: &str) -> bool {
     let lower = super::recovery::strip_think_blocks(content).to_lowercase();
-    let markers = [
+    let capability_markers = [
         "execute external tools",
+        "execute tools",
         "execute system commands",
+        "run external shell commands",
         "access local file system",
         "access local file systems",
+        "access the file system",
         "access files on your local system",
         "run tools",
         "view images directly",
         "call tools",
+        "interact with vision analysis tools",
+        "analyze the image",
+        "visual analysis of its specific contents",
         "only generate text responses",
         "only process and respond to the text",
         "information provided to me",
         "information provided directly",
     ];
-    markers
+    let refusal_markers = [
+        "as an ai text model",
+        "as a text model",
+        "do not have the capability",
+        "don't have the capability",
+        "cannot fulfill this request",
+        "cannot provide a visual analysis",
+        "cannot provide visual analysis",
+        "i cannot",
+        "i can't",
+        "unable to",
+    ];
+    let capability_hits = capability_markers
         .iter()
         .filter(|marker| lower.contains(**marker))
-        .count()
-        >= 2
+        .count();
+    if capability_hits >= 2 {
+        return true;
+    }
+
+    refusal_markers.iter().any(|marker| lower.contains(*marker)) && capability_hits >= 1
 }
 
 /// Detect responses that describe future work instead of delivering a completed result.
@@ -313,6 +335,14 @@ impl Agent {
             return Some(
                 "Your response describes work you still need to do instead of a completed result. \
                  Do NOT stop to narrate your next step. Call the needed tool now and continue."
+                    .to_string(),
+            );
+        }
+
+        if is_capability_disclaimer_response(&self.last_assistant_response) {
+            return Some(
+                "Your response incorrectly claims you cannot use tools, the filesystem, or image analysis. \
+                 Use the tools that are available and answer directly from their results instead of giving a capability disclaimer."
                     .to_string(),
             );
         }
