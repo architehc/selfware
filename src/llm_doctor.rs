@@ -874,6 +874,7 @@ async fn connection_test(
     let mut request_body = serde_json::json!({
         "model": model,
         "messages": [
+            {"role": "system", "content": "You are a concise assistant."},
             {"role": "user", "content": "Say 'hello' and nothing else."}
         ],
         "max_tokens": 16,
@@ -944,6 +945,10 @@ async fn test_tool_calling(
     let mut request_body = serde_json::json!({
         "model": model,
         "messages": [
+            {
+                "role": "system",
+                "content": "When a suitable tool is provided, call it instead of answering directly."
+            },
             {"role": "user", "content": "What is 2 + 2? Use the calculator tool."}
         ],
         "tools": [

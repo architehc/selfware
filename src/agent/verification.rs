@@ -39,6 +39,25 @@ pub(super) fn is_confused_response(content: &str) -> bool {
         >= 2
 }
 
+pub(super) fn is_capability_disclaimer_response(content: &str) -> bool {
+    let lower = super::recovery::strip_think_blocks(content).to_lowercase();
+    let markers = [
+        "execute external tools",
+        "access local file system",
+        "access local file systems",
+        "view images directly",
+        "call tools",
+        "only generate text responses",
+        "information provided to me",
+        "information provided directly",
+    ];
+    markers
+        .iter()
+        .filter(|marker| lower.contains(**marker))
+        .count()
+        >= 2
+}
+
 /// Detect responses that describe future work instead of delivering a completed result.
 /// This catches false completions like "I need to read the tests first" or pseudo-tool
 /// plans embedded in plain text.
@@ -254,10 +273,25 @@ impl Agent {
     /// Check whether the agent has done enough work to accept completion.
     /// Returns `None` to accept, or `Some(message)` to reject with instructions.
     pub(super) fn check_completion_gate(&self) -> Option<String> {
+        let missing_required_tools = self.missing_required_task_tools();
+        if !missing_required_tools.is_empty() {
+            let required_tool_list = missing_required_tools
+                .iter()
+                .map(|tool| format!("`{}`", tool))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Some(format!(
+                "This task explicitly requires {} before you may answer. Call the required tool now and use its result. Do NOT answer from memory, filenames, or prior knowledge.",
+                required_tool_list
+            ));
+        }
+
         let step_count = self.loop_control.current_step();
         let min_steps = self.config.agent.min_completion_steps;
+        let skip_min_steps_for_read_only = !self.current_task_context.is_empty()
+            && !super::tool_dispatch::task_requires_mutation(self.learning_context());
 
-        if step_count < min_steps {
+        if step_count < min_steps && !skip_min_steps_for_read_only {
             // Tailor the message: don't mention cargo for non-Rust tasks
             let verification_hint = if self.should_skip_cargo_verification() {
                 "Continue working: review your results and ensure the task is fully complete."

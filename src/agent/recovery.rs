@@ -146,6 +146,26 @@ impl Agent {
         self.last_no_action_prompt_hash = None;
     }
 
+    pub(super) fn missing_required_task_tools(&self) -> Vec<String> {
+        let successful_tools: std::collections::BTreeSet<String> = self
+            .current_checkpoint
+            .as_ref()
+            .map(|cp| {
+                cp.tool_calls
+                    .iter()
+                    .filter(|tc| tc.success)
+                    .map(|tc| tc.tool_name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        self.required_task_tools
+            .iter()
+            .filter(|tool| !successful_tools.contains(*tool))
+            .cloned()
+            .collect()
+    }
+
     /// Track a screenshot hash and detect visual stuck loops.
     ///
     /// Maintains a sliding window of the last 10 screenshot hashes.
@@ -290,6 +310,19 @@ impl Agent {
     }
 
     fn build_no_action_prompt_message(&self) -> String {
+        let missing_required_tools = self.missing_required_task_tools();
+        if !missing_required_tools.is_empty() {
+            let required_tool_list = missing_required_tools
+                .iter()
+                .map(|tool| format!("`{}`", tool))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return format!(
+                "<selfware_system_directive>\nThis task explicitly requires {} before you answer.\nCall the required tool now.\nDo NOT answer from memory, filenames, or prior knowledge.\n</selfware_system_directive>",
+                required_tool_list
+            );
+        }
+
         let failure_context = self.no_action_failure_context().unwrap_or_default();
         let tool_options = super::NO_ACTION_TOOL_OPTIONS;
 
@@ -580,6 +613,10 @@ Try ONE of these strategies:\
             return false;
         }
 
+        if !self.missing_required_task_tools().is_empty() {
+            return true;
+        }
+
         // Strip any residual think blocks from content to measure real output.
         let effective_content = strip_think_blocks(content);
         let effective_len = effective_content.len();
@@ -745,6 +782,10 @@ Try ONE of these strategies:\
     pub(super) fn pick_smart_fallback(&self, content: &str) -> (String, String) {
         let stripped = strip_think_blocks(content);
 
+        if let Some(required_fallback) = self.pick_required_tool_fallback() {
+            return required_fallback;
+        }
+
         // Try to extract a file path the model mentioned wanting to read.
         if let Some(path) = extract_mentioned_path(&stripped) {
             let p = std::path::Path::new(&path);
@@ -784,6 +825,33 @@ Try ONE of these strategies:\
             super::FALLBACK_TOOL_ARGS.to_string(),
         )
     }
+
+    fn pick_required_tool_fallback(&self) -> Option<(String, String)> {
+        let task_context = self
+            .current_checkpoint
+            .as_ref()
+            .map(|cp| cp.task_description.as_str())
+            .unwrap_or_else(|| self.learning_context());
+        let missing_required_tools = self.missing_required_task_tools();
+
+        for tool_name in missing_required_tools {
+            match tool_name.as_str() {
+                "vision_analyze" => {
+                    if let Some(args) = build_vision_analyze_fallback_args(task_context) {
+                        return Some((tool_name, args));
+                    }
+                }
+                "vision_compare" => {
+                    if let Some(args) = build_vision_compare_fallback_args(task_context) {
+                        return Some((tool_name, args));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        None
+    }
 }
 
 /// Extract a file path mentioned in model output (e.g., "src/main.rs", "./Cargo.toml").
@@ -804,6 +872,84 @@ fn extract_mentioned_path(content: &str) -> Option<String> {
     None
 }
 
+fn extract_mentioned_image_paths(content: &str) -> Vec<String> {
+    let Ok(path_re) =
+        regex::Regex::new(r#"(?i)(?:^|[\s`"'(])((?:\./|/)?[\w./-]+\.(?:png|jpe?g|webp|gif|bmp))"#)
+    else {
+        return Vec::new();
+    };
+
+    let mut paths = Vec::new();
+    for cap in path_re.captures_iter(content) {
+        let Some(path) = cap.get(1).map(|m| m.as_str().to_string()) else {
+            continue;
+        };
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+
+    paths
+}
+
+fn derive_vision_prompt(task_context: &str, anchor: &str, default_prompt: &str) -> String {
+    let prompt = task_context
+        .split_once(anchor)
+        .map(|(_, after)| after.trim())
+        .unwrap_or(task_context)
+        .trim_start_matches(|c: char| c.is_ascii_whitespace() || matches!(c, ',' | ';' | ':'))
+        .trim_start_matches("and ")
+        .trim_start_matches("then ")
+        .trim_start_matches("please ")
+        .trim();
+
+    if prompt.is_empty() {
+        default_prompt.to_string()
+    } else {
+        prompt.to_string()
+    }
+}
+
+fn build_vision_analyze_fallback_args(task_context: &str) -> Option<String> {
+    let image_path = extract_mentioned_image_paths(task_context)
+        .into_iter()
+        .next()?;
+    let prompt = derive_vision_prompt(
+        task_context,
+        &image_path,
+        "Describe the main subject in the image.",
+    );
+    Some(
+        serde_json::json!({
+            "image_path": image_path,
+            "prompt": prompt,
+        })
+        .to_string(),
+    )
+}
+
+fn build_vision_compare_fallback_args(task_context: &str) -> Option<String> {
+    let image_paths = extract_mentioned_image_paths(task_context);
+    if image_paths.len() < 2 {
+        return None;
+    }
+
+    let prompt = derive_vision_prompt(
+        task_context,
+        image_paths.get(1)?,
+        "Compare these two images and summarize the main differences.",
+    );
+    Some(
+        serde_json::json!({
+            "image_a": image_paths[0],
+            "image_b": image_paths[1],
+            "threshold": 90.0,
+            "prompt": prompt,
+        })
+        .to_string(),
+    )
+}
+
 /// Extract a quoted string from content (single or double quotes, or backticks).
 fn _extract_quoted_string(content: &str) -> Option<String> {
     for delim in ['"', '\'', '`'] {
@@ -817,4 +963,34 @@ fn _extract_quoted_string(content: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_mentioned_image_paths_finds_absolute_image() {
+        let paths = extract_mentioned_image_paths(
+            "Use vision_analyze on /home/ivo/radarcam/samples/sample_3_00000693.jpg and answer.",
+        );
+        assert_eq!(
+            paths,
+            vec!["/home/ivo/radarcam/samples/sample_3_00000693.jpg".to_string()]
+        );
+    }
+
+    #[test]
+    fn build_vision_analyze_fallback_args_uses_task_prompt_suffix() {
+        let args = build_vision_analyze_fallback_args(
+            "Use vision_analyze on /tmp/frame.png and answer in one short sentence describing the main subject.",
+        )
+        .expect("expected fallback args");
+        let parsed: serde_json::Value = serde_json::from_str(&args).expect("valid json");
+        assert_eq!(parsed["image_path"], "/tmp/frame.png");
+        assert_eq!(
+            parsed["prompt"],
+            "answer in one short sentence describing the main subject."
+        );
+    }
 }

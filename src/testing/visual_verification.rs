@@ -162,6 +162,8 @@ pub struct VisualVerifier {
     endpoint: String,
     /// Vision model identifier.
     model: String,
+    /// Optional bearer token for authenticated vision endpoints.
+    api_key: Option<crate::config::RedactedString>,
     /// HTTP request timeout in seconds.
     timeout_secs: u64,
     /// Default max response tokens for ad hoc requests.
@@ -185,6 +187,7 @@ impl VisualVerifier {
         Self {
             endpoint: endpoint.into(),
             model: model.into(),
+            api_key: None,
             timeout_secs: default_visual_timeout(),
             default_max_tokens: 4096,
             temperature: JSON_TEMPERATURE,
@@ -201,6 +204,7 @@ impl VisualVerifier {
     /// Create a verifier from a named model profile.
     pub fn from_model_profile(profile: &crate::config::ModelProfile) -> Self {
         Self::new(&profile.endpoint, &profile.model)
+            .with_api_key(profile.api_key.clone())
             .with_generation(profile.max_tokens, profile.temperature as f64)
             .with_extra_body(profile.extra_body.clone())
     }
@@ -217,6 +221,7 @@ impl VisualVerifier {
             .or_else(|| config.resolve_model(None).map(Self::from_model_profile))
             .unwrap_or_else(|| {
                 Self::new(&config.endpoint, &config.model)
+                    .with_api_key(config.api_key.clone())
                     .with_generation(config.max_tokens, config.temperature as f64)
                     .with_extra_body(config.extra_body.clone())
             });
@@ -235,6 +240,12 @@ impl VisualVerifier {
     pub fn with_generation(mut self, max_tokens: usize, temperature: f64) -> Self {
         self.default_max_tokens = max_tokens.max(1);
         self.temperature = temperature;
+        self
+    }
+
+    /// Attach a bearer token for authenticated endpoints.
+    pub fn with_api_key(mut self, api_key: Option<crate::config::RedactedString>) -> Self {
+        self.api_key = api_key;
         self
     }
 
@@ -271,7 +282,7 @@ impl VisualVerifier {
             &prompt,
             image_base64,
             VERIFICATION_MAX_TOKENS,
-        );
+        )?;
         let raw = self.call_vlm(&body).await?;
         parse_verification_response(&raw)
     }
@@ -288,7 +299,7 @@ impl VisualVerifier {
     ) -> Result<VisualDiffResult> {
         let prompt = build_compare_prompt(change_description);
         let body =
-            self.build_two_image_request_with_options(&prompt, before, after, DIFF_MAX_TOKENS);
+            self.build_two_image_request_with_options(&prompt, before, after, DIFF_MAX_TOKENS)?;
         let raw = self.call_vlm(&body).await?;
         parse_diff_response(&raw)
     }
@@ -298,7 +309,7 @@ impl VisualVerifier {
         let prompt = "Extract ALL visible text from this screenshot. \
                       Return only the extracted text, preserving line breaks \
                       and layout as much as possible. Do not add commentary.";
-        let body = self.build_single_image_request(prompt, image_base64);
+        let body = self.build_single_image_request(prompt, image_base64)?;
         self.call_vlm(&body).await
     }
 
@@ -309,7 +320,7 @@ impl VisualVerifier {
         elements: &[UiElement],
     ) -> Result<Vec<ElementVerification>> {
         let prompt = build_elements_prompt(elements);
-        let body = self.build_single_image_request(&prompt, image_base64);
+        let body = self.build_single_image_request(&prompt, image_base64)?;
         let raw = self.call_vlm(&body).await?;
         parse_elements_response(&raw, elements)
     }
@@ -323,7 +334,7 @@ impl VisualVerifier {
                       - \"responsive_notes\": array of strings with notes about the layout\n\
                       \n\
                       Respond ONLY with the JSON object, no extra text.";
-        let body = self.build_single_image_request(prompt, image_base64);
+        let body = self.build_single_image_request(prompt, image_base64)?;
         let raw = self.call_vlm(&body).await?;
         parse_layout_response(&raw)
     }
@@ -443,7 +454,7 @@ impl VisualVerifier {
     // -----------------------------------------------------------------------
 
     /// Build a chat-completion request body with a single image.
-    fn build_single_image_request(&self, prompt: &str, image_base64: &str) -> Value {
+    fn build_single_image_request(&self, prompt: &str, image_base64: &str) -> Result<Value> {
         self.build_single_image_request_with_options(prompt, image_base64, self.default_max_tokens)
     }
 
@@ -452,23 +463,29 @@ impl VisualVerifier {
         prompt: &str,
         image_base64: &str,
         max_tokens: usize,
-    ) -> Value {
+    ) -> Result<Value> {
         let data_uri = format!("data:image/png;base64,{}", image_base64);
         let mut body = json!({
             "model": self.model,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    { "type": "text", "text": prompt },
-                    { "type": "image_url", "image_url": { "url": data_uri, "detail": self.image_detail } }
-                ]
-            }],
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a precise visual verification assistant. Follow the user instruction exactly and answer directly."
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": prompt },
+                        { "type": "image_url", "image_url": { "url": data_uri, "detail": self.image_detail } }
+                    ]
+                }
+            ],
             "max_tokens": self.clamp_max_tokens(max_tokens),
             "temperature": self.temperature,
             "stream": false
         });
-        self.merge_extra_body(&mut body);
-        body
+        self.merge_extra_body(&mut body)?;
+        Ok(body)
     }
 
     /// Build a chat-completion request body with two images (before/after).
@@ -477,7 +494,7 @@ impl VisualVerifier {
         prompt: &str,
         before_base64: &str,
         after_base64: &str,
-    ) -> Value {
+    ) -> Result<Value> {
         self.build_two_image_request_with_options(
             prompt,
             before_base64,
@@ -492,41 +509,42 @@ impl VisualVerifier {
         before_base64: &str,
         after_base64: &str,
         max_tokens: usize,
-    ) -> Value {
+    ) -> Result<Value> {
         let uri_before = format!("data:image/png;base64,{}", before_base64);
         let uri_after = format!("data:image/png;base64,{}", after_base64);
         let mut body = json!({
             "model": self.model,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    { "type": "text", "text": prompt },
-                    { "type": "image_url", "image_url": { "url": uri_before, "detail": self.image_detail } },
-                    { "type": "image_url", "image_url": { "url": uri_after, "detail": self.image_detail } }
-                ]
-            }],
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a precise visual verification assistant. Follow the user instruction exactly and answer directly."
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": prompt },
+                        { "type": "image_url", "image_url": { "url": uri_before, "detail": self.image_detail } },
+                        { "type": "image_url", "image_url": { "url": uri_after, "detail": self.image_detail } }
+                    ]
+                }
+            ],
             "max_tokens": self.clamp_max_tokens(max_tokens),
             "temperature": self.temperature,
             "stream": false
         });
-        self.merge_extra_body(&mut body);
-        body
+        self.merge_extra_body(&mut body)?;
+        Ok(body)
     }
 
     fn clamp_max_tokens(&self, max_tokens: usize) -> usize {
         max_tokens.min(self.default_max_tokens.max(1))
     }
 
-    fn merge_extra_body(&self, body: &mut Value) {
+    fn merge_extra_body(&self, body: &mut Value) -> Result<()> {
         let Some(extra_body) = &self.extra_body else {
-            return;
+            return Ok(());
         };
-        let Some(body_obj) = body.as_object_mut() else {
-            return;
-        };
-        for (key, value) in extra_body {
-            body_obj.insert(key.clone(), value.clone());
-        }
+        crate::api::merge_extra_body(body, Some(extra_body), "visual verification request")
     }
 
     /// Send a request to the VLM endpoint and extract the response text.
@@ -540,9 +558,12 @@ impl VisualVerifier {
             .build()
             .context("Failed to build HTTP client")?;
 
-        let response = client
-            .post(&url)
-            .header("Content-Type", "application/json")
+        let mut request = client.post(&url).header("Content-Type", "application/json");
+        if let Some(ref key) = self.api_key {
+            request = request.bearer_auth(key.expose());
+        }
+
+        let response = request
             .json(body)
             .send()
             .await
@@ -1752,11 +1773,14 @@ mod tests {
     #[test]
     fn test_build_single_image_request() {
         let verifier = VisualVerifier::new("http://localhost:1234/v1", "test-model");
-        let body = verifier.build_single_image_request("Describe this", "AAAA");
+        let body = verifier
+            .build_single_image_request("Describe this", "AAAA")
+            .unwrap();
         assert_eq!(body["model"], "test-model");
         assert_eq!(body["temperature"], 0.0);
         assert_eq!(body["stream"], false);
-        let content = body["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(body["messages"][0]["role"], "system");
+        let content = body["messages"][1]["content"].as_array().unwrap();
         assert_eq!(content.len(), 2);
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[0]["text"], "Describe this");
@@ -1771,8 +1795,11 @@ mod tests {
     #[test]
     fn test_build_two_image_request() {
         let verifier = VisualVerifier::new("http://localhost:1234/v1", "test-model");
-        let body = verifier.build_two_image_request("Compare", "BEFORE", "AFTER");
-        let content = body["messages"][0]["content"].as_array().unwrap();
+        let body = verifier
+            .build_two_image_request("Compare", "BEFORE", "AFTER")
+            .unwrap();
+        assert_eq!(body["messages"][0]["role"], "system");
+        let content = body["messages"][1]["content"].as_array().unwrap();
         assert_eq!(content.len(), 3);
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[1]["type"], "image_url");
@@ -1788,23 +1815,18 @@ mod tests {
     #[test]
     fn test_build_single_image_request_verification_budget() {
         let verifier = VisualVerifier::new("http://localhost:1234/v1", "test-model");
-        let body = verifier.build_single_image_request_with_options(
-            "Verify",
-            "AAAA",
-            VERIFICATION_MAX_TOKENS,
-        );
+        let body = verifier
+            .build_single_image_request_with_options("Verify", "AAAA", VERIFICATION_MAX_TOKENS)
+            .unwrap();
         assert_eq!(body["max_tokens"], VERIFICATION_MAX_TOKENS);
     }
 
     #[test]
     fn test_build_two_image_request_diff_budget() {
         let verifier = VisualVerifier::new("http://localhost:1234/v1", "test-model");
-        let body = verifier.build_two_image_request_with_options(
-            "Compare",
-            "BEFORE",
-            "AFTER",
-            DIFF_MAX_TOKENS,
-        );
+        let body = verifier
+            .build_two_image_request_with_options("Compare", "BEFORE", "AFTER", DIFF_MAX_TOKENS)
+            .unwrap();
         assert_eq!(body["max_tokens"], DIFF_MAX_TOKENS);
     }
 
@@ -1819,11 +1841,13 @@ mod tests {
             .with_generation(256, 0.25)
             .with_image_detail("high")
             .with_extra_body(Some(extra_body));
-        let body = verifier.build_single_image_request_with_options("Verify", "AAAA", 4096);
+        let body = verifier
+            .build_single_image_request_with_options("Verify", "AAAA", 4096)
+            .unwrap();
         assert_eq!(body["max_tokens"], 256);
         assert_eq!(body["temperature"], 0.25);
         assert_eq!(
-            body["messages"][0]["content"][1]["image_url"]["detail"],
+            body["messages"][1]["content"][1]["image_url"]["detail"],
             "high"
         );
         assert_eq!(
@@ -1839,6 +1863,7 @@ mod tests {
         let v = VisualVerifier::new("http://example.com/v1", "model-x");
         assert_eq!(v.endpoint, "http://example.com/v1");
         assert_eq!(v.model, "model-x");
+        assert!(v.api_key.is_none());
         assert_eq!(v.timeout_secs, 120);
         assert_eq!(v.default_max_tokens, 4096);
         assert_eq!(v.temperature, 0.0);
@@ -1879,7 +1904,7 @@ mod tests {
         let profile = crate::config::ModelProfile {
             endpoint: "https://vision.example/v1".to_string(),
             model: "vision-model".to_string(),
-            api_key: None,
+            api_key: Some(crate::config::RedactedString::new("vision-secret")),
             max_tokens: 192,
             temperature: 0.0,
             modalities: vec!["text".to_string(), "vision".to_string()],
@@ -1889,6 +1914,7 @@ mod tests {
         let v = VisualVerifier::from_model_profile(&profile);
         assert_eq!(v.endpoint, "https://vision.example/v1");
         assert_eq!(v.model, "vision-model");
+        assert_eq!(v.api_key.as_ref().unwrap().expose(), "vision-secret");
         assert_eq!(v.default_max_tokens, 192);
         assert_eq!(v.temperature, 0.0);
         assert_eq!(
@@ -1994,9 +2020,11 @@ mod tests {
         // The actual VLM call would fail, but construction must be graceful.
         let verifier = VisualVerifier::new("http://localhost:1234/v1", "test-model");
         let garbage = "not-valid-base64-!@#$%^&*()";
-        let body = verifier.build_single_image_request("Check this", garbage);
+        let body = verifier
+            .build_single_image_request("Check this", garbage)
+            .unwrap();
         // The body is constructed; the data URI contains the garbage verbatim
-        let url = body["messages"][0]["content"][1]["image_url"]["url"]
+        let url = body["messages"][1]["content"][1]["image_url"]["url"]
             .as_str()
             .unwrap();
         assert!(url.starts_with("data:image/png;base64,"));

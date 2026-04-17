@@ -79,7 +79,9 @@ use package::{NpmInstall, NpmRun, NpmScripts, PipFreeze, PipInstall, PipList, Ya
 use page_controller::PageControlTool;
 use process::{PortCheck, ProcessList, ProcessLogs, ProcessRestart, ProcessStart, ProcessStop};
 use pty_shell::PtyShellTool;
-use radarcam::{RadarCamControl, RadarCamFrame, RadarCamIntrospect, RadarCamLogs, RadarCamStatus, RadarCamTest};
+use radarcam::{
+    RadarCamControl, RadarCamFrame, RadarCamIntrospect, RadarCamLogs, RadarCamStatus, RadarCamTest,
+};
 use screen_capture::ScreenCapture;
 use search::{GlobFind, SymbolSearch};
 use shell_exec::ShellExec;

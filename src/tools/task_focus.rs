@@ -188,10 +188,17 @@ pub fn classify_task(task: &str) -> TaskType {
     if t.contains("browser")
         || t.contains("screenshot")
         || t.contains("visual")
+        || t.contains("vision_analyze")
+        || t.contains("vision_compare")
         || t.contains("website")
         || t.contains("page")
         || t.contains("css")
         || t.contains("ui look")
+        || t.contains(".png")
+        || t.contains(".jpg")
+        || t.contains(".jpeg")
+        || t.contains(".webp")
+        || t.contains(".gif")
     {
         return TaskType::Visual;
     }
@@ -615,5 +622,21 @@ mod tests {
         assert_eq!(format!("{}", TaskType::Read), "read");
         assert_eq!(format!("{}", TaskType::Edit), "edit");
         assert_eq!(format!("{}", TaskType::Ship), "ship");
+    }
+
+    #[test]
+    fn test_classify_task_detects_explicit_vision_tool() {
+        assert_eq!(
+            classify_task("Use vision_analyze on ./sample.jpg and answer directly."),
+            TaskType::Visual
+        );
+    }
+
+    #[test]
+    fn test_classify_task_detects_image_path() {
+        assert_eq!(
+            classify_task("Describe /tmp/camera_frame.png in one sentence."),
+            TaskType::Visual
+        );
     }
 }

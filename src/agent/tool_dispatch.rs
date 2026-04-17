@@ -480,6 +480,37 @@ pub(super) fn extract_explicit_allowed_tools(
     (!allowed.is_empty()).then_some(allowed)
 }
 
+pub(super) fn extract_explicit_requested_tools<'a, I>(
+    task_context: &str,
+    tool_names: I,
+) -> std::collections::BTreeSet<String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut required = std::collections::BTreeSet::new();
+
+    for tool_name in tool_names {
+        let escaped = regex::escape(tool_name);
+        let patterns = [
+            format!(
+                r"(?i)\b(?:use|call|invoke|run)\s+(?:the\s+)?`?{}`?(?:\s+tool)?\b",
+                escaped
+            ),
+            format!(r"(?i)\busing\s+`?{}`?(?:\s+tool)?\b", escaped),
+        ];
+
+        if patterns
+            .iter()
+            .filter_map(|pattern| regex::Regex::new(pattern).ok())
+            .any(|re| re.is_match(task_context))
+        {
+            required.insert(tool_name.to_string());
+        }
+    }
+
+    required
+}
+
 fn extract_explicit_disallowed_tools(task_context: &str) -> std::collections::BTreeSet<String> {
     let mut disallowed = std::collections::BTreeSet::new();
 
@@ -659,7 +690,12 @@ fn configured_vision_profile(
     config
         .models
         .get("vision")
-        .or_else(|| config.resolve_model(None))
+        .filter(|profile| profile.supports_vision())
+        .or_else(|| {
+            config
+                .resolve_model(None)
+                .filter(|profile| profile.supports_vision())
+        })
 }
 
 fn insert_missing_tool_arg(
@@ -3117,6 +3153,25 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_explicit_requested_tools_detects_imperative_use() {
+        let required = extract_explicit_requested_tools(
+            "Use vision_analyze on ./sample.jpg and answer in one sentence.",
+            ["vision_analyze", "file_read"].iter().copied(),
+        );
+        assert!(required.contains("vision_analyze"));
+        assert_eq!(required.len(), 1);
+    }
+
+    #[test]
+    fn test_extract_explicit_requested_tools_detects_backticked_tool() {
+        let required = extract_explicit_requested_tools(
+            "Please call `file_read` on Cargo.toml before answering.",
+            ["vision_analyze", "file_read"].iter().copied(),
+        );
+        assert!(required.contains("file_read"));
+    }
+
+    #[test]
     fn test_shell_exec_verification_commands_are_observational() {
         assert!(shell_command_is_observational("cargo test --quiet"));
         assert!(shell_command_is_observational("cargo check"));
@@ -3279,6 +3334,33 @@ mod tests {
         assert_eq!(parsed["max_tokens"], 512);
         assert_eq!(parsed["temperature"], 0.5);
         assert_eq!(parsed["detail"], "high");
+    }
+
+    #[test]
+    fn test_inject_runtime_tool_defaults_ignores_text_only_default_profile() {
+        let mut config = crate::config::Config::default();
+        config.models.insert(
+            "default".to_string(),
+            crate::config::ModelProfile {
+                endpoint: "https://text.example/v1".to_string(),
+                model: "text-only".to_string(),
+                api_key: None,
+                max_tokens: 512,
+                temperature: 0.3,
+                modalities: vec!["text".to_string()],
+                context_length: 131_072,
+                extra_body: None,
+            },
+        );
+
+        let effective = inject_runtime_tool_defaults(
+            &config,
+            "vision_analyze",
+            r#"{"prompt":"describe","image_base64":"AAAA"}"#,
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&effective).unwrap();
+        assert!(parsed.get("endpoint").is_none());
+        assert!(parsed.get("model").is_none());
     }
 
     // =========================================================================

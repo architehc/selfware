@@ -11,7 +11,12 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use std::time::Duration;
 
+use crate::api::merge_extra_body as merge_request_extra_body;
+
 use super::Tool;
+
+const VISION_SYSTEM_PROMPT: &str =
+    "You are a precise multimodal assistant. Follow the user request exactly and answer directly.";
 
 // ───────────────────────────────────────────────────────────────────────────
 // vision_analyze
@@ -59,6 +64,10 @@ impl Tool for VisionAnalyze {
                     "type": "string",
                     "description": "Vision model name. Required."
                 },
+                "api_key": {
+                    "type": "string",
+                    "description": "Optional bearer token for authenticated vision endpoints."
+                },
                 "detail": {
                     "type": "string",
                     "enum": ["low", "high", "auto"],
@@ -94,6 +103,7 @@ impl Tool for VisionAnalyze {
             .get("model")
             .and_then(|v| v.as_str())
             .context("model is required")?;
+        let api_key = args.get("api_key").and_then(|v| v.as_str());
         let detail = args
             .get("detail")
             .and_then(|v| v.as_str())
@@ -112,20 +122,26 @@ impl Tool for VisionAnalyze {
         // Build the multimodal message array (OpenAI vision format)
         let mut body = json!({
             "model": model,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    { "type": "text", "text": prompt },
-                    { "type": "image_url", "image_url": { "url": data_uri, "detail": detail } }
-                ]
-            }],
+            "messages": [
+                {
+                    "role": "system",
+                    "content": VISION_SYSTEM_PROMPT
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": prompt },
+                        { "type": "image_url", "image_url": { "url": data_uri, "detail": detail } }
+                    ]
+                }
+            ],
             "max_tokens": max_tokens,
             "temperature": temperature,
             "stream": false
         });
         merge_extra_body(&mut body, args.get("extra_body"))?;
 
-        let response = call_vision_endpoint(endpoint, &body).await?;
+        let response = call_vision_endpoint(endpoint, api_key, &body).await?;
 
         let content = response["choices"][0]["message"]["content"]
             .as_str()
@@ -192,6 +208,10 @@ impl Tool for VisionCompare {
                     "type": "string",
                     "description": "Optional vision model name for semantic comparison"
                 },
+                "api_key": {
+                    "type": "string",
+                    "description": "Optional bearer token for authenticated semantic comparison endpoints."
+                },
                 "detail": {
                     "type": "string",
                     "enum": ["low", "high", "auto"],
@@ -227,6 +247,7 @@ impl Tool for VisionCompare {
             .get("threshold")
             .and_then(|v| v.as_f64())
             .unwrap_or(90.0);
+        let api_key = args.get("api_key").and_then(|v| v.as_str());
         let detail = args
             .get("detail")
             .and_then(|v| v.as_str())
@@ -283,21 +304,27 @@ impl Tool for VisionCompare {
 
             let mut body = json!({
                 "model": model,
-                "messages": [{
-                    "role": "user",
-                    "content": [
-                        { "type": "text", "text": "Compare these two images. Describe the visual differences between image 1 and image 2. Be specific about layout, color, typography, and content differences." },
-                        { "type": "image_url", "image_url": { "url": uri_a, "detail": detail } },
-                        { "type": "image_url", "image_url": { "url": uri_b, "detail": detail } }
-                    ]
-                }],
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": VISION_SYSTEM_PROMPT
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            { "type": "text", "text": "Compare these two images. Describe the visual differences between image 1 and image 2. Be specific about layout, color, typography, and content differences." },
+                            { "type": "image_url", "image_url": { "url": uri_a, "detail": detail } },
+                            { "type": "image_url", "image_url": { "url": uri_b, "detail": detail } }
+                        ]
+                    }
+                ],
                 "max_tokens": max_tokens,
                 "temperature": temperature,
                 "stream": false
             });
             merge_extra_body(&mut body, args.get("extra_body"))?;
 
-            match call_vision_endpoint(endpoint, &body).await {
+            match call_vision_endpoint(endpoint, api_key, &body).await {
                 Ok(response) => {
                     let analysis = response["choices"][0]["message"]["content"]
                         .as_str()
@@ -329,13 +356,7 @@ fn merge_extra_body(body: &mut Value, extra_body: Option<&Value>) -> Result<()> 
     let Some(extra_obj) = extra_body.as_object() else {
         anyhow::bail!("extra_body must be an object");
     };
-    let Some(body_obj) = body.as_object_mut() else {
-        return Ok(());
-    };
-    for (key, value) in extra_obj {
-        body_obj.insert(key.clone(), value.clone());
-    }
-    Ok(())
+    merge_request_extra_body(body, Some(extra_obj), "vision tool request")
 }
 
 /// Resolve an image to a data URI from either `image_path` or `image_base64`.
@@ -410,7 +431,11 @@ pub(crate) fn guess_mime(path: &str) -> &'static str {
 }
 
 /// Send a request to an OpenAI-compatible vision endpoint.
-pub(crate) async fn call_vision_endpoint(endpoint: &str, body: &Value) -> Result<Value> {
+pub(crate) async fn call_vision_endpoint(
+    endpoint: &str,
+    api_key: Option<&str>,
+    body: &Value,
+) -> Result<Value> {
     let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
     let client = Client::builder()
         .timeout(Duration::from_secs(120))
@@ -418,9 +443,12 @@ pub(crate) async fn call_vision_endpoint(endpoint: &str, body: &Value) -> Result
         .build()
         .context("Failed to build HTTP client")?;
 
-    let response = client
-        .post(&url)
-        .header("Content-Type", "application/json")
+    let mut request = client.post(&url).header("Content-Type", "application/json");
+    if let Some(key) = api_key {
+        request = request.bearer_auth(key);
+    }
+
+    let response = request
         .json(body)
         .send()
         .await
@@ -496,6 +524,7 @@ mod tests {
         assert!(schema["properties"]["detail"].is_object());
         assert!(schema["properties"]["max_tokens"].is_object());
         assert!(schema["properties"]["temperature"].is_object());
+        assert!(schema["properties"]["api_key"].is_object());
         assert!(schema["properties"]["extra_body"].is_object());
         let required = schema["required"].as_array().unwrap();
         assert!(required.contains(&json!("prompt")));
@@ -586,6 +615,7 @@ mod tests {
         assert!(schema["properties"]["detail"].is_object());
         assert!(schema["properties"]["max_tokens"].is_object());
         assert!(schema["properties"]["temperature"].is_object());
+        assert!(schema["properties"]["api_key"].is_object());
         assert!(schema["properties"]["extra_body"].is_object());
         let required = schema["required"].as_array().unwrap();
         assert!(required.contains(&json!("image_a")));
@@ -650,6 +680,15 @@ mod tests {
         let result = merge_extra_body(&mut body, Some(&extra));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("extra_body"));
+    }
+
+    #[test]
+    fn test_merge_extra_body_rejects_reserved_keys() {
+        let mut body = json!({ "model": "vision", "stream": false });
+        let extra = json!({ "model": "override" });
+        let result = merge_extra_body(&mut body, Some(&extra));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("reserved key"));
     }
 
     // ── guess_mime ────────────────────────────────────────────────────
@@ -911,7 +950,7 @@ mod tests {
     #[tokio::test]
     async fn test_call_vision_endpoint_invalid_url() {
         let body = json!({"model": "test", "messages": []});
-        let result = call_vision_endpoint("http://localhost:1/v1", &body).await;
+        let result = call_vision_endpoint("http://localhost:1/v1", None, &body).await;
         assert!(result.is_err());
     }
 
@@ -919,7 +958,7 @@ mod tests {
     async fn test_call_vision_endpoint_trailing_slash_normalization() {
         // Should strip trailing slash — will still fail to connect, but tests the URL building
         let body = json!({"model": "test", "messages": []});
-        let result = call_vision_endpoint("http://localhost:1/v1/", &body).await;
+        let result = call_vision_endpoint("http://localhost:1/v1/", None, &body).await;
         assert!(result.is_err());
         // Error should mention the URL (not double slash)
     }

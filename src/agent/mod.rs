@@ -337,6 +337,8 @@ pub struct Agent {
     self_improvement: SelfImprovementEngine,
     /// Current task description used as learning context for tool/error feedback
     current_task_context: String,
+    /// Tools the task explicitly requires before the agent may answer.
+    required_task_tools: std::collections::BTreeSet<String>,
     /// Verification gate for automatic code validation
     verification_gate: VerificationGate,
     /// Error analyzer for intelligent error suggestions
@@ -879,6 +881,7 @@ To call a tool, use this EXACT XML structure:
             cognitive_state,
             self_improvement,
             current_task_context: String::new(),
+            required_task_tools: std::collections::BTreeSet::new(),
             verification_gate,
             error_analyzer,
             file_tracker: FileTracker::new(),

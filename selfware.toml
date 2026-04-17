@@ -1,13 +1,11 @@
-# Selfware config — Qwen3.5-122B on SGLang via ngrok
+# Selfware config — Remote Qwen3.5-122B on SGLang for heavy tasks
 endpoint = "https://crazyshit.ngrok.io/v1"
 model = "/media/thread/trebuchet6/qwen35/models/Qwen3.5-122B-A10B-NVFP4-yarn-1010k"
-# 16K allows thinking + tool calls + answer without runaway generation
 max_tokens = 16384
 context_length = 1010000
 temperature = 0.6
 
 [extra_body]
-# Enable thinking for better tool-call reasoning
 chat_template_kwargs = { enable_thinking = true }
 
 [safety]
@@ -17,9 +15,7 @@ protected_branches = ["main"]
 
 [agent]
 max_iterations = 100
-# Generous timeout per step since model is slow (~1-4 tok/s)
 step_timeout_secs = 600
-# SGLang doesn't support native function calling reliably — use XML tool calling
 native_function_calling = false
 streaming = true
 
@@ -34,3 +30,10 @@ max_recovery_attempts = 10
 max_retries = 3
 base_delay_ms = 2000
 max_delay_ms = 30000
+
+# Local fast model for quick tasks
+[models.local]
+endpoint = "http://localhost:9100/v1"
+model = "qwen3.6"
+max_tokens = 4096
+context_length = 32768

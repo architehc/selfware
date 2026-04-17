@@ -69,7 +69,22 @@ impl Agent {
         self.clear_task_state_memory();
         self.reset_no_action_prompt_state();
         self.total_no_action_prompts = 0;
+        self.required_task_tools.clear();
         let task_description = task.to_string();
+        let available_tool_names: Vec<String> = self
+            .tools
+            .list()
+            .into_iter()
+            .map(|tool| tool.name().to_string())
+            .collect();
+        let explicit_task_tools = super::tool_dispatch::extract_explicit_requested_tools(
+            &task_description,
+            available_tool_names.iter().map(String::as_str),
+        );
+        self.required_task_tools = explicit_task_tools.clone();
+        for tool_name in &explicit_task_tools {
+            self.tools.activate(tool_name);
+        }
 
         let cancel_token = self.cancel_token();
         let ctrl_c_handle = tokio::spawn(async move {
@@ -106,7 +121,20 @@ impl Agent {
             .as_ref()
             .map(|c| c.task_id.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        self.start_learning_session(&learning_session_id, &task_description);
+        let task_learning_context = if explicit_task_tools.is_empty() {
+            task_description.clone()
+        } else {
+            let required_tool_lines = explicit_task_tools
+                .iter()
+                .map(|tool| format!("- `{}`", tool))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "{}\n\nThis task explicitly requires these tools before answering:\n{}\nDo not answer until each required tool has been called successfully.",
+                task_description, required_tool_lines
+            )
+        };
+        self.start_learning_session(&learning_session_id, &task_learning_context);
         self.cognitive_state.upsert_strategic_goal(
             "strategic-agent-reliability",
             "Improve long-term autonomous task reliability and production readiness",
@@ -158,11 +186,41 @@ impl Agent {
             } else {
                 String::new()
             };
+            let explicit_tool_guidance = if explicit_task_tools.is_empty() {
+                String::new()
+            } else {
+                let activated_tools = explicit_task_tools
+                    .iter()
+                    .filter_map(|name| self.tools.get(name))
+                    .map(|tool| {
+                        format!(
+                            r#"<tool name="{}">
+  <description>{}</description>
+  <parameters>{}</parameters>
+</tool>"#,
+                            tool.name(),
+                            tool.description(),
+                            tool.schema()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!(
+                    "\n\n## EXPLICIT TOOL REQUIREMENT\nThe user explicitly required these tools for this task: {}.\nYou MUST call each required tool successfully before giving a final answer.\nDo NOT infer results from filenames, paths, or prior knowledge.\nThese tools are activated for this session:\n{}",
+                    explicit_task_tools
+                        .iter()
+                        .map(|tool| format!("`{}`", tool))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    activated_tools
+                )
+            };
 
             let focus_block = format!(
-                "\n\n## TASK FOCUS (READ THIS FIRST)\n{}{}\n\nPrimary tools for this task: {}\nUse these tools FIRST. Do NOT start with git_status, context_status, or process_list.\n",
+                "\n\n## TASK FOCUS (READ THIS FIRST)\n{}{}{}\n\nPrimary tools for this task: {}\nUse these tools FIRST. Do NOT start with git_status, context_status, or process_list.\n",
                 preamble,
                 file_hint,
+                explicit_tool_guidance,
                 task_type.primary_tools().join(", ")
             );
             let current = self.messages[0].content.to_string();

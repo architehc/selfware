@@ -249,6 +249,26 @@ impl Agent {
                 return Ok(false);
             }
 
+            if super::verification::is_capability_disclaimer_response(&content) {
+                let has_successful_tool_calls = self
+                    .current_checkpoint
+                    .as_ref()
+                    .map(|cp| cp.tool_calls.iter().any(|tc| tc.success))
+                    .unwrap_or(false);
+                if has_successful_tool_calls {
+                    info!("Rejected false capability disclaimer after successful tool use");
+                    self.messages.push(crate::api::types::Message::user(
+                        "<selfware_system_directive>\n\
+                         You already executed tools successfully in this session. \
+                         Use the tool results that are already in context and answer the task directly. \
+                         Do NOT claim you cannot access tools, files, or the local filesystem.\n\
+                         </selfware_system_directive>"
+                            .to_string(),
+                    ));
+                    return Ok(false);
+                }
+            }
+
             // Detect text responses that contain code — the model should
             // use file_write/file_edit tools, not output code as text.
             // If we can extract the code and a target path, auto-write it.
@@ -915,6 +935,16 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_is_capability_disclaimer_response() {
+        assert!(super::verification::is_capability_disclaimer_response(
+            "I cannot fulfill this request. I am an AI assistant and do not have the capability to execute external tools like `vision_analyze`, access local file systems, or view images directly. Additionally, I cannot call tools as described in your prompt; I can only generate text responses based on the information provided to me."
+        ));
+        assert!(!super::verification::is_capability_disclaimer_response(
+            "The image shows a weathered coastal building beside the sea."
+        ));
+    }
+
     #[tokio::test]
     async fn test_maybe_prompt_for_action_escalates_after_repeated_no_action_turns() {
         let server = MockLlmServer::builder().with_response("done").build().await;
@@ -1328,7 +1358,8 @@ mod tests {
         let mut config = test_config(format!("{}/v1", server.url()));
         config.agent.min_completion_steps = 5;
         config.agent.require_verification_before_completion = false;
-        let agent = Agent::new(config).await.unwrap();
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.current_task_context = "Implement the requested change".to_string();
 
         let result = agent.check_completion_gate();
         assert!(result.is_some());
@@ -1336,6 +1367,74 @@ mod tests {
         assert!(msg.contains("only"));
         assert!(msg.contains("step"));
         assert!(msg.contains("required"));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_gate_rejects_missing_required_explicit_tool() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.agent.min_completion_steps = 0;
+        config.agent.require_verification_before_completion = false;
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.current_task_context = "Use vision_analyze on ./sample.jpg".to_string();
+        agent
+            .required_task_tools
+            .insert("vision_analyze".to_string());
+
+        let result = agent.check_completion_gate();
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("vision_analyze"));
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_gate_passes_after_required_explicit_tool_succeeds() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.agent.min_completion_steps = 0;
+        config.agent.require_verification_before_completion = false;
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.current_task_context = "Use vision_analyze on ./sample.jpg".to_string();
+        agent
+            .required_task_tools
+            .insert("vision_analyze".to_string());
+
+        let mut checkpoint = crate::checkpoint::TaskCheckpoint::new(
+            "vision-task".to_string(),
+            "Use vision_analyze on ./sample.jpg".to_string(),
+        );
+        checkpoint.log_tool_call(ToolCallLog {
+            timestamp: Utc::now(),
+            tool_name: "vision_analyze".to_string(),
+            arguments: r#"{"image_path":"./sample.jpg"}"#.to_string(),
+            result: Some("ok".to_string()),
+            success: true,
+            duration_ms: Some(150),
+        });
+        agent.current_checkpoint = Some(checkpoint);
+
+        assert!(agent.check_completion_gate().is_none());
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_gate_skips_min_steps_for_read_only_task_context() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.agent.min_completion_steps = 5;
+        config.agent.require_verification_before_completion = false;
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.current_task_context =
+            "What is the default full validation CLI command for this workspace?".to_string();
+
+        assert!(
+            agent.check_completion_gate().is_none(),
+            "read-only tasks should not be forced through the min-step gate"
+        );
 
         server.stop().await;
     }
