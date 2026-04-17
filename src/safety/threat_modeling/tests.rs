@@ -1907,12 +1907,18 @@ mod property_tests {
     fn test_risk_level_score_consistency() {
         for score in 0..=20 {
             let level = RiskLevel::from_score(score);
-            let (min, _max) = level.score_range();
+            let (min, max) = level.score_range();
+            let in_expected_bucket = if score == 0 {
+                level == RiskLevel::Low
+            } else if score > max {
+                level == RiskLevel::Critical
+            } else {
+                (min..=max).contains(&score)
+            };
             assert!(
-                score >= min,
+                in_expected_bucket,
                 "Score {} should be in range for {:?}",
-                score,
-                level
+                score, level
             );
         }
     }
