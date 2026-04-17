@@ -77,6 +77,12 @@ impl LongRunningConfig {
         self
     }
 
+    /// Set the maximum number of concurrent projects.
+    pub fn with_max_concurrent(mut self, max_concurrent: usize) -> Self {
+        self.max_concurrent = max_concurrent.max(1);
+        self
+    }
+
     /// Set timeout per project.
     pub fn with_project_timeout(mut self, secs: u64) -> Self {
         self.timeout_per_project_secs = secs;

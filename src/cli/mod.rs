@@ -2054,6 +2054,7 @@ async fn handle_command(
             hours,
             timeout,
             max_iters,
+            concurrent,
             endpoint,
             model,
             #[allow(unused_variables)]
@@ -2068,6 +2069,7 @@ async fn handle_command(
             println!("   Duration: {} hours", hours.to_string().emphasis());
             println!("   Timeout: {}s per project", timeout);
             println!("   Max iterations: {}", max_iters);
+            println!("   Concurrent: {}", concurrent.to_string().emphasis());
             println!("   Output: {}", output.clone().emphasis());
             if let Some(ref ep) = endpoint {
                 println!("   Endpoint: {}", ep);
@@ -2093,6 +2095,7 @@ async fn handle_command(
                     .with_duration(Duration::from_secs(hours * 3600))
                     .with_project_timeout(timeout)
                     .with_max_iterations(max_iters)
+                    .with_max_concurrent(concurrent)
                     .with_templates_dir(tmpl)
                     .with_output_dir(&output);
 

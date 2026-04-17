@@ -197,6 +197,9 @@ pub(crate) enum Commands {
         /// Maximum iterations per project (default: 80)
         #[arg(short, long, default_value_t = 80)]
         max_iters: usize,
+        /// Maximum concurrent projects (default: 1)
+        #[arg(short, long, default_value_t = 1)]
+        concurrent: usize,
         /// Endpoint URL (defaults to config)
         #[arg(short, long)]
         endpoint: Option<String>,
