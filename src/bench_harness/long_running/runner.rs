@@ -2,7 +2,7 @@
 
 use super::config::LongRunningConfig;
 use super::project::{ProjectResult, ProjectStatus, ProjectType};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
@@ -67,7 +67,7 @@ impl LongRunningRunner {
     }
 
     /// Run a single test task.
-    pub async fn run_task(&self, task: &TestTask, work_dir: &PathBuf) -> ProjectResult {
+    pub async fn run_task(&self, task: &TestTask, work_dir: &Path) -> ProjectResult {
         let task_start = Instant::now();
 
         // Setup project
@@ -152,7 +152,7 @@ impl LongRunningRunner {
     }
 
     /// Setup a project based on task setup.
-    async fn setup_project(&self, setup: &TaskSetup, dir: &PathBuf) -> std::io::Result<()> {
+    async fn setup_project(&self, setup: &TaskSetup, dir: &Path) -> std::io::Result<()> {
         use super::project::{scaffold_go, scaffold_python, scaffold_rust, scaffold_template};
 
         match setup {
@@ -169,7 +169,7 @@ impl LongRunningRunner {
     fn evaluate_project(
         &self,
         project_type: &ProjectType,
-        work_dir: &PathBuf,
+        work_dir: &Path,
     ) -> (bool, usize, usize, usize) {
         let compiles = self.check_compiles(project_type, work_dir);
         let src_lines = self.count_source_lines(project_type, work_dir);
@@ -184,7 +184,7 @@ impl LongRunningRunner {
     }
 
     /// Check if the project compiles.
-    fn check_compiles(&self, project_type: &ProjectType, work_dir: &PathBuf) -> bool {
+    fn check_compiles(&self, project_type: &ProjectType, work_dir: &Path) -> bool {
         let cmd_parts = project_type.check_command();
         if cmd_parts.is_empty() {
             return false;
@@ -213,7 +213,7 @@ impl LongRunningRunner {
     }
 
     /// Run tests and count results.
-    fn run_tests(&self, project_type: &ProjectType, work_dir: &PathBuf) -> (usize, usize) {
+    fn run_tests(&self, project_type: &ProjectType, work_dir: &Path) -> (usize, usize) {
         let cmd_parts = project_type.test_command();
         if cmd_parts.is_empty() {
             return (0, 0);
@@ -234,13 +234,13 @@ impl LongRunningRunner {
                         let passed: usize = stdout
                             .lines()
                             .filter_map(|l| l.split("passed").next())
-                            .filter_map(|l| l.trim().split_whitespace().last())
+                            .filter_map(|l| l.split_whitespace().next_back())
                             .filter_map(|n| n.parse::<usize>().ok())
                             .sum();
                         let failed: usize = stdout
                             .lines()
                             .filter_map(|l| l.split("failed").next())
-                            .filter_map(|l| l.trim().split_whitespace().last())
+                            .filter_map(|l| l.split_whitespace().next_back())
                             .filter_map(|n| n.parse::<usize>().ok())
                             .sum();
                         (passed, failed)
@@ -259,13 +259,13 @@ impl LongRunningRunner {
                         let passed: usize = stdout
                             .lines()
                             .filter_map(|l| l.split("passed").next())
-                            .filter_map(|l| l.trim().split_whitespace().last())
+                            .filter_map(|l| l.split_whitespace().next_back())
                             .filter_map(|n| n.parse::<usize>().ok())
                             .sum();
                         let failed: usize = stdout
                             .lines()
                             .filter_map(|l| l.split("failed").next())
-                            .filter_map(|l| l.trim().split_whitespace().last())
+                            .filter_map(|l| l.split_whitespace().next_back())
                             .filter_map(|n| n.parse::<usize>().ok())
                             .sum();
                         (passed, failed)
@@ -277,7 +277,7 @@ impl LongRunningRunner {
     }
 
     /// Count source lines in the project.
-    fn count_source_lines(&self, project_type: &ProjectType, work_dir: &PathBuf) -> usize {
+    fn count_source_lines(&self, project_type: &ProjectType, work_dir: &Path) -> usize {
         let ext = project_type.source_extension();
         if ext.is_empty() {
             return 0;
@@ -371,7 +371,7 @@ fn extract_outcome(output: &[u8]) -> String {
     let text = String::from_utf8_lossy(output);
     text.lines()
         .filter(|l| l.contains("Outcome:"))
-        .last()
+        .next_back()
         .map(|l| {
             l.split("Outcome:")
                 .nth(1)

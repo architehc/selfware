@@ -1326,7 +1326,7 @@ mod tests {
     #[test]
     fn test_workflow_phase_clone() {
         let phase = WorkflowPhase::Verification;
-        let cloned = phase.clone();
+        let cloned = phase;
         assert_eq!(phase, cloned);
     }
 

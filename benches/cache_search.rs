@@ -56,7 +56,7 @@ fn l2_normalize(v: &mut [f32]) {
 
 // Generate random normalized embedding
 fn random_embedding(dim: usize) -> Vec<f32> {
-    use rand::Rng;
+    use rand::RngExt;
     let mut rng = rand::rng();
     let mut v: Vec<f32> = (0..dim).map(|_| rng.random_range(-1.0..1.0)).collect();
     l2_normalize(&mut v);

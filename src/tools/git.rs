@@ -1061,7 +1061,7 @@ mod tests {
         assert_ne!(path1, path2);
 
         // Clean up
-        let _ = std::fs::remove_file(&path1.unwrap());
-        let _ = std::fs::remove_file(&path2.unwrap());
+        let _ = std::fs::remove_file(path1.unwrap());
+        let _ = std::fs::remove_file(path2.unwrap());
     }
 }

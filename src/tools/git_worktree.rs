@@ -818,9 +818,10 @@ detached
     #[tokio::test]
     async fn test_exit_worktree_not_in_worktree() {
         // Reset state to ensure we're not in a worktree
-        let mut state = WORKTREE_STATE.lock().unwrap();
-        *state = WorktreeState::new();
-        drop(state);
+        {
+            let mut state = WORKTREE_STATE.lock().unwrap();
+            *state = WorktreeState::new();
+        }
 
         let tool = ExitWorktreeTool::new();
         let args = serde_json::json!({});
@@ -837,9 +838,10 @@ detached
     #[test]
     fn test_is_in_worktree_initially_false() {
         // Reset state
-        let mut state = WORKTREE_STATE.lock().unwrap();
-        *state = WorktreeState::new();
-        drop(state);
+        {
+            let mut state = WORKTREE_STATE.lock().unwrap();
+            *state = WorktreeState::new();
+        }
 
         assert!(!is_in_worktree());
     }
@@ -847,9 +849,10 @@ detached
     #[test]
     fn test_get_current_worktree_initially_none() {
         // Reset state
-        let mut state = WORKTREE_STATE.lock().unwrap();
-        *state = WorktreeState::new();
-        drop(state);
+        {
+            let mut state = WORKTREE_STATE.lock().unwrap();
+            *state = WorktreeState::new();
+        }
 
         assert!(get_current_worktree().is_none());
     }

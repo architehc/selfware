@@ -1909,7 +1909,7 @@ mod property_tests {
             let level = RiskLevel::from_score(score);
             let (min, _max) = level.score_range();
             assert!(
-                score >= min || score < min,
+                score >= min,
                 "Score {} should be in range for {:?}",
                 score,
                 level
@@ -1930,7 +1930,7 @@ mod property_tests {
                     .with_likelihood(likelihood);
 
                 let risk = threat.risk_score();
-                assert!(risk >= 1 && risk <= 16);
+                assert!((1..=16).contains(&risk));
             }
         }
     }
@@ -1945,7 +1945,7 @@ mod property_tests {
                     .with_sensitivity(sensitivity);
 
                 let score = asset.risk_score();
-                assert!(score >= 1 && score <= 5);
+                assert!((1..=5).contains(&score));
             }
         }
     }

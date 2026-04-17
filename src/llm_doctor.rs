@@ -1317,15 +1317,17 @@ mod tests {
 
     #[test]
     fn test_configured_enable_thinking_false() {
-        let mut config = Config::default();
-        config.extra_body = Some({
-            let mut extra = serde_json::Map::new();
-            extra.insert(
-                "chat_template_kwargs".to_string(),
-                serde_json::json!({ "enable_thinking": false }),
-            );
-            extra
-        });
+        let config = Config {
+            extra_body: Some({
+                let mut extra = serde_json::Map::new();
+                extra.insert(
+                    "chat_template_kwargs".to_string(),
+                    serde_json::json!({ "enable_thinking": false }),
+                );
+                extra
+            }),
+            ..Config::default()
+        };
 
         assert_eq!(configured_enable_thinking(&config), Some(false));
     }
@@ -1338,8 +1340,13 @@ mod tests {
 
     #[test]
     fn test_connection_test_timeout_respects_minimum() {
-        let mut config = Config::default();
-        config.agent.step_timeout_secs = 5;
+        let config = Config {
+            agent: crate::config::AgentConfig {
+                step_timeout_secs: 5,
+                ..crate::config::AgentConfig::default()
+            },
+            ..Config::default()
+        };
         assert_eq!(
             connection_test_timeout(&config),
             Duration::from_secs(MIN_CONNECTION_TEST_TIMEOUT_SECS)
@@ -1348,8 +1355,13 @@ mod tests {
 
     #[test]
     fn test_connection_test_timeout_respects_maximum() {
-        let mut config = Config::default();
-        config.agent.step_timeout_secs = 600;
+        let config = Config {
+            agent: crate::config::AgentConfig {
+                step_timeout_secs: 600,
+                ..crate::config::AgentConfig::default()
+            },
+            ..Config::default()
+        };
         assert_eq!(
             connection_test_timeout(&config),
             Duration::from_secs(MAX_CONNECTION_TEST_TIMEOUT_SECS)

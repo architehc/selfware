@@ -1926,7 +1926,7 @@ mod tests {
     fn test_context_level_clone_copy() {
         let level = ContextLevel::Skeleton;
         let copied = level;
-        let cloned = level.clone();
+        let cloned = level;
         assert_eq!(level, copied);
         assert_eq!(level, cloned);
     }

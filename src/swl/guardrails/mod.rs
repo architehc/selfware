@@ -190,7 +190,7 @@ mod tests {
                 assert_eq!(operator, LogicalOperator::And);
                 assert_eq!(conditions.len(), 2);
             }
-            _ => assert!(false, "Expected composite condition"),
+            _ => unreachable!("Expected composite condition"),
         }
     }
 
@@ -200,7 +200,7 @@ mod tests {
 
         match condition {
             Condition::Inline(expr) => assert_eq!(expr, "only_one"),
-            _ => assert!(false, "Expected inline condition for single item"),
+            _ => unreachable!("Expected inline condition for single item"),
         }
     }
 
@@ -231,7 +231,7 @@ mod tests {
                 assert_eq!(operator, LogicalOperator::And);
                 assert!(conditions.len() >= 4);
             }
-            _ => assert!(false, "Expected composite condition"),
+            _ => unreachable!("Expected composite condition"),
         }
     }
 
@@ -244,7 +244,7 @@ mod tests {
                 assert!(expr.contains("1000"));
                 assert!(expr.contains("agent_output.len()"));
             }
-            _ => assert!(false, "Expected inline condition"),
+            _ => unreachable!("Expected inline condition"),
         }
     }
 
@@ -260,7 +260,7 @@ mod tests {
                 assert_eq!(operator, LogicalOperator::And);
                 assert!(conditions.len() >= 3);
             }
-            _ => assert!(false, "Expected composite condition"),
+            _ => unreachable!("Expected composite condition"),
         }
     }
 }

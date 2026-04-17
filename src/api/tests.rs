@@ -3314,7 +3314,7 @@ fn test_message_content_partial_eq_str() {
 #[test]
 fn test_message_content_partial_eq_string() {
     let content = MessageContent::Text("hello".to_string());
-    assert!(content == "hello".to_string());
+    assert!(content == "hello");
 }
 
 #[test]
@@ -3340,7 +3340,7 @@ fn test_rand_jitter_distribution() {
         } else {
             above_50 += 1;
         }
-        assert!(j >= 0.0 && j < 1.0);
+        assert!((0.0..1.0).contains(&j));
     }
 
     // Roughly balanced (within reasonable bounds for randomness)
