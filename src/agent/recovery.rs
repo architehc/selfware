@@ -836,6 +836,12 @@ Try ONE of these strategies:\
 
         for tool_name in missing_required_tools {
             match tool_name.as_str() {
+                "file_read" => {
+                    if let Some(path) = extract_mentioned_path(task_context) {
+                        let args = serde_json::json!({ "path": path }).to_string();
+                        return Some((tool_name, args));
+                    }
+                }
                 "vision_analyze" => {
                     if let Some(args) = build_vision_analyze_fallback_args(task_context) {
                         return Some((tool_name, args));
@@ -857,12 +863,12 @@ Try ONE of these strategies:\
 /// Extract a file path mentioned in model output (e.g., "src/main.rs", "./Cargo.toml").
 fn extract_mentioned_path(content: &str) -> Option<String> {
     let path_re = regex::Regex::new(
-        r#"(?:^|[\s`"'(])(\./)?([a-zA-Z_][\w\-./]*\.(?:rs|toml|json|yaml|yml|md|txt|py|ts|js|go))"#,
+        r#"(?:^|[\s`"'(])((?:\./|/)?[a-zA-Z_][\w\-./]*\.(?:rs|toml|json|yaml|yml|md|txt|py|ts|js|go))"#,
     )
     .ok()?;
 
     for cap in path_re.captures_iter(content) {
-        let full = cap.get(0)?.as_str().trim_matches(|c: char| {
+        let full = cap.get(1)?.as_str().trim_matches(|c: char| {
             !c.is_alphanumeric() && c != '.' && c != '/' && c != '_' && c != '-'
         });
         if full.contains('/') || full.ends_with(".rs") || full.ends_with(".toml") {
@@ -992,5 +998,14 @@ mod tests {
             parsed["prompt"],
             "answer in one short sentence describing the main subject."
         );
+    }
+
+    #[test]
+    fn extract_mentioned_path_finds_absolute_markdown_file() {
+        let path = extract_mentioned_path(
+            "Use file_read on /home/ivo/radarcam/AGENTS.md and answer in one line.",
+        )
+        .expect("expected path");
+        assert_eq!(path, "/home/ivo/radarcam/AGENTS.md");
     }
 }

@@ -1165,7 +1165,7 @@ mod tests {
             .await;
         assert!(result.is_ok());
         let json = result.unwrap();
-        assert!(!json.get("awareness").is_some());
+        assert!(json.get("awareness").is_none());
     }
 
     #[tokio::test]
@@ -1180,8 +1180,8 @@ mod tests {
             .await;
         assert!(result.is_ok());
         let json = result.unwrap();
-        assert!(!json.get("calibration").is_some());
-        assert!(!json.get("calibration_history").is_some());
+        assert!(json.get("calibration").is_none());
+        assert!(json.get("calibration_history").is_none());
     }
 
     // --- Control tool variants ---
@@ -1439,11 +1439,7 @@ mod tests {
                     );
                     // JPEG encoding can vary slightly between concurrent requests
                     // (overlay timestamps, re-compression). Allow 2% tolerance.
-                    let byte_diff = if rust_bytes > py_bytes {
-                        rust_bytes - py_bytes
-                    } else {
-                        py_bytes - rust_bytes
-                    };
+                    let byte_diff = rust_bytes.abs_diff(py_bytes);
                     let tolerance = (rust_bytes.max(py_bytes) as f64 * 0.02) as u64;
                     assert!(
                         byte_diff <= tolerance.max(1024),
@@ -1456,11 +1452,7 @@ mod tests {
 
                     let rust_b64_len = rust["base64_png"].as_str().map(|s| s.len()).unwrap_or(0);
                     let py_b64_len = python["base64_png"].as_str().map(|s| s.len()).unwrap_or(0);
-                    let b64_diff = if rust_b64_len > py_b64_len {
-                        rust_b64_len - py_b64_len
-                    } else {
-                        py_b64_len - rust_b64_len
-                    };
+                    let b64_diff = rust_b64_len.abs_diff(py_b64_len);
                     let b64_tolerance = (rust_b64_len.max(py_b64_len) as f64 * 0.02) as usize;
                     assert!(
                         b64_diff <= b64_tolerance.max(1024),
@@ -1593,11 +1585,7 @@ mod tests {
                         py_bytes
                     );
                     // Overlay frames include dynamic timestamps → allow 2% tolerance
-                    let byte_diff = if rust_bytes > py_bytes {
-                        rust_bytes - py_bytes
-                    } else {
-                        py_bytes - rust_bytes
-                    };
+                    let byte_diff = rust_bytes.abs_diff(py_bytes);
                     let tolerance = (rust_bytes.max(py_bytes) as f64 * 0.02) as u64;
                     assert!(
                         byte_diff <= tolerance.max(1024),

@@ -43,11 +43,15 @@ pub(super) fn is_capability_disclaimer_response(content: &str) -> bool {
     let lower = super::recovery::strip_think_blocks(content).to_lowercase();
     let markers = [
         "execute external tools",
+        "execute system commands",
         "access local file system",
         "access local file systems",
+        "access files on your local system",
+        "run tools",
         "view images directly",
         "call tools",
         "only generate text responses",
+        "only process and respond to the text",
         "information provided to me",
         "information provided directly",
     ];

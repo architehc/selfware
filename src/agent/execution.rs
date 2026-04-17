@@ -257,11 +257,20 @@ impl Agent {
                     .unwrap_or(false);
                 if has_successful_tool_calls {
                     info!("Rejected false capability disclaimer after successful tool use");
+                    if self.pending_synthesis.is_none() {
+                        let synthesis_task = self
+                            .current_checkpoint
+                            .as_ref()
+                            .map(|cp| cp.task_description.clone())
+                            .unwrap_or_else(|| self.learning_context().to_string());
+                        self.pending_synthesis = Some(synthesis_task);
+                    }
                     self.messages.push(crate::api::types::Message::user(
                         "<selfware_system_directive>\n\
                          You already executed tools successfully in this session. \
                          Use the tool results that are already in context and answer the task directly. \
-                         Do NOT claim you cannot access tools, files, or the local filesystem.\n\
+                         Do NOT claim you cannot access tools, files, or the local filesystem. \
+                         A synthesis pass will answer from the tool results if needed.\n\
                          </selfware_system_directive>"
                             .to_string(),
                     ));
