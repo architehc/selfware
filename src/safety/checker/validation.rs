@@ -254,7 +254,7 @@ impl SafetyChecker {
     ///
     /// SECURITY: This function implements multiple layers of protection:
     /// 1. Pattern matching against known dangerous commands (rm -rf /, mkfs, etc.)
-    /// 2. Base64/hex encoded command detection (prevents "echo <base64> | base64 -d | sh")
+    /// 2. Base64/hex encoded command detection (prevents `echo <base64> | base64 -d | sh`)
     /// 3. Command chaining analysis (checks each segment of chained commands)
     /// 4. Environment variable injection prevention
     pub fn check_shell_command(&self, cmd: &str) -> Result<()> {
