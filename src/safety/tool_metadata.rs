@@ -445,6 +445,16 @@ pub fn default_tool_metadata(tool_name: &str) -> ToolMetadata {
         // Code map
         "code_map" | "context_budget" | "context_action" => ToolMetadata::read_only(),
 
+        // RadarCam tools
+        "radarcam_status" | "radarcam_frame" | "radarcam_logs" => ToolMetadata::network(),
+        "radarcam_control" => {
+            ToolMetadata::custom(false, false, RiskLevel::Medium, true, false)
+        }
+        "radarcam_test" => ToolMetadata::shell(),
+        "radarcam_introspect" => {
+            ToolMetadata::custom(false, false, RiskLevel::Medium, true, false)
+        }
+
         // Default: medium risk
         _ => ToolMetadata::custom(false, false, RiskLevel::Medium, false, false),
     }

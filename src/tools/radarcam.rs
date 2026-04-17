@@ -528,13 +528,7 @@ impl Tool for RadarCamTest {
     }
 
     fn metadata(&self) -> crate::safety::ToolMetadata {
-        crate::safety::ToolMetadata::custom(
-            false,
-            false,
-            crate::safety::RiskLevel::Medium,
-            false,
-            true,
-        )
+        crate::safety::ToolMetadata::shell()
     }
 }
 
@@ -658,7 +652,14 @@ impl Tool for RadarCamIntrospect {
     }
 
     fn metadata(&self) -> crate::safety::ToolMetadata {
-        crate::safety::ToolMetadata::network()
+        // Introspect is NOT read-only because include_validation=true performs a POST
+        crate::safety::ToolMetadata::custom(
+            false,
+            false,
+            crate::safety::RiskLevel::Medium,
+            true,
+            false,
+        )
     }
 }
 
@@ -927,9 +928,12 @@ mod tests {
         assert!(RadarCamStatus.metadata().read_only);
         assert!(RadarCamFrame.metadata().read_only);
         assert!(RadarCamLogs.metadata().read_only);
-        assert!(RadarCamIntrospect.metadata().read_only);
+        // Introspect is NOT read-only because include_validation=true performs a POST
+        assert!(!RadarCamIntrospect.metadata().read_only);
         assert!(!RadarCamControl.metadata().read_only);
         assert!(!RadarCamTest.metadata().read_only);
+        // Test executes shell commands
+        assert!(RadarCamTest.metadata().shell_execution);
     }
 
     #[test]
