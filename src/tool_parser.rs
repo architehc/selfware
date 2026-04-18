@@ -220,6 +220,14 @@ pub fn parse_tool_calls(content: &str) -> ParseResult {
         parse_errors: Vec::new(),
     };
 
+    // Warn about unclosed tool tags (common with Qwen3.5 quantized models)
+    if content.contains("<tool>") && !content.contains("</tool>") {
+        tracing::warn!(
+            "Unclosed <tool> tag detected — tool call may be lost. Content preview: {}",
+            &content[..content.len().min(300)]
+        );
+    }
+
     // Strategy 1: Try XML-style parsing first (most common for our agent)
     if let Some(xml_results) = try_parse_xml(content) {
         for (tool_call, raw) in xml_results {

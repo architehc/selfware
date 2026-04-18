@@ -50,7 +50,7 @@ impl Agent {
             .enumerate()
             .rev()
             .filter(|(_, message)| Self::is_critical_context_message(message))
-            .take(5)
+            .take(20)
             .map(|(idx, _)| idx)
             .collect();
 
@@ -168,6 +168,17 @@ impl Agent {
                         | "build"
                         | "out"
                         | "pkg"
+                        // ML/data directories that pollute agent context
+                        | "Hunyuan3D-2"
+                        | "TRELLIS.2"
+                        | "instantmesh_repo"
+                        | "models"
+                        | "data"
+                        | ".cache"
+                        | "gen3d_outputs"
+                        | "hunyuan3d_outputs"
+                        | "trellis2_outputs"
+                        | "calibration"
                 )
             })
         {
