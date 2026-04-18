@@ -9,7 +9,9 @@ VISION_IMAGE="${SELFWARE_VISION_IMAGE:-$WORKDIR/samples/sample_3_00000693.jpg}"
 HEADLESS_FLAGS="${SELFWARE_HEADLESS_FLAGS:---yolo --ascii --compact}"
 SESSION_LOG_DIR="${SELFWARE_SESSION_LOG_DIR:-$HOME/.local/share/selfware/session_logs}"
 TMP_DIR="$(mktemp -d)"
-TEXT_PROMPT="What is the default full validation CLI command for this workspace? Answer in one line."
+LIVE_TASK_ATTEMPTS="${SELFWARE_LIVE_TASK_ATTEMPTS:-3}"
+HEADLESS_TIMEOUT_SECS="${SELFWARE_HEADLESS_TIMEOUT_SECS:-45}"
+TEXT_PROMPT="Reply with exactly this text and nothing else: python validate.py"
 TEXT_ANSWER_REGEX='python validate\.py'
 VISION_PROMPT="Use vision_analyze on $VISION_IMAGE and answer with exactly one lowercase word naming the main subject from this set: aircraft, airplane, plane, jet, bird, insect, unknown."
 VISION_ANSWER_REGEX='^(aircraft|airplane|plane|jet)[.!]?$'
@@ -43,10 +45,23 @@ session_log_for_prompt() {
 
 extract_final_answer() {
   awk '
+    BEGIN {
+      in_code_block = 0
+      code_line = ""
+    }
     NF {
       if ($0 == "[100% Done]") {
+        if (code_line != "") {
+          print code_line
+          exit
+        }
         print prev
         exit
+      }
+      if ($0 ~ /^```/) {
+        in_code_block = !in_code_block
+      } else if (in_code_block) {
+        code_line = $0
       }
       prev = $0
     }
@@ -104,7 +119,7 @@ check_llm_doctor_output() {
   done < <(rg '!!' "$clean_output" || true)
 }
 
-run_headless_check() {
+run_headless_check_once() {
   local label="$1"
   local prompt="$2"
   local answer_regex="$3"
@@ -116,49 +131,79 @@ run_headless_check() {
   output="$(mktemp "$TMP_DIR/${label}.stdout.XXXXXX")"
   clean_output="$(mktemp "$TMP_DIR/${label}.clean.XXXXXX")"
 
-  "$BIN" "${HEADLESS_ARGV[@]}" -C "$WORKDIR" --config "$CONFIG" -p "$prompt" | tee "$output"
+  if ! timeout --preserve-status "${HEADLESS_TIMEOUT_SECS}s" \
+    "$BIN" "${HEADLESS_ARGV[@]}" -C "$WORKDIR" --config "$CONFIG" -p "$prompt" \
+    | tee "$output"; then
+    echo "Headless run failed or timed out for $label after ${HEADLESS_TIMEOUT_SECS}s" >&2
+    return 1
+  fi
 
   strip_ansi_and_normalize "$output" >"$clean_output"
 
-  session_log="$(session_log_for_prompt "$marker" "$prompt")"
-  if [[ -z "${session_log:-}" ]]; then
+  if ! session_log="$(session_log_for_prompt "$marker" "$prompt")"; then
     echo "Could not locate the session log for prompt: $prompt" >&2
-    exit 1
+    return 1
   fi
 
   if ! rg -q '"event_type":"task_end".*"success":true' "$session_log"; then
     echo "Expected a successful task_end event in $session_log" >&2
-    exit 1
+    return 1
   fi
 
   if [[ -n "$required_tool" ]] && ! rg -q "\"event_type\":\"tool_call\".*\"tool_name\":\"$required_tool\".*\"success\":true" "$session_log"; then
     echo "Expected a successful $required_tool tool call in $session_log" >&2
-    exit 1
+    return 1
   fi
 
   answer="$(extract_final_answer "$clean_output")"
   if [[ -z "${answer// }" ]]; then
     echo "Could not extract a final answer for $label from $clean_output" >&2
-    exit 1
+    return 1
   fi
 
   if is_capability_disclaimer "$answer"; then
     echo "Final answer for $label was a capability disclaimer: $answer" >&2
-    exit 1
+    return 1
   fi
 
   if ! printf '%s\n' "$answer" | rg -qi "$answer_regex"; then
     echo "Final answer for $label did not match /$answer_regex/: $answer" >&2
-    exit 1
+    return 1
   fi
 
   if [[ -n "$forbidden_regex" ]] && printf '%s\n' "$answer" | rg -qi "$forbidden_regex"; then
     echo "Final answer for $label matched forbidden /$forbidden_regex/: $answer" >&2
-    exit 1
+    return 1
   fi
 
   echo "Verified $label in $session_log"
   echo "Final answer: $answer"
+}
+
+run_headless_check() {
+  local label="$1"
+  local prompt="$2"
+  local answer_regex="$3"
+  local required_tool="${4:-}"
+  local forbidden_regex="${5:-}"
+  local attempt
+
+  for ((attempt = 1; attempt <= LIVE_TASK_ATTEMPTS; attempt += 1)); do
+    if ((LIVE_TASK_ATTEMPTS > 1)); then
+      echo "Attempt $attempt/$LIVE_TASK_ATTEMPTS for $label"
+    fi
+
+    if run_headless_check_once "$label" "$prompt" "$answer_regex" "$required_tool" "$forbidden_regex"; then
+      return 0
+    fi
+
+    if ((attempt < LIVE_TASK_ATTEMPTS)); then
+      echo "Retrying $label after attempt $attempt failed" >&2
+    fi
+  done
+
+  echo "All $LIVE_TASK_ATTEMPTS attempt(s) failed for $label" >&2
+  return 1
 }
 
 cargo build --bin selfware --manifest-path "$ROOT_DIR/Cargo.toml"

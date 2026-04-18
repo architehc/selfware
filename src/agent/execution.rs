@@ -354,6 +354,32 @@ impl Agent {
             return Ok(true);
         }
 
+        let literal_target = self
+            .current_checkpoint
+            .as_ref()
+            .map(|cp| cp.task_description.as_str())
+            .or_else(|| {
+                if self.current_task_context.is_empty() {
+                    None
+                } else {
+                    Some(self.current_task_context.as_str())
+                }
+            })
+            .and_then(super::verification::exact_response_target);
+
+        if let Some(target) = literal_target {
+            info!("Rejected tool calls for exact-response task");
+            self.messages.push(crate::api::types::Message::user(format!(
+                "<selfware_system_directive>\n\
+                 Do NOT use any tools for this task.\n\
+                 Reply with exactly this text and nothing else:\n\
+                 {}\n\
+                 </selfware_system_directive>",
+                target
+            )));
+            return Ok(false);
+        }
+
         // Plan mode: show proposed tool calls without executing
         if self.plan_mode {
             let mut plan_summary =
@@ -1467,6 +1493,47 @@ mod tests {
         assert!(
             result.unwrap().contains("capability disclaimer"),
             "Expected the gate to explain the disclaimer rejection"
+        );
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_gate_accepts_exact_literal_response() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.agent.min_completion_steps = 0;
+        config.agent.require_verification_before_completion = false;
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.current_task_context =
+            "Reply with exactly this text and nothing else: python validate.py".to_string();
+        agent.last_assistant_response = "python validate.py".to_string();
+
+        assert!(
+            agent.check_completion_gate().is_none(),
+            "Exact literal responses should pass"
+        );
+
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_gate_rejects_non_exact_literal_response() {
+        let server = MockLlmServer::builder().with_response("done").build().await;
+        let mut config = test_config(format!("{}/v1", server.url()));
+        config.agent.min_completion_steps = 0;
+        config.agent.require_verification_before_completion = false;
+        let mut agent = Agent::new(config).await.unwrap();
+        agent.current_task_context =
+            "Reply with exactly this text and nothing else: python validate.py".to_string();
+        agent.last_assistant_response =
+            "The default full validation CLI command is `python validate.py`.".to_string();
+
+        let result = agent.check_completion_gate();
+        assert!(result.is_some(), "Non-exact literal responses should fail");
+        assert!(
+            result.unwrap().contains("exact literal response"),
+            "Expected the gate to explain the exact-response failure"
         );
 
         server.stop().await;

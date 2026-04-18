@@ -84,6 +84,31 @@ pub(super) fn is_capability_disclaimer_response(content: &str) -> bool {
     refusal_markers.iter().any(|marker| lower.contains(*marker)) && capability_hits >= 1
 }
 
+pub(super) fn exact_response_target(task: &str) -> Option<String> {
+    let task = task.trim();
+    let lower = task.to_lowercase();
+    let prefixes = [
+        "reply with exactly this text and nothing else:",
+        "respond with exactly this text and nothing else:",
+        "answer with exactly this text and nothing else:",
+    ];
+
+    for prefix in prefixes {
+        if lower.starts_with(prefix) {
+            let target = task[prefix.len()..].trim();
+            if !target.is_empty() {
+                return Some(target.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+pub(super) fn matches_exact_response_target(content: &str, target: &str) -> bool {
+    super::recovery::strip_think_blocks(content).trim() == target
+}
+
 /// Detect responses that describe future work instead of delivering a completed result.
 /// This catches false completions like "I need to read the tests first" or pseudo-tool
 /// plans embedded in plain text.
@@ -299,6 +324,19 @@ impl Agent {
     /// Check whether the agent has done enough work to accept completion.
     /// Returns `None` to accept, or `Some(message)` to reject with instructions.
     pub(super) fn check_completion_gate(&self) -> Option<String> {
+        let literal_target = self
+            .current_checkpoint
+            .as_ref()
+            .map(|cp| cp.task_description.as_str())
+            .or_else(|| {
+                if self.current_task_context.is_empty() {
+                    None
+                } else {
+                    Some(self.current_task_context.as_str())
+                }
+            })
+            .and_then(exact_response_target);
+
         let missing_required_tools = self.missing_required_task_tools();
         if !missing_required_tools.is_empty() {
             let required_tool_list = missing_required_tools
@@ -337,6 +375,15 @@ impl Agent {
                  Do NOT stop to narrate your next step. Call the needed tool now and continue."
                     .to_string(),
             );
+        }
+
+        if let Some(target) = literal_target.as_deref() {
+            if !matches_exact_response_target(&self.last_assistant_response, target) {
+                return Some(format!(
+                    "This task requires an exact literal response. Reply with exactly `{}` and nothing else.",
+                    target
+                ));
+            }
         }
 
         if is_capability_disclaimer_response(&self.last_assistant_response) {

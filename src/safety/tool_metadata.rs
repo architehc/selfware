@@ -539,6 +539,28 @@ mod tests {
     }
 
     #[test]
+    fn test_radarcam_test_prompts_in_auto_mode() {
+        // radarcam_test executes shell commands and must require confirmation in Auto mode
+        let checker = PermissionChecker::new(ExecutionMode::Auto);
+        let radarcam_test_meta = ToolMetadata::shell();
+        let result = checker.check("radarcam_test", &radarcam_test_meta, &Value::Null);
+        assert!(
+            matches!(result, PermissionResult::Prompt { .. }),
+            "radarcam_test should prompt in Auto mode, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_radarcam_control_auto_approved_in_auto_mode() {
+        // radarcam_control is Medium risk — should be auto-approved in Auto mode
+        let checker = PermissionChecker::new(ExecutionMode::Auto);
+        let control_meta = ToolMetadata::custom(false, false, RiskLevel::Medium, true, false);
+        let result = checker.check("radarcam_control", &control_meta, &Value::Null);
+        assert_eq!(result, PermissionResult::Allow);
+    }
+
+    #[test]
     fn test_default_tool_metadata() {
         assert!(default_tool_metadata("file_read").read_only);
         assert!(!default_tool_metadata("file_write").read_only);
