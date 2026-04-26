@@ -19,11 +19,6 @@ pub mod swarm;
 pub mod visual_loop;
 pub mod workflows;
 
-#[cfg(feature = "workflows")]
-pub mod parallel;
-#[cfg(feature = "workflows")]
-pub mod workflow_dsl;
-
 // Re-export coordinator types
 pub use coordinator::{
     CoordinatorAgent, CoordinatorConfig, CoordinatorStatus, PhaseResult, WorkerAgent, WorkerResult,
