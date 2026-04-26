@@ -1,7 +1,0 @@
-{
-  "model": "/media/thread/trebuchet6/qwen35/models/Qwen3.5-122B-A10B-NVFP4-yarn-1010k",
-  "messages": [{"role":"user","content":"You are a security auditor reviewing Rust code. Analyze these 3 files for security risks.\n\nFILE 1: src/tools/shell.rs (shell command execution)\n- Takes command/cwd/timeout/env from JSON args\n- Blocks dangerous patterns via find_dangerous_shell_pattern()\n- Validates cwd is absolute, no .., no null bytes\n- Runs: sh -c $command via tokio::process::Command\n- Uses kill_on_drop(true) and timeout\n\nFILE 2: src/tools/pty_shell.rs (interactive shell sessions)\n- Spawns persistent bash sessions with piped stdin/stdout/stderr\n- Injects __SELFWARE_CMD_DONE_ marker after commands\n- MAX_COMMAND_LENGTH=10000, MAX_SESSIONS=5, IDLE_TIMEOUT=30min\n- NO explicit dangerous pattern filtering (unlike shell.rs)\n- Rate limit: 1 second between commands\n\nFILE 3: src/config/api_key.rs (API key handling)\n- load_api_key_from_keyring() uses OS keyring via keyring crate\n- save_api_key_to_keyring() saves to OS keyring\n- Falls back to ConfigFile (plaintext TOML) if keyring unavailable\n- is_local_endpoint() checks for localhost/127.0.0.1\n\nFor each file, list: (1) what it does, (2) security risks found, (3) severity Critical/High/Medium/Low, (4) recommended fix with code example.\n\nThen give an overall risk score (1-10) and the top 3 priority fixes."}],
-  "max_tokens": 4096,
-  "temperature": 0.2,
-  "chat_template_kwargs": {"enable_thinking": false}
-}

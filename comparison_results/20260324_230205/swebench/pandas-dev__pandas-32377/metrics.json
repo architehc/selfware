@@ -1,9 +1,0 @@
-{
-  "task_id": "pandas-dev__pandas-32377",
-  "system": "swebench_pro",
-  "duration_ms": 1625,
-  "tokens_in": 5349,
-  "tokens_out": 2866,
-  "success": 1,
-  "timestamp": "2026-03-24T23:02:06-04:00"
-}

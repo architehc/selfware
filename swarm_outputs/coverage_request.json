@@ -1,7 +1,0 @@
-{
-  "model": "/media/thread/trebuchet6/qwen35/models/Qwen3.5-122B-A10B-NVFP4-yarn-1010k",
-  "messages": [{"role":"user","content":"You are a test coverage analyst for a Rust project. These files have ZERO tests (no #[test] functions):\n\nCRITICAL MODULES (should definitely have tests):\n- src/agent/mod.rs (agent core)\n- src/agent/tool_execution.rs\n- src/agent/recovery.rs\n- src/agent/context_files.rs\n- src/api/client.rs (API client)\n- src/api/streaming.rs\n- src/safety/checker/types.rs\n- src/safety/checker/mod.rs\n- src/safety/checker/validation.rs\n- src/analysis/vector_index.rs\n- src/analysis/vector_query.rs\n\nMODULES WITH MINIMAL LOGIC (may not need tests):\n- src/concurrent_queue/mod.rs\n- src/concurrent_queue/bounded.rs\n- src/devops/mod.rs\n- src/mcp/client.rs\n- src/mcp/discovery.rs\n- src/cli/mod.rs\n- src/cli/args.rs\n- src/cli/init_wizard.rs\n- src/lsp/mod.rs\n- src/cognitive/mod.rs\n- src/kv_store/mod.rs\n\nFor the top 5 CRITICAL untested modules, write a brief assessment (2-3 sentences each):\n1. Why it needs tests\n2. What kind of tests would be most valuable\n3. Estimated test complexity (easy/medium/hard)\n\nKeep it concise. Use markdown bullet points."}],
-  "max_tokens": 2048,
-  "temperature": 0.3,
-  "chat_template_kwargs": {"enable_thinking": false}
-}
