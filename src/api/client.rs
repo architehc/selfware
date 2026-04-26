@@ -564,12 +564,14 @@ impl LlmClient for ApiClient {
     }
 }
 
-/// Generate a random jitter value between 0 and 1
+/// Generate a uniform random jitter value in `[0.0, 1.0)`.
+///
+/// The previous implementation derived the value from
+/// `SystemTime::now().subsec_nanos() % 1000` and was not actually random
+/// when called repeatedly in a tight loop — sequential calls landed in
+/// the same nanosecond bucket, producing skewed distributions. This now
+/// uses thread_rng so retry jitter is genuinely uniform.
 pub(crate) fn rand_jitter() -> f64 {
-    use std::time::SystemTime;
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    (nanos % 1000) as f64 / 1000.0
+    use rand::distr::{Distribution, StandardUniform};
+    StandardUniform.sample(&mut rand::rng())
 }
