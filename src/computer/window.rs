@@ -985,16 +985,16 @@ impl WindowManager {
             _ => String::new(),
         };
 
+        // Build the new id->app mapping locally so we don't hold the std::sync::Mutex
+        // guard across the .await below (MutexGuard is !Send, which would make the
+        // resulting future !Send and break callers like ToolRegistry that require
+        // Send futures).
+        let mut new_id_to_app: HashMap<WindowId, String> = HashMap::new();
         let mut windows = Vec::new();
-        let mut id_to_app = self
-            .window_id_to_app
-            .lock()
-            .map_err(|e| anyhow::anyhow!("macOS window ID map poisoned: {}", e))?;
-        id_to_app.clear();
 
         for (i, app_name) in app_names.iter().enumerate() {
             let window_id = WindowId(i as u64);
-            id_to_app.insert(window_id.clone(), app_name.to_string());
+            new_id_to_app.insert(window_id.clone(), app_name.to_string());
 
             // Get window info for each app
             let window_output = tokio::process::Command::new("osascript")
@@ -1041,6 +1041,12 @@ impl WindowManager {
                 is_focused,
                 is_minimized: false,
             });
+        }
+
+        // Now publish the new mapping; the lock is held only briefly and never
+        // across an await.
+        if let Ok(mut id_to_app) = self.window_id_to_app.lock() {
+            *id_to_app = new_id_to_app;
         }
 
         Ok(windows)

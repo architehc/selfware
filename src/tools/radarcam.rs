@@ -1884,6 +1884,7 @@ mod tests {
     // 4. TEST TOOL — smoke tests
     // ========================================================================
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_radarcam_test_custom_echo() {
         let tool = RadarCamTest;

@@ -637,6 +637,7 @@ mod tests {
         assert!(state_path.exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_execute_improvement_cycle_applies_mutation_and_records_result() {
         let dir = create_rsi_fixture_project();

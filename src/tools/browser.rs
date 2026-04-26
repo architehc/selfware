@@ -1542,6 +1542,7 @@ mod tests {
         assert!(schema["properties"].get("user_agent").is_some());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_should_stage_chrome_output_for_non_home_absolute_paths() {
         let home_dir = Path::new("/home/tester");
@@ -1559,6 +1560,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_chrome_staging_output_preserves_filename() {
         let staged = chrome_staging_output_path(Path::new("/tmp/chart-shot.png")).unwrap();
@@ -1921,6 +1923,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_should_stage_outside_home_triggers_staging() {
         assert!(should_stage_chrome_output_for_home(

@@ -310,6 +310,7 @@ mod tests {
         assert!(result.error_prompt().contains("nonexistent_fn"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_is_protected_from_parent() {
         use super::super::is_protected;

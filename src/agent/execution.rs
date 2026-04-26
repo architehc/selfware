@@ -2906,6 +2906,7 @@ mod tests {
         server.stop().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_successful_different_tool_clears_failed_tool_suppression_window() {
         let server = MockLlmServer::builder().with_response("done").build().await;
@@ -2916,7 +2917,7 @@ mod tests {
         // so the test doesn't depend on CWD being in a git repo.
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), "hello").unwrap();
-        let read_args = format!(r#"{{"path":"{}"}}"#, tmp.path().display());
+        let read_args = serde_json::json!({"path": tmp.path()}).to_string();
 
         let batch: Vec<CollectedToolCall> = vec![
             ("shell_exec".to_string(), "{}".to_string(), None),
@@ -3411,6 +3412,7 @@ mod tests {
         server.stop().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_redundant_unchanged_file_reads_update_task_state_memory() {
         let server = MockLlmServer::builder().with_response("done").build().await;
@@ -3421,12 +3423,12 @@ mod tests {
         let batch: Vec<CollectedToolCall> = vec![
             (
                 "file_read".to_string(),
-                format!(r#"{{"path":"{}"}}"#, cargo_toml_path),
+                serde_json::json!({"path": cargo_toml_path}).to_string(),
                 None,
             ),
             (
                 "file_read".to_string(),
-                format!(r#"{{"path":"{}"}}"#, cargo_toml_path),
+                serde_json::json!({"path": cargo_toml_path}).to_string(),
                 None,
             ),
         ];
@@ -3449,6 +3451,7 @@ mod tests {
         server.stop().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_third_unchanged_file_read_is_blocked() {
         use std::fs;
@@ -3466,17 +3469,17 @@ mod tests {
         let batch1: Vec<CollectedToolCall> = vec![
             (
                 "file_read".to_string(),
-                format!(r#"{{"path":"{}"}}"#, path),
+                serde_json::json!({"path": path}).to_string(),
                 None,
             ),
             (
                 "file_read".to_string(),
-                format!(r#"{{"path":"{}"}}"#, path),
+                serde_json::json!({"path": path}).to_string(),
                 None,
             ),
             (
                 "file_read".to_string(),
-                format!(r#"{{"path":"{}"}}"#, path),
+                serde_json::json!({"path": path}).to_string(),
                 None,
             ),
         ];
@@ -3486,12 +3489,12 @@ mod tests {
         let batch2: Vec<CollectedToolCall> = vec![
             (
                 "file_read".to_string(),
-                format!(r#"{{"path":"{}"}}"#, path),
+                serde_json::json!({"path": path}).to_string(),
                 None,
             ),
             (
                 "file_read".to_string(),
-                format!(r#"{{"path":"{}"}}"#, path),
+                serde_json::json!({"path": path}).to_string(),
                 None,
             ),
         ];
@@ -3521,6 +3524,7 @@ mod tests {
         server.stop().await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_file_edit_clears_task_state_for_modified_file() {
         use std::fs;
@@ -3537,15 +3541,17 @@ mod tests {
         let batch: Vec<CollectedToolCall> = vec![
             (
                 "file_read".to_string(),
-                format!(r#"{{"path":"{}"}}"#, path),
+                serde_json::json!({"path": path}).to_string(),
                 None,
             ),
             (
                 "file_edit".to_string(),
-                format!(
-                    r#"{{"path":"{}","old_str":"hello world","new_str":"hello rust"}}"#,
-                    path
-                ),
+                serde_json::json!({
+                    "path": &path,
+                    "old_str": "hello world",
+                    "new_str": "hello rust"
+                })
+                .to_string(),
                 None,
             ),
         ];

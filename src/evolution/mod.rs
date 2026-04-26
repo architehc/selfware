@@ -258,6 +258,7 @@ pub fn is_protected(path: &std::path::Path) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn test_protected_paths() {
         assert!(is_protected(std::path::Path::new(

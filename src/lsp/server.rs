@@ -536,6 +536,7 @@ mod tests {
         assert_eq!(extract_token_at(source, 0, 26).as_deref(), Some("widget"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn resolves_root_from_initialize_params() {
         let params = serde_json::json!({

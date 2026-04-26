@@ -790,7 +790,7 @@ Try ONE of these strategies:\
         if let Some(path) = extract_mentioned_path(&stripped) {
             let p = std::path::Path::new(&path);
             if self.context_map.level_of(p) != Some(super::context_map::ContextLevel::Full) {
-                return ("file_read".to_string(), format!(r#"{{"path":"{}"}}"#, path));
+                return ("file_read".to_string(), serde_json::json!({"path": path}).to_string());
             }
         }
 
@@ -814,7 +814,7 @@ Try ONE of these strategies:\
                 let path_str = path.to_string_lossy().to_string();
                 return (
                     "file_read".to_string(),
-                    format!(r#"{{"path":"{}"}}"#, path_str),
+                    serde_json::json!({"path": path_str}).to_string(),
                 );
             }
         }

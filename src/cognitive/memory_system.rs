@@ -382,6 +382,7 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    #[cfg(unix)]
     #[test]
     fn test_discover_finds_files_up_to_home() {
         let temp = tempfile::tempdir().unwrap();
@@ -445,6 +446,7 @@ mod tests {
         assert!(formatted.contains("Prefer anyhow for errors."));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_discover_workspace_guidance_finds_agents_files_up_to_home() {
         let temp = tempfile::tempdir().unwrap();
@@ -521,6 +523,7 @@ mod tests {
         assert!(files[0].content.len() <= MAX_WORKSPACE_GUIDANCE_BYTES + 32);
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_project_key_from_path() {
         let path = Path::new("/home/user/projects/myapp");
@@ -537,6 +540,7 @@ mod tests {
         assert_eq!(key, "/");
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_discover_consolidated_memory() {
         let temp = tempdir().unwrap();
@@ -595,6 +599,7 @@ mod tests {
         assert_eq!(system.project_key, "projects_myapp");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_dream_integrated_memory_system_load_consolidated() {
         let temp = tempdir().unwrap();
