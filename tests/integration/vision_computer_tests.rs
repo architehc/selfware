@@ -217,16 +217,33 @@ async fn test_computer_control_chain() {
 }
 
 /// Test that window management tools work in sequence.
+///
+/// Requires `wmctrl` or `xdotool` and a real display server, so it skips
+/// gracefully on headless WSL/CI.
 #[tokio::test]
 async fn test_window_management_chain() {
+    fn binary_available(name: &str) -> bool {
+        std::process::Command::new("sh")
+            .args(["-c", &format!("command -v {name}")])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    if !binary_available("wmctrl") && !binary_available("xdotool") {
+        eprintln!("SKIPPED: test_window_management_chain — no wmctrl/xdotool on PATH");
+        return;
+    }
+
     let window = ComputerWindowTool;
 
-    // List windows
     let r = window.execute(json!({"action": "list"})).await.unwrap();
     assert_eq!(r["status"], "ok");
-    assert!(r["windows"].is_array());
+    let windows = r["windows"].as_array().expect("windows array");
+    if windows.is_empty() {
+        eprintln!("SKIPPED: test_window_management_chain — no windows visible to the WM");
+        return;
+    }
 
-    // Focus a window
     let r = window
         .execute(json!({"action": "focus", "window_id": 0}))
         .await
