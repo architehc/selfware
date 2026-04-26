@@ -1587,7 +1587,7 @@ impl VectorStore {
             .with_context(|| format!("index for collection '{}' not found", collection_name))?;
 
         // Add chunks with embeddings
-        for (chunk, embedding) in chunks.into_iter().zip(embeddings.into_iter()) {
+        for (chunk, embedding) in chunks.into_iter().zip(embeddings) {
             let chunk_id = chunk.id.clone();
             let chunk = chunk.with_embedding(embedding.clone());
             collection.add_chunk(chunk)?;
@@ -1618,7 +1618,7 @@ impl VectorStore {
         let embeddings = self.provider.embed_batch(&texts).await?;
 
         let mut new_index = VectorIndex::new(self.provider.dimension());
-        for (id, embedding) in ids.into_iter().zip(embeddings.into_iter()) {
+        for (id, embedding) in ids.into_iter().zip(embeddings) {
             new_index.add(id, embedding)?;
         }
 
@@ -1861,7 +1861,7 @@ impl VectorStore {
                     }
 
                     let mut index = VectorIndex::new(self.provider.dimension());
-                    for (chunk_id, embedding) in chunk_ids.into_iter().zip(embeddings.into_iter()) {
+                    for (chunk_id, embedding) in chunk_ids.into_iter().zip(embeddings) {
                         index.add(chunk_id, embedding)?;
                     }
                     self.indices.insert(name.to_string(), index);

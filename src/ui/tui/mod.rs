@@ -931,21 +931,19 @@ pub fn run_tui_dashboard(model: &str) -> Result<Vec<String>> {
                 }
 
                 // Chat input handling
-                KeyCode::Enter => {
-                    if !show_help {
-                        if let Some(input) = app.on_enter() {
-                            if input.starts_with('/') {
-                                app.add_user_message(&input);
-                                app.status = format!("Executed: {}", input);
-                                dashboard_state.log(LogLevel::Info, &format!("Command: {}", input));
-                            } else {
-                                app.add_user_message(&input);
-                                user_inputs.push(input.clone());
-                                dashboard_state.log(
-                                    LogLevel::Info,
-                                    &format!("User: {}", truncate_for_display(&input, 50)),
-                                );
-                            }
+                KeyCode::Enter if !show_help => {
+                    if let Some(input) = app.on_enter() {
+                        if input.starts_with('/') {
+                            app.add_user_message(&input);
+                            app.status = format!("Executed: {}", input);
+                            dashboard_state.log(LogLevel::Info, &format!("Command: {}", input));
+                        } else {
+                            app.add_user_message(&input);
+                            user_inputs.push(input.clone());
+                            dashboard_state.log(
+                                LogLevel::Info,
+                                &format!("User: {}", truncate_for_display(&input, 50)),
+                            );
                         }
                     }
                 }
@@ -1301,30 +1299,29 @@ pub fn run_tui_dashboard_with_events(
                         state.log(LogLevel::Info, "Layout: Full Workspace");
                     });
                 }
-                KeyCode::Enter => {
-                    if !show_help {
-                        if let Some(input) = app.on_enter() {
-                            if input.starts_with('/') {
-                                // Handle slash commands locally
-                                let parts: Vec<&str> = input.splitn(2, ' ').collect();
-                                let cmd = parts[0];
-                                let arg = parts.get(1).copied().unwrap_or("");
-                                match cmd {
-                                    "/clear" => {
-                                        app.clear_chat();
-                                        with_dashboard_state(&shared_state, |state| {
-                                            state.log(LogLevel::Info, "Chat cleared");
-                                        });
-                                    }
-                                    "/quit" | "/exit" => {
-                                        with_dashboard_state(&shared_state, |state| {
-                                            state.log(LogLevel::Info, "Quit requested via command");
-                                        });
-                                        let _ = user_input_tx.send("quit".to_string());
-                                        break;
-                                    }
-                                    "/help" => {
-                                        app.add_system_message(
+                KeyCode::Enter if !show_help => {
+                    if let Some(input) = app.on_enter() {
+                        if input.starts_with('/') {
+                            // Handle slash commands locally
+                            let parts: Vec<&str> = input.splitn(2, ' ').collect();
+                            let cmd = parts[0];
+                            let arg = parts.get(1).copied().unwrap_or("");
+                            match cmd {
+                                "/clear" => {
+                                    app.clear_chat();
+                                    with_dashboard_state(&shared_state, |state| {
+                                        state.log(LogLevel::Info, "Chat cleared");
+                                    });
+                                }
+                                "/quit" | "/exit" => {
+                                    with_dashboard_state(&shared_state, |state| {
+                                        state.log(LogLevel::Info, "Quit requested via command");
+                                    });
+                                    let _ = user_input_tx.send("quit".to_string());
+                                    break;
+                                }
+                                "/help" => {
+                                    app.add_system_message(
                                             "Available commands:\n\
                                              \n\
                                              Session:\n  \
@@ -1359,117 +1356,103 @@ pub fn run_tui_dashboard_with_events(
                                              \n\
                                              Keyboard: q (quit), ? (help), Ctrl+D (dashboard), Ctrl+G (garden), Tab (cycle panes)"
                                         );
-                                        with_dashboard_state(&shared_state, |state| {
-                                            state.log(LogLevel::Info, "Displayed help text");
-                                        });
-                                    }
-                                    "/status" => {
-                                        let status_msg = with_dashboard_state(
-                                            &shared_state,
-                                            |state| {
-                                                let mode =
-                                                    if app.verbose { "verbose" } else { "compact" };
-                                                let msg_count = app.messages.len();
-                                                let tokens = state.tokens_used;
-                                                let connected = if state.connected {
-                                                    "connected"
-                                                } else {
-                                                    "disconnected"
-                                                };
-                                                format!(
-                                                "Status: {} output, {} messages, {} tokens used, {}",
-                                                mode, msg_count, tokens, connected
-                                            )
-                                            },
-                                        );
-                                        app.add_system_message(&status_msg);
-                                        with_dashboard_state(&shared_state, |state| {
-                                            state.log(LogLevel::Info, "Displayed status");
-                                        });
-                                    }
-                                    "/stats" => {
-                                        let stats_msg =
-                                            with_dashboard_state(&shared_state, |state| {
-                                                let elapsed = state.elapsed_formatted();
-                                                let tokens = state.tokens_used;
-                                                let msg_count = app.messages.len();
-                                                let tool_count = state
-                                                    .logs
-                                                    .iter()
-                                                    .filter(|l| {
-                                                        l.message.contains("completed")
-                                                            || l.message.contains("started")
-                                                    })
-                                                    .count();
-                                                format!(
-                                                    "Session statistics:\n  \
+                                    with_dashboard_state(&shared_state, |state| {
+                                        state.log(LogLevel::Info, "Displayed help text");
+                                    });
+                                }
+                                "/status" => {
+                                    let status_msg = with_dashboard_state(&shared_state, |state| {
+                                        let mode = if app.verbose { "verbose" } else { "compact" };
+                                        let msg_count = app.messages.len();
+                                        let tokens = state.tokens_used;
+                                        let connected = if state.connected {
+                                            "connected"
+                                        } else {
+                                            "disconnected"
+                                        };
+                                        format!(
+                                            "Status: {} output, {} messages, {} tokens used, {}",
+                                            mode, msg_count, tokens, connected
+                                        )
+                                    });
+                                    app.add_system_message(&status_msg);
+                                    with_dashboard_state(&shared_state, |state| {
+                                        state.log(LogLevel::Info, "Displayed status");
+                                    });
+                                }
+                                "/stats" => {
+                                    let stats_msg = with_dashboard_state(&shared_state, |state| {
+                                        let elapsed = state.elapsed_formatted();
+                                        let tokens = state.tokens_used;
+                                        let msg_count = app.messages.len();
+                                        let tool_count = state
+                                            .logs
+                                            .iter()
+                                            .filter(|l| {
+                                                l.message.contains("completed")
+                                                    || l.message.contains("started")
+                                            })
+                                            .count();
+                                        format!(
+                                            "Session statistics:\n  \
                                                  Elapsed time:  {}\n  \
                                                  Messages:      {}\n  \
                                                  Tokens used:   {}\n  \
                                                  Tool calls:    {}\n  \
                                                  Model:         {}",
-                                                    elapsed,
-                                                    msg_count,
-                                                    tokens,
-                                                    tool_count,
-                                                    state.model
-                                                )
-                                            });
-                                        app.add_system_message(&stats_msg);
-                                        with_dashboard_state(&shared_state, |state| {
-                                            state.log(LogLevel::Info, "Displayed session stats");
-                                        });
-                                    }
-                                    "/mode" => {
-                                        if arg.is_empty() {
-                                            let mode =
-                                                if app.verbose { "verbose" } else { "compact" };
-                                            app.add_system_message(
+                                            elapsed, msg_count, tokens, tool_count, state.model
+                                        )
+                                    });
+                                    app.add_system_message(&stats_msg);
+                                    with_dashboard_state(&shared_state, |state| {
+                                        state.log(LogLevel::Info, "Displayed session stats");
+                                    });
+                                }
+                                "/mode" => {
+                                    if arg.is_empty() {
+                                        let mode = if app.verbose { "verbose" } else { "compact" };
+                                        app.add_system_message(
                                                 &format!("Current output mode: {}. Use /mode <normal|yolo|auto-edit|daemon> to change.", mode),
                                             );
-                                        } else {
-                                            match arg {
-                                                "normal" | "yolo" | "auto-edit" | "daemon" => {
-                                                    app.add_system_message(
+                                    } else {
+                                        match arg {
+                                            "normal" | "yolo" | "auto-edit" | "daemon" => {
+                                                app.add_system_message(
                                                         &format!("Mode switching to '{}' is not yet supported from the TUI. The agent continues in its current mode.", arg)
                                                     );
-                                                }
-                                                _ => {
-                                                    app.add_system_message(
+                                            }
+                                            _ => {
+                                                app.add_system_message(
                                                         &format!("Unknown mode '{}'. Valid modes: normal, yolo, auto-edit, daemon", arg)
                                                     );
-                                                }
                                             }
                                         }
-                                        with_dashboard_state(&shared_state, |state| {
-                                            state.log(
-                                                LogLevel::Info,
-                                                &format!("Mode command: {}", arg),
-                                            );
-                                        });
                                     }
-                                    "/compact" => {
-                                        app.verbose = false;
-                                        app.add_system_message("Output mode: compact");
-                                        with_dashboard_state(&shared_state, |state| {
-                                            state.log(LogLevel::Info, "Switched to compact output");
-                                        });
-                                    }
-                                    "/verbose" => {
-                                        app.verbose = true;
-                                        app.add_system_message("Output mode: verbose");
-                                        with_dashboard_state(&shared_state, |state| {
-                                            state.log(LogLevel::Info, "Switched to verbose output");
-                                        });
-                                    }
-                                    "/cost" => {
-                                        let cost_msg = with_dashboard_state(
-                                            &shared_state,
-                                            |state| {
-                                                let tokens = state.tokens_used;
-                                                // Rough cost estimate: ~$0.01 per 1K tokens (blended input/output)
-                                                let estimated_cost = tokens as f64 * 0.00001;
-                                                format!(
+                                    with_dashboard_state(&shared_state, |state| {
+                                        state
+                                            .log(LogLevel::Info, &format!("Mode command: {}", arg));
+                                    });
+                                }
+                                "/compact" => {
+                                    app.verbose = false;
+                                    app.add_system_message("Output mode: compact");
+                                    with_dashboard_state(&shared_state, |state| {
+                                        state.log(LogLevel::Info, "Switched to compact output");
+                                    });
+                                }
+                                "/verbose" => {
+                                    app.verbose = true;
+                                    app.add_system_message("Output mode: verbose");
+                                    with_dashboard_state(&shared_state, |state| {
+                                        state.log(LogLevel::Info, "Switched to verbose output");
+                                    });
+                                }
+                                "/cost" => {
+                                    let cost_msg = with_dashboard_state(&shared_state, |state| {
+                                        let tokens = state.tokens_used;
+                                        // Rough cost estimate: ~$0.01 per 1K tokens (blended input/output)
+                                        let estimated_cost = tokens as f64 * 0.00001;
+                                        format!(
                                                 "Cost estimate:\n  \
                                                  Tokens used:    {}\n  \
                                                  Est. cost:      ${:.4}\n  \
@@ -1477,135 +1460,125 @@ pub fn run_tui_dashboard_with_events(
                                                  Note: Estimate is approximate; actual cost depends on model pricing.",
                                                 tokens, estimated_cost, state.model
                                             )
-                                            },
-                                        );
-                                        app.add_system_message(&cost_msg);
-                                        with_dashboard_state(&shared_state, |state| {
-                                            state.log(LogLevel::Info, "Displayed cost estimate");
-                                        });
-                                    }
-                                    "/ctx" => {
-                                        let ctx_msg =
-                                            with_dashboard_state(&shared_state, |state| {
-                                                let tokens = state.tokens_used;
-                                                // Context window estimate (128K tokens typical)
-                                                let context_limit: u64 = 128_000;
-                                                let usage_pct =
-                                                    (tokens as f64 / context_limit as f64) * 100.0;
-                                                format!(
-                                                    "Context usage:\n  \
+                                    });
+                                    app.add_system_message(&cost_msg);
+                                    with_dashboard_state(&shared_state, |state| {
+                                        state.log(LogLevel::Info, "Displayed cost estimate");
+                                    });
+                                }
+                                "/ctx" => {
+                                    let ctx_msg = with_dashboard_state(&shared_state, |state| {
+                                        let tokens = state.tokens_used;
+                                        // Context window estimate (128K tokens typical)
+                                        let context_limit: u64 = 128_000;
+                                        let usage_pct =
+                                            (tokens as f64 / context_limit as f64) * 100.0;
+                                        format!(
+                                            "Context usage:\n  \
                                                  Tokens used:    {} / {} ({:.1}%)\n  \
                                                  Remaining:      ~{} tokens\n  \
                                                  Messages:       {}",
-                                                    tokens,
-                                                    context_limit,
-                                                    usage_pct,
-                                                    context_limit.saturating_sub(tokens),
-                                                    app.messages.len()
-                                                )
-                                            });
-                                        app.add_system_message(&ctx_msg);
-                                        with_dashboard_state(&shared_state, |state| {
-                                            state.log(LogLevel::Info, "Displayed context usage");
-                                        });
-                                    }
-                                    "/diff" => {
-                                        app.add_system_message("Running git diff --stat...");
-                                        let tx = git_cmd_tx.clone();
-                                        std::thread::spawn(move || {
-                                            let msg = match std::process::Command::new("git")
-                                                .args(["diff", "--stat"])
-                                                .output()
-                                            {
-                                                Ok(result) => {
-                                                    let stdout =
-                                                        String::from_utf8_lossy(&result.stdout);
-                                                    let stderr =
-                                                        String::from_utf8_lossy(&result.stderr);
-                                                    if stdout.is_empty() && stderr.is_empty() {
-                                                        "No changes (working tree clean)."
-                                                            .to_string()
-                                                    } else if !stdout.is_empty() {
-                                                        format!(
-                                                            "git diff --stat:\n{}",
-                                                            stdout.trim_end()
-                                                        )
-                                                    } else {
-                                                        format!(
-                                                            "git diff error: {}",
-                                                            stderr.trim_end()
-                                                        )
-                                                    }
+                                            tokens,
+                                            context_limit,
+                                            usage_pct,
+                                            context_limit.saturating_sub(tokens),
+                                            app.messages.len()
+                                        )
+                                    });
+                                    app.add_system_message(&ctx_msg);
+                                    with_dashboard_state(&shared_state, |state| {
+                                        state.log(LogLevel::Info, "Displayed context usage");
+                                    });
+                                }
+                                "/diff" => {
+                                    app.add_system_message("Running git diff --stat...");
+                                    let tx = git_cmd_tx.clone();
+                                    std::thread::spawn(move || {
+                                        let msg = match std::process::Command::new("git")
+                                            .args(["diff", "--stat"])
+                                            .output()
+                                        {
+                                            Ok(result) => {
+                                                let stdout =
+                                                    String::from_utf8_lossy(&result.stdout);
+                                                let stderr =
+                                                    String::from_utf8_lossy(&result.stderr);
+                                                if stdout.is_empty() && stderr.is_empty() {
+                                                    "No changes (working tree clean).".to_string()
+                                                } else if !stdout.is_empty() {
+                                                    format!(
+                                                        "git diff --stat:\n{}",
+                                                        stdout.trim_end()
+                                                    )
+                                                } else {
+                                                    format!("git diff error: {}", stderr.trim_end())
                                                 }
-                                                Err(e) => format!("Failed to run git diff: {}", e),
-                                            };
-                                            let _ = tx.send(msg);
-                                        });
-                                        with_dashboard_state(&shared_state, |state| {
-                                            state.log(LogLevel::Info, "Ran git diff --stat");
-                                        });
-                                    }
-                                    "/git" => {
-                                        app.add_system_message("Running git status...");
-                                        let tx = git_cmd_tx.clone();
-                                        std::thread::spawn(move || {
-                                            let msg = match std::process::Command::new("git")
-                                                .args(["status", "--short", "--branch"])
-                                                .output()
-                                            {
-                                                Ok(result) => {
-                                                    let stdout =
-                                                        String::from_utf8_lossy(&result.stdout);
-                                                    let stderr =
-                                                        String::from_utf8_lossy(&result.stderr);
-                                                    if !stdout.is_empty() {
-                                                        format!(
-                                                            "git status:\n{}",
-                                                            stdout.trim_end()
-                                                        )
-                                                    } else if !stderr.is_empty() {
-                                                        format!("git error: {}", stderr.trim_end())
-                                                    } else {
-                                                        "git status returned no output.".to_string()
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    format!("Failed to run git status: {}", e)
-                                                }
-                                            };
-                                            let _ = tx.send(msg);
-                                        });
-                                        with_dashboard_state(&shared_state, |state| {
-                                            state.log(LogLevel::Info, "Ran git status");
-                                        });
-                                    }
-                                    "/skills" => {
-                                        let msg = if let Some(ref registry) = app.skill_registry {
-                                            if registry.is_empty() {
-                                                "No skills discovered.\n\nPlace skill markdown files in:\n  ~/.selfware/skills/\n  ./.selfware/skills/".to_string()
-                                            } else {
-                                                let mut lines =
-                                                    vec!["Available skills:".to_string()];
-                                                for skill in registry.list() {
-                                                    lines.push(format!(
-                                                        "  /{} -- {}",
-                                                        skill.name, skill.description
-                                                    ));
-                                                }
-                                                lines.join("\n")
                                             }
-                                        } else {
-                                            "Skill registry not initialized.".to_string()
+                                            Err(e) => format!("Failed to run git diff: {}", e),
                                         };
-                                        app.add_system_message(&msg);
-                                        with_dashboard_state(&shared_state, |state| {
-                                            state.log(LogLevel::Info, "Listed available skills");
-                                        });
-                                    }
-                                    "/plan" => {
-                                        // Send command to agent to enter plan mode
-                                        let _ = user_input_tx.send("/plan".to_string());
-                                        app.add_system_message(
+                                        let _ = tx.send(msg);
+                                    });
+                                    with_dashboard_state(&shared_state, |state| {
+                                        state.log(LogLevel::Info, "Ran git diff --stat");
+                                    });
+                                }
+                                "/git" => {
+                                    app.add_system_message("Running git status...");
+                                    let tx = git_cmd_tx.clone();
+                                    std::thread::spawn(move || {
+                                        let msg = match std::process::Command::new("git")
+                                            .args(["status", "--short", "--branch"])
+                                            .output()
+                                        {
+                                            Ok(result) => {
+                                                let stdout =
+                                                    String::from_utf8_lossy(&result.stdout);
+                                                let stderr =
+                                                    String::from_utf8_lossy(&result.stderr);
+                                                if !stdout.is_empty() {
+                                                    format!("git status:\n{}", stdout.trim_end())
+                                                } else if !stderr.is_empty() {
+                                                    format!("git error: {}", stderr.trim_end())
+                                                } else {
+                                                    "git status returned no output.".to_string()
+                                                }
+                                            }
+                                            Err(e) => {
+                                                format!("Failed to run git status: {}", e)
+                                            }
+                                        };
+                                        let _ = tx.send(msg);
+                                    });
+                                    with_dashboard_state(&shared_state, |state| {
+                                        state.log(LogLevel::Info, "Ran git status");
+                                    });
+                                }
+                                "/skills" => {
+                                    let msg = if let Some(ref registry) = app.skill_registry {
+                                        if registry.is_empty() {
+                                            "No skills discovered.\n\nPlace skill markdown files in:\n  ~/.selfware/skills/\n  ./.selfware/skills/".to_string()
+                                        } else {
+                                            let mut lines = vec!["Available skills:".to_string()];
+                                            for skill in registry.list() {
+                                                lines.push(format!(
+                                                    "  /{} -- {}",
+                                                    skill.name, skill.description
+                                                ));
+                                            }
+                                            lines.join("\n")
+                                        }
+                                    } else {
+                                        "Skill registry not initialized.".to_string()
+                                    };
+                                    app.add_system_message(&msg);
+                                    with_dashboard_state(&shared_state, |state| {
+                                        state.log(LogLevel::Info, "Listed available skills");
+                                    });
+                                }
+                                "/plan" => {
+                                    // Send command to agent to enter plan mode
+                                    let _ = user_input_tx.send("/plan".to_string());
+                                    app.add_system_message(
                                             "🔍 Entering plan mode. The agent will analyze the codebase using only read-only tools.\n\
                                              \n\
                                              Available tools in plan mode:\n  \
@@ -1618,129 +1591,110 @@ pub fn run_tui_dashboard_with_events(
                                              Type your request to generate a plan.\n\
                                              Use /execute to approve the plan, or /modify to cancel."
                                         );
+                                    with_dashboard_state(&shared_state, |state| {
+                                        state.log(LogLevel::Info, "Entered plan mode");
+                                    });
+                                }
+                                "/workers" => {
+                                    // Show coordinator worker status
+                                    let workers_msg =
                                         with_dashboard_state(&shared_state, |state| {
-                                            state.log(LogLevel::Info, "Entered plan mode");
-                                        });
-                                    }
-                                    "/workers" => {
-                                        // Show coordinator worker status
-                                        let workers_msg =
-                                            with_dashboard_state(&shared_state, |state| {
-                                                if state.coordinator_status.is_active {
-                                                    let phase =
-                                                        &state.coordinator_status.current_phase;
-                                                    let active =
-                                                        state.coordinator_status.active_workers;
-                                                    let total =
-                                                        state.coordinator_status.total_workers;
-                                                    if let Some(ref task_id) =
-                                                        state.coordinator_status.task_id
-                                                    {
-                                                        format!(
-                                                            "👑 Coordinator Mode Active\n\
+                                            if state.coordinator_status.is_active {
+                                                let phase = &state.coordinator_status.current_phase;
+                                                let active =
+                                                    state.coordinator_status.active_workers;
+                                                let total = state.coordinator_status.total_workers;
+                                                if let Some(ref task_id) =
+                                                    state.coordinator_status.task_id
+                                                {
+                                                    format!(
+                                                        "👑 Coordinator Mode Active\n\
                                                          Task ID: {}\n\
                                                          Phase: {}\n\
                                                          Workers: {}/{} active",
-                                                            task_id, phase, active, total
-                                                        )
-                                                    } else {
-                                                        format!(
-                                                            "👑 Coordinator Mode Active\n\
+                                                        task_id, phase, active, total
+                                                    )
+                                                } else {
+                                                    format!(
+                                                        "👑 Coordinator Mode Active\n\
                                                          Phase: {}\n\
                                                          Workers: {}/{} active",
-                                                            phase, active, total
-                                                        )
-                                                    }
-                                                } else {
-                                                    "Coordinator mode is not active.\n\
-                                                 Use --coordinator flag to enable."
-                                                        .to_string()
+                                                        phase, active, total
+                                                    )
                                                 }
-                                            });
-                                        app.add_system_message(&workers_msg);
-                                        with_dashboard_state(&shared_state, |state| {
-                                            state.log(LogLevel::Info, "Displayed worker status");
+                                            } else {
+                                                "Coordinator mode is not active.\n\
+                                                 Use --coordinator flag to enable."
+                                                    .to_string()
+                                            }
                                         });
-                                    }
-                                    "/execute" => {
-                                        let _ = user_input_tx.send("/execute".to_string());
-                                        app.add_system_message(
-                                            "✅ Plan approved. Executing modifications...",
-                                        );
-                                        with_dashboard_state(&shared_state, |state| {
-                                            state
-                                                .log(LogLevel::Info, "Plan approved for execution");
-                                        });
-                                    }
-                                    "/modify" => {
-                                        let _ = user_input_tx.send("/modify".to_string());
-                                        app.add_system_message(
+                                    app.add_system_message(&workers_msg);
+                                    with_dashboard_state(&shared_state, |state| {
+                                        state.log(LogLevel::Info, "Displayed worker status");
+                                    });
+                                }
+                                "/execute" => {
+                                    let _ = user_input_tx.send("/execute".to_string());
+                                    app.add_system_message(
+                                        "✅ Plan approved. Executing modifications...",
+                                    );
+                                    with_dashboard_state(&shared_state, |state| {
+                                        state.log(LogLevel::Info, "Plan approved for execution");
+                                    });
+                                }
+                                "/modify" => {
+                                    let _ = user_input_tx.send("/modify".to_string());
+                                    app.add_system_message(
                                             "📝 Plan mode cancelled. You can now request changes or enter /plan again."
                                         );
-                                        with_dashboard_state(&shared_state, |state| {
-                                            state.log(LogLevel::Info, "Plan mode cancelled");
-                                        });
-                                    }
-                                    // CLI-only commands that don't apply in TUI
-                                    "/queue" | "/swarm" | "/spawn" | "/delegate" | "/pipe"
-                                    | "/batch" | "/schedule" | "/cron" | "/webhook" => {
-                                        app.add_system_message(
+                                    with_dashboard_state(&shared_state, |state| {
+                                        state.log(LogLevel::Info, "Plan mode cancelled");
+                                    });
+                                }
+                                // CLI-only commands that don't apply in TUI
+                                "/queue" | "/swarm" | "/spawn" | "/delegate" | "/pipe"
+                                | "/batch" | "/schedule" | "/cron" | "/webhook" => {
+                                    app.add_system_message(
                                             &format!("{}: This command is only available in CLI interactive mode.", cmd)
                                         );
+                                    with_dashboard_state(&shared_state, |state| {
+                                        state.log(
+                                            LogLevel::Warning,
+                                            &format!("CLI-only command attempted: {}", cmd),
+                                        );
+                                    });
+                                }
+                                // Dynamic skill execution: /<skill_name>
+                                cmd if cmd.starts_with('/') => {
+                                    let skill_name = &cmd[1..];
+                                    let skill_opt = app
+                                        .skill_registry
+                                        .as_ref()
+                                        .and_then(|r| r.get(skill_name).cloned());
+                                    if let Some(skill) = skill_opt {
+                                        let prompt = if arg.is_empty() {
+                                            skill.content.clone()
+                                        } else {
+                                            format!("{}\n\nUser request: {}", skill.content, arg)
+                                        };
+                                        let skill_name = skill.name.clone();
+                                        app.add_system_message(&format!(
+                                            "Activated skill: /{}",
+                                            skill_name
+                                        ));
+                                        // Inject skill instructions as a system message
+                                        app.add_system_message(&prompt);
                                         with_dashboard_state(&shared_state, |state| {
                                             state.log(
-                                                LogLevel::Warning,
-                                                &format!("CLI-only command attempted: {}", cmd),
+                                                LogLevel::Info,
+                                                &format!("Activated skill: /{}", skill_name),
                                             );
                                         });
-                                    }
-                                    // Dynamic skill execution: /<skill_name>
-                                    cmd if cmd.starts_with('/') => {
-                                        let skill_name = &cmd[1..];
-                                        let skill_opt = app
-                                            .skill_registry
-                                            .as_ref()
-                                            .and_then(|r| r.get(skill_name).cloned());
-                                        if let Some(skill) = skill_opt {
-                                            let prompt = if arg.is_empty() {
-                                                skill.content.clone()
-                                            } else {
-                                                format!(
-                                                    "{}\n\nUser request: {}",
-                                                    skill.content, arg
-                                                )
-                                            };
-                                            let skill_name = skill.name.clone();
-                                            app.add_system_message(&format!(
-                                                "Activated skill: /{}",
-                                                skill_name
-                                            ));
-                                            // Inject skill instructions as a system message
-                                            app.add_system_message(&prompt);
-                                            with_dashboard_state(&shared_state, |state| {
-                                                state.log(
-                                                    LogLevel::Info,
-                                                    &format!("Activated skill: /{}", skill_name),
-                                                );
-                                            });
-                                        } else {
-                                            app.add_system_message(&format!(
+                                    } else {
+                                        app.add_system_message(&format!(
                                                 "Unknown command: {}. Type /help for available commands.",
                                                 cmd
                                             ));
-                                            with_dashboard_state(&shared_state, |state| {
-                                                state.log(
-                                                    LogLevel::Warning,
-                                                    &format!("Unknown command: {}", cmd),
-                                                );
-                                            });
-                                        }
-                                    }
-                                    _ => {
-                                        app.add_system_message(&format!(
-                                            "Unknown command: {}. Type /help for available commands.",
-                                            cmd
-                                        ));
                                         with_dashboard_state(&shared_state, |state| {
                                             state.log(
                                                 LogLevel::Warning,
@@ -1749,16 +1703,28 @@ pub fn run_tui_dashboard_with_events(
                                         });
                                     }
                                 }
-                            } else {
-                                app.add_user_message(&input);
-                                let _ = user_input_tx.send(input.clone());
-                                with_dashboard_state(&shared_state, |state| {
-                                    state.log(
-                                        LogLevel::Info,
-                                        &format!("User: {}", truncate_for_display(&input, 50)),
-                                    );
-                                });
+                                _ => {
+                                    app.add_system_message(&format!(
+                                        "Unknown command: {}. Type /help for available commands.",
+                                        cmd
+                                    ));
+                                    with_dashboard_state(&shared_state, |state| {
+                                        state.log(
+                                            LogLevel::Warning,
+                                            &format!("Unknown command: {}", cmd),
+                                        );
+                                    });
+                                }
                             }
+                        } else {
+                            app.add_user_message(&input);
+                            let _ = user_input_tx.send(input.clone());
+                            with_dashboard_state(&shared_state, |state| {
+                                state.log(
+                                    LogLevel::Info,
+                                    &format!("User: {}", truncate_for_display(&input, 50)),
+                                );
+                            });
                         }
                     }
                 }

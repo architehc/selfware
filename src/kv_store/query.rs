@@ -132,14 +132,14 @@ impl KvStore {
     /// Get entries sorted by value length
     pub fn sorted_by_value_length(&self) -> Vec<(&String, &Entry)> {
         let mut items: Vec<(&String, &Entry)> = self.data.iter().collect();
-        items.sort_by(|a, b| a.1.value.len().cmp(&b.1.value.len()));
+        items.sort_by_key(|a| a.1.value.len());
         items
     }
 
     /// Get entries with the longest values
     pub fn longest_values(&self, limit: usize) -> Vec<(&String, &Entry)> {
         let mut items: Vec<(&String, &Entry)> = self.data.iter().collect();
-        items.sort_by(|a, b| b.1.value.len().cmp(&a.1.value.len()));
+        items.sort_by_key(|x| std::cmp::Reverse(x.1.value.len()));
         items.into_iter().take(limit).collect()
     }
 }

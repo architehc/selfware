@@ -120,8 +120,7 @@ impl Agent {
             );
             return Ok(0);
         }
-        if budget > 0 {
-            let pct = (estimated_tokens * 100) / budget;
+        if let Some(pct) = (estimated_tokens * 100).checked_div(budget) {
             if pct > 75 {
                 tracing::warn!(
                     "/ctx load: estimated {} tokens from {} files (~{}% of context budget). \

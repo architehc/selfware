@@ -306,22 +306,18 @@ impl SwarmApp {
                 }
 
                 // Navigate agent list
-                KeyCode::Up => {
-                    if !self.swarm_state.agents.is_empty() {
-                        if self.selected_agent > 0 {
-                            self.selected_agent -= 1;
-                        } else {
-                            self.selected_agent = self.swarm_state.agents.len() - 1;
-                        }
+                KeyCode::Up if !self.swarm_state.agents.is_empty() => {
+                    if self.selected_agent > 0 {
+                        self.selected_agent -= 1;
+                    } else {
+                        self.selected_agent = self.swarm_state.agents.len() - 1;
                     }
                 }
-                KeyCode::Down => {
-                    if !self.swarm_state.agents.is_empty() {
-                        if self.selected_agent < self.swarm_state.agents.len() - 1 {
-                            self.selected_agent += 1;
-                        } else {
-                            self.selected_agent = 0;
-                        }
+                KeyCode::Down if !self.swarm_state.agents.is_empty() => {
+                    if self.selected_agent < self.swarm_state.agents.len() - 1 {
+                        self.selected_agent += 1;
+                    } else {
+                        self.selected_agent = 0;
                     }
                 }
 

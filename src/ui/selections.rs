@@ -913,11 +913,9 @@ fn read_raw_line() -> Result<SelectionInput> {
                         write!(stdout, "{c}")?;
                         stdout.flush()?;
                     }
-                    KeyCode::Backspace => {
-                        if buf.pop().is_some() {
-                            write!(stdout, "\x08 \x08")?;
-                            stdout.flush()?;
-                        }
+                    KeyCode::Backspace if buf.pop().is_some() => {
+                        write!(stdout, "\x08 \x08")?;
+                        stdout.flush()?;
                     }
                     _ => {}
                 }

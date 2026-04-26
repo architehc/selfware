@@ -134,7 +134,7 @@ impl GardenView {
         if let Some(garden) = &self.garden {
             // Sort beds by total lines (largest first)
             let mut beds: Vec<_> = garden.beds.values().collect();
-            beds.sort_by(|a, b| b.total_lines.cmp(&a.total_lines));
+            beds.sort_by_key(|x| std::cmp::Reverse(x.total_lines));
 
             for bed in beds {
                 // Add the bed
@@ -187,7 +187,7 @@ impl GardenView {
             if let Some(bed) = garden.beds.get(bed_path) {
                 // Sort plants by lines
                 let mut plants: Vec<_> = bed.plants.iter().collect();
-                plants.sort_by(|a, b| b.lines.cmp(&a.lines));
+                plants.sort_by_key(|x| std::cmp::Reverse(x.lines));
 
                 // Insert plants after the bed
                 let plant_items: Vec<GardenItem> = plants

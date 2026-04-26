@@ -260,48 +260,44 @@ fn spawn_esc_listener(
                                     .write_all(b"\r\n\x1b[33m[ESC] Cancelling...\x1b[0m\r\n");
                                 break;
                             }
-                            KeyCode::Enter => {
-                                if !input_buf.is_empty() {
-                                    let msg =
-                                        strip_trailing_submission_newlines(&input_buf).to_string();
-                                    input_buf.clear();
-                                    showing_prompt = false;
-                                    if !is_effectively_empty_message(&msg) {
-                                        let count = {
-                                            match queued_clone.lock() {
-                                                Ok(mut q) => {
-                                                    q.push(PendingMessage::new(
-                                                        msg.clone(),
-                                                        PendingMessageOrigin::InteractiveQueue,
-                                                        Instant::now(),
-                                                    ));
-                                                    q.len()
-                                                }
-                                                Err(_) => 0,
+                            KeyCode::Enter if !input_buf.is_empty() => {
+                                let msg =
+                                    strip_trailing_submission_newlines(&input_buf).to_string();
+                                input_buf.clear();
+                                showing_prompt = false;
+                                if !is_effectively_empty_message(&msg) {
+                                    let count = {
+                                        match queued_clone.lock() {
+                                            Ok(mut q) => {
+                                                q.push(PendingMessage::new(
+                                                    msg.clone(),
+                                                    PendingMessageOrigin::InteractiveQueue,
+                                                    Instant::now(),
+                                                ));
+                                                q.len()
                                             }
-                                        };
-                                        // Show confirmation
-                                        let notice = format!(
+                                            Err(_) => 0,
+                                        }
+                                    };
+                                    // Show confirmation
+                                    let notice = format!(
                                             "\r\x1b[2K\x1b[36m  ▸ Queued: \x1b[0m{}\x1b[90m ({})\x1b[0m\r\n",
                                             preview_with_ellipsis(&msg, QUEUE_NOTICE_PREVIEW_BYTES),
                                             count,
                                         );
-                                        let _ = std::io::stderr().write_all(notice.as_bytes());
-                                        let _ = std::io::stderr().flush();
-                                    } else {
-                                        let _ = std::io::stderr().write_all(b"\r\x1b[2K");
-                                        let _ = std::io::stderr().flush();
-                                    }
+                                    let _ = std::io::stderr().write_all(notice.as_bytes());
+                                    let _ = std::io::stderr().flush();
+                                } else {
+                                    let _ = std::io::stderr().write_all(b"\r\x1b[2K");
+                                    let _ = std::io::stderr().flush();
                                 }
                             }
-                            KeyCode::Backspace => {
-                                if input_buf.pop().is_some() {
-                                    render_inline_queue_prompt(&input_buf);
-                                    if input_buf.is_empty() {
-                                        let _ = std::io::stderr().write_all(b"\r\x1b[2K");
-                                        let _ = std::io::stderr().flush();
-                                        showing_prompt = false;
-                                    }
+                            KeyCode::Backspace if input_buf.pop().is_some() => {
+                                render_inline_queue_prompt(&input_buf);
+                                if input_buf.is_empty() {
+                                    let _ = std::io::stderr().write_all(b"\r\x1b[2K");
+                                    let _ = std::io::stderr().flush();
+                                    showing_prompt = false;
                                 }
                             }
                             KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {

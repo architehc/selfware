@@ -537,89 +537,78 @@ impl StyleChecker {
         let trimmed = line.trim();
 
         match rule.id.as_str() {
-            "rust/unwrap" => {
-                if trimmed.contains(".unwrap()") && !trimmed.starts_with("//") {
-                    return Some(StyleViolation {
-                        rule_id: rule.id.clone(),
-                        file: path.to_path_buf(),
-                        line: line_num,
-                        column: line.find(".unwrap()").map(|c| c as u32),
-                        message: rule.description.clone(),
-                        severity: rule.severity,
-                        suggestion: Some("Use `?` operator or `match`/`if let` instead".into()),
-                    });
-                }
+            "rust/unwrap" if trimmed.contains(".unwrap()") && !trimmed.starts_with("//") => {
+                return Some(StyleViolation {
+                    rule_id: rule.id.clone(),
+                    file: path.to_path_buf(),
+                    line: line_num,
+                    column: line.find(".unwrap()").map(|c| c as u32),
+                    message: rule.description.clone(),
+                    severity: rule.severity,
+                    suggestion: Some("Use `?` operator or `match`/`if let` instead".into()),
+                });
             }
-            "rust/expect" => {
-                if trimmed.contains(".expect(") && !trimmed.starts_with("//") {
-                    return Some(StyleViolation {
-                        rule_id: rule.id.clone(),
-                        file: path.to_path_buf(),
-                        line: line_num,
-                        column: line.find(".expect(").map(|c| c as u32),
-                        message: rule.description.clone(),
-                        severity: rule.severity,
-                        suggestion: Some("Use `?` operator with context".into()),
-                    });
-                }
+            "rust/expect" if trimmed.contains(".expect(") && !trimmed.starts_with("//") => {
+                return Some(StyleViolation {
+                    rule_id: rule.id.clone(),
+                    file: path.to_path_buf(),
+                    line: line_num,
+                    column: line.find(".expect(").map(|c| c as u32),
+                    message: rule.description.clone(),
+                    severity: rule.severity,
+                    suggestion: Some("Use `?` operator with context".into()),
+                });
             }
-            "rust/clone" => {
-                if trimmed.contains(".clone()") && !trimmed.starts_with("//") {
-                    return Some(StyleViolation {
-                        rule_id: rule.id.clone(),
-                        file: path.to_path_buf(),
-                        line: line_num,
-                        column: line.find(".clone()").map(|c| c as u32),
-                        message: rule.description.clone(),
-                        severity: rule.severity,
-                        suggestion: Some("Consider using a reference instead of cloning".into()),
-                    });
-                }
+            "rust/clone" if trimmed.contains(".clone()") && !trimmed.starts_with("//") => {
+                return Some(StyleViolation {
+                    rule_id: rule.id.clone(),
+                    file: path.to_path_buf(),
+                    line: line_num,
+                    column: line.find(".clone()").map(|c| c as u32),
+                    message: rule.description.clone(),
+                    severity: rule.severity,
+                    suggestion: Some("Consider using a reference instead of cloning".into()),
+                });
             }
-            "rust/todo" => {
-                if trimmed.contains("TODO") || trimmed.contains("FIXME") {
-                    return Some(StyleViolation {
-                        rule_id: rule.id.clone(),
-                        file: path.to_path_buf(),
-                        line: line_num,
-                        column: None,
-                        message: rule.description.clone(),
-                        severity: rule.severity,
-                        suggestion: Some("Address or create an issue for this TODO".into()),
-                    });
-                }
+            "rust/todo" if (trimmed.contains("TODO") || trimmed.contains("FIXME")) => {
+                return Some(StyleViolation {
+                    rule_id: rule.id.clone(),
+                    file: path.to_path_buf(),
+                    line: line_num,
+                    column: None,
+                    message: rule.description.clone(),
+                    severity: rule.severity,
+                    suggestion: Some("Address or create an issue for this TODO".into()),
+                });
             }
-            "rust/unsafe" => {
-                if trimmed.starts_with("unsafe ") || trimmed.contains(" unsafe ") {
-                    return Some(StyleViolation {
-                        rule_id: rule.id.clone(),
-                        file: path.to_path_buf(),
-                        line: line_num,
-                        column: line.find("unsafe").map(|c| c as u32),
-                        message: rule.description.clone(),
-                        severity: rule.severity,
-                        suggestion: Some(
-                            "Document safety invariants and consider safe alternatives".into(),
-                        ),
-                    });
-                }
+            "rust/unsafe" if (trimmed.starts_with("unsafe ") || trimmed.contains(" unsafe ")) => {
+                return Some(StyleViolation {
+                    rule_id: rule.id.clone(),
+                    file: path.to_path_buf(),
+                    line: line_num,
+                    column: line.find("unsafe").map(|c| c as u32),
+                    message: rule.description.clone(),
+                    severity: rule.severity,
+                    suggestion: Some(
+                        "Document safety invariants and consider safe alternatives".into(),
+                    ),
+                });
             }
-            "rust/panic" => {
+            "rust/panic"
                 if (trimmed.contains("panic!")
                     || trimmed.contains("unimplemented!")
                     || trimmed.contains("unreachable!"))
-                    && !trimmed.starts_with("//")
-                {
-                    return Some(StyleViolation {
-                        rule_id: rule.id.clone(),
-                        file: path.to_path_buf(),
-                        line: line_num,
-                        column: None,
-                        message: rule.description.clone(),
-                        severity: rule.severity,
-                        suggestion: Some("Return an error instead of panicking".into()),
-                    });
-                }
+                    && !trimmed.starts_with("//") =>
+            {
+                return Some(StyleViolation {
+                    rule_id: rule.id.clone(),
+                    file: path.to_path_buf(),
+                    line: line_num,
+                    column: None,
+                    message: rule.description.clone(),
+                    severity: rule.severity,
+                    suggestion: Some("Return an error instead of panicking".into()),
+                });
             }
             _ => {}
         }

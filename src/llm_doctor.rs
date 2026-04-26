@@ -1138,13 +1138,11 @@ fn print_recommendations(
                 "Consider --enable-prefix-caching for repeated prompts".to_string(),
             ));
         }
-        Backend::Ollama => {
-            if is_qwen_model(model_name) {
-                checks.push((
-                    CheckStatus::Info,
-                    "Set OLLAMA_NUM_PARALLEL=1 for best single-request throughput".to_string(),
-                ));
-            }
+        Backend::Ollama if is_qwen_model(model_name) => {
+            checks.push((
+                CheckStatus::Info,
+                "Set OLLAMA_NUM_PARALLEL=1 for best single-request throughput".to_string(),
+            ));
         }
         Backend::LlamaCpp => {
             checks.push((

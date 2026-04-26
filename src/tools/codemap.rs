@@ -508,11 +508,7 @@ impl Tool for ContextBudgetTool {
         // Estimate how many "typical" actions fit: assume a medium file (~2000 tokens)
         // with an Alter action (1.5x) at Binary fusion (1.0x) = 3000 tokens
         let typical_action_cost = 3000usize;
-        let actions_available = if typical_action_cost > 0 {
-            remaining / typical_action_cost
-        } else {
-            0
-        };
+        let actions_available = remaining.checked_div(typical_action_cost).unwrap_or(0);
 
         Ok(json!({
             "used_tokens": used,

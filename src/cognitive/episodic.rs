@@ -678,7 +678,7 @@ impl EpisodicMemory {
             .filter(|e| e.episode_type == episode_type)
             .collect();
 
-        episodes.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        episodes.sort_by_key(|x| std::cmp::Reverse(x.timestamp));
         episodes.truncate(limit);
         episodes
     }

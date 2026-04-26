@@ -1006,11 +1006,9 @@ impl TestProgress {
 
     /// Render progress bar
     pub fn render(&self) -> String {
-        let filled = if self.total > 0 {
-            (self.completed * self.width) / self.total
-        } else {
-            self.width
-        };
+        let filled = (self.completed * self.width)
+            .checked_div(self.total)
+            .unwrap_or(self.width);
         let empty = self.width - filled;
 
         let bar: String = "█".repeat(filled) + &"░".repeat(empty);

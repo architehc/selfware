@@ -161,7 +161,7 @@ impl ChatStore {
                 }
             }
         }
-        summaries.sort_by(|a, b| b.saved_at.cmp(&a.saved_at));
+        summaries.sort_by_key(|x| std::cmp::Reverse(x.saved_at));
         Ok(summaries)
     }
 

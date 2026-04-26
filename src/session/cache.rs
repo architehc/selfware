@@ -125,7 +125,7 @@ impl ToolCache {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.created_at))
                 .collect();
-            items.sort_by(|a, b| a.1.cmp(&b.1));
+            items.sort_by_key(|a| a.1);
 
             let to_remove = self.max_entries / 10;
             for (key, _) in items.iter().take(to_remove) {
@@ -386,7 +386,7 @@ impl LlmCache {
             .iter()
             .map(|(k, v)| (k.clone(), v.created_at))
             .collect();
-        items.sort_by(|a, b| a.1.cmp(&b.1));
+        items.sort_by_key(|a| a.1);
 
         let to_remove = self.config.max_entries / 10;
         let ids_to_remove: Vec<_> = items

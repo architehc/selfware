@@ -347,7 +347,7 @@ impl DigitalGarden {
         let mut output = String::from("Garden Beds:\n");
 
         let mut beds: Vec<_> = self.beds.values().collect();
-        beds.sort_by(|a, b| b.total_lines.cmp(&a.total_lines));
+        beds.sort_by_key(|x| std::cmp::Reverse(x.total_lines));
 
         for bed in beds.iter().take(10) {
             output.push_str(&format!(

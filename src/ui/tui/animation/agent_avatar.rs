@@ -316,7 +316,7 @@ impl Widget for &AgentAvatar {
         let mut x_offset = 0u16;
         for ch in icon.chars() {
             let char_width = ch.width().unwrap_or(1) as u16;
-            if inner_x + x_offset + char_width <= area.x + area.width - 1 {
+            if inner_x + x_offset + char_width < area.x + area.width {
                 buf[(inner_x + x_offset, inner_y)]
                     .set_symbol(&ch.to_string())
                     .set_style(Style::default().fg(self.role.color()));
@@ -381,7 +381,7 @@ impl Widget for &AgentAvatar {
             let mut token_x_offset = 0u16;
             for ch in display_text.chars() {
                 let char_width = ch.width().unwrap_or(1) as u16;
-                if inner_x + token_x_offset + char_width <= area.x + area.width - 1 {
+                if inner_x + token_x_offset + char_width < area.x + area.width {
                     buf[(inner_x + token_x_offset, token_y)]
                         .set_symbol(&ch.to_string())
                         .set_style(Style::default().fg(Color::Gray));

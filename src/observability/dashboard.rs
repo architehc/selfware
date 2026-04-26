@@ -135,7 +135,7 @@ impl TokenTracker {
     /// Get top models by usage
     pub fn top_models(&self, n: usize) -> Vec<(&String, &TokenUsage)> {
         let mut models: Vec<_> = self.by_model.iter().collect();
-        models.sort_by(|a, b| b.1.total.cmp(&a.1.total));
+        models.sort_by_key(|x| std::cmp::Reverse(x.1.total));
         models.into_iter().take(n).collect()
     }
 }
@@ -338,11 +338,7 @@ impl LatencyHistogram {
                 format!("≤{}ms", bucket.boundary)
             };
 
-            let bar_width = if max_count > 0 {
-                (bucket.count * width) / max_count
-            } else {
-                0
-            };
+            let bar_width = (bucket.count * width).checked_div(max_count).unwrap_or(0);
             let bar = "█".repeat(bar_width);
 
             // Skip if previous boundary covers this
@@ -504,7 +500,7 @@ impl ToolTracker {
             .iter()
             .map(|(name, execs)| (name, execs.len()))
             .collect();
-        tools.sort_by(|a, b| b.1.cmp(&a.1));
+        tools.sort_by_key(|x| std::cmp::Reverse(x.1));
         tools
     }
 
@@ -527,7 +523,7 @@ impl ToolTracker {
             .flatten()
             .filter(|e| !e.result.is_success())
             .collect();
-        failures.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        failures.sort_by_key(|x| std::cmp::Reverse(x.timestamp));
         failures.into_iter().take(limit).collect()
     }
 

@@ -1088,7 +1088,7 @@ impl CheckpointManager {
         }
 
         // Sort by updated_at descending (most recent first)
-        summaries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        summaries.sort_by_key(|x| std::cmp::Reverse(x.updated_at));
 
         Ok(summaries)
     }

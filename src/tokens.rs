@@ -699,12 +699,7 @@ impl ContextPruner {
             .iter()
             .filter(|msg| {
                 if msg.role == "system" {
-                    if first_system {
-                        first_system = false;
-                        true
-                    } else {
-                        false
-                    }
+                    std::mem::take(&mut first_system)
                 } else {
                     true
                 }

@@ -494,7 +494,7 @@ impl PatternDetector {
             .read()
             .map(|p| {
                 let mut patterns: Vec<_> = p.values().cloned().collect();
-                patterns.sort_by(|a, b| b.count.cmp(&a.count));
+                patterns.sort_by_key(|x| std::cmp::Reverse(x.count));
                 patterns.truncate(n);
                 patterns
             })

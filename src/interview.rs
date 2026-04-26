@@ -476,12 +476,10 @@ fn read_line_raw() -> Result<LineInput> {
                         write!(stdout, "{c}")?;
                         stdout.flush()?;
                     }
-                    KeyCode::Backspace => {
-                        if buf.pop().is_some() {
-                            // Move cursor back, overwrite, move back again.
-                            write!(stdout, "\x08 \x08")?;
-                            stdout.flush()?;
-                        }
+                    KeyCode::Backspace if buf.pop().is_some() => {
+                        // Move cursor back, overwrite, move back again.
+                        write!(stdout, "\x08 \x08")?;
+                        stdout.flush()?;
                     }
                     _ => {}
                 }

@@ -370,8 +370,7 @@ fn count_steps(output: &[u8]) -> usize {
 fn extract_outcome(output: &[u8]) -> String {
     let text = String::from_utf8_lossy(output);
     text.lines()
-        .filter(|l| l.contains("Outcome:"))
-        .next_back()
+        .rfind(|l| l.contains("Outcome:"))
         .map(|l| {
             l.split("Outcome:")
                 .nth(1)

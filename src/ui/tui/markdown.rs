@@ -397,12 +397,10 @@ impl<'a> RenderState<'a> {
                 self.flush_line();
                 self.lines.push(Line::default()); // Add blank line after heading
             }
-            TagEnd::CodeBlock => {
-                if self.in_code_block {
-                    self.render_code_block();
-                    self.in_code_block = false;
-                    self.code_content.clear();
-                }
+            TagEnd::CodeBlock if self.in_code_block => {
+                self.render_code_block();
+                self.in_code_block = false;
+                self.code_content.clear();
             }
             TagEnd::List(_) => {
                 self.list_depth = self.list_depth.saturating_sub(1);

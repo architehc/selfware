@@ -745,7 +745,7 @@ impl ToolSelectionLearner {
                 .iter()
                 .map(|(e, c)| (e.clone(), *c))
                 .collect();
-            errors.sort_by(|a, b| b.1.cmp(&a.1));
+            errors.sort_by_key(|x| std::cmp::Reverse(x.1));
             errors.into_iter().take(5).collect()
         } else {
             Vec::new()
@@ -1003,7 +1003,7 @@ impl ErrorPatternLearner {
     /// Get most common error patterns
     pub fn most_common_patterns(&self, limit: usize) -> Vec<&ErrorPattern> {
         let mut patterns: Vec<_> = self.patterns.values().collect();
-        patterns.sort_by(|a, b| b.count.cmp(&a.count));
+        patterns.sort_by_key(|x| std::cmp::Reverse(x.count));
         patterns.into_iter().take(limit).collect()
     }
 
@@ -1299,7 +1299,7 @@ impl UsageAnalyzer {
             .iter()
             .map(|(t, c)| (t.clone(), *c))
             .collect();
-        tools.sort_by(|a, b| b.1.cmp(&a.1));
+        tools.sort_by_key(|x| std::cmp::Reverse(x.1));
         tools.into_iter().take(limit).collect()
     }
 
