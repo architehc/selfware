@@ -1099,8 +1099,12 @@ end tell"#,
             return Ok(app_name);
         }
 
-        // Refresh the cache once in case the caller is using a stale/new manager instance.
-        self.list_windows_macos().await?;
+        // Refresh the cache once in case the caller is using a stale/new
+        // manager instance. We swallow the error here on purpose: in headless
+        // CI runners osascript fails because no display / Accessibility
+        // permissions are available, and surfacing that low-level error
+        // instead of "Unknown window ID" hides the real cause from callers.
+        let _ = self.list_windows_macos().await;
         self.lookup_macos_app_name(id)?
             .context("Unknown window ID. Call list_windows() first to refresh the window list.")
     }

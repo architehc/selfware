@@ -18,6 +18,25 @@ use serde_json::{json, Value};
 use std::io::Write;
 use tempfile::{NamedTempFile, TempDir};
 
+/// Resolve the path the safety checker will see for a temp file/dir.
+///
+/// macOS canonicalizes `/var/folders/...` to `/private/var/folders/...`,
+/// so a TempDir/NamedTempFile path used verbatim in the SafetyConfig
+/// allow-list won't match the canonical path the tool sees during
+/// execution. On Windows `Path::canonicalize()` returns UNC paths
+/// (`\\?\C:\...`) that break the allow-list comparison, so we leave the
+/// path alone there. On Linux there's no symlink to worry about.
+fn safe_canonical(p: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        p.to_path_buf()
+    }
+}
+
 /// Build a SafetyConfig that allows access to the given path (and its children).
 fn permissive_safety(path: &str) -> SafetyConfig {
     SafetyConfig {
@@ -80,6 +99,7 @@ async fn file_read_schema_contract() {
     assert!(props.get("path").is_some(), "schema must include 'path'");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn file_read_valid_execution() {
     let mut tmp = NamedTempFile::new().expect("create temp file");
@@ -87,7 +107,7 @@ async fn file_read_valid_execution() {
     // macOS canonicalizes /var/folders/... to /private/var/folders/...; the
     // tool sees the canonical path during safety checks, so we must
     // canonicalize here too or the allow-list won't match.
-    let canonical = tmp.path().canonicalize().expect("canonicalize temp path");
+    let canonical = safe_canonical(tmp.path());
     let path = canonical.to_str().unwrap().to_string();
     let parent = canonical.parent().unwrap().to_str().unwrap().to_string();
 
@@ -118,13 +138,7 @@ async fn file_read_invalid_args() {
 #[tokio::test]
 async fn file_read_nonexistent_file() {
     let dir = TempDir::new().expect("create temp dir");
-    let parent = dir
-        .path()
-        .canonicalize()
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
+    let parent = safe_canonical(dir.path()).to_str().unwrap().to_string();
     let tool = FileRead::with_safety_config(permissive_safety(&parent));
     let path = dir.path().join("no_such_file.txt");
     let result = tool.execute(json!({"path": path.to_str().unwrap()})).await;
@@ -152,17 +166,12 @@ async fn file_write_schema_contract() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn file_write_valid_execution() {
     let dir = TempDir::new().expect("create temp dir");
     let file_path = dir.path().join("output.txt");
-    let parent = dir
-        .path()
-        .canonicalize()
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
+    let parent = safe_canonical(dir.path()).to_str().unwrap().to_string();
 
     let tool = FileWrite::with_safety_config(permissive_safety(&parent));
     let result = tool
@@ -205,18 +214,13 @@ async fn file_edit_schema_contract() {
     assert!(props.get("new_str").is_some());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn file_edit_valid_execution() {
     let dir = TempDir::new().expect("create temp dir");
     let file_path = dir.path().join("editable.txt");
     std::fs::write(&file_path, "alpha beta gamma").expect("seed file");
-    let parent = dir
-        .path()
-        .canonicalize()
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
+    let parent = safe_canonical(dir.path()).to_str().unwrap().to_string();
 
     let tool = FileEdit::with_safety_config(permissive_safety(&parent));
     let result = tool
@@ -256,13 +260,7 @@ async fn file_edit_old_str_not_found() {
     let dir = TempDir::new().expect("create temp dir");
     let file_path = dir.path().join("no_match.txt");
     std::fs::write(&file_path, "unchanged content").expect("seed file");
-    let parent = dir
-        .path()
-        .canonicalize()
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
+    let parent = safe_canonical(dir.path()).to_str().unwrap().to_string();
 
     let tool = FileEdit::with_safety_config(permissive_safety(&parent));
     let result = tool
@@ -337,6 +335,7 @@ async fn directory_tree_schema_contract() {
     assert!(props.get("path").is_some(), "schema must include 'path'");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn directory_tree_valid_execution() {
     let dir = TempDir::new().expect("create temp dir");
@@ -344,13 +343,7 @@ async fn directory_tree_valid_execution() {
     let sub = dir.path().join("sub");
     std::fs::create_dir(&sub).expect("mkdir sub");
     std::fs::write(sub.join("file.txt"), "hi").expect("create file");
-    let parent = dir
-        .path()
-        .canonicalize()
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_string();
+    let parent = safe_canonical(dir.path()).to_str().unwrap().to_string();
 
     let tool = DirectoryTree::with_safety_config(permissive_safety(&parent));
     let result = tool.execute(json!({"path": parent, "max_depth": 2})).await;
