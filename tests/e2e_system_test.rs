@@ -14,7 +14,7 @@
 //! LLM tests additionally require the endpoint to be reachable:
 //!
 //! ```sh
-//! SELFWARE_TEST_ENDPOINT=https://crazyshit.ngrok.io/v1 \
+//! SELFWARE_TEST_ENDPOINT=http://127.0.0.1:8000/v1 \
 //! SELFWARE_TEST_MODEL=txn545/Qwen3.5-122B-A10B-NVFP4 \
 //! cargo test --features system-tests --test e2e_system_test -- --nocapture
 //! ```
@@ -36,7 +36,7 @@ use tempfile::tempdir;
 // ============================================================================
 
 /// Default test endpoint for LLM tests.
-const DEFAULT_TEST_ENDPOINT: &str = "https://crazyshit.ngrok.io/v1";
+const DEFAULT_TEST_ENDPOINT: &str = "http://127.0.0.1:8000/v1";
 
 /// Default test model for LLM tests.
 const DEFAULT_TEST_MODEL: &str = "txn545/Qwen3.5-122B-A10B-NVFP4";

@@ -11,7 +11,7 @@
 //! ```
 //!
 //! Environment overrides:
-//!   CC_TEST_ENDPOINT  — VLM endpoint (default: https://crazyshit.ngrok.io/v1)
+//!   CC_TEST_ENDPOINT  — VLM endpoint (default: http://127.0.0.1:8000/v1)
 //!   CC_TEST_MODEL     — VLM model   (default: txn545/Qwen3.5-122B-A10B-NVFP4)
 
 use std::path::{Path, PathBuf};
@@ -42,7 +42,7 @@ struct Args {
     output: PathBuf,
 
     /// VLM endpoint (OpenAI-compatible /v1). Override with CC_TEST_ENDPOINT env var.
-    #[arg(long, default_value = "https://crazyshit.ngrok.io/v1")]
+    #[arg(long, default_value = "http://127.0.0.1:8000/v1")]
     endpoint: String,
 
     /// VLM model name. Override with CC_TEST_MODEL env var.

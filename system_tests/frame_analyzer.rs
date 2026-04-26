@@ -6,7 +6,7 @@
 //! Usage:
 //! ```sh
 //! cargo run --bin frame_analyzer --features system-tests -- \
-//!   --endpoint https://crazyshit.ngrok.io/v1 \
+//!   --endpoint http://127.0.0.1:8000/v1 \
 //!   --model txn545/Qwen3.5-122B-A10B-NVFP4 \
 //!   --fps 2 --duration 30 --game-mode
 //! ```
@@ -51,7 +51,7 @@ impl Config {
         let args: Vec<String> = std::env::args().collect();
 
         let mut cfg = Config {
-            endpoint: "https://crazyshit.ngrok.io/v1".to_string(),
+            endpoint: "http://127.0.0.1:8000/v1".to_string(),
             model: "txn545/Qwen3.5-122B-A10B-NVFP4".to_string(),
             fps: 2,
             duration: 30,
@@ -110,7 +110,7 @@ impl Config {
                         "Usage: frame_analyzer [OPTIONS]\n\
                          \n\
                          Options:\n\
-                         --endpoint URL     VLM endpoint (default: https://crazyshit.ngrok.io/v1)\n\
+                         --endpoint URL     VLM endpoint (default: http://127.0.0.1:8000/v1)\n\
                          --model MODEL      Model name (default: txn545/Qwen3.5-122B-A10B-NVFP4)\n\
                          --fps N            Capture rate 1-10 (default: 2)\n\
                          --duration SECS    Total duration (default: 30)\n\

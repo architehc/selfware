@@ -8,7 +8,7 @@
 //!   SELFWARE_ENDPOINT=http://localhost:8000/v1 SELFWARE_MODEL=qwen3.5-27b cargo test --features integration qwen3_
 //!
 //!   # Remote sglang (Qwen3.5-122B)
-//!   SELFWARE_ENDPOINT=https://crazyshit.ngrok.io/v1 SELFWARE_MODEL="txn545/Qwen3.5-122B-A10B-NVFP4" cargo test --features integration qwen3_
+//!   SELFWARE_ENDPOINT=http://127.0.0.1:8000/v1 SELFWARE_MODEL="txn545/Qwen3.5-122B-A10B-NVFP4" cargo test --features integration qwen3_
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

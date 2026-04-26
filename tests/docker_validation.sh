@@ -136,7 +136,7 @@ test_config_creation() {
 
     mkdir -p "$VALIDATION_DIR/config-test"
     cat > "$VALIDATION_DIR/config-test/selfware.toml" << 'TOMLEOF'
-endpoint = "https://crazyshit.ngrok.io/v1"
+endpoint = "http://127.0.0.1:8000/v1"
 model = "txn545/Qwen3.5-122B-A10B-NVFP4"
 max_tokens = 4096
 temperature = 0.7

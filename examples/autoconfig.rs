@@ -5,7 +5,7 @@
 //!
 //! Usage:
 //!   cargo run --example autoconfig -- http://localhost:8000/v1
-//!   cargo run --example autoconfig -- https://crazyshit.ngrok.io/v1
+//!   cargo run --example autoconfig -- http://127.0.0.1:8000/v1
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -305,7 +305,7 @@ async fn main() -> Result<()> {
 
     if urls.is_empty() {
         eprintln!("Usage: autoconfig <endpoint_url> [endpoint_url2] ...");
-        eprintln!("Example: autoconfig http://localhost:8000/v1 https://crazyshit.ngrok.io/v1");
+        eprintln!("Example: autoconfig http://localhost:8000/v1 http://127.0.0.1:8000/v1");
         return Ok(());
     }
 

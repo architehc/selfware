@@ -5,7 +5,7 @@
 #   SELFWARE_TIMEOUT=28800 cargo test --features integration extended_
 
 # Top-level config fields (match Config struct schema)
-endpoint = "https://crazyshit.ngrok.io/v1"
+endpoint = "http://127.0.0.1:8000/v1"
 model = "/media/thread/trebuchet6/qwen35/models/Qwen3.5-122B-A10B-NVFP4-yarn-1010k"
 # api_key = ""  # Optional, uncomment if needed
 max_tokens = 65536

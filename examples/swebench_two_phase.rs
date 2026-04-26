@@ -9,7 +9,7 @@
 //!
 //! Run with:
 //!   cargo run --features bench-harness --example swebench_two_phase
-//!   SELFWARE_ENDPOINT=https://crazyshit.ngrok.io/v1 cargo run --features bench-harness --example swebench_two_phase
+//!   SELFWARE_ENDPOINT=http://127.0.0.1:8000/v1 cargo run --features bench-harness --example swebench_two_phase
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;

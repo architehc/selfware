@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="${ROOT}/target/release/selfware"
 CONFIG="${ROOT}/selfware-auto-txn545-Qwen3-5-122B-A10B-NVFP4.toml"
-ENDPOINT="https://crazyshit.ngrok.io/v1"
+ENDPOINT="http://127.0.0.1:8000/v1"
 MODEL="txn545/Qwen3.5-122B-A10B-NVFP4"
 
 if [[ ! -x "${BIN}" ]]; then

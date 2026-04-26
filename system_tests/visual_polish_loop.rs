@@ -5,7 +5,7 @@
 //! visual quality meets a threshold.
 //!
 //! Requires:
-//!   - A live VLM endpoint (default: https://crazyshit.ngrok.io/v1)
+//!   - A live VLM endpoint (default: http://127.0.0.1:8000/v1)
 //!   - Chromium / chromium-browser installed
 //!   - Feature flag: --features system-tests
 //!
@@ -30,7 +30,7 @@ use std::time::Duration;
 
 fn endpoint() -> String {
     std::env::var("SELFWARE_ENDPOINT")
-        .unwrap_or_else(|_| "https://crazyshit.ngrok.io/v1".to_string())
+        .unwrap_or_else(|_| "http://127.0.0.1:8000/v1".to_string())
 }
 
 fn model() -> String {

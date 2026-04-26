@@ -8,7 +8,7 @@
 //! Tests against a live endpoint and reports any unexpected errors.
 //!
 //! Run with:
-//!   cargo run --features bench-harness --example full_flow_test -- https://crazyshit.ngrok.io/v1
+//!   cargo run --features bench-harness --example full_flow_test -- http://127.0.0.1:8000/v1
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -77,7 +77,7 @@ fn default_targets() -> Vec<EndpointTarget> {
             concurrent: 16,
         },
         EndpointTarget {
-            endpoint: "https://crazyshit.ngrok.io/v1".to_string(),
+            endpoint: "http://127.0.0.1:8000/v1".to_string(),
             concurrent: 64,
         },
     ]
@@ -971,7 +971,7 @@ async fn main() -> Result<()> {
     let targets = if endpoint_arg.is_none() && concurrent_arg.is_none() && !vision_only {
         default_targets()
     } else {
-        let endpoint = endpoint_arg.unwrap_or_else(|| "https://crazyshit.ngrok.io/v1".to_string());
+        let endpoint = endpoint_arg.unwrap_or_else(|| "http://127.0.0.1:8000/v1".to_string());
         let concurrent = concurrent_arg.unwrap_or_else(|| infer_text_concurrency(&endpoint));
         vec![EndpointTarget {
             endpoint,

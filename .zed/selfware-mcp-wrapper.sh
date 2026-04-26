@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/bin/bash
 set -eu
 
 log_file="/tmp/selfware-zed-mcp.log"
@@ -9,8 +9,8 @@ log_file="/tmp/selfware-zed-mcp.log"
   env | grep -E '^(SELFWARE_|RUST_LOG=|NO_COLOR=)' || true
 } >> "$log_file"
 
-cd /Users/ivo/selfware
-/Users/ivo/selfware/target/debug/selfware "$@"
+cd /home/ivo/selfware
+/home/ivo/selfware/target/debug/selfware "$@"
 exit_code=$?
 
 {

@@ -23,7 +23,7 @@ fi
 
 # Create selfware config
 cat > selfware.toml << 'TOML'
-endpoint = "https://crazyshit.ngrok.io/v1"
+endpoint = "http://127.0.0.1:8000/v1"
 model = "txn545/Qwen3.5-122B-A10B-NVFP4"
 max_tokens = 65536
 temperature = 0.7

@@ -6,12 +6,12 @@
 //! Usage:
 //! ```sh
 //! cargo run --bin agent_regression --features system-tests -- \
-//!   --endpoint https://crazyshit.ngrok.io/v1 \
+//!   --endpoint http://127.0.0.1:8000/v1 \
 //!   --model txn545/Qwen3.5-122B-A10B-NVFP4
 //! ```
 //!
 //! Environment overrides:
-//!   SELFWARE_ENDPOINT — LLM endpoint (default: https://crazyshit.ngrok.io/v1)
+//!   SELFWARE_ENDPOINT — LLM endpoint (default: http://127.0.0.1:8000/v1)
 //!   SELFWARE_MODEL    — LLM model   (default: txn545/Qwen3.5-122B-A10B-NVFP4)
 
 use std::env;
@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 // Constants
 // ---------------------------------------------------------------------------
 
-const DEFAULT_ENDPOINT: &str = "https://crazyshit.ngrok.io/v1";
+const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:8000/v1";
 const DEFAULT_MODEL: &str = "txn545/Qwen3.5-122B-A10B-NVFP4";
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
