@@ -354,17 +354,13 @@ impl Agent {
             return Ok(true);
         }
 
+        let context_target =
+            (!self.current_task_context.is_empty()).then_some(self.current_task_context.as_str());
         let literal_target = self
             .current_checkpoint
             .as_ref()
             .map(|cp| cp.task_description.as_str())
-            .or_else(|| {
-                if self.current_task_context.is_empty() {
-                    None
-                } else {
-                    Some(self.current_task_context.as_str())
-                }
-            })
+            .or(context_target)
             .and_then(super::verification::exact_response_target);
 
         if let Some(target) = literal_target {

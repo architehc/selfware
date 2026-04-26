@@ -30,4 +30,3 @@ fn main() {
     eprintln!("Run with: cargo run --example swarm_ui_demo --features tui");
     std::process::exit(1);
 }
-

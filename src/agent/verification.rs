@@ -324,17 +324,13 @@ impl Agent {
     /// Check whether the agent has done enough work to accept completion.
     /// Returns `None` to accept, or `Some(message)` to reject with instructions.
     pub(super) fn check_completion_gate(&self) -> Option<String> {
+        let context_target =
+            (!self.current_task_context.is_empty()).then_some(self.current_task_context.as_str());
         let literal_target = self
             .current_checkpoint
             .as_ref()
             .map(|cp| cp.task_description.as_str())
-            .or_else(|| {
-                if self.current_task_context.is_empty() {
-                    None
-                } else {
-                    Some(self.current_task_context.as_str())
-                }
-            })
+            .or(context_target)
             .and_then(exact_response_target);
 
         let missing_required_tools = self.missing_required_task_tools();

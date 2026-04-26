@@ -75,7 +75,7 @@ impl Config {
                 "--fps" => {
                     i += 1;
                     let v: u32 = args[i].parse().expect("--fps must be a number");
-                    cfg.fps = v.min(10).max(1);
+                    cfg.fps = v.clamp(1, 10);
                 }
                 "--duration" => {
                     i += 1;

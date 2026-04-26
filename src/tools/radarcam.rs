@@ -252,10 +252,16 @@ impl Tool for RadarCamFrame {
         let args: Args = serde_json::from_value(args)?;
 
         let url = match args.view.as_str() {
-            "bank" => format!("{}/spectral_bank/{}.jpg", radarcam_base(), args.camera_index),
+            "bank" => format!(
+                "{}/spectral_bank/{}.jpg",
+                radarcam_base(),
+                args.camera_index
+            ),
             _ => format!(
                 "{}/frame/{}.jpg?view={}",
-                radarcam_base(), args.camera_index, args.view
+                radarcam_base(),
+                args.camera_index,
+                args.view
             ),
         };
 
@@ -965,7 +971,7 @@ mod tests {
                             let req = String::from_utf8_lossy(&buf[..n]);
                             let first = req.lines().next().unwrap_or("");
                             let parts: Vec<&str> = first.split_whitespace().collect();
-                            let method = parts.get(0).unwrap_or(&"GET");
+                            let method = parts.first().unwrap_or(&"GET");
                             let path = parts.get(1).unwrap_or(&"/");
                             let resp = build_mock_response(method, path, &jpeg);
                             let _ = socket.write_all(&resp).await;
@@ -984,7 +990,8 @@ mod tests {
             ("GET", "/api/status") => (
                 "200 OK",
                 "application/json",
-                br#"{"cameras":[{"index":0,"name":"Mock Cam 0"},{"index":1,"name":"Mock Cam 1"}]}"#.to_vec(),
+                br#"{"cameras":[{"index":0,"name":"Mock Cam 0"},{"index":1,"name":"Mock Cam 1"}]}"#
+                    .to_vec(),
             ),
             ("GET", "/api/intel") => (
                 "200 OK",
@@ -996,11 +1003,19 @@ mod tests {
                 "application/json",
                 br#"{"cameras":[{"index":0}],"live":true}"#.to_vec(),
             ),
-            ("GET", "/api/calibration") => ("200 OK", "application/json", br#"{"status":"ok"}"#.to_vec()),
-            ("GET", "/api/calibration/history") => ("200 OK", "application/json", br#"[]"#.to_vec()),
-            ("GET", "/api/awareness") => ("200 OK", "application/json", br#"{"status":"ok"}"#.to_vec()),
+            ("GET", "/api/calibration") => {
+                ("200 OK", "application/json", br#"{"status":"ok"}"#.to_vec())
+            }
+            ("GET", "/api/calibration/history") => {
+                ("200 OK", "application/json", br#"[]"#.to_vec())
+            }
+            ("GET", "/api/awareness") => {
+                ("200 OK", "application/json", br#"{"status":"ok"}"#.to_vec())
+            }
             ("GET", path) if path.starts_with("/frame/") => ("200 OK", "image/jpeg", jpeg.to_vec()),
-            ("GET", path) if path.starts_with("/spectral_bank/") => ("200 OK", "image/jpeg", jpeg.to_vec()),
+            ("GET", path) if path.starts_with("/spectral_bank/") => {
+                ("200 OK", "image/jpeg", jpeg.to_vec())
+            }
             ("POST", "/api/calibration/run") => (
                 "200 OK",
                 "application/json",
@@ -1016,14 +1031,19 @@ mod tests {
                 "application/json",
                 br#"{"overall_passed":true}"#.to_vec(),
             ),
-            _ => ("200 OK", "text/html", b"<html><body>Mock RadarCam</body></html>".to_vec()),
+            _ => (
+                "200 OK",
+                "text/html",
+                b"<html><body>Mock RadarCam</body></html>".to_vec(),
+            ),
         };
 
-        let mut resp = format!(
+        let mut resp =
+            format!(
             "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             status, ctype, body.len()
         )
-        .into_bytes();
+            .into_bytes();
         resp.extend_from_slice(&body);
         resp
     }

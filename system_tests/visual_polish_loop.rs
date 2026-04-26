@@ -29,8 +29,7 @@ use std::time::Duration;
 // ---------------------------------------------------------------------------
 
 fn endpoint() -> String {
-    std::env::var("SELFWARE_ENDPOINT")
-        .unwrap_or_else(|_| "http://127.0.0.1:8000/v1".to_string())
+    std::env::var("SELFWARE_ENDPOINT").unwrap_or_else(|_| "http://127.0.0.1:8000/v1".to_string())
 }
 
 fn model() -> String {
@@ -434,7 +433,7 @@ fn main() {
         // Read screenshot as base64
         let mut img_bytes = Vec::new();
         {
-            let mut f = fs::File::open(&screenshot_path()).expect("Cannot open screenshot");
+            let mut f = fs::File::open(screenshot_path()).expect("Cannot open screenshot");
             f.read_to_end(&mut img_bytes)
                 .expect("Cannot read screenshot");
         }
@@ -570,7 +569,7 @@ fn main() {
         chrono::Utc::now().format("%Y%m%d_%H%M%S")
     );
     if Path::new(&screenshot_path()).exists() {
-        let _ = fs::copy(&screenshot_path(), &final_path);
+        let _ = fs::copy(screenshot_path(), &final_path);
         report.final_screenshot = final_path;
     }
 
