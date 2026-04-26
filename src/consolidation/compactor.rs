@@ -87,9 +87,11 @@ impl MemoryCompactor {
             let tokens = total_tokens.clone();
 
             let handle = tokio::spawn(async move {
-                let _permit = sem.acquire().await.expect("semaphore closed");
-                let result = summarize_group(&client, &config, &group, &seq, &tokens).await;
-                result
+                let _permit = sem
+                    .acquire()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("consolidation semaphore closed: {e}"))?;
+                summarize_group(&client, &config, &group, &seq, &tokens).await
             });
             handles.push(handle);
         }

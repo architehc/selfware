@@ -17,10 +17,6 @@ struct EndpointInfo {
     model_id: String,
     model_root: String,
     max_model_len: usize,
-    #[allow(dead_code)]
-    owned_by: String,
-    #[allow(dead_code)]
-    supports_tools: bool,
     native_tool_calling: bool,
     supports_thinking: bool,
     thinking_uses_all_tokens: bool,
@@ -231,8 +227,6 @@ async fn probe_endpoint(base_url: &str) -> Result<EndpointInfo> {
         model_id,
         model_root,
         max_model_len,
-        owned_by,
-        supports_tools: tools_accepted,
         native_tool_calling,
         supports_thinking,
         thinking_uses_all_tokens: thinking_uses_all,

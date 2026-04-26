@@ -2,7 +2,6 @@
 //!
 //! A warm, informative prompt for the workshop.
 
-use nu_ansi_term::{Color, Style};
 use reedline::{Prompt, PromptEditMode, PromptHistorySearch, PromptHistorySearchStatus};
 use std::borrow::Cow;
 
@@ -14,12 +13,6 @@ pub struct SelfwarePrompt {
     step: usize,
     /// Context usage percentage (0.0 - 100.0)
     context_pct: f64,
-    /// Left prompt style
-    #[allow(dead_code)]
-    left_style: Style,
-    /// Right prompt style
-    #[allow(dead_code)]
-    right_style: Style,
 }
 
 impl SelfwarePrompt {
@@ -29,8 +22,6 @@ impl SelfwarePrompt {
             model: String::new(),
             step: 0,
             context_pct: 0.0,
-            left_style: Style::new().fg(Color::Rgb(212, 163, 115)), // Amber
-            right_style: Style::new().fg(Color::Rgb(128, 128, 128)).dimmed(), // Stone
         }
     }
 
@@ -40,8 +31,6 @@ impl SelfwarePrompt {
             model: model.to_string(),
             step,
             context_pct: 0.0,
-            left_style: Style::new().fg(Color::Rgb(212, 163, 115)),
-            right_style: Style::new().fg(Color::Rgb(128, 128, 128)).dimmed(),
         }
     }
 
@@ -51,8 +40,6 @@ impl SelfwarePrompt {
             model: model.to_string(),
             step,
             context_pct,
-            left_style: Style::new().fg(Color::Rgb(212, 163, 115)),
-            right_style: Style::new().fg(Color::Rgb(128, 128, 128)).dimmed(),
         }
     }
 

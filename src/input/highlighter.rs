@@ -11,9 +11,6 @@ pub struct SelfwareHighlighter {
     command_style: Style,
     /// Style for file paths
     path_style: Style,
-    /// Style for tool names
-    #[allow(dead_code)]
-    tool_style: Style,
     /// Style for keywords
     keyword_style: Style,
     /// Style for strings
@@ -30,8 +27,6 @@ impl SelfwareHighlighter {
             command_style: Style::new().fg(Color::Rgb(212, 163, 115)).bold(),
             // Sage for paths
             path_style: Style::new().fg(Color::Rgb(143, 151, 121)).italic(),
-            // Copper for tools
-            tool_style: Style::new().fg(Color::Rgb(184, 115, 51)).bold(),
             // Garden green for keywords
             keyword_style: Style::new().fg(Color::Rgb(96, 108, 56)),
             // Soil brown for strings
