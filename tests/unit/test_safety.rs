@@ -573,6 +573,7 @@ mod edge_case_tests {
         assert!(checker.check_tool_call(&call).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_safety_with_empty_allowed_paths() {
         let config = SafetyConfig {
