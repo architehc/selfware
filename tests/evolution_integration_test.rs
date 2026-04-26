@@ -194,6 +194,7 @@ fn test_tournament_empty_hypotheses_returns_empty() {
     assert!(results.is_empty());
 }
 
+#[cfg(unix)]
 #[test]
 fn test_hypothesis_safety_filter() {
     // Simulate the safety filter from daemon.rs:
@@ -475,6 +476,7 @@ fn test_e2e_pipeline_with_fuzzy_whitespace_matching() {
     cleanup_test_repo(&repo);
 }
 
+#[cfg(unix)]
 #[test]
 fn test_e2e_pipeline_safety_filter_blocks_protected_files() {
     // Simulate the safety filter that runs in the evolve() loop
