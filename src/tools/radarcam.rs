@@ -837,6 +837,14 @@ mod tests {
         false
     }
 
+    /// The Python comparison harness lives in /home/ivo/radarcam under a conda
+    /// env. CI runners (and most contributors) don't have this. Tests that
+    /// shell out to it must skip gracefully when these are missing.
+    fn python_comparison_available() -> bool {
+        std::path::Path::new("/home/ivo/miniconda3/etc/profile.d/conda.sh").exists()
+            && std::path::Path::new("/home/ivo/radarcam/tests/python_comparison.py").exists()
+    }
+
     /// Retry wrapper for radarcam_get with transient-failure tolerance.
     async fn radarcam_get_with_retry(path: &str, max_retries: u32) -> Result<Value> {
         let mut last_err = None;
@@ -1558,6 +1566,10 @@ mod tests {
             eprintln!("SKIPPING: RadarCam dashboard not running");
             return;
         }
+        if !python_comparison_available() {
+            eprintln!("SKIPPING: python comparison env (/home/ivo/miniconda3 or /home/ivo/radarcam) not available");
+            return;
+        }
 
         let (rust_result, python_result) = tokio::join!(
             RadarCamStatus.execute(serde_json::json!({})),
@@ -1610,6 +1622,10 @@ mod tests {
     async fn test_compare_frame_rust_vs_python() {
         if !dashboard_available().await {
             eprintln!("SKIPPING: RadarCam dashboard not running");
+            return;
+        }
+        if !python_comparison_available() {
+            eprintln!("SKIPPING: python comparison env (/home/ivo/miniconda3 or /home/ivo/radarcam) not available");
             return;
         }
 
@@ -1688,6 +1704,10 @@ mod tests {
             eprintln!("SKIPPING: RadarCam dashboard not running");
             return;
         }
+        if !python_comparison_available() {
+            eprintln!("SKIPPING: python comparison env (/home/ivo/miniconda3 or /home/ivo/radarcam) not available");
+            return;
+        }
 
         let (rust_result, python_result) = tokio::join!(
             RadarCamControl.execute(
@@ -1711,6 +1731,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_compare_logs_rust_vs_python() {
+        if !python_comparison_available() {
+            eprintln!("SKIPPING: python comparison env (/home/ivo/miniconda3 or /home/ivo/radarcam) not available");
+            return;
+        }
         let (rust_result, python_result) = tokio::join!(
             RadarCamLogs.execute(serde_json::json!({"log_type": "server", "tail_lines": 20})),
             run_python_comparison("logs", &["server", "20"]),
@@ -1760,6 +1784,10 @@ mod tests {
     async fn test_compare_frame_views_rust_vs_python() {
         if !dashboard_available().await {
             eprintln!("SKIPPING: RadarCam dashboard not running");
+            return;
+        }
+        if !python_comparison_available() {
+            eprintln!("SKIPPING: python comparison env (/home/ivo/miniconda3 or /home/ivo/radarcam) not available");
             return;
         }
 
@@ -1818,6 +1846,10 @@ mod tests {
     async fn test_compare_control_calibrate_rust_vs_python() {
         if !dashboard_available().await {
             eprintln!("SKIPPING: RadarCam dashboard not running");
+            return;
+        }
+        if !python_comparison_available() {
+            eprintln!("SKIPPING: python comparison env (/home/ivo/miniconda3 or /home/ivo/radarcam) not available");
             return;
         }
 
