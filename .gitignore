@@ -1,5 +1,6 @@
 # Build artifacts
 /target
+/zed-extension/target/
 
 # Coverage reports
 /coverage/
