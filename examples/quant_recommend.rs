@@ -187,7 +187,9 @@ fn main() {
 
     println!("Detected hardware:");
     match (total_vram, free_vram) {
-        (Some(t), Some(f)) => println!("  GPU: {t:.1} GB total / {f:.1} GB free (across all CUDA devices)"),
+        (Some(t), Some(f)) => {
+            println!("  GPU: {t:.1} GB total / {f:.1} GB free (across all CUDA devices)")
+        }
         _ => println!("  GPU: not detected (no nvidia-smi)"),
     }
     match (total_ram, free_ram) {
@@ -202,8 +204,8 @@ fn main() {
     // GPU recommendation
     println!("GPU-resident options (running with `llama-server -ngl 99`):");
     println!(
-        "  {:<10}  {:<6}  {:<7}  {:<14}  {}",
-        "Quant", "Bits", "Size", "Status", "Notes"
+        "  {:<10}  {:<6}  {:<7}  {:<14}  {:<14}  Notes",
+        "Quant", "Bits", "Size", "Status", "Tier"
     );
     let mut best_gpu: Option<&QuantInfo> = None;
     for q in QUANTS {
@@ -213,17 +215,32 @@ fn main() {
         } else {
             format!("✗ needs {:.0}+ GB", q.min_vram_gb)
         };
+        // Trim notes to keep one row readable.
+        let short_note: String = q.notes.chars().take(70).collect();
         println!(
-            "  {:<10}  {:<6}  {:<5.1}GB  {:<14}  {}",
-            q.name, q.bits, q.size_gb, status, q.quality_tier.label()
+            "  {:<10}  {:<6}  {:<5.1}GB  {:<14}  {:<14}  {}",
+            q.name,
+            q.bits,
+            q.size_gb,
+            status,
+            q.quality_tier.label(),
+            short_note
         );
         if fits {
             // Track the best quality tier that fits.
             best_gpu = Some(match (best_gpu, q.quality_tier) {
                 (None, _) => q,
                 (Some(_), QualityTier::Premium) => q,
-                (Some(prev), QualityTier::Recommended) if !matches!(prev.quality_tier, QualityTier::Premium) => q,
-                (Some(prev), QualityTier::Acceptable) if matches!(prev.quality_tier, QualityTier::Risky) => q,
+                (Some(prev), QualityTier::Recommended)
+                    if !matches!(prev.quality_tier, QualityTier::Premium) =>
+                {
+                    q
+                }
+                (Some(prev), QualityTier::Acceptable)
+                    if matches!(prev.quality_tier, QualityTier::Risky) =>
+                {
+                    q
+                }
                 _ => best_gpu.unwrap(),
             });
         }
@@ -231,7 +248,10 @@ fn main() {
 
     println!();
     if let Some(q) = best_gpu {
-        println!("Recommendation: download `{}` (~{:.1} GB).\n", q.name, q.size_gb);
+        println!(
+            "Recommendation: download `{}` (~{:.1} GB).\n",
+            q.name, q.size_gb
+        );
         let url = format!(
             "https://huggingface.co/HauhauCS/Qwen3.6-27B-Uncensored-HauhauCS-Aggressive/resolve/main/Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-{}.gguf",
             q.name
@@ -244,9 +264,7 @@ fn main() {
             "    Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-{}.gguf \\",
             q.name
         );
-        println!(
-            "    mmproj-Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-f16.gguf \\"
-        );
+        println!("    mmproj-Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-f16.gguf \\");
         println!("    --local-dir ~/models/qwen36-quants/");
         println!();
         println!("Or direct: {url}");
@@ -274,11 +292,17 @@ fn main() {
             }
         }
         if let Some(q) = best_cpu {
-            println!("  recommended CPU quant: `{}` ({:.1} GB on disk, needs ~{:.1} GB RAM)",
-                q.name, q.size_gb, q.size_gb * 1.2);
+            println!(
+                "  recommended CPU quant: `{}` ({:.1} GB on disk, needs ~{:.1} GB RAM)",
+                q.name,
+                q.size_gb,
+                q.size_gb * 1.2
+            );
         } else {
-            println!("  no quant fits — even IQ2_M needs ~{:.1} GB available.",
-                QUANTS[0].size_gb * 1.2);
+            println!(
+                "  no quant fits — even IQ2_M needs ~{:.1} GB available.",
+                QUANTS[0].size_gb * 1.2
+            );
         }
     } else {
         println!("Insufficient hardware for local inference. Consider:");

@@ -441,17 +441,15 @@ fn run_validator(work_dir: &Path, scenario: &Scenario) -> (bool, String) {
             _ => {}
         }
     }
-    let summary_line = best
-        .map(|(_, l)| l.to_string())
-        .unwrap_or_else(|| {
-            // No test-result line at all — most likely a compile error.
-            // Surface the first `error[E...]` so the user knows why.
-            combined
-                .lines()
-                .find(|l| l.trim_start().starts_with("error"))
-                .map(|l| l.trim().to_string())
-                .unwrap_or_else(|| "(no test result line)".to_string())
-        });
+    let summary_line = best.map(|(_, l)| l.to_string()).unwrap_or_else(|| {
+        // No test-result line at all — most likely a compile error.
+        // Surface the first `error[E...]` so the user knows why.
+        combined
+            .lines()
+            .find(|l| l.trim_start().starts_with("error"))
+            .map(|l| l.trim().to_string())
+            .unwrap_or_else(|| "(no test result line)".to_string())
+    });
 
     (output.status.success(), summary_line)
 }
@@ -521,7 +519,10 @@ fn run_agent(
                     })
                     .unwrap_or_default();
                 if let Some(p) = log_path {
-                    let _ = fs::write(p, format!("=== STDOUT ===\n{stdout}\n=== STDERR ===\n{stderr}"));
+                    let _ = fs::write(
+                        p,
+                        format!("=== STDOUT ===\n{stdout}\n=== STDERR ===\n{stderr}"),
+                    );
                 }
                 let steps = parse_step_count(&stdout);
                 return (exit, steps);
@@ -561,12 +562,14 @@ fn parse_step_count(stdout: &str) -> Option<u32> {
 }
 
 async fn run_speed_probe(args: &Args) -> Result<SpeedResult> {
-    let mut cfg = Config::default();
-    cfg.endpoint = args.endpoint.clone();
-    cfg.model = args.model.clone();
-    cfg.max_tokens = 200;
-    cfg.temperature = 0.0;
-    cfg.context_length = 32768;
+    let cfg = Config {
+        endpoint: args.endpoint.clone(),
+        model: args.model.clone(),
+        max_tokens: 200,
+        temperature: 0.0,
+        context_length: 32768,
+        ..Config::default()
+    };
     let client = ApiClient::new(&cfg)?;
 
     let prompt = "Count slowly from one to two hundred. Use words, one number per line. \
@@ -618,8 +621,12 @@ fn render_markdown(report: &Report) -> String {
         return out;
     }
 
-    out.push_str("| Scenario | Pre-fail | Agent exit | Post-pass | Wall (s) | Steps | Validator summary |\n");
-    out.push_str("|----------|----------|------------|-----------|---------:|------:|-------------------|\n");
+    out.push_str(
+        "| Scenario | Pre-fail | Agent exit | Post-pass | Wall (s) | Steps | Validator summary |\n",
+    );
+    out.push_str(
+        "|----------|----------|------------|-----------|---------:|------:|-------------------|\n",
+    );
     for s in &report.scenarios {
         let agent = match &s.agent_exit {
             AgentExit::Success => "success".to_string(),
@@ -632,7 +639,11 @@ fn render_markdown(report: &Report) -> String {
             s.name,
             if s.pre_validator_failed { "✓" } else { "✗" },
             agent,
-            if s.post_validator_passed { "✓" } else { "✗" },
+            if s.post_validator_passed {
+                "✓"
+            } else {
+                "✗"
+            },
             s.wall_time_secs,
             s.agent_steps.map_or("?".to_string(), |n| n.to_string()),
             md_escape(&s.validator_summary),

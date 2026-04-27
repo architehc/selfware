@@ -41,6 +41,88 @@ pub(super) async fn read_line_pausing_esc(
     result.map(|_| response)
 }
 
+/// Count source files in the current workdir (up to `cap`, then early-return).
+///
+/// Used by the ESCALATED progress guard to decide whether the workdir is a
+/// real existing codebase (in which case the Rust scaffold injection is the
+/// wrong move) or an empty SAB-style scratch project (where scaffold is fine).
+///
+/// We only need to know whether *any* substantial source exists, so we cap
+/// the count and skip well-known build / dependency / cache directories. The
+/// scaffold target `src/lib.rs` itself is excluded so that an empty SAB
+/// template still reports zero.
+pub(super) fn count_source_files_in_workdir(cap: usize) -> usize {
+    use std::path::Path;
+
+    const SOURCE_EXTS: &[&str] = &[
+        "rs", "py", "go", "js", "ts", "jsx", "tsx", "java", "rb", "c", "cpp", "cc", "cxx", "h",
+        "hpp", "kt", "swift", "scala", "ml", "fs", "cs", "php", "lua", "ex", "exs", "erl", "clj",
+        "dart", "zig",
+    ];
+    const EXCLUDED_DIRS: &[&str] = &[
+        "target",
+        "node_modules",
+        "vendor",
+        ".git",
+        "__pycache__",
+        "dist",
+        "build",
+        ".venv",
+        "venv",
+        "env",
+        "out",
+        ".next",
+        ".cache",
+        "site-packages",
+    ];
+
+    let workdir = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(_) => return 0,
+    };
+
+    let mut count = 0usize;
+    let walker = walkdir::WalkDir::new(&workdir)
+        .max_depth(4)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            if e.depth() == 0 {
+                return true;
+            }
+            !EXCLUDED_DIRS.contains(&name.as_ref())
+        });
+
+    for entry in walker.flatten() {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+
+        // Skip the scaffold target itself.
+        if path.file_name() == Some(std::ffi::OsStr::new("lib.rs"))
+            && path.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new("src"))
+            && path.parent().and_then(Path::parent) == Some(workdir.as_path())
+        {
+            continue;
+        }
+
+        let ext = match path.extension().and_then(|e| e.to_str()) {
+            Some(e) => e.to_ascii_lowercase(),
+            None => continue,
+        };
+        if !SOURCE_EXTS.contains(&ext.as_str()) {
+            continue;
+        }
+        count += 1;
+        if count >= cap {
+            return count;
+        }
+    }
+    count
+}
+
 /// Try to extract a `base64_png` field from a JSON tool result string.
 pub(super) fn try_extract_base64_png(result: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(result)
@@ -510,7 +592,38 @@ impl Agent {
                     return Ok(false);
                 }
 
-                // Greenfield project — src/lib.rs is minimal/empty. Write scaffold.
+                // Before assuming this is a greenfield project that needs a Rust
+                // scaffold dropped at src/lib.rs, check whether the workdir is in
+                // fact an existing codebase — possibly in a different language.
+                // Writing a Rust stub into a Go / JS / Python repo overwrites or
+                // pollutes real code and produces nonsense `git diff` output that
+                // looks like progress but isn't.
+                let real_codebase_evidence = count_source_files_in_workdir(5);
+                if real_codebase_evidence > 0 {
+                    info!(
+                        "ESCALATED progress guard: {} read-only steps, but workdir has {} existing source file(s) outside src/lib.rs — refusing to inject Rust scaffold; nudging targeted edit",
+                        self.consecutive_read_only_steps, real_codebase_evidence
+                    );
+                    self.consecutive_read_only_steps = 0;
+                    self.messages.push(crate::api::types::Message::user(
+                        "<selfware_system_directive>\n\
+                         You are working in an existing codebase that already has source files. \
+                         Do NOT create a new src/lib.rs scaffold. Instead:\n\
+                         1. Re-read the failing test or issue description to identify which \
+                            existing function(s) need to change.\n\
+                         2. Use file_edit on those specific lines — do NOT use file_write to \
+                            replace whole files unless you have read them in full.\n\
+                         3. Run the project's actual test command (cargo test / go test / \
+                            pytest / npm test, depending on the project) to verify.\n\
+                         </selfware_system_directive>"
+                            .to_string(),
+                    ));
+                    return Ok(false);
+                }
+
+                // Greenfield project — src/lib.rs is minimal/empty AND the workdir
+                // has no other source files. Write the Rust scaffold (the existing
+                // SAB-style scratch-project behaviour).
                 info!(
                     "ESCALATED progress guard: {} read-only steps, no writes ever — injecting scaffold",
                     self.consecutive_read_only_steps
@@ -767,6 +880,59 @@ mod tests {
     use crate::testing::mock_api::MockLlmServer;
     use chrono::Utc;
     use std::hash::{Hash, Hasher};
+
+    /// Detect a real existing codebase to suppress the Rust scaffold injection.
+    /// Empty dir + the SAB scratch shape (only src/lib.rs) must report zero.
+    /// Anything with another source file must report ≥ 1.
+    #[test]
+    fn count_source_files_skips_scaffold_target_and_excluded_dirs() {
+        // Save + restore cwd so we don't poison sibling tests.
+        let saved = std::env::current_dir().unwrap();
+
+        // 1. Genuinely empty workdir → 0
+        let empty = tempfile::tempdir().unwrap();
+        std::env::set_current_dir(empty.path()).unwrap();
+        assert_eq!(count_source_files_in_workdir(5), 0);
+
+        // 2. SAB-style: only src/lib.rs → 0 (the scaffold target itself doesn't count)
+        let sab = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(sab.path().join("src")).unwrap();
+        std::fs::write(sab.path().join("src/lib.rs"), "// empty\n").unwrap();
+        std::env::set_current_dir(sab.path()).unwrap();
+        assert_eq!(count_source_files_in_workdir(5), 0);
+
+        // 3. Real Rust codebase: tests/foo.rs alongside src/lib.rs → 1
+        std::fs::create_dir_all(sab.path().join("tests")).unwrap();
+        std::fs::write(sab.path().join("tests/foo.rs"), "fn it_works() {}\n").unwrap();
+        assert!(count_source_files_in_workdir(5) >= 1);
+
+        // 4. Excluded dirs (target/, node_modules/) must not count
+        let go_repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(go_repo.path().join("target")).unwrap();
+        std::fs::write(go_repo.path().join("target/built.rs"), "fn cached() {}\n").unwrap();
+        std::fs::create_dir_all(go_repo.path().join("node_modules/lodash")).unwrap();
+        std::fs::write(
+            go_repo.path().join("node_modules/lodash/index.js"),
+            "// dep\n",
+        )
+        .unwrap();
+        std::env::set_current_dir(go_repo.path()).unwrap();
+        assert_eq!(count_source_files_in_workdir(5), 0);
+
+        // 5. Real non-Rust codebase: a top-level .go file → 1 (must NOT scaffold)
+        std::fs::write(go_repo.path().join("main.go"), "package main\n").unwrap();
+        assert!(count_source_files_in_workdir(5) >= 1);
+
+        // 6. Cap is honoured (returns early once threshold reached)
+        let many = tempfile::tempdir().unwrap();
+        for i in 0..10 {
+            std::fs::write(many.path().join(format!("f{i}.py")), "x = 1\n").unwrap();
+        }
+        std::env::set_current_dir(many.path()).unwrap();
+        assert_eq!(count_source_files_in_workdir(3), 3);
+
+        std::env::set_current_dir(saved).unwrap();
+    }
 
     // =========================================================================
     // Helper: mirrors should_prompt_for_action logic for standalone testing
