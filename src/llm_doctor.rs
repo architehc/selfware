@@ -2,7 +2,10 @@
 //!
 //! Detects the backend type (sglang, vllm, ollama, llama.cpp, lmstudio),
 //! analyses model capabilities, checks context length and chat templates,
-//! runs a connectivity/latency test, and prints a recommendations tree.
+//! runs a connectivity/latency test, probes streaming + tool calling +
+//! `chat_template_kwargs` (Qwen-style thinking) support, and prints a
+//! unified `[PASS]/[WARN]/[FAIL]` capabilities matrix with remediation
+//! hints on failure.
 
 use anyhow::Result;
 use colored::Colorize;
@@ -12,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use crate::api::merge_extra_body;
 use crate::config::Config;
+use crate::doctor::{config_checks, CheckStatus as DoctorCheckStatus};
 
 // ── Timeout applied to every HTTP probe ──────────────────────────────────────
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -74,6 +78,9 @@ struct ConnectionTestResult {
 // ── Public entry-point ───────────────────────────────────────────────────────
 
 /// Run the full LLM doctor diagnostic.
+///
+/// Returns `Ok(())` on success and exits the process with code 1 if any
+/// FAIL-level check is encountered (so the binary can be used in CI / scripts).
 pub async fn run_llm_doctor(config: &Config) -> Result<()> {
     println!();
     println!(
@@ -99,21 +106,27 @@ pub async fn run_llm_doctor(config: &Config) -> Result<()> {
     let endpoint = config.endpoint.clone();
     let model_name = config.model.clone();
 
+    // ── Step 0: Config sanity checks (unified [PASS]/[WARN]/[FAIL] format) ──
+    println!("{}", "Step 0: Config Sanity".bold().underline());
+    let mut had_fail = false;
+    for c in config_checks(config) {
+        let printed_fail =
+            print_unified_check(&c.name, c.status, &c.message, c.fix_hint.as_deref());
+        had_fail |= printed_fail;
+    }
+    println!();
+
     // Step 1: Detect Backend
     println!("{}", "Step 1: Detecting Backend".bold().underline());
     let detection = detect_backend(&endpoint).await;
 
     match &detection {
         Ok(det) => {
-            println!(
-                "  {} Endpoint: {}",
-                ">>".green(),
-                det.endpoint.bright_white()
-            );
-            println!(
-                "  {} Backend:  {}",
-                ">>".green(),
-                det.backend.to_string().bright_yellow()
+            print_unified_check(
+                "endpoint reachable",
+                DoctorCheckStatus::Ok,
+                &format!("{} (backend: {})", det.endpoint, det.backend),
+                None,
             );
             println!(
                 "  {} Models available: {}",
@@ -127,22 +140,38 @@ pub async fn run_llm_doctor(config: &Config) -> Result<()> {
                     .unwrap_or_default();
                 println!("     - {}{}", m.id.bright_white(), ctx.dimmed());
             }
+            // Configured model is in the list?
+            let configured_in_list = det.models.iter().any(|m| {
+                m.id == model_name || m.id.contains(&model_name) || model_name.contains(&m.id)
+            });
+            if configured_in_list {
+                print_unified_check(
+                    "configured model available",
+                    DoctorCheckStatus::Ok,
+                    &model_name,
+                    None,
+                );
+            } else {
+                had_fail |= print_unified_check(
+                    "configured model available",
+                    DoctorCheckStatus::Missing,
+                    &format!("`{}` is not listed by the endpoint", model_name),
+                    Some(
+                        "Set selfware.toml `model` to one of the available IDs above, or load that model in your backend.",
+                    ),
+                );
+            }
         }
         Err(e) => {
-            println!(
-                "  {} Could not reach endpoint: {}",
-                "!!".red().bold(),
-                endpoint.bright_white()
+            print_unified_check(
+                "endpoint reachable",
+                DoctorCheckStatus::Missing,
+                &format!("could not reach `{}`: {}", endpoint, e),
+                Some("Start your local LLM backend (vLLM / SGLang / Ollama / LM Studio) and verify the endpoint URL in selfware.toml."),
             );
-            println!("     {}", e.to_string().red());
             println!();
-            println!(
-                "  {} Make sure your LLM backend is running and the endpoint",
-                ">>".yellow()
-            );
-            println!("     in selfware.toml is correct.");
-            println!();
-            return Ok(());
+            // No point continuing — exit non-zero per spec.
+            std::process::exit(1);
         }
     }
     println!();
@@ -223,7 +252,213 @@ pub async fn run_llm_doctor(config: &Config) -> Result<()> {
     print_recommendations(&det, config, conn_result.as_ref().ok());
     println!();
 
+    // Step 7: Capabilities matrix (tools / streaming / thinking / multimodal)
+    println!("{}", "Step 7: Capabilities Matrix".bold().underline());
+    let caps = probe_capabilities(&endpoint, &model_name, config).await;
+    let tools_status = match (
+        conn_result.as_ref().ok().and_then(|r| r.tool_calling_works),
+        caps.tools,
+    ) {
+        (Some(true), _) | (_, Some(true)) => DoctorCheckStatus::Ok,
+        (Some(false), _) | (_, Some(false)) => DoctorCheckStatus::Warning,
+        _ => DoctorCheckStatus::Warning,
+    };
+    had_fail |= print_unified_check(
+        "tool calling",
+        tools_status,
+        match tools_status {
+            DoctorCheckStatus::Ok => "model honored a calculator tool call",
+            DoctorCheckStatus::Warning => "model did not produce tool_calls",
+            DoctorCheckStatus::Missing => "tool calling probe failed",
+        },
+        if tools_status == DoctorCheckStatus::Ok {
+            None
+        } else {
+            Some("vLLM: pass `--enable-auto-tool-choice --tool-call-parser hermes`. SGLang: ensure a tool-aware chat template. Ollama: upgrade to >= 0.5.0.")
+        },
+    );
+    had_fail |= print_unified_check(
+        "streaming",
+        if caps.streaming.unwrap_or(false) {
+            DoctorCheckStatus::Ok
+        } else {
+            DoctorCheckStatus::Warning
+        },
+        if caps.streaming.unwrap_or(false) {
+            "SSE streaming responded with chunks"
+        } else {
+            "streaming not available or returned no chunks"
+        },
+        if caps.streaming.unwrap_or(false) {
+            None
+        } else {
+            Some("Ensure the backend supports SSE streaming (default for vLLM/SGLang/Ollama). Disable any reverse proxy buffering.")
+        },
+    );
+    had_fail |= print_unified_check(
+        "chat_template_kwargs (thinking)",
+        if caps.thinking.unwrap_or(false) {
+            DoctorCheckStatus::Ok
+        } else {
+            DoctorCheckStatus::Warning
+        },
+        if caps.thinking.unwrap_or(false) {
+            "backend accepts chat_template_kwargs (Qwen-style thinking)"
+        } else {
+            "chat_template_kwargs not supported (or backend ignored it)"
+        },
+        if caps.thinking.unwrap_or(false) {
+            None
+        } else {
+            Some("Required for Qwen3.5 thinking control. Use vLLM/SGLang with a Qwen template, or set `[extra_body] chat_template_kwargs = { enable_thinking = false }` to opt out.")
+        },
+    );
+    had_fail |= print_unified_check(
+        "multimodal (vision)",
+        if caps.multimodal {
+            DoctorCheckStatus::Ok
+        } else {
+            DoctorCheckStatus::Warning
+        },
+        if caps.multimodal {
+            "model name suggests vision-language support"
+        } else {
+            "no vision modality detected for this model"
+        },
+        if caps.multimodal {
+            None
+        } else {
+            Some("Multimodal is optional. To enable, configure a vision-language model (Qwen3.5-VL, Llava, etc.) and set `modalities = [\"text\", \"vision\"]`.")
+        },
+    );
+    println!();
+
+    if had_fail {
+        eprintln!(
+            "{}",
+            "  llm-doctor finished with FAILures — see remediation hints above."
+                .red()
+                .bold()
+        );
+        std::process::exit(1);
+    }
+
     Ok(())
+}
+
+// ── Unified output + capability probe helpers ────────────────────────────────
+
+/// Print a single `[PASS]/[WARN]/[FAIL]` line with optional `How to fix:` hint.
+/// Returns `true` if the printed status was a FAIL (so the caller can OR into a
+/// `had_fail` flag).
+fn print_unified_check(
+    name: &str,
+    status: DoctorCheckStatus,
+    detail: &str,
+    fix_hint: Option<&str>,
+) -> bool {
+    let (tag, line) = match status {
+        DoctorCheckStatus::Ok => (
+            "[PASS]".green().bold().to_string(),
+            format!("{} — {}", name, detail).green().to_string(),
+        ),
+        DoctorCheckStatus::Warning => (
+            "[WARN]".yellow().bold().to_string(),
+            format!("{} — {}", name, detail).yellow().to_string(),
+        ),
+        DoctorCheckStatus::Missing => (
+            "[FAIL]".red().bold().to_string(),
+            format!("{} — {}", name, detail).red().to_string(),
+        ),
+    };
+    println!("  {} {}", tag, line);
+    if status != DoctorCheckStatus::Ok {
+        if let Some(hint) = fix_hint {
+            println!("         {} {}", "How to fix:".bold().cyan(), hint);
+        }
+    }
+    status == DoctorCheckStatus::Missing
+}
+
+/// Capability probe results.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct Capabilities {
+    /// Tool calling worked when probed (None = not probed).
+    pub tools: Option<bool>,
+    /// Streaming returned at least one SSE chunk (None = not probed).
+    pub streaming: Option<bool>,
+    /// `chat_template_kwargs` accepted by the backend without error.
+    pub thinking: Option<bool>,
+    /// Configured model looks multimodal (heuristic by name).
+    pub multimodal: bool,
+}
+
+async fn probe_capabilities(endpoint: &str, model: &str, config: &Config) -> Capabilities {
+    let mut caps = Capabilities {
+        multimodal: looks_multimodal(model),
+        ..Default::default()
+    };
+
+    let probe_timeout = connection_test_timeout(config);
+    let client = match Client::builder().timeout(probe_timeout).build() {
+        Ok(c) => c,
+        Err(_) => return caps,
+    };
+
+    let base = endpoint.trim_end_matches('/');
+    let url = format!("{}/chat/completions", base);
+    let api_key = config.api_key.as_ref().map(|k| k.expose().to_string());
+
+    // ── streaming probe ──
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": "Reply with the single word: hi"}],
+        "max_tokens": 8,
+        "stream": true,
+        "temperature": 0.0,
+    });
+    let mut req = client.post(&url).json(&body);
+    if let Some(ref k) = api_key {
+        req = req.bearer_auth(k);
+    }
+    caps.streaming = match req.send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let text = resp.text().await.unwrap_or_default();
+            // Look for SSE chunk markers.
+            Some(text.contains("data:") && text.contains("\n"))
+        }
+        Ok(_) => Some(false),
+        Err(_) => Some(false),
+    };
+
+    // ── chat_template_kwargs (thinking) probe ──
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": "Reply with the single word: ok"}],
+        "max_tokens": 8,
+        "temperature": 0.0,
+        "chat_template_kwargs": { "enable_thinking": false }
+    });
+    let mut req = client.post(&url).json(&body);
+    if let Some(ref k) = api_key {
+        req = req.bearer_auth(k);
+    }
+    caps.thinking = match req.send().await {
+        Ok(resp) => Some(resp.status().is_success()),
+        Err(_) => Some(false),
+    };
+
+    caps
+}
+
+/// Heuristic: does the model name suggest vision-language capabilities?
+fn looks_multimodal(model: &str) -> bool {
+    let l = model.to_lowercase();
+    l.contains("vl")
+        || l.contains("vision")
+        || l.contains("llava")
+        || l.contains("multimodal")
+        || l.contains("122b") // selfware-hosted Qwen3.5-VL family commonly uses this size tag
 }
 
 // ── Step 1 implementation ────────────────────────────────────────────────────
@@ -248,19 +483,75 @@ async fn detect_backend(endpoint: &str) -> Result<DetectionResult> {
         anyhow::bail!("Endpoint returned HTTP {} for GET {}", status, models_url);
     }
 
+    // Snapshot interesting response headers BEFORE consuming the body. Backends
+    // like vLLM, SGLang, and LM Studio ship distinctive headers we can use for
+    // identification even if the JSON body is generic OpenAI-compatible.
+    let mut header_blob = String::new();
+    for (name, value) in resp.headers().iter() {
+        if let Ok(v) = value.to_str() {
+            header_blob.push_str(&format!("{}: {}\n", name.as_str().to_lowercase(), v));
+        }
+    }
+
     let body: Value = resp.json().await?;
 
     // Parse model list
     let models = parse_models(&body);
 
-    // Detect backend by probing various signals
-    let backend = identify_backend(&client, base_no_v1, &body).await;
+    // Header-first detection (cheap), falling back to active probes.
+    let backend = match detect_backend_from_headers(&header_blob, &body) {
+        Some(b) => b,
+        None => identify_backend(&client, base_no_v1, &body).await,
+    };
 
     Ok(DetectionResult {
         backend,
         models,
         endpoint: endpoint.to_string(),
     })
+}
+
+/// Try to identify the backend purely from response headers / body contents,
+/// without making additional probe requests. Returns `None` if no signal is
+/// found — the caller will fall back to active probing.
+fn detect_backend_from_headers(header_blob: &str, models_body: &Value) -> Option<Backend> {
+    let lower = header_blob.to_lowercase();
+    if lower.contains("x-vllm-version") || lower.contains("server: vllm") {
+        return Some(Backend::Vllm);
+    }
+    if lower.contains("x-sglang-version") || lower.contains("server: sglang") {
+        return Some(Backend::Sglang);
+    }
+    if lower.contains("server: ollama") {
+        return Some(Backend::Ollama);
+    }
+    if lower.contains("server: llama.cpp") || lower.contains("server: llama-cpp") {
+        return Some(Backend::LlamaCpp);
+    }
+    if lower.contains("server: lm-studio") || lower.contains("lm-studio") {
+        return Some(Backend::LmStudio);
+    }
+
+    // Inspect served-model-name field (vLLM) or "lm-studio" model IDs.
+    if let Some(data) = models_body.get("data").and_then(|d| d.as_array()) {
+        for item in data {
+            let raw = item.to_string().to_lowercase();
+            if raw.contains("served-model-name") || raw.contains("served_model_name") {
+                // SGLang/vLLM both use this; prefer not to disambiguate here.
+                if raw.contains("sglang") {
+                    return Some(Backend::Sglang);
+                }
+                if raw.contains("vllm") {
+                    return Some(Backend::Vllm);
+                }
+            }
+            if raw.contains("lm-studio") || raw.contains("lmstudio") {
+                return Some(Backend::LmStudio);
+            }
+        }
+    }
+
+    None
 }
 
 fn parse_models(body: &Value) -> Vec<ModelInfo> {
@@ -1674,5 +1965,111 @@ mod tests {
         };
         let s = format!("{:?}", info);
         assert!(s.contains("model"));
+    }
+
+    // =========================================================================
+    // Header-based backend detection
+    // =========================================================================
+
+    #[test]
+    fn test_detect_backend_from_headers_vllm() {
+        let headers = "x-vllm-version: 0.6.0\ncontent-type: application/json\n";
+        let body = serde_json::json!({"data": []});
+        assert_eq!(
+            detect_backend_from_headers(headers, &body),
+            Some(Backend::Vllm)
+        );
+    }
+
+    #[test]
+    fn test_detect_backend_from_headers_sglang() {
+        let headers = "server: sglang\n";
+        let body = serde_json::json!({"data": []});
+        assert_eq!(
+            detect_backend_from_headers(headers, &body),
+            Some(Backend::Sglang)
+        );
+    }
+
+    #[test]
+    fn test_detect_backend_from_headers_ollama() {
+        let headers = "server: ollama\n";
+        let body = serde_json::json!({"data": []});
+        assert_eq!(
+            detect_backend_from_headers(headers, &body),
+            Some(Backend::Ollama)
+        );
+    }
+
+    #[test]
+    fn test_detect_backend_from_headers_lmstudio_via_body() {
+        let headers = "content-type: application/json\n";
+        let body = serde_json::json!({
+            "data": [{"id": "lm-studio-model", "owned_by": "lmstudio"}]
+        });
+        assert_eq!(
+            detect_backend_from_headers(headers, &body),
+            Some(Backend::LmStudio)
+        );
+    }
+
+    #[test]
+    fn test_detect_backend_from_headers_no_match() {
+        let headers = "content-type: application/json\nserver: nginx\n";
+        let body = serde_json::json!({"data": []});
+        assert_eq!(detect_backend_from_headers(headers, &body), None);
+    }
+
+    // =========================================================================
+    // looks_multimodal heuristic
+    // =========================================================================
+
+    #[test]
+    fn test_looks_multimodal_positive() {
+        assert!(looks_multimodal("Qwen3.5-VL-7B"));
+        assert!(looks_multimodal("llava-1.5"));
+        assert!(looks_multimodal("vision-large"));
+        assert!(looks_multimodal("multimodal-pro"));
+    }
+
+    #[test]
+    fn test_looks_multimodal_negative() {
+        assert!(!looks_multimodal("qwen-7b"));
+        assert!(!looks_multimodal("llama-3-70b"));
+    }
+
+    // =========================================================================
+    // print_unified_check return value
+    // =========================================================================
+
+    #[test]
+    fn test_print_unified_check_returns_true_on_fail() {
+        // Output is captured by the test framework; we only assert the boolean.
+        assert!(print_unified_check(
+            "x",
+            DoctorCheckStatus::Missing,
+            "fail",
+            None
+        ));
+        assert!(!print_unified_check(
+            "x",
+            DoctorCheckStatus::Warning,
+            "warn",
+            None
+        ));
+        assert!(!print_unified_check("x", DoctorCheckStatus::Ok, "ok", None));
+    }
+
+    // =========================================================================
+    // Capabilities struct sanity
+    // =========================================================================
+
+    #[test]
+    fn test_capabilities_default() {
+        let c = Capabilities::default();
+        assert_eq!(c.tools, None);
+        assert_eq!(c.streaming, None);
+        assert_eq!(c.thinking, None);
+        assert!(!c.multimodal);
     }
 }

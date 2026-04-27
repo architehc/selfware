@@ -1,9 +1,14 @@
 //! Selfware Doctor — system diagnostics and dependency checker.
 //!
-//! Checks that all required and optional tools are available on the system.
-//! Run via `selfware doctor` or automatically on first launch.
+//! Checks that all required and optional tools are available on the system,
+//! verifies platform-specific binaries, the project Rust MSRV, and validates
+//! the loaded configuration. Each check carries a `fix_hint` so the user gets
+//! actionable remediation advice without having to read documentation.
+//!
+//! Run via `selfware doctor`. Exits non-zero if any required check FAILs.
 
 use std::fmt;
+use std::path::Path;
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -18,6 +23,10 @@ type CheckFut = Pin<Box<dyn std::future::Future<Output = DoctorCheck> + Send>>;
 /// Maximum time to wait for a single tool check.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Project minimum supported Rust version (kept in sync with `Cargo.toml`'s
+/// `rust-version` field).
+pub const MSRV: &str = "1.91";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -26,6 +35,7 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Category {
     Core,
+    Platform,
     Languages,
     RustTools,
     PythonTools,
@@ -35,12 +45,14 @@ pub enum Category {
     ContainerTools,
     BrowserAutomation,
     Security,
+    Configuration,
 }
 
 impl fmt::Display for Category {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Category::Core => write!(f, "Core (Required)"),
+            Category::Platform => write!(f, "Platform Tools"),
             Category::Languages => write!(f, "Languages (Optional)"),
             Category::RustTools => write!(f, "Rust Tools"),
             Category::PythonTools => write!(f, "Python Tools"),
@@ -50,6 +62,7 @@ impl fmt::Display for Category {
             Category::ContainerTools => write!(f, "Container Tools"),
             Category::BrowserAutomation => write!(f, "Browser Automation"),
             Category::Security => write!(f, "Security"),
+            Category::Configuration => write!(f, "Configuration"),
         }
     }
 }
@@ -70,6 +83,8 @@ pub struct DoctorCheck {
     pub status: CheckStatus,
     pub version: Option<String>,
     pub message: String,
+    /// Optional one-line "How to fix:" hint shown beneath FAIL/WARN entries.
+    pub fix_hint: Option<String>,
 }
 
 /// Overall health of the system.
@@ -138,6 +153,79 @@ fn extract_version(output: &str) -> Option<String> {
     None
 }
 
+/// Compare two semver-ish version strings — returns true if `actual >= required`.
+pub(crate) fn version_at_least(actual: &str, required: &str) -> bool {
+    fn parts(s: &str) -> Vec<u64> {
+        s.split('.')
+            .map(|x| {
+                x.chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+            })
+            .filter_map(|x| x.parse::<u64>().ok())
+            .collect()
+    }
+    let a = parts(actual);
+    let r = parts(required);
+    for i in 0..r.len().max(a.len()) {
+        let av = a.get(i).copied().unwrap_or(0);
+        let rv = r.get(i).copied().unwrap_or(0);
+        if av > rv {
+            return true;
+        }
+        if av < rv {
+            return false;
+        }
+    }
+    true
+}
+
+/// Suggest a per-OS install command for a missing binary.
+///
+/// Returns a single human-readable line; the caller prefixes "How to fix: ".
+pub(crate) fn install_hint_for(_name: &str, programs: &[&str]) -> Option<String> {
+    let primary = programs.first().copied().unwrap_or("");
+
+    let s: Option<&'static str> = match primary {
+        "rustc" | "cargo" => Some(
+            "Install via rustup: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`",
+        ),
+        "git" => {
+            if cfg!(target_os = "linux") {
+                Some("Linux: `sudo apt install git` (Debian/Ubuntu) / `sudo dnf install git` (Fedora) / `sudo pacman -S git` (Arch)")
+            } else if cfg!(target_os = "macos") {
+                Some("macOS: `brew install git` or install Xcode Command Line Tools (`xcode-select --install`)")
+            } else {
+                Some("Windows: install Git for Windows from https://git-scm.com/download/win")
+            }
+        }
+        "wmctrl" => Some(
+            "Linux: `sudo apt install wmctrl` (Debian/Ubuntu) / `sudo dnf install wmctrl` (Fedora) / `sudo pacman -S wmctrl` (Arch)",
+        ),
+        "xdotool" => Some(
+            "Linux: `sudo apt install xdotool` (Debian/Ubuntu) / `sudo dnf install xdotool` (Fedora) / `sudo pacman -S xdotool` (Arch)",
+        ),
+        "osascript" => Some(
+            "macOS only — ships with the OS. If missing, your install is broken; reinstall macOS tools.",
+        ),
+        "powershell" | "pwsh" => Some(
+            "Windows: PowerShell ships with Windows 7+. Install PowerShell 7 with `winget install --id Microsoft.Powershell`.",
+        ),
+        "docker" => Some(
+            "Install Docker Desktop (https://docker.com) or `sudo apt install docker.io` on Linux.",
+        ),
+        "node" | "nodejs" => Some(
+            "Install Node.js LTS: https://nodejs.org or use a version manager (`nvm`, `fnm`).",
+        ),
+        "python3" | "python" => Some(
+            "Install Python 3 from https://python.org or your distro: `sudo apt install python3`.",
+        ),
+        _ => None,
+    };
+
+    s.map(|x| x.to_string())
+}
+
 /// Check a tool by running `program --version` (or custom args).
 async fn check_tool(
     name: &str,
@@ -146,6 +234,7 @@ async fn check_tool(
     programs: &[&str],
     version_args: &[&str],
 ) -> DoctorCheck {
+    let fix_hint = install_hint_for(name, programs);
     for program in programs {
         if let Some(output) = run_cmd(program, version_args).await {
             let version = extract_version(&output);
@@ -155,6 +244,7 @@ async fn check_tool(
                 status: CheckStatus::Ok,
                 version,
                 message: format!("Found: {}", output.lines().next().unwrap_or(&output)),
+                fix_hint: None,
             };
         }
     }
@@ -179,6 +269,7 @@ async fn check_tool(
         } else {
             "Not found (optional)".to_string()
         },
+        fix_hint,
     }
 }
 
@@ -192,6 +283,7 @@ async fn check_npx_tool(name: &str, category: Category, tool: &str) -> DoctorChe
             status: CheckStatus::Ok,
             version,
             message: format!("Found: {}", output.lines().next().unwrap_or(&output)),
+            fix_hint: None,
         };
     }
     DoctorCheck {
@@ -200,6 +292,10 @@ async fn check_npx_tool(name: &str, category: Category, tool: &str) -> DoctorChe
         status: CheckStatus::Warning,
         version: None,
         message: "Not found (optional)".to_string(),
+        fix_hint: Some(format!(
+            "Install Node.js, then `npm install -g {}` (or invoke via `npx {}`).",
+            tool, tool
+        )),
     }
 }
 
@@ -225,6 +321,7 @@ async fn check_accessibility() -> DoctorCheck {
             status: CheckStatus::Ok,
             version: None,
             message: "Accessibility permissions granted".to_string(),
+            fix_hint: None,
         },
         None => DoctorCheck {
             name: "Accessibility (macOS)".to_string(),
@@ -233,6 +330,10 @@ async fn check_accessibility() -> DoctorCheck {
             version: None,
             message: "Accessibility permissions not granted — needed for computer control"
                 .to_string(),
+            fix_hint: Some(
+                "System Settings → Privacy & Security → Accessibility → enable your terminal/IDE."
+                    .to_string(),
+            ),
         },
     }
 }
@@ -245,6 +346,7 @@ async fn check_accessibility() -> DoctorCheck {
         status: CheckStatus::Ok,
         version: None,
         message: "Not applicable on this platform".to_string(),
+        fix_hint: None,
     }
 }
 
@@ -265,6 +367,7 @@ async fn check_xcap() -> DoctorCheck {
             status: CheckStatus::Ok,
             version: None,
             message: backend.doctor_message().to_string(),
+            fix_hint: None,
         }
     } else {
         DoctorCheck {
@@ -273,8 +376,288 @@ async fn check_xcap() -> DoctorCheck {
             status: CheckStatus::Warning,
             version: None,
             message: "Screen capture unavailable — check display server / permissions".to_string(),
+            fix_hint: Some(
+                "Linux: ensure X11 or Wayland is running. macOS: grant Screen Recording in System Settings → Privacy & Security."
+                    .to_string(),
+            ),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Platform-specific binary checks
+// ---------------------------------------------------------------------------
+
+/// Per-OS GUI / window-management binary checks.
+fn platform_checks() -> Vec<CheckFut> {
+    #[cfg(target_os = "linux")]
+    {
+        vec![
+            ck("wmctrl", Category::Platform, false, &["wmctrl"], &["-h"]),
+            ck(
+                "xdotool",
+                Category::Platform,
+                false,
+                &["xdotool"],
+                &["--version"],
+            ),
+        ]
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        vec![ck(
+            "osascript",
+            Category::Platform,
+            false,
+            &["osascript"],
+            &["-e", "return 1"],
+        )]
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        vec![ck(
+            "powershell",
+            Category::Platform,
+            true,
+            &["powershell", "pwsh"],
+            &["-Command", "$PSVersionTable.PSVersion.ToString()"],
+        )]
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        Vec::new()
+    }
+}
+
+/// Note explicitly stating Windows GUI tools are not supported on this platform.
+#[cfg(target_os = "windows")]
+fn windows_gui_note() -> DoctorCheck {
+    DoctorCheck {
+        name: "GUI computer-control tools".to_string(),
+        category: Category::Platform,
+        status: CheckStatus::Warning,
+        version: None,
+        message: "GUI window management (wmctrl/xdotool/osascript) is not supported on Windows"
+            .to_string(),
+        fix_hint: Some(
+            "Use the Linux or macOS port for full computer-control. Selfware core features still work on Windows."
+                .to_string(),
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rust MSRV check
+// ---------------------------------------------------------------------------
+
+/// Check that the installed `rustc` meets the project MSRV.
+async fn check_msrv() -> DoctorCheck {
+    let output = run_cmd("rustc", &["--version"]).await;
+    match output {
+        None => DoctorCheck {
+            name: "rustc MSRV".to_string(),
+            category: Category::Core,
+            status: CheckStatus::Missing,
+            version: None,
+            message: format!("rustc not found (MSRV >= {})", MSRV),
+            fix_hint: Some(
+                "Install Rust via rustup: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`"
+                    .to_string(),
+            ),
+        },
+        Some(out) => match extract_version(&out) {
+            Some(v) if version_at_least(&v, MSRV) => DoctorCheck {
+                name: "rustc MSRV".to_string(),
+                category: Category::Core,
+                status: CheckStatus::Ok,
+                version: Some(v.clone()),
+                message: format!("rustc {} satisfies MSRV >= {}", v, MSRV),
+                fix_hint: None,
+            },
+            Some(v) => DoctorCheck {
+                name: "rustc MSRV".to_string(),
+                category: Category::Core,
+                status: CheckStatus::Warning,
+                version: Some(v.clone()),
+                message: format!("rustc {} is below project MSRV {}", v, MSRV),
+                fix_hint: Some(format!(
+                    "Update Rust: `rustup update stable` (need >= {}).",
+                    MSRV
+                )),
+            },
+            None => DoctorCheck {
+                name: "rustc MSRV".to_string(),
+                category: Category::Core,
+                status: CheckStatus::Warning,
+                version: None,
+                message: "Could not parse rustc version".to_string(),
+                fix_hint: None,
+            },
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Configuration sanity checks
+// ---------------------------------------------------------------------------
+
+/// Run sanity checks against a loaded `Config`. Pure (no I/O against the LLM).
+///
+/// Verifies that:
+///   * the configured endpoint URL parses,
+///   * `allowed_paths` glob roots resolve to existing directories
+///     (or contain a glob — in which case we accept the literal prefix),
+///   * an api_key is present when the endpoint looks remote.
+pub fn config_checks(config: &crate::config::Config) -> Vec<DoctorCheck> {
+    let mut out = Vec::new();
+
+    // Endpoint URL parses
+    match url::Url::parse(&config.endpoint) {
+        Ok(u) => out.push(DoctorCheck {
+            name: "endpoint URL".to_string(),
+            category: Category::Configuration,
+            status: CheckStatus::Ok,
+            version: None,
+            message: format!("{} (host: {})", u, u.host_str().unwrap_or("?")),
+            fix_hint: None,
+        }),
+        Err(e) => out.push(DoctorCheck {
+            name: "endpoint URL".to_string(),
+            category: Category::Configuration,
+            status: CheckStatus::Missing,
+            version: None,
+            message: format!("invalid endpoint `{}` ({})", config.endpoint, e),
+            fix_hint: Some(
+                "Set a valid URL in selfware.toml `endpoint = \"http://127.0.0.1:8000/v1\"`."
+                    .to_string(),
+            ),
+        }),
+    }
+
+    // allowed_paths glob roots exist
+    let mut bad_roots: Vec<String> = Vec::new();
+    for raw in &config.safety.allowed_paths {
+        let root = glob_root(raw);
+        if root.is_empty() {
+            continue; // pure relative-like patterns ("**") — skip
+        }
+        let p = Path::new(&root);
+        if !p.exists() {
+            bad_roots.push(raw.clone());
+        }
+    }
+    if bad_roots.is_empty() {
+        out.push(DoctorCheck {
+            name: "allowed_paths roots".to_string(),
+            category: Category::Configuration,
+            status: CheckStatus::Ok,
+            version: None,
+            message: format!(
+                "{} entr{} resolve",
+                config.safety.allowed_paths.len(),
+                if config.safety.allowed_paths.len() == 1 {
+                    "y"
+                } else {
+                    "ies"
+                }
+            ),
+            fix_hint: None,
+        });
+    } else {
+        out.push(DoctorCheck {
+            name: "allowed_paths roots".to_string(),
+            category: Category::Configuration,
+            status: CheckStatus::Warning,
+            version: None,
+            message: format!("missing root(s): {}", bad_roots.join(", ")),
+            fix_hint: Some(
+                "Edit selfware.toml `[safety] allowed_paths` to point at directories that exist."
+                    .to_string(),
+            ),
+        });
+    }
+
+    // api_key required for remote endpoints
+    let endpoint_lower = config.endpoint.to_lowercase();
+    let looks_local = endpoint_lower.contains("localhost")
+        || endpoint_lower.contains("127.0.0.1")
+        || endpoint_lower.contains("0.0.0.0")
+        || endpoint_lower.starts_with("http://192.168.")
+        || endpoint_lower.starts_with("http://10.")
+        || endpoint_lower.starts_with("http://172.");
+    if config.api_key.is_none() && !looks_local {
+        out.push(DoctorCheck {
+            name: "api_key".to_string(),
+            category: Category::Configuration,
+            status: CheckStatus::Missing,
+            version: None,
+            message: "endpoint appears remote but no api_key is set".to_string(),
+            fix_hint: Some(
+                "Set `SELFWARE_API_KEY=...` in your environment, or `api_key = \"...\"` in selfware.toml."
+                    .to_string(),
+            ),
+        });
+    } else {
+        out.push(DoctorCheck {
+            name: "api_key".to_string(),
+            category: Category::Configuration,
+            status: CheckStatus::Ok,
+            version: None,
+            message: if config.api_key.is_some() {
+                "api_key present".to_string()
+            } else {
+                "api_key not set (endpoint is local — OK)".to_string()
+            },
+            fix_hint: None,
+        });
+    }
+
+    out
+}
+
+/// Strip glob metacharacters from a pattern, returning the literal directory
+/// prefix. Examples:
+///   `./**`              -> `.`
+///   `/srv/foo/**/*.rs`  -> `/srv/foo`
+///   `~/code/*`          -> `~/code` (caller may expand `~`)
+///   `**`                -> ``
+pub(crate) fn glob_root(pattern: &str) -> String {
+    let expanded = if let Some(rest) = pattern.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            home.join(rest).to_string_lossy().into_owned()
+        } else {
+            pattern.to_string()
+        }
+    } else {
+        pattern.to_string()
+    };
+
+    let mut root = String::new();
+    let starts_abs = expanded.starts_with('/');
+    let segments: Vec<&str> = expanded.split('/').collect();
+    for (i, seg) in segments.iter().enumerate() {
+        if seg.contains('*') || seg.contains('?') || seg.contains('[') {
+            break;
+        }
+        if i == 0 {
+            if starts_abs {
+                // first segment after leading '/' is empty — emit a single '/'
+                root.push('/');
+            } else {
+                root.push_str(seg);
+            }
+            continue;
+        }
+        // For non-leading segments: separator is needed unless we already end in '/'
+        if !root.ends_with('/') {
+            root.push('/');
+        }
+        root.push_str(seg);
+    }
+    root
 }
 
 // ---------------------------------------------------------------------------
@@ -302,7 +685,10 @@ pub async fn run_doctor() -> DoctorReport {
         ck("rustc", Category::Core, true, &["rustc"], &["--version"]),
         ck("cargo", Category::Core, true, &["cargo"], &["--version"]),
         ck("git", Category::Core, true, &["git"], &["--version"]),
+        Box::pin(check_msrv()),
     ];
+
+    let platform: Vec<CheckFut> = platform_checks();
 
     let languages: Vec<CheckFut> = vec![
         ck(
@@ -504,6 +890,7 @@ pub async fn run_doctor() -> DoctorReport {
     // Run all categories concurrently
     let (
         core_results,
+        platform_results,
         lang_results,
         rust_results,
         py_results,
@@ -517,6 +904,7 @@ pub async fn run_doctor() -> DoctorReport {
         accessibility_result,
     ) = tokio::join!(
         join_all(core),
+        join_all(platform),
         join_all(languages),
         join_all(rust_tools),
         join_all(python_tools),
@@ -551,6 +939,7 @@ pub async fn run_doctor() -> DoctorReport {
                     existing.message =
                         format!("Found: {}", output.lines().next().unwrap_or(&output));
                     existing.name = "docker compose (v2)".to_string();
+                    existing.fix_hint = None;
                 }
             }
         }
@@ -559,6 +948,26 @@ pub async fn run_doctor() -> DoctorReport {
     // Assemble all checks in category order.
     let mut checks = Vec::new();
     checks.extend(core_results);
+    checks.extend(platform_results);
+    #[cfg(target_os = "windows")]
+    {
+        checks.push(windows_gui_note());
+    }
+    // Best-effort: load and validate the user's config.
+    match crate::config::Config::load(None) {
+        Ok(cfg) => checks.extend(config_checks(&cfg)),
+        Err(e) => checks.push(DoctorCheck {
+            name: "config load".to_string(),
+            category: Category::Configuration,
+            status: CheckStatus::Warning,
+            version: None,
+            message: format!("could not load selfware.toml: {}", e),
+            fix_hint: Some(
+                "Run `selfware init`, or copy `selfware.example.toml` → `selfware.toml`."
+                    .to_string(),
+            ),
+        }),
+    }
     checks.extend(lang_results);
     checks.extend(rust_results);
     checks.extend(py_results);
@@ -590,7 +999,17 @@ pub async fn run_doctor() -> DoctorReport {
 // ---------------------------------------------------------------------------
 
 impl DoctorReport {
-    /// Print a nicely formatted, colored report to stdout.
+    /// Process exit code: `0` if no FAIL (Missing) status, `1` otherwise.
+    pub fn exit_code(&self) -> i32 {
+        if self.checks.iter().any(|c| c.status == CheckStatus::Missing) {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Print a nicely formatted, colored report to stdout, using the unified
+    /// `[PASS] / [WARN] / [FAIL]` tag format with per-FAIL "How to fix:" hints.
     pub fn print(&self) {
         println!();
         println!(
@@ -611,7 +1030,7 @@ impl DoctorReport {
                 println!("  {}:", check.category.to_string().bold());
             }
 
-            let (icon, style_msg) = match check.status {
+            let (tag, line) = match check.status {
                 CheckStatus::Ok => {
                     let ver = check
                         .version
@@ -619,25 +1038,31 @@ impl DoctorReport {
                         .map(|v| format!(" ({})", v))
                         .unwrap_or_default();
                     (
-                        "  \u{2713}".green().bold().to_string(),
+                        "[PASS]".green().bold().to_string(),
                         format!("{}{}", check.name, ver).green().to_string(),
                     )
                 }
                 CheckStatus::Warning => (
-                    "  \u{26a0}".yellow().bold().to_string(),
+                    "[WARN]".yellow().bold().to_string(),
                     format!("{} — {}", check.name, check.message)
                         .yellow()
                         .to_string(),
                 ),
                 CheckStatus::Missing => (
-                    "  \u{2717}".red().bold().to_string(),
+                    "[FAIL]".red().bold().to_string(),
                     format!("{} — {}", check.name, check.message)
                         .red()
                         .to_string(),
                 ),
             };
 
-            println!("  {} {}", icon, style_msg);
+            println!("  {} {}", tag, line);
+            // Show "How to fix:" beneath FAIL/WARN entries.
+            if check.status != CheckStatus::Ok {
+                if let Some(hint) = &check.fix_hint {
+                    println!("         {} {}", "How to fix:".bold().cyan(), hint);
+                }
+            }
         }
 
         println!();
@@ -746,6 +1171,8 @@ mod tests {
     fn test_category_display() {
         assert_eq!(Category::Core.to_string(), "Core (Required)");
         assert_eq!(Category::Languages.to_string(), "Languages (Optional)");
+        assert_eq!(Category::Platform.to_string(), "Platform Tools");
+        assert_eq!(Category::Configuration.to_string(), "Configuration");
     }
 
     #[test]
@@ -765,12 +1192,14 @@ mod tests {
                 status: CheckStatus::Ok,
                 version: Some("1.0.0".into()),
                 message: "ok".into(),
+                fix_hint: None,
             }],
             health: OverallHealth::Healthy,
         };
         assert_eq!(report.health, OverallHealth::Healthy);
+        assert_eq!(report.exit_code(), 0);
 
-        // Missing required => Broken
+        // Missing required => Broken => exit 1
         let report = DoctorReport {
             checks: vec![DoctorCheck {
                 name: "test".into(),
@@ -778,10 +1207,117 @@ mod tests {
                 status: CheckStatus::Missing,
                 version: None,
                 message: "missing".into(),
+                fix_hint: Some("install it".into()),
             }],
             health: OverallHealth::Broken,
         };
         assert_eq!(report.health, OverallHealth::Broken);
+        assert_eq!(report.exit_code(), 1);
+    }
+
+    // ---- version_at_least ----
+
+    #[test]
+    fn test_version_at_least_equal() {
+        assert!(version_at_least("1.91.0", "1.91"));
+        assert!(version_at_least("1.91.0", "1.91.0"));
+    }
+
+    #[test]
+    fn test_version_at_least_higher() {
+        assert!(version_at_least("1.95.0", "1.91"));
+        assert!(version_at_least("2.0.0", "1.91.0"));
+    }
+
+    #[test]
+    fn test_version_at_least_lower() {
+        assert!(!version_at_least("1.79.0", "1.91"));
+        assert!(!version_at_least("1.91.0", "1.95.0"));
+    }
+
+    #[test]
+    fn test_version_at_least_with_suffix() {
+        // rustc 1.95.0-nightly should satisfy >= 1.91
+        assert!(version_at_least("1.95.0-nightly", "1.91"));
+    }
+
+    // ---- install_hint_for ----
+
+    #[test]
+    fn test_install_hint_for_known() {
+        assert!(install_hint_for("rustc", &["rustc"]).is_some());
+        assert!(install_hint_for("git", &["git"]).is_some());
+        assert!(install_hint_for("wmctrl", &["wmctrl"]).is_some());
+        assert!(install_hint_for("xdotool", &["xdotool"]).is_some());
+    }
+
+    #[test]
+    fn test_install_hint_for_unknown() {
+        assert!(install_hint_for("totally-made-up", &["totally-made-up"]).is_none());
+    }
+
+    // ---- glob_root ----
+
+    #[test]
+    fn test_glob_root_simple() {
+        assert_eq!(glob_root("./**"), ".");
+    }
+
+    #[test]
+    fn test_glob_root_absolute() {
+        assert_eq!(glob_root("/srv/foo/**/*.rs"), "/srv/foo");
+    }
+
+    #[test]
+    fn test_glob_root_pure_glob() {
+        assert_eq!(glob_root("**"), "");
+    }
+
+    #[test]
+    fn test_glob_root_no_glob() {
+        assert_eq!(glob_root("/etc/passwd"), "/etc/passwd");
+    }
+
+    // ---- config_checks ----
+
+    #[test]
+    fn test_config_checks_default_endpoint_local() {
+        // A default Config has localhost endpoint and no api_key — should NOT
+        // fail (treated as local).
+        let cfg = crate::config::Config::default();
+        let checks = config_checks(&cfg);
+        // endpoint URL should pass
+        assert!(checks
+            .iter()
+            .any(|c| c.name == "endpoint URL" && c.status == CheckStatus::Ok));
+        // api_key should not be Missing for local default
+        let api_check = checks.iter().find(|c| c.name == "api_key").unwrap();
+        assert_ne!(api_check.status, CheckStatus::Missing);
+    }
+
+    #[test]
+    fn test_config_checks_invalid_endpoint() {
+        let cfg = crate::config::Config {
+            endpoint: "not a url".to_string(),
+            ..crate::config::Config::default()
+        };
+        let checks = config_checks(&cfg);
+        let url_check = checks.iter().find(|c| c.name == "endpoint URL").unwrap();
+        assert_eq!(url_check.status, CheckStatus::Missing);
+        assert!(url_check.fix_hint.is_some());
+    }
+
+    #[test]
+    fn test_config_checks_remote_no_api_key_fails() {
+        let cfg = crate::config::Config {
+            endpoint: "https://api.example.com/v1".to_string(),
+            api_key: None,
+            ..crate::config::Config::default()
+        };
+        let checks = config_checks(&cfg);
+        let api_check = checks.iter().find(|c| c.name == "api_key").unwrap();
+        assert_eq!(api_check.status, CheckStatus::Missing);
+        assert!(api_check.fix_hint.is_some());
     }
 
     #[tokio::test]
@@ -793,5 +1329,7 @@ mod tests {
         let rustc = report.checks.iter().find(|c| c.name == "rustc");
         assert!(rustc.is_some());
         assert_eq!(rustc.unwrap().status, CheckStatus::Ok);
+        // MSRV check present
+        assert!(report.checks.iter().any(|c| c.name == "rustc MSRV"));
     }
 }

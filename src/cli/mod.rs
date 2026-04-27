@@ -2243,6 +2243,10 @@ async fn handle_command(
             }
             let report = crate::doctor::run_doctor().await;
             report.print();
+            let code = report.exit_code();
+            if code != 0 {
+                std::process::exit(code);
+            }
         }
 
         Commands::AutoConfig {
