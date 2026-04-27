@@ -254,6 +254,10 @@ name = "swebench_two_phase"
 path = "examples/swebench_two_phase.rs"
 required-features = ["bench-harness"]
 
+[[example]]
+name = "quant_benchmark"
+path = "examples/quant_benchmark.rs"
+
 # VLM Benchmark binaries
 [[bin]]
 name = "codegraph"
