@@ -573,7 +573,6 @@ mod edge_case_tests {
         assert!(checker.check_tool_call(&call).is_err());
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_safety_with_empty_allowed_paths() {
         let config = SafetyConfig {
@@ -583,9 +582,19 @@ mod edge_case_tests {
         };
         let checker = SafetyChecker::new(&config);
 
-        // Empty allowed_paths means restrict to working directory
-        // Absolute paths outside working directory should be blocked
-        let call = create_test_call("file_write", r#"{"path": "/any/path.txt", "content": ""}"#);
+        // Empty allowed_paths means restrict to working directory.
+        // Absolute paths outside working directory should be blocked.
+        // Use a platform-appropriate absolute path: `/any/...` is absolute on
+        // Unix, but on Windows `Path::is_absolute("/any/path.txt")` is false,
+        // so we'd never exercise the "outside working dir" branch — pick a
+        // real Windows absolute path that is also outside `cwd`.
+        #[cfg(unix)]
+        let outside_payload = r#"{"path": "/any/path.txt", "content": ""}"#;
+        #[cfg(windows)]
+        let outside_payload =
+            r#"{"path": "C:\\Windows\\System32\\drivers\\etc\\hosts", "content": ""}"#;
+
+        let call = create_test_call("file_write", outside_payload);
         assert!(checker.check_tool_call(&call).is_err());
 
         // Paths inside working directory should be allowed

@@ -382,11 +382,23 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    #[cfg(unix)]
+    // Windows: `dirs::home_dir()` reads `%USERPROFILE%`, not `$HOME`, so the
+    // env-var override below doesn't redirect the lookup. Setting USERPROFILE
+    // would race with other tests in the same process. The path-safety
+    // production fix is orthogonal to this env-var-channel mismatch.
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_discover_finds_files_up_to_home() {
         let temp = tempfile::tempdir().unwrap();
-        let home = temp.path().join("home");
+        // macOS canonicalizes `/var/folders/...` to `/private/var/folders/...`;
+        // the path walked by `discover` follows the canonical form, so we must
+        // anchor `home`/`project` on the same canonical root or the
+        // PathBuf comparisons below silently miss.
+        let temp_root = temp
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| temp.path().to_path_buf());
+        let home = temp_root.join("home");
         let project = home.join("projects").join("myapp");
         let src = project.join("src");
         std::fs::create_dir_all(&src).unwrap();
@@ -394,7 +406,7 @@ mod tests {
         // Create two memory files: one in project root, one in home
         let project_memory = project.join(".selfware.md");
         let home_memory = home.join(".selfware.md");
-        let outside_memory = temp.path().join(".selfware.md");
+        let outside_memory = temp_root.join(".selfware.md");
 
         std::fs::write(&project_memory, "project memory").unwrap();
         std::fs::write(&home_memory, "home memory").unwrap();
@@ -446,18 +458,25 @@ mod tests {
         assert!(formatted.contains("Prefer anyhow for errors."));
     }
 
-    #[cfg(unix)]
+    // See `test_discover_finds_files_up_to_home` for the rationale on the
+    // Windows gate (USERPROFILE vs HOME).
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_discover_workspace_guidance_finds_agents_files_up_to_home() {
         let temp = tempfile::tempdir().unwrap();
-        let home = temp.path().join("home");
+        // Canonicalize on macOS where the temp dir resolves through /private.
+        let temp_root = temp
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| temp.path().to_path_buf());
+        let home = temp_root.join("home");
         let project = home.join("projects").join("radarcam");
         let src = project.join("src");
         std::fs::create_dir_all(&src).unwrap();
 
         let project_guidance = project.join("AGENTS.md");
         let home_guidance = home.join("CLAUDE.md");
-        let outside_guidance = temp.path().join("AGENTS.md");
+        let outside_guidance = temp_root.join("AGENTS.md");
 
         std::fs::write(&project_guidance, "project guidance").unwrap();
         std::fs::write(&home_guidance, "home guidance").unwrap();
@@ -523,28 +542,43 @@ mod tests {
         assert!(files[0].content.len() <= MAX_WORKSPACE_GUIDANCE_BYTES + 32);
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_project_key_from_path() {
-        let path = Path::new("/home/user/projects/myapp");
-        let key = MemorySystem::project_key_from_path(path);
+        // Use platform-native absolute paths so component splitting works
+        // identically: Unix uses `/` separators, Windows uses `\` plus a
+        // drive letter prefix component.
+        #[cfg(unix)]
+        let abs = Path::new("/home/user/projects/myapp");
+        #[cfg(windows)]
+        let abs = Path::new(r"C:\Users\user\projects\myapp");
+
+        let key = MemorySystem::project_key_from_path(abs);
         assert_eq!(key, "projects_myapp");
 
         let path = Path::new("myapp");
         let key = MemorySystem::project_key_from_path(path);
         assert_eq!(key, "myapp");
 
-        // Root path returns "/" as the key (single component)
-        let path = Path::new("/");
-        let key = MemorySystem::project_key_from_path(path);
-        assert_eq!(key, "/");
+        // Root path returns the OS-native root as the key (single component).
+        #[cfg(unix)]
+        {
+            let path = Path::new("/");
+            let key = MemorySystem::project_key_from_path(path);
+            assert_eq!(key, "/");
+        }
     }
 
-    #[cfg(unix)]
+    // See `test_discover_finds_files_up_to_home`: HOME-vs-USERPROFILE makes
+    // this Windows-incompatible regardless of path normalization.
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_discover_consolidated_memory() {
         let temp = tempdir().unwrap();
-        let home = temp.path().join("home");
+        let temp_root = temp
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| temp.path().to_path_buf());
+        let home = temp_root.join("home");
         let project = home.join("projects").join("myapp");
         let memory_base = home.join(".selfware").join("memory");
 
@@ -599,11 +633,17 @@ mod tests {
         assert_eq!(system.project_key, "projects_myapp");
     }
 
-    #[cfg(unix)]
+    // See `test_discover_finds_files_up_to_home`: HOME-vs-USERPROFILE makes
+    // this Windows-incompatible regardless of path normalization.
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn test_dream_integrated_memory_system_load_consolidated() {
         let temp = tempdir().unwrap();
-        let home = temp.path().join("home");
+        let temp_root = temp
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| temp.path().to_path_buf());
+        let home = temp_root.join("home");
         let project = home.join("myapp");
         let memory_base = home.join(".selfware").join("memory");
 

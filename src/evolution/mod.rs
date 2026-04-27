@@ -234,17 +234,15 @@ impl std::fmt::Display for GenerationRating {
 /// Uses proper path prefix matching with canonicalization to prevent bypasses
 /// via symlinks, relative paths, or substring tricks.
 pub fn is_protected(path: &std::path::Path) -> bool {
-    // Canonicalize the path to resolve symlinks and normalize separators
-    let canonical_path = match path.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
-            // If we can't canonicalize (e.g., file doesn't exist yet),
-            // fall back to normalizing the path as-is
-            path.to_path_buf()
-        }
-    };
+    // Canonicalize the path to resolve symlinks and normalize separators.
+    // We use the safety-checker normalize_path so the Windows `\\?\` UNC
+    // prefix is stripped — without that, `path_str.contains("src/evolution/")`
+    // would never match an extended-length canonicalized path.
+    let canonical_path = crate::safety::checker::normalize_path(path);
 
-    let path_str = canonical_path.to_string_lossy();
+    // PROTECTED_PATHS uses forward slashes; convert any `\` to `/` so the
+    // contains/starts_with checks work on Windows too.
+    let path_str = canonical_path.to_string_lossy().replace('\\', "/");
 
     PROTECTED_PATHS.iter().any(|protected_prefix| {
         // Check if the path starts with the protected prefix (for relative paths)
@@ -258,7 +256,6 @@ pub fn is_protected(path: &std::path::Path) -> bool {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn test_protected_paths() {
         assert!(is_protected(std::path::Path::new(

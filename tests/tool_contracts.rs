@@ -99,7 +99,6 @@ async fn file_read_schema_contract() {
     assert!(props.get("path").is_some(), "schema must include 'path'");
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn file_read_valid_execution() {
     let mut tmp = NamedTempFile::new().expect("create temp file");
@@ -166,7 +165,6 @@ async fn file_write_schema_contract() {
     );
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn file_write_valid_execution() {
     let dir = TempDir::new().expect("create temp dir");
@@ -214,7 +212,6 @@ async fn file_edit_schema_contract() {
     assert!(props.get("new_str").is_some());
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn file_edit_valid_execution() {
     let dir = TempDir::new().expect("create temp dir");
@@ -335,7 +332,6 @@ async fn directory_tree_schema_contract() {
     assert!(props.get("path").is_some(), "schema must include 'path'");
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn directory_tree_valid_execution() {
     let dir = TempDir::new().expect("create temp dir");

@@ -1884,6 +1884,9 @@ mod tests {
     // 4. TEST TOOL — smoke tests
     // ========================================================================
 
+    // RadarCamTest hard-codes `bash -c <cmd>` (see `RadarCamTest::execute`),
+    // and Windows CI doesn't ship a `bash` on PATH. The path-safety fix is
+    // orthogonal to the shell dependency, so we keep this gated on Unix.
     #[cfg(unix)]
     #[tokio::test]
     async fn test_radarcam_test_custom_echo() {

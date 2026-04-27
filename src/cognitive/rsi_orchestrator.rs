@@ -637,6 +637,10 @@ mod tests {
         assert!(state_path.exists());
     }
 
+    // The fixture writes a `run_projecte2e.sh` shell script with a bash
+    // shebang and runs it via the RSI improvement cycle; Windows CI doesn't
+    // ship `bash` and `.sh` files aren't executable there. The path-safety
+    // production fix is orthogonal to that shell dependency.
     #[cfg(unix)]
     #[tokio::test]
     async fn test_execute_improvement_cycle_applies_mutation_and_records_result() {

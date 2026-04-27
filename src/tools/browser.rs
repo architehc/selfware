@@ -1542,35 +1542,58 @@ mod tests {
         assert!(schema["properties"].get("user_agent").is_some());
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_should_stage_chrome_output_for_non_home_absolute_paths() {
-        let home_dir = Path::new("/home/tester");
-        assert!(should_stage_chrome_output_for_home(
+        // Use platform-appropriate absolute path literals so the test works
+        // identically on Linux, macOS, and Windows.
+        #[cfg(unix)]
+        let (home_dir, outside_abs, inside_abs, relative_abs) = (
+            Path::new("/home/tester"),
             Path::new("/tmp/output.png"),
-            Some(home_dir)
-        ));
-        assert!(!should_stage_chrome_output_for_home(
             Path::new("/home/tester/output.png"),
+            Path::new("relative/output.png"),
+        );
+        #[cfg(windows)]
+        let (home_dir, outside_abs, inside_abs, relative_abs) = (
+            Path::new(r"C:\Users\tester"),
+            Path::new(r"D:\tmp\output.png"),
+            Path::new(r"C:\Users\tester\output.png"),
+            Path::new(r"relative\output.png"),
+        );
+
+        assert!(should_stage_chrome_output_for_home(
+            outside_abs,
             Some(home_dir)
         ));
         assert!(!should_stage_chrome_output_for_home(
-            Path::new("relative/output.png"),
+            inside_abs,
+            Some(home_dir)
+        ));
+        assert!(!should_stage_chrome_output_for_home(
+            relative_abs,
             Some(home_dir)
         ));
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_chrome_staging_output_preserves_filename() {
-        let staged = chrome_staging_output_path(Path::new("/tmp/chart-shot.png")).unwrap();
+        // Use a platform-relative-but-still-valid absolute path so this works
+        // on Windows too. We just need *some* absolute path with a filename.
+        #[cfg(unix)]
+        let input = Path::new("/tmp/chart-shot.png");
+        #[cfg(windows)]
+        let input = Path::new(r"C:\tmp\chart-shot.png");
+
+        let staged = chrome_staging_output_path(input).unwrap();
         assert_eq!(
             staged.file_name().and_then(|name| name.to_str()),
             Some("chart-shot.png")
         );
-        assert!(staged
-            .to_string_lossy()
-            .contains(".selfware/browser-output"));
+
+        // Compare on a forward-slash form so the assertion holds on Windows
+        // (where the staged path uses `\`).
+        let staged_str = staged.to_string_lossy().replace('\\', "/");
+        assert!(staged_str.contains(".selfware/browser-output"));
     }
 
     #[test]
@@ -1923,13 +1946,13 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_should_stage_outside_home_triggers_staging() {
-        assert!(should_stage_chrome_output_for_home(
-            Path::new("/var/output.png"),
-            Some(Path::new("/home/user"))
-        ));
+        #[cfg(unix)]
+        let (outside, home) = (Path::new("/var/output.png"), Path::new("/home/user"));
+        #[cfg(windows)]
+        let (outside, home) = (Path::new(r"D:\var\output.png"), Path::new(r"C:\Users\user"));
+        assert!(should_stage_chrome_output_for_home(outside, Some(home)));
     }
 
     // =========================================================================

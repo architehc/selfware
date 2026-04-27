@@ -2,6 +2,7 @@
 
 use crate::config::SafetyConfig;
 use crate::errors::{Result, SafetyError, SelfwareError};
+use crate::safety::checker::{normalize_path, to_glob_form};
 use std::path::{Path, PathBuf};
 
 /// ELOOP errno value (symlink encountered with O_NOFOLLOW).
@@ -153,7 +154,7 @@ impl PathValidator {
                 let safe_target = self.check_symlink_safety(&resolved)?;
                 safe_target
                     .canonicalize()
-                    .unwrap_or_else(|_| normalize_path(&safe_target))
+                    .unwrap_or_else(|_| lexical_normalize_path(&safe_target))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // If it doesn't exist, check parent atomically
@@ -166,18 +167,18 @@ impl PathValidator {
                             let safe_parent = self.check_symlink_safety(parent)?;
                             safe_parent
                                 .canonicalize()
-                                .unwrap_or_else(|_| normalize_path(&safe_parent))
+                                .unwrap_or_else(|_| lexical_normalize_path(&safe_parent))
                                 .join(resolved.file_name().unwrap_or_default())
                         }
-                        Err(_) => normalize_path(&resolved),
+                        Err(_) => lexical_normalize_path(&resolved),
                     }
                 } else {
-                    normalize_path(&resolved)
+                    lexical_normalize_path(&resolved)
                 }
             }
             Err(_) => resolved
                 .canonicalize()
-                .unwrap_or_else(|_| normalize_path(&resolved)),
+                .unwrap_or_else(|_| lexical_normalize_path(&resolved)),
         };
         let canonical_str = strip_unc_prefix(&canonical.to_string_lossy());
 
@@ -229,15 +230,22 @@ impl PathValidator {
         // Always validate denied patterns, even for paths in allowed_paths
         // This prevents accidentally allowing dangerous paths via overly broad allowed_paths
         // Check against denied patterns using both original and canonical paths.
+        //
+        // Cross-platform: convert `\` to `/` in BOTH the pattern and the input
+        // before glob matching, since the `glob` crate treats `\` as an escape
+        // character. This is a no-op on Unix.
+        let canonical_glob = to_glob_form(&canonical_str);
+        let path_glob = to_glob_form(path);
         for pattern in &self.config.denied_paths {
-            let glob_pattern = glob::Pattern::new(pattern)?;
+            let pattern_glob = to_glob_form(pattern);
+            let glob_pattern = glob::Pattern::new(&pattern_glob)?;
 
-            if glob_pattern.matches(&canonical_str) {
+            if glob_pattern.matches(&canonical_glob) {
                 return Err(SelfwareError::Safety(SafetyError::PathDeniedPattern {
                     pattern: pattern.clone(),
                 }));
             }
-            if glob_pattern.matches(path) {
+            if glob_pattern.matches(&path_glob) {
                 return Err(SelfwareError::Safety(SafetyError::PathDeniedPattern {
                     pattern: pattern.clone(),
                 }));
@@ -286,24 +294,28 @@ impl PathValidator {
     /// Check if a path is in the allowed list.
     ///
     /// IMPORTANT: We only check the canonical path, not the original path.
+    ///
+    /// Cross-platform handling:
+    /// - The input `canonical_str` is already canonicalized by the caller.
+    /// - On macOS, allow-list entries that point at temp paths
+    ///   (`/var/folders/...`) must be canonicalized to `/private/var/folders/...`
+    ///   to match the canonical input. We do that here by passing each pattern
+    ///   through [`crate::safety::checker::normalize_path`].
+    /// - On Windows, paths use `\` as a separator while glob patterns use `/`,
+    ///   so we convert via [`to_glob_form`] before invoking `glob::Pattern`.
     pub fn is_path_in_allowed_list(
         &self,
         canonical_str: &str,
         _original_path: &str,
     ) -> Result<bool> {
-        let working_dir_canonical = strip_unc_prefix(
-            &self
-                .working_dir
-                .canonicalize()
-                .unwrap_or_else(|_| self.working_dir.clone())
-                .to_string_lossy(),
-        );
+        let working_dir_canonical_pb = normalize_path(&self.working_dir);
+        let working_dir_canonical = working_dir_canonical_pb.to_string_lossy();
 
         // Normalize to forward slashes for glob matching on all platforms.
         // The `glob` crate treats backslash as an escape character, so
         // Windows paths like `C:\foo\bar` must be converted to `C:/foo/bar`.
-        let canonical_normalized = canonical_str.replace('\\', "/");
-        let working_dir_normalized = working_dir_canonical.replace('\\', "/");
+        let canonical_normalized = to_glob_form(canonical_str);
+        let working_dir_normalized = to_glob_form(&working_dir_canonical);
 
         for pattern in &self.config.allowed_paths {
             // For relative patterns, expand using the working directory
@@ -311,15 +323,52 @@ impl PathValidator {
                 let suffix = pattern.strip_prefix("./").unwrap_or("");
                 format!("{}/{}", working_dir_normalized, suffix)
             } else {
-                pattern.replace('\\', "/")
+                to_glob_form(pattern)
             };
 
-            let pattern_normalized = pattern.replace('\\', "/");
+            let pattern_normalized = to_glob_form(pattern);
 
             if glob::Pattern::new(&expanded_pattern)?.matches(&canonical_normalized)
                 || glob::Pattern::new(&pattern_normalized)?.matches(&canonical_normalized)
             {
                 return Ok(true);
+            }
+
+            // Symmetric canonicalization: the allow-list pattern may be a
+            // pre-canonical path the caller passed in literally — e.g. on
+            // macOS callers commonly use `TempDir::path()` (`/var/folders/...`)
+            // verbatim while the canonical form is `/private/var/folders/...`.
+            // Run the literal pattern through the same `normalize_path`
+            // pipeline so prefixes line up. We only attempt this for patterns
+            // that look like concrete paths (no glob metacharacters), since
+            // canonicalizing a pattern like `**/*.rs` is meaningless.
+            let looks_like_concrete_path = !pattern_normalized.contains(['*', '?', '[']);
+            if looks_like_concrete_path {
+                let canonical_pattern = normalize_path(Path::new(pattern));
+                let canonical_pattern_str = to_glob_form(&canonical_pattern.to_string_lossy());
+                if !canonical_pattern_str.is_empty()
+                    && canonical_pattern_str != pattern_normalized
+                    && glob::Pattern::new(&canonical_pattern_str)?.matches(&canonical_normalized)
+                {
+                    return Ok(true);
+                }
+                // Some allow-list entries are written as `<path>/**` directly —
+                // try canonicalizing the parent and re-appending the suffix.
+                if let Some(stripped) = pattern_normalized.strip_suffix("/**") {
+                    let canon_parent = normalize_path(Path::new(stripped));
+                    let canon_parent_glob = to_glob_form(&canon_parent.to_string_lossy());
+                    if !canon_parent_glob.is_empty() {
+                        let combined = format!("{}/**", canon_parent_glob);
+                        if glob::Pattern::new(&combined)?.matches(&canonical_normalized) {
+                            return Ok(true);
+                        }
+                        // Also accept the parent itself, since `<dir>/**` does
+                        // not match `<dir>` exactly.
+                        if canonical_normalized == canon_parent_glob {
+                            return Ok(true);
+                        }
+                    }
+                }
             }
 
             // On Windows, absolute Unix-style patterns like "/**" won't match
@@ -336,7 +385,7 @@ impl PathValidator {
             }
 
             // Fallback: for "./**" pattern, do a simple prefix check
-            if pattern == "./**" && canonical_normalized.starts_with(&working_dir_normalized) {
+            if pattern == "./**" && canonical_normalized.starts_with(&*working_dir_normalized) {
                 return Ok(true);
             }
         }
@@ -414,8 +463,13 @@ fn strip_unc_prefix(path: &str) -> String {
     }
 }
 
-/// Normalize a path by resolving . and .. components.
-pub fn normalize_path(path: &Path) -> PathBuf {
+/// Normalize a path lexically (without touching the filesystem) by resolving
+/// `.` and `..` components.
+///
+/// Use this only when the path may not exist on disk; otherwise prefer
+/// [`crate::safety::checker::normalize_path`], which canonicalizes through
+/// the filesystem and strips the Windows `\\?\` UNC prefix.
+pub fn lexical_normalize_path(path: &Path) -> PathBuf {
     let mut components = Vec::new();
 
     for component in path.components() {
@@ -448,42 +502,47 @@ mod tests {
         }
     }
 
-    // ===== normalize_path tests =====
+    // ===== lexical_normalize_path tests =====
 
+    #[cfg(unix)]
     #[test]
     fn test_normalize_simple_absolute() {
-        let path = normalize_path(Path::new("/foo/bar/baz"));
+        let path = lexical_normalize_path(Path::new("/foo/bar/baz"));
         assert_eq!(path, PathBuf::from("/foo/bar/baz"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_normalize_with_dot() {
-        let path = normalize_path(Path::new("/foo/./bar"));
+        let path = lexical_normalize_path(Path::new("/foo/./bar"));
         assert_eq!(path, PathBuf::from("/foo/bar"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_normalize_with_dotdot() {
-        let path = normalize_path(Path::new("/foo/bar/../baz"));
+        let path = lexical_normalize_path(Path::new("/foo/bar/../baz"));
         assert_eq!(path, PathBuf::from("/foo/baz"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_normalize_multiple_dotdot() {
-        let path = normalize_path(Path::new("/foo/bar/baz/../../qux"));
+        let path = lexical_normalize_path(Path::new("/foo/bar/baz/../../qux"));
         assert_eq!(path, PathBuf::from("/foo/qux"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_normalize_dotdot_at_root() {
         // When all components are popped, the result is an empty path
-        let path = normalize_path(Path::new("/foo/../.."));
+        let path = lexical_normalize_path(Path::new("/foo/../.."));
         assert_eq!(path, PathBuf::from(""));
     }
 
     #[test]
     fn test_normalize_relative() {
-        let path = normalize_path(Path::new("foo/./bar/../baz"));
+        let path = lexical_normalize_path(Path::new("foo/./bar/../baz"));
         assert_eq!(path, PathBuf::from("foo/baz"));
     }
 

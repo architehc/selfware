@@ -405,7 +405,6 @@ async fn test_e2e_all_tools_registered() {
     );
 }
 
-#[cfg(unix)]
 #[test]
 fn test_e2e_safety_allows_local_page_control_targets() {
     let checker = SafetyChecker::new(&selfware::config::SafetyConfig::default());
@@ -506,7 +505,6 @@ async fn test_e2e_localhost_http_and_browser_fetch_round_trip() {
     server.abort();
 }
 
-#[cfg(unix)]
 #[tokio::test]
 async fn test_e2e_browser_screenshot_round_trip() {
     let _env_lock = BROWSER_ENV_LOCK.lock().await;

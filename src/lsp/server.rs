@@ -536,7 +536,11 @@ mod tests {
         assert_eq!(extract_token_at(source, 0, 26).as_deref(), Some("widget"));
     }
 
-    #[cfg(unix)]
+    // Windows: `Url::to_file_path` parses `file:///tmp/example` as a UNC-style
+    // path (`\tmp\example`), not the bare absolute `/tmp/example` we assert on.
+    // There is no equivalent Windows literal to substitute for `/tmp` in this
+    // assertion, so we keep the gate scoped to non-Windows.
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn resolves_root_from_initialize_params() {
         let params = serde_json::json!({
