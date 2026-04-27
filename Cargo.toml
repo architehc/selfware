@@ -258,6 +258,10 @@ required-features = ["bench-harness"]
 name = "quant_benchmark"
 path = "examples/quant_benchmark.rs"
 
+[[example]]
+name = "quant_recommend"
+path = "examples/quant_recommend.rs"
+
 # VLM Benchmark binaries
 [[bin]]
 name = "codegraph"

@@ -1,690 +1,598 @@
-//! Qwen3.6 quantization benchmark harness.
+//! Quant comparison benchmark — drives the **real selfware agent** against
+//! SAB-style coding scenarios and records what it actually managed to do.
 //!
-//! Drives a `llama-server` endpoint through a fixed test suite and emits both
-//! a JSON record (for collation) and a markdown table (for human review).
+//! Why this exists: synthetic prompts ("write fizzbuzz", "describe a red
+//! square") pass for every quant we tested down to 2-bit, including ones
+//! that fabricate "task complete" without editing the file. The old
+//! version of this example hid that failure mode behind a 5/5 green
+//! score. This one runs the agent end-to-end on a repository, lets the
+//! model use tools, and validates by re-running the project's own test
+//! suite — the same gate the SAB framework uses.
 //!
-//! # Test categories
+//! # What gets measured per scenario
 //!
-//! 1. **Speed** — Tokens/second on a 200-token completion (3 cold runs, median).
-//! 2. **Tool-use** — Verifies the model invokes a 3-step tool chain
-//!    (`file_read` → `grep_search` → `file_edit`) on a temp file.
-//! 3. **Codegen** — Asks for a tiny Rust `fizzbuzz` and runs `cargo check` on it.
-//! 4. **Reasoning** — Multi-step word problem with a verifiable numeric answer.
-//! 5. **Multimodal** — Sends a generated PNG and checks for visual references in
-//!    the reply (requires the `mmproj` to be loaded server-side).
+//! 1. **pre_validator_failed** — bug injection actually broke the project
+//!    (sanity check; if false the scenario is broken, not the model).
+//! 2. **agent_exit** — `success` / `nonzero(N)` / `timeout`.
+//! 3. **post_validator_passed** — did `cargo test` (or the scenario's
+//!    validator) come back green after the agent finished?
+//! 4. **wall_time_secs** — how long the whole agent run took.
+//! 5. **agent_steps** — best-effort step count parsed from the agent's
+//!    progress lines (`📝 Step N`); `None` if the format changes.
+//!
+//! # Speed test
+//!
+//! Kept as a single warm-up probe for the perf number — 3 cold runs of
+//! a 200-token completion against the endpoint, median tok/s.
 //!
 //! # Usage
 //!
 //! ```bash
 //! cargo run --release --example quant_benchmark -- \
-//!     --endpoint http://127.0.0.1:8080/v1 \
-//!     --quant Qwen3.6-IQ2_M \
-//!     --output reports/
+//!     --endpoint http://127.0.0.1:8000/v1 \
+//!     --quant Qwen3.6-27B-HauhauCS-Q4_K_P \
+//!     --model qwen3.6-27b-q4kp \
+//!     --output reports/quant_bench/q4kp.json
 //! ```
 //!
-//! The example uses [`selfware::api::ApiClient`] directly, with a synthetic
-//! [`selfware::config::Config`] (no config file required).
+//! The harness shells out to the `selfware` binary (default: looks for
+//! `target/release/selfware`, override with `SELFWARE_BIN` env var). It
+//! also requires `cargo` on PATH for the validator.
 
 use std::fs;
-use std::io::Cursor;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Instant;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
-use base64::Engine as _;
 use clap::Parser;
-use image::{ImageBuffer, Rgb};
-use selfware::api::types::{FunctionDefinition, Message, MessageContent, ToolDefinition};
+use selfware::api::types::Message;
 use selfware::api::{ApiClient, ThinkingMode};
 use selfware::config::Config;
 use serde::Serialize;
-use serde_json::json;
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "quant_benchmark",
-    about = "Drive a quant through a fixed test suite"
-)]
+#[command(about = "Drive a quantization through real SAB scenarios + a speed probe")]
 struct Args {
-    /// OpenAI-compatible endpoint, e.g. `http://127.0.0.1:8080/v1`.
+    /// OpenAI-compatible endpoint, e.g. `http://127.0.0.1:8000/v1`
     #[arg(long)]
     endpoint: String,
 
-    /// Logical name of the quantization (used in filenames + the report).
+    /// Logical name of the quantization (used in filenames + the report)
     #[arg(long)]
     quant: String,
 
-    /// Output directory for `<quant>.json` (created if missing).
+    /// Output file path for `<quant>.json` (parent created if missing)
     #[arg(long)]
     output: PathBuf,
 
-    /// Optional model name override (defaults to the loaded model on the server).
+    /// Optional model name override; defaults to whatever the server reports
     #[arg(long, default_value = "qwen3.6-27b")]
     model: String,
 
-    /// Per-request timeout in seconds (default: 120).
-    #[arg(long, default_value_t = 120)]
-    timeout_secs: u64,
+    /// Per-scenario timeout in seconds (default: 480 = 8 min)
+    #[arg(long, default_value_t = 480)]
+    scenario_timeout_secs: u64,
 
-    /// Skip the multimodal test (for quants without an mmproj attached).
+    /// Keep work directories on FAIL (for debugging). Default: deleted on PASS,
+    /// preserved on FAIL.
+    #[arg(long, default_value = "/tmp/quant_bench_work")]
+    keep_dir: PathBuf,
+
+    /// Path to the selfware binary (default: target/release/selfware or $SELFWARE_BIN)
     #[arg(long)]
-    skip_multimodal: bool,
+    selfware_bin: Option<PathBuf>,
+
+    /// Skip the speed probe (e.g. when the same endpoint is already benched)
+    #[arg(long)]
+    skip_speed: bool,
+
+    /// Skip scenarios entirely and only run the speed probe
+    #[arg(long)]
+    speed_only: bool,
 }
 
-#[derive(Debug, Serialize, Clone)]
-struct TestResult {
+/// One scenario the agent gets to drive.
+///
+/// `bug` modifies a single file in the work-dir copy of `template_rel` to
+/// guarantee the validator fails before the agent runs. The agent gets the
+/// task description in `prompt`, then we re-run `validator` and record
+/// whether it now passes.
+struct Scenario {
     name: &'static str,
-    passed: bool,
-    duration_ms: u128,
-    detail: String,
-    /// Optional metric (tokens/sec, etc.) — only populated for `speed`.
-    metric: Option<f64>,
+    template_rel: &'static str,
+    bug: BugSpec,
+    prompt: &'static str,
+    validator_program: &'static str,
+    validator_args: &'static [&'static str],
+}
+
+/// How to corrupt a template so the validator fails before the agent runs.
+#[allow(dead_code)] // OverwriteFile is part of the API even if no scenario uses it
+enum BugSpec {
+    /// Template already ships pre-broken — no injection needed.
+    None,
+    /// Replace the entire file at `path` with `content`.
+    OverwriteFile {
+        path: &'static str,
+        content: &'static str,
+    },
+    /// Find `find` (must be unique in `path`) and replace it with `replace`.
+    Patch {
+        path: &'static str,
+        find: &'static str,
+        replace: &'static str,
+    },
+}
+
+const FIX_PROMPT: &str = "You are fixing a small Rust library in the current directory.\n\
+     Task:\n\
+     1. Run tests and identify failing behavior.\n\
+     2. Fix the implementation so all tests pass.\n\
+     3. Keep all existing public function signatures unchanged.\n\
+     4. Do not add dependencies.\n\
+     5. Run cargo test before finishing.\n\
+     \n\
+     When done, summarize exactly what you changed.";
+
+const SCENARIOS: &[Scenario] = &[
+    Scenario {
+        name: "easy_calculator",
+        template_rel: "system_tests/projecte2e/templates/easy_calculator",
+        bug: BugSpec::Patch {
+            path: "src/lib.rs",
+            find: "pub fn multiply(a: i64, b: i64) -> i64 {\n    a * b\n}",
+            replace: "pub fn multiply(a: i64, b: i64) -> i64 {\n    // BUG: should multiply\n    a + b\n}",
+        },
+        prompt: FIX_PROMPT,
+        validator_program: "cargo",
+        validator_args: &["test"],
+    },
+    Scenario {
+        name: "easy_string_ops",
+        template_rel: "system_tests/projecte2e/templates/easy_string_ops",
+        bug: BugSpec::Patch {
+            path: "src/string_ops.rs",
+            find: "pub fn reverse(s: &str) -> String {\n    s.chars().rev().collect()\n}",
+            replace: "pub fn reverse(s: &str) -> String {\n    // BUG: forgot rev()\n    s.chars().collect()\n}",
+        },
+        prompt: FIX_PROMPT,
+        validator_program: "cargo",
+        validator_args: &["test"],
+    },
+    Scenario {
+        name: "medium_bitset",
+        template_rel: "system_tests/projecte2e/templates/medium_bitset",
+        bug: BugSpec::Patch {
+            path: "src/lib.rs",
+            find: "    pub fn count_ones(&self) -> usize {\n        self.words.iter().map(|w| w.count_ones() as usize).sum()\n    }",
+            replace: "    pub fn count_ones(&self) -> usize {\n        // BUG: counts zero bits instead of one bits\n        self.words.iter().map(|w| w.count_zeros() as usize).sum()\n    }",
+        },
+        prompt: FIX_PROMPT,
+        validator_program: "cargo",
+        validator_args: &["test"],
+    },
+    Scenario {
+        name: "medium_json_merge",
+        template_rel: "system_tests/projecte2e/templates/medium_json_merge",
+        bug: BugSpec::Patch {
+            path: "src/lib.rs",
+            // Replace the recursive call with a non-recursive overwrite,
+            // making the merge shallow.
+            find: "                if merged.contains_key(key) {\n                    let base_value = merged.get(key).expect(\"key exists after contains_key check\");\n                    merged.insert(key.clone(), merge_json(base_value, patch_value));\n                } else {\n                    merged.insert(key.clone(), patch_value.clone());\n                }",
+            replace: "                // BUG: shallow merge — patch always overwrites without recursing\n                merged.insert(key.clone(), patch_value.clone());",
+        },
+        prompt: FIX_PROMPT,
+        validator_program: "cargo",
+        validator_args: &["test"],
+    },
+    // === pre-broken templates: no injection needed ===
+    Scenario {
+        name: "actor_pdvr",
+        template_rel: "system_tests/projecte2e/templates/actor_pdvr",
+        bug: BugSpec::None,
+        prompt: FIX_PROMPT,
+        validator_program: "cargo",
+        validator_args: &["test"],
+    },
+    Scenario {
+        name: "hard_event_bus",
+        template_rel: "system_tests/projecte2e/templates/hard_event_bus",
+        bug: BugSpec::None,
+        prompt: FIX_PROMPT,
+        validator_program: "cargo",
+        validator_args: &["test"],
+    },
+    Scenario {
+        name: "hard_scheduler",
+        template_rel: "system_tests/projecte2e/templates/hard_scheduler",
+        bug: BugSpec::None,
+        prompt: FIX_PROMPT,
+        validator_program: "cargo",
+        validator_args: &["test"],
+    },
+    Scenario {
+        name: "unsafe_scanner",
+        template_rel: "system_tests/projecte2e/templates/unsafe_scanner",
+        bug: BugSpec::None,
+        prompt: FIX_PROMPT,
+        validator_program: "cargo",
+        validator_args: &["test"],
+    },
+    Scenario {
+        name: "viz_ascii_table",
+        template_rel: "system_tests/projecte2e/templates/viz_ascii_table",
+        bug: BugSpec::None,
+        prompt: FIX_PROMPT,
+        validator_program: "cargo",
+        validator_args: &["test"],
+    },
+    Scenario {
+        name: "viz_maze_gen",
+        template_rel: "system_tests/projecte2e/templates/viz_maze_gen",
+        bug: BugSpec::None,
+        prompt: FIX_PROMPT,
+        validator_program: "cargo",
+        validator_args: &["test"],
+    },
+    Scenario {
+        name: "viz_svg_chart",
+        template_rel: "system_tests/projecte2e/templates/viz_svg_chart",
+        bug: BugSpec::None,
+        prompt: FIX_PROMPT,
+        validator_program: "cargo",
+        validator_args: &["test"],
+    },
+];
+
+#[derive(Debug, Serialize)]
+struct ScenarioResult {
+    name: String,
+    pre_validator_failed: bool,
+    agent_exit: AgentExit,
+    post_validator_passed: bool,
+    wall_time_secs: f64,
+    agent_steps: Option<u32>,
+    validator_summary: String,
 }
 
 #[derive(Debug, Serialize)]
-struct BenchReport {
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum AgentExit {
+    Success,
+    Nonzero { code: i32 },
+    Timeout,
+    Killed,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct SpeedResult {
+    samples_tok_per_sec: Vec<f64>,
+    median_tok_per_sec: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct Report {
     quant: String,
     endpoint: String,
     model: String,
     started_at: String,
-    total_duration_ms: u128,
-    tests: Vec<TestResult>,
+    total_duration_secs: f64,
+    speed: Option<SpeedResult>,
+    scenarios: Vec<ScenarioResult>,
     summary: Summary,
 }
 
 #[derive(Debug, Serialize)]
 struct Summary {
-    passed: usize,
-    failed: usize,
-    total: usize,
-    tokens_per_sec_median: Option<f64>,
+    scenarios_passed: usize,
+    scenarios_total: usize,
+    speed_tok_per_sec_median: Option<f64>,
 }
 
-fn build_client(args: &Args) -> Result<ApiClient> {
-    // Pass `chat_template_kwargs.enable_thinking = false` like the model card asks.
-    let mut extra = serde_json::Map::new();
-    extra.insert(
-        "chat_template_kwargs".to_string(),
-        json!({ "enable_thinking": false }),
-    );
+fn resolve_selfware_bin(args: &Args) -> Result<PathBuf> {
+    if let Some(p) = &args.selfware_bin {
+        return Ok(p.clone());
+    }
+    if let Ok(env) = std::env::var("SELFWARE_BIN") {
+        return Ok(PathBuf::from(env));
+    }
+    // Look for target/release/selfware relative to the repo root (cwd).
+    let candidate = PathBuf::from("target/release/selfware");
+    if candidate.exists() {
+        return Ok(candidate);
+    }
+    Err(anyhow!(
+        "selfware binary not found — pass --selfware-bin or set SELFWARE_BIN, \
+         or build with `cargo build --release --features extras`"
+    ))
+}
 
-    let mut config = Config {
-        endpoint: args.endpoint.clone(),
-        model: args.model.clone(),
-        // llama.cpp servers handle 131072-context fine when started with -c 131072.
-        context_length: 131072,
-        max_tokens: 4096,
-        temperature: 0.0,
-        extra_body: Some(extra),
-        ..Config::default()
+fn apply_bug(work_dir: &Path, bug: &BugSpec) -> Result<()> {
+    match bug {
+        BugSpec::None => Ok(()),
+        BugSpec::OverwriteFile { path, content } => {
+            let target = work_dir.join(path);
+            fs::write(&target, content)
+                .with_context(|| format!("write {} failed", target.display()))?;
+            Ok(())
+        }
+        BugSpec::Patch {
+            path,
+            find,
+            replace,
+        } => {
+            let target = work_dir.join(path);
+            let original = fs::read_to_string(&target)
+                .with_context(|| format!("read {} failed", target.display()))?;
+            let occurrences = original.matches(find).count();
+            if occurrences == 0 {
+                return Err(anyhow!(
+                    "bug-injection patch did not match any text in {} — \
+                     the template may have changed; update the scenario.",
+                    target.display()
+                ));
+            }
+            if occurrences > 1 {
+                return Err(anyhow!(
+                    "bug-injection patch matched {occurrences} places in {} — \
+                     make `find` more specific so it's unambiguous.",
+                    target.display()
+                ));
+            }
+            let patched = original.replace(find, replace);
+            fs::write(&target, patched)?;
+            Ok(())
+        }
+    }
+}
+
+fn copy_template(template: &Path, dest: &Path) -> Result<()> {
+    fs::create_dir_all(dest)?;
+    for entry in walkdir::WalkDir::new(template) {
+        let entry = entry?;
+        let rel = entry.path().strip_prefix(template).unwrap();
+        let target = dest.join(rel);
+        if entry.file_type().is_dir() {
+            // Skip target/ — it just bloats the copy and gets rebuilt anyway.
+            if rel.components().any(|c| c.as_os_str() == "target") {
+                continue;
+            }
+            fs::create_dir_all(&target)?;
+        } else if entry.file_type().is_file() {
+            if rel.components().any(|c| c.as_os_str() == "target") {
+                continue;
+            }
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Run the validator. Returns (passed, summary string for the report).
+fn run_validator(work_dir: &Path, scenario: &Scenario) -> (bool, String) {
+    // Force a fresh build; otherwise stale artifacts can mask the bug.
+    let _ = Command::new(scenario.validator_program)
+        .arg("clean")
+        .current_dir(work_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    let output = match Command::new(scenario.validator_program)
+        .args(scenario.validator_args)
+        .current_dir(work_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => return (false, format!("validator failed to spawn: {e}")),
     };
-    config.agent.step_timeout_secs = args.timeout_secs;
 
-    ApiClient::new(&config)
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}{stderr}");
+
+    // Find every `test result:` line and pick the most informative one — i.e.
+    // the one with the highest passed+failed count. (`cargo test` emits one
+    // line per harness — lib tests, each integration target, and doctests —
+    // and the doctest line is often `0 passed; 0 failed` which hides the
+    // real result if we just take the last.)
+    //
+    // We extract counts with a simple "<digits> passed" / "<digits> failed"
+    // scan since the line starts with "test result: ok. <N> passed" or
+    // "test result: FAILED. <N> passed; <M> failed".
+    fn extract_count(line: &str, suffix: &str) -> u64 {
+        let mut total = 0u64;
+        let bytes = line.as_bytes();
+        let pat = format!(" {}", suffix);
+        let mut idx = 0;
+        while let Some(found) = line[idx..].find(&pat) {
+            let end = idx + found;
+            // Walk left to find the digits.
+            let mut start = end;
+            while start > 0 && bytes[start - 1].is_ascii_digit() {
+                start -= 1;
+            }
+            if start < end {
+                if let Ok(n) = line[start..end].parse::<u64>() {
+                    total += n;
+                }
+            }
+            idx = end + pat.len();
+        }
+        total
+    }
+
+    let mut best: Option<(u64, &str)> = None;
+    for line in combined.lines() {
+        let line = line.trim();
+        if !line.contains("test result:") {
+            continue;
+        }
+        let total = extract_count(line, "passed") + extract_count(line, "failed");
+        match best {
+            None => best = Some((total, line)),
+            Some((t, _)) if total > t => best = Some((total, line)),
+            _ => {}
+        }
+    }
+    let summary_line = best
+        .map(|(_, l)| l.to_string())
+        .unwrap_or_else(|| {
+            // No test-result line at all — most likely a compile error.
+            // Surface the first `error[E...]` so the user knows why.
+            combined
+                .lines()
+                .find(|l| l.trim_start().starts_with("error"))
+                .map(|l| l.trim().to_string())
+                .unwrap_or_else(|| "(no test result line)".to_string())
+        });
+
+    (output.status.success(), summary_line)
 }
 
-// ── Test 1: Speed ──────────────────────────────────────────────────────────────
-
-async fn test_speed(client: &ApiClient) -> TestResult {
+/// Drive the selfware binary against the work dir; capture exit + step count.
+///
+/// If `log_path` is supplied, agent stdout+stderr is teed into it so the
+/// model's full reasoning trace is preserved for debugging.
+fn run_agent(
+    selfware_bin: &Path,
+    endpoint: &str,
+    model: &str,
+    work_dir: &Path,
+    prompt: &str,
+    timeout: Duration,
+    log_path: Option<&Path>,
+) -> (AgentExit, Option<u32>) {
     let start = Instant::now();
-    let prompt = "Count slowly from one to two hundred, one number per line, like:\n1\n2\n3\n... \
-                  Continue all the way to 200. Output the numbers and nothing else.";
-    let messages = vec![
-        Message::system("You are a benchmark target. Comply exactly with the user's request."),
-        Message::user(prompt),
-    ];
+    let mut cmd = Command::new(selfware_bin);
+    cmd.arg("-p")
+        .arg(prompt)
+        .arg("-C")
+        .arg(work_dir)
+        .arg("--yolo")
+        .arg("--no-tui")
+        .arg("--quiet")
+        .env("SELFWARE_ENDPOINT", endpoint)
+        .env("SELFWARE_MODEL", model)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
-    let mut samples: Vec<f64> = Vec::with_capacity(3);
-    let mut last_err: Option<String> = None;
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("  selfware spawn error: {e}");
+            return (AgentExit::Killed, None);
+        }
+    };
 
-    for run in 0..3 {
-        let run_start = Instant::now();
-        match client
-            .chat(messages.clone(), None, ThinkingMode::Disabled)
-            .await
-        {
-            Ok(resp) => {
-                let elapsed = run_start.elapsed().as_secs_f64();
-                let completion_tokens = resp.usage.completion_tokens.max(1) as f64;
-                let toks = completion_tokens / elapsed.max(0.001);
-                samples.push(toks);
-                tracing::info!(run = run, tok_per_sec = toks, "speed sample");
+    // Poll for exit, killing on timeout.
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let exit = if status.success() {
+                    AgentExit::Success
+                } else if let Some(code) = status.code() {
+                    AgentExit::Nonzero { code }
+                } else {
+                    AgentExit::Killed
+                };
+                let stdout = child
+                    .stdout
+                    .take()
+                    .and_then(|mut s| {
+                        use std::io::Read;
+                        let mut buf = String::new();
+                        s.read_to_string(&mut buf).ok().map(|_| buf)
+                    })
+                    .unwrap_or_default();
+                let stderr = child
+                    .stderr
+                    .take()
+                    .and_then(|mut s| {
+                        use std::io::Read;
+                        let mut buf = String::new();
+                        s.read_to_string(&mut buf).ok().map(|_| buf)
+                    })
+                    .unwrap_or_default();
+                if let Some(p) = log_path {
+                    let _ = fs::write(p, format!("=== STDOUT ===\n{stdout}\n=== STDERR ===\n{stderr}"));
+                }
+                let steps = parse_step_count(&stdout);
+                return (exit, steps);
+            }
+            Ok(None) => {
+                if start.elapsed() > timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    if let Some(p) = log_path {
+                        let _ = fs::write(p, "=== KILLED on timeout ===\n");
+                    }
+                    return (AgentExit::Timeout, None);
+                }
+                std::thread::sleep(Duration::from_millis(500));
             }
             Err(e) => {
-                last_err = Some(e.to_string());
+                eprintln!("  try_wait error: {e}");
+                return (AgentExit::Killed, None);
             }
         }
     }
-
-    if samples.is_empty() {
-        return TestResult {
-            name: "speed",
-            passed: false,
-            duration_ms: start.elapsed().as_millis(),
-            detail: format!(
-                "all 3 runs failed: {}",
-                last_err.as_deref().unwrap_or("unknown")
-            ),
-            metric: None,
-        };
-    }
-
-    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let median = samples[samples.len() / 2];
-
-    TestResult {
-        name: "speed",
-        passed: true,
-        duration_ms: start.elapsed().as_millis(),
-        detail: format!(
-            "median={:.1} tok/s (samples={:?})",
-            median,
-            samples
-                .iter()
-                .map(|s| format!("{:.1}", s))
-                .collect::<Vec<_>>()
-        ),
-        metric: Some(median),
-    }
 }
 
-// ── Test 2: Tool-use ──────────────────────────────────────────────────────────
-
-fn make_tools() -> Vec<ToolDefinition> {
-    vec![
-        ToolDefinition {
-            def_type: "function".into(),
-            function: FunctionDefinition {
-                name: "file_read".into(),
-                description: "Read a UTF-8 text file and return its contents.".into(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string", "description": "Absolute path to the file"}
-                    },
-                    "required": ["path"]
-                }),
-            },
-        },
-        ToolDefinition {
-            def_type: "function".into(),
-            function: FunctionDefinition {
-                name: "grep_search".into(),
-                description: "Search for a regex pattern across files in a directory.".into(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "pattern": {"type": "string"},
-                        "path": {"type": "string"}
-                    },
-                    "required": ["pattern", "path"]
-                }),
-            },
-        },
-        ToolDefinition {
-            def_type: "function".into(),
-            function: FunctionDefinition {
-                name: "file_edit".into(),
-                description: "Replace `old_string` with `new_string` in a file.".into(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "old_string": {"type": "string"},
-                        "new_string": {"type": "string"}
-                    },
-                    "required": ["path", "old_string", "new_string"]
-                }),
-            },
-        },
-    ]
-}
-
-async fn test_tool_use(client: &ApiClient) -> TestResult {
-    let start = Instant::now();
-
-    // Set up a known temp file the model is supposed to (notionally) work on.
-    let tmp = match tempfile::tempdir() {
-        Ok(d) => d,
-        Err(e) => {
-            return TestResult {
-                name: "tool_use",
-                passed: false,
-                duration_ms: start.elapsed().as_millis(),
-                detail: format!("could not create tempdir: {}", e),
-                metric: None,
+fn parse_step_count(stdout: &str) -> Option<u32> {
+    // selfware emits lines like `📝 Step 17 Executing...`. Find the largest N.
+    let mut max = None;
+    for line in stdout.lines() {
+        if let Some(rest) = line.split("Step ").nth(1) {
+            if let Some(num_str) = rest.split_whitespace().next() {
+                if let Ok(n) = num_str.parse::<u32>() {
+                    max = Some(max.map_or(n, |m: u32| m.max(n)));
+                }
             }
         }
-    };
-    let target = tmp.path().join("notes.txt");
-    if let Err(e) = fs::write(&target, "hello world\nlorem ipsum dolor\n") {
-        return TestResult {
-            name: "tool_use",
-            passed: false,
-            duration_ms: start.elapsed().as_millis(),
-            detail: format!("could not write fixture: {}", e),
-            metric: None,
-        };
     }
-
-    let prompt = format!(
-        "There is a text file at `{path}`. Please:\n\
-         1. Use `file_read` to load it.\n\
-         2. Use `grep_search` with pattern `lorem` against `{dir}` to confirm the match.\n\
-         3. Use `file_edit` to replace `lorem` with `LOREM` in that file.\n\
-         Call the tools in that order, one per turn.",
-        path = target.display(),
-        dir = tmp.path().display(),
-    );
-
-    let tools = make_tools();
-    let messages = vec![
-        Message::system(
-            "You are a coding assistant with access to tools. Use the provided tools \
-             instead of describing what you would do.",
-        ),
-        Message::user(prompt),
-    ];
-
-    let resp = match client
-        .chat(messages, Some(tools), ThinkingMode::Disabled)
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return TestResult {
-                name: "tool_use",
-                passed: false,
-                duration_ms: start.elapsed().as_millis(),
-                detail: format!("chat failed: {}", e),
-                metric: None,
-            }
-        }
-    };
-
-    let calls = resp
-        .choices
-        .first()
-        .and_then(|c| c.message.tool_calls.as_ref());
-
-    let names: Vec<String> = calls
-        .map(|tc| tc.iter().map(|c| c.function.name.clone()).collect())
-        .unwrap_or_default();
-
-    let allowed = ["file_read", "grep_search", "file_edit"];
-    let invoked_any_known = names.iter().any(|n| allowed.contains(&n.as_str()));
-    let all_known = !names.is_empty() && names.iter().all(|n| allowed.contains(&n.as_str()));
-    let any_invalid_args = calls
-        .map(|tc| {
-            tc.iter()
-                .any(|c| serde_json::from_str::<serde_json::Value>(&c.function.arguments).is_err())
-        })
-        .unwrap_or(false);
-
-    let passed = invoked_any_known && all_known && !any_invalid_args;
-    let detail = if passed {
-        format!(
-            "{} tool call(s) issued: {}",
-            names.len(),
-            names.join(" -> ")
-        )
-    } else if names.is_empty() {
-        format!(
-            "no tool calls in reply; raw text='{}'",
-            preview(
-                &resp
-                    .choices
-                    .first()
-                    .map(|c| c.message.content.text_all())
-                    .unwrap_or_default(),
-                160,
-            )
-        )
-    } else {
-        format!(
-            "tool-call set unexpected: {:?} (any_invalid_args={})",
-            names, any_invalid_args
-        )
-    };
-
-    TestResult {
-        name: "tool_use",
-        passed,
-        duration_ms: start.elapsed().as_millis(),
-        detail,
-        metric: None,
-    }
+    max
 }
 
-// ── Test 3: Codegen ───────────────────────────────────────────────────────────
+async fn run_speed_probe(args: &Args) -> Result<SpeedResult> {
+    let mut cfg = Config::default();
+    cfg.endpoint = args.endpoint.clone();
+    cfg.model = args.model.clone();
+    cfg.max_tokens = 200;
+    cfg.temperature = 0.0;
+    cfg.context_length = 32768;
+    let client = ApiClient::new(&cfg)?;
 
-async fn test_codegen(client: &ApiClient) -> TestResult {
-    let start = Instant::now();
-    let messages = vec![
-        Message::system(
-            "You are a Rust expert. Output ONLY the contents of a single Rust source file. \
-             No code fences, no explanation.",
-        ),
-        Message::user(
-            "Write a Rust program with `fn main()` that prints the FizzBuzz output for \
-             numbers 1 through 15. Print 'Fizz' for multiples of 3, 'Buzz' for multiples \
-             of 5, 'FizzBuzz' for multiples of both, and the number otherwise.",
-        ),
-    ];
-
-    let resp = match client.chat(messages, None, ThinkingMode::Disabled).await {
-        Ok(r) => r,
-        Err(e) => {
-            return TestResult {
-                name: "codegen",
-                passed: false,
-                duration_ms: start.elapsed().as_millis(),
-                detail: format!("chat failed: {}", e),
-                metric: None,
-            }
-        }
-    };
-
-    let raw = resp
-        .choices
-        .first()
-        .map(|c| c.message.content.text_all())
-        .unwrap_or_default();
-    let source = strip_code_fences(&raw);
-
-    let detail_text = preview(&source, 120);
-    let check_result = match cargo_check_snippet(&source) {
-        Ok(()) => {
-            return TestResult {
-                name: "codegen",
-                passed: true,
-                duration_ms: start.elapsed().as_millis(),
-                detail: format!("compiled cleanly ({} bytes)", source.len()),
-                metric: None,
-            }
-        }
-        Err(e) => format!("cargo check failed: {} (snippet: {})", e, detail_text),
-    };
-
-    TestResult {
-        name: "codegen",
-        passed: false,
-        duration_ms: start.elapsed().as_millis(),
-        detail: check_result,
-        metric: None,
+    let prompt = "Count slowly from one to two hundred. Use words, one number per line. \
+                  Do not add commentary. Begin with: one";
+    let mut samples = Vec::new();
+    for run in 1..=3 {
+        let messages = vec![Message::user(prompt.to_string())];
+        let started = Instant::now();
+        let resp = client
+            .chat(messages, None, ThinkingMode::Disabled)
+            .await
+            .with_context(|| format!("speed probe run {run} failed"))?;
+        let elapsed = started.elapsed().as_secs_f64();
+        let completion = resp.usage.completion_tokens.max(1) as f64;
+        samples.push(completion / elapsed);
     }
+    let mut sorted = samples.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = sorted[sorted.len() / 2];
+    Ok(SpeedResult {
+        samples_tok_per_sec: samples,
+        median_tok_per_sec: median,
+    })
 }
 
-fn strip_code_fences(s: &str) -> String {
-    let t = s.trim();
-    if let Some(stripped) = t.strip_prefix("```") {
-        // drop optional language tag on the first line
-        let after_lang = stripped
-            .split_once('\n')
-            .map(|(_, body)| body)
-            .unwrap_or("");
-        if let Some(end) = after_lang.rfind("```") {
-            return after_lang[..end].trim().to_string();
-        }
-    }
-    t.to_string()
-}
-
-fn cargo_check_snippet(source: &str) -> Result<()> {
-    let dir = tempfile::tempdir().context("tempdir for codegen")?;
-    let crate_name = "qb_fizzbuzz";
-
-    fs::create_dir_all(dir.path().join("src"))?;
-    fs::write(
-        dir.path().join("Cargo.toml"),
-        format!(
-            "[package]\nname = \"{crate_name}\"\nversion = \"0.0.1\"\nedition = \"2021\"\n\n\
-             [dependencies]\n",
-        ),
-    )?;
-    fs::write(dir.path().join("src/main.rs"), source)?;
-
-    let output = Command::new("cargo")
-        .args(["check", "--quiet", "--offline"])
-        .current_dir(dir.path())
-        .output()
-        .context("spawn cargo check")?;
-
-    if output.status.success() {
-        Ok(())
-    } else {
-        // Retry without --offline in case the registry is not pre-populated.
-        let retry = Command::new("cargo")
-            .args(["check", "--quiet"])
-            .current_dir(dir.path())
-            .output()
-            .context("spawn cargo check (retry)")?;
-        if retry.status.success() {
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&retry.stderr);
-            Err(anyhow!("{}", preview(&stderr, 240)))
-        }
-    }
-}
-
-// ── Test 4: Reasoning ─────────────────────────────────────────────────────────
-
-async fn test_reasoning(client: &ApiClient) -> TestResult {
-    let start = Instant::now();
-    // Three independent steps, single deterministic answer = 26.
-    //   1. Alice has 12 apples. She gives Bob a third.   → 8 left.
-    //   2. Bob then doubles his share and returns 2 apples to Alice. → Alice 10, Bob 6.
-    //   3. They each pick up an additional 5 apples.     → Alice 15, Bob 11. Total = 26.
-    let messages = vec![
-        Message::system(
-            "You are a careful problem solver. Show brief reasoning, then on the final \
-             line write `ANSWER: <number>` with no other text on that line.",
-        ),
-        Message::user(
-            "Alice has 12 apples. She gives one third of her apples to Bob. \
-             Bob then doubles his share by picking apples from a tree, and afterwards \
-             returns 2 apples to Alice. Then both Alice and Bob each pick up 5 \
-             additional apples. How many apples do Alice and Bob have in total now? \
-             Finish with `ANSWER: <number>` on its own line.",
-        ),
-    ];
-
-    let resp = match client.chat(messages, None, ThinkingMode::Disabled).await {
-        Ok(r) => r,
-        Err(e) => {
-            return TestResult {
-                name: "reasoning",
-                passed: false,
-                duration_ms: start.elapsed().as_millis(),
-                detail: format!("chat failed: {}", e),
-                metric: None,
-            }
-        }
-    };
-
-    let text = resp
-        .choices
-        .first()
-        .map(|c| c.message.content.text_all())
-        .unwrap_or_default();
-
-    let answer = extract_answer(&text);
-    let passed = answer == Some(26);
-
-    TestResult {
-        name: "reasoning",
-        passed,
-        duration_ms: start.elapsed().as_millis(),
-        detail: match answer {
-            Some(n) => format!("answer={} (expected 26)", n),
-            None => format!(
-                "could not parse ANSWER: line; reply='{}'",
-                preview(&text, 160)
-            ),
-        },
-        metric: None,
-    }
-}
-
-fn extract_answer(text: &str) -> Option<i64> {
-    for line in text.lines().rev() {
-        let lower = line.trim().to_lowercase();
-        if let Some(rest) = lower.strip_prefix("answer:") {
-            return parse_first_int(rest);
-        }
-        if let Some(rest) = lower.strip_prefix("answer =") {
-            return parse_first_int(rest);
-        }
-    }
-    parse_first_int(text)
-}
-
-fn parse_first_int(s: &str) -> Option<i64> {
-    let mut digits = String::new();
-    let mut started = false;
-    let mut negative = false;
-    for c in s.chars() {
-        if c == '-' && !started {
-            negative = true;
-            started = true;
-        } else if c.is_ascii_digit() {
-            digits.push(c);
-            started = true;
-        } else if started {
-            break;
-        }
-    }
-    if digits.is_empty() {
-        None
-    } else {
-        let n: i64 = digits.parse().ok()?;
-        Some(if negative { -n } else { n })
-    }
-}
-
-// ── Test 5: Multimodal ────────────────────────────────────────────────────────
-
-async fn test_multimodal(client: &ApiClient) -> TestResult {
-    let start = Instant::now();
-    let png_bytes = match generate_red_square_on_green_png() {
-        Ok(b) => b,
-        Err(e) => {
-            return TestResult {
-                name: "multimodal",
-                passed: false,
-                duration_ms: start.elapsed().as_millis(),
-                detail: format!("could not generate fixture: {}", e),
-                metric: None,
-            }
-        }
-    };
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
-
-    let user_content = MessageContent::from_text(
-        "Briefly describe this image in one sentence. Mention any colors and shapes you see.",
-    )
-    .with_image(&b64);
-
-    let messages = vec![
-        Message::system(
-            "You are a vision-capable assistant. Reply with a short visual description.",
-        ),
-        Message {
-            role: "user".into(),
-            content: user_content,
-            reasoning_content: None,
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-        },
-    ];
-
-    let resp = match client.chat(messages, None, ThinkingMode::Disabled).await {
-        Ok(r) => r,
-        Err(e) => {
-            return TestResult {
-                name: "multimodal",
-                passed: false,
-                duration_ms: start.elapsed().as_millis(),
-                detail: format!("chat failed (mmproj loaded?): {}", e),
-                metric: None,
-            }
-        }
-    };
-
-    let text = resp
-        .choices
-        .first()
-        .map(|c| c.message.content.text_all())
-        .unwrap_or_default()
-        .to_lowercase();
-
-    // Look for any visual-vocabulary marker.  We don't require pixel-perfect
-    // identification — only that the model's reply references *something*
-    // visual that could plausibly come from the image.
-    let visual_markers = [
-        "red",
-        "green",
-        "square",
-        "rectangle",
-        "shape",
-        "color",
-        "image",
-        "picture",
-    ];
-    let hits: Vec<&str> = visual_markers
-        .iter()
-        .copied()
-        .filter(|m| text.contains(m))
-        .collect();
-    let passed = hits.len() >= 2;
-
-    TestResult {
-        name: "multimodal",
-        passed,
-        duration_ms: start.elapsed().as_millis(),
-        detail: format!(
-            "matched markers: {:?} | reply: '{}'",
-            hits,
-            preview(&text, 120)
-        ),
-        metric: None,
-    }
-}
-
-fn generate_red_square_on_green_png() -> Result<Vec<u8>> {
-    let w = 64u32;
-    let h = 64u32;
-    let mut img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(w, h);
-    for (x, y, p) in img.enumerate_pixels_mut() {
-        // Green background, red square in the centre.
-        if (16..48).contains(&x) && (16..48).contains(&y) {
-            *p = Rgb([220, 30, 30]);
-        } else {
-            *p = Rgb([30, 180, 60]);
-        }
-    }
-    let mut buf = Cursor::new(Vec::new());
-    img.write_to(&mut buf, image::ImageFormat::Png)
-        .context("encode PNG")?;
-    Ok(buf.into_inner())
-}
-
-// ── Output ────────────────────────────────────────────────────────────────────
-
-fn preview(s: &str, max: usize) -> String {
-    let one_line: String = s.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
-    if one_line.chars().count() <= max {
-        one_line
-    } else {
-        let truncated: String = one_line.chars().take(max).collect();
-        format!("{}…", truncated)
-    }
-}
-
-fn render_markdown(report: &BenchReport) -> String {
+fn render_markdown(report: &Report) -> String {
     let mut out = String::new();
     out.push_str(&format!("## Quant: `{}`\n\n", report.quant));
     out.push_str(&format!("- Endpoint: `{}`\n", report.endpoint));
@@ -692,24 +600,42 @@ fn render_markdown(report: &BenchReport) -> String {
     out.push_str(&format!("- Started: {}\n", report.started_at));
     out.push_str(&format!(
         "- Total duration: {:.2}s\n",
-        report.total_duration_ms as f64 / 1000.0
+        report.total_duration_secs
     ));
-    if let Some(tps) = report.summary.tokens_per_sec_median {
-        out.push_str(&format!("- Speed (median): **{:.1} tok/s**\n", tps));
+    if let Some(s) = &report.speed {
+        out.push_str(&format!(
+            "- Speed (median): **{:.1} tok/s**\n",
+            s.median_tok_per_sec
+        ));
     }
     out.push_str(&format!(
-        "- Result: **{}/{} passed**\n\n",
-        report.summary.passed, report.summary.total
+        "- Scenarios passed: **{}/{}**\n\n",
+        report.summary.scenarios_passed, report.summary.scenarios_total
     ));
-    out.push_str("| Test | Pass | Duration (ms) | Detail |\n");
-    out.push_str("|------|------|---------------|--------|\n");
-    for t in &report.tests {
+
+    if report.scenarios.is_empty() {
+        out.push_str("(speed-only run, no scenarios)\n");
+        return out;
+    }
+
+    out.push_str("| Scenario | Pre-fail | Agent exit | Post-pass | Wall (s) | Steps | Validator summary |\n");
+    out.push_str("|----------|----------|------------|-----------|---------:|------:|-------------------|\n");
+    for s in &report.scenarios {
+        let agent = match &s.agent_exit {
+            AgentExit::Success => "success".to_string(),
+            AgentExit::Nonzero { code } => format!("nonzero({code})"),
+            AgentExit::Timeout => "timeout".to_string(),
+            AgentExit::Killed => "killed".to_string(),
+        };
         out.push_str(&format!(
-            "| `{}` | {} | {} | {} |\n",
-            t.name,
-            if t.passed { "OK" } else { "FAIL" },
-            t.duration_ms,
-            md_escape(&t.detail),
+            "| `{}` | {} | {} | {} | {:.1} | {} | {} |\n",
+            s.name,
+            if s.pre_validator_failed { "✓" } else { "✗" },
+            agent,
+            if s.post_validator_passed { "✓" } else { "✗" },
+            s.wall_time_secs,
+            s.agent_steps.map_or("?".to_string(), |n| n.to_string()),
+            md_escape(&s.validator_summary),
         ));
     }
     out
@@ -719,94 +645,133 @@ fn md_escape(s: &str) -> String {
     s.replace('|', "\\|").replace('\n', " ")
 }
 
-fn save_report(out_dir: &Path, report: &BenchReport) -> Result<PathBuf> {
-    fs::create_dir_all(out_dir).context("create output dir")?;
-    let safe_quant: String = report
-        .quant
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let path = out_dir.join(format!("{}.json", safe_quant));
-    let json = serde_json::to_string_pretty(report).context("serialize report")?;
-    fs::write(&path, json).context("write report")?;
-    Ok(path)
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let started = Instant::now();
+    let started_at = chrono::Utc::now().to_rfc3339();
 
-    if std::env::var("SELFWARE_DEBUG").is_ok() {
-        tracing_subscriber::fmt()
-            .with_env_filter("selfware=debug,quant_benchmark=debug")
-            .init();
-    }
-
-    let client = build_client(&args)?;
-    let started = chrono::Utc::now().to_rfc3339();
-    let total_start = Instant::now();
-
-    let mut tests = Vec::new();
-    eprintln!("[1/5] speed");
-    tests.push(test_speed(&client).await);
-    eprintln!("[2/5] tool_use");
-    tests.push(test_tool_use(&client).await);
-    eprintln!("[3/5] codegen");
-    tests.push(test_codegen(&client).await);
-    eprintln!("[4/5] reasoning");
-    tests.push(test_reasoning(&client).await);
-    if args.skip_multimodal {
-        eprintln!("[5/5] multimodal (skipped)");
-        tests.push(TestResult {
-            name: "multimodal",
-            passed: false,
-            duration_ms: 0,
-            detail: "skipped via --skip-multimodal".into(),
-            metric: None,
-        });
+    let speed = if args.skip_speed {
+        None
     } else {
-        eprintln!("[5/5] multimodal");
-        tests.push(test_multimodal(&client).await);
+        eprintln!("=== speed probe ===");
+        Some(run_speed_probe(&args).await?)
+    };
+
+    let mut scenarios_results = Vec::new();
+    if !args.speed_only {
+        let bin = resolve_selfware_bin(&args)?;
+        eprintln!("=== using selfware binary: {} ===", bin.display());
+        let timeout = Duration::from_secs(args.scenario_timeout_secs);
+
+        // Use a stable directory under args.keep_dir so we can preserve
+        // failing runs for inspection. Each scenario gets its own subdir
+        // named by quant + scenario.
+        fs::create_dir_all(&args.keep_dir)?;
+
+        for scenario in SCENARIOS {
+            eprintln!("\n=== scenario: {} ===", scenario.name);
+
+            let work_path = args
+                .keep_dir
+                .join(format!("{}__{}", args.quant, scenario.name));
+            // Wipe any previous run.
+            let _ = fs::remove_dir_all(&work_path);
+
+            let template = PathBuf::from(scenario.template_rel);
+            copy_template(&template, &work_path)
+                .with_context(|| format!("copy template {} failed", scenario.template_rel))?;
+
+            // Inject the bug.
+            apply_bug(&work_path, &scenario.bug)
+                .with_context(|| format!("bug injection failed for {}", scenario.name))?;
+
+            // Sanity: the validator must FAIL on the bugged code.
+            let (pre_passed, _pre_summary) = run_validator(&work_path, scenario);
+            let pre_failed = !pre_passed;
+            if !pre_failed {
+                eprintln!(
+                    "  WARNING: bug injection didn't break the project. \
+                     Scenario will not discriminate quants."
+                );
+            }
+
+            // Run the agent. Capture stdout to a log file in the work dir
+            // so we can inspect what the model actually did.
+            let agent_log = work_path.join("_agent.log");
+            let agent_started = Instant::now();
+            let (agent_exit, agent_steps) = run_agent(
+                &bin,
+                &args.endpoint,
+                &args.model,
+                &work_path,
+                scenario.prompt,
+                timeout,
+                Some(&agent_log),
+            );
+            let wall = agent_started.elapsed().as_secs_f64();
+            eprintln!("  agent exit: {agent_exit:?} after {wall:.1}s, steps={agent_steps:?}");
+            eprintln!("  log: {}", agent_log.display());
+
+            // Final validation.
+            let (post_passed, post_summary) = run_validator(&work_path, scenario);
+            eprintln!(
+                "  post-validator: {} ({})",
+                if post_passed { "PASS" } else { "FAIL" },
+                post_summary
+            );
+
+            // Clean up on PASS, keep on FAIL (or always keep if it's a
+            // discriminating scenario the user wants to inspect).
+            if post_passed && pre_failed {
+                let _ = fs::remove_dir_all(&work_path);
+            } else {
+                eprintln!("  KEPT for inspection: {}", work_path.display());
+            }
+
+            scenarios_results.push(ScenarioResult {
+                name: scenario.name.to_string(),
+                pre_validator_failed: pre_failed,
+                agent_exit,
+                post_validator_passed: post_passed,
+                wall_time_secs: wall,
+                agent_steps,
+                validator_summary: post_summary,
+            });
+        }
     }
 
-    let passed = tests.iter().filter(|t| t.passed).count();
-    let total = tests.len();
-    let tps = tests
+    let scenarios_passed = scenarios_results
         .iter()
-        .find(|t| t.name == "speed")
-        .and_then(|t| t.metric);
+        .filter(|s| s.post_validator_passed && s.pre_validator_failed)
+        .count();
 
-    let report = BenchReport {
+    let report = Report {
         quant: args.quant.clone(),
         endpoint: args.endpoint.clone(),
         model: args.model.clone(),
-        started_at: started,
-        total_duration_ms: total_start.elapsed().as_millis(),
-        tests,
+        started_at,
+        total_duration_secs: started.elapsed().as_secs_f64(),
+        speed: speed.clone(),
+        scenarios: scenarios_results,
         summary: Summary {
-            passed,
-            failed: total - passed,
-            total,
-            tokens_per_sec_median: tps,
+            scenarios_passed,
+            scenarios_total: SCENARIOS.len(),
+            speed_tok_per_sec_median: speed.as_ref().map(|s| s.median_tok_per_sec),
         },
     };
 
-    // JSON to stdout.
-    println!("{}", serde_json::to_string_pretty(&report)?);
-    // Markdown to stderr (so callers can pipe stdout to a JSON file).
-    eprintln!("\n{}", render_markdown(&report));
-    // Also persist to <output>/<quant>.json for the collator.
-    let saved = save_report(&args.output, &report)?;
-    eprintln!("wrote {}", saved.display());
+    // Write JSON.
+    if let Some(parent) = args.output.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    fs::write(&args.output, serde_json::to_string_pretty(&report)?)?;
 
-    // Don't return non-zero on partial failure — the collator wants every
-    // run's report regardless.  Only true infrastructure errors (e.g. client
-    // construction) bubble up.
+    // Markdown to stderr (so JSON on stdout stays clean if redirected).
+    eprintln!("\n{}", render_markdown(&report));
+    eprintln!("wrote {}", args.output.display());
+
     Ok(())
 }
