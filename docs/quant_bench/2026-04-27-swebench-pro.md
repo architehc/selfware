@@ -3,105 +3,127 @@
 Three SWE-bench Pro instances (qutebrowser/python, NodeBB/js,
 flipt-io/go), every available Qwen3.6-27B HauhauCS quant + the
 Qwen3.6-35B-A3B-Q3_K_XL baseline. 33 (instance × quant) pairs,
-~100 min total agent runtime on 2× RTX 4090, llama-server with
+~140 min agent runtime on 2× RTX 4090, llama-server with
 256k ctx + q8_0 KV cache + `--parallel 2` continuous batching.
 
-## Headline
+This page describes **two** runs of the same harness on the same
+data:
 
-**0/33 instances genuinely fixed.** Every quant scored 0/3 on this
-subset.
+1. **Pre-fix run (initial)** — selfware's ESCALATED progress guard
+   force-wrote a generic Rust scaffold to `src/lib.rs` whenever the
+   agent stalled, regardless of whether the workdir was a real
+   codebase. 21 of 33 patches were byte-identical scaffolds that
+   masked the true model behaviour.
+2. **Post-fix run (after `642e7ed3`)** — the scaffold injection now
+   refuses to fire when the workdir already contains source files.
+   This unblocks the bench but reveals that the **agent loop itself
+   gives up** on these tasks before producing edits.
 
-| Quant | qutebrowser | NodeBB | flipt-io | Real |
+## Headline (post-fix)
+
+**1/33 instances received a real (non-empty, non-scaffold) edit attempt.**
+Zero passed `cargo test` / language-equivalent.
+
+| Quant | qutebrowser | NodeBB | flipt-io | bytes |
 |---|---|---|---|---:|
-| Qwen3.6-35B-A3B-Q3_K_XL | empty | empty | scaffold | 0/3 |
-| Qwen3.6-27B-HauhauCS-Q8_K_P | empty | empty | empty | 0/3 |
-| Qwen3.6-27B-HauhauCS-Q6_K_P | empty | empty | scaffold | 0/3 |
-| Qwen3.6-27B-HauhauCS-Q5_K_P | empty | empty | scaffold | 0/3 |
-| Qwen3.6-27B-HauhauCS-Q4_K_P | scaffold | empty | scaffold | 0/3 |
-| Qwen3.6-27B-HauhauCS-Q3_K_P | scaffold | scaffold | empty | 0/3 |
-| Qwen3.6-27B-HauhauCS-Q2_K_P | empty | scaffold | scaffold | 0/3 |
-| Qwen3.6-27B-HauhauCS-IQ4_XS | scaffold | empty | empty | 0/3 |
-| Qwen3.6-27B-HauhauCS-IQ3_M | scaffold | empty | scaffold | 0/3 |
-| Qwen3.6-27B-HauhauCS-IQ3_XS | scaffold | scaffold | scaffold | 0/3 |
-| Qwen3.6-27B-HauhauCS-IQ2_M | scaffold | empty | scaffold | 0/3 |
+| Qwen3.6-35B-A3B-Q3_K_XL | empty | empty | empty | 0 |
+| Qwen3.6-27B-HauhauCS-Q8_K_P | empty | empty | **342B (real)** | 342 |
+| Qwen3.6-27B-HauhauCS-Q6_K_P | empty | empty | empty | 0 |
+| Qwen3.6-27B-HauhauCS-Q5_K_P | empty | empty | empty | 0 |
+| Qwen3.6-27B-HauhauCS-Q4_K_P | empty | empty | empty | 0 |
+| Qwen3.6-27B-HauhauCS-Q3_K_P | empty | empty | empty | 0 |
+| Qwen3.6-27B-HauhauCS-Q2_K_P | empty | empty | empty | 0 |
+| Qwen3.6-27B-HauhauCS-IQ4_XS | empty | empty | empty | 0 |
+| Qwen3.6-27B-HauhauCS-IQ3_M | empty | empty | empty | 0 |
+| Qwen3.6-27B-HauhauCS-IQ3_XS | empty | empty | empty | 0 |
+| Qwen3.6-27B-HauhauCS-IQ2_M | empty | empty | empty | 0 |
 
-`empty` = 0-byte patch (agent gave up without writing anything)
-`scaffold` = a 357-byte patch that's **byte-identical (md5 `62c7ecd1`)** across every "scaffold" cell — see below.
+### The one real attempt
 
-## What the "scaffold" patch actually contains
-
-Every non-empty pred file is the same 5-line stub:
+Q8_K_P on `flipt-io/flipt` produced exactly the right starting move:
 
 ```diff
-diff --git a/src/lib.rs b/src/lib.rs
-new file mode 100644
-+// AUTO-SCAFFOLD: fill in the implementation
-+// Task: You are working on a real codebase in the current directory. Resolve this issue:
-+
-+// TODO: implement the functions described in the task
-+// Then run cargo test to verify
+diff --git a/rpc/flipt/flipt.proto b/rpc/flipt/flipt.proto
+@@ -68,6 +68,7 @@ message EvaluationResponse {
+   string value = 8;
+   double request_duration_millis = 9;
+   string attachment = 10;
++  string reason = 11;
+ }
 ```
 
-It's emitted whether the underlying repo is Rust, Go, or JS. It
-overwrites or creates `src/lib.rs` regardless of the project's actual
-layout.
+The issue asked literally for `Add a "reason" field to the
+EvaluationResponse payload`. The model edited the right file, used
+the next available proto field number, and stopped. The full gold
+patch goes further (regenerated Go code, evaluation logic, tests)
+so this is necessary-but-not-sufficient — the eval would still
+score it as failed — but it's the only run on the entire sweep
+where the model touched the actual problem.
 
-## Where the scaffold comes from — and why this is a selfware bug
+There's also one **single-trial earlier verification run** outside
+the sweep where Q4_K_P produced a 3178-byte patch on qutebrowser:
+right file (`qutebrowser/misc/guiprocess.py`), right semantic idea
+(`if self.outcome.was_successful(): all_processes.pop(self.pid, None)`),
+but with the same edit duplicated 7× in a degenerate loop. That run
+isn't in the sweep table because the sweep's Q4_K_P × qutebrowser
+trial separately produced 0B. **Single-trial variance is large** on
+these long-horizon tasks.
 
-`src/agent/execution.rs:515` has an **ESCALATED progress guard**:
-when the agent accumulates more than ~20 consecutive read-only steps,
-selfware injects a synthetic `file_write` tool call that creates
-`src/lib.rs` with a hardcoded boilerplate, then sets
-`has_written_any_file = true` and rewrites the system directive to
-tell the model "now implement the full solution."
+## Why "empty" dominates
 
-The logic was designed for the SAB harness's small Rust scratch
-projects, where `src/lib.rs` is the right place to scaffold against a
-known-empty workspace. In any real-world codebase — including every
-SWE-bench Pro instance — it's harmful:
+A representative agent log from the sweep
+(Q4_K_P × qutebrowser, post-fix):
 
-- Wrong path: most repos have `src/lib.rs` at a different location
-  (or no Rust at all).
-- Wrong format: it writes Rust to Go, JS, Python repos.
-- Wrong scope: it dumps the user task as a comment instead of
-  reading existing code and editing it.
+```
+Step 9 ✗ PROGRESS GUARD: 7 consecutive read-only steps … blocked
+Step 11 ✗ PROGRESS GUARD: 8 consecutive read-only steps
+Step 12 ✗ RETRY SUPPRESSED: grep_search blocked
+Step 13–15 (more retry suppression)
+[exit, 0-byte patch]
+```
 
-This is what's blocking real evaluation against SWE-bench Pro for
-every quant we tested. The model itself never gets a chance to
-demonstrate capability on these tasks because selfware's safety
-fallback fires first.
+The model:
+1. Reads the failing test file.
+2. Greps for related symbols.
+3. Reads more code.
+4. Selfware's "read_loop" guard fires at ~step 8 and blocks further
+   read-only tools.
+5. Instead of pivoting to `file_edit`, the model retries the same
+   read tool, gets blocked again, and eventually exits.
 
-## What we still learned
+This is a real product issue separate from the scaffold bug — the
+model isn't internalising the directive to switch from reading to
+editing. Possible mitigations:
+- More forceful nudges in the system directive when the guard fires
+  ("you MUST call `file_edit` next; no other tool will be permitted").
+- Inject a synthetic example tool-call sequence in the directive so
+  the model has a template to copy.
+- Lower the read-only-step threshold for the warning, leave the hard
+  block at 12+ instead of 8.
 
-1. **The harness works end-to-end.** `scripts/swebench_pro/run.py`
-   correctly loads the dataset, clones each repo at the right
-   `base_commit`, builds a prompt from `problem_statement` /
-   `fail_to_pass` / `selected_test_files`, drives selfware via
-   subprocess, captures the diff, and saves a `.pred` per `(quant,
-   instance)`. Resumable via `--skip-existing`.
-2. **Function calling at 256k context survives parallelism.** 4
-   concurrent calculator-tool requests through llama-server's 2 slots
-   all returned correct tool calls. q8_0 KV cache + `--parallel 2`
-   keeps Q4_K_P at ~32 GB VRAM with 16 GB headroom.
-3. **The progress-guard scaffold needs a SAB-vs-real-codebase split.**
-   Today it triggers regardless of context.
-4. **Single-trial variance dominates** (just like the SAB sweep). With
-   the scaffold problem masking the model, we can't tell anything
-   below it about quant capability on Pro tasks.
+## What the harness now produces correctly
 
-## Recommended next steps
+After `642e7ed3`:
 
-1. **Fix the scaffold**, in priority order:
-   - Skip the scaffold when the workdir already has source files
-     (i.e. don't apply it to non-empty real repos).
-   - When the scaffold does fire, look at the project's existing
-     directory layout instead of hardcoding `src/lib.rs`.
-   - Make the scaffold opt-in via config rather than always-on.
-2. **Re-run this exact harness** after the fix; that gives us real
-   per-quant numbers.
-3. **Don't run the official SWE-bench Pro Docker eval yet** — applying
-   these synthetic patches inside the test images will return 0% for
-   every quant and waste a few hundred GB of pulls.
+- Real patches when the model engages (Q8_K_P × flipt example above).
+- Empty patches when the model gives up (no false-positive scaffold
+  pollution).
+- Per-pair `agent.log` preserved so any "the model tried but
+  selfware blocked it" pattern is inspectable.
+
+## What's still missing
+
+1. **Multi-trial averaging.** 33 single trials with this much
+   variance gives noisy data. 3-5× retries per (instance × quant)
+   would let us report median bytes / median pass and have actual
+   confidence intervals.
+2. **Docker eval.** We have not run the official
+   `swe_bench_pro_eval.py` — every patch is either empty or
+   incomplete, so the eval would return 0% across the board for ~50
+   GB of dockerhub pulls.
+3. **Read-loop UX fix.** Until the model reliably pivots to writing
+   when blocked from reading, even strong quants will look weak on
+   long-horizon tasks.
 
 ## Reproducing
 
@@ -116,9 +138,9 @@ python3 scripts/swebench_pro/run.py \
 ```
 
 Outputs land in `reports/swebench_pro/<timestamp>/runs/<quant>/<instance_id>/`:
-- `repo/` — the cloned + checked-out workdir
+- `repo/` — cloned + checked out workdir
 - `prompt.txt` — exactly what the agent saw
-- `instance.json` — the full HF dataset row
-- `agent.log` — full selfware stdout (very useful for diagnosing the scaffold)
-- `<instance_id>.pred` — the captured diff (input to `helper_code/gather_patches.py`)
+- `instance.json` — full HF dataset row
+- `agent.log` — full selfware stdout (very useful for diagnosing read_loop)
+- `<instance_id>.pred` — captured diff
 - `result.json` — exit code + wall time + patch size
