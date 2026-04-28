@@ -114,6 +114,10 @@ async fn main() -> Result<()> {
         hooks: Vec::new(),
         cache: Default::default(),
         plan_mode: false,
+        debug: Default::default(),
+        matched_profile: None,
+        matched_profile_applied: Vec::new(),
+        sources: Default::default(),
     };
 
     println!("Configuration:");

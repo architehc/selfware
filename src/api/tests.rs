@@ -3711,7 +3711,11 @@ async fn test_chat_with_profile_honors_native_function_calling_true() {
             &profile,
         )
         .await;
-    assert!(result.is_ok(), "chat_with_profile failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "chat_with_profile failed: {:?}",
+        result.err()
+    );
 
     let bodies = server.captured_request_bodies().await;
     assert!(!bodies.is_empty(), "no request captured");
@@ -3763,7 +3767,11 @@ async fn test_chat_with_profile_honors_native_function_calling_false() {
             &profile,
         )
         .await;
-    assert!(result.is_ok(), "chat_with_profile failed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "chat_with_profile failed: {:?}",
+        result.err()
+    );
 
     let bodies = server.captured_request_bodies().await;
     let body: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();

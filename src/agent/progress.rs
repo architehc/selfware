@@ -254,10 +254,7 @@ pub fn render_event_kv(event: &ProgressEvent) -> String {
             if args_short.is_empty() {
                 format!("kind=tool_call_started tool={}", tool)
             } else {
-                format!(
-                    "kind=tool_call_started tool={} args={}",
-                    tool, args_short
-                )
+                format!("kind=tool_call_started tool={} args={}", tool, args_short)
             }
         }
         ProgressEvent::ToolCallCompleted {

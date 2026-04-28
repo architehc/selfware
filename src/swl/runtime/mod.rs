@@ -6,6 +6,7 @@
 // pub mod guarded;
 // pub use guarded::{GuardedRuntimeBuilder, GuardedSwlRuntime};
 
+use crate::api::tool_calling::extract_tool_calls;
 use crate::api::{ApiClient, Message, ThinkingMode};
 use crate::errors::Result;
 use crate::observability::telemetry::{
@@ -16,7 +17,6 @@ use crate::orchestration::workflows::VarValue;
 use crate::swl::parser::ast::{AgentDefinition, SwlDocument, WorkflowDefinition, WorkflowType};
 use crate::swl::state::{StateBackendType, StateManager};
 use crate::swl::types::schema::StateSchema;
-use crate::api::tool_calling::extract_tool_calls;
 use crate::tools::ToolRegistry;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -733,8 +733,7 @@ impl SwlRuntime {
                 // values with synthetic ids, so we have a single code
                 // path for both native and text-parsed calls.
                 for tool_call in &extracted {
-                    let tool_result =
-                        self.execute_tool_call(tool_call, &available_tools).await;
+                    let tool_result = self.execute_tool_call(tool_call, &available_tools).await;
 
                     let result_content = match tool_result {
                         Ok(result) => result.to_string(),

@@ -34,8 +34,8 @@ pub use auto_config::*;
 pub use debug::DebugConfig;
 pub use model::*;
 pub use model_profiles::{
-    apply_profile as apply_model_defaults_profile, builtin_profiles, match_profile,
-    AppliedFields, ModelDefaultsProfile, UserExplicitFields,
+    apply_profile as apply_model_defaults_profile, builtin_profiles, match_profile, AppliedFields,
+    ModelDefaultsProfile, UserExplicitFields,
 };
 pub use provenance::{ConfigSource, ConfigSources};
 pub use resources::*;

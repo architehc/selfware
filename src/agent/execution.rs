@@ -297,8 +297,7 @@ impl Agent {
         // nudge / completion classifications are visible from the agent
         // decision branches below, but writing the artifact early ensures we
         // never lose it when later code panics or short-circuits unexpectedly.
-        let initial_decision = if parsed_tool_calls_for_artifact.is_empty()
-            && tool_calls.is_empty()
+        let initial_decision = if parsed_tool_calls_for_artifact.is_empty() && tool_calls.is_empty()
         {
             super::turn_artifacts::AgentDecision::NoToolCall
         } else {

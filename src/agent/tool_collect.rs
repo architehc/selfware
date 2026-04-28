@@ -51,17 +51,14 @@ impl Agent {
             name: None,
         };
 
-        let mut extracted =
-            extract_tool_calls(&msg, self.config.agent.native_function_calling);
+        let mut extracted = extract_tool_calls(&msg, self.config.agent.native_function_calling);
 
         // Validate native tool calls against the loaded schema for early
         // diagnostic.  Validation failures are logged but do not abort —
         // individual bad calls will still be rejected at dispatch time.
         if !extracted.is_empty() && msg.tool_calls.as_ref().is_some_and(|c| !c.is_empty()) {
             let defs = self.tools.definitions();
-            if let Err(e) =
-                crate::agent::tool_validator::validate_tool_calls(&extracted, &defs)
-            {
+            if let Err(e) = crate::agent::tool_validator::validate_tool_calls(&extracted, &defs) {
                 warn!("Native tool call batch validation failed: {}", e);
             }
             extracted.retain(|tc| match tc.validate_structure() {
@@ -91,7 +88,10 @@ impl Agent {
         }
 
         if !extracted.is_empty() {
-            info!("Extracted {} tool call(s) via unified extractor", extracted.len());
+            info!(
+                "Extracted {} tool call(s) via unified extractor",
+                extracted.len()
+            );
         }
 
         extracted

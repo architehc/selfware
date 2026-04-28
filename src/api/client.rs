@@ -209,10 +209,7 @@ impl ApiClient {
         let resp = self.send_with_retry(&body).await?;
         let elapsed_ms = started.elapsed().as_millis() as u64;
 
-        let finish_reason = resp
-            .choices
-            .first()
-            .and_then(|c| c.finish_reason.clone());
+        let finish_reason = resp.choices.first().and_then(|c| c.finish_reason.clone());
 
         let meta = ChatMetadata {
             request_body: body,

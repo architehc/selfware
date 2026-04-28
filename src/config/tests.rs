@@ -4231,10 +4231,7 @@ model = "qwen3.6-27b-q4kp"
         .get("chat_template_kwargs")
         .and_then(|v| v.as_object())
         .expect("chat_template_kwargs object");
-    assert_eq!(
-        ctk.get("preserve_thinking"),
-        Some(&serde_json::json!(true))
-    );
+    assert_eq!(ctk.get("preserve_thinking"), Some(&serde_json::json!(true)));
 }
 
 /// Explicit user config must beat the matched profile: a user who sets
@@ -4311,4 +4308,3 @@ model = "llama-3-70b-instruct"
     assert!(config.matched_profile.is_none());
     assert!(config.matched_profile_applied.is_empty());
 }
-

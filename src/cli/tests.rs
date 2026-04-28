@@ -314,11 +314,19 @@ fn config_load_selfware_config_env_overrides_local_selfware_toml_with_workdir() 
 
     let dir_a = tempfile::tempdir().unwrap();
     let cfg_a = dir_a.path().join("selfware.toml");
-    std::fs::write(&cfg_a, "model = \"A-model\"\nendpoint = \"http://a:1/v1\"\n").unwrap();
+    std::fs::write(
+        &cfg_a,
+        "model = \"A-model\"\nendpoint = \"http://a:1/v1\"\n",
+    )
+    .unwrap();
 
     let dir_b = tempfile::tempdir().unwrap();
     let cfg_b = dir_b.path().join("selfware.toml");
-    std::fs::write(&cfg_b, "model = \"B-model\"\nendpoint = \"http://b:1/v1\"\n").unwrap();
+    std::fs::write(
+        &cfg_b,
+        "model = \"B-model\"\nendpoint = \"http://b:1/v1\"\n",
+    )
+    .unwrap();
 
     std::env::set_var("SELFWARE_CONFIG", cfg_b.to_str().unwrap());
 
@@ -348,8 +356,7 @@ fn config_load_selfware_config_env_overrides_local_selfware_toml_with_workdir() 
     let cfg_c = dir_c.path().join("explicit.toml");
     std::fs::write(&cfg_c, "model = \"C-model\"\n").unwrap();
 
-    let resolved =
-        resolve_config_path(Some(cfg_c.to_str().unwrap()), true, Some(dir_a.path()));
+    let resolved = resolve_config_path(Some(cfg_c.to_str().unwrap()), true, Some(dir_a.path()));
     let resolved_path = resolved.unwrap();
     let cfg = Config::load(Some(&resolved_path)).unwrap();
     assert_eq!(
@@ -406,7 +413,10 @@ fn bench_legacy_form_still_parses() {
             concurrent,
             ..
         } => {
-            assert!(command.is_none(), "legacy form should leave subcommand=None");
+            assert!(
+                command.is_none(),
+                "legacy form should leave subcommand=None"
+            );
             assert_eq!(suite, "throughput");
             assert_eq!(concurrent, 4); // default
         }
@@ -416,8 +426,8 @@ fn bench_legacy_form_still_parses() {
 
 #[test]
 fn bench_swebench_pro_basic_parsing() {
-    use clap::Parser;
     use args::BenchCommand;
+    use clap::Parser;
     let cli = Cli::try_parse_from([
         "selfware",
         "bench",
@@ -462,8 +472,8 @@ fn bench_swebench_pro_basic_parsing() {
 
 #[test]
 fn bench_swebench_pro_defaults() {
-    use clap::Parser;
     use args::BenchCommand;
+    use clap::Parser;
     let cli = Cli::try_parse_from(["selfware", "bench", "swebench-pro"]).unwrap();
     match cli.command.unwrap() {
         Commands::Bench { command, .. } => match command.unwrap() {
@@ -484,8 +494,8 @@ fn bench_swebench_pro_defaults() {
 
 #[test]
 fn bench_swebench_pro_instance_ids_overrides_count() {
-    use clap::Parser;
     use args::BenchCommand;
+    use clap::Parser;
     let cli = Cli::try_parse_from([
         "selfware",
         "bench",
@@ -507,8 +517,8 @@ fn bench_swebench_pro_instance_ids_overrides_count() {
 
 #[test]
 fn bench_other_subcommands_parse_for_help_visibility() {
-    use clap::Parser;
     use args::BenchCommand;
+    use clap::Parser;
     for sub in ["throughput", "multilang", "browser", "long-run"] {
         let cli = Cli::try_parse_from(["selfware", "bench", sub])
             .unwrap_or_else(|e| panic!("failed to parse `bench {}`: {}", sub, e));

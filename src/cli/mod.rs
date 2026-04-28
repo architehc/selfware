@@ -367,10 +367,7 @@ pub async fn run() -> Result<()> {
     // configuration as loaded from disk + env vars. Running calibration here
     // would overwrite explicit user values (and inflate provenance), so we
     // skip it for that subcommand.
-    let skip_calibration = matches!(
-        cli.command,
-        Some(Commands::Config { .. })
-    );
+    let skip_calibration = matches!(cli.command, Some(Commands::Config { .. }));
     if !skip_calibration {
         if let Err(e) = crate::config::unpack::auto_calibrate(&mut config).await {
             tracing::warn!("Auto-calibration failed: {}", e);
@@ -399,9 +396,10 @@ pub async fn run() -> Result<()> {
         } else {
             "--mode"
         };
-        config
-            .sources
-            .set("execution_mode", crate::config::ConfigSource::CliArg(flag.into()));
+        config.sources.set(
+            "execution_mode",
+            crate::config::ConfigSource::CliArg(flag.into()),
+        );
     }
 
     if config.execution_mode == ExecutionMode::Daemon {
@@ -446,33 +444,38 @@ pub async fn run() -> Result<()> {
 
     // Record CLI-arg provenance for the override flags.
     if cli.compact {
-        config
-            .sources
-            .set("ui.compact_mode", crate::config::ConfigSource::CliArg("--compact".into()));
+        config.sources.set(
+            "ui.compact_mode",
+            crate::config::ConfigSource::CliArg("--compact".into()),
+        );
     }
     if cli.verbose {
-        config
-            .sources
-            .set("ui.verbose_mode", crate::config::ConfigSource::CliArg("--verbose".into()));
+        config.sources.set(
+            "ui.verbose_mode",
+            crate::config::ConfigSource::CliArg("--verbose".into()),
+        );
     }
     if cli.show_tokens {
-        config
-            .sources
-            .set("ui.show_tokens", crate::config::ConfigSource::CliArg("--show-tokens".into()));
+        config.sources.set(
+            "ui.show_tokens",
+            crate::config::ConfigSource::CliArg("--show-tokens".into()),
+        );
     }
 
     // Apply plan mode from CLI
     if cli.plan {
         config.plan_mode = true;
-        config
-            .sources
-            .set("plan_mode", crate::config::ConfigSource::CliArg("--plan".into()));
+        config.sources.set(
+            "plan_mode",
+            crate::config::ConfigSource::CliArg("--plan".into()),
+        );
     }
     // Record `--debug` provenance when the flag is present.
     if cli.debug.is_some() {
-        config
-            .sources
-            .set("debug", crate::config::ConfigSource::CliArg("--debug".into()));
+        config.sources.set(
+            "debug",
+            crate::config::ConfigSource::CliArg("--debug".into()),
+        );
     }
 
     // Initialize output control with merged settings
@@ -1888,13 +1891,11 @@ async fn handle_command(
             }
         }
 
-        Commands::Config { command } => {
-            match command {
-                ConfigCommands::Show { json } => {
-                    config_show(&config, json)?;
-                }
+        Commands::Config { command } => match command {
+            ConfigCommands::Show { json } => {
+                config_show(&config, json)?;
             }
-        }
+        },
 
         Commands::McpServer => {
             crate::mcp::server::run_mcp_server().await?;
@@ -2926,10 +2927,7 @@ pub(crate) fn config_show(config: &Config, json: bool) -> Result<()> {
 /// `swebench-pro` is implemented; the other planned subcommands stub with a
 /// clear "not yet implemented" error so users see them in `--help` without
 /// hitting an `unimplemented!()` panic.
-async fn dispatch_bench_subcommand(
-    sub: args::BenchCommand,
-    _config: &Config,
-) -> Result<()> {
+async fn dispatch_bench_subcommand(sub: args::BenchCommand, _config: &Config) -> Result<()> {
     use args::BenchCommand;
 
     match sub {
@@ -2996,8 +2994,9 @@ async fn run_swebench_pro_cli(args: args::SwebenchProArgs) -> Result<()> {
 
     let selfware_bin = match args.selfware_bin {
         Some(p) => PathBuf::from(p),
-        None => std::env::current_exe()
-            .unwrap_or_else(|_| PathBuf::from("target/release/selfware")),
+        None => {
+            std::env::current_exe().unwrap_or_else(|_| PathBuf::from("target/release/selfware"))
+        }
     };
 
     let mut llama_opts: crate::bench_harness::swebench_pro::harness::LlamaServerOpts =

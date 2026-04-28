@@ -96,10 +96,7 @@ fn record_toml_sources(
         };
         match v {
             toml::Value::Table(t) => {
-                sources.set(
-                    dotted.clone(),
-                    ConfigSource::ConfigFile(path.clone()),
-                );
+                sources.set(dotted.clone(), ConfigSource::ConfigFile(path.clone()));
                 record_toml_sources(sources, t, path, &dotted);
             }
             _ => {
@@ -233,12 +230,7 @@ impl Config {
                         if let Ok(toml::Value::Table(table)) =
                             toml::from_str::<toml::Value>(&content)
                         {
-                            record_toml_sources(
-                                &mut sources,
-                                &table,
-                                &PathBuf::from(*p),
-                                "",
-                            );
+                            record_toml_sources(&mut sources, &table, &PathBuf::from(*p), "");
                         }
                         raw_toml_content = Some(content);
                         loaded = Some(cfg);

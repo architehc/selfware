@@ -130,11 +130,7 @@ impl LlamaServer {
 
         // Boot failed — drop the server and propagate.
         drop(server);
-        bail!(
-            "llama-server boot timed out (alias={}, pid={})",
-            alias,
-            pid
-        );
+        bail!("llama-server boot timed out (alias={}, pid={})", alias, pid);
     }
 }
 
@@ -370,9 +366,7 @@ mod tests {
     #[test]
     fn opts_default_uses_models_subdir() {
         let opts = LlamaServerOpts::default();
-        assert!(opts
-            .models_dir
-            .ends_with(Path::new("models/qwen36-quants")));
+        assert!(opts.models_dir.ends_with(Path::new("models/qwen36-quants")));
         assert_eq!(opts.port, 8000);
         assert_eq!(opts.parallel, 2);
         assert_eq!(opts.ctx, 262_144);

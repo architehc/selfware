@@ -61,10 +61,7 @@ pub fn attach_tools(
 ///
 /// In all cases the returned `ToolCall` values are normalized OpenAI-style
 /// objects (id/type/function) so downstream code never needs to distinguish.
-pub fn extract_tool_calls(
-    message: &Message,
-    _native_function_calling: bool,
-) -> Vec<ToolCall> {
+pub fn extract_tool_calls(message: &Message, _native_function_calling: bool) -> Vec<ToolCall> {
     if let Some(native) = &message.tool_calls {
         if !native.is_empty() {
             return native.clone();
@@ -235,8 +232,7 @@ mod tests {
         assert_eq!(calls[0].function.name, "shell_exec");
         assert!(calls[0].id.starts_with("parsed_"));
         // Arguments should round-trip as valid JSON
-        let parsed: serde_json::Value =
-            serde_json::from_str(&calls[0].function.arguments).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&calls[0].function.arguments).unwrap();
         assert_eq!(parsed["command"], "ls -la");
     }
 

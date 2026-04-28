@@ -2496,7 +2496,6 @@ impl Agent {
         args: &Value,
         start_time: std::time::Instant,
     ) -> Result<(bool, String, String)> {
-
         // Intercept context management tools — they operate on agent state,
         // not the filesystem, so they bypass the normal tool registry.
         if crate::tools::context::is_context_tool(name) {
@@ -4144,10 +4143,7 @@ mod tests {
             "shell_exec",
             Some("rm /tmp/foo")
         ));
-        assert!(classify_shell_as_mutating(
-            "shell_exec",
-            Some("cargo fmt")
-        ));
+        assert!(classify_shell_as_mutating("shell_exec", Some("cargo fmt")));
         assert!(classify_shell_as_mutating(
             "shell_exec",
             Some("mv a.txt b.txt")

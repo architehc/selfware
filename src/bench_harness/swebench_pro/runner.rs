@@ -188,9 +188,14 @@ fn run_one(
     let pred_path = trial_dir.join(format!("{}.pred", inst.instance_id));
 
     if opts.skip_existing && pred_path.exists() {
-        eprintln!("  → {} (trial {}): SKIP (pred exists)", inst.instance_id, trial);
+        eprintln!(
+            "  → {} (trial {}): SKIP (pred exists)",
+            inst.instance_id, trial
+        );
         // Reconstruct minimal record from the existing pred so aggregation works.
-        let bytes = std::fs::metadata(&pred_path).map(|m| m.len() as usize).unwrap_or(0);
+        let bytes = std::fs::metadata(&pred_path)
+            .map(|m| m.len() as usize)
+            .unwrap_or(0);
         let lines = std::fs::read_to_string(&pred_path)
             .map(|s| s.lines().count())
             .unwrap_or(0);

@@ -176,7 +176,8 @@ impl FailureMode {
                             "wall-clock budget exhausted with {} mutating tool calls completed",
                             mutating
                         ),
-                        advice: "increase the wall-clock budget or shrink the task scope".to_string(),
+                        advice: "increase the wall-clock budget or shrink the task scope"
+                            .to_string(),
                     };
                 }
                 if reason.contains("panic")
@@ -185,11 +186,9 @@ impl FailureMode {
                 {
                     return FailureMode {
                         kind: FailureKind::SelfwareError,
-                        evidence: format!(
-                            "selfware-side error: {}",
-                            truncate(&reason, 160)
-                        ),
-                        advice: "file a bug with the trace attached; this is not a model failure".to_string(),
+                        evidence: format!("selfware-side error: {}", truncate(&reason, 160)),
+                        advice: "file a bug with the trace attached; this is not a model failure"
+                            .to_string(),
                     };
                 }
                 // Fall through: treat as a classified failure based on counters.
@@ -282,7 +281,8 @@ fn classify_max_iter_failure(
                 "progress guard fired {} time(s); {} read/verify calls but 0 mutating calls",
                 progress_guard, total_calls
             ),
-            advice: "raise the read-only block threshold or feed the model an explicit edit hint".to_string(),
+            advice: "raise the read-only block threshold or feed the model an explicit edit hint"
+                .to_string(),
         };
     }
 
@@ -383,9 +383,8 @@ mod tests {
         let mut agent = make_agent().await;
         agent.test_set_mutating_count(0);
         agent.test_set_total_tool_calls(4);
-        agent.test_set_last_assistant_response(
-            "Final answer: implementation complete.".to_string(),
-        );
+        agent
+            .test_set_last_assistant_response("Final answer: implementation complete.".to_string());
 
         let mode = FailureMode::classify(&agent, RunOutcome::NaturalCompletion);
         assert_eq!(mode.kind, FailureKind::FakeComplete);

@@ -84,10 +84,7 @@ pub fn sanitize_request_body(body: &mut serde_json::Value) {
         // Common nested shapes: headers / auth.
         if let Some(headers) = obj.get_mut("headers").and_then(|h| h.as_object_mut()) {
             for (k, v) in headers.iter_mut() {
-                if SECRET_KEYS
-                    .iter()
-                    .any(|s| k.eq_ignore_ascii_case(s))
-                {
+                if SECRET_KEYS.iter().any(|s| k.eq_ignore_ascii_case(s)) {
                     *v = serde_json::Value::String("***".into());
                 }
             }
@@ -215,7 +212,11 @@ mod tests {
         let artifact = sample_artifact();
         write_artifact(dir.path(), &artifact);
         let written = artifact_dir(dir.path()).join("turn_0001.json");
-        assert!(written.exists(), "turn_0001.json should exist at {:?}", written);
+        assert!(
+            written.exists(),
+            "turn_0001.json should exist at {:?}",
+            written
+        );
         let content = std::fs::read_to_string(&written).expect("read written artifact");
         let _decoded: TurnArtifact =
             serde_json::from_str(&content).expect("written artifact must be valid JSON");

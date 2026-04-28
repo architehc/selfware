@@ -140,10 +140,7 @@ mod tests {
 
     #[test]
     fn coerce_handles_plain_string() {
-        assert_eq!(
-            coerce_string_list(&json!("solo")),
-            vec!["solo".to_string()]
-        );
+        assert_eq!(coerce_string_list(&json!("solo")), vec!["solo".to_string()]);
     }
 
     #[test]

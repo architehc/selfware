@@ -163,9 +163,8 @@ impl Agent {
         // first LLM call of a task).
         self.turn_artifact_seq += 1;
         let plan_step_idx = self.turn_artifact_seq;
-        let parsed_calls_for_artifact: Vec<crate::api::types::ToolCall> = native_tool_calls
-            .clone()
-            .unwrap_or_default();
+        let parsed_calls_for_artifact: Vec<crate::api::types::ToolCall> =
+            native_tool_calls.clone().unwrap_or_default();
         let plan_decision = if parsed_calls_for_artifact.is_empty() {
             super::turn_artifacts::AgentDecision::NoToolCall
         } else {

@@ -233,13 +233,9 @@ pub fn apply_profile(
 
     // Merge extra_body — only keys NOT already present in the user's map.
     if let Value::Object(profile_extra) = &profile.extra_body {
-        let dest = config
-            .extra_body
-            .get_or_insert_with(Map::new);
+        let dest = config.extra_body.get_or_insert_with(Map::new);
         for (k, v) in profile_extra {
-            if !user_explicit.extra_body_keys.iter().any(|uk| uk == k)
-                && !dest.contains_key(k)
-            {
+            if !user_explicit.extra_body_keys.iter().any(|uk| uk == k) && !dest.contains_key(k) {
                 dest.insert(k.clone(), v.clone());
                 applied.extra_body_keys.push(k.clone());
             }
@@ -426,7 +422,9 @@ model = "qwen3.6-27b"
         assert!(applied.native_function_calling);
         assert!(applied.temperature);
         assert!(applied.max_tokens);
-        assert!(applied.extra_body_keys.contains(&"presence_penalty".to_string()));
+        assert!(applied
+            .extra_body_keys
+            .contains(&"presence_penalty".to_string()));
     }
 
     #[test]
@@ -460,9 +458,7 @@ model = "qwen3.6-27b"
         assert!(!applied.native_function_calling);
         assert!(!applied.temperature);
         assert!(!applied.max_tokens);
-        assert!(applied
-            .extra_body_keys
-            .contains(&"top_p".to_string()));
+        assert!(applied.extra_body_keys.contains(&"top_p".to_string()));
         assert!(!applied
             .extra_body_keys
             .contains(&"presence_penalty".to_string()));

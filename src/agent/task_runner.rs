@@ -1008,11 +1008,7 @@ impl Agent {
                     });
                     if mode == LoopMode::NewTask {
                         self.emit_event(AgentEvent::Error {
-                            message: format!(
-                                "Task aborted ({}): {}",
-                                fm.kind.tag(),
-                                fm.evidence
-                            ),
+                            message: format!("Task aborted ({}): {}", fm.kind.tag(), fm.evidence),
                         });
                     }
                     self.record_task_outcome(

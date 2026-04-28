@@ -535,7 +535,10 @@ pub(crate) enum BenchCommand {
 #[derive(clap::Args, Clone, Debug)]
 pub(crate) struct SwebenchProArgs {
     /// Comma-separated quant labels (or 'all' for every catalog entry)
-    #[arg(long, default_value = "Qwen3.6-35B-A3B-Q3_K_XL,Qwen3.6-27B-HauhauCS-Q4_K_P,Qwen3.6-27B-HauhauCS-IQ4_XS,Qwen3.6-27B-HauhauCS-Q2_K_P")]
+    #[arg(
+        long,
+        default_value = "Qwen3.6-35B-A3B-Q3_K_XL,Qwen3.6-27B-HauhauCS-Q4_K_P,Qwen3.6-27B-HauhauCS-IQ4_XS,Qwen3.6-27B-HauhauCS-Q2_K_P"
+    )]
     pub quants: String,
 
     /// How many SWE-bench Pro instances to subset (sorted by problem_statement length)

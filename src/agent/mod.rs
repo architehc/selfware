@@ -97,10 +97,10 @@ mod session_log;
 mod streaming;
 mod task_runner;
 mod tool_collect;
-pub mod turn_artifacts;
 mod tool_dispatch;
 mod tool_validator;
 pub mod tui_events;
+pub mod turn_artifacts;
 mod verification;
 
 use crate::errors::{is_confirmation_error, is_no_action_error};
@@ -1006,10 +1006,7 @@ To call a tool, use this EXACT XML structure:
 
     /// Swap in a custom [`progress::ProgressEmitter`].  Used by the headless
     /// non-TUI path to attach a [`progress::StderrProgressEmitter`].
-    pub fn with_progress_emitter(
-        mut self,
-        emitter: Arc<dyn progress::ProgressEmitter>,
-    ) -> Self {
+    pub fn with_progress_emitter(mut self, emitter: Arc<dyn progress::ProgressEmitter>) -> Self {
         self.progress_emitter = emitter;
         self
     }
@@ -1888,8 +1885,7 @@ To call a tool, use this EXACT XML structure:
     }
     #[cfg(test)]
     pub(super) fn test_set_permanently_blocked(&mut self, n: usize) {
-        self.permanently_blocked_tool_calls =
-            (0..n).map(|i| format!("tool_{}", i)).collect();
+        self.permanently_blocked_tool_calls = (0..n).map(|i| format!("tool_{}", i)).collect();
     }
     #[cfg(test)]
     pub(super) fn test_set_prefill_400s(&mut self, n: usize) {
