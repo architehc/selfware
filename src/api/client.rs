@@ -20,6 +20,24 @@ use super::{
     merge_extra_body, LlmClient, ThinkingMode,
 };
 
+/// Print a request body to stderr when `SELFWARE_DEBUG_REQUEST` is set.
+///
+/// Backwards-compatible with the previous "set the env var, grep stderr"
+/// debug workflow.  The body is sanitized of obvious credential locations
+/// before printing — defence in depth, since the JSON request body should
+/// never carry an API key in normal operation (creds live on headers).
+fn maybe_log_request_body(body: &serde_json::Value, label: &str) {
+    if std::env::var("SELFWARE_DEBUG_REQUEST").is_err() {
+        return;
+    }
+    let mut sanitized = body.clone();
+    crate::agent::turn_artifacts::sanitize_request_body(&mut sanitized);
+    match serde_json::to_string_pretty(&sanitized) {
+        Ok(s) => eprintln!("=== SELFWARE_DEBUG_REQUEST ({label}) ===\n{s}\n=== END REQUEST ==="),
+        Err(e) => eprintln!("SELFWARE_DEBUG_REQUEST: failed to format body: {e}"),
+    }
+}
+
 /// Retry configuration for API calls
 #[derive(Clone, Debug)]
 pub struct RetryConfig {
@@ -167,9 +185,55 @@ impl ApiClient {
         tools: Option<Vec<ToolDefinition>>,
         thinking: ThinkingMode,
     ) -> Result<ChatResponse> {
+        let (resp, _meta) = self.chat_with_meta(messages, tools, thinking).await?;
+        Ok(resp)
+    }
+
+    /// Like [`chat`], but also returns the exact request body that was sent
+    /// and HTTP-layer timing.  Used by the per-turn debug capture.
+    pub async fn chat_with_meta(
+        &self,
+        messages: Vec<Message>,
+        tools: Option<Vec<ToolDefinition>>,
+        thinking: ThinkingMode,
+    ) -> Result<(ChatResponse, ChatMetadata)> {
+        let body = self.build_chat_body(messages, tools, thinking, false)?;
+        maybe_log_request_body(&body, "chat");
+
+        let started = std::time::Instant::now();
+        let resp = self.send_with_retry(&body).await?;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+
+        let finish_reason = resp
+            .choices
+            .first()
+            .and_then(|c| c.finish_reason.clone());
+
+        let meta = ChatMetadata {
+            request_body: body,
+            elapsed_ms,
+            finish_reason,
+            prompt_tokens: Some(resp.usage.prompt_tokens as u32),
+            completion_tokens: Some(resp.usage.completion_tokens as u32),
+        };
+        Ok((resp, meta))
+    }
+
+    /// Build a non-streaming or streaming chat-completion request body.
+    ///
+    /// Encapsulates message normalization, context-budget enforcement, tool
+    /// attachment, thinking-mode injection and `extra_body` merging.  The
+    /// returned `serde_json::Value` is exactly what would be POSTed to the
+    /// backend (sans HTTP headers — credentials live there, not in the body).
+    fn build_chat_body(
+        &self,
+        messages: Vec<Message>,
+        tools: Option<Vec<ToolDefinition>>,
+        thinking: ThinkingMode,
+        stream: bool,
+    ) -> Result<serde_json::Value> {
         let mut messages = messages;
         maybe_prepend_disabled_thinking_instruction(&mut messages, &thinking);
-
         canonicalize_message_order(&mut messages);
 
         let message_tokens = estimate_messages_tokens(&messages);
@@ -202,7 +266,7 @@ impl ApiClient {
             "messages": messages,
             "temperature": self.config.temperature,
             "max_tokens": max_tokens,
-            "stream": false,
+            "stream": stream,
         });
 
         attach_tools_to_body(&mut body, &tools, self.config.agent.native_function_calling);
@@ -217,10 +281,14 @@ impl ApiClient {
         merge_extra_body(
             &mut body,
             self.config.extra_body.as_ref(),
-            "default chat request",
+            if stream {
+                "streaming chat request"
+            } else {
+                "default chat request"
+            },
         )?;
 
-        self.send_with_retry(&body).await
+        Ok(body)
     }
 
     pub async fn chat_stream(
@@ -229,77 +297,52 @@ impl ApiClient {
         tools: Option<Vec<ToolDefinition>>,
         thinking: ThinkingMode,
     ) -> Result<StreamingResponse> {
-        self.circuit_breaker
-            .call(|| self.chat_stream_inner(messages.clone(), tools.clone(), thinking))
-            .await
-            .map_err(|e| match e {
-                CircuitBreakerError::CircuitOpen => {
-                    ApiError::Network("Circuit breaker is open - API is unavailable".to_string())
-                        .into()
-                }
-                CircuitBreakerError::OperationFailed(err) => err,
-            })
+        let (stream, _meta) = self
+            .chat_stream_with_meta(messages, tools, thinking)
+            .await?;
+        Ok(stream)
     }
 
-    async fn chat_stream_inner(
+    /// Like [`chat_stream`], but also returns the exact request body that was
+    /// sent.  Used by the per-turn debug capture; the caller is responsible
+    /// for filling in `finish_reason` / token usage from the SSE stream.
+    pub async fn chat_stream_with_meta(
         &self,
         messages: Vec<Message>,
         tools: Option<Vec<ToolDefinition>>,
         thinking: ThinkingMode,
-    ) -> Result<StreamingResponse> {
-        let mut messages = messages;
-        maybe_prepend_disabled_thinking_instruction(&mut messages, &thinking);
+    ) -> Result<(StreamingResponse, ChatMetadata)> {
+        let body = self.build_chat_body(messages, tools, thinking, true)?;
+        maybe_log_request_body(&body, "chat_stream");
 
-        canonicalize_message_order(&mut messages);
+        let started = std::time::Instant::now();
+        let body_for_meta = body.clone();
+        let stream = self
+            .circuit_breaker
+            .call(|| self.chat_stream_send(body.clone()))
+            .await
+            .map_err(|e| -> anyhow::Error {
+                match e {
+                    CircuitBreakerError::CircuitOpen => ApiError::Network(
+                        "Circuit breaker is open - API is unavailable".to_string(),
+                    )
+                    .into(),
+                    CircuitBreakerError::OperationFailed(err) => err,
+                }
+            })?;
+        let elapsed_ms = started.elapsed().as_millis() as u64;
 
-        let message_tokens = estimate_messages_tokens(&messages);
-        let tool_tokens = tools
-            .as_ref()
-            .map(|t| estimate_tool_definitions_tokens(t))
-            .unwrap_or(0);
-        let input_tokens = message_tokens + tool_tokens;
+        let meta = ChatMetadata {
+            request_body: body_for_meta,
+            elapsed_ms,
+            finish_reason: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+        };
+        Ok((stream, meta))
+    }
 
-        let hard_limit = self.config.context_length;
-        let min_output = 512_usize;
-        if input_tokens + min_output > hard_limit {
-            let msg = format!(
-                "input_tokens ({}) + min_output ({}) > context_length ({}). \
-                 Messages: {} tokens, Tools: {} tokens. Context trimming failed to stay within limits.",
-                input_tokens, min_output, hard_limit, message_tokens, tool_tokens
-            );
-            tracing::error!("CONTEXT OVERFLOW: {}", msg);
-            return Err(ApiError::ContextOverflow(msg).into());
-        }
-
-        let available_for_output = hard_limit.saturating_sub(input_tokens);
-        let max_tokens = self
-            .config
-            .max_tokens
-            .min(available_for_output.max(min_output));
-
-        let mut body = serde_json::json!({
-            "model": self.config.model,
-            "messages": messages,
-            "temperature": self.config.temperature,
-            "max_tokens": max_tokens,
-            "stream": true,
-        });
-
-        attach_tools_to_body(&mut body, &tools, self.config.agent.native_function_calling);
-
-        if let ThinkingMode::Budget(tokens) = thinking {
-            body["thinking"] = serde_json::json!({
-                "type": "enabled",
-                "budget_tokens": tokens
-            });
-        }
-
-        merge_extra_body(
-            &mut body,
-            self.config.extra_body.as_ref(),
-            "streaming chat request",
-        )?;
-
+    async fn chat_stream_send(&self, body: serde_json::Value) -> Result<StreamingResponse> {
         let url = format!("{}/chat/completions", self.base_url);
         debug!("Starting streaming request to {}", url);
 
@@ -523,7 +566,15 @@ impl ApiClient {
             "stream": false,
         });
 
-        attach_tools_to_body(&mut body, &tools, false);
+        // Resolve native FC for this profile: an explicit profile setting
+        // wins, otherwise inherit the parent client's
+        // `agent.native_function_calling`. Previously this path was
+        // hard-coded to `false`, which silently disabled native FC for
+        // any swarm code that routed through a `ModelProfile` even when
+        // the parent agent had it enabled. See `src/api/tool_calling.rs`.
+        let native_fc =
+            profile.effective_native_function_calling(self.config.agent.native_function_calling);
+        attach_tools_to_body(&mut body, &tools, native_fc);
 
         if let ThinkingMode::Budget(tokens) = thinking {
             body["thinking"] = serde_json::json!({

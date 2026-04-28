@@ -416,6 +416,9 @@ fn test_config_full_roundtrip() {
         hooks: Vec::new(),
         plan_mode: false,
         concurrency: crate::config::ConcurrencyConfig::default(),
+        matched_profile: None,
+        matched_profile_applied: Vec::new(),
+        sources: crate::config::ConfigSources::new(),
     };
 
     let toml_str = toml::to_string(&config).unwrap();
@@ -1378,6 +1381,7 @@ fn test_model_profile_clone() {
         modalities: vec!["text".to_string()],
         context_length: 4096,
         extra_body: None,
+        native_function_calling: None,
     };
     let cloned = profile.clone();
     assert_eq!(cloned.endpoint, profile.endpoint);
@@ -1397,6 +1401,7 @@ fn test_model_profile_serialize_roundtrip() {
         modalities: vec!["text".to_string(), "vision".to_string()],
         context_length: 16384,
         extra_body: None,
+        native_function_calling: None,
     };
     let toml_str = toml::to_string(&profile).unwrap();
     let parsed: ModelProfile = toml::from_str(&toml_str).unwrap();
@@ -1418,6 +1423,7 @@ fn test_model_profile_debug_format() {
         modalities: vec!["text".to_string()],
         context_length: 4096,
         extra_body: None,
+        native_function_calling: None,
     };
     let debug = format!("{:?}", profile);
     assert!(debug.contains("ModelProfile"));
@@ -1497,6 +1503,7 @@ fn test_resolve_model_default() {
             modalities: vec!["text".to_string()],
             context_length: 131072,
             extra_body: None,
+            native_function_calling: None,
         },
     );
     let profile = config.resolve_model(None);
@@ -1518,6 +1525,7 @@ fn test_resolve_model_by_name() {
             modalities: vec!["text".to_string(), "vision".to_string()],
             context_length: 8192,
             extra_body: None,
+            native_function_calling: None,
         },
     );
     let profile = config.resolve_model(Some("vision"));
@@ -1539,6 +1547,7 @@ fn test_resolve_model_fallback_to_default() {
             modalities: vec!["text".to_string()],
             context_length: 131072,
             extra_body: None,
+            native_function_calling: None,
         },
     );
     let profile = config.resolve_model(Some("nonexistent"));
@@ -1567,6 +1576,7 @@ fn test_resolve_model_none_with_no_default() {
             modalities: vec!["text".to_string()],
             context_length: 131072,
             extra_body: None,
+            native_function_calling: None,
         },
     );
     let profile = config.resolve_model(None);
@@ -1799,7 +1809,11 @@ fn test_config_load_empty_file() {
     let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
     assert_eq!(config.endpoint, "http://127.0.0.1:1234/v1");
     assert_eq!(config.model, "qwen3.5-27b");
-    assert_eq!(config.max_tokens, 65536);
+    // The default model "qwen3.5-27b" matches the built-in qwen3.5-* profile,
+    // which applies max_tokens=32768.  Without the profile this would be the
+    // hard-coded default (65536).
+    assert_eq!(config.max_tokens, 32768);
+    assert_eq!(config.matched_profile.as_deref(), Some("qwen3.5"));
     assert!(config.models.contains_key("default"));
 }
 
@@ -2522,6 +2536,7 @@ fn test_config_full_roundtrip_with_models() {
             modalities: vec!["text".to_string()],
             context_length: 32768,
             extra_body: None,
+            native_function_calling: None,
         },
     );
     models.insert(
@@ -2535,6 +2550,7 @@ fn test_config_full_roundtrip_with_models() {
             modalities: vec!["text".to_string(), "vision".to_string()],
             context_length: 16384,
             extra_body: None,
+            native_function_calling: None,
         },
     );
 
@@ -3792,6 +3808,7 @@ fn test_model_profile_supports_vision() {
         modalities: vec!["text".to_string(), "vision".to_string()],
         context_length: 8192,
         extra_body: None,
+        native_function_calling: None,
     };
     assert!(profile_with_vision.supports_vision());
 
@@ -3822,6 +3839,7 @@ fn test_model_profile_extra_body() {
         modalities: vec!["text".to_string()],
         context_length: 8192,
         extra_body: Some(extra),
+        native_function_calling: None,
     };
 
     assert!(profile.extra_body.is_some());
@@ -4166,3 +4184,130 @@ fn test_validate_invalid_glob_pattern_unclosed() {
     let err = config.validate().unwrap_err();
     assert!(err.to_string().contains("Invalid glob"));
 }
+
+// =========================================================================
+// Model-defaults profile loader integration smoke tests
+// =========================================================================
+
+/// Spec smoke test: a tmpdir selfware.toml with just `endpoint` and
+/// `model = "qwen3.6-27b-q4kp"` should auto-apply the qwen3.6 profile.
+#[test]
+fn test_loader_applies_qwen36_profile_from_minimal_toml() {
+    let _env_guard = clear_selfware_env_vars();
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("selfware.toml");
+    let mut file = std::fs::File::create(&config_path).unwrap();
+    write!(
+        file,
+        r#"endpoint = "http://127.0.0.1:8000/v1"
+model = "qwen3.6-27b-q4kp"
+"#
+    )
+    .unwrap();
+
+    let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+
+    assert_eq!(config.matched_profile.as_deref(), Some("qwen3.6"));
+    // The user did not set native_function_calling — the profile fills it in.
+    assert!(
+        config.agent.native_function_calling,
+        "qwen3.6 profile must enable native_function_calling"
+    );
+    // The user did not set extra_body — the profile fills it in.
+    let extra = config
+        .extra_body
+        .as_ref()
+        .expect("profile populates extra_body");
+    assert_eq!(
+        extra.get("presence_penalty"),
+        Some(&serde_json::json!(1.5)),
+        "qwen3.6 profile must set presence_penalty=1.5"
+    );
+    assert_eq!(extra.get("top_p"), Some(&serde_json::json!(0.8)));
+    assert_eq!(extra.get("min_p"), Some(&serde_json::json!(0.0)));
+    let ctk = extra
+        .get("chat_template_kwargs")
+        .and_then(|v| v.as_object())
+        .expect("chat_template_kwargs object");
+    assert_eq!(
+        ctk.get("preserve_thinking"),
+        Some(&serde_json::json!(true))
+    );
+}
+
+/// Explicit user config must beat the matched profile: a user who sets
+/// `presence_penalty = 0.0` keeps that value even though the qwen3.6
+/// profile recommends 1.5.
+#[test]
+fn test_loader_explicit_user_config_beats_profile() {
+    let _env_guard = clear_selfware_env_vars();
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("selfware.toml");
+    let mut file = std::fs::File::create(&config_path).unwrap();
+    write!(
+        file,
+        r#"endpoint = "http://127.0.0.1:8000/v1"
+model = "qwen3.6-27b-q4kp"
+temperature = 0.123
+max_tokens = 999
+
+[agent]
+native_function_calling = false
+
+[extra_body]
+presence_penalty = 0.0
+"#
+    )
+    .unwrap();
+
+    let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+
+    assert_eq!(config.matched_profile.as_deref(), Some("qwen3.6"));
+    // Explicit user values must NOT be overwritten.
+    assert!(
+        !config.agent.native_function_calling,
+        "explicit native_function_calling=false must beat profile"
+    );
+    assert!((config.temperature - 0.123).abs() < f32::EPSILON);
+    assert_eq!(config.max_tokens, 999);
+    let extra = config.extra_body.as_ref().unwrap();
+    assert_eq!(
+        extra.get("presence_penalty"),
+        Some(&serde_json::json!(0.0)),
+        "explicit presence_penalty must beat profile"
+    );
+    // ...but other profile keys ARE filled in.
+    assert_eq!(extra.get("top_p"), Some(&serde_json::json!(0.8)));
+    // matched_profile_applied lists only what the profile actually filled in.
+    let applied = &config.matched_profile_applied;
+    assert!(!applied.iter().any(|s| s == "temperature"));
+    assert!(!applied.iter().any(|s| s == "max_tokens"));
+    assert!(!applied.iter().any(|s| s == "native_function_calling"));
+    assert!(!applied.iter().any(|s| s == "extra_body.presence_penalty"));
+    assert!(applied.iter().any(|s| s == "extra_body.top_p"));
+}
+
+/// A model name that does not match any built-in profile should leave
+/// matched_profile = None and not change defaults.
+#[test]
+fn test_loader_unknown_model_no_profile() {
+    let _env_guard = clear_selfware_env_vars();
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("selfware.toml");
+    let mut file = std::fs::File::create(&config_path).unwrap();
+    write!(
+        file,
+        r#"endpoint = "http://127.0.0.1:8000/v1"
+model = "llama-3-70b-instruct"
+"#
+    )
+    .unwrap();
+
+    let config = Config::load(Some(config_path.to_str().unwrap())).unwrap();
+    assert!(config.matched_profile.is_none());
+    assert!(config.matched_profile_applied.is_empty());
+}
+

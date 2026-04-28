@@ -82,6 +82,7 @@ mod context_management;
 pub mod context_map;
 pub mod evolution_events;
 mod execution;
+pub mod failure_mode;
 mod interactive;
 pub mod last_tool;
 mod learning;
@@ -95,6 +96,7 @@ mod session_log;
 mod streaming;
 mod task_runner;
 mod tool_collect;
+pub mod turn_artifacts;
 mod tool_dispatch;
 mod tool_validator;
 pub mod tui_events;
@@ -413,6 +415,9 @@ pub struct Agent {
     esc_pause_ack: Arc<AtomicBool>,
     /// Last tool output for progressive disclosure via `/last`.
     last_tool_output: Option<last_tool::LastToolOutput>,
+    /// Monotonic counter for `<workdir>/.selfware/turns/turn_NNNN.json` files.
+    /// Incremented once per LLM call that produces a captured artifact.
+    turn_artifact_seq: usize,
     /// Recent screenshot hashes for visual stuck-loop detection.
     recent_screenshot_hashes: std::collections::VecDeque<u64>,
     /// Whether a visual stuck loop was detected on the most recent screenshot.
@@ -440,6 +445,22 @@ pub struct Agent {
     has_written_any_file: bool,
     /// Three-layer context compression orchestrator
     compression_orchestrator: CompressionOrchestrator,
+    /// Lifetime count of successful mutating tool calls (file_write/file_edit/file_delete/etc.)
+    /// for this task. Drives `FailureMode::classify`.
+    mutating_tool_call_count: usize,
+    /// Lifetime count of all attempted tool calls (success + failure). Drives
+    /// `FailureMode::classify` to compute read/total ratios.
+    total_tool_call_count: usize,
+    /// Number of times the read-only progress guard fired during this task.
+    progress_guard_fire_count: usize,
+    /// Tool calls that have been hard-blocked (e.g. by `STUCK_LOOP_HARD_BLOCK_AFTER`)
+    /// after repeated failures. Length feeds the RetryLoop classification.
+    permanently_blocked_tool_calls: Vec<String>,
+    /// Count of HTTP 400 "Assistant response prefill incompatible" responses
+    /// observed from the API. 3+ trips the prefill circuit breaker.
+    prefill_400_count: usize,
+    /// Whether the prefill-incompatible circuit breaker is currently open.
+    prefill_breaker_open: bool,
 }
 
 impl Agent {
@@ -919,6 +940,7 @@ To call a tool, use this EXACT XML structure:
             esc_paused: Arc::new(AtomicBool::new(false)),
             esc_pause_ack: Arc::new(AtomicBool::new(false)),
             last_tool_output: None,
+            turn_artifact_seq: 0,
             recent_screenshot_hashes: std::collections::VecDeque::new(),
             visual_stuck_loop_active: false,
             visual_state_tracker:
@@ -930,6 +952,12 @@ To call a tool, use this EXACT XML structure:
             consecutive_read_only_steps: 0,
             has_written_any_file: false,
             compression_orchestrator: CompressionOrchestrator::new(),
+            mutating_tool_call_count: 0,
+            total_tool_call_count: 0,
+            progress_guard_fire_count: 0,
+            permanently_blocked_tool_calls: Vec::new(),
+            prefill_400_count: 0,
+            prefill_breaker_open: false,
         };
 
         let reconcile_report = crate::tools::process::reconcile_managed_processes(true).await;
@@ -1678,6 +1706,148 @@ To call a tool, use this EXACT XML structure:
                 Ok(PermissionPromptResult::No)
             }
         }
+    }
+
+    // ========================================================================
+    // FailureMode accessors
+    //
+    // These are read-only views into the per-task counters that the
+    // failure-mode classifier consumes at run end. They are intentionally
+    // narrow: each one returns a single primitive so the classifier never
+    // needs to know about internal field names.
+    // ========================================================================
+
+    /// Number of successful mutating tool calls in the current task.
+    pub fn mutating_tool_call_count(&self) -> usize {
+        self.mutating_tool_call_count
+    }
+
+    /// Total tool calls attempted (success + failure) in the current task.
+    pub fn total_tool_call_count(&self) -> usize {
+        self.total_tool_call_count
+    }
+
+    /// How many times the read-only progress guard fired in the current task.
+    pub fn progress_guard_fire_count(&self) -> usize {
+        self.progress_guard_fire_count
+    }
+
+    /// Number of consecutive prose-only turns (no tool call) at run end.
+    /// Mirrors `consecutive_no_action_prompts`, which measures the same thing.
+    pub fn consecutive_no_tool_call_turns(&self) -> usize {
+        self.consecutive_no_action_prompts
+    }
+
+    /// Count of tool calls that have been hard-blocked after repeated failures.
+    pub fn permanently_blocked_tool_calls_len(&self) -> usize {
+        self.permanently_blocked_tool_calls.len()
+    }
+
+    /// Count of HTTP 400 "Assistant response prefill incompatible" responses.
+    pub fn prefill_400_count(&self) -> usize {
+        self.prefill_400_count
+    }
+
+    /// Whether the prefill circuit breaker is currently open.
+    pub fn prefill_breaker_open(&self) -> bool {
+        self.prefill_breaker_open
+    }
+
+    /// Length in bytes of the last assistant response. Used by the
+    /// classifier to surface "47KB of prose without a tool call".
+    pub fn last_assistant_response_len(&self) -> usize {
+        self.last_assistant_response.len()
+    }
+
+    /// True if the last assistant response contains a "Final answer" marker
+    /// — a tell-tale of FakeComplete when no mutating call ever happened.
+    pub fn last_assistant_response_has_final_answer(&self) -> bool {
+        let lower = self.last_assistant_response.to_lowercase();
+        lower.contains("final answer")
+    }
+
+    /// Reset all per-task failure-mode counters. Called when starting or
+    /// resetting a task so counters from a prior run never leak into the
+    /// next classification.
+    pub(super) fn reset_failure_mode_counters(&mut self) {
+        self.mutating_tool_call_count = 0;
+        self.total_tool_call_count = 0;
+        self.progress_guard_fire_count = 0;
+        self.permanently_blocked_tool_calls.clear();
+        self.prefill_400_count = 0;
+        self.prefill_breaker_open = false;
+    }
+
+    /// Increment the mutating-call counter. Called from tool dispatch when
+    /// `file_write` / `file_edit` / `file_delete` / `shell_exec` (with mutation)
+    /// completes successfully.
+    pub(super) fn note_mutating_tool_call(&mut self) {
+        self.mutating_tool_call_count += 1;
+    }
+
+    /// Increment the total tool-call counter. Should be called for every
+    /// dispatched tool call regardless of success.
+    pub(super) fn note_total_tool_call(&mut self) {
+        self.total_tool_call_count += 1;
+    }
+
+    /// Note that the read-only progress guard fired. Called by
+    /// `maybe_block_progressless_batch` whenever it emits the PROGRESS GUARD
+    /// rejection.
+    pub(super) fn note_progress_guard_fired(&mut self) {
+        self.progress_guard_fire_count += 1;
+    }
+
+    /// Record that a tool call was permanently blocked after repeated retries.
+    pub(super) fn note_permanently_blocked(&mut self, tool_name: &str) {
+        if self.permanently_blocked_tool_calls.len() < 64 {
+            self.permanently_blocked_tool_calls
+                .push(tool_name.to_string());
+        }
+    }
+
+    /// Record an "Assistant response prefill incompatible" 400 from the API.
+    pub(super) fn note_prefill_400(&mut self) {
+        self.prefill_400_count = self.prefill_400_count.saturating_add(1);
+        if self.prefill_400_count >= 3 {
+            self.prefill_breaker_open = true;
+        }
+    }
+
+    // ===== test-only setters used by failure_mode unit tests =====
+
+    #[cfg(test)]
+    pub(super) fn test_set_mutating_count(&mut self, n: usize) {
+        self.mutating_tool_call_count = n;
+    }
+    #[cfg(test)]
+    pub(super) fn test_set_total_tool_calls(&mut self, n: usize) {
+        self.total_tool_call_count = n;
+    }
+    #[cfg(test)]
+    pub(super) fn test_set_progress_guard_fires(&mut self, n: usize) {
+        self.progress_guard_fire_count = n;
+    }
+    #[cfg(test)]
+    pub(super) fn test_set_consecutive_no_action(&mut self, n: usize) {
+        self.consecutive_no_action_prompts = n;
+    }
+    #[cfg(test)]
+    pub(super) fn test_set_permanently_blocked(&mut self, n: usize) {
+        self.permanently_blocked_tool_calls =
+            (0..n).map(|i| format!("tool_{}", i)).collect();
+    }
+    #[cfg(test)]
+    pub(super) fn test_set_prefill_400s(&mut self, n: usize) {
+        self.prefill_400_count = n;
+    }
+    #[cfg(test)]
+    pub(super) fn test_set_prefill_breaker_open(&mut self, v: bool) {
+        self.prefill_breaker_open = v;
+    }
+    #[cfg(test)]
+    pub(super) fn test_set_last_assistant_response(&mut self, s: String) {
+        self.last_assistant_response = s;
     }
 }
 

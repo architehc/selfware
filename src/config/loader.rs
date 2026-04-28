@@ -68,10 +68,45 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
     "disk_limit_gb",
 ];
 
+use std::path::PathBuf;
+
 use super::api_key::{load_api_key_from_keyring, ApiKeySource};
 use super::model::{default_modalities, ModelProfile, RedactedString};
+use super::model_profiles::{apply_profile, match_profile, UserExplicitFields};
+use super::provenance::{ConfigSource, ConfigSources};
 use super::types::ExecutionMode;
 use super::Config;
+
+/// Walk a parsed TOML value and record `ConfigSource::ConfigFile(path)` for
+/// every leaf key reachable from a known top-level field. Nested keys are
+/// flattened with `.` (e.g. `agent.native_function_calling`,
+/// `extra_body.top_p`).
+fn record_toml_sources(
+    sources: &mut ConfigSources,
+    table: &toml::value::Table,
+    path: &PathBuf,
+    prefix: &str,
+) {
+    for (k, v) in table.iter() {
+        let dotted = if prefix.is_empty() {
+            k.clone()
+        } else {
+            format!("{}.{}", prefix, k)
+        };
+        match v {
+            toml::Value::Table(t) => {
+                sources.set(
+                    dotted.clone(),
+                    ConfigSource::ConfigFile(path.clone()),
+                );
+                record_toml_sources(sources, t, path, &dotted);
+            }
+            _ => {
+                sources.set(dotted, ConfigSource::ConfigFile(path.clone()));
+            }
+        }
+    }
+}
 
 impl Config {
     fn content_sets_agent_token_budget(content: &str) -> bool {
@@ -141,9 +176,15 @@ impl Config {
         // path is provided via CLI.
         let env_config_path = std::env::var("SELFWARE_CONFIG").ok();
         let effective_path: Option<&str> = path.or(env_config_path.as_deref());
+        let path_was_from_env = path.is_none() && env_config_path.is_some();
 
         let mut loaded_from_path: Option<String> = None;
         let mut token_budget_was_explicit = false;
+        let mut sources = ConfigSources::new();
+        // Raw TOML content as read from disk. Captured so we can later compute
+        // which fields the user set explicitly and so model-defaults profiles
+        // do not overwrite them.
+        let mut raw_toml_content: Option<String> = None;
         let mut config = match effective_path {
             Some(p) => {
                 let content = std::fs::read_to_string(p)
@@ -151,9 +192,20 @@ impl Config {
                 loaded_from_path = Some(p.to_string());
                 token_budget_was_explicit = Self::content_sets_agent_token_budget(&content);
                 Self::warn_unknown_keys(&content);
-                toml::from_str(&content).with_context(|| {
+                let cfg: Config = toml::from_str(&content).with_context(|| {
                     format!("Failed to parse config file: {}. Check TOML syntax.", p)
-                })?
+                })?;
+                if let Ok(toml::Value::Table(table)) = toml::from_str::<toml::Value>(&content) {
+                    record_toml_sources(&mut sources, &table, &PathBuf::from(p), "");
+                }
+                if path_was_from_env {
+                    sources.set(
+                        "__config_path_source".to_string(),
+                        ConfigSource::EnvVar("SELFWARE_CONFIG".to_string()),
+                    );
+                }
+                raw_toml_content = Some(content);
+                cfg
             }
             None => {
                 // Try default locations - expand ~ to actual home directory
@@ -174,9 +226,21 @@ impl Config {
                         loaded_from_path = Some(p.to_string());
                         token_budget_was_explicit = Self::content_sets_agent_token_budget(&content);
                         Self::warn_unknown_keys(&content);
-                        loaded = Some(toml::from_str(&content).with_context(|| {
+                        let cfg: Config = toml::from_str(&content).with_context(|| {
                             format!("Failed to parse config file: {}. Check TOML syntax.", p)
-                        })?);
+                        })?;
+                        if let Ok(toml::Value::Table(table)) =
+                            toml::from_str::<toml::Value>(&content)
+                        {
+                            record_toml_sources(
+                                &mut sources,
+                                &table,
+                                &PathBuf::from(*p),
+                                "",
+                            );
+                        }
+                        raw_toml_content = Some(content);
+                        loaded = Some(cfg);
                         break;
                     }
                 }
@@ -210,9 +274,11 @@ impl Config {
         // Override with environment variables
         if let Ok(endpoint) = std::env::var("SELFWARE_ENDPOINT") {
             config.endpoint = endpoint;
+            sources.set("endpoint", ConfigSource::EnvVar("SELFWARE_ENDPOINT".into()));
         }
         if let Ok(model) = std::env::var("SELFWARE_MODEL") {
             config.model = model;
+            sources.set("model", ConfigSource::EnvVar("SELFWARE_MODEL".into()));
         }
 
         // --- API key resolution hierarchy ---
@@ -270,6 +336,10 @@ impl Config {
         if let Ok(max_tokens) = std::env::var("SELFWARE_MAX_TOKENS") {
             if let Ok(n) = max_tokens.parse::<usize>() {
                 config.max_tokens = n;
+                sources.set(
+                    "max_tokens",
+                    ConfigSource::EnvVar("SELFWARE_MAX_TOKENS".into()),
+                );
             }
         }
         if !token_budget_was_explicit {
@@ -282,15 +352,24 @@ impl Config {
         if let Ok(temp) = std::env::var("SELFWARE_TEMPERATURE") {
             if let Ok(t) = temp.parse::<f32>() {
                 config.temperature = t;
+                sources.set(
+                    "temperature",
+                    ConfigSource::EnvVar("SELFWARE_TEMPERATURE".into()),
+                );
             }
         }
         if let Ok(timeout) = std::env::var("SELFWARE_TIMEOUT") {
             if let Ok(t) = timeout.parse::<u64>() {
                 config.agent.step_timeout_secs = t;
+                sources.set(
+                    "agent.step_timeout_secs",
+                    ConfigSource::EnvVar("SELFWARE_TIMEOUT".into()),
+                );
             }
         }
         if let Ok(theme) = std::env::var("SELFWARE_THEME") {
             config.ui.theme = theme;
+            sources.set("ui.theme", ConfigSource::EnvVar("SELFWARE_THEME".into()));
         }
         // SELFWARE_LOG_LEVEL is consumed by telemetry::init_tracing() as a
         // fallback when RUST_LOG is not set. No validation needed here — the
@@ -318,6 +397,42 @@ impl Config {
         config.verbose_mode = config.ui.verbose_mode;
         config.show_tokens = config.ui.show_tokens;
 
+        // Apply built-in model-defaults profile, if any pattern matches the
+        // configured model name.  Profiles fill in *only* fields the user did
+        // not set explicitly in their TOML — explicit user config wins.  This
+        // pass is purely static: it never touches the network, only inspects
+        // `config.model`.  We do this BEFORE synthesizing the "default" model
+        // profile below so the synthesized profile inherits any tweaks (e.g.
+        // Qwen 3.6's required `presence_penalty`).
+        let user_explicit = match raw_toml_content.as_deref() {
+            Some(content) => UserExplicitFields::from_toml(content),
+            None => UserExplicitFields::default(),
+        };
+        if let Some(profile) = match_profile(&config.model) {
+            let profile_name = profile.name.to_string();
+            let applied = apply_profile(&mut config, &profile, &user_explicit);
+            config.matched_profile = Some(profile_name);
+            if !applied.is_empty() {
+                let mut fields: Vec<String> = Vec::new();
+                if applied.native_function_calling {
+                    fields.push("native_function_calling".to_string());
+                }
+                if applied.streaming {
+                    fields.push("streaming".to_string());
+                }
+                if applied.temperature {
+                    fields.push("temperature".to_string());
+                }
+                if applied.max_tokens {
+                    fields.push("max_tokens".to_string());
+                }
+                for k in &applied.extra_body_keys {
+                    fields.push(format!("extra_body.{}", k));
+                }
+                config.matched_profile_applied = fields;
+            }
+        }
+
         // Ensure a "default" model profile exists, synthesized from the
         // top-level endpoint/model/api_key fields so that existing configs
         // without explicit [models.*] sections keep working.
@@ -333,6 +448,7 @@ impl Config {
                     modalities: default_modalities(),
                     context_length: config.context_length,
                     extra_body: config.extra_body.clone(),
+                    native_function_calling: None,
                 },
             );
         }
@@ -341,6 +457,9 @@ impl Config {
         // both satisfy validation.  Local models have varying context sizes —
         // defaulting to 500k was wrong because it misrepresents the actual capacity.
         config.normalize_agent_limits();
+
+        // Attach the provenance map.
+        config.sources = sources;
 
         // Validate the loaded configuration
         config.validate()?;

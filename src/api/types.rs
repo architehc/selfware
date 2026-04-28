@@ -666,6 +666,32 @@ pub struct Usage {
     pub total_tokens: usize,
 }
 
+/// Side-channel metadata produced alongside a chat call.
+///
+/// Carries the exact request body that was sent (so debug capture can record
+/// it without re-serializing) and the wall time spent in the HTTP / stream
+/// layer.  For streaming requests, `finish_reason` and the usage fields are
+/// populated from the SSE stream rather than the (synthetic) `ChatResponse`.
+///
+/// This is *only* exposed via the `*_with_meta` API on `ApiClient` — the
+/// public `chat`/`chat_stream` signatures are unchanged.
+#[derive(Debug, Clone, Default)]
+pub struct ChatMetadata {
+    /// The full request body that was POSTed. Includes `messages`, `tools`,
+    /// `temperature`, `max_tokens`, etc. Does **not** contain credentials —
+    /// those live on HTTP headers, never the body.
+    pub request_body: serde_json::Value,
+    /// Wall-clock duration of the HTTP request (or stream consumption).
+    pub elapsed_ms: u64,
+    /// Optional `finish_reason` from the response (`"stop"`, `"length"`,
+    /// `"tool_calls"`, …). `None` when the backend doesn't report it.
+    pub finish_reason: Option<String>,
+    /// Prompt tokens reported by the backend, if any.
+    pub prompt_tokens: Option<u32>,
+    /// Completion tokens reported by the backend, if any.
+    pub completion_tokens: Option<u32>,
+}
+
 /// A streaming chunk of a chat completion response.
 ///
 /// When streaming is enabled, the API sends multiple `ChatResponseChunk`

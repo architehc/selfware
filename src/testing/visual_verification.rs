@@ -1910,6 +1910,7 @@ mod tests {
             modalities: vec!["text".to_string(), "vision".to_string()],
             context_length: 262_144,
             extra_body: Some(extra_body.clone()),
+            native_function_calling: None,
         };
         let v = VisualVerifier::from_model_profile(&profile);
         assert_eq!(v.endpoint, "https://vision.example/v1");
@@ -1947,6 +1948,7 @@ mod tests {
                 modalities: vec!["text".to_string()],
                 context_length: 1_000_000,
                 extra_body: None,
+                native_function_calling: None,
             },
         );
         config.models.insert(
@@ -1967,6 +1969,7 @@ mod tests {
                     );
                     map
                 }),
+                native_function_calling: None,
             },
         );
 

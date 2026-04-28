@@ -263,6 +263,48 @@ selfware --tui
 
 ---
 
+## What's New
+
+Recent improvements landing in 0.3.0-beta:
+
+- **Config provenance.** `--show-config` now reports the *source* of every
+  setting (default / TOML / profile / env / CLI) so you can answer
+  "where is this temperature coming from?" in one command. See
+  [docs/configuration.md](docs/configuration.md).
+- **Model profiles.** Define a `coder`, `vision`, or `quick` profile in
+  `[models.<name>]` and switch with `--model coder`. Vision-capable
+  profiles unlock screenshot tools automatically. See
+  [docs/model_profiles.md](docs/model_profiles.md).
+- **Per-turn artifacts.** Every agent turn is dumped to
+  `~/.selfware/artifacts/turns/<session>/<turn>.json` with secrets
+  redacted, so you can replay or diff a session after the fact.
+- **`--debug` flag.** One flag turns on every diagnostic channel
+  (events, turns, prompts, raw I/O, failure-mode classifier). Pick
+  individual channels with `SELFWARE_DEBUG_CHANNELS=...`. See
+  [docs/debugging.md](docs/debugging.md).
+- **Failure-mode classifier.** Failed turns are tagged
+  (`endpoint_unreachable`, `model_timeout`, `tool_error`,
+  `parse_error`, `policy_denial`) and streamed to
+  `~/.selfware/logs/failures.jsonl`.
+- **Native function-call unification.** Native FC and textual fallback
+  paths now produce byte-identical `ToolCall` objects, so streaming and
+  non-streaming responses are interchangeable.
+- **Tool-call dedupe.** The harness drops duplicate tool calls within a
+  turn (same name + same args) before dispatching, eliminating a common
+  source of agent loops.
+- **Benchmark suite, ported to Rust.** `selfware bench` is now native
+  Rust (no Python wrapper), supports `--trials N` for stability sweeps,
+  and writes a single `aggregate.json` covering all trials. See
+  [docs/benchmarks.md](docs/benchmarks.md).
+- **Event channel.** A typed broadcast channel exposes lifecycle events
+  to in-process subscribers (TUI, MCP server, custom harnesses) without
+  scraping logs.
+
+For the full test contract pinning these features, see
+[docs/test_plan.md](docs/test_plan.md).
+
+---
+
 ## Recommended Models & Hardware
 
 ### Qwen3.5 — Hardware Requirements

@@ -1,0 +1,535 @@
+//! Structured failure-mode classification for agent runs.
+//!
+//! When a `run_task` ends — successfully or otherwise — selfware already
+//! tracks all of the signals needed to explain *why*: how many mutating
+//! tool calls happened, whether the progress guard fired, whether the
+//! model fake-completed, whether a circuit breaker tripped, and so on.
+//!
+//! Historically this state was discarded as soon as the loop exited,
+//! leaving SWE-bench-Pro post-mortems to grep through the log file with
+//! a forensic Bash script. This module promotes it to a first-class
+//! structured artifact so the harness — and the CLI — can surface a
+//! concrete failure category, evidence, and a one-line piece of advice
+//! at the end of every run.
+//!
+//! The classifier is purely *observational*: it inspects already-recorded
+//! agent state and returns a verdict. It does not mutate the agent.
+
+use serde::Serialize;
+use std::path::Path;
+
+use super::Agent;
+
+/// A category of run outcome.
+///
+/// `Success` is included so the same artifact format describes both
+/// happy and unhappy endings — making downstream histograms trivial.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum FailureKind {
+    /// Run reached a natural completion with at least one mutating tool call.
+    Success,
+    /// 3+ "Assistant response prefill incompatible" 400s tripped the breaker.
+    PrefillBreaker,
+    /// Progress guard fired: long read-only streak ended without writes.
+    ReadLoop,
+    /// `consecutive_no_action_prompts` hit the abort threshold (prose-only).
+    NontermProse,
+    /// Hard-block reached after repeated failed retries on the same tool.
+    RetryLoop,
+    /// Wall-clock budget exhausted while making progress.
+    Timeout,
+    /// Selfware-side panic, invariant violation, or known bug.
+    SelfwareError,
+    /// `max_iterations` hit without any other distinguishing signal.
+    MaxIterations,
+    /// Model emitted "Final answer:" without ever mutating a tool.
+    FakeComplete,
+    /// Outcome could not be classified from available signals.
+    Unknown,
+}
+
+impl FailureKind {
+    /// Short uppercase tag suitable for log lines and CLI output.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            FailureKind::Success => "REAL_EDIT",
+            FailureKind::PrefillBreaker => "PREFILL_BREAKER",
+            FailureKind::ReadLoop => "READ_LOOP",
+            FailureKind::NontermProse => "NONTERM_PROSE",
+            FailureKind::RetryLoop => "RETRY_LOOP",
+            FailureKind::Timeout => "TIMEOUT",
+            FailureKind::SelfwareError => "SELFWARE_ERROR",
+            FailureKind::MaxIterations => "MAX_ITERATIONS",
+            FailureKind::FakeComplete => "FAKE_COMPLETE",
+            FailureKind::Unknown => "UNKNOWN",
+        }
+    }
+
+    pub fn is_success(&self) -> bool {
+        matches!(self, FailureKind::Success)
+    }
+}
+
+/// Structured failure-mode verdict for a single run.
+///
+/// `evidence` is a one-or-two-sentence summary with concrete numbers
+/// (e.g. counter values, byte counts) so a human glancing at the CLI
+/// output can immediately see *why* the classifier picked this kind.
+/// `advice` is a one-sentence next step.
+#[derive(Debug, Clone, Serialize)]
+pub struct FailureMode {
+    pub kind: FailureKind,
+    pub evidence: String,
+    pub advice: String,
+}
+
+impl FailureMode {
+    /// Build a verdict directly from the agent state at run end.
+    ///
+    /// `outcome` describes how the loop terminated as observed by the
+    /// `run_execution_loop`: natural completion, `Failed { reason }`,
+    /// or partial (loop exited the iteration ceiling without entering
+    /// any terminal state).
+    pub fn classify(agent: &Agent, outcome: RunOutcome) -> Self {
+        // Pull observational state off the agent. All accessors are
+        // cheap and read-only.
+        let mutating = agent.mutating_tool_call_count();
+        let progress_guard = agent.progress_guard_fire_count();
+        let no_action_consecutive = agent.consecutive_no_tool_call_turns();
+        let permanently_blocked = agent.permanently_blocked_tool_calls_len();
+        let total_calls = agent.total_tool_call_count();
+        let final_answer_len = agent.last_assistant_response_len();
+        let has_final_answer_marker = agent.last_assistant_response_has_final_answer();
+        let circuit_open = agent.prefill_breaker_open();
+        let prefill_400s = agent.prefill_400_count();
+
+        match outcome {
+            RunOutcome::NaturalCompletion => {
+                if mutating == 0 && has_final_answer_marker {
+                    return FailureMode {
+                        kind: FailureKind::FakeComplete,
+                        evidence: format!(
+                            "model emitted 'Final answer' but performed 0 mutating tool calls across {} total calls",
+                            total_calls
+                        ),
+                        advice: "tighten the completion gate to require at least one file_write/file_edit before accepting a final answer".to_string(),
+                    };
+                }
+                let progress_note = if progress_guard > 0 {
+                    format!(", {} progress guards", progress_guard)
+                } else {
+                    ", 0 progress guards".to_string()
+                };
+                FailureMode {
+                    kind: FailureKind::Success,
+                    evidence: format!(
+                        "{} mutating tool calls, {} total tool calls{}, completed naturally",
+                        mutating, total_calls, progress_note
+                    ),
+                    advice: "-".to_string(),
+                }
+            }
+            RunOutcome::Failed { reason } => {
+                if circuit_open || prefill_400s >= 3 {
+                    return FailureMode {
+                        kind: FailureKind::PrefillBreaker,
+                        evidence: format!(
+                            "{} prefill-incompatible 400s tripped the circuit breaker (open={})",
+                            prefill_400s, circuit_open
+                        ),
+                        advice: "disable assistant prefill or switch to a server build that accepts the prefill format".to_string(),
+                    };
+                }
+                if reason.contains("Max iterations") {
+                    return classify_max_iter_failure(
+                        mutating,
+                        progress_guard,
+                        no_action_consecutive,
+                        permanently_blocked,
+                        total_calls,
+                        final_answer_len,
+                    );
+                }
+                if reason.to_lowercase().contains("timeout")
+                    || reason.contains("wall-clock")
+                    || reason.contains("budget exhausted")
+                {
+                    return FailureMode {
+                        kind: FailureKind::Timeout,
+                        evidence: format!(
+                            "wall-clock budget exhausted with {} mutating tool calls completed",
+                            mutating
+                        ),
+                        advice: "increase the wall-clock budget or shrink the task scope".to_string(),
+                    };
+                }
+                if reason.contains("panic")
+                    || reason.contains("invariant")
+                    || reason.starts_with("internal:")
+                {
+                    return FailureMode {
+                        kind: FailureKind::SelfwareError,
+                        evidence: format!(
+                            "selfware-side error: {}",
+                            truncate(&reason, 160)
+                        ),
+                        advice: "file a bug with the trace attached; this is not a model failure".to_string(),
+                    };
+                }
+                // Fall through: treat as a classified failure based on counters.
+                classify_max_iter_failure(
+                    mutating,
+                    progress_guard,
+                    no_action_consecutive,
+                    permanently_blocked,
+                    total_calls,
+                    final_answer_len,
+                )
+            }
+            RunOutcome::Partial => classify_max_iter_failure(
+                mutating,
+                progress_guard,
+                no_action_consecutive,
+                permanently_blocked,
+                total_calls,
+                final_answer_len,
+            ),
+        }
+    }
+
+    /// Serialize the verdict to a `failure_mode.json` next to `result.json`.
+    ///
+    /// `result_dir` is the directory the SWE-bench Pro harness uses for a
+    /// single instance's artifacts. Failures here are non-fatal: artifact
+    /// writing is best-effort and must never abort a run.
+    pub fn write_artifact(&self, result_dir: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(result_dir)?;
+        let path = result_dir.join("failure_mode.json");
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(path, json)
+    }
+
+    /// Render a multi-line CLI banner suitable for the end of a non-TUI run.
+    pub fn cli_banner(&self) -> String {
+        let header = if self.kind.is_success() {
+            format!("✅ Task completed successfully ({})", self.kind.tag())
+        } else {
+            format!("❌ Task aborted ({})", self.kind.tag())
+        };
+        format!(
+            "{}\n   evidence: {}\n   advice: {}",
+            header, self.evidence, self.advice
+        )
+    }
+}
+
+/// How `run_execution_loop` terminated, from the caller's perspective.
+#[derive(Debug, Clone)]
+pub enum RunOutcome {
+    /// Agent reached `AgentState::Completed` or returned successfully.
+    NaturalCompletion,
+    /// Agent transitioned to `AgentState::Failed { reason }`.
+    Failed { reason: String },
+    /// Loop exited without a terminal state (e.g. iteration ceiling fall-through).
+    Partial,
+}
+
+fn classify_max_iter_failure(
+    mutating: usize,
+    progress_guard: usize,
+    no_action_consecutive: usize,
+    permanently_blocked: usize,
+    total_calls: usize,
+    final_answer_len: usize,
+) -> FailureMode {
+    // Order matters: most specific signals first.
+
+    // 1) Prose-only termination.
+    if no_action_consecutive >= super::recovery::FORCE_FALLBACK_AFTER && mutating == 0 {
+        return FailureMode {
+            kind: FailureKind::NontermProse,
+            evidence: format!(
+                "{} consecutive prose-only turns; model emitted {}KB of text without tool calls",
+                no_action_consecutive,
+                final_answer_len / 1024
+            ),
+            advice: "try a smaller context budget or a stronger quant".to_string(),
+        };
+    }
+
+    // 2) Read-loop: progress guard fired and no edits ever landed.
+    if progress_guard > 0 && mutating == 0 {
+        return FailureMode {
+            kind: FailureKind::ReadLoop,
+            evidence: format!(
+                "progress guard fired {} time(s); {} read/verify calls but 0 mutating calls",
+                progress_guard, total_calls
+            ),
+            advice: "raise the read-only block threshold or feed the model an explicit edit hint".to_string(),
+        };
+    }
+
+    // 3) Retry-loop: tools were permanently blocked after repeated failures.
+    if permanently_blocked >= 1 {
+        return FailureMode {
+            kind: FailureKind::RetryLoop,
+            evidence: format!(
+                "{} tool call(s) hard-blocked after repeated failures (mutating={}, total={})",
+                permanently_blocked, mutating, total_calls
+            ),
+            advice: "inspect the tool error and either fix selfware's validator or steer the model away from that signature".to_string(),
+        };
+    }
+
+    // 4) Fake-complete (caught by gate, not by natural completion).
+    if mutating == 0 && final_answer_len > 0 {
+        return FailureMode {
+            kind: FailureKind::FakeComplete,
+            evidence: format!(
+                "model produced {}B of final answer text but executed 0 mutating calls",
+                final_answer_len
+            ),
+            advice: "tighten the completion gate to require at least one file_write/file_edit before accepting a final answer".to_string(),
+        };
+    }
+
+    // 5) Otherwise: max iterations with no clear discriminator.
+    FailureMode {
+        kind: FailureKind::MaxIterations,
+        evidence: format!(
+            "max_iterations reached with {} mutating, {} total tool calls",
+            mutating, total_calls
+        ),
+        advice: "raise max_iterations or split the task into smaller subtasks".to_string(),
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..max])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    fn test_config() -> Config {
+        Config {
+            endpoint: "http://localhost:0/v1".to_string(),
+            model: "mock-model".to_string(),
+            context_length: 500_000,
+            max_tokens: 8192,
+            agent: crate::config::AgentConfig {
+                max_iterations: 8,
+                step_timeout_secs: 30,
+                streaming: false,
+                native_function_calling: false,
+                min_completion_steps: 0,
+                require_verification_before_completion: false,
+                ..Default::default()
+            },
+            safety: crate::config::SafetyConfig {
+                allowed_paths: vec!["./**".to_string(), "/**".to_string()],
+                ..Default::default()
+            },
+            execution_mode: crate::config::ExecutionMode::Yolo,
+            ..Default::default()
+        }
+    }
+
+    async fn make_agent() -> Agent {
+        Agent::new(test_config()).await.expect("agent::new")
+    }
+
+    #[tokio::test]
+    async fn classify_success_when_mutating_calls_exist() {
+        let mut agent = make_agent().await;
+        agent.test_set_mutating_count(3);
+        agent.test_set_total_tool_calls(12);
+        agent.test_set_last_assistant_response("Done.".to_string());
+
+        let mode = FailureMode::classify(&agent, RunOutcome::NaturalCompletion);
+        assert_eq!(mode.kind, FailureKind::Success);
+        assert!(
+            mode.evidence.contains("3 mutating tool calls"),
+            "evidence: {}",
+            mode.evidence
+        );
+    }
+
+    #[tokio::test]
+    async fn classify_fake_complete_on_natural_with_final_answer_no_mutation() {
+        let mut agent = make_agent().await;
+        agent.test_set_mutating_count(0);
+        agent.test_set_total_tool_calls(4);
+        agent.test_set_last_assistant_response(
+            "Final answer: implementation complete.".to_string(),
+        );
+
+        let mode = FailureMode::classify(&agent, RunOutcome::NaturalCompletion);
+        assert_eq!(mode.kind, FailureKind::FakeComplete);
+        assert!(mode.evidence.contains("0 mutating"));
+    }
+
+    #[tokio::test]
+    async fn classify_nonterm_prose_when_consecutive_no_action_high() {
+        let mut agent = make_agent().await;
+        agent.test_set_mutating_count(0);
+        agent.test_set_consecutive_no_action(30);
+        let big = "x".repeat(47_000);
+        agent.test_set_last_assistant_response(big);
+
+        let mode = FailureMode::classify(
+            &agent,
+            RunOutcome::Failed {
+                reason: "Max iterations exceeded".to_string(),
+            },
+        );
+        assert_eq!(mode.kind, FailureKind::NontermProse);
+        assert!(
+            mode.evidence.contains("30 consecutive"),
+            "evidence: {}",
+            mode.evidence
+        );
+        assert!(
+            mode.evidence.contains("KB of text"),
+            "evidence: {}",
+            mode.evidence
+        );
+    }
+
+    #[tokio::test]
+    async fn classify_read_loop_when_progress_guard_fired_no_mutations() {
+        let mut agent = make_agent().await;
+        agent.test_set_mutating_count(0);
+        agent.test_set_progress_guard_fires(2);
+        agent.test_set_total_tool_calls(15);
+
+        let mode = FailureMode::classify(&agent, RunOutcome::Partial);
+        assert_eq!(mode.kind, FailureKind::ReadLoop);
+        assert!(mode.evidence.contains("progress guard fired 2"));
+    }
+
+    #[tokio::test]
+    async fn classify_retry_loop_on_permanently_blocked_tool_calls() {
+        let mut agent = make_agent().await;
+        agent.test_set_mutating_count(1);
+        agent.test_set_permanently_blocked(3);
+        agent.test_set_total_tool_calls(20);
+
+        let mode = FailureMode::classify(&agent, RunOutcome::Partial);
+        assert_eq!(mode.kind, FailureKind::RetryLoop);
+        assert!(mode.evidence.contains("3 tool call"));
+    }
+
+    #[tokio::test]
+    async fn classify_prefill_breaker_when_circuit_open() {
+        let mut agent = make_agent().await;
+        agent.test_set_prefill_400s(5);
+        agent.test_set_prefill_breaker_open(true);
+
+        let mode = FailureMode::classify(
+            &agent,
+            RunOutcome::Failed {
+                reason: "prefill incompatible".to_string(),
+            },
+        );
+        assert_eq!(mode.kind, FailureKind::PrefillBreaker);
+        assert!(mode.evidence.contains("5 prefill-incompatible"));
+    }
+
+    #[tokio::test]
+    async fn classify_timeout_when_reason_contains_timeout() {
+        let mut agent = make_agent().await;
+        agent.test_set_mutating_count(2);
+
+        let mode = FailureMode::classify(
+            &agent,
+            RunOutcome::Failed {
+                reason: "wall-clock timeout".to_string(),
+            },
+        );
+        assert_eq!(mode.kind, FailureKind::Timeout);
+    }
+
+    #[tokio::test]
+    async fn classify_selfware_error_on_panic_reason() {
+        let agent = make_agent().await;
+        let mode = FailureMode::classify(
+            &agent,
+            RunOutcome::Failed {
+                reason: "internal: panicked at src/foo.rs:42".to_string(),
+            },
+        );
+        assert_eq!(mode.kind, FailureKind::SelfwareError);
+    }
+
+    #[tokio::test]
+    async fn classify_max_iterations_when_no_clear_signal() {
+        let mut agent = make_agent().await;
+        agent.test_set_mutating_count(2);
+        agent.test_set_total_tool_calls(20);
+
+        let mode = FailureMode::classify(
+            &agent,
+            RunOutcome::Failed {
+                reason: "Max iterations exceeded".to_string(),
+            },
+        );
+        assert_eq!(mode.kind, FailureKind::MaxIterations);
+        assert!(mode.evidence.contains("max_iterations"));
+    }
+
+    #[tokio::test]
+    async fn write_artifact_emits_failure_mode_json() {
+        let mode = FailureMode {
+            kind: FailureKind::ReadLoop,
+            evidence: "ev".to_string(),
+            advice: "ad".to_string(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        mode.write_artifact(dir.path()).unwrap();
+        let path = dir.path().join("failure_mode.json");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("ReadLoop"));
+        assert!(contents.contains("\"evidence\""));
+    }
+
+    #[test]
+    fn cli_banner_uses_tag_and_evidence() {
+        let mode = FailureMode {
+            kind: FailureKind::NontermProse,
+            evidence: "30 consecutive prose-only turns".to_string(),
+            advice: "try a smaller context budget".to_string(),
+        };
+        let banner = mode.cli_banner();
+        assert!(banner.contains("NONTERM_PROSE"));
+        assert!(banner.contains("30 consecutive"));
+        assert!(banner.contains("smaller context"));
+
+        let success = FailureMode {
+            kind: FailureKind::Success,
+            evidence: "all good".to_string(),
+            advice: "-".to_string(),
+        };
+        assert!(success.cli_banner().contains("REAL_EDIT"));
+        assert!(success.cli_banner().contains("✅"));
+    }
+
+    #[test]
+    fn failure_kind_serializes_to_json() {
+        let mode = FailureMode {
+            kind: FailureKind::PrefillBreaker,
+            evidence: "x".to_string(),
+            advice: "y".to_string(),
+        };
+        let json = serde_json::to_string(&mode).unwrap();
+        assert!(json.contains("PrefillBreaker"));
+        assert!(json.contains("\"kind\""));
+    }
+}

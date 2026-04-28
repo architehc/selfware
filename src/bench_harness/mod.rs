@@ -64,6 +64,7 @@ pub mod task;
 
 pub mod computer_control;
 pub mod long_running;
+pub mod swebench_pro;
 
 pub use config::HarnessConfig;
 pub use report::HarnessReport;

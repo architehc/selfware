@@ -16,7 +16,7 @@ use crate::orchestration::workflows::VarValue;
 use crate::swl::parser::ast::{AgentDefinition, SwlDocument, WorkflowDefinition, WorkflowType};
 use crate::swl::state::{StateBackendType, StateManager};
 use crate::swl::types::schema::StateSchema;
-use crate::tool_parser::{parse_tool_calls, ParsedToolCall};
+use crate::api::tool_calling::extract_tool_calls;
 use crate::tools::ToolRegistry;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -705,64 +705,46 @@ impl SwlRuntime {
                 ctx.trace.push(event);
             }
 
-            // Check for native tool calls
-            if let Some(tool_calls) = choice.message.tool_calls {
-                if !tool_calls.is_empty() {
-                    // Add assistant message with tool calls
-                    messages.push(Message {
-                        role: "assistant".to_string(),
-                        content: crate::api::types::MessageContent::Text(
-                            choice.message.content.text_all(),
-                        ),
-                        reasoning_content: choice.message.reasoning_content.clone(),
-                        tool_calls: Some(tool_calls.clone()),
-                        tool_call_id: None,
-                        name: None,
-                    });
-
-                    // Execute each tool call
-                    for tool_call in &tool_calls {
-                        let tool_result = self.execute_tool_call(tool_call, &available_tools).await;
-
-                        let result_content = match tool_result {
-                            Ok(result) => result.to_string(),
-                            Err(e) => format!("Error: {}", e),
-                        };
-
-                        // Add tool response message
-                        messages.push(Message::tool(result_content, &tool_call.id));
-                    }
-
-                    // Continue the loop for the agent to process tool results
-                    continue;
-                }
-            }
-
-            // Parse text response for XML-style tool calls
+            // Use the shared extractor: native `tool_calls` if present
+            // and non-empty, otherwise fall back to text-format parsing
+            // of `content`. This is the same policy used by the main
+            // agent and `chat_with_profile`. See `src/api/tool_calling.rs`.
+            //
+            // SWL doesn't carry a per-runtime native_function_calling
+            // flag — `extract_tool_calls` ignores that flag in practice
+            // (it always tries native first, then falls back to text),
+            // so we pass `true` to make the intent explicit.
+            let extracted = extract_tool_calls(&choice.message, true);
             let text = choice.message.content.text_all();
-            let parse_result = parse_tool_calls(&text);
 
-            if !parse_result.tool_calls.is_empty() {
-                // Add assistant message
-                messages.push(Message::assistant(text.clone()));
+            if !extracted.is_empty() {
+                // Add assistant message with the extracted tool calls.
+                messages.push(Message {
+                    role: "assistant".to_string(),
+                    content: crate::api::types::MessageContent::Text(text.clone()),
+                    reasoning_content: choice.message.reasoning_content.clone(),
+                    tool_calls: Some(extracted.clone()),
+                    tool_call_id: None,
+                    name: None,
+                });
 
-                // Execute each parsed tool call
-                for parsed_call in &parse_result.tool_calls {
-                    let tool_result = self
-                        .execute_parsed_tool_call(parsed_call, &available_tools)
-                        .await;
+                // Execute each tool call. `extract_tool_calls` already
+                // normalized text-format calls into OpenAI-style ToolCall
+                // values with synthetic ids, so we have a single code
+                // path for both native and text-parsed calls.
+                for tool_call in &extracted {
+                    let tool_result =
+                        self.execute_tool_call(tool_call, &available_tools).await;
 
                     let result_content = match tool_result {
                         Ok(result) => result.to_string(),
                         Err(e) => format!("Error: {}", e),
                     };
 
-                    // Add tool response as a user message (since we don't have tool_call_id for parsed calls)
-                    let tool_response = format!(
-                        "Tool '{}' result:\n{}",
-                        parsed_call.tool_name, result_content
-                    );
-                    messages.push(Message::user(tool_response));
+                    // Add tool response message — use the (possibly
+                    // synthetic) tool_call_id so backends that demand
+                    // matching ids accept the trace.
+                    messages.push(Message::tool(result_content, &tool_call.id));
                 }
 
                 // Continue the loop for the agent to process tool results
@@ -889,27 +871,6 @@ Wait for tool results before proceeding. When done, respond with plain text only
         // Execute the tool
         self.tool_registry
             .execute(&tool_call.function.name, args)
-            .await
-    }
-
-    /// Execute a parsed tool call from XML
-    async fn execute_parsed_tool_call(
-        &self,
-        parsed_call: &ParsedToolCall,
-        available_tools: &[String],
-    ) -> anyhow::Result<serde_json::Value> {
-        // Check if tool is in available tools list
-        if !available_tools.contains(&parsed_call.tool_name) {
-            anyhow::bail!(
-                "Tool '{}' is not available to this agent. Available tools: {:?}",
-                parsed_call.tool_name,
-                available_tools
-            );
-        }
-
-        // Execute the tool
-        self.tool_registry
-            .execute(&parsed_call.tool_name, parsed_call.arguments.clone())
             .await
     }
 

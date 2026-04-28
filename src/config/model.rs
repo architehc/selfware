@@ -104,12 +104,34 @@ pub struct ModelProfile {
     /// Extra fields merged into every chat-completion request body.
     #[serde(default)]
     pub extra_body: Option<serde_json::Map<String, serde_json::Value>>,
+    /// Whether this profile supports native (OpenAI-style) tool calling.
+    ///
+    /// `None` (default) means "fall back to the parent
+    /// `agent.native_function_calling`", preserving prior behaviour for
+    /// existing TOML configs. `Some(true)` / `Some(false)` overrides for
+    /// that profile only.
+    ///
+    /// This was previously hard-coded to `false` inside
+    /// `chat_with_profile`, which silently disabled native FC for any
+    /// swarm code that routed through a `ModelProfile`. See
+    /// `src/api/tool_calling.rs`.
+    #[serde(default)]
+    pub native_function_calling: Option<bool>,
 }
 
 impl ModelProfile {
     /// Returns `true` if this model profile lists `"vision"` among its modalities.
     pub fn supports_vision(&self) -> bool {
         self.modalities.iter().any(|m| m == "vision")
+    }
+
+    /// Resolve the effective native FC flag for this profile.
+    ///
+    /// If the profile sets [`Self::native_function_calling`] explicitly,
+    /// that wins. Otherwise we fall back to the supplied default
+    /// (typically the parent `Config.agent.native_function_calling`).
+    pub fn effective_native_function_calling(&self, default_native: bool) -> bool {
+        self.native_function_calling.unwrap_or(default_native)
     }
 }
 
@@ -241,6 +263,7 @@ mod tests {
             modalities: vec!["text".to_string(), "vision".to_string()],
             context_length: 32768,
             extra_body: None,
+            native_function_calling: None,
         };
         assert!(profile.supports_vision());
     }
@@ -256,6 +279,7 @@ mod tests {
             modalities: vec!["text".to_string()],
             context_length: 32768,
             extra_body: None,
+            native_function_calling: None,
         };
         assert!(!profile.supports_vision());
     }
@@ -271,6 +295,7 @@ mod tests {
             modalities: vec![],
             context_length: 32768,
             extra_body: None,
+            native_function_calling: None,
         };
         assert!(!profile.supports_vision());
     }
@@ -286,6 +311,7 @@ mod tests {
             modalities: vec!["text".to_string()],
             context_length: 131072,
             extra_body: None,
+            native_function_calling: None,
         };
         let json = serde_json::to_string(&profile).unwrap();
         assert!(json.contains("qwen-72b"));
@@ -330,6 +356,7 @@ mod tests {
             modalities: vec!["text".to_string()],
             context_length: 32768,
             extra_body: Some(extra),
+            native_function_calling: None,
         };
         let extra = profile.extra_body.as_ref().unwrap();
         assert_eq!(extra["top_p"], serde_json::json!(0.95));
@@ -352,6 +379,7 @@ mod tests {
             modalities: vec!["text".to_string()],
             context_length: 8192,
             extra_body: None,
+            native_function_calling: None,
         };
         let cloned = profile.clone();
         assert_eq!(cloned.model, "model");

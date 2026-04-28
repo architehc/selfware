@@ -61,6 +61,14 @@ pub struct AgentConfig {
     /// - "full": current behavior, summarize everything via LLM (~50% reduction)
     #[serde(default = "default_compression_detail")]
     pub compression_detail: String,
+    /// Disable per-turn debug artifact capture under `<workdir>/.selfware/turns/`.
+    ///
+    /// Capture is on by default — every LLM call writes a `turn_NNNN.json`
+    /// containing the sanitized request body, the response, parsed tool
+    /// calls, and the agent's decision. Set this to `true` to suppress
+    /// that output (e.g. to avoid disk noise on a read-only workdir).
+    #[serde(default)]
+    pub disable_turn_artifacts: bool,
 }
 
 impl Default for AgentConfig {
@@ -79,6 +87,7 @@ impl Default for AgentConfig {
             context_compression_ratio: default_context_compression_ratio(),
             context_thinking_ratio: default_context_thinking_ratio(),
             compression_detail: default_compression_detail(),
+            disable_turn_artifacts: false,
         }
     }
 }

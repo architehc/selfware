@@ -827,6 +827,9 @@ impl Agent {
             self.consecutive_read_only_steps
         );
 
+        // Record the firing for FailureMode classification.
+        self.note_progress_guard_fired();
+
         for (name, args_str, tool_call_id) in tool_calls {
             let start_time = std::time::Instant::now();
             let (call_id, use_native_fc, _) =
@@ -1274,6 +1277,8 @@ impl Agent {
         self.push_tool_result_message(use_native_fc, call_id, tool_name, false, &err);
         self.log_tool_call(tool_name, args_str, &err, false, start_time, false);
         self.remember_failed_tool(tool_name, &err);
+        // Surface this as a permanently-blocked tool call for FailureMode.
+        self.note_permanently_blocked(tool_name);
         let duration_ms = start_time.elapsed().as_millis() as u64;
         self.self_improvement.record_tool(
             tool_name,
@@ -2453,6 +2458,9 @@ impl Agent {
         args: &Value,
         start_time: std::time::Instant,
     ) -> Result<(bool, String, String)> {
+        // Track every dispatched tool call for FailureMode classification.
+        self.note_total_tool_call();
+
         // Intercept context management tools — they operate on agent state,
         // not the filesystem, so they bypass the normal tool registry.
         if crate::tools::context::is_context_tool(name) {
@@ -2588,6 +2596,14 @@ impl Agent {
                             crate::output::display_file_diff(path, old_content, &new_content);
                         }
                     }
+                }
+
+                // Track mutating tool calls for FailureMode classification.
+                if matches!(
+                    name,
+                    "file_edit" | "file_write" | "file_delete" | "file_fim_edit"
+                ) {
+                    self.note_mutating_tool_call();
                 }
 
                 // Record successful tool usage for learning
@@ -3286,6 +3302,7 @@ mod tests {
                     );
                     map
                 }),
+                native_function_calling: None,
             },
         );
 
@@ -3320,6 +3337,7 @@ mod tests {
                 modalities: vec!["text".to_string(), "vision".to_string()],
                 context_length: 262_144,
                 extra_body: None,
+                native_function_calling: None,
             },
         );
 
@@ -3350,6 +3368,7 @@ mod tests {
                 modalities: vec!["text".to_string()],
                 context_length: 131_072,
                 extra_body: None,
+                native_function_calling: None,
             },
         );
 

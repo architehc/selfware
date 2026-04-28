@@ -627,12 +627,16 @@ fn test_parse_sse_event_tool_calls_flushed_on_done() {
 
 #[test]
 fn test_parse_sse_event_finish_reason() {
-    // Test SSE event with finish_reason but no content
+    // Test SSE event with finish_reason but no content.
+    //
+    // The parser now propagates finish_reason as a `FinishReason` chunk so
+    // the agent can record it in per-turn debug artifacts. Older versions
+    // dropped it; the new behaviour is that one chunk is emitted.
     let mut acc = ToolCallAccumulator::new();
     let event = r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#;
     let results = parse_sse_event(event, &mut acc);
-    // Should return empty since there's no content or reasoning
-    assert!(results.is_empty());
+    assert_eq!(results.len(), 1);
+    assert!(matches!(&results[0], StreamChunk::FinishReason(r) if r == "stop"));
 }
 
 #[test]
@@ -686,8 +690,10 @@ fn test_parse_sse_event_flushes_on_finish_reason() {
 
     let finish = r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
     let r2 = parse_sse_event(finish, &mut acc);
-    assert_eq!(r2.len(), 1);
+    // Now: one accumulated tool call followed by the propagated finish_reason.
+    assert_eq!(r2.len(), 2);
     assert!(matches!(&r2[0], StreamChunk::ToolCall(tc) if tc.id == "call_finish"));
+    assert!(matches!(&r2[1], StreamChunk::FinishReason(r) if r == "tool_calls"));
 }
 
 // ============================================
@@ -1082,11 +1088,13 @@ fn test_parse_sse_finish_reason_flushes_tool_calls() {
     let r1 = parse_sse_event(event1, &mut acc);
     assert!(r1.is_empty());
 
-    // Second event with finish_reason: should flush
+    // Second event with finish_reason: should flush the buffered tool call
+    // and propagate the finish_reason as its own chunk.
     let event2 = r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#;
     let r2 = parse_sse_event(event2, &mut acc);
-    assert_eq!(r2.len(), 1);
+    assert_eq!(r2.len(), 2);
     assert!(matches!(&r2[0], StreamChunk::ToolCall(tc) if tc.id == "c_fin"));
+    assert!(matches!(&r2[1], StreamChunk::FinishReason(r) if r == "tool_calls"));
 }
 
 #[test]
@@ -2677,6 +2685,7 @@ async fn test_chat_with_profile_normalizes_messages() {
         modalities: vec!["text".to_string()],
         context_length: 32768,
         extra_body: None,
+        native_function_calling: None,
     };
 
     // Only system + tool messages (no user message) — canonicalization
@@ -2736,6 +2745,7 @@ async fn test_chat_with_profile_strips_images_for_text_only_model() {
         modalities: vec!["text".to_string()], // NO vision
         context_length: 32768,
         extra_body: None,
+        native_function_calling: None,
     };
 
     // Send a real multimodal message — strip_images should remove the image block.
@@ -2784,6 +2794,7 @@ async fn test_chat_with_profile_context_overflow() {
         modalities: vec!["text".to_string()],
         context_length: 100, // Impossibly small
         extra_body: None,
+        native_function_calling: None,
     };
 
     let messages = vec![
@@ -3632,4 +3643,252 @@ fn test_completion_request_with_stop_sequences() {
     // Newline is escaped as \\n in JSON, check for the escaped version
     assert!(json.contains("\\n"));
     assert!(json.contains("###"));
+}
+
+// ============================================
+// Native function calling unification:
+// chat() and chat_with_profile() must honour
+// native_function_calling identically.
+// ============================================
+
+/// Helper: build a [`ToolDefinition`] for a fake `shell_exec` tool.
+#[cfg(test)]
+fn dummy_shell_tool() -> types::ToolDefinition {
+    types::ToolDefinition {
+        def_type: "function".to_string(),
+        function: types::FunctionDefinition {
+            name: "shell_exec".to_string(),
+            description: "Execute a shell command".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            }),
+        },
+    }
+}
+
+/// Regression: `chat_with_profile` must honour `native_function_calling`.
+///
+/// Before this fix, the function hard-coded `false` when calling
+/// `attach_tools_to_body`, so any swarm code routing through a
+/// `ModelProfile` silently sent requests *without* `tool_choice: auto`.
+/// This test verifies that when the profile sets
+/// `native_function_calling = Some(true)`, the outgoing request body
+/// contains `tool_choice: "auto"`.
+#[tokio::test]
+async fn test_chat_with_profile_honors_native_function_calling_true() {
+    use crate::testing::mock_api::MockLlmServer;
+
+    let server = MockLlmServer::builder()
+        .with_response("native FC ack")
+        .build()
+        .await;
+
+    let config = crate::config::Config {
+        endpoint: format!("{}/v1", server.url()),
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+
+    let profile = crate::config::ModelProfile {
+        endpoint: format!("{}/v1", server.url()),
+        model: "fc-model".to_string(),
+        api_key: None,
+        max_tokens: 1024,
+        temperature: 0.5,
+        modalities: vec!["text".to_string()],
+        context_length: 32768,
+        extra_body: None,
+        native_function_calling: Some(true),
+    };
+
+    let result = client
+        .chat_with_profile(
+            vec![Message::user("call a tool")],
+            Some(vec![dummy_shell_tool()]),
+            ThinkingMode::Enabled,
+            &profile,
+        )
+        .await;
+    assert!(result.is_ok(), "chat_with_profile failed: {:?}", result.err());
+
+    let bodies = server.captured_request_bodies().await;
+    assert!(!bodies.is_empty(), "no request captured");
+    let body: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    assert_eq!(
+        body["tool_choice"], "auto",
+        "profile native FC=true must produce tool_choice: auto, body was: {}",
+        bodies[0]
+    );
+    assert!(body["tools"].is_array());
+
+    server.stop().await;
+}
+
+/// Regression: profile with `native_function_calling = Some(false)`
+/// must NOT send `tool_choice`.
+#[tokio::test]
+async fn test_chat_with_profile_honors_native_function_calling_false() {
+    use crate::testing::mock_api::MockLlmServer;
+
+    let server = MockLlmServer::builder()
+        .with_response("text-mode ack")
+        .build()
+        .await;
+
+    let config = crate::config::Config {
+        endpoint: format!("{}/v1", server.url()),
+        ..Default::default()
+    };
+    let client = ApiClient::new(&config).unwrap();
+
+    let profile = crate::config::ModelProfile {
+        endpoint: format!("{}/v1", server.url()),
+        model: "text-mode".to_string(),
+        api_key: None,
+        max_tokens: 1024,
+        temperature: 0.5,
+        modalities: vec!["text".to_string()],
+        context_length: 32768,
+        extra_body: None,
+        native_function_calling: Some(false),
+    };
+
+    let result = client
+        .chat_with_profile(
+            vec![Message::user("call a tool")],
+            Some(vec![dummy_shell_tool()]),
+            ThinkingMode::Enabled,
+            &profile,
+        )
+        .await;
+    assert!(result.is_ok(), "chat_with_profile failed: {:?}", result.err());
+
+    let bodies = server.captured_request_bodies().await;
+    let body: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    assert!(
+        body.get("tool_choice").is_none(),
+        "profile native FC=false must omit tool_choice, body was: {}",
+        bodies[0]
+    );
+
+    server.stop().await;
+}
+
+/// Regression: when the profile leaves `native_function_calling = None`,
+/// it inherits the parent client's `agent.native_function_calling`.
+/// This test verifies the inheritance with the parent set to true.
+#[tokio::test]
+async fn test_chat_with_profile_inherits_parent_native_fc() {
+    use crate::testing::mock_api::MockLlmServer;
+
+    let server = MockLlmServer::builder()
+        .with_response("inherited ack")
+        .build()
+        .await;
+
+    let mut config = crate::config::Config {
+        endpoint: format!("{}/v1", server.url()),
+        ..Default::default()
+    };
+    config.agent.native_function_calling = true;
+    let client = ApiClient::new(&config).unwrap();
+
+    let profile = crate::config::ModelProfile {
+        endpoint: format!("{}/v1", server.url()),
+        model: "inherit".to_string(),
+        api_key: None,
+        max_tokens: 1024,
+        temperature: 0.5,
+        modalities: vec!["text".to_string()],
+        context_length: 32768,
+        extra_body: None,
+        native_function_calling: None, // inherit from parent
+    };
+
+    let result = client
+        .chat_with_profile(
+            vec![Message::user("call a tool")],
+            Some(vec![dummy_shell_tool()]),
+            ThinkingMode::Enabled,
+            &profile,
+        )
+        .await;
+    assert!(result.is_ok());
+
+    let bodies = server.captured_request_bodies().await;
+    let body: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    assert_eq!(
+        body["tool_choice"], "auto",
+        "profile with None must inherit parent native FC=true: {}",
+        bodies[0]
+    );
+
+    server.stop().await;
+}
+
+/// Regression: `chat()` and `chat_with_profile()` must produce the same
+/// `tool_choice` for the same effective `native_function_calling`. This
+/// is the core invariant the unification is meant to enforce.
+#[tokio::test]
+async fn test_chat_and_chat_with_profile_agree_on_tool_choice() {
+    use crate::testing::mock_api::MockLlmServer;
+
+    let server = MockLlmServer::builder()
+        .with_response("ack-1")
+        .with_response("ack-2")
+        .build()
+        .await;
+
+    let mut config = crate::config::Config {
+        endpoint: format!("{}/v1", server.url()),
+        ..Default::default()
+    };
+    config.agent.native_function_calling = true;
+    let client = ApiClient::new(&config).unwrap();
+
+    // Path 1: chat()
+    let _ = client
+        .chat(
+            vec![Message::user("hi")],
+            Some(vec![dummy_shell_tool()]),
+            ThinkingMode::Enabled,
+        )
+        .await
+        .unwrap();
+
+    // Path 2: chat_with_profile() with explicit native FC = true
+    let profile = crate::config::ModelProfile {
+        endpoint: format!("{}/v1", server.url()),
+        model: config.model.clone(),
+        api_key: None,
+        max_tokens: 1024,
+        temperature: 0.5,
+        modalities: vec!["text".to_string()],
+        context_length: 32768,
+        extra_body: None,
+        native_function_calling: Some(true),
+    };
+    let _ = client
+        .chat_with_profile(
+            vec![Message::user("hi")],
+            Some(vec![dummy_shell_tool()]),
+            ThinkingMode::Enabled,
+            &profile,
+        )
+        .await
+        .unwrap();
+
+    let bodies = server.captured_request_bodies().await;
+    assert_eq!(bodies.len(), 2);
+    let b1: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    let b2: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+    assert_eq!(
+        b1["tool_choice"], b2["tool_choice"],
+        "chat and chat_with_profile must agree on tool_choice when native FC matches"
+    );
+    assert_eq!(b1["tool_choice"], "auto");
+
+    server.stop().await;
 }

@@ -287,16 +287,34 @@ def run_selfware(workdir: Path, prompt: str, alias: str, timeout: int, log_path:
 
 
 def capture_patch(workdir: Path) -> str:
-    """Return `git diff` from the workdir, including newly added files."""
-    # Stage everything so new files show up in `diff --cached`
+    """Return `git diff` from the workdir, code-only.
+
+    Excludes selfware operational artifacts that would otherwise inflate
+    the patch and confuse the SWE-bench Pro evaluator:
+    - `.selfware/` (tool-result cache, checkpoints)
+    - `.claude/` (Claude Code metadata)
+    - `__pycache__/`
+    - `selfware.toml` (the per-instance config we write into the workdir)
+    - `*.bak` (selfware's pre-edit file backups)
+    """
     subprocess.run(
         ["git", "-C", str(workdir), "add", "-A"],
         check=False,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+    excluded_paths = [
+        ":(exclude).selfware/**",
+        ":(exclude).claude/**",
+        ":(exclude)__pycache__/**",
+        ":(exclude)**/__pycache__/**",
+        ":(exclude)selfware.toml",
+        ":(exclude)*.bak",
+        ":(exclude)**/*.bak",
+    ]
     r = subprocess.run(
-        ["git", "-C", str(workdir), "diff", "--cached", "HEAD"],
+        ["git", "-C", str(workdir), "diff", "--cached", "HEAD", "--", "."]
+        + excluded_paths,
         capture_output=True,
         text=True,
         check=False,

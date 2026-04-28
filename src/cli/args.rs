@@ -173,18 +173,23 @@ pub(crate) enum Commands {
     },
 
     /// Run comprehensive benchmark suite
+    ///
+    /// With no subcommand, runs the legacy throughput/e2e suite (back-compat
+    /// with previous releases).  Use a subcommand for newer benchmarks.
     #[command(alias = "bm")]
     Bench {
-        /// Endpoint URL to benchmark (defaults to config)
+        #[command(subcommand)]
+        command: Option<BenchCommand>,
+        /// Endpoint URL to benchmark (legacy mode, defaults to config)
         #[arg(short, long)]
         endpoint: Option<String>,
-        /// Benchmark suites to run (throughput,e2e,swebench)
+        /// Benchmark suites to run (legacy mode: throughput,e2e,swebench,multilang)
         #[arg(short, long, default_value = "throughput,e2e")]
         suite: String,
-        /// Number of concurrent tasks
+        /// Number of concurrent tasks (legacy mode)
         #[arg(short, long, default_value_t = 4)]
         concurrent: usize,
-        /// Output format (text, json)
+        /// Output format (legacy mode: text, json)
         #[arg(long, default_value = "text")]
         format: String,
     },
@@ -479,11 +484,96 @@ pub(crate) enum Commands {
         command: WorkflowCommands,
     },
 
+    /// Inspect or manipulate selfware configuration
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
+
     /// Inspect workflow state
     #[command(alias = "st")]
     State {
         #[command(subcommand)]
         command: StateCommands,
+    },
+}
+
+/// Subcommands of `selfware bench` for the modern benchmark surface.
+#[derive(Subcommand, Clone, Debug)]
+pub(crate) enum BenchCommand {
+    /// Run SWE-bench Pro instances against one or more local quants
+    #[command(name = "swebench-pro")]
+    SwebenchPro(SwebenchProArgs),
+
+    /// Plain throughput benchmark (TODO: port from `Commands::Bench` legacy path)
+    Throughput,
+
+    /// Multi-language coding benchmark (TODO: port from legacy)
+    Multilang,
+
+    /// Browser automation benchmark (TODO)
+    Browser,
+
+    /// Long-running soak test (TODO: port from `Commands::LongTest`)
+    #[command(name = "long-run")]
+    LongRun,
+}
+
+/// Flags for `selfware bench swebench-pro`.
+#[derive(clap::Args, Clone, Debug)]
+pub(crate) struct SwebenchProArgs {
+    /// Comma-separated quant labels (or 'all' for every catalog entry)
+    #[arg(long, default_value = "Qwen3.6-35B-A3B-Q3_K_XL,Qwen3.6-27B-HauhauCS-Q4_K_P,Qwen3.6-27B-HauhauCS-IQ4_XS,Qwen3.6-27B-HauhauCS-Q2_K_P")]
+    pub quants: String,
+
+    /// How many SWE-bench Pro instances to subset (sorted by problem_statement length)
+    #[arg(long, default_value_t = 3)]
+    pub instances: usize,
+
+    /// Comma-separated instance_ids (overrides --instances)
+    #[arg(long)]
+    pub instance_ids: Option<String>,
+
+    /// Per-instance agent timeout (seconds)
+    #[arg(long, default_value_t = 900)]
+    pub scenario_timeout: u64,
+
+    /// llama-server context size
+    #[arg(long, default_value_t = 262_144)]
+    pub ctx: u32,
+
+    /// llama-server `--parallel` slots
+    #[arg(long, default_value_t = 2)]
+    pub parallel: u32,
+
+    /// Future-use: bench-side concurrency (currently surfaced in plan.json)
+    #[arg(long, default_value_t = 1)]
+    pub concurrency: u32,
+
+    /// Number of trials per (quant, instance) pair
+    #[arg(long, default_value_t = 1)]
+    pub trials: u32,
+
+    /// Output directory (default: reports/swebench_pro/<timestamp>)
+    #[arg(long)]
+    pub output: Option<String>,
+
+    /// Path to the selfware binary used for sub-runs (defaults to current binary)
+    #[arg(long)]
+    pub selfware_bin: Option<String>,
+
+    /// Skip (quant, instance, trial) triples whose .pred already exists
+    #[arg(long)]
+    pub skip_existing: bool,
+}
+
+#[derive(Subcommand, Clone, Debug)]
+pub(crate) enum ConfigCommands {
+    /// Print effective configuration with provenance annotations
+    Show {
+        /// Render as JSON instead of the human-readable table
+        #[arg(long)]
+        json: bool,
     },
 }
 

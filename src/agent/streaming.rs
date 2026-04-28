@@ -173,12 +173,18 @@ impl Agent {
     }
 
     /// Chat with streaming, displaying output as it arrives
-    /// Returns (content, reasoning, tool_calls) tuple
+    /// Returns (content, reasoning, tool_calls) tuple.
+    ///
+    /// `meta_out` is populated with the request body and per-turn timing /
+    /// finish_reason / token usage when set to `Some(_)` by the caller. This
+    /// is how the per-turn debug capture in `execute_step_internal` learns
+    /// what was actually sent over the wire and how the model ended its turn.
     pub(super) async fn chat_streaming(
         &self,
         messages: Vec<Message>,
         tools: Option<Vec<crate::api::types::ToolDefinition>>,
         thinking: ThinkingMode,
+        meta_out: Option<&mut crate::api::types::ChatMetadata>,
     ) -> Result<(String, Option<String>, Option<Vec<ToolCall>>)> {
         use std::io::{self, Write};
 
@@ -224,7 +230,16 @@ impl Agent {
         let mut phrase_rotation = tokio::time::Instant::now();
         let _last_bar_update = tokio::time::Instant::now();
 
-        let stream = self.client.chat_stream(messages, tools, thinking).await?;
+        let (stream, request_meta) = self
+            .client
+            .chat_stream_with_meta(messages, tools, thinking)
+            .await?;
+        // request_meta is plumbed through to meta_out at the bottom of this
+        // function, after we've also harvested finish_reason / token usage
+        // from the SSE stream.
+        let mut captured_finish_reason: Option<String> = None;
+        let mut captured_prompt_tokens: Option<u32> = None;
+        let mut captured_completion_tokens: Option<u32> = None;
 
         let mut rx = stream.into_channel().await;
         let mut content = String::new();
@@ -448,10 +463,16 @@ impl Agent {
                     output::record_tokens(u.prompt_tokens as u64, u.completion_tokens as u64);
                     output::print_token_usage(u.prompt_tokens as u64, u.completion_tokens as u64);
 
+                    captured_prompt_tokens = Some(u.prompt_tokens as u32);
+                    captured_completion_tokens = Some(u.completion_tokens as u32);
+
                     self.emit_event(AgentEvent::TokenUsage {
                         prompt_tokens: u.prompt_tokens as u64,
                         completion_tokens: u.completion_tokens as u64,
                     });
+                }
+                StreamChunk::FinishReason(reason) => {
+                    captured_finish_reason = Some(reason);
                 }
                 StreamChunk::Done => break,
             }
@@ -501,6 +522,16 @@ impl Agent {
             }
 
             // No per-call summary — chat_streaming runs multiple times per task.
+        }
+
+        if let Some(slot) = meta_out {
+            *slot = crate::api::types::ChatMetadata {
+                request_body: request_meta.request_body,
+                elapsed_ms: request_meta.elapsed_ms,
+                finish_reason: captured_finish_reason,
+                prompt_tokens: captured_prompt_tokens,
+                completion_tokens: captured_completion_tokens,
+            };
         }
 
         Ok((

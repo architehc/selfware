@@ -218,12 +218,17 @@ fn build_workflow_llm_handler(
 /// `selfware.toml` default are always resolved against the directory the user
 /// was in when they invoked the command.
 ///
-/// Rules:
+/// Precedence (highest to lowest):
 /// 1. Explicit `--config` path → expand `~`, then absolutify against `original_cwd`.
-/// 2. No `--config` but `-C` is active → check `original_cwd/selfware.toml`.
+/// 2. `SELFWARE_CONFIG` env var → use as-is (must be absolute or resolvable).
+///    This MUST be honoured before falling back to scanning original cwd —
+///    otherwise `-C /workdir` combined with `SELFWARE_CONFIG=/abs/path.toml`
+///    silently loads `./selfware.toml` from the original cwd instead of the
+///    explicitly requested env-var path.
+/// 3. No `--config` but `-C` is active → check `original_cwd/selfware.toml`.
 ///    If it exists, return its absolute path.  Otherwise return `None` so that
 ///    `Config::load` does its normal search (in the new cwd + home dir).
-/// 3. Neither flag → return `None` (normal search).
+/// 4. Neither flag → return `None` (normal search).
 fn resolve_config_path(
     config_flag: Option<&str>,
     has_workdir: bool,
@@ -247,7 +252,7 @@ fn resolve_config_path(
         };
 
         // Make relative paths absolute against the original cwd
-        Some(if std::path::Path::new(&expanded).is_absolute() {
+        return Some(if std::path::Path::new(&expanded).is_absolute() {
             expanded
         } else if let Some(cwd) = original_cwd {
             cwd.join(&expanded).to_string_lossy().to_string()
@@ -257,27 +262,31 @@ fn resolve_config_path(
                 expanded
             );
             expanded
-        })
-    } else if has_workdir {
-        // No explicit --config but -C is being used: check for selfware.toml
-        // in the ORIGINAL directory first.  If found, pass its absolute path so
-        // Config::load doesn't accidentally pick up a different file in the -C
-        // target directory.
+        });
+    }
+
+    // SELFWARE_CONFIG must take precedence over scanning original_cwd.
+    // Returning `None` here lets `Config::load` consult the env var on its
+    // own; if we returned an absolute path from `original_cwd/selfware.toml`
+    // here, it would override SELFWARE_CONFIG inside the loader.
+    if std::env::var_os("SELFWARE_CONFIG").is_some() {
+        return None;
+    }
+
+    if has_workdir {
+        // No explicit --config and no SELFWARE_CONFIG, but -C is being used:
+        // check for selfware.toml in the ORIGINAL directory first.  If found,
+        // pass its absolute path so Config::load doesn't accidentally pick up
+        // a different file in the -C target directory.
         if let Some(cwd) = original_cwd {
             let candidate = cwd.join("selfware.toml");
             if candidate.is_file() {
-                Some(candidate.to_string_lossy().to_string())
-            } else {
-                // Not in original dir — let Config::load do its normal search
-                // (which will look in the -C directory and ~/.config/selfware/).
-                None
+                return Some(candidate.to_string_lossy().to_string());
             }
-        } else {
-            None
         }
-    } else {
-        None
     }
+
+    None
 }
 
 pub async fn run() -> Result<()> {
@@ -1810,6 +1819,14 @@ async fn handle_command(
             }
         }
 
+        Commands::Config { command } => {
+            match command {
+                ConfigCommands::Show { json } => {
+                    config_show(&config, json)?;
+                }
+            }
+        }
+
         Commands::McpServer => {
             crate::mcp::server::run_mcp_server().await?;
         }
@@ -1855,11 +1872,15 @@ async fn handle_command(
         }
 
         Commands::Bench {
+            command,
             endpoint,
             suite,
             concurrent,
             format: _format,
         } => {
+            if let Some(sub) = command {
+                return dispatch_bench_subcommand(sub, &config).await;
+            }
             if !quiet {
                 println!("{}", render_header(ctx));
             }
@@ -2267,6 +2288,33 @@ async fn handle_command(
             println!("{}", render_header(ctx));
             println!("\n{} Auto-Configuration Detection\n", "⚙️".emphasis());
             println!("   Endpoint: {}", endpoint.clone().emphasis());
+
+            // Show the model-defaults profile that was matched (if any) at
+            // config-load time. This is purely static (driven by config.model)
+            // and never makes network calls, so it is safe to print before
+            // we even talk to the backend.
+            match (&config.matched_profile, &config.matched_profile_applied) {
+                (Some(name), applied) if !applied.is_empty() => {
+                    println!(
+                        "   Profile: {} (applied: {})",
+                        name.clone().emphasis(),
+                        applied.join(", ")
+                    );
+                }
+                (Some(name), _) => {
+                    println!(
+                        "   Profile: {} (no fields applied — user config covers all)",
+                        name.clone().emphasis()
+                    );
+                }
+                (None, _) => {
+                    println!(
+                        "   Profile: {} (no built-in defaults for model '{}')",
+                        "none".dimmed(),
+                        config.model
+                    );
+                }
+            }
 
             let configurator = AutoConfigurator::new(&endpoint, api_key);
 
@@ -2692,6 +2740,224 @@ fn load_related_yaml_workflows(
     }
 
     Ok(())
+}
+
+/// Render the effective configuration with provenance annotations.
+///
+/// Mirrors `selfware config show`. Each row is `key = value [source]`,
+/// formatted into aligned columns for readability.
+pub(crate) fn config_show(config: &Config, json: bool) -> Result<()> {
+    use crate::config::ConfigSource;
+
+    let mut rows: Vec<(String, String, ConfigSource)> = Vec::new();
+
+    rows.push((
+        "endpoint".to_string(),
+        config.endpoint.clone(),
+        config.source_of("endpoint"),
+    ));
+    rows.push((
+        "model".to_string(),
+        config.model.clone(),
+        config.source_of("model"),
+    ));
+    rows.push((
+        "temperature".to_string(),
+        format!("{}", config.temperature),
+        config.source_of("temperature"),
+    ));
+    rows.push((
+        "max_tokens".to_string(),
+        format!("{}", config.max_tokens),
+        config.source_of("max_tokens"),
+    ));
+    rows.push((
+        "context_length".to_string(),
+        format!("{}", config.context_length),
+        config.source_of("context_length"),
+    ));
+
+    rows.push((
+        "agent.native_function_calling".to_string(),
+        format!("{}", config.agent.native_function_calling),
+        config.source_of("agent.native_function_calling"),
+    ));
+    rows.push((
+        "agent.streaming".to_string(),
+        format!("{}", config.agent.streaming),
+        config.source_of("agent.streaming"),
+    ));
+    rows.push((
+        "agent.max_iterations".to_string(),
+        format!("{}", config.agent.max_iterations),
+        config.source_of("agent.max_iterations"),
+    ));
+    rows.push((
+        "agent.step_timeout_secs".to_string(),
+        format!("{}", config.agent.step_timeout_secs),
+        config.source_of("agent.step_timeout_secs"),
+    ));
+
+    if let Some(extra) = &config.extra_body {
+        let mut keys: Vec<&String> = extra.keys().collect();
+        keys.sort();
+        for k in keys {
+            let key = format!("extra_body.{}", k);
+            let val = match extra.get(k) {
+                Some(serde_json::Value::String(s)) => s.clone(),
+                Some(v) => v.to_string(),
+                None => String::new(),
+            };
+            let source = config.source_of(&key);
+            rows.push((key, val, source));
+        }
+    }
+
+    if json {
+        let entries: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(k, v, src)| {
+                serde_json::json!({
+                    "key": k,
+                    "value": v,
+                    "source": src.label(),
+                })
+            })
+            .collect();
+        let payload = serde_json::json!({ "config": entries });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload)
+                .map_err(|e| anyhow::anyhow!("failed to serialize config: {}", e))?
+        );
+        return Ok(());
+    }
+
+    let key_w = rows.iter().map(|(k, _, _)| k.len()).max().unwrap_or(0);
+    let val_w = rows.iter().map(|(_, v, _)| v.len()).max().unwrap_or(0);
+
+    println!("Effective configuration (selfware config show)");
+    println!();
+    for (k, v, src) in &rows {
+        println!(
+            "  {:<kw$} = {:<vw$}  [{}]",
+            k,
+            v,
+            src.label(),
+            kw = key_w,
+            vw = val_w
+        );
+    }
+
+    Ok(())
+}
+
+/// Dispatcher for the modern `selfware bench <subcommand>` surface.
+///
+/// `swebench-pro` is implemented; the other planned subcommands stub with a
+/// clear "not yet implemented" error so users see them in `--help` without
+/// hitting an `unimplemented!()` panic.
+async fn dispatch_bench_subcommand(
+    sub: args::BenchCommand,
+    _config: &Config,
+) -> Result<()> {
+    use args::BenchCommand;
+
+    match sub {
+        BenchCommand::SwebenchPro(args) => run_swebench_pro_cli(args).await,
+        BenchCommand::Throughput => {
+            anyhow::bail!(
+                "`bench throughput` subcommand is not yet implemented; use `selfware bench --suite throughput` for the legacy path."
+            )
+        }
+        BenchCommand::Multilang => {
+            anyhow::bail!(
+                "`bench multilang` subcommand is not yet implemented; use `selfware bench --suite multilang` for the legacy path."
+            )
+        }
+        BenchCommand::Browser => {
+            anyhow::bail!("`bench browser` subcommand is not yet implemented.")
+        }
+        BenchCommand::LongRun => {
+            anyhow::bail!(
+                "`bench long-run` subcommand is not yet implemented; use `selfware long-test` for the legacy path."
+            )
+        }
+    }
+}
+
+#[cfg(feature = "bench-harness")]
+async fn run_swebench_pro_cli(args: args::SwebenchProArgs) -> Result<()> {
+    use crate::bench_harness::swebench_pro::{
+        catalog::{quant_catalog, DEFAULT_QUANTS},
+        run_swebench_pro, SwebenchProOpts,
+    };
+    use std::time::Duration;
+
+    let quants: Vec<String> = if args.quants.eq_ignore_ascii_case("all") {
+        quant_catalog().keys().map(|s| s.to_string()).collect()
+    } else if args.quants.trim().is_empty() {
+        DEFAULT_QUANTS.iter().map(|s| s.to_string()).collect()
+    } else {
+        args.quants
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+
+    let instance_ids: Vec<String> = args
+        .instance_ids
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    let output = match args.output {
+        Some(p) => PathBuf::from(p),
+        None => {
+            let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+            PathBuf::from("reports/swebench_pro").join(stamp)
+        }
+    };
+
+    let selfware_bin = match args.selfware_bin {
+        Some(p) => PathBuf::from(p),
+        None => std::env::current_exe()
+            .unwrap_or_else(|_| PathBuf::from("target/release/selfware")),
+    };
+
+    let opts = SwebenchProOpts {
+        quants,
+        instance_ids,
+        instances: args.instances,
+        scenario_timeout: Duration::from_secs(args.scenario_timeout),
+        ctx: args.ctx,
+        parallel: args.parallel,
+        concurrency: args.concurrency,
+        trials: args.trials,
+        output,
+        selfware_bin,
+        skip_existing: args.skip_existing,
+        llama_opts: Default::default(),
+    };
+
+    // The harness is blocking (subprocess + file I/O) and intentionally serial;
+    // run it inside `spawn_blocking` so we don't hold the runtime hostage.
+    tokio::task::spawn_blocking(move || run_swebench_pro(opts))
+        .await
+        .map_err(|e| anyhow::anyhow!("swebench-pro task join error: {}", e))?
+}
+
+#[cfg(not(feature = "bench-harness"))]
+async fn run_swebench_pro_cli(_args: args::SwebenchProArgs) -> Result<()> {
+    anyhow::bail!(
+        "`bench swebench-pro` requires the `bench-harness` feature: rebuild with `--features bench-harness`."
+    )
 }
 
 #[cfg(test)]

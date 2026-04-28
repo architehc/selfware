@@ -4,6 +4,7 @@ use tracing::warn;
 
 use super::*;
 
+use super::failure_mode::{FailureMode, RunOutcome};
 use super::tui_events::AgentEvent;
 
 enum PlannedToolExecution {
@@ -69,6 +70,7 @@ impl Agent {
         self.clear_task_state_memory();
         self.reset_no_action_prompt_state();
         self.total_no_action_prompts = 0;
+        self.reset_failure_mode_counters();
         self.required_task_tools.clear();
         let task_description = task.to_string();
         let available_tool_names: Vec<String> = self
@@ -614,11 +616,15 @@ impl Agent {
                         Ok(PlannedToolExecution::Interrupted) => continue,
                         Ok(PlannedToolExecution::Completed) => {
                             record_state_transition("Executing", "Completed");
-                            output::task_completed();
                             self.record_task_outcome(task_description, Outcome::Success, None);
+                            let fm = self.finalize_failure_mode(RunOutcome::NaturalCompletion);
                             if mode == LoopMode::NewTask {
                                 self.emit_event(AgentEvent::Completed {
-                                    message: "Task completed successfully".to_string(),
+                                    message: format!(
+                                        "Task completed ({}): {}",
+                                        fm.kind.tag(),
+                                        fm.evidence
+                                    ),
                                 });
                             }
                             if let Err(e) = self.complete_checkpoint() {
@@ -743,8 +749,8 @@ impl Agent {
                                 if mode == LoopMode::NewTask {
                                     progress.complete_phase();
                                 }
-                                output::task_completed();
                                 self.record_task_outcome(task_description, Outcome::Success, None);
+                                self.finalize_failure_mode(RunOutcome::NaturalCompletion);
                                 if let Err(e) = self.complete_checkpoint() {
                                     warn!("Failed to save completed checkpoint: {}", e);
                                 }
@@ -774,8 +780,8 @@ impl Agent {
                                 if mode == LoopMode::NewTask {
                                     progress.complete_phase();
                                 }
-                                output::task_completed();
                                 self.record_task_outcome(task_description, Outcome::Success, None);
+                                self.finalize_failure_mode(RunOutcome::NaturalCompletion);
                                 if let Err(e) = self.complete_checkpoint() {
                                     warn!("Failed to save completed checkpoint: {}", e);
                                 }
@@ -984,9 +990,8 @@ impl Agent {
                     if mode == LoopMode::NewTask {
                         progress.complete_phase();
                     }
-                    output::task_completed();
-                    cli_println!("{}", "📊 Outcome: green".bright_green());
                     self.record_task_outcome(task_description, Outcome::Success, Some("[green]"));
+                    self.finalize_failure_mode(RunOutcome::NaturalCompletion);
                     if let Err(e) = self.complete_checkpoint() {
                         warn!("Failed to save completed checkpoint: {}", e);
                     }
@@ -996,17 +1001,24 @@ impl Agent {
                     record_state_transition("Executing", "Failed");
                     if mode == LoopMode::NewTask {
                         progress.fail_phase();
-                        self.emit_event(AgentEvent::Error {
-                            message: format!("Task failed: {}", reason),
-                        });
                     }
 
-                    let label = self.classify_outcome_label();
-                    cli_println!("{} {} [{}]", "❌ Task failed:".bright_red(), reason, label);
+                    let fm = self.finalize_failure_mode(RunOutcome::Failed {
+                        reason: reason.clone(),
+                    });
+                    if mode == LoopMode::NewTask {
+                        self.emit_event(AgentEvent::Error {
+                            message: format!(
+                                "Task aborted ({}): {}",
+                                fm.kind.tag(),
+                                fm.evidence
+                            ),
+                        });
+                    }
                     self.record_task_outcome(
                         task_description,
                         Outcome::Failure,
-                        Some(&format!("{} [{}]", reason, label)),
+                        Some(&format!("{} [{}]", reason, fm.kind.tag())),
                     );
                     if let Err(e) = self.fail_checkpoint(&reason) {
                         warn!("Failed to save failed checkpoint: {}", e);
@@ -1023,9 +1035,49 @@ impl Agent {
             outcome_label,
             self.loop_control.current_step()
         );
-        cli_println!("{} {}", "📊 Outcome:".bright_yellow(), outcome_label);
         self.record_task_outcome(task_description, Outcome::Partial, Some(&detail));
+        self.finalize_failure_mode(RunOutcome::Partial);
         Ok(())
+    }
+
+    /// Build a `FailureMode` for the current run state and surface it on the
+    /// CLI. Also writes a `failure_mode.json` artifact next to the agent's
+    /// checkpoint directory (best-effort; never fails the run).
+    fn finalize_failure_mode(&mut self, outcome: RunOutcome) -> FailureMode {
+        let mode = FailureMode::classify(self, outcome);
+        cli_println!("{}", mode.cli_banner());
+        // Best-effort artifact write so the SWE-bench Pro harness can pick it up.
+        if let Some(dir) = self.failure_mode_artifact_dir() {
+            if let Err(e) = mode.write_artifact(&dir) {
+                warn!(
+                    "Failed to write failure_mode.json to {}: {}",
+                    dir.display(),
+                    e
+                );
+            }
+        }
+        mode
+    }
+
+    /// Resolve the directory `failure_mode.json` should be written to.
+    ///
+    /// Order:
+    /// 1. `SELFWARE_RESULT_DIR` env var (set by the SWE-bench Pro harness
+    ///    next to its `result.json`).
+    /// 2. The current task's checkpoint directory under `~/.selfware/...`.
+    /// 3. None — silently skip the artifact write.
+    fn failure_mode_artifact_dir(&self) -> Option<std::path::PathBuf> {
+        if let Ok(dir) = std::env::var("SELFWARE_RESULT_DIR") {
+            if !dir.is_empty() {
+                return Some(std::path::PathBuf::from(dir));
+            }
+        }
+        let task_id = self
+            .current_checkpoint
+            .as_ref()
+            .map(|c| c.task_id.clone())?;
+        let home = dirs::home_dir()?;
+        Some(home.join(".selfware").join("checkpoints").join(task_id))
     }
 
     /// Classify the run outcome into a specific failure mode label.

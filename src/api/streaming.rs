@@ -159,6 +159,7 @@ impl StreamingResponse {
             completion_tokens: 0,
             total_tokens: 0,
         };
+        let mut finish_reason: Option<String> = None;
 
         while let Some(chunk_result) = rx.recv().await {
             let chunk = chunk_result?;
@@ -176,6 +177,9 @@ impl StreamingResponse {
                     } else {
                         usage = u;
                     }
+                }
+                StreamChunk::FinishReason(reason) => {
+                    finish_reason = Some(reason);
                 }
                 StreamChunk::Done => break,
             }
@@ -220,7 +224,7 @@ impl StreamingResponse {
                     name: None,
                 },
                 reasoning_content: None,
-                finish_reason: Some("stop".to_string()),
+                finish_reason: finish_reason.or_else(|| Some("stop".to_string())),
             }],
             usage,
         })
@@ -238,6 +242,11 @@ pub enum StreamChunk {
     ToolCall(ToolCall),
     /// Token usage information
     Usage(Usage),
+    /// The model's reported finish reason for this turn (e.g. `"stop"`,
+    /// `"length"`, `"tool_calls"`).  Emitted at most once per stream when
+    /// the backend includes it on the SSE choice; consumers that don't care
+    /// can safely ignore it.
+    FinishReason(String),
     /// Stream is complete
     Done,
 }
@@ -363,13 +372,15 @@ pub(crate) fn parse_sse_event(
                     }
                 }
 
-                if choice
+                if let Some(finish) = choice
                     .and_then(|c| c.get("finish_reason"))
                     .and_then(|f| f.as_str())
-                    .is_some()
                 {
                     for call in accumulator.flush() {
                         chunks.push(StreamChunk::ToolCall(call));
+                    }
+                    if !finish.is_empty() {
+                        chunks.push(StreamChunk::FinishReason(finish.to_string()));
                     }
                 }
 

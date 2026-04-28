@@ -257,3 +257,274 @@ fn resolve_config_path_no_original_cwd_falls_back_gracefully() {
     // Should still return the path, just not absolutified
     assert_eq!(result.as_deref(), Some("my.toml"));
 }
+
+// ── SELFWARE_CONFIG + -C regression tests ──
+//
+// Bug history: setting `SELFWARE_CONFIG=/abs/path/selfware.toml` together with
+// `-C /workdir` previously caused `resolve_config_path` to return an absolute
+// path for `<original_cwd>/selfware.toml` (when one existed), shadowing the
+// env-var setting and silently loading the wrong file. The fix returns `None`
+// from `resolve_config_path` whenever `SELFWARE_CONFIG` is set, letting
+// `Config::load` honour the env var.
+
+use std::sync::Mutex;
+static CLI_ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+fn lock_cli_env() -> std::sync::MutexGuard<'static, ()> {
+    CLI_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn clear_config_env() {
+    std::env::remove_var("SELFWARE_CONFIG");
+    std::env::remove_var("SELFWARE_ENDPOINT");
+    std::env::remove_var("SELFWARE_MODEL");
+    std::env::remove_var("SELFWARE_API_KEY");
+    std::env::remove_var("SELFWARE_MAX_TOKENS");
+    std::env::remove_var("SELFWARE_TEMPERATURE");
+    std::env::remove_var("SELFWARE_TIMEOUT");
+    std::env::remove_var("SELFWARE_THEME");
+    std::env::remove_var("SELFWARE_MODE");
+    std::env::remove_var("SELFWARE_STRICT_PERMISSIONS");
+}
+
+#[test]
+fn resolve_config_path_workdir_with_selfware_config_env_returns_none() {
+    let _guard = lock_cli_env();
+    clear_config_env();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let original_cfg = tmp.path().join("selfware.toml");
+    std::fs::write(&original_cfg, "model = \"A\"\n").unwrap();
+
+    std::env::set_var("SELFWARE_CONFIG", "/some/other/path.toml");
+    let result = resolve_config_path(None, true, Some(tmp.path()));
+    std::env::remove_var("SELFWARE_CONFIG");
+
+    assert!(
+        result.is_none(),
+        "SELFWARE_CONFIG must take precedence over original_cwd/selfware.toml; got {:?}",
+        result
+    );
+}
+
+#[test]
+fn config_load_selfware_config_env_overrides_local_selfware_toml_with_workdir() {
+    let _guard = lock_cli_env();
+    clear_config_env();
+
+    let dir_a = tempfile::tempdir().unwrap();
+    let cfg_a = dir_a.path().join("selfware.toml");
+    std::fs::write(&cfg_a, "model = \"A-model\"\nendpoint = \"http://a:1/v1\"\n").unwrap();
+
+    let dir_b = tempfile::tempdir().unwrap();
+    let cfg_b = dir_b.path().join("selfware.toml");
+    std::fs::write(&cfg_b, "model = \"B-model\"\nendpoint = \"http://b:1/v1\"\n").unwrap();
+
+    std::env::set_var("SELFWARE_CONFIG", cfg_b.to_str().unwrap());
+
+    let resolved = resolve_config_path(None, false, Some(dir_a.path()));
+    assert!(resolved.is_none());
+    let cfg = Config::load(resolved.as_deref()).unwrap();
+    assert_eq!(
+        cfg.model, "B-model",
+        "SELFWARE_CONFIG must override local selfware.toml; loaded {:?}",
+        cfg.model
+    );
+
+    let resolved = resolve_config_path(None, true, Some(dir_a.path()));
+    assert!(
+        resolved.is_none(),
+        "with -C and SELFWARE_CONFIG set, resolve must yield None to let the env var win; got {:?}",
+        resolved
+    );
+    let cfg = Config::load(resolved.as_deref()).unwrap();
+    assert_eq!(
+        cfg.model, "B-model",
+        "BUG: SELFWARE_CONFIG + -C silently loaded the wrong file (got {:?})",
+        cfg.model
+    );
+
+    let dir_c = tempfile::tempdir().unwrap();
+    let cfg_c = dir_c.path().join("explicit.toml");
+    std::fs::write(&cfg_c, "model = \"C-model\"\n").unwrap();
+
+    let resolved =
+        resolve_config_path(Some(cfg_c.to_str().unwrap()), true, Some(dir_a.path()));
+    let resolved_path = resolved.unwrap();
+    let cfg = Config::load(Some(&resolved_path)).unwrap();
+    assert_eq!(
+        cfg.model, "C-model",
+        "CLI --config must override SELFWARE_CONFIG"
+    );
+
+    std::env::remove_var("SELFWARE_CONFIG");
+}
+
+#[test]
+fn config_show_renders_provenance_lines() {
+    let _guard = lock_cli_env();
+    clear_config_env();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_path = tmp.path().join("selfware.toml");
+    std::fs::write(
+        &cfg_path,
+        "model = \"qwen-test\"\nendpoint = \"http://localhost:1234/v1\"\ntemperature = 0.7\n",
+    )
+    .unwrap();
+
+    let cfg = Config::load(Some(cfg_path.to_str().unwrap())).unwrap();
+
+    let model_src = cfg.source_of("model");
+    assert!(
+        matches!(model_src, crate::config::ConfigSource::ConfigFile(_)),
+        "model source should be ConfigFile, got {:?}",
+        model_src
+    );
+
+    let unset = cfg.source_of("agent.native_function_calling");
+    assert!(
+        matches!(unset, crate::config::ConfigSource::Default),
+        "untouched key should be Default, got {:?}",
+        unset
+    );
+
+    super::config_show(&cfg, false).unwrap();
+    super::config_show(&cfg, true).unwrap();
+}
+
+// ── `selfware bench <subcommand>` parsing tests ──
+
+#[test]
+fn bench_legacy_form_still_parses() {
+    use clap::Parser;
+    let cli = Cli::try_parse_from(["selfware", "bench", "--suite", "throughput"]).unwrap();
+    match cli.command.unwrap() {
+        Commands::Bench {
+            command,
+            suite,
+            concurrent,
+            ..
+        } => {
+            assert!(command.is_none(), "legacy form should leave subcommand=None");
+            assert_eq!(suite, "throughput");
+            assert_eq!(concurrent, 4); // default
+        }
+        other => panic!("expected Bench, got {:?}", other),
+    }
+}
+
+#[test]
+fn bench_swebench_pro_basic_parsing() {
+    use clap::Parser;
+    use args::BenchCommand;
+    let cli = Cli::try_parse_from([
+        "selfware",
+        "bench",
+        "swebench-pro",
+        "--quants",
+        "Q4_K_P,Q8_K_P",
+        "--instances",
+        "10",
+        "--scenario-timeout",
+        "1800",
+        "--ctx",
+        "262144",
+        "--parallel",
+        "1",
+        "--concurrency",
+        "1",
+        "--trials",
+        "3",
+        "--output",
+        "reports/swebench_pro/test",
+    ])
+    .unwrap();
+
+    match cli.command.unwrap() {
+        Commands::Bench { command, .. } => match command.unwrap() {
+            BenchCommand::SwebenchPro(args) => {
+                assert_eq!(args.quants, "Q4_K_P,Q8_K_P");
+                assert_eq!(args.instances, 10);
+                assert_eq!(args.scenario_timeout, 1800);
+                assert_eq!(args.ctx, 262_144);
+                assert_eq!(args.parallel, 1);
+                assert_eq!(args.concurrency, 1);
+                assert_eq!(args.trials, 3);
+                assert_eq!(args.output.as_deref(), Some("reports/swebench_pro/test"));
+                assert!(!args.skip_existing);
+            }
+            other => panic!("expected SwebenchPro, got {:?}", other),
+        },
+        other => panic!("expected Bench, got {:?}", other),
+    }
+}
+
+#[test]
+fn bench_swebench_pro_defaults() {
+    use clap::Parser;
+    use args::BenchCommand;
+    let cli = Cli::try_parse_from(["selfware", "bench", "swebench-pro"]).unwrap();
+    match cli.command.unwrap() {
+        Commands::Bench { command, .. } => match command.unwrap() {
+            BenchCommand::SwebenchPro(args) => {
+                // Defaults should match the documented values.
+                assert_eq!(args.instances, 3);
+                assert_eq!(args.scenario_timeout, 900);
+                assert_eq!(args.ctx, 262_144);
+                assert_eq!(args.parallel, 2);
+                assert_eq!(args.trials, 1);
+                assert!(args.quants.contains("Q4_K_P"));
+            }
+            other => panic!("expected SwebenchPro, got {:?}", other),
+        },
+        other => panic!("expected Bench, got {:?}", other),
+    }
+}
+
+#[test]
+fn bench_swebench_pro_instance_ids_overrides_count() {
+    use clap::Parser;
+    use args::BenchCommand;
+    let cli = Cli::try_parse_from([
+        "selfware",
+        "bench",
+        "swebench-pro",
+        "--instance-ids",
+        "foo-1,foo-2",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Commands::Bench { command, .. } => match command.unwrap() {
+            BenchCommand::SwebenchPro(args) => {
+                assert_eq!(args.instance_ids.as_deref(), Some("foo-1,foo-2"));
+            }
+            other => panic!("expected SwebenchPro, got {:?}", other),
+        },
+        other => panic!("expected Bench, got {:?}", other),
+    }
+}
+
+#[test]
+fn bench_other_subcommands_parse_for_help_visibility() {
+    use clap::Parser;
+    use args::BenchCommand;
+    for sub in ["throughput", "multilang", "browser", "long-run"] {
+        let cli = Cli::try_parse_from(["selfware", "bench", sub])
+            .unwrap_or_else(|e| panic!("failed to parse `bench {}`: {}", sub, e));
+        match cli.command.unwrap() {
+            Commands::Bench { command, .. } => {
+                let cmd = command.expect("subcommand parsed");
+                let label = match cmd {
+                    BenchCommand::Throughput => "throughput",
+                    BenchCommand::Multilang => "multilang",
+                    BenchCommand::Browser => "browser",
+                    BenchCommand::LongRun => "long-run",
+                    BenchCommand::SwebenchPro(_) => "swebench-pro",
+                };
+                assert_eq!(label, sub);
+            }
+            other => panic!("expected Bench, got {:?}", other),
+        }
+    }
+}

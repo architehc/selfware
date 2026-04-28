@@ -7,6 +7,49 @@ Selfware is configured via TOML files. Config is loaded from (in order of priori
 3. `selfware.toml` in the current directory
 4. `~/.config/selfware/config.toml`
 
+## Precedence Chain
+
+Once a config file is selected, individual *values* are resolved through a
+five-layer cascade. Higher layers override lower layers:
+
+```
+defaults  <  toml file  <  [models.<name>] profile  <  env var  <  CLI flag
+```
+
+| Layer | Example source | Notes |
+|-------|----------------|-------|
+| 1. Built-in defaults | `default_endpoint()`, `default_temperature()` | Compiled in |
+| 2. TOML file | `selfware.toml` top-level fields | Loaded once |
+| 3. Model profile | `[models.coder]` section | Selected by `--model coder` |
+| 4. Env var | `SELFWARE_TEMPERATURE=0.2` | Per-process |
+| 5. CLI flag | `selfware --temperature 0.1` | Per-invocation |
+
+For example, given:
+
+```toml
+# selfware.toml
+endpoint    = "http://localhost:8000/v1"
+temperature = 0.7
+
+[models.coder]
+endpoint    = "http://gpu-rig:8000/v1"
+temperature = 0.3
+```
+
+```bash
+SELFWARE_TEMPERATURE=0.5 selfware --model coder --temperature 0.1 run "..."
+```
+
+…the agent ends up with:
+
+- `endpoint = "http://gpu-rig:8000/v1"` *(from `[models.coder]`; CLI gave no `--endpoint`)*
+- `temperature = 0.1` *(from CLI; beats env var, which beats profile, which beats TOML)*
+
+The (planned) `Config::provenance(field)` API exposes the source of every
+value at runtime, so `--show-config` can print "endpoint: gpu-rig (from
+profile.coder)". See [test_plan.md](test_plan.md) for the precise contract
+the test suite pins.
+
 ## Top-Level Settings
 
 ```toml

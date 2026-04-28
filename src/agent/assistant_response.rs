@@ -14,6 +14,10 @@ pub(super) struct AssistantStepResponse {
     pub content_chars: usize,
     /// Characters inside think/reasoning blocks.
     pub reasoning_chars: usize,
+    /// Per-call metadata populated from the live HTTP / SSE layer.
+    /// Used by the per-turn debug capture; `None` when this struct was built
+    /// from a previously-stored assistant message (no fresh call was made).
+    pub metadata: Option<crate::api::types::ChatMetadata>,
 }
 
 impl Agent {
@@ -49,6 +53,7 @@ impl Agent {
                 content: content_text,
                 reasoning_content: reasoning_clone,
                 native_tool_calls,
+                metadata: None,
             };
             self.log_turn_end_event(
                 "assistant_step",
@@ -196,16 +201,24 @@ impl Agent {
             request_messages.insert(insert_pos, Message::user(boundary));
         }
 
+        // Captured per-call metadata (request body, finish_reason, tokens,
+        // elapsed_ms) — populated by whichever branch makes the actual call.
+        // Stays `None` only if all branches return early via `?`.
+        #[allow(unused_assignments)]
+        let mut chat_metadata: Option<crate::api::types::ChatMetadata> = None;
         let (content, reasoning) = if self.config.agent.streaming {
+            let mut local_meta = crate::api::types::ChatMetadata::default();
             match self
                 .chat_streaming(
                     request_messages.clone(),
                     self.api_tools(),
                     ThinkingMode::Enabled,
+                    Some(&mut local_meta),
                 )
                 .await
             {
                 Ok((content, reasoning, stream_tool_calls)) => {
+                    chat_metadata = Some(local_meta);
                     if self.config.agent.native_function_calling {
                         let has_native = stream_tool_calls
                             .as_ref()
@@ -252,9 +265,19 @@ impl Agent {
                         stream_err
                     );
 
+                    // Detect "Assistant response prefill incompatible" 400s for
+                    // FailureMode classification.
+                    if stream_err
+                        .to_string()
+                        .to_lowercase()
+                        .contains("prefill incompatible")
+                    {
+                        self.note_prefill_400();
+                    }
+
                     let response = self
                         .client
-                        .chat(request_messages, self.api_tools(), ThinkingMode::Enabled)
+                        .chat_with_meta(request_messages, self.api_tools(), ThinkingMode::Enabled)
                         .await
                         .with_context(|| {
                             format!(
@@ -262,8 +285,8 @@ impl Agent {
                                 stream_err
                             )
                         });
-                    let response = match response {
-                        Ok(response) => response,
+                    let (response, fallback_meta) = match response {
+                        Ok((response, meta)) => (response, meta),
                         Err(e) => {
                             self.log_turn_end_event(
                                 "assistant_step",
@@ -311,17 +334,24 @@ impl Agent {
                         debug!("Fallback reasoning ({} chars): {}", r.len(), r);
                     }
 
+                    chat_metadata = Some(fallback_meta);
                     (content, reasoning)
                 }
             }
         } else {
             let response = self
                 .client
-                .chat(request_messages, self.api_tools(), ThinkingMode::Enabled)
+                .chat_with_meta(request_messages, self.api_tools(), ThinkingMode::Enabled)
                 .await;
-            let response = match response {
-                Ok(response) => response,
+            let (response, sync_meta) = match response {
+                Ok((response, meta)) => (response, meta),
                 Err(e) => {
+                    if e.to_string()
+                        .to_lowercase()
+                        .contains("prefill incompatible")
+                    {
+                        self.note_prefill_400();
+                    }
                     self.log_turn_end_event(
                         "assistant_step",
                         false,
@@ -376,6 +406,7 @@ impl Agent {
                 debug!("Reasoning content ({} chars): {}", r.len(), r);
             }
 
+            chat_metadata = Some(sync_meta);
             (content, reasoning)
         };
 
@@ -404,6 +435,7 @@ impl Agent {
             content,
             reasoning_content: reasoning,
             native_tool_calls,
+            metadata: chat_metadata,
         };
         self.log_turn_end_event(
             "assistant_step",

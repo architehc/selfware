@@ -19,6 +19,8 @@ pub mod api_key;
 pub mod auto_config;
 mod loader;
 pub mod model;
+pub mod model_profiles;
+pub mod provenance;
 pub mod resources;
 pub mod safety;
 pub mod types;
@@ -29,6 +31,11 @@ pub use agent::*;
 pub use api_key::{is_local_endpoint, load_api_key_from_keyring, save_api_key_to_keyring};
 pub use auto_config::*;
 pub use model::*;
+pub use model_profiles::{
+    apply_profile as apply_model_defaults_profile, builtin_profiles, match_profile,
+    AppliedFields, ModelDefaultsProfile, UserExplicitFields,
+};
+pub use provenance::{ConfigSource, ConfigSources};
 pub use resources::*;
 pub use safety::*;
 pub use types::*;
@@ -231,6 +238,36 @@ pub struct Config {
     /// Plan mode: agent reasons and proposes tool calls without executing them.
     #[serde(skip)]
     pub plan_mode: bool,
+
+    /// Name of the built-in [`ModelDefaultsProfile`] that matched
+    /// `self.model` and was applied during config load, if any.  Set by
+    /// `Config::load`; `None` for [`Config::default`] or when no rule matches.
+    #[serde(skip)]
+    pub matched_profile: Option<String>,
+
+    /// Names of fields the matched profile actually filled in (i.e. fields
+    /// the user did NOT set explicitly).  Empty when `matched_profile` is
+    /// `None` or when the user explicitly set every relevant field.
+    #[serde(skip)]
+    pub matched_profile_applied: Vec<String>,
+
+    /// Provenance map: dotted field name → where the value came from.
+    /// Populated by `Config::load`. Not persisted (transient runtime metadata).
+    #[serde(skip)]
+    pub sources: ConfigSources,
+}
+
+impl Config {
+    /// Look up where a top-level field's effective value originated.
+    ///
+    /// Keys use dotted notation matching the TOML schema, e.g. `"endpoint"`,
+    /// `"agent.native_function_calling"`, `"extra_body.top_p"`.
+    pub fn source_of(&self, key: &str) -> ConfigSource {
+        self.sources
+            .get(key)
+            .cloned()
+            .unwrap_or(ConfigSource::Default)
+    }
 }
 
 // Manual `Debug` implementation that delegates to `RedactedString`'s `Debug`
@@ -263,6 +300,9 @@ impl std::fmt::Debug for Config {
             .field("mcp", &self.mcp)
             .field("hooks", &self.hooks)
             .field("plan_mode", &self.plan_mode)
+            .field("matched_profile", &self.matched_profile)
+            .field("matched_profile_applied", &self.matched_profile_applied)
+            .field("sources", &self.sources)
             .finish()
     }
 }
@@ -296,6 +336,9 @@ impl Default for Config {
             verbose_mode: false,
             show_tokens: false,
             plan_mode: false,
+            matched_profile: None,
+            matched_profile_applied: Vec::new(),
+            sources: ConfigSources::new(),
         }
     }
 }

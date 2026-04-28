@@ -10,10 +10,14 @@ use async_trait::async_trait;
 
 pub mod client;
 pub mod streaming;
+pub mod tool_calling;
 pub mod types;
 
 pub use client::{ApiClient, RetryConfig};
 pub use streaming::{StreamChunk, StreamingResponse};
+pub use tool_calling::{
+    attach_tools, extract_tool_calls, extract_tool_calls_from_text, parsed_to_tool_call,
+};
 pub use types::*;
 
 const DISABLED_THINKING_SYSTEM_MESSAGE: &str =
@@ -65,17 +69,16 @@ fn maybe_prepend_disabled_thinking_instruction(
 }
 
 /// Attach tool definitions to a chat-completion request body.
+///
+/// Thin wrapper over [`tool_calling::attach_tools`] — kept for backward
+/// compatibility with internal callers in this module. New code should
+/// prefer the public re-export at the crate root.
 fn attach_tools_to_body(
     body: &mut serde_json::Value,
     tools: &Option<Vec<ToolDefinition>>,
     native_tool_choice: bool,
 ) {
-    if let Some(tools) = tools {
-        body["tools"] = serde_json::json!(tools);
-        if native_tool_choice {
-            body["tool_choice"] = serde_json::json!("auto");
-        }
-    }
+    tool_calling::attach_tools(body, tools, native_tool_choice);
 }
 
 /// Keys that the request builder owns — extra_body must not override these.

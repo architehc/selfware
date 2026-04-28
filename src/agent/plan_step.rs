@@ -28,6 +28,9 @@ impl Agent {
                 request_messages.insert(0, Message::system(learning_hint));
             }
         }
+        // Capture per-call metadata so the planning step also gets a
+        // turn_NNNN.json artifact under <workdir>/.selfware/turns/.
+        let mut plan_meta = crate::api::types::ChatMetadata::default();
         // Use streaming for planning so the user sees progress and can cancel.
         // Non-streaming blocks silently for 60+ seconds while the model thinks.
         let assistant_msg = if self.config.agent.streaming {
@@ -36,6 +39,7 @@ impl Agent {
                     request_messages.clone(),
                     self.api_tools(),
                     ThinkingMode::Enabled,
+                    Some(&mut plan_meta),
                 )
                 .await
             {
@@ -65,10 +69,13 @@ impl Agent {
         } else {
             let response = self
                 .client
-                .chat(request_messages, self.api_tools(), ThinkingMode::Enabled)
+                .chat_with_meta(request_messages, self.api_tools(), ThinkingMode::Enabled)
                 .await;
             let response = match response {
-                Ok(response) => response,
+                Ok((response, meta)) => {
+                    plan_meta = meta;
+                    response
+                }
                 Err(e) => {
                     self.log_turn_end_event(
                         "planning",
@@ -143,10 +150,50 @@ impl Agent {
             role: "assistant".to_string(),
             content: content.clone(),
             reasoning_content: assistant_msg.reasoning_content,
-            tool_calls: native_tool_calls,
+            tool_calls: native_tool_calls.clone(),
             tool_call_id: None,
             name: None,
         });
+
+        // Per-turn debug capture for the planning step. Increment the
+        // counter so this becomes turn_0001.json (planning is always the
+        // first LLM call of a task).
+        self.turn_artifact_seq += 1;
+        let plan_step_idx = self.turn_artifact_seq;
+        let parsed_calls_for_artifact: Vec<crate::api::types::ToolCall> = native_tool_calls
+            .clone()
+            .unwrap_or_default();
+        let plan_decision = if parsed_calls_for_artifact.is_empty() {
+            super::turn_artifacts::AgentDecision::NoToolCall
+        } else {
+            super::turn_artifacts::AgentDecision::ExecutedTools {
+                tools: parsed_calls_for_artifact
+                    .iter()
+                    .map(|c| c.function.name.clone())
+                    .collect(),
+            }
+        };
+        // plan_meta.request_body is empty when the streaming branch took an
+        // error path before assigning it; write_turn_artifact handles that
+        // by checking for an empty body.
+        let plan_meta_opt = if plan_meta.request_body.is_null()
+            || plan_meta
+                .request_body
+                .as_object()
+                .map(|o| o.is_empty())
+                .unwrap_or(true)
+        {
+            None
+        } else {
+            Some(plan_meta.clone())
+        };
+        self.write_turn_artifact(
+            plan_step_idx,
+            plan_meta_opt.as_ref(),
+            &parsed_calls_for_artifact,
+            plan_decision,
+            content.text(),
+        );
 
         self.log_turn_end_event(
             "planning",

@@ -165,20 +165,142 @@ impl Agent {
         self.execute_step_internal(true).await
     }
 
+    /// Write a per-turn debug artifact for the current step.
+    ///
+    /// Called from within `execute_step_internal` once we know what the
+    /// agent decided to do with the model's response.  Honours
+    /// `agent.disable_turn_artifacts`; failures are logged, never returned.
+    pub(super) fn write_turn_artifact(
+        &self,
+        step: usize,
+        chat_metadata: Option<&crate::api::types::ChatMetadata>,
+        parsed_tool_calls: &[crate::api::types::ToolCall],
+        decision: super::turn_artifacts::AgentDecision,
+        response_text: &str,
+    ) {
+        if self.config.agent.disable_turn_artifacts {
+            return;
+        }
+        // Skip when there's no fresh API call for this step — replays of
+        // prior assistant messages (use_last_message=true) don't have a
+        // request body to capture, and cache hits leave request_body empty.
+        let Some(meta) = chat_metadata else {
+            return;
+        };
+        let body_is_empty = meta.request_body.is_null()
+            || meta
+                .request_body
+                .as_object()
+                .map(|o| o.is_empty())
+                .unwrap_or(true);
+        if body_is_empty {
+            return;
+        }
+        let mut request_body = meta.request_body.clone();
+        super::turn_artifacts::sanitize_request_body(&mut request_body);
+
+        // Reconstruct a minimal response_body from what we have. Streaming
+        // never gives us back the original JSON — we build a faithful shape
+        // that includes the assembled assistant message + parsed tool calls.
+        let response_body = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": response_text,
+                    "tool_calls": parsed_tool_calls,
+                },
+                "finish_reason": meta.finish_reason,
+            }],
+            "usage": {
+                "prompt_tokens": meta.prompt_tokens,
+                "completion_tokens": meta.completion_tokens,
+            },
+        });
+
+        let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let artifact = super::turn_artifacts::TurnArtifact {
+            step,
+            timestamp: chrono::Utc::now(),
+            request_body,
+            response_body,
+            finish_reason: meta.finish_reason.clone(),
+            completion_tokens: meta.completion_tokens,
+            prompt_tokens: meta.prompt_tokens,
+            parsed_tool_calls: parsed_tool_calls.to_vec(),
+            agent_decision: decision,
+            elapsed_ms: meta.elapsed_ms,
+        };
+        super::turn_artifacts::write_artifact(&workdir, &artifact);
+    }
+
     /// Internal execution logic
     /// If `use_last_message` is true, process tool calls from the last assistant message
     async fn execute_step_internal(&mut self, use_last_message: bool) -> Result<bool> {
         let response = self.get_assistant_step_response(use_last_message).await?;
         let content = response.content;
         let reasoning_chars = response.reasoning_chars;
+        // Snapshot the per-call metadata before we move out of `response` —
+        // the per-turn debug capture below uses it to write the artifact.
+        let chat_metadata = response.metadata.clone();
 
         let tool_calls = self.collect_tool_calls(
             &content,
             response.reasoning_content.as_deref(),
             response.native_tool_calls.as_ref(),
         );
+        // Convert XML-extracted CollectedToolCall back to the structured
+        // ToolCall shape that goes into the artifact.  Use a deterministic
+        // synthetic id when the XML branch produced none.
+        let parsed_tool_calls_for_artifact: Vec<crate::api::types::ToolCall> =
+            response.native_tool_calls.clone().unwrap_or_else(|| {
+                tool_calls
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (name, args, id))| crate::api::types::ToolCall {
+                        id: id.clone().unwrap_or_else(|| format!("xml_{}", i)),
+                        call_type: "function".to_string(),
+                        function: crate::api::types::ToolFunction {
+                            name: name.clone(),
+                            arguments: args.clone(),
+                        },
+                    })
+                    .collect()
+            });
+        // Tool names in dispatch order — recorded for the AgentDecision.
+        let tool_names_for_artifact: Vec<String> =
+            tool_calls.iter().map(|(n, _, _)| n.clone()).collect();
+        // Reserve the next sequence number now so the file naming matches
+        // the order calls happened, even when nested helpers also write.
+        let artifact_step = {
+            self.turn_artifact_seq += 1;
+            self.turn_artifact_seq
+        };
 
         debug!("Total tool calls to execute: {}", tool_calls.len());
+
+        // Per-turn debug capture: write `<workdir>/.selfware/turns/turn_NNNN.json`
+        // immediately after parsing.  Decision is the obvious split between
+        // "executed N tools" and "model returned no tool call" — refusal /
+        // nudge / completion classifications are visible from the agent
+        // decision branches below, but writing the artifact early ensures we
+        // never lose it when later code panics or short-circuits unexpectedly.
+        let initial_decision = if parsed_tool_calls_for_artifact.is_empty()
+            && tool_calls.is_empty()
+        {
+            super::turn_artifacts::AgentDecision::NoToolCall
+        } else {
+            super::turn_artifacts::AgentDecision::ExecutedTools {
+                tools: tool_names_for_artifact.clone(),
+            }
+        };
+        self.write_turn_artifact(
+            artifact_step,
+            chat_metadata.as_ref(),
+            &parsed_tool_calls_for_artifact,
+            initial_decision,
+            &content,
+        );
 
         // Check if the response contains code alongside tool calls.
         // Models often output file_read tool calls AND code text in the same
@@ -415,6 +537,17 @@ impl Agent {
             // Check completion gate before accepting task as done
             if let Some(gate_msg) = self.check_completion_gate() {
                 info!("Completion gate rejected: {}", gate_msg);
+                // Refine the previously-written turn artifact: this turn ended
+                // with a gate refusal, not a plain "no tool call".
+                self.write_turn_artifact(
+                    artifact_step,
+                    chat_metadata.as_ref(),
+                    &parsed_tool_calls_for_artifact,
+                    super::turn_artifacts::AgentDecision::Refused {
+                        reason: gate_msg.clone(),
+                    },
+                    &content,
+                );
                 self.messages
                     .push(crate::api::types::Message::user(gate_msg));
                 return Ok(false);
@@ -432,6 +565,16 @@ impl Agent {
                 .trim()
                 .to_string();
             output::final_answer(&clean_content);
+            // Refine the artifact decision: this turn ended in a final answer.
+            self.write_turn_artifact(
+                artifact_step,
+                chat_metadata.as_ref(),
+                &parsed_tool_calls_for_artifact,
+                super::turn_artifacts::AgentDecision::Completed {
+                    text: clean_content.clone(),
+                },
+                &content,
+            );
             self.last_assistant_response = clean_content;
             return Ok(true);
         }
@@ -3148,6 +3291,7 @@ mod tests {
                     );
                     extra
                 }),
+                native_function_calling: None,
             },
         );
         let mut agent = Agent::new(config).await.unwrap();
