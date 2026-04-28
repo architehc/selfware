@@ -232,12 +232,12 @@ pub struct RunOutcome {
 }
 
 /// Capture `git diff` from `workdir`, including newly added files and excluding
-/// selfware-internal scratch directories.  Equivalent to:
+/// selfware-internal scratch directories.
 ///
-/// ```text
-/// git -C workdir add -A
-/// git -C workdir diff --cached HEAD -- ':!.selfware' ':!.claude' ':!__pycache__'
-/// ```
+/// Mirrors the Python harness's exclusion list exactly so a Rust run produces
+/// the same patch as `scripts/swebench_pro/run.py`:
+///   `.selfware/`, `.claude/`, `__pycache__/`, `selfware.toml`, `*.bak`,
+///   `**/*.bak`.
 pub fn capture_patch(workdir: &Path) -> Result<String> {
     let _ = Command::new("git")
         .args(["-C"])
@@ -255,9 +255,14 @@ pub fn capture_patch(workdir: &Path) -> Result<String> {
             "--cached",
             "HEAD",
             "--",
-            ":!.selfware",
-            ":!.claude",
-            ":!__pycache__",
+            ".",
+            ":(exclude).selfware/**",
+            ":(exclude).claude/**",
+            ":(exclude)__pycache__/**",
+            ":(exclude)**/__pycache__/**",
+            ":(exclude)selfware.toml",
+            ":(exclude)*.bak",
+            ":(exclude)**/*.bak",
         ])
         .output()
         .with_context(|| format!("running git diff in {}", workdir.display()))?;
@@ -325,14 +330,21 @@ pub fn clone_instance(repo: &str, base_commit: &str, dest: &Path) -> Result<()> 
     if dest.exists() {
         let _ = std::fs::remove_dir_all(dest);
     }
-    Command::new("git")
+    let clone_status = Command::new("git")
         .args(["clone", "--filter=blob:none", "--depth", "200", &url])
         .arg(dest)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .with_context(|| "git clone fallback")?;
-    Command::new("git")
+    if !clone_status.success() {
+        bail!(
+            "git clone fallback failed for {} (status={:?})",
+            url,
+            clone_status.code()
+        );
+    }
+    let checkout_status = Command::new("git")
         .args(["-C"])
         .arg(dest)
         .args(["checkout", base_commit])
@@ -340,6 +352,14 @@ pub fn clone_instance(repo: &str, base_commit: &str, dest: &Path) -> Result<()> 
         .stderr(Stdio::null())
         .status()
         .with_context(|| "git checkout fallback")?;
+    if !checkout_status.success() {
+        bail!(
+            "git checkout fallback failed for {}@{} (status={:?})",
+            url,
+            base_commit,
+            checkout_status.code()
+        );
+    }
     Ok(())
 }
 

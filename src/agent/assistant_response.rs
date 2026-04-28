@@ -233,27 +233,17 @@ impl Agent {
                             );
                         } else if !content.is_empty() {
                             // Fallback: sglang returns tool_calls:[] but puts
-                            // Qwen3-format calls in content. Parse those.
-                            let parsed = crate::tool_parser::parse_tool_calls(&content);
-                            if !parsed.tool_calls.is_empty() {
+                            // Qwen3-format calls in content. Route through the
+                            // unified extractor so this path matches the agent
+                            // and SWL runtime parsers exactly.
+                            let parsed_calls =
+                                crate::api::tool_calling::extract_tool_calls_from_text(&content);
+                            if !parsed_calls.is_empty() {
                                 info!(
                                     "Native FC returned empty tool_calls; parsed {} from content (sglang fallback)",
-                                    parsed.tool_calls.len()
+                                    parsed_calls.len()
                                 );
-                                native_tool_calls = Some(
-                                    parsed
-                                        .tool_calls
-                                        .into_iter()
-                                        .map(|p| crate::api::types::ToolCall {
-                                            id: format!("parsed_{}", uuid::Uuid::new_v4()),
-                                            call_type: "function".to_string(),
-                                            function: crate::api::types::ToolFunction {
-                                                name: p.tool_name,
-                                                arguments: p.arguments.to_string(),
-                                            },
-                                        })
-                                        .collect(),
-                                );
+                                native_tool_calls = Some(parsed_calls);
                             }
                         }
                     }
@@ -391,7 +381,7 @@ impl Agent {
                 content
             );
 
-            if std::env::var("SELFWARE_DEBUG").is_ok() {
+            if self.config.debug.should_log_responses() {
                 cli_println!("{}", "=== DEBUG: Raw Model Response ===".bright_magenta());
                 cli_println!("{}", content);
                 cli_println!("{}", "=== END DEBUG ===".bright_magenta());

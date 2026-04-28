@@ -23,6 +23,7 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
     "concurrency",
     "evolution",
     "cache",
+    "debug",
     "models",
     "extra_body",
     "qa",
@@ -399,19 +400,40 @@ impl Config {
 
         // Apply built-in model-defaults profile, if any pattern matches the
         // configured model name.  Profiles fill in *only* fields the user did
-        // not set explicitly in their TOML — explicit user config wins.  This
-        // pass is purely static: it never touches the network, only inspects
+        // not set explicitly via TOML or env vars — explicit user config wins.
+        // This pass is purely static: it never touches the network, only inspects
         // `config.model`.  We do this BEFORE synthesizing the "default" model
         // profile below so the synthesized profile inherits any tweaks (e.g.
         // Qwen 3.6's required `presence_penalty`).
-        let user_explicit = match raw_toml_content.as_deref() {
+        let mut user_explicit = match raw_toml_content.as_deref() {
             Some(content) => UserExplicitFields::from_toml(content),
             None => UserExplicitFields::default(),
         };
+        // Bug fix: env-var overrides should also count as "explicit user
+        // intent" — without this, `SELFWARE_TEMPERATURE=0.2` was silently
+        // overwritten by the profile's default.  Consult the provenance map.
+        if matches!(sources.get("temperature"), Some(ConfigSource::EnvVar(_))) {
+            user_explicit.temperature = true;
+        }
+        if matches!(sources.get("max_tokens"), Some(ConfigSource::EnvVar(_))) {
+            user_explicit.max_tokens = true;
+        }
+        if matches!(
+            sources.get("agent.native_function_calling"),
+            Some(ConfigSource::EnvVar(_))
+        ) {
+            user_explicit.native_function_calling = true;
+        }
+        if matches!(
+            sources.get("agent.streaming"),
+            Some(ConfigSource::EnvVar(_))
+        ) {
+            user_explicit.streaming = true;
+        }
         if let Some(profile) = match_profile(&config.model) {
             let profile_name = profile.name.to_string();
             let applied = apply_profile(&mut config, &profile, &user_explicit);
-            config.matched_profile = Some(profile_name);
+            config.matched_profile = Some(profile_name.clone());
             if !applied.is_empty() {
                 let mut fields: Vec<String> = Vec::new();
                 if applied.native_function_calling {
@@ -428,6 +450,17 @@ impl Config {
                 }
                 for k in &applied.extra_body_keys {
                     fields.push(format!("extra_body.{}", k));
+                }
+                // Record provenance for every field the profile filled in so
+                // `selfware config show` reports them as `[profile: <name>]`
+                // instead of the misleading `[default]`.
+                for f in &fields {
+                    let dotted = match f.as_str() {
+                        "native_function_calling" => "agent.native_function_calling".to_string(),
+                        "streaming" => "agent.streaming".to_string(),
+                        other => other.to_string(),
+                    };
+                    sources.set(dotted, ConfigSource::Profile(profile_name.clone()));
                 }
                 config.matched_profile_applied = fields;
             }
@@ -460,6 +493,11 @@ impl Config {
 
         // Attach the provenance map.
         config.sources = sources;
+
+        // Layer SELFWARE_DEBUG_* env-var force-ons on top of TOML / defaults.
+        // CLI flags merge later in `cli::run` and re-apply env overrides so the
+        // env vars always win.
+        config.debug.apply_env_overrides();
 
         // Validate the loaded configuration
         config.validate()?;

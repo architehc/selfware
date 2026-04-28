@@ -427,6 +427,24 @@ pub async fn auto_calibrate(config: &mut Config) -> Result<bool> {
         config.agent.token_budget = detected.agent.token_budget;
         config.extra_body = detected.extra_body.clone();
 
+        // Bug fix: record auto-config provenance so `selfware config show`
+        // surfaces these values as `[auto-config]` instead of `[default]`,
+        // and so subsequent CLI overrides don't get silently superseded.
+        for key in [
+            "endpoint",
+            "model",
+            "max_tokens",
+            "context_length",
+            "temperature",
+            "agent.native_function_calling",
+            "agent.streaming",
+            "agent.token_budget",
+        ] {
+            config
+                .sources
+                .set(key, super::provenance::ConfigSource::AutoConfig);
+        }
+
         if let Some(profile) = config.models.get_mut("default") {
             profile.endpoint = config.endpoint.clone();
             profile.model = config.model.clone();

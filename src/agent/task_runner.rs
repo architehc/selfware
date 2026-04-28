@@ -1045,6 +1045,18 @@ impl Agent {
     /// checkpoint directory (best-effort; never fails the run).
     fn finalize_failure_mode(&mut self, outcome: RunOutcome) -> FailureMode {
         let mode = FailureMode::classify(self, outcome);
+        // Emit a structured progress event so non-TUI consumers can see the
+        // run's terminal state. Successful runs emit `TaskCompleted`; every
+        // other classification emits `TaskFailed { reason }`.
+        if mode.kind.is_success() {
+            self.emit_progress(super::progress::ProgressEvent::TaskCompleted {
+                outcome: mode.kind.tag().to_string(),
+            });
+        } else {
+            self.emit_progress(super::progress::ProgressEvent::TaskFailed {
+                reason: format!("{}: {}", mode.kind.tag(), mode.evidence),
+            });
+        }
         cli_println!("{}", mode.cli_banner());
         // Best-effort artifact write so the SWE-bench Pro harness can pick it up.
         if let Some(dir) = self.failure_mode_artifact_dir() {

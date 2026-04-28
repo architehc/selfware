@@ -92,6 +92,18 @@ pub(crate) struct Cli {
     /// Validate the configuration file and exit without running the agent
     #[arg(long)]
     pub(crate) validate_config: bool,
+
+    /// Enable debug-channel output. With no value, enables every channel
+    /// (requests, responses, gates, turns). Use `--debug=requests,gates`
+    /// to enable specific ones. Channels: requests, responses, gates, turns, all.
+    #[arg(
+        long,
+        value_name = "CHANNELS",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "",
+    )]
+    pub(crate) debug: Option<String>,
 }
 
 /// Color theme for terminal output
@@ -545,6 +557,11 @@ pub(crate) struct SwebenchProArgs {
     /// llama-server `--parallel` slots
     #[arg(long, default_value_t = 2)]
     pub parallel: u32,
+
+    /// Port the spawned llama-server listens on (default 8000).  Selfware
+    /// sub-runs are pointed at `http://127.0.0.1:<port>/v1`.
+    #[arg(long, default_value_t = 8000)]
+    pub port: u16,
 
     /// Future-use: bench-side concurrency (currently surfaced in plan.json)
     #[arg(long, default_value_t = 1)]

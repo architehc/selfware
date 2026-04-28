@@ -829,6 +829,10 @@ impl Agent {
 
         // Record the firing for FailureMode classification.
         self.note_progress_guard_fired();
+        self.emit_progress(super::progress::ProgressEvent::GuardFired {
+            kind: "progress_guard".to_string(),
+            count: self.progress_guard_fire_count(),
+        });
 
         for (name, args_str, tool_call_id) in tool_calls {
             let start_time = std::time::Instant::now();
@@ -2461,6 +2465,38 @@ impl Agent {
         // Track every dispatched tool call for FailureMode classification.
         self.note_total_tool_call();
 
+        // Emit a `ToolCallStarted` progress event before dispatch. The matching
+        // `ToolCallCompleted` event is emitted at the end via the inner helper
+        // so we don't have to thread it through every early-return branch.
+        self.emit_progress(super::progress::ProgressEvent::ToolCallStarted {
+            tool: name.to_string(),
+            args_short: super::progress::short_args_for(name, args),
+        });
+
+        let result = self
+            .execute_single_tool_inner(name, args_str, args, start_time)
+            .await;
+        let elapsed_ms = start_time.elapsed().as_millis() as u64;
+        let ok = matches!(&result, Ok((true, _, _)));
+        self.emit_progress(super::progress::ProgressEvent::ToolCallCompleted {
+            tool: name.to_string(),
+            ok,
+            elapsed_ms,
+        });
+        result
+    }
+
+    /// Inner body of [`execute_single_tool`] — kept as a separate method so the
+    /// outer wrapper can emit `ToolCallStarted` / `ToolCallCompleted` progress
+    /// events around it without threading them through every early return.
+    async fn execute_single_tool_inner(
+        &mut self,
+        name: &str,
+        args_str: &str,
+        args: &Value,
+        start_time: std::time::Instant,
+    ) -> Result<(bool, String, String)> {
+
         // Intercept context management tools — they operate on agent state,
         // not the filesystem, so they bypass the normal tool registry.
         if crate::tools::context::is_context_tool(name) {
@@ -2599,10 +2635,22 @@ impl Agent {
                 }
 
                 // Track mutating tool calls for FailureMode classification.
+                // For `shell_exec`, only count as mutating when the command is
+                // NOT observational (e.g. `rm`, `mv`, `git add`, `cargo fmt`,
+                // `sed -i`, redirects).  Observational shell calls like
+                // `cargo check` / `git status` / `ls` should NOT bump the
+                // mutating counter.
+                let is_mutating_shell = name == "shell_exec"
+                    && args
+                        .get("command")
+                        .and_then(|v| v.as_str())
+                        .map(|cmd| !shell_command_is_observational(cmd))
+                        .unwrap_or(false);
                 if matches!(
                     name,
                     "file_edit" | "file_write" | "file_delete" | "file_fim_edit"
-                ) {
+                ) || is_mutating_shell
+                {
                     self.note_mutating_tool_call();
                 }
 
@@ -4049,5 +4097,67 @@ mod tests {
         let inserted = insert_missing_tool_arg(&mut obj, "key", serde_json::json!("value"));
         assert!(inserted);
         assert_eq!(obj["key"], "value");
+    }
+
+    // =========================================================================
+    // shell_exec mutating-counter classification (#4)
+    // =========================================================================
+
+    /// Helper that mirrors the increment-site's classification predicate so we
+    /// can unit-test it without spinning up a full agent loop.
+    fn classify_shell_as_mutating(name: &str, command: Option<&str>) -> bool {
+        if matches!(
+            name,
+            "file_edit" | "file_write" | "file_delete" | "file_fim_edit"
+        ) {
+            return true;
+        }
+        if name == "shell_exec" {
+            if let Some(cmd) = command {
+                return !shell_command_is_observational(cmd);
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn shell_exec_cargo_check_does_not_count_as_mutating() {
+        assert!(!classify_shell_as_mutating(
+            "shell_exec",
+            Some("cargo check")
+        ));
+        assert!(!classify_shell_as_mutating(
+            "shell_exec",
+            Some("git status")
+        ));
+        assert!(!classify_shell_as_mutating("shell_exec", Some("ls -la")));
+    }
+
+    #[test]
+    fn shell_exec_mutating_commands_count_as_mutating() {
+        // git add / rm / cargo fmt / mv / sed -i — all should bump the counter.
+        assert!(classify_shell_as_mutating(
+            "shell_exec",
+            Some("git add src/")
+        ));
+        assert!(classify_shell_as_mutating(
+            "shell_exec",
+            Some("rm /tmp/foo")
+        ));
+        assert!(classify_shell_as_mutating(
+            "shell_exec",
+            Some("cargo fmt")
+        ));
+        assert!(classify_shell_as_mutating(
+            "shell_exec",
+            Some("mv a.txt b.txt")
+        ));
+        assert!(classify_shell_as_mutating(
+            "shell_exec",
+            Some("sed -i 's/a/b/' file.rs")
+        ));
+        // file_* tools are always mutating.
+        assert!(classify_shell_as_mutating("file_write", None));
+        assert!(classify_shell_as_mutating("file_edit", None));
     }
 }

@@ -177,6 +177,7 @@ impl Agent {
         parsed_tool_calls: &[crate::api::types::ToolCall],
         decision: super::turn_artifacts::AgentDecision,
         response_text: &str,
+        reasoning_content: Option<&str>,
     ) {
         if self.config.agent.disable_turn_artifacts {
             return;
@@ -201,13 +202,15 @@ impl Agent {
 
         // Reconstruct a minimal response_body from what we have. Streaming
         // never gives us back the original JSON — we build a faithful shape
-        // that includes the assembled assistant message + parsed tool calls.
+        // that includes the assembled assistant message + reasoning_content
+        // + parsed tool calls so the artifact mirrors the on-the-wire format.
         let response_body = serde_json::json!({
             "choices": [{
                 "index": 0,
                 "message": {
                     "role": "assistant",
                     "content": response_text,
+                    "reasoning_content": reasoning_content,
                     "tool_calls": parsed_tool_calls,
                 },
                 "finish_reason": meta.finish_reason,
@@ -227,6 +230,7 @@ impl Agent {
             finish_reason: meta.finish_reason.clone(),
             completion_tokens: meta.completion_tokens,
             prompt_tokens: meta.prompt_tokens,
+            reasoning_content: reasoning_content.map(|s| s.to_string()),
             parsed_tool_calls: parsed_tool_calls.to_vec(),
             agent_decision: decision,
             elapsed_ms: meta.elapsed_ms,
@@ -237,6 +241,14 @@ impl Agent {
     /// Internal execution logic
     /// If `use_last_message` is true, process tool calls from the last assistant message
     async fn execute_step_internal(&mut self, use_last_message: bool) -> Result<bool> {
+        // Emit a structured progress event at the top of every loop iteration.
+        // Step is 1-based; tool count is the registry's current size.
+        self.emit_progress(super::progress::ProgressEvent::StepStarted {
+            step: self.loop_control.current_step().saturating_add(1),
+            model: self.config.model.clone(),
+            tools_available: self.tools.definitions().len(),
+        });
+
         let response = self.get_assistant_step_response(use_last_message).await?;
         let content = response.content;
         let reasoning_chars = response.reasoning_chars;
@@ -300,6 +312,7 @@ impl Agent {
             &parsed_tool_calls_for_artifact,
             initial_decision,
             &content,
+            response.reasoning_content.as_deref(),
         );
 
         // Check if the response contains code alongside tool calls.
@@ -547,6 +560,7 @@ impl Agent {
                         reason: gate_msg.clone(),
                     },
                     &content,
+                    response.reasoning_content.as_deref(),
                 );
                 self.messages
                     .push(crate::api::types::Message::user(gate_msg));
@@ -574,6 +588,7 @@ impl Agent {
                     text: clean_content.clone(),
                 },
                 &content,
+                response.reasoning_content.as_deref(),
             );
             self.last_assistant_response = clean_content;
             return Ok(true);

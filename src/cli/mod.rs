@@ -335,6 +335,16 @@ pub async fn run() -> Result<()> {
 
     let mut config = Config::load(config_path.as_deref())?;
 
+    // ── Merge CLI debug flag onto config + re-apply env overrides ──
+    // Precedence: defaults < TOML < CLI flag < env vars.  `Config::load`
+    // already applied env overrides once after TOML parse; merging CLI on
+    // top and re-applying env keeps env strictly the highest priority.
+    if let Some(spec) = cli.debug.as_deref() {
+        let cli_dbg = crate::config::DebugConfig::from_channel_list(spec);
+        config.debug.merge_cli(&cli_dbg);
+        config.debug.apply_env_overrides();
+    }
+
     // ── Validate config and exit if requested ──
     if cli.validate_config {
         match config.validate() {
@@ -352,8 +362,19 @@ pub async fn run() -> Result<()> {
     // ── Auto-calibration: make local LLM setup as automatic as possible ──
     // If the config looks unconfigured (default endpoint/model), scan for local
     // servers, auto-start backends if needed, and auto-generate configuration.
-    if let Err(e) = crate::config::unpack::auto_calibrate(&mut config).await {
-        tracing::warn!("Auto-calibration failed: {}", e);
+    //
+    // Bug fix: `selfware config show` is meant to print the *effective*
+    // configuration as loaded from disk + env vars. Running calibration here
+    // would overwrite explicit user values (and inflate provenance), so we
+    // skip it for that subcommand.
+    let skip_calibration = matches!(
+        cli.command,
+        Some(Commands::Config { .. })
+    );
+    if !skip_calibration {
+        if let Err(e) = crate::config::unpack::auto_calibrate(&mut config).await {
+            tracing::warn!("Auto-calibration failed: {}", e);
+        }
     }
 
     // Resolve execution mode: explicit CLI flags > --mode > env var (from Config::load)
@@ -367,8 +388,21 @@ pub async fn run() -> Result<()> {
         config.execution_mode // Preserve SELFWARE_MODE env var / default
     };
 
-    // Apply execution mode to config
+    // Apply execution mode to config — record provenance for `config show`.
+    let prior_exec_mode = config.execution_mode;
     config.execution_mode = exec_mode;
+    if exec_mode != prior_exec_mode {
+        let flag = if cli.daemon {
+            "--daemon"
+        } else if cli.yolo {
+            "--yolo"
+        } else {
+            "--mode"
+        };
+        config
+            .sources
+            .set("execution_mode", crate::config::ConfigSource::CliArg(flag.into()));
+    }
 
     if config.execution_mode == ExecutionMode::Daemon {
         let addr = "127.0.0.1:9090"
@@ -410,9 +444,35 @@ pub async fn run() -> Result<()> {
     config.verbose_mode = verbose;
     config.show_tokens = show_tokens;
 
+    // Record CLI-arg provenance for the override flags.
+    if cli.compact {
+        config
+            .sources
+            .set("ui.compact_mode", crate::config::ConfigSource::CliArg("--compact".into()));
+    }
+    if cli.verbose {
+        config
+            .sources
+            .set("ui.verbose_mode", crate::config::ConfigSource::CliArg("--verbose".into()));
+    }
+    if cli.show_tokens {
+        config
+            .sources
+            .set("ui.show_tokens", crate::config::ConfigSource::CliArg("--show-tokens".into()));
+    }
+
     // Apply plan mode from CLI
     if cli.plan {
         config.plan_mode = true;
+        config
+            .sources
+            .set("plan_mode", crate::config::ConfigSource::CliArg("--plan".into()));
+    }
+    // Record `--debug` provenance when the flag is present.
+    if cli.debug.is_some() {
+        config
+            .sources
+            .set("debug", crate::config::ConfigSource::CliArg("--debug".into()));
     }
 
     // Initialize output control with merged settings
@@ -446,7 +506,16 @@ pub async fn run() -> Result<()> {
         }
 
         let start = std::time::Instant::now();
+        // Headless / non-TUI mode: attach a StderrProgressEmitter so users
+        // can `tee` or `grep` structured progress events from long runs.
+        // Skipped under --quiet to keep CI scripts clean.
+        let attach_stderr_progress = !cli.quiet;
         let mut agent = Agent::new(config).await?;
+        if attach_stderr_progress {
+            agent = agent.with_progress_emitter(std::sync::Arc::new(
+                crate::agent::progress::StderrProgressEmitter::new(),
+            ));
+        }
         agent.run_task(&actual_prompt).await?;
 
         if !cli.quiet {
@@ -2931,6 +3000,9 @@ async fn run_swebench_pro_cli(args: args::SwebenchProArgs) -> Result<()> {
             .unwrap_or_else(|_| PathBuf::from("target/release/selfware")),
     };
 
+    let mut llama_opts: crate::bench_harness::swebench_pro::harness::LlamaServerOpts =
+        Default::default();
+    llama_opts.port = args.port;
     let opts = SwebenchProOpts {
         quants,
         instance_ids,
@@ -2943,7 +3015,7 @@ async fn run_swebench_pro_cli(args: args::SwebenchProArgs) -> Result<()> {
         output,
         selfware_bin,
         skip_existing: args.skip_existing,
-        llama_opts: Default::default(),
+        llama_opts,
     };
 
     // The harness is blocking (subprocess + file I/O) and intentionally serial;

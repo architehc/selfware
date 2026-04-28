@@ -17,6 +17,7 @@
 pub mod agent;
 pub mod api_key;
 pub mod auto_config;
+pub mod debug;
 mod loader;
 pub mod model;
 pub mod model_profiles;
@@ -30,6 +31,7 @@ mod validation;
 pub use agent::*;
 pub use api_key::{is_local_endpoint, load_api_key_from_keyring, save_api_key_to_keyring};
 pub use auto_config::*;
+pub use debug::DebugConfig;
 pub use model::*;
 pub use model_profiles::{
     apply_profile as apply_model_defaults_profile, builtin_profiles, match_profile,
@@ -173,6 +175,13 @@ pub struct Config {
     #[serde(default)]
     pub cache: crate::session::cache::LlmCacheConfig,
 
+    /// Debug-channel configuration (request/response/gate/turn logging).
+    ///
+    /// Layered as: defaults → `[debug]` TOML → CLI `--debug[=channels]` →
+    /// `SELFWARE_DEBUG_*` env vars (force-on only).
+    #[serde(default)]
+    pub debug: DebugConfig,
+
     /// Named model profiles, keyed by ID (e.g. "coder", "vision").
     /// Populated from `[models.*]` TOML sections.  A `"default"` entry is
     /// auto-generated from the top-level endpoint/model/api_key fields if
@@ -290,6 +299,7 @@ impl std::fmt::Debug for Config {
             .field("concurrency", &self.concurrency)
             .field("evolution", &self.evolution)
             .field("cache", &self.cache)
+            .field("debug", &self.debug)
             .field("models", &self.models)
             .field("execution_mode", &self.execution_mode)
             .field("compact_mode", &self.compact_mode)
@@ -326,6 +336,7 @@ impl Default for Config {
             concurrency: ConcurrencyConfig::default(),
             evolution: EvolutionTomlConfig::default(),
             cache: crate::session::cache::LlmCacheConfig::default(),
+            debug: DebugConfig::default(),
             models: HashMap::new(),
             extra_body: None,
             qa: crate::testing::qa_profiles::QaConfig::default(),

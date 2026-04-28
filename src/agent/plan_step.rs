@@ -146,6 +146,9 @@ impl Agent {
             None
         };
 
+        // Snapshot reasoning_content before the message-push moves it, so the
+        // turn artifact can capture the model's <think> output too.
+        let reasoning_for_artifact = assistant_msg.reasoning_content.clone();
         self.messages.push(Message {
             role: "assistant".to_string(),
             content: content.clone(),
@@ -193,6 +196,7 @@ impl Agent {
             &parsed_calls_for_artifact,
             plan_decision,
             content.text(),
+            reasoning_for_artifact.as_deref(),
         );
 
         self.log_turn_end_event(

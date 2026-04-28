@@ -876,3 +876,81 @@ fn test_trim_message_history_preserves_system_only() {
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].role, "system");
 }
+
+// =========================================================================
+// Progress emitter integration tests (#1)
+// =========================================================================
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_progress_emitter_receives_task_completed_event() {
+    use std::sync::Arc;
+    let server = MockLlmServer::builder()
+        .with_response("All done.")
+        .build()
+        .await;
+
+    let config = mock_agent_config(format!("{}/v1", server.url()), false);
+    let recorder = Arc::new(super::progress::RecordingProgressEmitter::new());
+    let mut agent = Agent::new(config)
+        .await
+        .unwrap()
+        .with_progress_emitter(recorder.clone());
+
+    let _ = agent.run_task("Just answer immediately").await;
+    let kinds = recorder.kinds();
+    assert!(
+        kinds.contains(&"step_started"),
+        "expected step_started in {:?}",
+        kinds
+    );
+    assert!(
+        kinds.contains(&"task_completed") || kinds.contains(&"task_failed"),
+        "expected a terminal task_* event in {:?}",
+        kinds
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "mock TCP server unreliable under heavy parallelism on Windows CI"
+)]
+async fn test_progress_emitter_records_tool_call_started_and_completed() {
+    use std::sync::Arc;
+    let server = MockLlmServer::builder()
+        .with_response(
+            r#"<tool>
+<name>file_read</name>
+<arguments>{"path":"./Cargo.toml"}</arguments>
+</tool>"#,
+        )
+        .with_response("Done.")
+        .build()
+        .await;
+
+    let config = mock_agent_config(format!("{}/v1", server.url()), false);
+    let recorder = Arc::new(super::progress::RecordingProgressEmitter::new());
+    let mut agent = Agent::new(config)
+        .await
+        .unwrap()
+        .with_progress_emitter(recorder.clone());
+
+    let _ = agent.run_task("Read Cargo.toml and finish").await;
+    let kinds = recorder.kinds();
+    assert!(
+        kinds.contains(&"tool_call_started"),
+        "expected tool_call_started in {:?}",
+        kinds
+    );
+    assert!(
+        kinds.contains(&"tool_call_completed"),
+        "expected tool_call_completed in {:?}",
+        kinds
+    );
+    server.stop().await;
+}

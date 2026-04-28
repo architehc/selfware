@@ -47,6 +47,11 @@ pub struct TurnArtifact {
     pub finish_reason: Option<String>,
     pub completion_tokens: Option<u32>,
     pub prompt_tokens: Option<u32>,
+    /// Qwen/DeepSeek-style `<think>...</think>` reasoning content captured
+    /// alongside the visible response.  Older artifacts may omit the field;
+    /// `serde(default)` keeps deserialization compatible with both shapes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     /// What selfware extracted from the response.
     pub parsed_tool_calls: Vec<ToolCall>,
     /// What selfware did with it.
@@ -141,6 +146,7 @@ mod tests {
             finish_reason: Some("stop".to_string()),
             completion_tokens: Some(2),
             prompt_tokens: Some(5),
+            reasoning_content: Some("<think>this is the plan</think>".to_string()),
             parsed_tool_calls: vec![ToolCall {
                 id: "call_0".into(),
                 call_type: "function".into(),
@@ -190,6 +196,7 @@ mod tests {
         assert_eq!(decoded.finish_reason, original.finish_reason);
         assert_eq!(decoded.completion_tokens, original.completion_tokens);
         assert_eq!(decoded.prompt_tokens, original.prompt_tokens);
+        assert_eq!(decoded.reasoning_content, original.reasoning_content);
         assert_eq!(decoded.elapsed_ms, original.elapsed_ms);
         assert_eq!(decoded.parsed_tool_calls.len(), 1);
         assert_eq!(decoded.parsed_tool_calls[0].function.name, "file_read");

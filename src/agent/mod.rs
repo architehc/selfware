@@ -90,6 +90,7 @@ pub mod loop_control;
 pub mod plan_mode;
 mod plan_step;
 pub mod planning;
+pub mod progress;
 pub mod prompt_builder;
 mod recovery;
 mod session_log;
@@ -357,6 +358,9 @@ pub struct Agent {
     checkpoint_persisted_once: bool,
     /// Event emitter for real-time updates (TUI or other)
     events: Arc<dyn EventEmitter>,
+    /// Structured progress emitter (stderr / TUI / future Prometheus, etc).
+    /// Defaults to a no-op; set to a `StderrProgressEmitter` for headless runs.
+    progress_emitter: Arc<dyn progress::ProgressEmitter>,
     /// Edit history for undo support
     edit_history: EditHistory,
     /// Last assistant response content (for /copy command)
@@ -911,6 +915,7 @@ To call a tool, use this EXACT XML structure:
             last_checkpoint_tool_calls: 0,
             checkpoint_persisted_once: false,
             events: Arc::new(NoopEmitter),
+            progress_emitter: Arc::new(progress::NoopProgressEmitter),
             edit_history,
             last_assistant_response: String::new(),
             chat_store,
@@ -997,6 +1002,28 @@ To call a tool, use this EXACT XML structure:
     /// Emit an event to the TUI / event listener (no-op when no emitter is configured).
     fn emit_event(&self, event: AgentEvent) {
         self.events.emit(event);
+    }
+
+    /// Swap in a custom [`progress::ProgressEmitter`].  Used by the headless
+    /// non-TUI path to attach a [`progress::StderrProgressEmitter`].
+    pub fn with_progress_emitter(
+        mut self,
+        emitter: Arc<dyn progress::ProgressEmitter>,
+    ) -> Self {
+        self.progress_emitter = emitter;
+        self
+    }
+
+    /// Emit a structured progress event (no-op when the emitter is the default).
+    pub(super) fn emit_progress(&self, event: progress::ProgressEvent) {
+        self.progress_emitter.emit(event);
+    }
+
+    /// Read-only access to the configured progress emitter — used by helpers
+    /// that need to clone the `Arc` (e.g. the tool dispatcher).
+    #[allow(dead_code)]
+    pub(super) fn progress_emitter(&self) -> Arc<dyn progress::ProgressEmitter> {
+        Arc::clone(&self.progress_emitter)
     }
 
     fn collect_synthesis_tool_history(&self) -> String {
@@ -1739,8 +1766,18 @@ To call a tool, use this EXACT XML structure:
     }
 
     /// Count of tool calls that have been hard-blocked after repeated failures.
+    ///
+    /// The underlying vector may record the same `(tool_name, args_hash)`
+    /// signature multiple times because the permanent-block hook can fire on
+    /// every retry attempt of the same tool.  Returning the deduplicated
+    /// count keeps `FailureMode` evidence honest and stops the same blocked
+    /// signature from being counted three times in the CLI banner.
     pub fn permanently_blocked_tool_calls_len(&self) -> usize {
-        self.permanently_blocked_tool_calls.len()
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for entry in &self.permanently_blocked_tool_calls {
+            seen.insert(entry.as_str());
+        }
+        seen.len()
     }
 
     /// Count of HTTP 400 "Assistant response prefill incompatible" responses.
@@ -1764,6 +1801,14 @@ To call a tool, use this EXACT XML structure:
     pub fn last_assistant_response_has_final_answer(&self) -> bool {
         let lower = self.last_assistant_response.to_lowercase();
         lower.contains("final answer")
+    }
+
+    /// True when the current task description has been classified as one
+    /// that requires file mutation (`fix`, `implement`, `edit`, `add`, etc.).
+    /// Used by `FailureMode::classify` to flag suspicious natural-completion
+    /// runs where the model wrote zero files but claimed success.
+    pub fn current_task_requires_mutation(&self) -> bool {
+        tool_dispatch::task_requires_mutation(&self.current_task_context)
     }
 
     /// Reset all per-task failure-mode counters. Called when starting or
@@ -1799,8 +1844,17 @@ To call a tool, use this EXACT XML structure:
     }
 
     /// Record that a tool call was permanently blocked after repeated retries.
+    ///
+    /// Dedupes by exact entry so the same signature does not inflate the
+    /// stored vec on every retry attempt.  The cap stays at 64 to bound
+    /// memory in pathological loops.
     pub(super) fn note_permanently_blocked(&mut self, tool_name: &str) {
-        if self.permanently_blocked_tool_calls.len() < 64 {
+        if !self
+            .permanently_blocked_tool_calls
+            .iter()
+            .any(|s| s == tool_name)
+            && self.permanently_blocked_tool_calls.len() < 64
+        {
             self.permanently_blocked_tool_calls
                 .push(tool_name.to_string());
         }

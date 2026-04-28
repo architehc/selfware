@@ -115,6 +115,22 @@ impl FailureMode {
                         advice: "tighten the completion gate to require at least one file_write/file_edit before accepting a final answer".to_string(),
                     };
                 }
+                // Bug fix: a natural completion that performed zero mutating
+                // calls on a task explicitly requiring mutation is also a
+                // FakeComplete — even when the model never wrote the literal
+                // "Final answer" marker. Without this, runs like
+                // `selfware -p "fix the failing test"` that exit cleanly with
+                // a chatty no-op response were wrongly tagged Success.
+                if mutating == 0 && agent.current_task_requires_mutation() {
+                    return FailureMode {
+                        kind: FailureKind::FakeComplete,
+                        evidence: format!(
+                            "task required mutation but agent completed naturally with 0 mutating tool calls (total={})",
+                            total_calls
+                        ),
+                        advice: "tighten the completion gate to require at least one file_write/file_edit before accepting a final answer".to_string(),
+                    };
+                }
                 let progress_note = if progress_guard > 0 {
                     format!(", {} progress guards", progress_guard)
                 } else {

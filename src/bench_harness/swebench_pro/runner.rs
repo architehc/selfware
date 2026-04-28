@@ -223,12 +223,15 @@ fn run_one(
     )?;
 
     let log_path = trial_dir.join("agent.log");
+    // Use the configured llama-server port so `--port 8001` actually points
+    // selfware sub-runs at the right endpoint instead of the hard-coded 8000.
+    let endpoint = format!("http://127.0.0.1:{}/v1", opts.llama_opts.port);
     let outcome = run_selfware(
         &opts.selfware_bin,
         &workdir,
         &prompt,
         spec.alias,
-        "http://127.0.0.1:8000/v1",
+        &endpoint,
         opts.scenario_timeout,
         &log_path,
     )?;

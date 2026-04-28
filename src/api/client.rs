@@ -20,14 +20,19 @@ use super::{
     merge_extra_body, LlmClient, ThinkingMode,
 };
 
-/// Print a request body to stderr when `SELFWARE_DEBUG_REQUEST` is set.
+/// Print a request body to stderr when the configured debug `requests`
+/// channel is active (CLI `--debug=requests`, `[debug] log_requests = true`,
+/// or the legacy `SELFWARE_DEBUG_REQUEST` env var).
 ///
-/// Backwards-compatible with the previous "set the env var, grep stderr"
-/// debug workflow.  The body is sanitized of obvious credential locations
-/// before printing — defence in depth, since the JSON request body should
-/// never carry an API key in normal operation (creds live on headers).
-fn maybe_log_request_body(body: &serde_json::Value, label: &str) {
-    if std::env::var("SELFWARE_DEBUG_REQUEST").is_err() {
+/// The body is sanitized of obvious credential locations before printing —
+/// defence in depth, since the JSON request body should never carry an API
+/// key in normal operation (creds live on headers).
+fn maybe_log_request_body(
+    debug: &crate::config::DebugConfig,
+    body: &serde_json::Value,
+    label: &str,
+) {
+    if !debug.should_log_requests() {
         return;
     }
     let mut sanitized = body.clone();
@@ -198,7 +203,7 @@ impl ApiClient {
         thinking: ThinkingMode,
     ) -> Result<(ChatResponse, ChatMetadata)> {
         let body = self.build_chat_body(messages, tools, thinking, false)?;
-        maybe_log_request_body(&body, "chat");
+        maybe_log_request_body(&self.config.debug, &body, "chat");
 
         let started = std::time::Instant::now();
         let resp = self.send_with_retry(&body).await?;
@@ -313,7 +318,7 @@ impl ApiClient {
         thinking: ThinkingMode,
     ) -> Result<(StreamingResponse, ChatMetadata)> {
         let body = self.build_chat_body(messages, tools, thinking, true)?;
-        maybe_log_request_body(&body, "chat_stream");
+        maybe_log_request_body(&self.config.debug, &body, "chat_stream");
 
         let started = std::time::Instant::now();
         let body_for_meta = body.clone();
@@ -443,9 +448,7 @@ impl ApiClient {
                             .context("Failed to read response body")?;
 
                         debug!("API response body ({} chars)", body_text.len());
-                        if std::env::var("SELFWARE_DEBUG").is_ok()
-                            && std::env::var("SELFWARE_DEBUG_RAW").is_ok()
-                        {
+                        if self.config.debug.should_log_responses() {
                             eprintln!("=== RAW API RESPONSE ===\n{}\n=== END RAW ===", body_text);
                         }
 

@@ -405,6 +405,7 @@ fn test_config_full_roundtrip() {
         resources: crate::config::ResourcesConfig::default(),
         evolution: EvolutionTomlConfig::default(),
         cache: crate::session::cache::LlmCacheConfig::default(),
+        debug: crate::config::DebugConfig::default(),
         models: HashMap::new(),
         execution_mode: ExecutionMode::default(),
         compact_mode: false,
