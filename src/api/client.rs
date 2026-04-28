@@ -194,7 +194,7 @@ impl ApiClient {
         Ok(resp)
     }
 
-    /// Like [`chat`], but also returns the exact request body that was sent
+    /// Like [`Self::chat`], but also returns the exact request body that was sent
     /// and HTTP-layer timing.  Used by the per-turn debug capture.
     pub async fn chat_with_meta(
         &self,
@@ -305,7 +305,7 @@ impl ApiClient {
         Ok(stream)
     }
 
-    /// Like [`chat_stream`], but also returns the exact request body that was
+    /// Like [`Self::chat_stream`], but also returns the exact request body that was
     /// sent.  Used by the per-turn debug capture; the caller is responsible
     /// for filling in `finish_reason` / token usage from the SSE stream.
     pub async fn chat_stream_with_meta(

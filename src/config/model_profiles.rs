@@ -44,7 +44,7 @@ pub struct ModelDefaultsProfile {
 }
 
 /// Names of fields a profile filled in for a particular config.  Returned
-/// by [`apply_matched_profile`] for diagnostic / introspection purposes.
+/// by [`apply_profile`] for diagnostic / introspection purposes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AppliedFields {
     pub native_function_calling: bool,

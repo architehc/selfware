@@ -2999,9 +2999,10 @@ async fn run_swebench_pro_cli(args: args::SwebenchProArgs) -> Result<()> {
         }
     };
 
-    let mut llama_opts: crate::bench_harness::swebench_pro::harness::LlamaServerOpts =
-        Default::default();
-    llama_opts.port = args.port;
+    let llama_opts = crate::bench_harness::swebench_pro::harness::LlamaServerOpts {
+        port: args.port,
+        ..Default::default()
+    };
     let opts = SwebenchProOpts {
         quants,
         instance_ids,

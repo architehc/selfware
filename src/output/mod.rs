@@ -846,7 +846,13 @@ pub(crate) fn display_file_diff(path: &str, old_content: &str, new_content: &str
     }
 }
 
-/// Print task completed message
+/// Print task completed message.
+///
+/// Replaced by the structured failure-mode classifier in
+/// `src/agent/failure_mode.rs::cli_banner` for the main agent path.
+/// Kept here as `#[allow(dead_code)]` because integration tests and
+/// future entry points may still want a generic completion banner.
+#[allow(dead_code)]
 pub(crate) fn task_completed() {
     if !is_compact() {
         let _lock = OUTPUT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
