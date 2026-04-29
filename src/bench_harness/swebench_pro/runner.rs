@@ -638,14 +638,14 @@ fn run_trial(
                         let mut m = manifest.lock().unwrap();
                         update_manifest_entry(
                             &mut m,
-                            spec.label,
+                            &spec.label,
                             &inst.instance_id,
                             trial,
                             state,
                             error,
                             Some(selected.pred_path.clone()),
                             Some(
-                                trial_dir_for(&opts.output, spec.label, &inst.instance_id, trial)
+                                trial_dir_for(&opts.output, &spec.label, &inst.instance_id, trial)
                                     .join("result.json"),
                             ),
                         );
@@ -839,7 +839,7 @@ fn run_one_candidate(
     } else {
         format!("{}-{}-{}", spec.label, inst.instance_id, trial)
     };
-    let mut run_trace = RunTrace::new(run_id, inst.instance_id.clone(), spec.label.into(), trial);
+    let mut run_trace = RunTrace::new(run_id, inst.instance_id.clone(), spec.label.clone().into(), trial);
 
     if opts.skip_existing && pred_path.exists() {
         eprintln!(
@@ -981,7 +981,7 @@ fn run_one_candidate(
         &inst.repo,
         &inst.base_commit,
         &inst.instance_id,
-        spec.label,
+        &spec.label,
         trial,
     );
     let instance_memory = store.as_ref().and_then(|s| s.get_instance(&instance_key));
@@ -1132,7 +1132,7 @@ fn run_one(
     inst: &Instance,
     trial: u32,
 ) -> Result<(PerRunResult, Vec<PerRunResult>)> {
-    let trial_dir = trial_dir_for(&opts.output, spec.label, &inst.instance_id, trial);
+    let trial_dir = trial_dir_for(&opts.output, &spec.label, &inst.instance_id, trial);
     std::fs::create_dir_all(&trial_dir)
         .with_context(|| format!("creating {}", trial_dir.display()))?;
     let trial_pred = trial_dir.join(format!("{}.pred", inst.instance_id));
@@ -1157,7 +1157,7 @@ fn run_one(
             .unwrap_or(0);
         let synthetic = PerRunResult {
             instance_id: inst.instance_id.clone(),
-            quant: spec.label.into(),
+            quant: spec.label.clone().into(),
             trial,
             exit_code: 0,
             timed_out: false,
@@ -1197,7 +1197,7 @@ fn run_one(
         }
         let synthetic = PerRunResult {
             instance_id: inst.instance_id.clone(),
-            quant: spec.label.into(),
+            quant: spec.label.clone().into(),
             trial,
             exit_code: -2,
             timed_out: false,
@@ -1238,7 +1238,7 @@ fn run_one(
 
     let synthetic = PerRunResult {
         instance_id: inst.instance_id.clone(),
-        quant: spec.label.into(),
+        quant: spec.label.clone().into(),
         trial,
         exit_code: best.exit_code,
         timed_out: best.timed_out,

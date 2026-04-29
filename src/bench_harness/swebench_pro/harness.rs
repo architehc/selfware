@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use super::catalog::{BackendProfile, QuantSpec, ThinkingPolicy};
+use super::catalog::QuantSpec;
 
 #[derive(Clone, Debug)]
 pub struct LlamaServerOpts {
