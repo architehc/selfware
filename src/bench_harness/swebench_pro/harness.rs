@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 
-use super::catalog::QuantSpec;
+use super::catalog::{BackendProfile, QuantSpec, ThinkingPolicy};
 
 #[derive(Clone, Debug)]
 pub struct LlamaServerOpts {
@@ -116,7 +116,7 @@ pub fn build_llama_server_args(
         "--port".into(),
         opts.port.to_string(),
         "--alias".into(),
-        spec.alias.into(),
+        spec.alias.clone(),
     ]);
     if let Some(p) = mmproj {
         args.push("--mmproj".into());
@@ -146,8 +146,8 @@ impl LlamaServer {
     /// Boot llama-server for the given quant; block until it answers
     /// `/v1/models` or `boot_timeout` elapses.
     pub fn boot(spec: &QuantSpec, opts: &LlamaServerOpts) -> Result<Self> {
-        let gguf = opts.models_dir.join(spec.gguf);
-        let mmproj = opts.models_dir.join(spec.mmproj);
+        let gguf = opts.models_dir.join(&spec.gguf);
+        let mmproj = opts.models_dir.join(&spec.mmproj);
         let gguf = gguf
             .canonicalize()
             .with_context(|| format!("missing GGUF: {}", gguf.display()))?;
@@ -177,7 +177,7 @@ impl LlamaServer {
         let pid = child.id();
 
         let port = opts.port;
-        let alias = spec.alias.to_string();
+        let alias = spec.alias.clone();
         let server = LlamaServer {
             child: Some(child),
             alias: alias.clone(),
@@ -220,6 +220,50 @@ fn probe_endpoint(port: u16) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Detect the backend engine by querying `/v1/models` and inspecting headers
+/// plus body content.  Returns a lower-case label like `"llama.cpp"`,
+/// `"sglang"`, `"vllm"`, or `"unknown"`.
+pub fn detect_backend(port: u16) -> Result<String> {
+    let url = format!("http://127.0.0.1:{}/v1/models", port);
+    let output = Command::new("curl")
+        .args(["-sf", "-m", "3", "-i", &url])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .context("spawning curl for backend detection")?;
+
+    if !output.status.success() {
+        bail!("curl probe failed for {}", url);
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let lower = text.to_lowercase();
+
+    // Header hints
+    if lower.contains("server: llama.cpp") || lower.contains("server: llamacpp") {
+        return Ok("llama.cpp".into());
+    }
+    if lower.contains("server: sglang") {
+        return Ok("sglang".into());
+    }
+    if lower.contains("server: vllm") {
+        return Ok("vllm".into());
+    }
+
+    // Body hints
+    if lower.contains("llama.cpp") || lower.contains("llamacpp") {
+        return Ok("llama.cpp".into());
+    }
+    if lower.contains("sglang") {
+        return Ok("sglang".into());
+    }
+    if lower.contains("vllm") {
+        return Ok("vllm".into());
+    }
+
+    Ok("unknown".into())
 }
 
 /// Parse the final JSON object from stdout text.
@@ -481,10 +525,18 @@ mod tests {
 
     fn dummy_spec() -> QuantSpec {
         QuantSpec {
-            label: "test-label",
-            gguf: "test.gguf",
-            alias: "test-alias",
-            mmproj: "mmproj.gguf",
+            label: "test-label".into(),
+            gguf: "test.gguf".into(),
+            alias: "test-alias".into(),
+            mmproj: "mmproj.gguf".into(),
+            name: "Test".into(),
+            ctx: 262_144,
+            max_parallel: 2,
+            kv_cache_type: "q8_0".into(),
+            tensor_split: Some("24,24".into()),
+            temperature: 1.0,
+            thinking_policy: ThinkingPolicy::Disable,
+            backend: BackendProfile::LlamaCpp,
         }
     }
 
@@ -587,5 +639,12 @@ mod tests {
         let p = resolve_llama_binary();
         std::env::remove_var("LLAMA_SERVER_BIN");
         assert_eq!(p, PathBuf::from("/sentinel/llama-server-test"));
+    }
+
+    #[test]
+    fn detect_backend_returns_unknown_for_unresponsive_port() {
+        // Use a port that is almost certainly closed.
+        let result = detect_backend(59999);
+        assert!(result.is_err() || result.unwrap() == "unknown");
     }
 }
