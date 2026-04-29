@@ -168,6 +168,7 @@ pub(crate) enum DemoScenarioKind {
 }
 
 #[derive(Subcommand, Clone, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Commands {
     /// Check system dependencies and tool availability
     Doctor,
@@ -186,18 +187,11 @@ pub(crate) enum Commands {
         format: String,
     },
 
-    /// Experimental SWE-bench entrypoint (currently disabled)
+    /// SWE-bench commands
     #[command(alias = "swe")]
     SWEBench {
-        /// Dataset to use (public, held-out, commercial)
-        #[arg(short, long, default_value = "public")]
-        dataset: String,
-        /// Number of tasks to evaluate
-        #[arg(short, long)]
-        limit: Option<usize>,
-        /// Output file for results
-        #[arg(short, long, default_value = "swebench_results.json")]
-        output: String,
+        #[command(subcommand)]
+        command: SWEBenchCommands,
     },
 
     /// Run comprehensive benchmark suite
@@ -526,8 +520,31 @@ pub(crate) enum Commands {
     },
 }
 
+/// Subcommands of `selfware swebench`.
+#[derive(Subcommand, Clone, Debug)]
+pub(crate) enum SWEBenchCommands {
+    /// Run SWE-bench evaluation (legacy/placeholder)
+    Run {
+        /// Dataset to use (public, held-out, commercial)
+        #[arg(short, long, default_value = "public")]
+        dataset: String,
+        /// Number of tasks to evaluate
+        #[arg(short, long)]
+        limit: Option<usize>,
+        /// Output file for results
+        #[arg(short, long, default_value = "swebench_results.json")]
+        output: String,
+    },
+    /// Diagnose SWE-bench Pro traces
+    Diagnose {
+        /// Output directory containing trace.jsonl files
+        output_dir: String,
+    },
+}
+
 /// Subcommands of `selfware bench` for the modern benchmark surface.
 #[derive(Subcommand, Clone, Debug)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum BenchCommand {
     /// Run SWE-bench Pro instances against one or more local quants
     #[command(name = "swebench-pro")]
@@ -602,6 +619,14 @@ pub(crate) struct SwebenchProArgs {
     #[arg(long)]
     pub skip_existing: bool,
 
+    /// Resume an existing swebench-pro output directory when manifest options match.
+    #[arg(long)]
+    pub resume: bool,
+
+    /// Re-run trials that are already complete in the manifest.
+    #[arg(long)]
+    pub force_rerun: bool,
+
     /// Prompt mode: `diagnostic` includes fail-to-pass tests (default);
     /// `official` excludes them for valid scoring.
     #[arg(long, default_value = "diagnostic")]
@@ -614,6 +639,44 @@ pub(crate) struct SwebenchProArgs {
     /// Run official SWE-bench Pro Docker eval after generating patches.
     #[arg(long)]
     pub official_eval: bool,
+
+    /// Path to the SWE-bench Pro evaluator script.
+    #[arg(
+        long,
+        default_value = "/home/ivo/SWE-bench_Pro-os/swe_bench_pro_eval.py"
+    )]
+    pub official_eval_script: String,
+
+    /// Path to the SWE-bench Pro raw sample CSV/JSONL.
+    #[arg(
+        long,
+        default_value = "/home/ivo/SWE-bench_Pro-os/helper_code/sweap_eval_full_v2.jsonl"
+    )]
+    pub official_eval_raw_sample_path: String,
+
+    /// Directory containing per-instance run_script.sh/parser.py files.
+    #[arg(long, default_value = "/home/ivo/SWE-bench_Pro-os/run_scripts")]
+    pub official_eval_scripts_dir: String,
+
+    /// Docker Hub user/org that hosts sweap-images.
+    #[arg(long, default_value = "jefzda")]
+    pub official_eval_dockerhub_username: String,
+
+    /// Parallel workers for official eval.
+    #[arg(long, default_value_t = 1)]
+    pub official_eval_num_workers: u32,
+
+    /// Use Modal instead of local Docker for official eval.
+    #[arg(long)]
+    pub official_eval_modal: bool,
+
+    /// Re-run official eval even when per-instance outputs already exist.
+    #[arg(long)]
+    pub official_eval_redo: bool,
+
+    /// Block network access inside official-eval containers.
+    #[arg(long)]
+    pub official_eval_block_network: bool,
 }
 
 #[derive(Subcommand, Clone, Debug)]

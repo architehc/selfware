@@ -577,12 +577,31 @@ pub async fn run() -> Result<()> {
 
         let start = std::time::Instant::now();
         let mut agent = Agent::new(config).await?;
+        let mut emitters: Vec<std::sync::Arc<dyn crate::agent::progress::ProgressEmitter>> =
+            Vec::new();
         if is_stream_json {
-            agent = agent
-                .with_progress_emitter(std::sync::Arc::new(headless::JsonlProgressEmitter::new()));
+            emitters.push(std::sync::Arc::new(headless::JsonlProgressEmitter::new()));
         } else if !cli.quiet {
-            agent = agent.with_progress_emitter(std::sync::Arc::new(
+            emitters.push(std::sync::Arc::new(
                 crate::agent::progress::StderrProgressEmitter::new(),
+            ));
+        }
+        #[cfg(feature = "bench-harness")]
+        {
+            if let Ok(result_dir) = std::env::var("SELFWARE_RESULT_DIR") {
+                let trace_path = std::path::PathBuf::from(result_dir).join("trace.jsonl");
+                if let Ok(emitter) =
+                    crate::bench_harness::swebench_pro::trace::TraceProgressEmitter::new(
+                        &trace_path,
+                    )
+                {
+                    emitters.push(std::sync::Arc::new(emitter));
+                }
+            }
+        }
+        if !emitters.is_empty() {
+            agent = agent.with_progress_emitter(std::sync::Arc::new(
+                crate::agent::progress::MultiProgressEmitter::new(emitters),
             ));
         }
         let run_result = agent.run_task(&actual_prompt).await;
@@ -798,9 +817,27 @@ async fn handle_command(
 
             let start = std::time::Instant::now();
             let mut agent = Agent::new(config).await?;
+            let mut emitters: Vec<std::sync::Arc<dyn crate::agent::progress::ProgressEmitter>> =
+                Vec::new();
             if is_stream_json {
+                emitters.push(std::sync::Arc::new(headless::JsonlProgressEmitter::new()));
+            }
+            #[cfg(feature = "bench-harness")]
+            {
+                if let Ok(result_dir) = std::env::var("SELFWARE_RESULT_DIR") {
+                    let trace_path = std::path::PathBuf::from(result_dir).join("trace.jsonl");
+                    if let Ok(emitter) =
+                        crate::bench_harness::swebench_pro::trace::TraceProgressEmitter::new(
+                            &trace_path,
+                        )
+                    {
+                        emitters.push(std::sync::Arc::new(emitter));
+                    }
+                }
+            }
+            if !emitters.is_empty() {
                 agent = agent.with_progress_emitter(std::sync::Arc::new(
-                    headless::JsonlProgressEmitter::new(),
+                    crate::agent::progress::MultiProgressEmitter::new(emitters),
                 ));
             }
             let run_result = agent.run_task(&task).await;
@@ -2063,23 +2100,31 @@ async fn handle_command(
             run_local_tests(&pattern, &format).await?;
         }
 
-        Commands::SWEBench {
-            dataset,
-            limit,
-            output,
-        } => {
-            if !quiet {
-                println!("{}", render_header(ctx));
+        Commands::SWEBench { command } => {
+            use args::SWEBenchCommands;
+            match command {
+                SWEBenchCommands::Run {
+                    dataset,
+                    limit,
+                    output,
+                } => {
+                    if !quiet {
+                        println!("{}", render_header(ctx));
+                    }
+                    anyhow::bail!(
+                        "SWE-bench evaluation is not implemented yet. The current path only uses embedded demo data and placeholder success.\n\
+                         Requested dataset={}{} output={}. Use the repo's experimental examples/scripts instead.",
+                        dataset,
+                        limit
+                            .map(|value| format!(", limit {}", value))
+                            .unwrap_or_default(),
+                        output
+                    );
+                }
+                SWEBenchCommands::Diagnose { output_dir } => {
+                    run_swebench_diagnose(&output_dir)?;
+                }
             }
-            anyhow::bail!(
-                "SWE-bench evaluation is not implemented yet. The current path only uses embedded demo data and placeholder success.\n\
-                 Requested dataset={}{} output={}. Use the repo's experimental examples/scripts instead.",
-                dataset,
-                limit
-                    .map(|value| format!(", limit {}", value))
-                    .unwrap_or_default(),
-                output
-            );
         }
 
         Commands::Bench {
@@ -3158,9 +3203,19 @@ async fn run_swebench_pro_cli(args: args::SwebenchProArgs) -> Result<()> {
         output,
         selfware_bin,
         skip_existing: args.skip_existing,
+        resume: args.resume,
+        force_rerun: args.force_rerun,
         prompt_mode: args.prompt_mode,
         prompt_profile: args.prompt_profile,
         official_eval: args.official_eval,
+        official_eval_script: PathBuf::from(args.official_eval_script),
+        official_eval_raw_sample_path: PathBuf::from(args.official_eval_raw_sample_path),
+        official_eval_scripts_dir: PathBuf::from(args.official_eval_scripts_dir),
+        official_eval_dockerhub_username: args.official_eval_dockerhub_username,
+        official_eval_num_workers: args.official_eval_num_workers,
+        official_eval_use_local_docker: !args.official_eval_modal,
+        official_eval_redo: args.official_eval_redo,
+        official_eval_block_network: args.official_eval_block_network,
         llama_opts,
     };
 
@@ -3176,6 +3231,84 @@ async fn run_swebench_pro_cli(_args: args::SwebenchProArgs) -> Result<()> {
     anyhow::bail!(
         "`bench swebench-pro` requires the `bench-harness` feature: rebuild with `--features bench-harness`."
     )
+}
+
+#[cfg(not(feature = "bench-harness"))]
+fn run_swebench_diagnose(_output_dir: &str) -> Result<()> {
+    anyhow::bail!(
+        "`swebench diagnose` requires the `bench-harness` feature: rebuild with `--features bench-harness`."
+    )
+}
+
+#[cfg(feature = "bench-harness")]
+fn run_swebench_diagnose(output_dir: &str) -> Result<()> {
+    use crate::bench_harness::swebench_pro::trace::{DiagnosisSummary, PerRunDiagnosis, RunTrace};
+
+    let output_path = std::path::Path::new(output_dir);
+    if !output_path.exists() {
+        anyhow::bail!("Output directory does not exist: {}", output_dir);
+    }
+
+    // Find all trace.jsonl files recursively.
+    let mut trace_files = Vec::new();
+    for entry in walkdir::WalkDir::new(output_path) {
+        let entry = entry?;
+        if entry.file_type().is_file() && entry.file_name() == "trace.jsonl" {
+            trace_files.push(entry.path().to_path_buf());
+        }
+    }
+
+    if trace_files.is_empty() {
+        anyhow::bail!("No trace.jsonl files found in {}", output_dir);
+    }
+
+    eprintln!("Found {} trace file(s)", trace_files.len());
+
+    let mut diagnoses: Vec<(RunTrace, PerRunDiagnosis)> = Vec::new();
+
+    for path in &trace_files {
+        let mut trace = match RunTrace::read_jsonl(path) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("  ⚠ failed to read {}: {}", path.display(), e);
+                continue;
+            }
+        };
+        // Derive metadata from the file path if the trace header is empty.
+        if trace.run_id.is_empty() {
+            if let Some(parent) = path.parent() {
+                trace.instance_id = parent
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+            }
+        }
+        let diag = PerRunDiagnosis::from_trace(&trace);
+
+        // Write per-run diagnosis next to the trace file.
+        let diagnosis_path = path.with_file_name("diagnosis.json");
+        if let Err(e) = std::fs::write(&diagnosis_path, serde_json::to_vec_pretty(&diag)?) {
+            eprintln!("  ⚠ failed to write {}: {}", diagnosis_path.display(), e);
+        }
+
+        diagnoses.push((trace, diag));
+    }
+
+    // Compute sweep-level summary.
+    let summary = DiagnosisSummary::from_diagnoses(&diagnoses);
+    let summary_path = output_path.join("diagnosis_summary.json");
+    std::fs::write(&summary_path, serde_json::to_vec_pretty(&summary)?)?;
+
+    eprintln!("Wrote diagnosis_summary.json to {}", summary_path.display());
+    eprintln!(
+        "  total_runs={} read_loop={:.1}% fake_complete={:.1}% timeout={:.1}%",
+        summary.total_runs,
+        summary.read_loop_rate * 100.0,
+        summary.fake_complete_rate * 100.0,
+        summary.timeout_rate * 100.0,
+    );
+
+    Ok(())
 }
 
 #[cfg(test)]

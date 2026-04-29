@@ -726,6 +726,65 @@ impl LspClient {
         Ok(diag_store.get(&uri).cloned().unwrap_or_default())
     }
 
+    /// Find workspace symbols matching a query string.
+    pub async fn workspace_symbol(&self, query: &str) -> Result<Vec<SymbolInfo>> {
+        // Try existing connections first.
+        let langs: Vec<Language> = {
+            let conns = self.connections.lock().await;
+            conns.keys().cloned().collect()
+        };
+
+        for lang in langs {
+            if let Ok(conn) = self.connection_for(lang).await {
+                let result = conn
+                    .request("workspace/symbol", serde_json::json!({ "query": query }))
+                    .await?;
+                let symbols = Self::parse_symbols(&result)?;
+                if !symbols.is_empty() {
+                    return Ok(symbols);
+                }
+            }
+        }
+
+        // No existing connections — try to start a server for the dominant language.
+        if let Some(lang) = detect_dominant_language(&self.project_root).await {
+            let conn = self.connection_for(lang).await?;
+            let result = conn
+                .request("workspace/symbol", serde_json::json!({ "query": query }))
+                .await?;
+            return Self::parse_symbols(&result);
+        }
+
+        Ok(vec![])
+    }
+
+    /// Go to the implementation of a symbol at a given position.
+    pub async fn goto_implementation(
+        &self,
+        file: &str,
+        line: u32,
+        col: u32,
+    ) -> Result<Vec<Location>> {
+        let lang = Language::from_path(file)
+            .ok_or_else(|| anyhow::anyhow!("Cannot detect language for: {}", file))?;
+        let conn = self.connection_for(lang).await?;
+
+        let content = tokio::fs::read_to_string(&file).await.unwrap_or_default();
+        self.did_open(file, &content).await?;
+
+        let result = conn
+            .request(
+                "textDocument/implementation",
+                serde_json::json!({
+                    "textDocument": { "uri": Self::file_uri(file) },
+                    "position": { "line": line, "character": col }
+                }),
+            )
+            .await?;
+
+        Self::parse_locations(&result)
+    }
+
     /// Gracefully shut down all connected language servers.
     pub async fn shutdown(&self) -> Result<()> {
         let mut conns = self.connections.lock().await;
@@ -848,6 +907,24 @@ impl LspClient {
 }
 
 /// Map LSP SymbolKind numeric value to a human-readable string.
+/// Detect the dominant language in a project by counting source files.
+async fn detect_dominant_language(root: &Path) -> Option<Language> {
+    let mut counts: HashMap<Language, usize> = HashMap::new();
+
+    for entry in walkdir::WalkDir::new(root)
+        .max_depth(3)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+    {
+        if let Some(lang) = Language::from_path(entry.path().to_string_lossy().as_ref()) {
+            *counts.entry(lang).or_insert(0) += 1;
+        }
+    }
+
+    counts.into_iter().max_by_key(|(_, c)| *c).map(|(l, _)| l)
+}
+
 fn symbol_kind_name(kind: u64) -> String {
     match kind {
         1 => "file",

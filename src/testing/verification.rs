@@ -75,6 +75,92 @@ pub enum ErrorSeverity {
     Help,
 }
 
+/// Detected repository language for verification dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepoLanguage {
+    Rust,
+    Python,
+    JavaScript,
+    TypeScript,
+    Go,
+    Unknown,
+}
+
+impl RepoLanguage {
+    /// File extensions associated with this language.
+    pub fn extensions(&self) -> &'static [&'static str] {
+        match self {
+            Self::Rust => &[".rs"],
+            Self::Python => &[".py"],
+            Self::JavaScript => &[".js", ".jsx"],
+            Self::TypeScript => &[".ts", ".tsx"],
+            Self::Go => &[".go"],
+            Self::Unknown => &[],
+        }
+    }
+
+    /// Convert from a file extension.
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        match ext {
+            ".rs" => Some(Self::Rust),
+            ".py" => Some(Self::Python),
+            ".js" | ".jsx" => Some(Self::JavaScript),
+            ".ts" | ".tsx" => Some(Self::TypeScript),
+            ".go" => Some(Self::Go),
+            _ => None,
+        }
+    }
+
+    /// Convert from a manifest file name.
+    pub fn from_manifest(name: &str) -> Option<Self> {
+        match name {
+            "Cargo.toml" => Some(Self::Rust),
+            "setup.py" | "pyproject.toml" | "requirements.txt" => Some(Self::Python),
+            "package.json" => Some(Self::JavaScript), // may be upgraded to TypeScript
+            "go.mod" => Some(Self::Go),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for RepoLanguage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rust => write!(f, "rust"),
+            Self::Python => write!(f, "python"),
+            Self::JavaScript => write!(f, "javascript"),
+            Self::TypeScript => write!(f, "typescript"),
+            Self::Go => write!(f, "go"),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
+/// Per-language verification settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LanguageCheckSet {
+    #[serde(default = "crate::config::types::default_true")]
+    pub syntax: bool,
+    #[serde(default = "crate::config::types::default_true")]
+    pub format: bool,
+    #[serde(default = "crate::config::types::default_true")]
+    pub lint: bool,
+    #[serde(default = "crate::config::types::default_true")]
+    pub test: bool,
+}
+
+impl Default for LanguageCheckSet {
+    fn default() -> Self {
+        Self {
+            syntax: true,
+            format: true,
+            lint: true,
+            test: true,
+        }
+    }
+}
+
 /// Complete verification report after a change
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerificationReport {
@@ -129,6 +215,10 @@ pub struct VerificationConfig {
     pub exclude_patterns: Vec<String>,
     /// Custom verification commands
     pub custom_checks: Vec<CustomCheck>,
+    /// Per-language verification settings. When a language is absent,
+    /// all checks default to enabled.
+    #[serde(default)]
+    pub language_settings: std::collections::HashMap<RepoLanguage, LanguageCheckSet>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,6 +246,7 @@ impl Default for VerificationConfig {
                 "*.toml".to_string(),
             ],
             custom_checks: vec![],
+            language_settings: std::collections::HashMap::new(),
         }
     }
 }
@@ -193,6 +284,10 @@ pub struct VerificationGate {
     file_hash_cache: std::collections::HashMap<String, u64>,
     /// Last verification timestamp for cache TTL
     last_verification_time: Option<std::time::Instant>,
+    /// Optional hint from the SWE-bench dataset (e.g. "python").
+    repo_language_hint: Option<String>,
+    /// Cached inferred language to avoid re-scanning the repo.
+    inferred_language_cache: Option<RepoLanguage>,
 }
 
 impl VerificationGate {
@@ -203,7 +298,16 @@ impl VerificationGate {
             last_results: None,
             file_hash_cache: std::collections::HashMap::new(),
             last_verification_time: None,
+            repo_language_hint: None,
+            inferred_language_cache: None,
         }
+    }
+
+    /// Set a language hint (e.g. from SWE-bench Pro dataset).
+    /// Invalidates any cached inference so the hint takes effect.
+    pub fn set_repo_language_hint(&mut self, hint: impl Into<String>) {
+        self.repo_language_hint = Some(hint.into());
+        self.inferred_language_cache = None;
     }
 
     /// Compute hash for a file's content
@@ -312,6 +416,54 @@ impl VerificationGate {
             }
         }
 
+        // Group changed files by language
+        let mut files_by_lang: std::collections::HashMap<RepoLanguage, Vec<String>> =
+            std::collections::HashMap::new();
+        for file in &files_to_check {
+            if let Some(ext) = Path::new(file).extension().and_then(|e| e.to_str()) {
+                let ext = format!(".{}", ext);
+                if let Some(lang) = RepoLanguage::from_extension(&ext) {
+                    files_by_lang.entry(lang).or_default().push(file.clone());
+                }
+            }
+        }
+
+        // Run cheap syntax checks first for all touched languages
+        if self.config.check_on_edit {
+            for (lang, files) in &files_by_lang {
+                let settings = self.get_language_settings(*lang);
+                if settings.syntax {
+                    let result = self.run_cheap_syntax_check(*lang, files).await?;
+                    if !result.passed {
+                        suggested_next_steps
+                            .push(format!("Fix {} syntax errors before proceeding", lang));
+                    }
+                    checks.push(result);
+                }
+            }
+        }
+
+        // Early exit if syntax checks failed and continue_on_failure is false
+        if !self.config.continue_on_failure && checks.iter().any(|c| !c.passed) {
+            let overall_passed = false;
+            let total_duration = start.elapsed().as_millis() as u64;
+            let side_effects = self.detect_side_effects(&files_to_check).await;
+            let report = VerificationReport {
+                triggered_by: trigger.to_string(),
+                timestamp: chrono::Utc::now(),
+                total_duration_ms: total_duration,
+                checks,
+                overall_passed,
+                affected_files: files_to_check,
+                side_effects,
+                suggested_next_steps,
+            };
+            self.last_results = Some(report.clone());
+            self.update_file_cache(&report.affected_files);
+            self.last_verification_time = Some(std::time::Instant::now());
+            return Ok(report);
+        }
+
         // Detect if any Rust files changed
         let rust_files_changed = files_to_check.iter().any(|f| f.ends_with(".rs"));
 
@@ -353,30 +505,42 @@ impl VerificationGate {
             }
         }
 
+        // Targeted tests for non-Rust languages
+        if self.config.test_on_edit {
+            for (lang, files) in &files_by_lang {
+                if *lang == RepoLanguage::Rust {
+                    continue;
+                }
+                let settings = self.get_language_settings(*lang);
+                if settings.test {
+                    let result = self.run_targeted_test(*lang, files).await?;
+                    if !result.passed {
+                        suggested_next_steps.push(format!("Fix failing {} tests", lang));
+                    }
+                    checks.push(result);
+                }
+            }
+        }
+
         // Multi-language QA: dispatch to language_qa runners for non-Rust files
-        if !rust_files_changed {
+        let has_non_rust = files_by_lang.keys().any(|l| *l != RepoLanguage::Rust);
+        if has_non_rust {
             use crate::testing::language_qa::{run_go_qa, run_node_qa, run_python_qa, QaLanguage};
 
             let detected_lang = QaLanguage::detect(&self.project_root);
             let timeout = self.config.check_timeout_secs;
 
+            let has_python = files_by_lang.contains_key(&RepoLanguage::Python);
+            let has_js = files_by_lang.contains_key(&RepoLanguage::JavaScript)
+                || files_by_lang.contains_key(&RepoLanguage::TypeScript);
+            let has_go = files_by_lang.contains_key(&RepoLanguage::Go);
+
             let qa_results = match detected_lang {
-                QaLanguage::Python if files_to_check.iter().any(|f| f.ends_with(".py")) => {
+                QaLanguage::Python if has_python => {
                     run_python_qa(&self.project_root, timeout).await
                 }
-                QaLanguage::Node
-                    if files_to_check.iter().any(|f| {
-                        f.ends_with(".js")
-                            || f.ends_with(".ts")
-                            || f.ends_with(".tsx")
-                            || f.ends_with(".jsx")
-                    }) =>
-                {
-                    run_node_qa(&self.project_root, timeout).await
-                }
-                QaLanguage::Go if files_to_check.iter().any(|f| f.ends_with(".go")) => {
-                    run_go_qa(&self.project_root, timeout).await
-                }
+                QaLanguage::Node if has_js => run_node_qa(&self.project_root, timeout).await,
+                QaLanguage::Go if has_go => run_go_qa(&self.project_root, timeout).await,
                 _ => Vec::new(),
             };
 
@@ -682,8 +846,14 @@ impl VerificationGate {
                 });
             }
 
-            // Check for test files
-            if file.contains("test") || file.contains("_test.rs") {
+            // Check for test files (language-agnostic)
+            if file.contains("test")
+                || file.contains("_test.rs")
+                || file.contains("_test.py")
+                || file.contains("_test.go")
+                || file.contains(".test.js")
+                || file.contains(".test.ts")
+            {
                 effects.push(SideEffect {
                     effect_type: SideEffectType::TestAdded,
                     description: "Test file modified".to_string(),
@@ -692,12 +862,40 @@ impl VerificationGate {
             }
         }
 
-        // Check Cargo.toml for dependency changes
+        // Check manifest files for dependency changes
         if files.iter().any(|f| f.ends_with("Cargo.toml")) {
             effects.push(SideEffect {
                 effect_type: SideEffectType::DependencyAdded,
                 description: "Cargo.toml modified - dependencies may have changed".to_string(),
                 files: vec!["Cargo.toml".to_string()],
+            });
+        }
+        if files.iter().any(|f| f.ends_with("package.json")) {
+            effects.push(SideEffect {
+                effect_type: SideEffectType::DependencyAdded,
+                description: "package.json modified - dependencies may have changed".to_string(),
+                files: vec!["package.json".to_string()],
+            });
+        }
+        if files.iter().any(|f| f.ends_with("go.mod")) {
+            effects.push(SideEffect {
+                effect_type: SideEffectType::DependencyAdded,
+                description: "go.mod modified - dependencies may have changed".to_string(),
+                files: vec!["go.mod".to_string()],
+            });
+        }
+        if files
+            .iter()
+            .any(|f| f.ends_with("requirements.txt") || f.ends_with("pyproject.toml"))
+        {
+            effects.push(SideEffect {
+                effect_type: SideEffectType::DependencyAdded,
+                description: "Python manifest modified - dependencies may have changed".to_string(),
+                files: files
+                    .iter()
+                    .filter(|f| f.ends_with("requirements.txt") || f.ends_with("pyproject.toml"))
+                    .cloned()
+                    .collect(),
             });
         }
 
@@ -708,6 +906,392 @@ impl VerificationGate {
     pub fn last_results(&self) -> Option<&VerificationReport> {
         self.last_results.as_ref()
     }
+
+    /// Infer the primary repository language using multiple signals:
+    /// 1. SWE-bench `repo_language` hint (if set)
+    /// 2. Manifest files (Cargo.toml, package.json, go.mod, etc.)
+    /// 3. File extensions in the repo
+    ///
+    /// Result is cached per workdir.
+    #[cfg(test)]
+    fn infer_repo_language(&mut self) -> RepoLanguage {
+        if let Some(cached) = self.inferred_language_cache {
+            return cached;
+        }
+
+        // 1. Use dataset hint if available
+        if let Some(ref hint) = self.repo_language_hint {
+            let lang = match hint.to_lowercase().as_str() {
+                "rust" => RepoLanguage::Rust,
+                "python" => RepoLanguage::Python,
+                "javascript" | "js" => RepoLanguage::JavaScript,
+                "typescript" | "ts" => RepoLanguage::TypeScript,
+                "go" | "golang" => RepoLanguage::Go,
+                _ => RepoLanguage::Unknown,
+            };
+            if lang != RepoLanguage::Unknown {
+                self.inferred_language_cache = Some(lang);
+                return lang;
+            }
+        }
+
+        // 2. Check for manifest files
+        let manifests = [
+            ("Cargo.toml", RepoLanguage::Rust),
+            ("go.mod", RepoLanguage::Go),
+            ("package.json", RepoLanguage::JavaScript),
+            ("setup.py", RepoLanguage::Python),
+            ("pyproject.toml", RepoLanguage::Python),
+            ("requirements.txt", RepoLanguage::Python),
+        ];
+        for (file, lang) in &manifests {
+            if self.project_root.join(file).exists() {
+                if *lang == RepoLanguage::JavaScript
+                    && self.project_root.join("tsconfig.json").exists()
+                {
+                    self.inferred_language_cache = Some(RepoLanguage::TypeScript);
+                    return RepoLanguage::TypeScript;
+                }
+                self.inferred_language_cache = Some(*lang);
+                return *lang;
+            }
+        }
+
+        // 3. Fall back to file extension counting
+        let counts = scan_repo_extensions(&self.project_root, 100);
+        let best = counts
+            .iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|(lang, _)| *lang);
+        let result = best.unwrap_or(RepoLanguage::Unknown);
+        self.inferred_language_cache = Some(result);
+        result
+    }
+
+    /// Retrieve per-language settings, falling back to defaults.
+    fn get_language_settings(&self, lang: RepoLanguage) -> LanguageCheckSet {
+        self.config
+            .language_settings
+            .get(&lang)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Run a cheap syntax check on ONLY the touched files.
+    async fn run_cheap_syntax_check(
+        &self,
+        lang: RepoLanguage,
+        files: &[String],
+    ) -> Result<CheckResult> {
+        let start = Instant::now();
+        let full_paths: Vec<_> = files.iter().map(|f| self.project_root.join(f)).collect();
+
+        let (program, args): (&str, Vec<String>) = match lang {
+            RepoLanguage::Python => {
+                let mut a = vec!["-m".to_string(), "py_compile".to_string()];
+                for p in &full_paths {
+                    a.push(p.to_string_lossy().to_string());
+                }
+                ("python3", a)
+            }
+            RepoLanguage::JavaScript => {
+                if let Some(p) = full_paths.first() {
+                    (
+                        "node",
+                        vec!["--check".to_string(), p.to_string_lossy().to_string()],
+                    )
+                } else {
+                    return Ok(CheckResult {
+                        check_type: CheckType::TypeCheck,
+                        passed: true,
+                        duration_ms: 0,
+                        output: "No JS files to check".to_string(),
+                        errors: vec![],
+                        warnings: vec![],
+                        suggestions: vec![],
+                    });
+                }
+            }
+            RepoLanguage::TypeScript => {
+                let mut a = vec!["tsc".to_string(), "--noEmit".to_string()];
+                for p in &full_paths {
+                    a.push(p.to_string_lossy().to_string());
+                }
+                ("npx", a)
+            }
+            RepoLanguage::Go => {
+                let mut a = vec!["-l".to_string()];
+                for p in &full_paths {
+                    a.push(p.to_string_lossy().to_string());
+                }
+                ("gofmt", a)
+            }
+            RepoLanguage::Rust => {
+                let mut a = vec!["--check".to_string()];
+                for p in &full_paths {
+                    a.push(p.to_string_lossy().to_string());
+                }
+                ("rustfmt", a)
+            }
+            RepoLanguage::Unknown => {
+                return Ok(CheckResult {
+                    check_type: CheckType::TypeCheck,
+                    passed: true,
+                    duration_ms: 0,
+                    output: "Unknown language, skipping syntax check".to_string(),
+                    errors: vec![],
+                    warnings: vec![],
+                    suggestions: vec![],
+                });
+            }
+        };
+
+        let output = Command::new(program)
+            .args(&args)
+            .current_dir(&self.project_root)
+            .output()
+            .await
+            .context(format!("Failed to run {} syntax check", lang))?;
+
+        let duration = start.elapsed().as_millis() as u64;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = if stderr.is_empty() {
+            stdout.to_string()
+        } else {
+            format!("{}\n{}", stdout, stderr)
+        };
+
+        Ok(CheckResult {
+            check_type: CheckType::TypeCheck,
+            passed: output.status.success(),
+            duration_ms: duration,
+            output: if output.status.success() {
+                format!("{} syntax check passed", lang)
+            } else {
+                combined
+            },
+            errors: if output.status.success() {
+                vec![]
+            } else {
+                vec![VerificationError {
+                    file: files.first().cloned().unwrap_or_default(),
+                    line: None,
+                    column: None,
+                    message: format!("{} syntax error", lang),
+                    code: None,
+                    severity: ErrorSeverity::Error,
+                    suggestion: Some(format!("Check {} syntax and fix errors", lang)),
+                }]
+            },
+            warnings: vec![],
+            suggestions: if output.status.success() {
+                vec![]
+            } else {
+                vec![format!("Fix {} syntax errors before running tests", lang)]
+            },
+        })
+    }
+
+    /// Infer the appropriate test command for the repository.
+    async fn infer_test_command(&self, lang: RepoLanguage) -> Option<(String, Vec<String>)> {
+        match lang {
+            RepoLanguage::Rust => Some((
+                "cargo".to_string(),
+                vec!["test".to_string(), "--no-fail-fast".to_string()],
+            )),
+            RepoLanguage::Python => {
+                if self.project_root.join("pytest.ini").exists()
+                    || self.has_pyproject_pytest()
+                    || self.command_exists("pytest").await
+                {
+                    Some((
+                        "pytest".to_string(),
+                        vec!["--quiet".to_string(), "--tb=short".to_string()],
+                    ))
+                } else {
+                    Some((
+                        "python3".to_string(),
+                        vec![
+                            "-m".to_string(),
+                            "unittest".to_string(),
+                            "discover".to_string(),
+                            "-s".to_string(),
+                            ".".to_string(),
+                            "-q".to_string(),
+                        ],
+                    ))
+                }
+            }
+            RepoLanguage::JavaScript | RepoLanguage::TypeScript => {
+                let pm = self.detect_package_manager();
+                Some((pm.to_string(), vec!["test".to_string()]))
+            }
+            RepoLanguage::Go => Some((
+                "go".to_string(),
+                vec!["test".to_string(), "-v".to_string(), "./...".to_string()],
+            )),
+            RepoLanguage::Unknown => None,
+        }
+    }
+
+    /// Run targeted tests for a specific language.
+    async fn run_targeted_test(
+        &self,
+        lang: RepoLanguage,
+        changed_files: &[String],
+    ) -> Result<CheckResult> {
+        let start = Instant::now();
+        let timeout_secs = self.config.check_timeout_secs.max(60);
+
+        let Some((program, mut args)) = self.infer_test_command(lang).await else {
+            return Ok(CheckResult {
+                check_type: CheckType::Test,
+                passed: true,
+                duration_ms: 0,
+                output: "No test command inferred for unknown language".to_string(),
+                errors: vec![],
+                warnings: vec![],
+                suggestions: vec![],
+            });
+        };
+
+        // If specific test files were touched, target them when possible
+        if lang == RepoLanguage::Python {
+            let test_files: Vec<_> = changed_files
+                .iter()
+                .filter(|f| f.contains("test") && f.ends_with(".py"))
+                .cloned()
+                .collect();
+            if !test_files.is_empty() {
+                args.extend(test_files);
+            }
+        }
+
+        let command_future = Command::new(&program)
+            .args(&args)
+            .current_dir(&self.project_root)
+            .output();
+
+        let output = match tokio::time::timeout(
+            tokio::time::Duration::from_secs(timeout_secs),
+            command_future,
+        )
+        .await
+        {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => {
+                return Ok(CheckResult {
+                    check_type: CheckType::Test,
+                    passed: false,
+                    duration_ms: timeout_secs * 1000,
+                    output: format!("Tests timed out after {} seconds", timeout_secs),
+                    errors: vec![VerificationError {
+                        file: "N/A".to_string(),
+                        line: None,
+                        column: None,
+                        message: format!("{} test exceeded {}s timeout", lang, timeout_secs),
+                        code: Some("TIMEOUT".to_string()),
+                        severity: ErrorSeverity::Error,
+                        suggestion: Some(
+                            "Tests took too long. Run manually or increase check_timeout_secs in config"
+                                .to_string(),
+                        ),
+                    }],
+                    warnings: vec![],
+                    suggestions: vec![],
+                });
+            }
+        };
+
+        let duration = start.elapsed().as_millis() as u64;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        Ok(CheckResult {
+            check_type: CheckType::Test,
+            passed: output.status.success(),
+            duration_ms: duration,
+            output: format!("{}\n{}", stdout, stderr),
+            errors: vec![],
+            warnings: vec![],
+            suggestions: vec![],
+        })
+    }
+
+    async fn command_exists(&self, cmd: &str) -> bool {
+        match Command::new("which").arg(cmd).output().await {
+            Ok(output) => output.status.success(),
+            Err(_) => false,
+        }
+    }
+
+    fn has_pyproject_pytest(&self) -> bool {
+        let path = self.project_root.join("pyproject.toml");
+        if !path.exists() {
+            return false;
+        }
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            content.contains("[tool.pytest") || content.contains("[tool:pytest")
+        } else {
+            false
+        }
+    }
+
+    fn detect_package_manager(&self) -> &'static str {
+        if self.project_root.join("pnpm-lock.yaml").exists() {
+            "pnpm"
+        } else if self.project_root.join("yarn.lock").exists() {
+            "yarn"
+        } else {
+            "npm"
+        }
+    }
+}
+
+/// Scan a repo for file extensions and count languages.
+#[cfg(test)]
+fn scan_repo_extensions(
+    root: &Path,
+    max_files: usize,
+) -> std::collections::HashMap<RepoLanguage, usize> {
+    let mut counts = std::collections::HashMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    let mut checked = 0usize;
+
+    while let Some(dir) = stack.pop() {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if checked >= max_files {
+                    return counts;
+                }
+                if let Ok(meta) = entry.metadata() {
+                    if meta.is_file() {
+                        if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
+                            let ext = format!(".{}", ext);
+                            if let Some(lang) = RepoLanguage::from_extension(&ext) {
+                                *counts.entry(lang).or_insert(0) += 1;
+                            }
+                        }
+                        checked += 1;
+                    } else if meta.is_dir() {
+                        let name = entry.file_name();
+                        let name = name.to_string_lossy();
+                        if !name.starts_with('.')
+                            && name != "target"
+                            && name != "node_modules"
+                            && name != "__pycache__"
+                            && name != "vendor"
+                        {
+                            stack.push(entry.path());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    counts
 }
 
 /// Convert a CompilerError from cargo module to VerificationError
@@ -2778,5 +3362,218 @@ mod tests {
         // Both should pass
         assert!(report1.overall_passed);
         assert!(report2.overall_passed);
+    }
+
+    #[test]
+    fn infer_repo_language_from_manifests() {
+        let tmp = std::env::temp_dir().join(format!(
+            "selfware_verify_manifest_test_{}",
+            std::process::id()
+        ));
+
+        // Python via setup.py
+        let py_dir = tmp.join("python_repo");
+        std::fs::create_dir_all(&py_dir).unwrap();
+        std::fs::write(py_dir.join("setup.py"), "from setuptools import setup\n").unwrap();
+        let mut gate = VerificationGate::new(&py_dir, VerificationConfig::default());
+        assert_eq!(gate.infer_repo_language(), RepoLanguage::Python);
+
+        // TypeScript via package.json + tsconfig.json
+        let ts_dir = tmp.join("ts_repo");
+        std::fs::create_dir_all(&ts_dir).unwrap();
+        std::fs::write(ts_dir.join("package.json"), "{}").unwrap();
+        std::fs::write(ts_dir.join("tsconfig.json"), "{}").unwrap();
+        let mut gate = VerificationGate::new(&ts_dir, VerificationConfig::default());
+        assert_eq!(gate.infer_repo_language(), RepoLanguage::TypeScript);
+
+        // Go via go.mod
+        let go_dir = tmp.join("go_repo");
+        std::fs::create_dir_all(&go_dir).unwrap();
+        std::fs::write(go_dir.join("go.mod"), "module example\n").unwrap();
+        let mut gate = VerificationGate::new(&go_dir, VerificationConfig::default());
+        assert_eq!(gate.infer_repo_language(), RepoLanguage::Go);
+
+        // Rust via Cargo.toml
+        let rs_dir = tmp.join("rust_repo");
+        std::fs::create_dir_all(&rs_dir).unwrap();
+        std::fs::write(rs_dir.join("Cargo.toml"), "[package]\n").unwrap();
+        let mut gate = VerificationGate::new(&rs_dir, VerificationConfig::default());
+        assert_eq!(gate.infer_repo_language(), RepoLanguage::Rust);
+
+        // Clean up
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn infer_repo_language_from_extensions() {
+        let tmp =
+            std::env::temp_dir().join(format!("selfware_verify_ext_test_{}", std::process::id()));
+        let py_dir = tmp.join("py_ext_repo");
+        std::fs::create_dir_all(&py_dir).unwrap();
+        std::fs::write(py_dir.join("main.py"), "print('hello')\n").unwrap();
+        std::fs::write(py_dir.join("lib.py"), "def foo(): pass\n").unwrap();
+        std::fs::write(py_dir.join("README.md"), "# hi\n").unwrap();
+
+        let mut gate = VerificationGate::new(&py_dir, VerificationConfig::default());
+        assert_eq!(gate.infer_repo_language(), RepoLanguage::Python);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn infer_repo_language_from_hint() {
+        let tmp =
+            std::env::temp_dir().join(format!("selfware_verify_hint_test_{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut gate = VerificationGate::new(&tmp, VerificationConfig::default());
+        gate.set_repo_language_hint("go");
+        assert_eq!(gate.infer_repo_language(), RepoLanguage::Go);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn cheap_syntax_check_python() {
+        let tmp = std::env::temp_dir().join(format!(
+            "selfware_verify_py_syntax_test_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let good_py = tmp.join("good.py");
+        std::fs::write(&good_py, "def hello():\n    print('world')\n").unwrap();
+
+        let gate = VerificationGate::new(&tmp, VerificationConfig::default());
+        let result = gate
+            .run_cheap_syntax_check(RepoLanguage::Python, &["good.py".to_string()])
+            .await
+            .unwrap();
+        assert!(result.passed, "valid python should pass: {}", result.output);
+
+        let bad_py = tmp.join("bad.py");
+        std::fs::write(&bad_py, "def hello(\n    print 'world'\n").unwrap();
+        let result = gate
+            .run_cheap_syntax_check(RepoLanguage::Python, &["bad.py".to_string()])
+            .await
+            .unwrap();
+        assert!(!result.passed, "invalid python should fail");
+        assert!(
+            !result.output.is_empty(),
+            "error output should contain details"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn targeted_test_command_python() {
+        let tmp = std::env::temp_dir().join(format!(
+            "selfware_verify_py_test_cmd_test_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // No pytest manifest - if pytest is installed it will be preferred,
+        // otherwise falls back to unittest
+        let gate = VerificationGate::new(&tmp, VerificationConfig::default());
+        let cmd = gate.infer_test_command(RepoLanguage::Python).await;
+        assert!(cmd.is_some());
+        let (program, _args) = cmd.unwrap();
+        assert!(
+            program == "pytest" || program == "python3",
+            "expected pytest or python3, got {}",
+            program
+        );
+
+        // With pytest.ini → should use pytest
+        std::fs::write(tmp.join("pytest.ini"), "[pytest]\n").unwrap();
+        let gate = VerificationGate::new(&tmp, VerificationConfig::default());
+        let cmd = gate.infer_test_command(RepoLanguage::Python).await;
+        assert!(cmd.is_some());
+        let (program, args) = cmd.unwrap();
+        assert_eq!(program, "pytest");
+        assert!(args.contains(&"--quiet".to_string()));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn repo_language_from_extension_coverage() {
+        assert_eq!(
+            RepoLanguage::from_extension(".rs"),
+            Some(RepoLanguage::Rust)
+        );
+        assert_eq!(
+            RepoLanguage::from_extension(".py"),
+            Some(RepoLanguage::Python)
+        );
+        assert_eq!(
+            RepoLanguage::from_extension(".js"),
+            Some(RepoLanguage::JavaScript)
+        );
+        assert_eq!(
+            RepoLanguage::from_extension(".ts"),
+            Some(RepoLanguage::TypeScript)
+        );
+        assert_eq!(RepoLanguage::from_extension(".go"), Some(RepoLanguage::Go));
+        assert_eq!(RepoLanguage::from_extension(".txt"), None);
+    }
+
+    #[test]
+    fn repo_language_from_manifest_coverage() {
+        assert_eq!(
+            RepoLanguage::from_manifest("Cargo.toml"),
+            Some(RepoLanguage::Rust)
+        );
+        assert_eq!(
+            RepoLanguage::from_manifest("pyproject.toml"),
+            Some(RepoLanguage::Python)
+        );
+        assert_eq!(
+            RepoLanguage::from_manifest("package.json"),
+            Some(RepoLanguage::JavaScript)
+        );
+        assert_eq!(
+            RepoLanguage::from_manifest("go.mod"),
+            Some(RepoLanguage::Go)
+        );
+        assert_eq!(RepoLanguage::from_manifest("random.txt"), None);
+    }
+
+    #[test]
+    fn language_check_set_default() {
+        let set = LanguageCheckSet::default();
+        assert!(set.syntax);
+        assert!(set.format);
+        assert!(set.lint);
+        assert!(set.test);
+    }
+
+    #[test]
+    fn verification_config_language_settings_roundtrip() {
+        let mut config = VerificationConfig::default();
+        let mut settings = std::collections::HashMap::new();
+        settings.insert(
+            RepoLanguage::Python,
+            LanguageCheckSet {
+                syntax: true,
+                format: false,
+                lint: false,
+                test: true,
+            },
+        );
+        config.language_settings = settings;
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: VerificationConfig = serde_json::from_str(&json).unwrap();
+        assert!(deserialized
+            .language_settings
+            .contains_key(&RepoLanguage::Python));
+        let py = deserialized
+            .language_settings
+            .get(&RepoLanguage::Python)
+            .unwrap();
+        assert!(py.syntax);
+        assert!(!py.format);
+        assert!(!py.lint);
+        assert!(py.test);
     }
 }

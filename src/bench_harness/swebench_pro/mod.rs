@@ -10,9 +10,12 @@
 pub mod catalog;
 pub mod dataset;
 pub mod harness;
+pub mod manifest;
 pub mod runner;
+pub mod trace;
 
 pub use catalog::{quant_catalog, QuantSpec};
 pub use dataset::{load_instances, Instance};
 pub use harness::{LlamaServer, LlamaServerOpts};
+pub use manifest::{SwebenchProOptsSnapshot, SweepManifest, TrialManifest, TrialState};
 pub use runner::{run_swebench_pro, SwebenchProOpts};

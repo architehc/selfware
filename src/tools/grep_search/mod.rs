@@ -1,4 +1,8 @@
 //! Grep search tool - searches file contents using regex patterns.
+//!
+//! When `ripgrep` (`rg`) is installed, it is used for fast searches with
+//! automatic exclusion of VCS/build directories and binary files.  If `rg` is
+//! not available the tool falls back to a built-in regex walker.
 
 use crate::tools::Tool;
 use anyhow::{Context, Result};
@@ -10,6 +14,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::Duration;
 use tracing::instrument;
 use walkdir::WalkDir;
 
@@ -26,6 +31,9 @@ const MAX_REGEX_SIZE: usize = 1 << 20; // 1 MB
 
 /// Global cache of compiled regex patterns.
 static REGEX_CACHE: Lazy<Mutex<HashMap<String, Regex>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Timeout for a single grep search operation.
+const GREP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Return a cached `Regex` for `pattern`, compiling and caching it on first use.
 fn cached_regex(pattern: &str) -> Result<Regex> {
@@ -56,6 +64,211 @@ fn cached_regex(pattern: &str) -> Result<Regex> {
 
     cache.insert(pattern.to_owned(), re.clone());
     Ok(re)
+}
+
+/// Check whether the `rg` binary is available on PATH.
+fn rg_available() -> bool {
+    std::process::Command::new("rg")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Run ripgrep and parse the `--json` output into a [`GrepSearchResult`].
+///
+/// `max_matches` caps the number of matches *returned* (after `offset`).  The
+/// total match count is tracked separately so pagination metadata is accurate.
+fn run_ripgrep(
+    pattern: &str,
+    path: &str,
+    case_insensitive: bool,
+    context_lines: usize,
+    max_matches: usize,
+    skip_offset: usize,
+    include_pattern: Option<&str>,
+    exclude_pattern: Option<&str>,
+) -> Result<GrepSearchResult> {
+    let mut cmd = std::process::Command::new("rg");
+    cmd.arg("--json")
+        .arg("--line-number")
+        .arg("--column")
+        .arg("--hidden")
+        .arg("--max-columns")
+        .arg("500")
+        .arg("--max-filesize")
+        .arg("10M")
+        // Exclude common VCS / build directories automatically.
+        .arg("-g")
+        .arg("!target/")
+        .arg("-g")
+        .arg("!.git/")
+        .arg("-g")
+        .arg("!node_modules/")
+        .arg("-g")
+        .arg("!.venv/")
+        .arg("-g")
+        .arg("!dist/")
+        .arg("-g")
+        .arg("!build/")
+        .arg(pattern)
+        .arg(path);
+
+    if case_insensitive {
+        cmd.arg("-i");
+    }
+    if let Some(include) = include_pattern {
+        cmd.arg("--glob").arg(include);
+    }
+    if let Some(exclude) = exclude_pattern {
+        cmd.arg("--glob").arg(format!("!{}", exclude));
+    }
+
+    let output = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .context("Failed to spawn ripgrep")?;
+
+    // Exit code 1 means "no matches" — not an error for us.
+    if !output.status.success() && output.status.code() != Some(1) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("ripgrep failed: {}", stderr);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // ------------------------------------------------------------------
+    // Parse rg --json output
+    // ------------------------------------------------------------------
+
+    #[derive(Debug, Default)]
+    struct RawMatch {
+        file: String,
+        line: u32,
+        column: u32,
+        content: String,
+    }
+
+    let needed = skip_offset.saturating_add(max_matches).saturating_add(1);
+    let mut total_matches: usize = 0;
+    let mut stored: Vec<RawMatch> = Vec::new();
+
+    for line in stdout.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let json: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        if json.get("type").and_then(|v| v.as_str()) != Some("match") {
+            continue;
+        }
+
+        let data = match json.get("data") {
+            Some(d) => d,
+            None => continue,
+        };
+
+        let file = data
+            .get("path")
+            .and_then(|p| p.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let line_num = data
+            .get("line_number")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+
+        let content = data
+            .get("lines")
+            .and_then(|l| l.get("text"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .trim_end_matches('\n')
+            .to_string();
+
+        let column = data
+            .get("submatches")
+            .and_then(|s| s.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|m| m.get("start"))
+            .and_then(|v| v.as_u64())
+            .map(|c| (c + 1) as u32)
+            .unwrap_or(1);
+
+        total_matches += 1;
+        if stored.len() < needed {
+            stored.push(RawMatch {
+                file,
+                line: line_num,
+                column,
+                content,
+            });
+        }
+    }
+
+    // Apply offset / limit.
+    let window: Vec<RawMatch> = stored
+        .into_iter()
+        .skip(skip_offset)
+        .take(max_matches)
+        .collect();
+
+    // ------------------------------------------------------------------
+    // Read files to extract context lines.
+    // ------------------------------------------------------------------
+    let mut matches = Vec::with_capacity(window.len());
+    let mut files_read: HashMap<String, Vec<String>> = HashMap::new();
+
+    for raw in window {
+        let lines = files_read.entry(raw.file.clone()).or_insert_with(|| {
+            std::fs::read_to_string(&raw.file)
+                .unwrap_or_default()
+                .lines()
+                .map(|s| s.to_string())
+                .collect()
+        });
+
+        let line_idx = raw.line.saturating_sub(1) as usize;
+        let start = line_idx.saturating_sub(context_lines);
+        let end = (line_idx + context_lines + 1).min(lines.len());
+
+        let context_before: Vec<String> = if line_idx > 0 && start < line_idx {
+            lines[start..line_idx].to_vec()
+        } else {
+            vec![]
+        };
+
+        let context_after: Vec<String> = if line_idx + 1 < lines.len() {
+            lines[(line_idx + 1)..end].to_vec()
+        } else {
+            vec![]
+        };
+
+        matches.push(GrepMatch {
+            file: raw.file,
+            line: raw.line,
+            column: raw.column,
+            content: raw.content,
+            context_before,
+            context_after,
+        });
+    }
+
+    let file_count = files_read.len();
+
+    Ok(GrepSearchResult {
+        matches,
+        total_matches,
+        file_count,
+    })
 }
 
 /// Searches file contents for regex patterns, returning matching lines with context.
@@ -142,174 +355,246 @@ impl Tool for GrepSearch {
 
     #[instrument(level = "info", skip(self, args), fields(tool_name = self.name()))]
     async fn execute(&self, args: Value) -> Result<Value> {
-        let result = tokio::task::spawn_blocking(move || -> Result<Value> {
-            let pattern_str = args
-                .get("pattern")
-                .and_then(|v| v.as_str())
-                .context("Missing required parameter: pattern")?;
+        let result = tokio::time::timeout(
+            GREP_TIMEOUT,
+            tokio::task::spawn_blocking(move || -> Result<Value> {
+                let pattern_str = args
+                    .get("pattern")
+                    .and_then(|v| v.as_str())
+                    .context("Missing required parameter: pattern")?;
 
-            let path_str = args
-                .get("path")
-                .and_then(|v| v.as_str())
-                .context("Missing required parameter: path")?;
+                let path_str = args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .context("Missing required parameter: path")?;
 
-            let recursive = args
-                .get("recursive")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-            let case_insensitive = args
-                .get("case_insensitive")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let context_lines = args
-                .get("context_lines")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(2) as usize;
-            let max_matches = args
-                .get("max_matches")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(100) as usize;
-            let skip_offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-            let include_pattern = args.get("include").and_then(|v| v.as_str());
-            let exclude_pattern = args.get("exclude").and_then(|v| v.as_str());
+                let recursive = args
+                    .get("recursive")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let case_insensitive = args
+                    .get("case_insensitive")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let context_lines = args
+                    .get("context_lines")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(2) as usize;
+                let max_matches = args
+                    .get("max_matches")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(100) as usize;
+                let skip_offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                let include_pattern = args.get("include").and_then(|v| v.as_str());
+                let exclude_pattern = args.get("exclude").and_then(|v| v.as_str());
 
-            // Build regex
-            let full_pattern = if case_insensitive {
-                format!("(?i){}", pattern_str)
-            } else {
-                pattern_str.to_string()
-            };
-            let regex = cached_regex(&full_pattern)?;
-
-            // Build include/exclude globs
-            let include_glob = include_pattern
-                .map(glob::Pattern::new)
-                .transpose()
-                .context("Invalid include pattern")?;
-            let exclude_glob = exclude_pattern
-                .map(glob::Pattern::new)
-                .transpose()
-                .context("Invalid exclude pattern")?;
-
-            let path = Path::new(path_str);
-            let mut matches = Vec::new();
-            let mut total_matches = 0;
-
-            // Collect files to search
-            let files: Vec<_> = if path.is_file() {
-                vec![path.to_path_buf()]
-            } else {
-                let walker = if recursive {
-                    WalkDir::new(path)
-                } else {
-                    WalkDir::new(path).max_depth(1)
-                };
-
-                walker
-                    .into_iter()
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.file_type().is_file())
-                    .filter(|e| {
-                        let file_name = e.file_name().to_string_lossy();
-                        if file_name.starts_with('.') {
-                            return false;
-                        }
-                        let path_str = e.path().to_string_lossy();
-                        if path_str.contains("/target/")
-                            || path_str.contains("/.git/")
-                            || path_str.contains("/node_modules/")
-                        {
-                            return false;
-                        }
-                        if let Some(ref glob) = include_glob {
-                            if !glob.matches(&file_name) {
-                                return false;
-                            }
-                        }
-                        if let Some(ref glob) = exclude_glob {
-                            if glob.matches(&file_name) {
-                                return false;
-                            }
-                        }
-                        true
-                    })
-                    .map(|e| e.path().to_path_buf())
-                    .collect()
-            };
-
-            // Search files
-            for file_path in files {
-                let content =
-                    match tokio::task::block_in_place(|| std::fs::read_to_string(&file_path)) {
-                        Ok(c) => c,
-                        Err(_) => continue,
-                    };
-
-                let lines: Vec<&str> = content.lines().collect();
-
-                for (line_num, line) in lines.iter().enumerate() {
-                    if let Some(m) = regex.find(line) {
-                        total_matches += 1;
-
-                        // Skip if before offset
-                        if total_matches <= skip_offset {
-                            continue;
-                        }
-
-                        // Add to results if we haven't reached max_matches yet
-                        if matches.len() < max_matches {
-                            let start = line_num.saturating_sub(context_lines);
-                            let end = (line_num + context_lines + 1).min(lines.len());
-
-                            let context_before: Vec<String> = lines[start..line_num]
-                                .iter()
-                                .map(|s| s.to_string())
-                                .collect();
-
-                            let context_after: Vec<String> = if line_num + 1 < lines.len() {
-                                lines[(line_num + 1)..end]
-                                    .iter()
-                                    .map(|s| s.to_string())
-                                    .collect()
-                            } else {
-                                vec![]
-                            };
-
-                            matches.push(GrepMatch {
-                                file: file_path.to_string_lossy().to_string(),
-                                line: (line_num + 1) as u32,
-                                column: (m.start() + 1) as u32,
-                                content: line.to_string(),
-                                context_before,
-                                context_after,
-                            });
+                // Try ripgrep first, then fall back to built-in walker.
+                let result = if rg_available() {
+                    match run_ripgrep(
+                        pattern_str,
+                        path_str,
+                        case_insensitive,
+                        context_lines,
+                        max_matches,
+                        skip_offset,
+                        include_pattern,
+                        exclude_pattern,
+                    ) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::warn!("ripgrep failed, falling back to built-in grep: {}", e);
+                            run_builtin_grep(
+                                pattern_str,
+                                path_str,
+                                recursive,
+                                case_insensitive,
+                                context_lines,
+                                max_matches,
+                                skip_offset,
+                                include_pattern,
+                                exclude_pattern,
+                            )?
                         }
                     }
-                }
-            }
+                } else {
+                    run_builtin_grep(
+                        pattern_str,
+                        path_str,
+                        recursive,
+                        case_insensitive,
+                        context_lines,
+                        max_matches,
+                        skip_offset,
+                        include_pattern,
+                        exclude_pattern,
+                    )?
+                };
 
-            let truncated = matches.len() >= max_matches;
-            let has_more = truncated || (total_matches > skip_offset + matches.len());
+                let truncated = result.matches.len() >= max_matches;
+                let has_more =
+                    truncated || (result.total_matches > skip_offset + result.matches.len());
 
-            Ok(serde_json::json!({
-                "matches": matches,
-                "count": matches.len(),
-                "total_matches": total_matches,
-                "truncated": truncated,
-                "pagination": {
-                    "offset": skip_offset,
-                    "limit": max_matches,
-                    "total_matches": total_matches,
-                    "has_more": has_more
-                }
-            }))
-        })
-        .await??;
-        Ok(result)
+                Ok(serde_json::json!({
+                    "matches": result.matches,
+                    "count": result.matches.len(),
+                    "total_matches": result.total_matches,
+                    "truncated": truncated,
+                    "pagination": {
+                        "offset": skip_offset,
+                        "limit": max_matches,
+                        "total_matches": result.total_matches,
+                        "has_more": has_more
+                    }
+                }))
+            }),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("grep_search timed out after {}s", GREP_TIMEOUT.as_secs()))?
+        .map_err(|e| anyhow::anyhow!("grep_search blocking task failed: {}", e))?;
+
+        result
+    }
+
+    fn metadata(&self) -> crate::safety::ToolMetadata {
+        crate::safety::ToolMetadata::read_only()
     }
 }
 
+/// Built-in grep implementation (fallback when ripgrep is unavailable).
+fn run_builtin_grep(
+    pattern_str: &str,
+    path_str: &str,
+    recursive: bool,
+    case_insensitive: bool,
+    context_lines: usize,
+    max_matches: usize,
+    skip_offset: usize,
+    include_pattern: Option<&str>,
+    exclude_pattern: Option<&str>,
+) -> Result<GrepSearchResult> {
+    let full_pattern = if case_insensitive {
+        format!("(?i){}", pattern_str)
+    } else {
+        pattern_str.to_string()
+    };
+    let regex = cached_regex(&full_pattern)?;
+
+    let include_glob = include_pattern
+        .map(glob::Pattern::new)
+        .transpose()
+        .context("Invalid include pattern")?;
+    let exclude_glob = exclude_pattern
+        .map(glob::Pattern::new)
+        .transpose()
+        .context("Invalid exclude pattern")?;
+
+    let path = Path::new(path_str);
+    let mut matches = Vec::new();
+    let mut total_matches = 0;
+
+    let files: Vec<_> = if path.is_file() {
+        vec![path.to_path_buf()]
+    } else {
+        let walker = if recursive {
+            WalkDir::new(path)
+        } else {
+            WalkDir::new(path).max_depth(1)
+        };
+
+        walker
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .filter(|e| {
+                let file_name = e.file_name().to_string_lossy();
+                if file_name.starts_with('.') {
+                    return false;
+                }
+                let path_str = e.path().to_string_lossy();
+                if path_str.contains("/target/")
+                    || path_str.contains("/.git/")
+                    || path_str.contains("/node_modules/")
+                {
+                    return false;
+                }
+                if let Some(ref glob) = include_glob {
+                    if !glob.matches(&file_name) {
+                        return false;
+                    }
+                }
+                if let Some(ref glob) = exclude_glob {
+                    if glob.matches(&file_name) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .map(|e| e.path().to_path_buf())
+            .collect()
+    };
+
+    for file_path in files {
+        let content = match tokio::task::block_in_place(|| std::fs::read_to_string(&file_path)) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let lines: Vec<&str> = content.lines().collect();
+
+        for (line_num, line) in lines.iter().enumerate() {
+            if let Some(m) = regex.find(line) {
+                total_matches += 1;
+
+                if total_matches <= skip_offset {
+                    continue;
+                }
+
+                if matches.len() < max_matches {
+                    let start = line_num.saturating_sub(context_lines);
+                    let end = (line_num + context_lines + 1).min(lines.len());
+
+                    let context_before: Vec<String> = lines[start..line_num]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
+
+                    let context_after: Vec<String> = if line_num + 1 < lines.len() {
+                        lines[(line_num + 1)..end]
+                            .iter()
+                            .map(|s| s.to_string())
+                            .collect()
+                    } else {
+                        vec![]
+                    };
+
+                    matches.push(GrepMatch {
+                        file: file_path.to_string_lossy().to_string(),
+                        line: (line_num + 1) as u32,
+                        column: (m.start() + 1) as u32,
+                        content: line.to_string(),
+                        context_before,
+                        context_after,
+                    });
+                }
+            }
+        }
+    }
+
+    let file_count = matches
+        .iter()
+        .map(|m| &m.file)
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+
+    Ok(GrepSearchResult {
+        matches,
+        total_matches,
+        file_count,
+    })
+}
+
 /// Standalone function for grep search (for use in tests and other modules).
+/// Attempts ripgrep first, then falls back to the built-in walker.
 pub fn grep_search(
     pattern: &str,
     path: &str,
@@ -317,74 +602,29 @@ pub fn grep_search(
     max_matches: usize,
     offset: usize,
 ) -> GrepSearchResult {
-    let mut matches = Vec::new();
-    let mut file_count = 0;
-    let re = match cached_regex(pattern) {
-        Ok(re) => re,
-        Err(_) => {
-            // Return empty result on invalid regex
-            return GrepSearchResult {
-                matches: Vec::new(),
-                total_matches: 0,
-                file_count: 0,
-            };
-        }
-    };
-
-    if Path::new(path).is_file() {
-        let content = std::fs::read_to_string(path).unwrap_or_default();
-        let lines: Vec<&str> = content.lines().collect();
-
-        for (line_idx, line) in lines.iter().enumerate() {
-            if re.is_match(line) {
-                let line_num = (line_idx + 1) as u32;
-                let column = line.find(re.as_str()).map_or(1, |i| i + 1) as u32;
-
-                matches.push(GrepMatch {
-                    file: path.to_string(),
-                    line: line_num,
-                    column,
-                    content: line.to_string(),
-                    context_before: Vec::new(),
-                    context_after: Vec::new(),
-                });
-            }
-        }
-        file_count = 1;
-    } else if recursive {
-        for entry in WalkDir::new(path).into_iter().flatten() {
-            if entry.file_type().is_file() {
-                let path_str = entry.path().to_string_lossy();
-                let content = std::fs::read_to_string(entry.path()).unwrap_or_default();
-                let lines: Vec<&str> = content.lines().collect();
-
-                for (line_idx, line) in lines.iter().enumerate() {
-                    if re.is_match(line) {
-                        let line_num = (line_idx + 1) as u32;
-                        let column = line.find(re.as_str()).map_or(1, |i| i + 1) as u32;
-
-                        matches.push(GrepMatch {
-                            file: path_str.to_string(),
-                            line: line_num,
-                            column,
-                            content: line.to_string(),
-                            context_before: Vec::new(),
-                            context_after: Vec::new(),
-                        });
-                    }
-                }
-                file_count += 1;
-            }
+    if rg_available() {
+        if let Ok(result) = run_ripgrep(pattern, path, false, 0, max_matches, offset, None, None) {
+            return result;
         }
     }
 
-    let total_matches = matches.len();
-    matches = matches.into_iter().skip(offset).take(max_matches).collect();
-
-    GrepSearchResult {
-        matches,
-        total_matches,
-        file_count,
+    match run_builtin_grep(
+        pattern,
+        path,
+        recursive,
+        false,
+        0,
+        max_matches,
+        offset,
+        None,
+        None,
+    ) {
+        Ok(r) => r,
+        Err(_) => GrepSearchResult {
+            matches: Vec::new(),
+            total_matches: 0,
+            file_count: 0,
+        },
     }
 }
 

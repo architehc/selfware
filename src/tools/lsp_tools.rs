@@ -342,6 +342,212 @@ impl Tool for LspHoverTool {
     }
 }
 
+/// Create extra LSP tools (diagnostics, workspace symbols, goto implementation)
+/// sharing a single client handle.
+pub fn create_extra_lsp_tools(
+    project_root: PathBuf,
+) -> (
+    LspDiagnosticsTool,
+    LspWorkspaceSymbolsTool,
+    LspGotoImplementationTool,
+) {
+    let handle = Arc::new(LspClientHandle::new(project_root));
+    (
+        LspDiagnosticsTool {
+            handle: Arc::clone(&handle),
+        },
+        LspWorkspaceSymbolsTool {
+            handle: Arc::clone(&handle),
+        },
+        LspGotoImplementationTool { handle },
+    )
+}
+
+// ---------------------------------------------------------------------------
+// LspDiagnosticsTool
+// ---------------------------------------------------------------------------
+
+/// Get diagnostics (errors, warnings) for a file from the language server.
+pub struct LspDiagnosticsTool {
+    handle: Arc<LspClientHandle>,
+}
+
+#[async_trait]
+impl Tool for LspDiagnosticsTool {
+    fn name(&self) -> &str {
+        "lsp_diagnostics"
+    }
+
+    fn description(&self) -> &str {
+        "Get diagnostics (errors, warnings, infos, hints) for a source file. \
+         Returns a list of diagnostic messages with severity and line numbers. \
+         Requires a language server to be installed."
+    }
+
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "required": ["file"],
+            "properties": {
+                "file": {
+                    "type": "string",
+                    "description": "Path to the source file"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, args: Value) -> Result<Value> {
+        #[derive(Deserialize)]
+        struct Args {
+            file: String,
+        }
+        let args: Args = serde_json::from_value(args)?;
+        let client = self.handle.get().await?;
+
+        let diags = client.diagnostics(&args.file).await?;
+
+        let errors = diags.iter().filter(|d| d.severity == "error").count();
+        let warnings = diags.iter().filter(|d| d.severity == "warning").count();
+
+        Ok(json!({
+            "status": "ok",
+            "count": diags.len(),
+            "errors": errors,
+            "warnings": warnings,
+            "diagnostics": diags
+        }))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LspWorkspaceSymbolsTool
+// ---------------------------------------------------------------------------
+
+/// Search for symbols across the entire workspace.
+pub struct LspWorkspaceSymbolsTool {
+    handle: Arc<LspClientHandle>,
+}
+
+#[async_trait]
+impl Tool for LspWorkspaceSymbolsTool {
+    fn name(&self) -> &str {
+        "lsp_workspace_symbols"
+    }
+
+    fn description(&self) -> &str {
+        "Search for symbols (functions, structs, classes, etc.) across the entire workspace. \
+         Provide a query string to filter results. Requires a language server to be installed."
+    }
+
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Symbol name or partial name to search for"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, args: Value) -> Result<Value> {
+        #[derive(Deserialize)]
+        struct Args {
+            query: String,
+        }
+        let args: Args = serde_json::from_value(args)?;
+        let client = self.handle.get().await?;
+
+        let symbols = client.workspace_symbol(&args.query).await?;
+
+        if symbols.is_empty() {
+            Ok(json!({
+                "status": "not_found",
+                "message": "No workspace symbols matched the query"
+            }))
+        } else {
+            Ok(json!({
+                "status": "ok",
+                "count": symbols.len(),
+                "symbols": symbols
+            }))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LspGotoImplementationTool
+// ---------------------------------------------------------------------------
+
+/// Navigate to the implementation of a symbol.
+pub struct LspGotoImplementationTool {
+    handle: Arc<LspClientHandle>,
+}
+
+#[async_trait]
+impl Tool for LspGotoImplementationTool {
+    fn name(&self) -> &str {
+        "lsp_goto_implementation"
+    }
+
+    fn description(&self) -> &str {
+        "Go to the implementation of a symbol. Provide the file path and cursor position \
+         (line, column). Returns the file path and location where the symbol is implemented. \
+         Requires a language server to be installed."
+    }
+
+    fn schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "required": ["file", "line", "column"],
+            "properties": {
+                "file": {
+                    "type": "string",
+                    "description": "Path to the source file"
+                },
+                "line": {
+                    "type": "integer",
+                    "description": "Zero-based line number"
+                },
+                "column": {
+                    "type": "integer",
+                    "description": "Zero-based column number (character offset)"
+                }
+            }
+        })
+    }
+
+    async fn execute(&self, args: Value) -> Result<Value> {
+        #[derive(Deserialize)]
+        struct Args {
+            file: String,
+            line: u32,
+            column: u32,
+        }
+        let args: Args = serde_json::from_value(args)?;
+        let client = self.handle.get().await?;
+
+        let locations = client
+            .goto_implementation(&args.file, args.line, args.column)
+            .await?;
+
+        if locations.is_empty() {
+            Ok(json!({
+                "status": "not_found",
+                "message": "No implementation found at the given position"
+            }))
+        } else {
+            Ok(json!({
+                "status": "ok",
+                "implementations": locations
+            }))
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -394,5 +600,40 @@ mod tests {
         assert!(Arc::ptr_eq(&goto.handle, &refs.handle));
         assert!(Arc::ptr_eq(&refs.handle, &syms.handle));
         assert!(Arc::ptr_eq(&syms.handle, &hover.handle));
+    }
+
+    #[test]
+    fn test_diagnostics_tool_metadata() {
+        let (diag, _ws, _impl) = create_extra_lsp_tools(PathBuf::from("/tmp/test"));
+        assert_eq!(diag.name(), "lsp_diagnostics");
+        assert!(!diag.description().is_empty());
+
+        let schema = diag.schema();
+        let required = schema.get("required").unwrap().as_array().unwrap();
+        assert!(required.contains(&json!("file")));
+    }
+
+    #[test]
+    fn test_workspace_symbols_tool_metadata() {
+        let (_diag, ws, _impl) = create_extra_lsp_tools(PathBuf::from("/tmp/test"));
+        assert_eq!(ws.name(), "lsp_workspace_symbols");
+        assert!(!ws.description().is_empty());
+
+        let schema = ws.schema();
+        let required = schema.get("required").unwrap().as_array().unwrap();
+        assert!(required.contains(&json!("query")));
+    }
+
+    #[test]
+    fn test_goto_implementation_tool_metadata() {
+        let (_diag, _ws, imp) = create_extra_lsp_tools(PathBuf::from("/tmp/test"));
+        assert_eq!(imp.name(), "lsp_goto_implementation");
+        assert!(!imp.description().is_empty());
+
+        let schema = imp.schema();
+        let required = schema.get("required").unwrap().as_array().unwrap();
+        assert!(required.contains(&json!("file")));
+        assert!(required.contains(&json!("line")));
+        assert!(required.contains(&json!("column")));
     }
 }

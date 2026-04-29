@@ -99,3 +99,4 @@ new_template_results_*/
 /reports/
 __pycache__/
 /.selfware/turns/
+.selfware/

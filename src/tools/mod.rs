@@ -42,6 +42,7 @@ pub mod hot_reload;
 pub mod http;
 pub mod introspect;
 pub mod knowledge;
+pub mod localize_issue;
 pub mod lsp_tools;
 pub mod net_policy;
 pub mod package;
@@ -76,6 +77,7 @@ use knowledge::{
     KnowledgeAdd, KnowledgeAutoExtract, KnowledgeClear, KnowledgeExport, KnowledgeQuery,
     KnowledgeRelate, KnowledgeRemove, KnowledgeStats as KnowledgeStatsTool,
 };
+use localize_issue::LocalizeIssue;
 use package::{NpmInstall, NpmRun, NpmScripts, PipFreeze, PipInstall, PipList, YarnInstall};
 use page_controller::PageControlTool;
 use patch_apply::PatchApply;
@@ -472,14 +474,23 @@ impl ToolRegistry {
         registry.register_deferred(computer::ComputerScreenTool);
         registry.register_deferred(computer::ComputerWindowTool);
 
+        // Deferred: Issue localization
+        registry.register_deferred(LocalizeIssue);
+
         // Deferred: LSP code intelligence tools
         let project_root =
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let (lsp_goto, lsp_refs, lsp_syms, lsp_hover) = lsp_tools::create_lsp_tools(project_root);
+        let (lsp_goto, lsp_refs, lsp_syms, lsp_hover) =
+            lsp_tools::create_lsp_tools(project_root.clone());
         registry.register_deferred(lsp_goto);
         registry.register_deferred(lsp_refs);
         registry.register_deferred(lsp_syms);
         registry.register_deferred(lsp_hover);
+
+        let (lsp_diag, lsp_ws, lsp_impl) = lsp_tools::create_extra_lsp_tools(project_root);
+        registry.register_deferred(lsp_diag);
+        registry.register_deferred(lsp_ws);
+        registry.register_deferred(lsp_impl);
 
         // Deferred: Code introspection tools for evolution
         registry.register_deferred(introspect::CodeIntrospect::new());
@@ -915,6 +926,24 @@ mod tests {
         assert!(registry.get("grep_search").is_some());
         assert!(registry.get("glob_find").is_some());
         assert!(registry.get("symbol_search").is_some());
+    }
+
+    #[test]
+    fn test_localize_issue_tool_registered() {
+        let registry = ToolRegistry::new();
+        assert!(registry.get("localize_issue").is_some());
+    }
+
+    #[test]
+    fn test_lsp_tools_registered() {
+        let registry = ToolRegistry::new();
+        assert!(registry.get("lsp_goto_definition").is_some());
+        assert!(registry.get("lsp_find_references").is_some());
+        assert!(registry.get("lsp_document_symbols").is_some());
+        assert!(registry.get("lsp_hover").is_some());
+        assert!(registry.get("lsp_diagnostics").is_some());
+        assert!(registry.get("lsp_workspace_symbols").is_some());
+        assert!(registry.get("lsp_goto_implementation").is_some());
     }
 
     #[test]

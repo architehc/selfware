@@ -451,6 +451,8 @@ fn bench_swebench_pro_basic_parsing() {
                 assert_eq!(args.trials, 3);
                 assert_eq!(args.output.as_deref(), Some("reports/swebench_pro/test"));
                 assert!(!args.skip_existing);
+                assert!(!args.resume);
+                assert!(!args.force_rerun);
             }
             other => panic!("expected SwebenchPro, got {:?}", other),
         },
@@ -473,6 +475,8 @@ fn bench_swebench_pro_defaults() {
                 assert_eq!(args.parallel, 2);
                 assert_eq!(args.trials, 1);
                 assert!(args.quants.contains("Q4_K_P"));
+                assert!(!args.resume);
+                assert!(!args.force_rerun);
             }
             other => panic!("expected SwebenchPro, got {:?}", other),
         },
@@ -496,6 +500,52 @@ fn bench_swebench_pro_instance_ids_overrides_count() {
         Commands::Bench { command, .. } => match command.unwrap() {
             BenchCommand::SwebenchPro(args) => {
                 assert_eq!(args.instance_ids.as_deref(), Some("foo-1,foo-2"));
+            }
+            other => panic!("expected SwebenchPro, got {:?}", other),
+        },
+        other => panic!("expected Bench, got {:?}", other),
+    }
+}
+
+#[test]
+fn bench_swebench_pro_official_eval_flags_parse() {
+    use args::BenchCommand;
+    use clap::Parser;
+    let cli = Cli::try_parse_from([
+        "selfware",
+        "bench",
+        "swebench-pro",
+        "--official-eval",
+        "--prompt-mode",
+        "official",
+        "--official-eval-script",
+        "/tmp/eval.py",
+        "--official-eval-raw-sample-path",
+        "/tmp/sample.jsonl",
+        "--official-eval-scripts-dir",
+        "/tmp/run_scripts",
+        "--official-eval-dockerhub-username",
+        "example",
+        "--official-eval-num-workers",
+        "2",
+        "--official-eval-modal",
+        "--official-eval-redo",
+        "--official-eval-block-network",
+    ])
+    .unwrap();
+    match cli.command.unwrap() {
+        Commands::Bench { command, .. } => match command.unwrap() {
+            BenchCommand::SwebenchPro(args) => {
+                assert!(args.official_eval);
+                assert_eq!(args.prompt_mode, "official");
+                assert_eq!(args.official_eval_script, "/tmp/eval.py");
+                assert_eq!(args.official_eval_raw_sample_path, "/tmp/sample.jsonl");
+                assert_eq!(args.official_eval_scripts_dir, "/tmp/run_scripts");
+                assert_eq!(args.official_eval_dockerhub_username, "example");
+                assert_eq!(args.official_eval_num_workers, 2);
+                assert!(args.official_eval_modal);
+                assert!(args.official_eval_redo);
+                assert!(args.official_eval_block_network);
             }
             other => panic!("expected SwebenchPro, got {:?}", other),
         },
