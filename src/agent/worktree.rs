@@ -54,6 +54,9 @@ impl WorktreeManager {
     }
 
     /// Remove a worktree by id.
+    ///
+    /// First attempts `git worktree remove`. If that fails (e.g. because the
+    /// worktree is not recognised), falls back to a manual directory removal.
     pub async fn remove_worktree(&self, id: &str) -> Result<()> {
         let worktree_path = self.base_dir.join(id);
         if !worktree_path.exists() {
@@ -61,23 +64,37 @@ impl WorktreeManager {
             return Ok(());
         }
 
-        let output = tokio::process::Command::new("git")
-            .args([
-                "worktree",
-                "remove",
-                "--force",
-                &worktree_path.to_string_lossy(),
-            ])
+        // Try `git worktree remove` from inside the worktree so git knows
+        // which repository it belongs to.
+        let git_result = tokio::process::Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .current_dir(&worktree_path)
             .output()
-            .await
-            .context("Failed to execute git worktree remove")?;
+            .await;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("git worktree remove failed: {}", stderr);
+        match git_result {
+            Ok(output) if output.status.success() => {
+                info!(worktree_id = %id, "Removed worktree via git");
+                return Ok(());
+            }
+            Ok(output) => {
+                warn!(
+                    worktree_id = %id,
+                    stderr = %String::from_utf8_lossy(&output.stderr),
+                    "git worktree remove failed, falling back to manual removal"
+                );
+            }
+            Err(e) => {
+                warn!(worktree_id = %id, error = %e, "Failed to run git worktree remove");
+            }
         }
 
-        info!(worktree_id = %id, "Removed worktree");
+        // Fallback: manual removal.
+        tokio::fs::remove_dir_all(&worktree_path)
+            .await
+            .with_context(|| format!("Failed to remove worktree directory: {}", worktree_path.display()))?;
+
+        info!(worktree_id = %id, "Removed worktree manually");
         Ok(())
     }
 
