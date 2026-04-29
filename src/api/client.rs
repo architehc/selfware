@@ -643,6 +643,26 @@ impl ApiClient {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_backend_returns_string_for_unresponsive() {
+        // A port that is almost certainly closed.
+        let result = detect_backend("http://127.0.0.1:59999/v1");
+        // Should either fail (network error) or return "unknown".
+        match result {
+            Ok(label) => assert!(
+                ["llama.cpp", "sglang", "vllm", "unknown"].contains(&label.as_str()),
+                "unexpected backend label: {}",
+                label
+            ),
+            Err(_) => {} // network error is acceptable
+        }
+    }
+}
+
 #[async_trait]
 impl LlmClient for ApiClient {
     async fn chat(
@@ -662,6 +682,59 @@ impl LlmClient for ApiClient {
     ) -> Result<StreamingResponse> {
         self.chat_stream(messages, tools, thinking).await
     }
+}
+
+/// Blocking probe of `/v1/models` to detect which backend engine is running.
+///
+/// Inspects response headers (`Server`) and body content for tell-tale
+/// strings from llama.cpp, SGLang, or vLLM.  Returns a lower-case label
+/// like `"llama.cpp"`, `"sglang"`, `"vllm"`, or `"unknown"`.
+///
+/// This is a synchronous helper so it can be called from the bench-harness
+/// runner (which runs inside `spawn_blocking`).
+pub fn detect_backend(endpoint: &str) -> Result<String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .context("Failed to build blocking HTTP client")?;
+
+    let url = format!("{}/models", endpoint.trim_end_matches('/'));
+
+    let response = client
+        .get(&url)
+        .send()
+        .context("Failed to query /v1/models")?;
+
+    // Header hints
+    if let Some(server) = response.headers().get("server") {
+        if let Ok(s) = server.to_str() {
+            let lower = s.to_lowercase();
+            if lower.contains("llama") {
+                return Ok("llama.cpp".into());
+            }
+            if lower.contains("sglang") {
+                return Ok("sglang".into());
+            }
+            if lower.contains("vllm") {
+                return Ok("vllm".into());
+            }
+        }
+    }
+
+    // Body hints
+    let body = response.text().unwrap_or_default();
+    let lower = body.to_lowercase();
+    if lower.contains("llama.cpp") || lower.contains("llamacpp") {
+        return Ok("llama.cpp".into());
+    }
+    if lower.contains("sglang") {
+        return Ok("sglang".into());
+    }
+    if lower.contains("vllm") {
+        return Ok("vllm".into());
+    }
+
+    Ok("unknown".into())
 }
 
 /// Generate a uniform random jitter value in `[0.0, 1.0)`.

@@ -11,6 +11,7 @@ pub mod catalog;
 pub mod dataset;
 pub mod harness;
 pub mod manifest;
+pub mod quants;
 pub mod runner;
 pub mod trace;
 

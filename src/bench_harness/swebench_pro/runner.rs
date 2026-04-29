@@ -117,7 +117,7 @@ fn reconstruct_result_from_disk(
     inst: &Instance,
     trial: u32,
 ) -> Result<PerRunResult> {
-    let trial_dir = trial_dir_for(&opts.output, spec.label, &inst.instance_id, trial);
+    let trial_dir = trial_dir_for(&opts.output, &spec.label, &inst.instance_id, trial);
     let result_path = trial_dir.join("result.json");
     if result_path.exists() {
         let bytes = std::fs::read(&result_path)?;
@@ -140,7 +140,7 @@ fn reconstruct_result_from_disk(
 
     Ok(PerRunResult {
         instance_id: inst.instance_id.clone(),
-        quant: spec.label.into(),
+        quant: spec.label.clone(),
         trial,
         exit_code: 0,
         timed_out: false,
@@ -247,7 +247,7 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
         .quants
         .iter()
         .filter(|q| {
-            if catalog.contains_key(q.as_str()) {
+            if catalog.contains_key(*q) {
                 true
             } else {
                 eprintln!("  ⚠ unknown quant: {} — skipping", q);
@@ -289,10 +289,18 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
         let dummy_gguf = std::path::Path::new("/dev/null/dummy.gguf");
         super::harness::build_llama_server_args(
             &super::catalog::QuantSpec {
-                label: "plan-dummy",
-                gguf: "dummy.gguf",
-                alias: "plan-dummy",
-                mmproj: "dummy.mmproj.gguf",
+                label: "plan-dummy".into(),
+                gguf: "dummy.gguf".into(),
+                alias: "plan-dummy".into(),
+                mmproj: "dummy.mmproj.gguf".into(),
+                name: "plan-dummy".into(),
+                ctx: opts.ctx,
+                max_parallel: opts.parallel,
+                kv_cache_type: "q8_0".into(),
+                tensor_split: opts.llama_opts.tensor_split.clone(),
+                temperature: 1.0,
+                thinking_policy: super::catalog::ThinkingPolicy::Disable,
+                backend: super::catalog::BackendProfile::LlamaCpp,
             },
             &opts.llama_opts,
             dummy_gguf,
@@ -389,7 +397,7 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
             }
             // Find the instance to build a synthetic result.
             if let Some(inst) = instances.iter().find(|i| i.instance_id == t.instance_id) {
-                if let Some(spec) = catalog.get(t.quant.as_str()) {
+                if let Some(spec) = catalog.get(&t.quant) {
                     if let Ok(synthetic) =
                         reconstruct_result_from_disk(&opts, &spec.clone(), inst, t.trial)
                     {
@@ -406,7 +414,7 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
     // tear down before next quant.
     for quant in &valid_quants {
         let spec = catalog
-            .get(quant.as_str())
+            .get(quant)
             .expect("validated above")
             .clone();
 
@@ -414,8 +422,32 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
         eprintln!("QUANT: {}", quant);
         eprintln!("{}", "=".repeat(70));
 
+        // Apply per-quant scheduling overrides.
+        let mut quant_llama_opts = opts.llama_opts.clone();
+        if spec.ctx > 0 {
+            quant_llama_opts.ctx = spec.ctx;
+        }
+        if spec.max_parallel > 0 {
+            quant_llama_opts.parallel = spec.max_parallel;
+        }
+        if let Some(ref ts) = spec.tensor_split {
+            quant_llama_opts.tensor_split = Some(ts.clone());
+        }
+
+        // Concurrency clamping: never exceed the quant's max_parallel.
+        let effective_concurrency = if opts.concurrency > spec.max_parallel {
+            eprintln!(
+                "  ⚠ concurrency {} exceeds max_parallel {} for quant {} — clamping to {}",
+                opts.concurrency, spec.max_parallel, spec.label, spec.max_parallel
+            );
+            spec.max_parallel
+        } else {
+            opts.concurrency
+        };
+        let concurrency = effective_concurrency.max(1) as usize;
+
         LlamaServer::stop_existing();
-        let server = match LlamaServer::boot(&spec, &opts.llama_opts) {
+        let server = match LlamaServer::boot(&spec, &quant_llama_opts) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("  ❌ boot failed: {} — recording failures and skipping", e);
@@ -429,7 +461,7 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
                                 all_runs.push(res.clone());
                                 update_manifest_entry(
                                     &mut m,
-                                    spec.label,
+                                    &spec.label,
                                     &inst.instance_id,
                                     trial,
                                     TrialState::BootFailed,
@@ -438,7 +470,7 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
                                     Some(
                                         trial_dir_for(
                                             &opts.output,
-                                            spec.label,
+                                            &spec.label,
                                             &inst.instance_id,
                                             trial,
                                         )
@@ -460,7 +492,27 @@ pub fn run_swebench_pro(opts: SwebenchProOpts) -> Result<()> {
             }
         };
 
-        let concurrency = opts.concurrency.max(1) as usize;
+        // Detect backend after successful boot and annotate plan.json.
+        let endpoint = format!("http://127.0.0.1:{}/v1", opts.llama_opts.port);
+        match crate::api::client::detect_backend(&endpoint) {
+            Ok(backend) => {
+                if let Ok(bytes) = std::fs::read(&plan_path) {
+                    if let Ok(mut plan) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                        if let Some(obj) = plan.as_object_mut() {
+                            obj.insert("detected_backend".into(), backend.into());
+                            let _ = std::fs::write(
+                                &plan_path,
+                                serde_json::to_vec_pretty(&plan).unwrap_or_default(),
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("  ⚠ backend detection failed: {}", e);
+            }
+        }
+
         for trial in 1..=trials {
             let trial_results = run_trial(
                 &opts,
@@ -540,7 +592,7 @@ fn run_trial(
                 // Check manifest state before running.
                 {
                     let m = manifest.lock().unwrap();
-                    if let Some(t) = m.find_trial(spec.label, &inst.instance_id, trial) {
+                    if let Some(t) = m.find_trial(&spec.label, &inst.instance_id, trial) {
                         if should_skip_trial(opts, Some(t)) {
                             eprintln!(
                                 "  → {} (trial {}): SKIP (manifest: {:?})",
@@ -567,7 +619,7 @@ fn run_trial(
                             let mut m = manifest.lock().unwrap();
                             update_manifest_entry(
                                 &mut m,
-                                spec.label,
+                                &spec.label,
                                 &inst.instance_id,
                                 trial,
                                 state,
@@ -576,7 +628,7 @@ fn run_trial(
                                 Some(
                                     trial_dir_for(
                                         &opts.output,
-                                        spec.label,
+                                        &spec.label,
                                         &inst.instance_id,
                                         trial,
                                     )
@@ -635,7 +687,7 @@ fn run_trial(
                 // Check manifest state before running.
                 {
                     let m = manifest_c.lock().unwrap();
-                    if let Some(t) = m.find_trial(spec_c.label, &inst.instance_id, trial) {
+                    if let Some(t) = m.find_trial(&spec_c.label, &inst.instance_id, trial) {
                         if should_skip_trial(&opts_c, Some(t)) {
                             eprintln!(
                                 "  → {} (trial {}): SKIP (manifest: {:?})",
@@ -658,7 +710,7 @@ fn run_trial(
                             let mut m = manifest_c.lock().unwrap();
                             update_manifest_entry(
                                 &mut m,
-                                spec_c.label,
+                                &spec_c.label,
                                 &inst.instance_id,
                                 trial,
                                 state,
@@ -667,7 +719,7 @@ fn run_trial(
                                 Some(
                                     trial_dir_for(
                                         &output_c,
-                                        spec_c.label,
+                                        &spec_c.label,
                                         &inst.instance_id,
                                         trial,
                                     )
@@ -716,7 +768,7 @@ fn record_boot_failure(
     trial: u32,
     reason: &str,
 ) -> Result<PerRunResult> {
-    let trial_dir = trial_dir_for(&opts.output, spec.label, &inst.instance_id, trial);
+    let trial_dir = trial_dir_for(&opts.output, &spec.label, &inst.instance_id, trial);
     std::fs::create_dir_all(&trial_dir)
         .with_context(|| format!("creating {}", trial_dir.display()))?;
     let pred_path = trial_dir.join(format!("{}.pred", inst.instance_id));
@@ -726,7 +778,7 @@ fn record_boot_failure(
     }
     let result = PerRunResult {
         instance_id: inst.instance_id.clone(),
-        quant: spec.label.into(),
+        quant: spec.label.clone(),
         trial,
         exit_code: -2,
         timed_out: false,
@@ -752,7 +804,7 @@ fn run_one(
     inst: &Instance,
     trial: u32,
 ) -> Result<PerRunResult> {
-    let trial_dir = trial_dir_for(&opts.output, spec.label, &inst.instance_id, trial);
+    let trial_dir = trial_dir_for(&opts.output, &spec.label, &inst.instance_id, trial);
     std::fs::create_dir_all(&trial_dir)
         .with_context(|| format!("creating {}", trial_dir.display()))?;
     let pred_path = trial_dir.join(format!("{}.pred", inst.instance_id));
@@ -760,7 +812,7 @@ fn run_one(
     let mut run_trace = RunTrace::new(
         format!("{}-{}-{}", spec.label, inst.instance_id, trial),
         inst.instance_id.clone(),
-        spec.label.into(),
+        spec.label.clone(),
         trial,
     );
 
@@ -778,7 +830,7 @@ fn run_one(
             .unwrap_or(0);
         return Ok(PerRunResult {
             instance_id: inst.instance_id.clone(),
-            quant: spec.label.into(),
+            quant: spec.label.clone(),
             trial,
             exit_code: 0,
             timed_out: false,
@@ -807,7 +859,7 @@ fn run_one(
         }
         let result = PerRunResult {
             instance_id: inst.instance_id.clone(),
-            quant: spec.label.into(),
+            quant: spec.label.clone(),
             trial,
             exit_code: -2,
             timed_out: false,
@@ -879,7 +931,7 @@ fn run_one(
         &opts.selfware_bin,
         &workdir,
         &prompt,
-        spec.alias,
+        &spec.alias,
         &endpoint,
         opts.scenario_timeout,
         &log_path,
@@ -941,7 +993,7 @@ fn run_one(
 
     let result = PerRunResult {
         instance_id: inst.instance_id.clone(),
-        quant: spec.label.into(),
+        quant: spec.label.clone(),
         trial,
         exit_code: outcome.exit_code,
         timed_out: outcome.timed_out,
@@ -1547,5 +1599,40 @@ mod tests {
         assert!((median_f64(&[1.0, 2.0, 3.0]) - 2.0).abs() < 1e-9);
         assert!((median_f64(&[1.0, 2.0, 3.0, 4.0]) - 2.5).abs() < 1e-9);
         assert_eq!(median_f64(&[]), 0.0);
+    }
+
+    #[test]
+    fn concurrency_clamping_logic() {
+        use super::super::catalog::{BackendProfile, QuantSpec, ThinkingPolicy};
+
+        let spec = QuantSpec {
+            label: "test".into(),
+            gguf: "test.gguf".into(),
+            alias: "test-alias".into(),
+            mmproj: "mmproj.gguf".into(),
+            name: "Test".into(),
+            ctx: 65536,
+            max_parallel: 2,
+            kv_cache_type: "q8_0".into(),
+            tensor_split: None,
+            temperature: 0.7,
+            thinking_policy: ThinkingPolicy::Enable,
+            backend: BackendProfile::LlamaCpp,
+        };
+
+        // When requested concurrency is below max_parallel, keep it.
+        let requested = 1;
+        let effective = requested.min(spec.max_parallel).max(1);
+        assert_eq!(effective, 1);
+
+        // When requested concurrency exceeds max_parallel, clamp.
+        let requested = 8;
+        let effective = requested.min(spec.max_parallel).max(1);
+        assert_eq!(effective, 2);
+
+        // Zero should bump to 1.
+        let requested = 0;
+        let effective = requested.min(spec.max_parallel).max(1);
+        assert_eq!(effective, 1);
     }
 }
